@@ -176,6 +176,13 @@ pub struct CommitShow {
     pub lines: Vec<String>,
 }
 
+/// The `git diff` output for one file, shown in the in-tab file-diff view.
+/// Unified diff (`-U3`) split into lines for scrolling and per-line coloring.
+#[derive(Clone)]
+pub struct FileDiff {
+    pub lines: Vec<String>,
+}
+
 /// A git worktree — one checkout of a repo (docs/18 WT). `is_main` marks the
 /// primary worktree (the original clone), which can't be removed.
 #[derive(Clone, Debug, PartialEq)]

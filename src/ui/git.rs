@@ -96,6 +96,11 @@ pub(super) fn render(
         g.scroll = draw_issue_detail(f, body, g, cat, t);
         return tab_rects;
     }
+    // The file diff view: in-tab unified diff, scrolls as a block.
+    if g.open_file_diff.is_some() {
+        g.scroll = draw_file_diff(f, body, g, t);
+        return tab_rects;
+    }
     // Flow / Status scroll as a block: they return the clamped scroll offset,
     // which we write back so the wheel/keys settle at the content's end.
     match g.section {
@@ -424,6 +429,51 @@ fn draw_commit_detail(f: &mut RenderTarget, area: Rect, g: &GitView, t: &Theme) 
             || line.starts_with("Author")
         {
             Style::new().fg(t.subtext0)
+        } else {
+            Style::new().fg(t.text)
+        }
+    };
+    let avail = area.height as usize;
+    let scroll = g.scroll.min(d.lines.len().saturating_sub(avail));
+    for (y, line) in (area.y..).zip(d.lines.iter().skip(scroll).take(avail)) {
+        f.render_widget(
+            Paragraph::new(Span::styled(line.clone(), style(line))),
+            Rect::new(area.x, y, area.width, 1),
+        );
+    }
+    scroll
+}
+
+/// In-tab unified diff for a Status file: `git diff` output with per-line
+/// coloring (same palette as commit detail). Returns the clamped scroll offset.
+fn draw_file_diff(f: &mut RenderTarget, area: Rect, g: &GitView, t: &Theme) -> usize {
+    let d = match &g.file_diff {
+        Load::Loading => {
+            message(f, area, "loading…", t.overlay0);
+            return 0;
+        }
+        Load::Error(e) => {
+            message(f, area, &format!("git: {e}"), t.coral);
+            return 0;
+        }
+        Load::Loaded(d) => d,
+        Load::Idle => return 0,
+    };
+    if d.lines.is_empty() {
+        message(f, area, "no changes", t.overlay0);
+        return 0;
+    }
+    let style = |line: &str| -> Style {
+        if line.starts_with("diff --git") || line.starts_with("index ") {
+            Style::new().fg(t.subtext1).bold()
+        } else if line.starts_with("@@ ") {
+            Style::new().fg(t.mint)
+        } else if line.starts_with("+++") || line.starts_with("---") {
+            Style::new().fg(t.subtext0)
+        } else if line.starts_with('+') {
+            Style::new().fg(t.green)
+        } else if line.starts_with('-') {
+            Style::new().fg(t.coral)
         } else {
             Style::new().fg(t.text)
         }
@@ -861,6 +911,12 @@ fn draw_footer(f: &mut RenderTarget, area: Rect, g: &GitView, cat: &Catalog, t: 
         f.render_widget(Paragraph::new(hint_line(&pairs, t)), area);
         return;
     }
+    // The file diff view owns the footer while it's open.
+    if g.open_file_diff.is_some() {
+        let pairs = [("esc", cat.act_back), ("j/k", cat.act_scroll)];
+        f.render_widget(Paragraph::new(hint_line(&pairs, t)), area);
+        return;
+    }
     // Per-section hints as (key, label) pairs — the shared `hint_line` colors
     // the keys with the theme accent and the labels in light text.
     let scope = scope_label(g.scope, cat);
@@ -918,6 +974,7 @@ fn draw_footer(f: &mut RenderTarget, area: Rect, g: &GitView, cat: &Catalog, t: 
         // The `x` email toggle is deliberately left off this line.
         Section::Status => vec![
             ("j/k", cat.act_scroll),
+            ("⏎", cat.act_diff),
             ("E", cat.st_show_more),
             ("r", cat.act_refresh),
             ("q", cat.act_close),
@@ -1061,7 +1118,7 @@ fn commit_row(
 fn draw_status(
     f: &mut RenderTarget,
     area: Rect,
-    g: &GitView,
+    g: &mut GitView,
     cat: &Catalog,
     t: &Theme,
 ) -> (usize, Option<Rect>) {
@@ -1189,22 +1246,36 @@ fn draw_status(
 
     // ── Working tree ──
     let clean = s.dirty_count() == 0 && s.stashes.is_empty();
-    group(
-        &mut rows,
-        format!("{} ({})", cat.st_staged, s.staged.len()),
-        s.staged
-            .iter()
-            .map(|c| file_line(c.code, &c.path, t.green, t))
-            .collect(),
-    );
-    group(
-        &mut rows,
-        format!("{} ({})", cat.st_changed, s.unstaged.len()),
-        s.unstaged
-            .iter()
-            .map(|c| file_line(c.code, &c.path, t.amber, t))
-            .collect(),
-    );
+    // Track staged/unstaged file row indices for Enter/d hit-testing.
+    if !s.staged.is_empty() {
+        header(&mut rows, format!("{} ({})", cat.st_staged, s.staged.len()));
+        let start = rows.len();
+        rows.extend(
+            s.staged
+                .iter()
+                .map(|c| file_line(c.code, &c.path, t.green, t)),
+        );
+        g.status_staged_rows = start..rows.len();
+        rows.push(Line::from(""));
+    } else {
+        g.status_staged_rows = 0..0;
+    }
+    if !s.unstaged.is_empty() {
+        header(
+            &mut rows,
+            format!("{} ({})", cat.st_changed, s.unstaged.len()),
+        );
+        let start = rows.len();
+        rows.extend(
+            s.unstaged
+                .iter()
+                .map(|c| file_line(c.code, &c.path, t.amber, t)),
+        );
+        g.status_unstaged_rows = start..rows.len();
+        rows.push(Line::from(""));
+    } else {
+        g.status_unstaged_rows = 0..0;
+    }
     group(
         &mut rows,
         format!("{} ({})", cat.st_untracked, s.untracked.len()),
