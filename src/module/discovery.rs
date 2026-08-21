@@ -108,7 +108,7 @@ pub(crate) fn http_get(url: &str) -> Result<String> {
 /// Run `prog`; `Ok(None)` if it isn't installed (so we can try the next),
 /// `Err` if it ran but failed (a real network error).
 fn try_cmd(prog: &str, args: &[&str]) -> Result<Option<String>> {
-    match Command::new(prog).args(args).output() {
+    match crate::platform::no_window(Command::new(prog).args(args)).output() {
         Ok(out) if out.status.success() => {
             Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
         }

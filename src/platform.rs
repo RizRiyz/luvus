@@ -40,6 +40,28 @@ fn path_key(p: &Path) -> String {
     trimmed.to_string()
 }
 
+/// Keep a spawned console program from flashing a window on Windows.
+///
+/// `luvus server` runs detached (`main::spawn_server` uses `DETACHED_PROCESS`),
+/// so it has no console of its own. Windows then hands every console child it
+/// spawns a fresh `conhost.exe` **with a visible window** — and the git poller
+/// alone spawns one every ~2 s per workspace, which strobed black windows over
+/// the desktop ~45 times a minute. `CREATE_NO_WINDOW` (0x0800_0000) gives the
+/// child a console without a window; inherited/piped stdio handles are
+/// unaffected, so captured output still arrives.
+///
+/// Only for spawns luvus captures or discards (`.output()`, `.status()`,
+/// null stdio). **Never** put this on the PTY/pane child or an agent the user
+/// interacts with — those need their real console.
+pub fn no_window(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
 /// The user's home directory, cross-platform (`$HOME`, else `%USERPROFILE%`).
 pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
@@ -535,14 +557,16 @@ pub fn open_url(url: &str) {
         &[("xdg-open", &[]), ("gio", &["open"]), ("wslview", &[])]
     };
     for (cmd, args) in openers {
-        if Command::new(cmd)
-            .args(*args)
-            .arg(url)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .is_ok()
+        if no_window(
+            Command::new(cmd)
+                .args(*args)
+                .arg(url)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .spawn()
+        .is_ok()
         {
             return;
         }
@@ -551,6 +575,25 @@ pub fn open_url(url: &str) {
 
 #[cfg(test)]
 mod tests {
+    /// The hidden-window flag must not break output capture: a command routed
+    /// through [`no_window`] still runs and still reports its exit code. On
+    /// Windows that is the whole contract (no window, same result); elsewhere
+    /// the helper is a no-op and this pins that it stays one.
+    #[test]
+    fn no_window_keeps_the_command_working() {
+        let mut cmd = if cfg!(windows) {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/C", "exit 3"]);
+            c
+        } else {
+            let mut c = std::process::Command::new("sh");
+            c.args(["-c", "exit 3"]);
+            c
+        };
+        let status = super::no_window(&mut cmd).status().expect("spawns");
+        assert_eq!(status.code(), Some(3));
+    }
+
     #[cfg(unix)]
     #[test]
     fn process_tree_finds_this_process_and_its_children() {

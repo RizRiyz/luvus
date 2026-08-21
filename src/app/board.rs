@@ -829,6 +829,7 @@ fn run_gate_command(cwd: &std::path::Path, gate: &str) -> (Option<i32>, String) 
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::platform::no_window(&mut cmd);
     match cmd.output() {
         Ok(o) => {
             let mut s = String::from_utf8_lossy(&o.stdout).into_owned();

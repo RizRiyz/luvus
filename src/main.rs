@@ -245,13 +245,15 @@ fn wav_bytes(samples: &[i16], sr: u32) -> Vec<u8> {
 /// Play a WAV with the platform's audio tool (blocking — called in a thread).
 fn play_sound_file(path: &Path) {
     let run = |cmd: &str, args: &[&str]| -> bool {
-        Command::new(cmd)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok()
+        platform::no_window(
+            Command::new(cmd)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .status()
+        .is_ok()
     };
     let owned = path.to_string_lossy().into_owned();
     let p = owned.as_str();
@@ -288,13 +290,14 @@ fn system_clipboard_copy(text: &str) -> std::io::Result<()> {
         ]
     };
     for (cmd, args) in tools {
-        let Ok(mut child) = Command::new(cmd)
-            .args(*args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
+        let Ok(mut child) = platform::no_window(
+            Command::new(cmd)
+                .args(*args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .spawn() else {
             continue; // tool not installed — try the next
         };
         if let Some(mut stdin) = child.stdin.take() {

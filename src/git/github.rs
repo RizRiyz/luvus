@@ -30,20 +30,20 @@ impl GhState {
 
 /// Probe `gh` once (installed? authenticated?).
 pub fn detect() -> GhState {
-    match Command::new("gh").arg("--version").output() {
-        Ok(o) if o.status.success() => match Command::new("gh").args(["auth", "status"]).output() {
-            Ok(a) if a.status.success() => GhState::Ready,
-            Ok(_) => GhState::NotAuthed,
-            Err(_) => GhState::Missing,
-        },
+    match crate::platform::no_window(Command::new("gh").arg("--version")).output() {
+        Ok(o) if o.status.success() => {
+            match crate::platform::no_window(Command::new("gh").args(["auth", "status"])).output() {
+                Ok(a) if a.status.success() => GhState::Ready,
+                Ok(_) => GhState::NotAuthed,
+                Err(_) => GhState::Missing,
+            }
+        }
         _ => GhState::Missing,
     }
 }
 
 fn run_gh(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("gh")
-        .args(args)
-        .current_dir(cwd)
+    let out = crate::platform::no_window(Command::new("gh").args(args).current_dir(cwd))
         .output()
         .map_err(|e| format!("gh: {e}"))?;
     if !out.status.success() {

@@ -94,11 +94,13 @@ impl Drop for Pane {
         // No signals on Windows; end the whole child tree instead.
         #[cfg(windows)]
         {
-            let _ = std::process::Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
+            let _ = crate::platform::no_window(
+                std::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null()),
+            )
+            .spawn();
         }
     }
 }
@@ -426,11 +428,13 @@ impl Pane {
                     }
                     #[cfg(windows)]
                     {
-                        let _ = std::process::Command::new("taskkill")
-                            .args(["/PID", &pid.to_string(), "/T", "/F"])
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .spawn();
+                        let _ = crate::platform::no_window(
+                            std::process::Command::new("taskkill")
+                                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null()),
+                        )
+                        .spawn();
                     }
                     let mut child = child;
                     let _ = child.wait();

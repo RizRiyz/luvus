@@ -148,6 +148,7 @@ fn run(root: &PathBuf, argv: &[String], env: &[(String, String)]) -> (Option<i32
     for (k, v) in env {
         cmd.env(k, v);
     }
+    crate::platform::no_window(&mut cmd);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {

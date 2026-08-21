@@ -486,11 +486,13 @@ fn fetch_bytes(url: &str, limit: usize) -> Result<Vec<u8>> {
 }
 
 fn try_fetch_command(prog: &str, args: &[&str], limit: usize) -> Result<Option<Vec<u8>>> {
-    let mut child = match Command::new(prog)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let mut child = match crate::platform::no_window(
+        Command::new(prog)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .spawn()
     {
         Ok(child) => child,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
