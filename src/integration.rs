@@ -676,12 +676,23 @@ mod tests {
         fs::create_dir_all(&tmp).unwrap();
         std::env::set_var("LUVUS_COPILOT_DIR", &tmp);
         fs::write(tmp.join("bohay-agent-hook.sh"), "old managed script").unwrap();
+        // Built through serde, not `format!`: a Windows temp path is full of
+        // backslashes, and pasting one into a JSON string literal produces
+        // invalid escapes — the file then failed to parse and the assertions
+        // below read `null` for everything.
+        let legacy = tmp.join("bohay-agent-hook.sh");
+        let settings = serde_json::json!({
+            "keep": "yes",
+            "hooks": {
+                "sessionStart": [
+                    { "hooks": [ { "type": "command", "command": legacy } ] },
+                    { "hooks": [ { "type": "command", "command": "echo user" } ] },
+                ]
+            }
+        });
         fs::write(
             tmp.join("settings.json"),
-            format!(
-                r#"{{"keep":"yes","hooks":{{"sessionStart":[{{"hooks":[{{"type":"command","command":"{}/bohay-agent-hook.sh"}}]}},{{"hooks":[{{"type":"command","command":"echo user"}}]}}]}}}}"#,
-                tmp.display()
-            ),
+            serde_json::to_vec_pretty(&settings).unwrap(),
         )
         .unwrap();
 

@@ -718,9 +718,10 @@ mod tests {
         let mut app = App::new(120, 40, tx).unwrap();
         let tabs_before = app.workspaces[app.active_ws].tabs.len();
 
-        // `cat` stands in for an editor: a real program launched with the file as
-        // a literal argv element (present on every unix CI runner).
-        app.open_file_in_editor(file.clone(), "cat");
+        // A real program launched with the file as a literal argv element, so
+        // the pane is a true PTY: `cat` on unix, `cmd /c type` on Windows.
+        let editor = if cfg!(windows) { "cmd /c type" } else { "cat" };
+        app.open_file_in_editor(file.clone(), editor);
 
         assert_eq!(
             app.workspaces[app.active_ws].tabs.len(),

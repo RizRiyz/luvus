@@ -765,6 +765,9 @@ detached
         g(&["init", "-q", "-b", "main"]);
         g(&["config", "user.email", "t@t"]);
         g(&["config", "user.name", "t"]);
+        // Git for Windows ships `core.autocrlf=true` in its system config, which
+        // would hand the checkouts below CRLF and fail the byte comparisons.
+        g(&["config", "core.autocrlf", "false"]);
         write("X", "base\n");
         g(&["add", "."]);
         g(&["commit", "-q", "-m", "base"]);
