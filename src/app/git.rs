@@ -368,20 +368,8 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') => self.git_close_commit_detail(),
             KeyCode::Char('j') | KeyCode::Down => self.git_scroll(1),
             KeyCode::Char('k') | KeyCode::Up => self.git_scroll(-1),
-            KeyCode::PageUp => {
-                let page = self
-                    .active_git()
-                    .map(|g| g.list_area.height.saturating_sub(1) as i32)
-                    .unwrap_or(20);
-                self.git_scroll(-page);
-            }
-            KeyCode::PageDown => {
-                let page = self
-                    .active_git()
-                    .map(|g| g.list_area.height.saturating_sub(1) as i32)
-                    .unwrap_or(20);
-                self.git_scroll(page);
-            }
+            KeyCode::PageUp => self.git_scroll(-self.git_page_size()),
+            KeyCode::PageDown => self.git_scroll(self.git_page_size()),
             KeyCode::Char('g') | KeyCode::Home => {
                 if let Some(g) = self.active_git_mut() {
                     g.scroll = 0;
@@ -555,20 +543,8 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') => self.git_close_issue_detail(),
             KeyCode::Char('j') | KeyCode::Down => self.git_scroll(1),
             KeyCode::Char('k') | KeyCode::Up => self.git_scroll(-1),
-            KeyCode::PageUp => {
-                let page = self
-                    .active_git()
-                    .map(|g| g.list_area.height.saturating_sub(1) as i32)
-                    .unwrap_or(20);
-                self.git_scroll(-page);
-            }
-            KeyCode::PageDown => {
-                let page = self
-                    .active_git()
-                    .map(|g| g.list_area.height.saturating_sub(1) as i32)
-                    .unwrap_or(20);
-                self.git_scroll(page);
-            }
+            KeyCode::PageUp => self.git_scroll(-self.git_page_size()),
+            KeyCode::PageDown => self.git_scroll(self.git_page_size()),
             KeyCode::Char('g') | KeyCode::Home => {
                 if let Some(g) = self.active_git_mut() {
                     g.scroll = 0;
@@ -833,6 +809,13 @@ impl App {
             self.active_git().map(|g| g.section),
             Some(Section::Commits | Section::Branches | Section::Prs | Section::Issues)
         )
+    }
+
+    /// Page size for PgUp/PgDn in detail views: visible rows minus one for overlap.
+    fn git_page_size(&self) -> i32 {
+        self.active_git()
+            .map(|g| g.list_area.height.saturating_sub(1) as i32)
+            .unwrap_or(20)
     }
 
     /// Scroll the active view by `delta` rows — moves the cursor in list views,
