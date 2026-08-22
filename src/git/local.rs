@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::model::{
-    BranchInfo, Commit, CommitShow, Contributor, FileChange, RepoInfo, RepoStatus, Worktree,
+    BranchInfo, Commit, CommitShow, Contributor, FileChange, FileDiff, RepoInfo, RepoStatus,
+    Worktree,
 };
 
 /// Run `git <args>` in `cwd`, returning stdout (trimmed of a trailing newline).
@@ -367,6 +368,23 @@ pub fn commit_show(cwd: &Path, sha: &str) -> Result<CommitShow, String> {
         ],
     )?;
     Ok(CommitShow {
+        lines: out.replace('\r', "").lines().map(str::to_string).collect(),
+    })
+}
+
+/// Unified diff for a single file. `staged` = true runs `--cached` (index vs
+/// HEAD), false shows working-tree changes (wt vs index). Returns the full
+/// `git diff` output split into lines, colored per-line by the renderer.
+/// Empty output means the file has no changes in that category.
+pub fn file_diff(cwd: &Path, path: &str, staged: bool) -> Result<FileDiff, String> {
+    let mut args = vec!["diff", "--no-color", "-U3"];
+    if staged {
+        args.push("--cached");
+    }
+    args.push("--");
+    args.push(path);
+    let out = run(cwd, &args)?;
+    Ok(FileDiff {
         lines: out.replace('\r', "").lines().map(str::to_string).collect(),
     })
 }

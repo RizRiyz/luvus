@@ -12,6 +12,7 @@ pub mod local;
 pub mod model;
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -21,8 +22,8 @@ pub use github::GhState;
 pub use model::Checks;
 pub use model::WorktreeMembership;
 use model::{
-    BranchInfo, Commit, CommitShow, Contributor, Issue, IssueDetail, PrDetail, PullRequest,
-    RepoInfo, RepoStatus,
+    BranchInfo, Commit, CommitShow, Contributor, FileDiff, Issue, IssueDetail, PrDetail,
+    PullRequest, RepoInfo, RepoStatus,
 };
 
 /// Which section of the git tab is shown.
@@ -154,6 +155,8 @@ pub enum GitPayload {
     PrDetail(Box<Result<PrDetail, String>>),
     // The `git show` output for a clicked commit (docs/17), shown in-tab.
     CommitDetail(Box<Result<CommitShow, String>>),
+    // The `git diff` output for a clicked file in the Status view, shown in-tab.
+    FileDiff(Box<Result<FileDiff, String>>),
     // Full detail for a clicked issue (docs/17), shown in-tab.
     IssueDetail(Box<Result<IssueDetail, String>>),
 }
@@ -198,6 +201,17 @@ pub struct GitView {
     /// back with esc). Mirrors `open_pr` (docs/17).
     pub open_issue: Option<u64>,
     pub issue_detail: Load<IssueDetail>,
+    /// The open file-diff view (`Some(path)` ⇒ showing that file's `git diff`
+    /// in-tab, back with esc). Mirrors `open_commit`.
+    pub open_file_diff: Option<String>,
+    /// Whether the open diff is staged (`--cached`) or unstaged.
+    pub open_file_diff_staged: bool,
+    pub file_diff: Load<FileDiff>,
+    /// Row indices of staged file rows in the last Status render (for Enter/d
+    /// hit-testing). Empty when Status hasn't rendered yet.
+    pub status_staged_rows: Range<usize>,
+    /// Row indices of unstaged file rows in the last Status render.
+    pub status_unstaged_rows: Range<usize>,
     /// The list body rect from the last render, so a click maps to the row under
     /// it. Transient (GitView is rebuilt on restore, never serialized).
     pub list_area: Rect,
@@ -287,6 +301,11 @@ impl GitView {
             commit_detail: Load::Idle,
             open_issue: None,
             issue_detail: Load::Idle,
+            open_file_diff: None,
+            open_file_diff_staged: false,
+            file_diff: Load::Idle,
+            status_staged_rows: 0..0,
+            status_unstaged_rows: 0..0,
             list_area: Rect::new(0, 0, 0, 0),
             contributors_expanded: false,
             show_emails: false,
@@ -326,6 +345,12 @@ impl GitView {
             GitPayload::CommitDetail(r) => {
                 if self.open_commit.is_some() {
                     self.commit_detail = into_load(*r);
+                }
+            }
+            // Only apply if the file-diff view is still open.
+            GitPayload::FileDiff(r) => {
+                if self.open_file_diff.is_some() {
+                    self.file_diff = into_load(*r);
                 }
             }
             GitPayload::IssueDetail(r) => {

@@ -1412,6 +1412,11 @@ impl App {
                 self.git_toggle_contributors();
                 return;
             }
+            // Clicking a file row in the Status section opens its diff in-tab.
+            if let Some((path, staged)) = self.git_status_file_at(m.column, m.row) {
+                self.fetch_file_diff(path, staged);
+                return;
+            }
             // Clicking a list row opens its detail in-tab (docs/17) — commit `git
             // show`, PR panel, or issue detail. `esc` goes back to the list.
             if let Some(idx) = self.git_list_row_at(m.column, m.row) {
