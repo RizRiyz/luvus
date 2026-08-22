@@ -371,6 +371,22 @@ pub fn resume_for(
     }
 }
 
+/// Resolve the source session for a native fork.
+///
+/// A hook-reported or explicitly resumed identity always wins. Codex must have
+/// that exact binding because several live rollouts commonly share one cwd;
+/// guessing its newest file can fork a different pane's conversation. Agents
+/// without a precise integration retain the historical newest-session fallback.
+pub fn fork_session_id(agent: &str, bound: Option<&str>, cwd: &Path) -> Option<String> {
+    if let Some(id) = bound {
+        return Some(id.to_string());
+    }
+    if agent == "codex" {
+        return None;
+    }
+    latest_session(agent, cwd)
+}
+
 /// The command that **forks** an agent's session: continue from the original's
 /// full context in a new, diverging session (the original is left untouched).
 /// `None` for agents without a native fork, unknown agents, or unsafe ids.
@@ -1544,6 +1560,20 @@ mod tests {
 
         // Unknown agent stays None however it is called.
         assert!(resume_for("nope", "abc", Some(&flags), true).is_none());
+    }
+
+    #[test]
+    fn codex_fork_requires_the_selected_session_identity() {
+        let cwd = Path::new("/work/project");
+        assert_eq!(
+            fork_session_id("codex", Some("selected-rollout"), cwd).as_deref(),
+            Some("selected-rollout")
+        );
+        assert_eq!(
+            fork_session_id("codex", None, cwd),
+            None,
+            "Codex must not guess another active rollout from the shared cwd"
+        );
     }
 
     #[test]

@@ -24,6 +24,7 @@ pub enum Cmd {
     ClosePane,
     ZoomPane,
     ResizeMode,
+    CopyMode,
     NewTab,
     NextTab,
     PrevTab,
@@ -60,6 +61,7 @@ impl Cmd {
         Cmd::ClosePane,
         Cmd::ZoomPane,
         Cmd::ResizeMode,
+        Cmd::CopyMode,
         Cmd::NewTab,
         Cmd::NextTab,
         Cmd::PrevTab,
@@ -96,6 +98,7 @@ impl Cmd {
             Cmd::ClosePane => "close_pane",
             Cmd::ZoomPane => "zoom_pane",
             Cmd::ResizeMode => "resize_mode",
+            Cmd::CopyMode => "copy_mode",
             Cmd::NewTab => "new_tab",
             Cmd::NextTab => "next_tab",
             Cmd::PrevTab => "prev_tab",
@@ -135,6 +138,8 @@ impl Cmd {
             Cmd::ClosePane => cat.cmd_close_pane,
             Cmd::ZoomPane => cat.cmd_zoom_pane,
             Cmd::ResizeMode => cat.cmd_resize_mode,
+            // The Keys tab's section headings are intentionally English too.
+            Cmd::CopyMode => "Copy terminal text",
             Cmd::NewTab => cat.cmd_new_tab,
             Cmd::NextTab => cat.cmd_next_tab,
             Cmd::PrevTab => cat.cmd_prev_tab,
@@ -174,7 +179,8 @@ impl Cmd {
             | Cmd::ForkSession
             | Cmd::ClosePane
             | Cmd::ZoomPane
-            | Cmd::ResizeMode => "Panes",
+            | Cmd::ResizeMode
+            | Cmd::CopyMode => "Panes",
             Cmd::NewTab | Cmd::NextTab | Cmd::PrevTab | Cmd::RenameTab => "Tabs",
             Cmd::NewWorkspace
             | Cmd::CloseWorkspace
@@ -208,6 +214,7 @@ impl Cmd {
             Cmd::ClosePane => "x",
             Cmd::ZoomPane => "z",
             Cmd::ResizeMode => "r",
+            Cmd::CopyMode => "y",
             Cmd::NewTab => "c",
             Cmd::NextTab => "n",
             Cmd::PrevTab => "p",
@@ -287,9 +294,8 @@ pub const KEY_REFERENCE: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
-        "Copy mode  (no prefix)",
+        "Copy mode  (after Copy terminal text)",
         &[
-            ("Shift+v", "select terminal text with the keyboard"),
             ("arrows  hjkl", "extend the selection by character / line"),
             ("w / B", "next / previous word"),
             ("Space / b", "page down / up"),
@@ -678,6 +684,9 @@ impl App {
             }
             Cmd::ZoomPane => self.zoomed = !self.zoomed,
             Cmd::ResizeMode => self.enter_resize_mode(),
+            Cmd::CopyMode => {
+                self.begin_copy_mode();
+            }
             Cmd::NewTab => self.new_tab(),
             Cmd::NextTab => self.cycle_tab(1),
             Cmd::PrevTab => self.cycle_tab(-1),
@@ -756,6 +765,7 @@ mod tests {
         // `,` renames the tab (tmux-compatible); Settings moved to `=`.
         assert_eq!(m.get(","), Some(&Cmd::RenameTab));
         assert_eq!(m.get("="), Some(&Cmd::OpenSettings));
+        assert_eq!(m.get("y"), Some(&Cmd::CopyMode));
         // every command is reachable by its default key
         for &c in Cmd::ALL {
             assert!(m.values().any(|v| *v == c), "{c:?} bound");
@@ -769,6 +779,22 @@ mod tests {
         let m = build_keymap(&o);
         assert_eq!(m.get("t"), Some(&Cmd::NewTab));
         assert_ne!(m.get("c"), Some(&Cmd::NewTab)); // old default freed
+    }
+
+    #[test]
+    fn copy_mode_binding_is_editable_like_every_other_prefix_command() {
+        let _env = crate::persist::test_env("copy-mode-rebind");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        assert_eq!(app.key_for(Cmd::CopyMode), "y");
+        app.rebind(Cmd::CopyMode, "t".into());
+        assert_eq!(app.key_for(Cmd::CopyMode), "t");
+        assert_eq!(app.keymap.get("t"), Some(&Cmd::CopyMode));
+
+        app.reset_binding(Cmd::CopyMode);
+        assert_eq!(app.key_for(Cmd::CopyMode), "y");
+        assert_eq!(app.keymap.get("y"), Some(&Cmd::CopyMode));
     }
 
     #[test]

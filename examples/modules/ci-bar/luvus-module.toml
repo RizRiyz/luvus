@@ -1,0 +1,25 @@
+id = "example.ci-bar"
+name = "CI Bar"
+version = "0.1.0"
+min_luvus_version = "0.11.0"
+description = "A compact Luvus Bar widget populated by startup and explicit refresh actions."
+platforms = ["macos", "linux"]
+
+[[bars]]
+id = "status"
+title = "CI status"
+region = "top-right"
+priority = 60
+
+[[startup]]
+command = ["sh", "refresh.sh"]
+
+[[actions]]
+id = "refresh"
+title = "Refresh CI status"
+command = ["sh", "refresh.sh"]
+
+[[actions]]
+id = "details"
+title = "Show CI details"
+command = ["sh", "details.sh"]

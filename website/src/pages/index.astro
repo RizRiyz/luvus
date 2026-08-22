@@ -159,6 +159,7 @@ const ogImage = 'https://luvus.dev/og.png';
       <div class="nav-links">
         <a href="/docs/">Docs</a>
         <a href="/modules/">Modules</a>
+        <a href="/themes/">Themes</a>
         <a href="/changelog/">Changelog</a>
         <a href={GITHUB} class="gh" aria-label="luvus on GitHub" title="GitHub">
           <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"
@@ -247,7 +248,7 @@ const ogImage = 'https://luvus.dev/og.png';
               <button class="tab on" data-tab="main">1 main</button>
               <button class="tab" data-tab="git">2 ⎇ git</button>
               <button class="tab" data-tab="orch">3 ◇ orch</button>
-              <button class="tab" data-tab="ctrl">4 ⠶ ctrl</button>
+              <button class="tab" data-tab="ctrl">4 ⦿ ctrl</button>
               <button class="tab" data-tab="talk">5 ⇄ talk</button>
               <span class="tab plus">+</span>
             </div>
@@ -418,7 +419,7 @@ const ogImage = 'https://luvus.dev/og.png';
             <a class="fc-go" href="/docs/guides/agents/">Mission Control →</a>
           </div>
           <div class="fm" aria-hidden="true">
-            <div class="fm-head"><span>⠶ ctrl</span><em>4 agents · 1 blocked · $3.99 total</em></div>
+            <div class="fm-head"><span>⦿ ctrl</span><em>4 agents · 1 blocked · $3.99 total</em></div>
             <div class="fm-row cols"><i class="hd">status</i><i class="hd">agent</i><i class="hd">ctx</i><i class="hd">cost</i><i class="hd">where</i></div>
             <div class="fm-row cols"><span><span class="d run"></span>working</span><b>claude</b><i class="ok">28%</i><em>$1.94</em><em>sudos</em></div>
             <div class="fm-row cols"><span><span class="d blk"></span>blocked</span><b>copilot</b><i class="hot">86%</i><em>$1.71</em><em>webapp</em></div>
@@ -567,7 +568,7 @@ const ogImage = 'https://luvus.dev/og.png';
         <a href="/docs/extend/writing-modules/">modules in any language</a> ·
         <a href="/docs/reference/keybindings/">remappable keys</a> ·
         <a href="/docs/guides/layout/">movable panels and themes</a> ·
-        <a href="/docs/guides/notch/">the macOS notch companion</a>
+        <a href="/docs/guides/bar/">a composable status bar</a>
       </p>
     </section>
 
@@ -964,7 +965,7 @@ const ogImage = 'https://luvus.dev/og.png';
         prs: [
           '<div class="grow"><span class="c-dim">#14</span> feat: api layer <span class="c-amber">● checks running</span> <span class="grow-meta">open</span></div>',
           '<div class="grow"><span class="c-dim">#13</span> fix: close audit findings <span class="c-grn">✓ checks</span> <span class="grow-meta">merged</span></div>',
-          '<div class="grow"><span class="c-dim">#12</span> feat: luvus-notch config <span class="c-grn">✓ checks</span> <span class="grow-meta">merged</span></div>',
+          '<div class="grow"><span class="c-dim">#12</span> feat: composable Luvus Bar <span class="c-grn">✓ checks</span> <span class="grow-meta">merged</span></div>',
         ].join(''),
         issues: [
           '<div class="grow"><span class="c-dim">#9</span> scroll mode on Windows Terminal <span class="grow-meta">enhancement</span></div>',
@@ -1309,7 +1310,6 @@ const ogImage = 'https://luvus.dev/og.png';
       }
 
       nav {
-        position: sticky; top: 0; z-index: 10;
         background: rgb(from var(--bg) r g b / 0.85);
         border-bottom: 1px solid var(--line);
       }

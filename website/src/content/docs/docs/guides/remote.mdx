@@ -19,5 +19,8 @@ terminal to it. No port-forwarding, no extra daemon, no config.
   session keeps running. `luvus --remote my-server` again from anywhere
   reattaches.
 - **Clipboard works:** selecting text copies to your **local** clipboard.
+- **Global finder stays remote:** `Ctrl+Space /` searches named sessions,
+  paths, and retained output from that remote Luvus home only. Selecting a
+  result in another running remote session reuses the same host and SSH options.
 
 Extra ssh arguments pass through: `luvus --remote host -p 2222 -i ~/.ssh/key`.

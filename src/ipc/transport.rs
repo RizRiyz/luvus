@@ -8,6 +8,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use fs2::FileExt;
 use interprocess::local_socket::prelude::*;
@@ -85,9 +86,36 @@ impl ServerStartupLock {
 #[derive(Clone)]
 pub struct Conn(Arc<Stream>);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimeoutMode {
+    Kernel,
+    Nonblocking,
+}
+
 impl Conn {
     fn new(stream: Stream) -> Self {
         Conn(Arc::new(stream))
+    }
+
+    /// Bound control-plane requests such as cross-session search. Unix local
+    /// sockets support kernel timeouts; named pipes may report Unsupported, in
+    /// which case the connection becomes nonblocking so the caller can enforce
+    /// an application deadline without leaving a blocked worker behind.
+    pub fn set_timeouts(&self, timeout: Duration) -> io::Result<TimeoutMode> {
+        use interprocess::local_socket::traits::Stream as _;
+        for result in [
+            self.0.set_recv_timeout(Some(timeout)),
+            self.0.set_send_timeout(Some(timeout)),
+        ] {
+            if let Err(error) = result {
+                if error.kind() != io::ErrorKind::Unsupported {
+                    return Err(error);
+                }
+                self.0.set_nonblocking(true)?;
+                return Ok(TimeoutMode::Nonblocking);
+            }
+        }
+        Ok(TimeoutMode::Kernel)
     }
 }
 

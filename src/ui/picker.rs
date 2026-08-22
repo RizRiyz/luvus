@@ -2,7 +2,7 @@
 //! Browse the filesystem, pick an existing folder, or create a new one.
 
 use super::*;
-use crate::app::{FolderPicker, Row};
+use crate::app::{FolderPicker, PickerHit, Row};
 use crate::i18n::Catalog;
 use ratatui::widgets::{Borders, Clear};
 
@@ -14,7 +14,7 @@ pub(super) fn draw_picker(
     p: &FolderPicker,
     cat: &Catalog,
     t: &Theme,
-) -> Vec<(usize, Rect)> {
+) -> Vec<(PickerHit, Rect)> {
     dim_backdrop(f, area, t);
 
     let w = area.width.saturating_sub(6).clamp(46, 76).min(area.width);
@@ -44,10 +44,48 @@ pub(super) fn draw_picker(
     );
     hline(f, inner.x, inner.y + 2, inner.width, t);
 
-    // Footer: the new-folder input, an error, or the key hints.
+    // Footer: the in-modal path input, new-folder input, an error, or key hints.
     let footer_y = inner.bottom().saturating_sub(1);
-    hline(f, inner.x, footer_y.saturating_sub(1), inner.width, t);
-    if let Some(buf) = &p.creating {
+    let divider_y = if p.going_to.is_some() {
+        footer_y.saturating_sub(2)
+    } else {
+        footer_y.saturating_sub(1)
+    };
+    hline(f, inner.x, divider_y, inner.width, t);
+    let mut go_to_rect = None;
+    if let Some(buf) = &p.going_to {
+        let input_y = footer_y.saturating_sub(1);
+        let label = format!(" {}: ", cat.act_go_to);
+        let input = trunc_tail(
+            buf,
+            (inner.width as usize)
+                .saturating_sub(display_width(&label))
+                .saturating_sub(1),
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(label, Style::new().fg(t.subtext0)),
+                Span::styled(input, Style::new().fg(t.accent).bold()),
+                Span::styled("▏", Style::new().fg(t.accent)),
+            ])),
+            Rect::new(inner.x, input_y, inner.width, 1),
+        );
+        if let Some(e) = &p.error {
+            let error = trunc_tail(e, inner.width.saturating_sub(2) as usize);
+            f.render_widget(
+                Paragraph::new(Span::styled(format!(" {error}"), Style::new().fg(t.coral))),
+                Rect::new(inner.x, footer_y, inner.width, 1),
+            );
+        } else {
+            f.render_widget(
+                Paragraph::new(hint_line(
+                    &[("⏎", cat.act_go_to), ("esc", cat.act_cancel)],
+                    t,
+                )),
+                Rect::new(inner.x, footer_y, inner.width, 1),
+            );
+        }
+    } else if let Some(buf) = &p.creating {
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
@@ -74,6 +112,7 @@ pub(super) fn draw_picker(
         f.render_widget(
             Paragraph::new(hint_line(
                 &[
+                    ("g", cat.act_go_to),
                     ("↑↓", cat.act_move),
                     ("⏎", cat.act_select),
                     ("←", cat.act_up),
@@ -84,14 +123,21 @@ pub(super) fn draw_picker(
             )),
             Rect::new(inner.x, footer_y, inner.width, 1),
         );
+        // `g go to` is first, after hint_line's one-column leading pad.
+        go_to_rect = Some(Rect::new(
+            inner.x.saturating_add(1),
+            footer_y,
+            (2 + display_width(cat.act_go_to)).min(inner.width.saturating_sub(1) as usize) as u16,
+            1,
+        ));
     }
 
-    // The scrolling list: [Open this folder] · [..] · folders · files.
+    // The scrolling list: [Open this folder] · [Home] · [..] · folders · files.
     let list = Rect::new(
         inner.x + 1,
         inner.y + 3,
         inner.width.saturating_sub(2),
-        footer_y.saturating_sub(inner.y + 4),
+        divider_y.saturating_sub(inner.y + 3),
     );
     let avail = list.height.max(1) as usize;
     let scroll = p.cursor.saturating_sub(avail.saturating_sub(1));
@@ -107,6 +153,7 @@ pub(super) fn draw_picker(
         let (icon, label, fg) = match p.row(i) {
             Row::OpenFolder => ("✓", cat.open_this_folder.to_string(), t.accent),
             Row::OpenWorktree => ("⎇", cat.open_with_worktree.to_string(), t.accent),
+            Row::Home => ("⌂", cat.home.to_string(), t.accent),
             Row::Up => ("↑", "..".to_string(), t.subtext0),
             Row::Entry(idx) => {
                 let e = &p.entries[idx];
@@ -128,8 +175,12 @@ pub(super) fn draw_picker(
             ])),
             Rect::new(list.x, y, list.width, 1),
         );
-        rects.push((i, row_rect));
+        rects.push((PickerHit::Row(i), row_rect));
     }
+    if let Some(rect) = go_to_rect {
+        rects.push((PickerHit::GoTo, rect));
+    }
+    rects.push((PickerHit::Modal, modal));
     rects
 }
 

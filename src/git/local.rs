@@ -31,6 +31,54 @@ pub fn is_repo(cwd: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Result of [`repo_check`]: distinguishes "really not a repo" (stay quiet,
+/// e.g. a scratch folder) from "couldn't tell" (surface it, since something's
+/// actually broken).
+pub enum RepoCheck {
+    Repo,
+    NotRepo,
+    /// `git` is missing, failed to run, or errored. The reason is the
+    /// process's stderr (or the spawn error), e.g. a stale `PATH` picked up by
+    /// the long-running server, or a WSL `git.exe` shadowing the Linux binary.
+    Error(String),
+}
+
+/// Same check as [`is_repo`], but keeps *why* on failure instead of collapsing
+/// it to `false` (issue/67): a plain "not a repo" (`rev-parse` ran fine and
+/// said so) should stay a silent no-op, but `git` missing or failing to run at
+/// all deserves a toast instead of a keypress that does nothing with no
+/// feedback. Unlike [`is_repo`] this does not go through [`run`], because that
+/// collapses "ran, exited non-zero" (the ordinary not-a-repo case) and "could
+/// not run at all" (the actual problem) into the same `Err`.
+pub fn repo_check(cwd: &Path) -> RepoCheck {
+    match Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(cwd)
+        .output()
+    {
+        Err(e) => RepoCheck::Error(format!("git not found: {e}")),
+        Ok(out) if out.status.success() => {
+            if String::from_utf8_lossy(&out.stdout).trim() == "true" {
+                RepoCheck::Repo
+            } else {
+                RepoCheck::NotRepo
+            }
+        }
+        // Exited non-zero: git's own "not a git repository" is the ordinary
+        // case and stays quiet, but any other failure (malformed config, a
+        // corrupt `.git`, permission errors) is a real problem and must
+        // surface instead of being folded into the same silent no-op.
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if stderr.contains("not a git repository") {
+                RepoCheck::NotRepo
+            } else {
+                RepoCheck::Error(stderr.trim().to_string())
+            }
+        }
+    }
+}
+
 /// The GitHub `owner/repo` slug from the `origin` remote, if it's a GitHub URL.
 /// Used to pin `gh pr/issue list --repo <slug>` to the repo you're actually in,
 /// rather than relying on `gh`'s base-repo resolution (which picks the wrong repo
@@ -573,6 +621,57 @@ fn parse_contributors(out: &str) -> Vec<Contributor> {
 
 #[cfg(test)]
 mod tests {
+    /// `repo_check` reports `Repo` inside a work tree and `NotRepo` outside
+    /// one, matching `is_repo`'s existing bool for those two cases (issue/67).
+    #[test]
+    fn repo_check_matches_is_repo_for_repo_and_non_repo() {
+        use super::{is_repo, repo_check, RepoCheck};
+
+        let dir = std::env::temp_dir().join(format!("luvus-rc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(is_repo(&dir));
+        assert!(matches!(repo_check(&dir), RepoCheck::Repo));
+
+        let outside = std::env::temp_dir().join(format!("luvus-rc-not-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).unwrap();
+        assert!(!is_repo(&outside));
+        assert!(matches!(repo_check(&outside), RepoCheck::NotRepo));
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// A `.git` with a malformed config makes `git rev-parse` exit non-zero
+    /// for a reason that isn't "not a git repository". That's a real problem,
+    /// not an ordinary non-repo folder, so it must surface as `Error`, not
+    /// get folded into the same silent `NotRepo`.
+    #[test]
+    fn repo_check_surfaces_malformed_git_config_as_error() {
+        use super::{repo_check, RepoCheck};
+
+        let dir = std::env::temp_dir().join(format!("luvus-rc-badcfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::process::Command::new("git")
+            .args(["init", "-q", dir.to_str().unwrap()])
+            .output()
+            .unwrap();
+        std::fs::write(dir.join(".git/config"), "[core\n").unwrap(); // unterminated section
+
+        match repo_check(&dir) {
+            RepoCheck::Error(e) => assert!(!e.is_empty()),
+            _ => panic!("expected Error for a malformed git config"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The origin slug parser accepts ssh + https GitHub URLs and rejects others,
     /// so PRs/Issues pin to the repo you're in (not gh's default base repo).
     #[test]
@@ -855,6 +954,7 @@ impl FileStatus {
     }
 }
 
+#[cfg(test)]
 fn classify_code(code: &str) -> FileStatus {
     let b = code.as_bytes();
     let (x, y) = (b[0] as char, b[1] as char);
@@ -877,6 +977,7 @@ fn classify_code(code: &str) -> FileStatus {
 /// absolute path -> status, plus each ancestor directory (within `root`) marked
 /// `DirDirty` so a folder shows it *contains* changes. Empty when `root` is not
 /// a repo or `git` is missing — so a non-repo tree just renders untinted.
+#[cfg(test)]
 pub fn tree_status(root: &Path) -> std::collections::HashMap<PathBuf, FileStatus> {
     use std::collections::HashMap;
     let mut map: HashMap<PathBuf, FileStatus> = HashMap::new();

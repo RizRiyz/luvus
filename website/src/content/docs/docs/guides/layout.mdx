@@ -45,21 +45,32 @@ special dashboard, such as the `⎇ git` tab or the `◇ orch` board).
 | New tab | the `+` on the tab bar | `Ctrl+Space c` |
 | Next / previous tab | click a tab | `Ctrl+Space n` / `p` / `⇥` |
 | Close a tab | the `×` on the tab | `Ctrl+Space x` (on a dashboard) |
-| **Rename a tab** | **right-click the tab**, type a name, `⏎` | n/a |
+| Rename a tab | right-click the tab → **Rename**, type a name, `⏎` | `luvus tab rename <name>` |
+| Move a tab one position | right-click the tab → **Move Left** / **Move Right** | `luvus tab move left` / `right` |
+| Swap two tab positions | right-click a tab → **Swap With**, choose the other tab | `luvus tab swap <first> <second>` |
 
 A renamed tab shows your label instead of its number (empty reverts to the
-number). The `⎇ git` and `◇ orch` tabs keep their fixed labels.
+number). Dashboard tabs keep their fixed labels. **Swap With** lists every
+other tab in the workspace, including tabs hidden by tab-bar overflow. Choosing
+one exchanges its position with the right-clicked tab without changing which tab
+is active.
 
 The CLI exposes the same pane move plus tab reordering for scripts and agents:
 
 ```sh
 luvus pane move 7 --tab 2       # existing tab in pane 7's workspace
 luvus pane move 7 --new-tab     # append a fresh tab for pane 7
+luvus tab focus 4               # focus exact tab 4
+luvus tab move left             # move the active tab one position left
+luvus tab move right --tab 4    # move exact tab 4 one position right
 luvus tab move 3 1              # move current workspace tab 3 to position 1
+luvus tab swap 1 4              # exchange the tabs in positions 1 and 4
 ```
 
-All tab numbers are 1-based. A pane move keeps its process running and follows
-it with focus. Tab reordering preserves whichever tab was active.
+All tab numbers are 1-based and validated; missing, zero, or out-of-range
+positions fail instead of silently selecting a different tab. A pane move keeps
+its process running and follows it with focus. Tab reordering uses the requested
+final position and preserves whichever tab was active.
 
 ## Workspaces
 
@@ -68,9 +79,12 @@ A **workspace** is one project folder, fixed at its `cwd` (see
 live in the sidebar's top list.
 
 - **Open one:** the `+` button above the list, or `Ctrl+Space N`, opens a
-  **folder picker**. Browse with the arrows / wheel, `⏎` to open the highlighted
-  folder, `n` to create-and-open a new folder, or `w` to open a repo **as a new
-  worktree**. Running `luvus` inside a folder also adds it automatically.
+  **folder picker**. Browse with the arrows / wheel, use the **Home** row to jump
+  home, or press `g` (also clickable in the footer) to type an absolute, relative,
+  or `~/…` path without leaving the picker. `⏎` in **Go to** only navigates; select
+  **Open this folder** afterward to confirm the workspace. Press `n` to
+  create-and-open a new folder, or `w` to open a repo **as a new worktree**.
+  Running `luvus` inside a folder also adds it automatically.
 - **Switch:** click a row, or `Ctrl+Space w` / `W` to cycle.
 - **Jump to its git tab:** click the branch name next to a workspace.
 
@@ -131,6 +145,35 @@ The **Agents** dock header has an **All / Active** toggle: *Active* shows only
 running agents, while *All* also lists the resumable sessions luvus found on disk (click
 one to reopen it). See [Working with Agents](/docs/guides/agents/).
 :::
+
+## Luvus Bar
+
+Luvus Bar lets built-ins and modules use the otherwise flexible space beside
+the tabs and in the middle of the bottom status row. It never adds a row or
+changes pane/PTY dimensions. Tabs, sidebar toggles, the left prefix guidance,
+and the clickable version always keep priority.
+
+Arrange declared widgets in **Settings → Layout → Luvus Bar**:
+
+- **Top** places a compact widget beside the tabs.
+- **Bottom** places it between the fixed shortcut hint and version.
+- **Off** hides it without deleting module state or its placement declaration.
+
+The declaration rows stay in a stable order while you change placement, so the
+selected widget does not jump under the pointer.
+
+The built-in **Runtime status** widget shows `NORMAL · 1 pane · tab 2/4` in
+Bottom by default and can be moved or hidden. At narrow widths, widgets use
+their compact content and then move into a read-only `… +N` overflow popup;
+they never overlap navigation. See the dedicated [Luvus Bar guide](/docs/guides/bar/)
+for installation, placement, CLI control, module publishing, and troubleshooting.
+
+Both Top and Bottom are capped at 100 display columns. They may be narrower when
+the viewport has less room: Top reserves the active tab, scroll arrows, and
+new-tab button, while Bottom reserves the fixed shortcut guidance and version.
+Extra tabs enter their existing scroll window. A single widget may use all 100
+columns when its region has room. These are terminal columns rather than
+Unicode character counts; wide glyphs such as CJK and many emoji consume two.
 
 ## Selecting text
 

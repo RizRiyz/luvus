@@ -31,6 +31,11 @@ A `<target>` is one of three things:
 
 `agent send` and `agent keys` only target a pane that is actually running an agent, so a plain shell is refused.
 
+For line-specific feedback, the native [DIFF review](/docs/guides/diff/) uses
+the same target validation. It groups selected local notes into one bounded
+message, quotes source context as untrusted review data, and records delivery
+without resolving the notes.
+
 ### How to tell two of the same kind apart
 
 Run `luvus agent list` (each row has `pane`, `agent` kind, `name`, `cwd`, `workspace_name`). Two Claudes share the kind `claude` but differ by pane id and folder. Give each a name so you can mention it:

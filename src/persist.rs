@@ -83,6 +83,42 @@ pub struct PaneSnap {
     /// restore rebuilds the view (re-reads the file) instead of spawning a shell.
     #[serde(default)]
     pub file: Option<PathBuf>,
+    /// A native DIFF view specification. Patch content is always re-fetched.
+    #[serde(default)]
+    pub diff: Option<DiffSnap>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DiffSnap {
+    pub root: PathBuf,
+    pub key: crate::diff::DiffKey,
+    pub status: crate::diff::DiffFileStatus,
+    #[serde(default)]
+    pub preference: crate::diff::DiffLayoutPreference,
+    #[serde(default)]
+    pub scroll: usize,
+    #[serde(default)]
+    pub selected: usize,
+    #[serde(default)]
+    pub selected_side: crate::diff::DiffSide,
+    #[serde(default)]
+    pub horizontal: usize,
+    #[serde(default)]
+    pub wrap: bool,
+    #[serde(default = "default_diff_snap_context_lines")]
+    pub context_lines: u16,
+    #[serde(default = "default_diff_snap_line_numbers")]
+    pub show_line_numbers: bool,
+}
+
+fn default_diff_snap_context_lines() -> u16 {
+    crate::config::Config::default().diff_context_lines()
+}
+
+fn default_diff_snap_line_numbers() -> bool {
+    crate::config::Config::default()
+        .layout
+        .diff_show_line_numbers
 }
 
 /// Serializes tests that mutate the global `$LUVUS_HOME` env + config files, so
@@ -663,7 +699,37 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                 .filter_map(|id| {
                     // A file-view leaf (docs/38 FILE-3) is saved by its path and
                     // rebuilt on restore; it has no PTY.
-                    if let Some(crate::app::ViewKind::File(v)) = app.views.get(&id) {
+                    if let Some(view) = app.views.get(&id) {
+                        let (file, diff) = match view {
+                            crate::app::ViewKind::File(v) => (Some(v.path.clone()), None),
+                            crate::app::ViewKind::Diff(v) => {
+                                let status = app
+                                    .diff
+                                    .snapshot
+                                    .as_ref()
+                                    .and_then(|snapshot| {
+                                        snapshot.files.iter().find(|file| file.key == v.key)
+                                    })
+                                    .map(|file| file.status)
+                                    .unwrap_or(crate::diff::DiffFileStatus::Modified);
+                                (
+                                    None,
+                                    Some(DiffSnap {
+                                        root: v.root.clone(),
+                                        key: v.key.clone(),
+                                        status,
+                                        preference: v.preference,
+                                        scroll: v.scroll,
+                                        selected: v.selected,
+                                        selected_side: v.selected_side,
+                                        horizontal: v.horizontal,
+                                        wrap: v.wrap,
+                                        context_lines: v.context_lines,
+                                        show_line_numbers: v.show_line_numbers,
+                                    }),
+                                )
+                            }
+                        };
                         return Some((
                             id.0,
                             PaneSnap {
@@ -674,7 +740,8 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                                 agent_launch: None,
                                 screen: None,
                                 module: None,
-                                file: Some(v.path.clone()),
+                                file,
+                                diff,
                             },
                         ));
                     }
@@ -727,6 +794,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                                 screen,
                                 module,
                                 file: None,
+                                diff: None,
                             },
                         )
                     })
@@ -790,6 +858,59 @@ pub fn load() -> Option<SessionSnapshot> {
         return None; // newer than we understand — ignore rather than misparse
     }
     Some(snap)
+}
+
+#[cfg(test)]
+mod diff_snap_schema_tests {
+    use super::*;
+
+    #[test]
+    fn diff_snapshot_display_state_defaults_without_dropping_the_session() {
+        let path = crate::diff::RepoPath::from_path(std::path::Path::new("src/lib.rs")).unwrap();
+        let snap = DiffSnap {
+            root: PathBuf::from("repo"),
+            key: crate::diff::DiffKey {
+                repo_id: "repo".into(),
+                worktree_id: "tree".into(),
+                layer: crate::diff::DiffLayer::Worktree,
+                old_path: Some(path.clone()),
+                new_path: Some(path),
+            },
+            status: crate::diff::DiffFileStatus::Modified,
+            preference: crate::diff::DiffLayoutPreference::Split,
+            scroll: 4,
+            selected: 5,
+            selected_side: crate::diff::DiffSide::Old,
+            horizontal: 6,
+            wrap: true,
+            context_lines: 7,
+            show_line_numbers: false,
+        };
+        let mut value = serde_json::to_value(snap).unwrap();
+        let object = value.as_object_mut().unwrap();
+        for key in [
+            "preference",
+            "scroll",
+            "selected",
+            "selected_side",
+            "horizontal",
+            "wrap",
+            "context_lines",
+            "show_line_numbers",
+        ] {
+            object.remove(key);
+        }
+
+        let restored: DiffSnap = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.preference, crate::diff::DiffLayoutPreference::Auto);
+        assert_eq!(restored.scroll, 0);
+        assert_eq!(restored.selected, 0);
+        assert_eq!(restored.selected_side, crate::diff::DiffSide::New);
+        assert_eq!(restored.horizontal, 0);
+        assert!(!restored.wrap);
+        assert_eq!(restored.context_lines, 3);
+        assert!(restored.show_line_numbers);
+    }
 }
 
 #[cfg(all(test, unix))]

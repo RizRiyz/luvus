@@ -1,187 +1,176 @@
-//! The bottom status line: prefix hint, key cheatsheet, and right-aligned
-//! mode / pane / tab / version readout.
+//! The bottom status line. Fixed guidance owns the left edge, Luvus Bar owns
+//! the flexible middle, and the clickable version stays fixed at the right.
 
 use super::*;
 
-// ── status ──────────────────────────────────────────────────────────────────
-
 pub(super) fn draw_status(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) {
-    // Compact/touch mode collapses this row to nothing (docs/18) to reclaim it
-    // for content — the status readout is keyboard-oriented and redundant on a
-    // phone (the tab bar shows tabs, the switcher shows panes/nodes).
     if area.height == 0 {
         return;
     }
     f.render_widget(Block::new().style(Style::new().bg(t.crust)), area);
-    let cat = app.catalog;
+    app.version_rect = None;
 
-    // Keyboard scroll mode owns the whole status line with its own hints.
+    let version_text = concat!("v", env!("CARGO_PKG_VERSION"));
+    let dot = if app.update_available.is_some() {
+        " ●"
+    } else {
+        ""
+    };
+    let click_w = display_width(version_text).saturating_add(display_width(dot)) as u16;
+    let version = if click_w < area.width {
+        let rect = Rect::new(area.right().saturating_sub(click_w + 1), area.y, click_w, 1);
+        app.version_rect = Some(rect);
+        let hovered = app
+            .hover
+            .is_some_and(|(x, y)| rect.contains(Position::new(x, y)));
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    version_text,
+                    Style::new().fg(if hovered { t.accent } else { t.subtext1 }),
+                ),
+                Span::styled(dot, Style::new().fg(t.accent).bold()),
+                Span::raw(" "),
+            ])),
+            Rect::new(rect.x, area.y, click_w + 1, 1),
+        );
+        Some(rect)
+    } else {
+        None
+    };
+
+    let (left, show_bar) = fixed_guidance(app, t);
+    let left_width = left.width() as u16;
+    let left_limit = version.map_or(area.right(), |rect| rect.x);
+    f.render_widget(
+        Paragraph::new(left),
+        Rect::new(area.x, area.y, left_limit.saturating_sub(area.x), 1),
+    );
+
+    let Some(version) = version else { return };
+    if !show_bar {
+        return;
+    }
+    const GAP: u16 = 5;
+    let separator_x = version.x.saturating_sub(GAP);
+    let start = area.x.saturating_add(left_width);
+    let budget = separator_x
+        .saturating_sub(start)
+        .min(crate::bar::MAX_BAR_REGION_WIDTH);
+    if budget == 0 {
+        return;
+    }
+    let (hits, overflow, visible) = {
+        let candidates =
+            app.bar
+                .widgets_for(crate::bar::BarRegion::BottomRight, &app.config.bars, false);
+        let layout = crate::bar::compose(&candidates, budget, crate::bar::MAX_BAR_WIDGET_WIDTH);
+        let visible = !layout.is_empty();
+        let (hits, overflow) = crate::bar::render::draw_region(
+            f,
+            Rect::new(separator_x.saturating_sub(budget), area.y, budget, 1),
+            crate::bar::BarRegion::BottomRight,
+            &candidates,
+            &layout,
+            app.spinner,
+            t,
+        );
+        (hits, overflow, visible)
+    };
+    app.bar.hits.extend(hits);
+    if let Some(overflow) = overflow {
+        app.bar.overflow_hits.push(overflow);
+    }
+    if visible {
+        f.render_widget(
+            Paragraph::new(Span::styled("  ·  ", Style::new().fg(t.overlay0))),
+            Rect::new(separator_x, area.y, GAP, 1),
+        );
+    }
+}
+
+fn fixed_guidance(app: &App, t: &Theme) -> (Line<'static>, bool) {
+    let cat = app.catalog;
+    let mut left = vec![Span::raw(" ")];
     if app.scroll_pane.is_some() {
-        let mut left: Vec<Span> = vec![Span::raw(" ")];
-        left.push(Span::styled(
-            format!(" {} ", cat.mode_scroll),
-            Style::new().fg(t.crust).bg(t.accent).bold(),
-        ));
+        left.push(mode_label(cat.mode_scroll, t));
         left.push(Span::raw("  "));
         left.extend(hint("1-9", cat.scroll_jump, t));
         left.extend(hint("j/k f/b ↑↓", cat.act_scroll, t));
         left.extend(hint("g/G", cat.scroll_ends, t));
         left.extend(hint("q", cat.scroll_live, t));
-        f.render_widget(Paragraph::new(Line::from(left)), area);
-        return;
+        return (Line::from(left), false);
     }
-
-    // Keyboard copy mode owns navigation too. Keep its hints compact because
-    // the selected cells and inverse cursor are the primary affordance.
     if app.copy_mode.is_some() {
-        let mut left: Vec<Span> = vec![Span::raw(" ")];
-        left.push(Span::styled(
-            " COPY ",
-            Style::new().fg(t.crust).bg(t.accent).bold(),
-        ));
+        left.push(mode_label("COPY", t));
         left.push(Span::raw("  "));
         left.extend(hint("hjkl arrows", "move", t));
         left.extend(hint("v", "anchor", t));
         left.extend(hint("y", "copy", t));
         left.extend(hint("q", "cancel", t));
-        f.render_widget(Paragraph::new(Line::from(left)), area);
-        return;
+        return (Line::from(left), false);
     }
-
-    // Keyboard resize mode owns the status line with its own hint (docs/27).
     if app.mode == Mode::Resize {
-        let mut left: Vec<Span> = vec![Span::raw(" ")];
-        left.push(Span::styled(
-            format!(" {} ", cat.mode_resize),
-            Style::new().fg(t.crust).bg(t.accent).bold(),
-        ));
+        left.push(mode_label(cat.mode_resize, t));
         left.push(Span::styled(
             format!("  {}", cat.mode_resize_hint),
             Style::new().fg(t.subtext0),
         ));
-        f.render_widget(Paragraph::new(Line::from(left)), area);
-        return;
+        return (Line::from(left), false);
     }
 
-    let prefix = app.mode == Mode::Prefix;
-
-    let mut left: Vec<Span> = vec![Span::raw(" ")];
-    // The hint keys reflect the *actual* bindings (docs/64), so they stay correct
-    // after a rebind or the tmux preset (e.g. splits show `%`/`"`, not `v`/`s`).
-    let k = |c: crate::app::Cmd| app.key_for(c);
-    let prefix_label = app.prefix.label();
-    if prefix {
-        // The user just pressed the prefix — give the hints the full width (the
-        // right-side readout is suppressed below) and lead with `?` so the
-        // pointer to the full cheat-sheet never clips on a narrow terminal.
-        left.push(Span::styled(
-            format!(" {} ", cat.mode_prefix),
-            Style::new().fg(t.crust).bg(t.accent).bold(),
-        ));
+    let key = |command: crate::app::Cmd| app.key_for(command);
+    let prefix = app.prefix.label();
+    if app.mode == Mode::Prefix {
+        left.push(mode_label(cat.mode_prefix, t));
         left.push(Span::raw("  "));
         left.extend(hint("?", cat.all_keys, t));
         left.extend(hint("←↓↑→", cat.pane, t));
         left.extend(hint(
             &format!(
                 "{}/{}",
-                k(crate::app::Cmd::SplitRight),
-                k(crate::app::Cmd::SplitDown)
+                key(crate::app::Cmd::SplitRight),
+                key(crate::app::Cmd::SplitDown)
             ),
             cat.act_split,
             t,
         ));
-        left.extend(hint(&k(crate::app::Cmd::ClosePane), cat.act_close, t));
-        left.extend(hint(&k(crate::app::Cmd::NewTab), cat.act_new_tab, t));
+        left.extend(hint(&key(crate::app::Cmd::ClosePane), cat.act_close, t));
+        left.extend(hint(&key(crate::app::Cmd::NewTab), cat.act_new_tab, t));
         left.extend(hint(
             &format!(
                 "{}/{}",
-                k(crate::app::Cmd::NextTab),
-                k(crate::app::Cmd::PrevTab)
+                key(crate::app::Cmd::NextTab),
+                key(crate::app::Cmd::PrevTab)
             ),
             cat.act_tab,
             t,
         ));
-        left.extend(hint(&k(crate::app::Cmd::NewWorkspace), cat.workspace, t));
-        left.extend(hint(&k(crate::app::Cmd::OpenGit), "git", t));
-        left.extend(hint(&k(crate::app::Cmd::OpenBoard), "orch", t));
-        left.extend(hint(&k(crate::app::Cmd::GlobalSearch), cat.act_search, t));
-    } else {
-        left.push(Span::styled(
-            format!(" {prefix_label} "),
-            Style::new().fg(t.crust).bg(t.accent).bold(),
-        ));
-        left.push(Span::styled(
-            format!("  {}", cat.prefix),
-            Style::new().fg(t.subtext0),
-        ));
-        left.push(Span::styled("  ·  ", Style::new().fg(t.overlay0)));
-        left.extend(hint(&format!("{prefix_label} ?"), cat.all_shortcuts, t));
+        left.extend(hint(&key(crate::app::Cmd::NewWorkspace), cat.workspace, t));
+        left.extend(hint(&key(crate::app::Cmd::OpenGit), "git", t));
+        left.extend(hint(&key(crate::app::Cmd::OpenBoard), "orch", t));
+        left.extend(hint(&key(crate::app::Cmd::GlobalSearch), cat.act_search, t));
+        return (Line::from(left), false);
     }
-    f.render_widget(Paragraph::new(Line::from(left)), area);
 
-    // The right-side readout only shows in Normal mode; in Prefix mode the hint
-    // bar owns the full width so nothing collides.
-    if !prefix {
-        let panes = app.layout().len();
-        let (active_tab, tab_count) = {
-            let ws = app.ws();
-            (ws.active_tab, ws.tabs.len())
-        };
-        let version = concat!("v", env!("CARGO_PKG_VERSION"));
-        let version_w = crate::ui::display_width(version) as u16;
-        let dot = " ●";
-        let dot_w = if app.update_available.is_some() {
-            crate::ui::display_width(dot) as u16
-        } else {
-            0
-        };
-        // The version is the rightmost meaningful item, followed by one padding
-        // cell. It therefore remains fully visible even when a narrow status row
-        // clips older metadata on the left.
-        let click_w = version_w + dot_w;
-        let version_rect = Rect::new(
-            area.right().saturating_sub(click_w + 1),
-            area.y,
-            click_w.min(area.width.saturating_sub(1)),
-            1,
-        );
-        app.version_rect = (click_w < area.width).then_some(version_rect);
-        let version_fg = if app.hover.is_some_and(|(x, y)| {
-            x >= version_rect.x
-                && x < version_rect.right()
-                && y >= version_rect.y
-                && y < version_rect.bottom()
-        }) {
-            t.accent
-        } else {
-            t.subtext1
-        };
-        let right = Line::from(vec![
-            Span::styled(cat.mode_normal, Style::new().fg(t.overlay1).bold()),
-            Span::styled("  ·  ", Style::new().fg(t.overlay0)),
-            Span::styled(
-                format!("{panes} {}", if panes == 1 { cat.pane } else { cat.panes }),
-                Style::new().fg(t.subtext0),
-            ),
-            Span::styled("  ·  ", Style::new().fg(t.overlay0)),
-            Span::styled(
-                format!("{} {}/{}", cat.act_tab, active_tab + 1, tab_count),
-                Style::new().fg(t.subtext0),
-            ),
-            Span::styled("  ·  ", Style::new().fg(t.overlay0)),
-            Span::styled(version, Style::new().fg(version_fg)),
-            Span::styled(
-                if app.update_available.is_some() {
-                    dot
-                } else {
-                    ""
-                },
-                Style::new().fg(t.accent).bold(),
-            ),
-            Span::raw(" "),
-        ]);
-        f.render_widget(Paragraph::new(right).alignment(Alignment::Right), area);
-    }
+    left.push(Span::styled(
+        format!(" {prefix} "),
+        Style::new().fg(t.crust).bg(t.accent).bold(),
+    ));
+    left.push(Span::styled(
+        format!("  {}", cat.prefix),
+        Style::new().fg(t.subtext0),
+    ));
+    left.push(Span::styled("  ·  ", Style::new().fg(t.overlay0)));
+    left.extend(hint(&format!("{prefix} ?"), cat.all_shortcuts, t));
+    (Line::from(left), true)
+}
+
+fn mode_label(label: &str, t: &Theme) -> Span<'static> {
+    Span::styled(
+        format!(" {label} "),
+        Style::new().fg(t.crust).bg(t.accent).bold(),
+    )
 }
 
 fn hint(key: &str, word: &str, t: &Theme) -> Vec<Span<'static>> {
@@ -189,4 +178,116 @@ fn hint(key: &str, word: &str, t: &Theme) -> Vec<Span<'static>> {
         Span::styled(key.to_string(), Style::new().fg(t.accent).bold()),
         Span::styled(format!(" {word}   "), Style::new().fg(t.subtext0)),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn row(term: &Terminal<TestBackend>, y: u16) -> String {
+        let buffer = term.backend().buffer();
+        (0..buffer.area.width)
+            .map(|x| buffer.cell((x, y)).map_or(" ", |cell| cell.symbol()))
+            .collect()
+    }
+
+    #[test]
+    fn default_guidance_and_fixed_version_keep_the_existing_edges() {
+        let _env = crate::persist::test_env("bar-status-default");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 30, tx).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        let status = row(&terminal, 29);
+        let prefix = app.prefix.label();
+        let guidance = format!(
+            "  {prefix}   {}  ·  {prefix} ? {}",
+            app.catalog.prefix, app.catalog.all_shortcuts
+        );
+        assert!(
+            status.starts_with(&guidance),
+            "unexpected guidance prefix: {status:?}"
+        );
+        assert!(
+            status
+                .trim_end()
+                .ends_with(concat!("v", env!("CARGO_PKG_VERSION"))),
+            "unexpected version suffix: {status:?}"
+        );
+        let version = app.version_rect.expect("version stays clickable");
+        assert_eq!(version.right(), 119);
+    }
+
+    #[test]
+    fn external_bottom_widgets_and_long_mode_hints_never_cover_version() {
+        let _env = crate::persist::test_env("bar-status-fixed-lanes");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let mut segment =
+            crate::bar::BarSegment::text("deploy ready", crate::bar::BarTone::Success);
+        segment.action = Some("details".into());
+        let widget = crate::bar::BarWidget::new(
+            crate::bar::BarWidgetKey::new("example", "deploy"),
+            crate::bar::BarRegion::BottomRight,
+            vec![segment],
+            Vec::new(),
+            50,
+        )
+        .unwrap();
+        app.bar.push_widget(widget).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let version = app.version_rect.expect("version stays visible");
+        assert!(app.bar.hits.iter().all(|hit| hit.rect.right() <= version.x));
+
+        app.mode = Mode::Prefix;
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        assert_eq!(app.version_rect, Some(version));
+        assert!(
+            app.bar.hits.is_empty(),
+            "mode guidance temporarily owns the middle lane"
+        );
+    }
+
+    #[test]
+    fn bottom_bar_is_right_aligned_and_capped_at_100_columns() {
+        let _env = crate::persist::test_env("bar-status-100");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(200, 24, tx).unwrap();
+        app.config.bars.place(crate::bar::CORE_RUNTIME, None);
+        let mut segment =
+            crate::bar::BarSegment::text("x".repeat(100), crate::bar::BarTone::Accent);
+        segment.action = Some("details".into());
+        let widget = crate::bar::BarWidget::new(
+            crate::bar::BarWidgetKey::new("example", "wide-bottom"),
+            crate::bar::BarRegion::BottomRight,
+            vec![segment],
+            Vec::new(),
+            50,
+        )
+        .unwrap();
+        app.bar.push_widget(widget).unwrap();
+
+        let area = Rect::new(0, 0, 200, 1);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        let mut target = crate::ui::RenderTarget::new(&mut buffer, area);
+        let theme = app.theme.clone();
+        draw_status(&mut target, area, &mut app, &theme);
+
+        let hit = app.bar.hits.first().expect("bottom widget is visible");
+        assert_eq!(hit.rect.width, crate::bar::MAX_BAR_REGION_WIDTH);
+        let version = app.version_rect.expect("version remains fixed");
+        assert_eq!(hit.rect.right() + 5, version.x);
+    }
 }

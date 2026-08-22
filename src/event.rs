@@ -70,8 +70,70 @@ pub enum AppEvent {
         path: std::path::PathBuf,
         entries: Vec<crate::files::Entry>,
     },
-    /// The file-tree git-status scan finished (docs/38 FILE-6): path -> status.
-    FileGitStatus(std::collections::HashMap<std::path::PathBuf, crate::git::local::FileStatus>),
+    /// A bounded global-finder file-path catalog completed off the app loop.
+    SearchFilesIndexed {
+        instance: u64,
+        catalogs: Vec<(
+            usize,
+            String,
+            std::path::PathBuf,
+            crate::search::files::FileCatalog,
+        )>,
+    },
+    /// Fuzzy file/output scoring completed on the finder's dedicated worker.
+    SearchResults {
+        instance: u64,
+        generation: u64,
+        matches: Vec<crate::search::SearchMatch>,
+        total: usize,
+        capped: bool,
+    },
+    /// Bounded result rows returned by other running named-session owners.
+    SearchFederatedResults {
+        instance: u64,
+        generation: u64,
+        matches: Vec<crate::search::SearchMatch>,
+        total: usize,
+        partial: bool,
+    },
+    /// A target in another session was revalidated and focused by its owner.
+    SearchHandoffReady {
+        session: String,
+        result: Result<(), String>,
+    },
+    /// One structured Git status scan feeds FILES tint and DIFF (docs/88).
+    DiffStatus {
+        token: u64,
+        visible_root: std::path::PathBuf,
+        result: Result<crate::diff::DiffSnapshot, String>,
+    },
+    /// One selected file's bounded diff finished loading off the app loop.
+    DiffLoaded {
+        id: PaneId,
+        token: u64,
+        result: Result<crate::diff::LoadedDiff, String>,
+    },
+    DiffNotesLoaded {
+        review_id: String,
+        result: Result<
+            (
+                Vec<crate::diff::ReviewNote>,
+                crate::diff::notes::ReviewProgress,
+            ),
+            String,
+        >,
+    },
+    DiffNoteSaved {
+        note: crate::diff::ReviewNote,
+        result: Result<(), String>,
+    },
+    DiffNoteRemoved {
+        id: String,
+        result: Result<(), String>,
+    },
+    DiffProgressSaved {
+        result: Result<(), String>,
+    },
     /// A file-view read finished (docs/38 FILE-3): applied to the view leaf `id`.
     FileRead {
         id: PaneId,
@@ -117,6 +179,20 @@ pub enum AppEvent {
     /// the same channel as every other event so the loop wakes immediately —
     /// draining it on the idle tick would add a tick's latency to every CLI call.
     Api(crate::ipc::api::ApiRequest),
+    /// A home-level theme scan completed on an API worker. The app loop only
+    /// swaps the validated in-memory registry and applies the selected theme.
+    ThemeReloaded {
+        id: String,
+        registry: crate::theme::ThemeRegistry,
+        reply: Sender<String>,
+    },
+    /// Settings requested removal of an installed theme. Filesystem validation,
+    /// dependency checks, removal, and the follow-up scan all run on a worker;
+    /// the app loop only swaps the completed registry and reports the outcome.
+    ThemeUninstalled {
+        id: String,
+        result: Result<crate::theme::ThemeRegistry, String>,
+    },
     /// A `wait.output` request (docs/81): reply once the pane's output contains
     /// the needle, or the deadline elapses. Carries its own reply channel so
     /// the connection can block without ever polling the loop.

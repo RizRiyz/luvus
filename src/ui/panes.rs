@@ -18,20 +18,29 @@ pub(super) fn draw_pane_titles(
             continue;
         }
         // A view leaf's title is its file path + a state dot placeholder.
-        if let Some(crate::app::ViewKind::File(v)) = app.views.get(id) {
+        if let Some(view) = app.views.get(id) {
             let focused = *id == focus;
             let bg = t.mantle;
             let inner_w = rect.width - 2;
             let btn_w = title_buttons_w(focused, rect.width);
             let title_w = inner_w.saturating_sub(btn_w);
-            let name = v
-                .path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
+            let (marker, name) = match view {
+                crate::app::ViewKind::File(v) => (
+                    "■",
+                    v.path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                ),
+                crate::app::ViewKind::Diff(v) => (
+                    crate::diff::DIFF_GLYPH,
+                    format!("DIFF · {}", v.key.display_path()),
+                ),
+            };
             let path_fg = if focused { t.accent } else { t.subtext0 };
-            // A plain small-square glyph (no emoji), neutral marker.
-            let dot = Span::styled(" ■ ", Style::new().fg(t.overlay1).bg(bg));
+            // Plain terminal glyphs only: files use a square, DIFF uses its
+            // dedicated filled triangle. Neither depends on emoji rendering.
+            let dot = Span::styled(format!(" {marker} "), Style::new().fg(t.overlay1).bg(bg));
             let label: String = name
                 .chars()
                 .take(title_w.saturating_sub(3) as usize)
@@ -147,20 +156,37 @@ fn draw_title_buttons(
 
 // ── panes ─────────────────────────────────────────────────────────────────
 
+struct PaneRenderContext<'a> {
+    app: &'a App,
+    diff_source_rects: &'a mut Vec<(PaneId, usize, crate::diff::DiffSide, Rect)>,
+    diff_note_rects: &'a mut Vec<(PaneId, String, Rect)>,
+}
+
 pub(super) fn draw_panes(
     f: &mut RenderTarget,
     rects: &[(PaneId, Rect)],
     bordered: bool,
-    app: &App,
+    app: &mut App,
     t: &Theme,
 ) -> Option<(u16, u16)> {
     let focus = app.layout().focus;
     let mut cursor = None;
-    for (id, rect) in rects {
-        if let Some(c) = draw_one_pane(f, *rect, *id, *id == focus, bordered, app, t) {
-            cursor = Some(c);
+    let mut diff_source_rects = Vec::new();
+    let mut diff_note_rects = Vec::new();
+    {
+        let mut context = PaneRenderContext {
+            app,
+            diff_source_rects: &mut diff_source_rects,
+            diff_note_rects: &mut diff_note_rects,
+        };
+        for (id, rect) in rects {
+            if let Some(c) = draw_one_pane(f, *rect, *id, *id == focus, bordered, &mut context, t) {
+                cursor = Some(c);
+            }
         }
     }
+    app.diff_source_rects = diff_source_rects;
+    app.diff_note_rects = diff_note_rects;
     cursor
 }
 
@@ -170,14 +196,34 @@ fn draw_one_pane(
     id: PaneId,
     focused: bool,
     bordered: bool,
-    app: &App,
+    context: &mut PaneRenderContext<'_>,
     t: &Theme,
 ) -> Option<(u16, u16)> {
+    let app = context.app;
     // A view leaf (docs/38 FILE-3) renders natively, not from a PTY.
-    if let Some(crate::app::ViewKind::File(v)) = app.views.get(&id) {
+    if let Some(view) = app.views.get(&id) {
         let content = pane_content(area, bordered)?;
-        let sel = app.selection.filter(|s| s.pane == id);
-        super::files::draw_file_view(f, content, v, sel.as_ref(), t);
+        match view {
+            crate::app::ViewKind::File(v) => {
+                let sel = app.selection.filter(|s| s.pane == id);
+                super::files::draw_file_view(f, content, v, sel.as_ref(), t);
+            }
+            crate::app::ViewKind::Diff(v) => super::diff::draw_diff_view(
+                f,
+                content,
+                id,
+                v,
+                super::diff::DiffRenderContext {
+                    state: &app.diff,
+                    picker: app.diff_agent_picker.as_ref(),
+                    marker_style: app.config.layout.diff_marker_style,
+                    color_mode: app.config.layout.diff_color_mode,
+                    source_hits: context.diff_source_rects,
+                    note_hits: context.diff_note_rects,
+                },
+                t,
+            ),
+        }
         return None; // views own no terminal cursor
     }
     let pane = app.panes.get(&id)?;

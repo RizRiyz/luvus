@@ -293,31 +293,3 @@ fn fill_bg(f: &mut RenderTarget, rect: Rect, bg: ratatui::style::Color) {
         }
     }
 }
-
-/// A compact global agent-state summary for the phone header (docs/18): a colored
-/// state dot + count per non-empty state, in urgency order (blocked → working →
-/// done → idle). Language-neutral (dots, not words). When it can't all fit
-/// `max_width`, the **least-urgent** states drop first, so "must act on this"
-/// survives on the narrowest screen.
-pub(crate) fn compact_agent_summary(app: &App, max_width: u16) -> Line<'static> {
-    use crate::ui::theme::State;
-    let t = &app.theme;
-    let counts = app.agent_state_counts();
-    let states = [State::Blocked, State::Working, State::Done, State::Idle];
-    let mut spans: Vec<Span> = Vec::new();
-    let mut used = 0usize;
-    for (i, st) in states.iter().enumerate() {
-        if counts[i] == 0 {
-            continue;
-        }
-        // "● N " — dot + count + a trailing space.
-        let text = format!("{} {} ", st.dot(), counts[i]);
-        let w = super::display_width(&text);
-        if used + w > max_width as usize {
-            break; // least-urgent states fall off the end
-        }
-        used += w;
-        spans.push(Span::styled(text, Style::new().fg(st.color(t))));
-    }
-    Line::from(spans)
-}

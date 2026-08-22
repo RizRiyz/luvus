@@ -1,5 +1,5 @@
 //! `luvus-module.toml` — the module manifest: identity + declared argv commands
-//! (actions, event hooks, panes, docks, settings, startup + build steps). Parsed
+//! (actions, event hooks, panes, docks, bars, settings, startup + build steps). Parsed
 //! with serde; validated to mirror the spec in docs/13 §3.1.
 
 use std::collections::HashSet;
@@ -40,6 +40,10 @@ pub struct ModuleManifest {
     /// content over the socket (`ui.dock.push`); luvus owns rendering.
     #[serde(default)]
     pub docks: Vec<DockEntry>,
+    /// Compact single-row Luvus Bar widgets. A declaration grants ownership;
+    /// content arrives later through `luvus bar push` (`ui.bar.push` on the API).
+    #[serde(default)]
+    pub bars: Vec<BarWidgetEntry>,
     /// User-editable settings rendered in Settings → Modules (docs/13 §3.6).
     #[serde(default)]
     pub settings: Vec<SettingSpec>,
@@ -104,6 +108,20 @@ pub struct DockEntry {
     pub title: String,
     #[serde(default = "default_dock_placement")]
     pub placement: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct BarWidgetEntry {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub region: crate::bar::BarRegion,
+    #[serde(default = "default_bar_priority")]
+    pub priority: u8,
+}
+
+fn default_bar_priority() -> u8 {
+    50
 }
 
 fn default_dock_placement() -> String {
@@ -305,6 +323,27 @@ impl ModuleManifest {
             }
             if !dock_ids.insert(d.id.as_str()) {
                 return Err(format!("duplicate dock id: {}", d.id));
+            }
+        }
+        let mut bar_ids = HashSet::new();
+        for bar in &self.bars {
+            if !valid_local_id(&bar.id) {
+                return Err(format!(
+                    "invalid bar id {:?} (use [a-z0-9:_-], no dots)",
+                    bar.id
+                ));
+            }
+            if !bar_ids.insert(bar.id.as_str()) {
+                return Err(format!("duplicate bar id: {}", bar.id));
+            }
+            if bar.title.trim().is_empty()
+                || bar.title.len() > crate::bar::MAX_TEXT_BYTES
+                || bar.title.chars().any(char::is_control)
+            {
+                return Err(format!(
+                    "bar {}: title is required, bounded, and must not contain controls",
+                    bar.id
+                ));
             }
         }
         Ok(())
@@ -510,6 +549,7 @@ min_bohay_version = "0.8.3"
             events: vec![],
             panes: vec![],
             docks: vec![],
+            bars: vec![],
             settings: vec![],
         }
     }
@@ -529,6 +569,52 @@ min_bohay_version = "0.8.3"
         let mut m = base();
         m.actions.push(action("refresh"));
         assert!(m.validate().is_ok());
+    }
+
+    #[test]
+    fn bar_declarations_validate_ids_titles_regions_and_duplicates() {
+        let parsed: ModuleManifest = toml::from_str(
+            r#"
+id = "you.ci"
+name = "CI"
+version = "0.1.0"
+min_luvus_version = "0.1.0"
+
+[[bars]]
+id = "status"
+title = "CI status"
+region = "top-right"
+priority = 60
+"#,
+        )
+        .unwrap();
+        assert!(parsed.validate().is_ok());
+        assert_eq!(parsed.bars[0].region, crate::bar::BarRegion::TopRight);
+
+        let mut duplicate = parsed.clone();
+        duplicate.bars.push(duplicate.bars[0].clone());
+        assert!(duplicate
+            .validate()
+            .unwrap_err()
+            .contains("duplicate bar id"));
+
+        let mut unsafe_title = parsed.clone();
+        unsafe_title.bars[0].title = "CI\u{1b}[31m".into();
+        assert!(unsafe_title.validate().unwrap_err().contains("controls"));
+
+        let unknown = toml::from_str::<ModuleManifest>(
+            r#"
+id = "you.ci"
+name = "CI"
+version = "0.1.0"
+min_luvus_version = "0.1.0"
+[[bars]]
+id = "status"
+title = "CI"
+region = "middle"
+"#,
+        );
+        assert!(unknown.is_err());
     }
 
     #[test]

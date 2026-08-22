@@ -19,7 +19,7 @@ the live cheat-sheet. Remap anything, change the prefix, or apply a preset in
 | `f` | fork agent session | `g` | git tab |
 | `b` / `B` | toggle left / right sidebar | `o` | orchestration board |
 | `a` | agents All/Active | `m` | jump palette (tabs / workspaces / agents) |
-| `e` | toggle FILES dock | `/` | global search |
+| `e` | toggle FILES dock | `/` | global fuzzy finder |
 | `=` | Settings | `q` / `d` | detach |
 | `1`–`9` | jump to tab | | |
 
@@ -55,6 +55,19 @@ same as tmux's rename-window), and Settings lives on `=`. The **Menu** button
 **workspace**, and every **agent** in one overlay. Type to filter, and use the
 scope chips (or `Tab`) to narrow it to one category. Arrows move, `Enter` jumps,
 `Esc` clears the filter then closes.
+
+## The global fuzzy finder
+
+`/` opens one finder across the selected Luvus home. It ranks named sessions,
+workspaces, tabs, panes, agents, file paths, and retained pane output. Use
+`Tab` or `Shift+Tab` to move through **All**, **Navigate**, **Files**, and
+**Output**. `Ctrl+i` toggles case-sensitive retained-output matching. `Enter`
+opens the selected target. A non-empty query needs one `Esc` to clear and a
+second `Esc` to close.
+
+Navigation results appear first. File, output, and other running-session
+results arrive in the same list without resetting the selected row. See the
+[Global Fuzzy Finder](/docs/guides/search/) guide for limits and CLI use.
 
 ## No-prefix keys and menus
 

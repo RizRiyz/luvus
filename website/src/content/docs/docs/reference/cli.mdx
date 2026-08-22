@@ -41,7 +41,9 @@ tabs:
   tab list                   list tabs in the current workspace
   tab new                    new tab
   tab focus <n>              focus tab n (1-based)
-  tab move <from> <to>       reorder tabs in the current workspace (1-based)
+  tab move <from> <to>       move a tab to an exact position (1-based)
+  tab move left|right        move the active tab one position (--tab N targets one)
+  tab swap <first> <second>  exchange two tab positions (1-based)
   tab rename <name>          name a tab (--tab N to target one; empty clears it)
   tab close [<n>]            close a tab (default: active)
 
@@ -82,6 +84,28 @@ panes / agents:
 search:
   search <text...> [--case]  find text across every pane's scrollback (docs/63);
                              --case is case-sensitive; returns matches as JSON
+  search --fuzzy <query...> [--scope all|navigate|files|output] [--all-sessions]
+                           [--limit <1-200>] [--case] [--json]
+                             rank navigation, file paths, and retained output;
+                             legacy search stays exact unless --fuzzy is passed
+
+themes:
+  theme list [--json]       list built-in, installed, and virtual themes
+  theme path                print/create the shared themes directory
+  theme init <id> [--extends <id>]   write an editable TOML starter
+  theme validate <path> [--strict] [--json]   validate without installing
+  theme install <source> [--yes]     install a local file, HTTPS URL, GitHub repo, or community/<id>
+  theme use <id>            select and persist a registered theme
+  theme uninstall <id>      remove an inactive local theme
+  theme reload              rescan installed themes in the selected server
+
+bars:
+  bar list                   list declared Luvus Bar widgets and live content
+  bar push --id <id> [--region top-right|bottom-right] --content <json>
+                             publish validated live widget segments;
+                             --content-file, --compact-content, --text and --state supported
+  bar move --id <id> --region top-right|bottom-right|off
+  bar remove --id <id>       clear live widget content, preserving placement
 
 appearance:
   ui sidebar [--side left|right] --width <n>     set a sidebar's width (columns)
@@ -91,6 +115,8 @@ appearance:
   ui dock push --id <id> [--title <t>] [--side left|right] [--rows <json>]
                              feed a module's sidebar dock its rows (JSON array,
                              or piped on stdin). See docs/29 + the website
+  ui notification push --text <text> [--level info|success|warning|error]
+  ui notification clear [--dedupe-key <key>]
   ui toast <text>            flash a one-line message in the UI
 
 modules (extensions):
@@ -121,6 +147,20 @@ git:
   files open <path> [--target pane|tab|preview]   open a file in a view
   files reveal <path>        expand the tree to a path
   files refresh              re-read the tree from disk
+
+diff review:
+  diff list [--layer staged|worktree|untracked|conflict]   list exact diff layers
+  diff open [<path>] [--layer <layer>] [--view auto|split|stack]
+                             [--placement preview|pane|tab]
+  diff get <path> [--layer <layer>] [--include-patch]   inspect a bounded semantic diff
+  diff refresh               refresh the shared FILES and DIFF index
+  diff note add --file <path> (--old-line N|--new-line N) --body <text>
+                             [--end-line N] [--kind question|issue|suggestion|praise]
+  diff note list [--file <path>] [--state open|resolved|outdated|orphaned]
+  diff note edit <id> --body <text>
+  diff note resolve|reopen <id>
+  diff note remove <id> --yes
+  diff note send --to <agent> [<id>...] [--all-open]
 
 worktrees:
   worktree list              list the current repo's worktrees

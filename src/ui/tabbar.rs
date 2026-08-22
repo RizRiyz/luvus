@@ -76,22 +76,48 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
         3u16
     };
 
-    // In compact mode, an at-a-glance agent-state summary rides the right edge of
-    // the tab bar (before the right toggle): colored state dots + counts, urgency
-    // ordered, so a phone user sees "something needs me" without opening the
-    // switcher (docs/18). It drops the least-urgent states first when space is short.
-    let summary_w = if app.compact {
-        let budget = area.width.saturating_sub(tog_w + right_tog_w + 12).min(16);
-        let line = super::switcher::compact_agent_summary(app, budget);
-        let w = line.width() as u16;
-        if w > 0 {
-            let sx = area.right().saturating_sub(right_tog_w + w);
-            f.render_widget(Paragraph::new(line), Rect::new(sx, area.y, w, 1));
-        }
-        w
-    } else {
-        0
+    // Preserve one active tab plus the fixed arrows/new-tab allowance, then let
+    // Luvus Bar use the remaining lane up to its 100-column cap. Extra tabs use
+    // the existing scroll window before bar content is compressed.
+    const ARROW: u16 = 2;
+    const PLUS: u16 = 3;
+    const NAV_RESERVE: u16 = PLUS + 2 * ARROW;
+    let fixed = tog_w
+        .saturating_add(right_tog_w)
+        .saturating_add(NAV_RESERVE);
+    let flex = area.width.saturating_sub(fixed);
+    let top_budget = flex
+        .saturating_sub(crate::bar::MIN_TOP_TAB_FLEX_WIDTH)
+        .min(crate::bar::MAX_BAR_REGION_WIDTH);
+    let (bar_hits, bar_overflow, bar_w) = {
+        let candidates = app.bar.widgets_for(
+            crate::bar::BarRegion::TopRight,
+            &app.config.bars,
+            app.compact,
+        );
+        let layout = crate::bar::compose(&candidates, top_budget, crate::bar::MAX_BAR_WIDGET_WIDTH);
+        let width = layout.width;
+        let region = Rect::new(
+            area.right().saturating_sub(right_tog_w + width),
+            area.y,
+            width,
+            1,
+        );
+        let (hits, overflow) = crate::bar::render::draw_region(
+            f,
+            region,
+            crate::bar::BarRegion::TopRight,
+            &candidates,
+            &layout,
+            app.spinner,
+            t,
+        );
+        (hits, overflow, width)
     };
+    app.bar.hits.extend(bar_hits);
+    if let Some(overflow) = bar_overflow {
+        app.bar.overflow_hits.push(overflow);
+    }
 
     let ws = app.ws();
     let n = ws.tabs.len();
@@ -111,12 +137,10 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
     const PAD: u16 = 2; // one blank column each side of the label
     const CLOSE: u16 = 2; // the `✕ ` slot, reserved on every tab
     const GAP: u16 = 1;
-    const ARROW: u16 = 2;
-    let plus_w: u16 = 3;
     let left = area.x + 1 + tog_w;
     let right = area
         .right()
-        .saturating_sub(right_tog_w + summary_w + if summary_w > 0 { 1 } else { 0 });
+        .saturating_sub(right_tog_w + bar_w + if bar_w > 0 { 1 } else { 0 });
     let total = right.saturating_sub(left);
 
     // No single tab takes more than a third of the strip, so a long name still
@@ -136,11 +160,11 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
     };
 
     // Do all tabs fit without scroll arrows (leaving room for the "+")?
-    let need_scroll = strip(0, n) > total.saturating_sub(plus_w);
+    let need_scroll = strip(0, n) > total.saturating_sub(PLUS);
     let avail = if need_scroll {
-        total.saturating_sub(plus_w + 2 * ARROW)
+        total.saturating_sub(PLUS + 2 * ARROW)
     } else {
-        total.saturating_sub(plus_w)
+        total.saturating_sub(PLUS)
     };
     // Scroll the window so the active tab stays visible: pack leftward from the
     // active tab, then spend whatever room is left extending to the right. With
@@ -224,8 +248,8 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
     }
 
     // "+" new-tab button (clickable; index == tab count).
-    if x + plus_w <= right {
-        let rect = Rect::new(x, area.y, plus_w, 1);
+    if x + PLUS <= right {
+        let rect = Rect::new(x, area.y, PLUS, 1);
         f.render_widget(
             Paragraph::new(Span::styled(
                 " + ",
@@ -241,7 +265,7 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
 /// The text a tab shows, before any padding — what its width is measured from.
 ///
 /// A git tab is labeled `⎇ git`, the orchestration board `◇ orch`, Mission
-/// Control `⠶ ctrl` (a braille 2×2 "four squares"); a user-named pane tab
+/// Control `⦿ ctrl`; a user-named pane tab
 /// (docs/28) shows its name, a single file-view leaf (docs/38) `■ name`, and
 /// everything else its number.
 fn tab_label(ws: &crate::app::Workspace, app: &App, i: usize) -> String {
@@ -257,7 +281,7 @@ fn tab_label(ws: &crate::app::Workspace, app: &App, i: usize) -> String {
     } else if tb.is_orch() {
         "◇ orch".to_string()
     } else if tb.is_mission() {
-        "⠶ ctrl".to_string()
+        "⦿ ctrl".to_string()
     } else {
         (i + 1).to_string()
     }
@@ -286,18 +310,30 @@ fn file_tab_name(tab: &crate::app::Tab, app: &App) -> Option<String> {
         return None;
     }
     let id = leaves[0];
-    let path = match app.views.get(&id) {
-        Some(crate::app::ViewKind::File(v)) => &v.path,
-        _ => app.editor_files.get(&id)?,
-    };
-    let name = path.file_name()?.to_string_lossy().into_owned();
-    Some(format!("■ {name}"))
+    match app.views.get(&id) {
+        Some(crate::app::ViewKind::File(v)) => {
+            let name = v.path.file_name()?.to_string_lossy().into_owned();
+            Some(format!("■ {name}"))
+        }
+        Some(crate::app::ViewKind::Diff(v)) => Some(format!(
+            "{} {}",
+            crate::diff::DIFF_GLYPH,
+            v.key.display_path()
+        )),
+        None => {
+            let path = app.editor_files.get(&id)?;
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            Some(format!("■ {name}"))
+        }
+    }
 }
 
 #[cfg(test)]
 mod width_tests {
     use crate::app::App;
+    use crate::event::AppEvent;
     use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
     use ratatui::Terminal;
 
@@ -433,6 +469,95 @@ mod width_tests {
             }
         }
     }
+
+    #[test]
+    fn a_120_column_tab_row_shows_100_bar_columns_and_keeps_navigation() {
+        let _env = crate::persist::test_env("tab-bar-100");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let widget = crate::bar::BarWidget::new(
+            crate::bar::BarWidgetKey::new("example", "wide"),
+            crate::bar::BarRegion::TopRight,
+            vec![crate::bar::BarSegment::text(
+                "x".repeat(100),
+                crate::bar::BarTone::Accent,
+            )],
+            Vec::new(),
+            50,
+        )
+        .unwrap();
+        app.bar.push_widget(widget).unwrap();
+
+        let area = Rect::new(0, 0, 120, 1);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        let mut target = crate::ui::RenderTarget::new(&mut buffer, area);
+        let theme = app.theme.clone();
+        let (tabs, _, _, _) = super::draw_tabbar(&mut target, area, &mut app, &theme);
+
+        let rendered: String = (20..120)
+            .map(|x| buffer.cell((x, 0)).map_or(" ", |cell| cell.symbol()))
+            .collect();
+        assert_eq!(rendered, "x".repeat(100));
+        assert!(
+            tabs.iter().any(|(index, _)| *index == 0),
+            "active tab remains"
+        );
+        assert!(
+            tabs.iter().any(|(index, _)| *index == 1),
+            "new-tab button remains"
+        );
+    }
+
+    #[test]
+    fn overflow_arrows_move_the_active_tab_in_both_directions_with_a_wide_bar() {
+        let _env = crate::persist::test_env("tab-bar-arrow-clicks");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(180, 40, tx).unwrap();
+        for _ in 0..27 {
+            app.run_cmd(crate::app::Cmd::NewTab);
+        }
+        let widget = crate::bar::BarWidget::new(
+            crate::bar::BarWidgetKey::new("example", "wide"),
+            crate::bar::BarRegion::TopRight,
+            vec![crate::bar::BarSegment::text(
+                "x".repeat(100),
+                crate::bar::BarTone::Accent,
+            )],
+            Vec::new(),
+            50,
+        )
+        .unwrap();
+        app.bar.push_widget(widget).unwrap();
+
+        let mut term = Terminal::new(TestBackend::new(180, 40)).unwrap();
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let left = app.tab_prev_rect.expect("left overflow arrow");
+        assert!(app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: left.x,
+            row: left.y,
+            modifiers: KeyModifiers::NONE,
+        })));
+        assert_eq!(
+            app.workspaces[0].active_tab, 26,
+            "left arrow selects tab 27"
+        );
+
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let right = app.tab_next_rect.expect("right overflow arrow");
+        assert!(app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: right.x,
+            row: right.y,
+            modifiers: KeyModifiers::NONE,
+        })));
+        assert_eq!(
+            app.workspaces[0].active_tab, 27,
+            "right arrow selects tab 28"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -440,6 +565,18 @@ mod close_button_tests {
     use crate::app::App;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    #[test]
+    fn mission_control_uses_the_bullseye_tab_icon() {
+        let _env = crate::persist::test_env("mission-tab-icon");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.open_mission_control(app.active_ws);
+
+        let active = app.ws().active_tab;
+        assert_eq!(super::tab_label(app.ws(), &app, active), "⦿ ctrl");
+        assert_eq!(unicode_width::UnicodeWidthStr::width("⦿"), 1);
+    }
 
     /// The dashboard tabs are *views*, not pane trees, but they are still tabs a
     /// user opens and wants gone — so the active one must carry the same `✕` a

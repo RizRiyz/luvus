@@ -43,9 +43,11 @@ Drag across a pane to select. Release **auto-copies** and flashes a *Copied*
 toast. luvus writes both your native OS clipboard (`pbcopy` / `wl-copy` /
 `xclip` / `clip`) and OSC 52, so it works locally *and* over SSH.
 
-For keyboard selection, press **`Shift+V`**. This enters copy mode and keeps
-all navigation inside Luvus: use arrows or `h`/`j`/`k`/`l` for character and
-line movement, `w` / `B` for words, `Space` / `b` for pages, and `g` / `G` for
-the oldest / newest retained row. Press `v` to reset the selection anchor at
-the cursor. Press **`y`** or Enter to copy and return to live output. Press
-**`q`** or Esc to cancel and restore the viewport where copy mode began.
+For keyboard selection, press **`Ctrl+Space`**, then **`y`** by default. Change
+the second key in **Settings → Keys → Copy terminal text**. Shift-based `V`
+input always passes through to the terminal, including inside agent prompts. Copy
+mode keeps all navigation inside Luvus: use arrows or `h`/`j`/`k`/`l` for
+character and line movement, `w` / `B` for words, `Space` / `b` for pages, and
+`g` / `G` for the oldest / newest retained row. Press `v` to reset the selection
+anchor at the cursor. Press **`y`** or Enter to copy and return to live output.
+Press **`q`** or Esc to cancel and restore the viewport where copy mode began.

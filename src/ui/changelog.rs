@@ -21,6 +21,8 @@ pub const RECENT: usize = 3;
 /// Where the footer link goes. The site renders the same `changelog/*.md` files,
 /// so it can never disagree with what is embedded here.
 pub const CHANGELOG_URL: &str = "https://luvus.dev/changelog";
+pub const CURL_UPDATE_COMMAND: &str = "curl -fsSL https://luvus.dev/install.sh | sh";
+pub const BREW_UPDATE_COMMAND: &str = "brew upgrade luvus";
 
 pub(super) fn draw_changelog(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) {
     dim_backdrop(f, area, t);
@@ -86,9 +88,9 @@ pub(super) fn draw_changelog(f: &mut RenderTarget, area: Rect, app: &mut App, t:
     hline(f, inner.x, inner.y + 1, inner.width, t);
 
     // ── "how to update" header, always shown above the notes ──
-    // Notify-only: luvus is installed via cargo/brew/etc, so we name the upgrade
-    // commands rather than offer a self-update that can't work. When the
-    // background check found a newer release, an accent headline leads.
+    // Luvus cannot replace its running executable, so these rows copy the two
+    // supported upgrade commands instead. When the background check found a
+    // newer release, an accent headline leads.
     let mut top = inner.y + 2;
     if let Some(v) = app.update_available.clone() {
         f.render_widget(
@@ -103,23 +105,48 @@ pub(super) fn draw_changelog(f: &mut RenderTarget, area: Rect, app: &mut App, t:
         );
         top += 1;
     }
-    // Complete, copyable commands instead of a bare installer URL. The script
-    // is listed first because it works for a direct install or upgrade; package
-    // manager users can keep using the manager they originally chose.
-    let update_guide = [
-        (cat.update_hint, Style::new().fg(t.subtext0)),
-        (
-            "curl -fsSL https://luvus.dev/install.sh | sh",
-            Style::new().fg(t.text),
-        ),
-        ("brew upgrade luvus", Style::new().fg(t.text)),
-        ("cargo install luvus", Style::new().fg(t.text)),
-    ];
-    for (line, style) in update_guide {
-        f.render_widget(
-            Paragraph::new(Span::styled(format!("  {line}"), style)),
-            Rect::new(inner.x, top, inner.width, 1),
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!("  {}", cat.update_hint),
+            Style::new().fg(t.subtext0),
+        )),
+        Rect::new(inner.x, top, inner.width, 1),
+    );
+    top += 1;
+
+    app.changelog_copy_rects.clear();
+    for command in [CURL_UPDATE_COMMAND, BREW_UPDATE_COMMAND] {
+        let row = Rect::new(inner.x + 1, top, inner.width.saturating_sub(2), 1);
+        let hot = app
+            .hover
+            .is_some_and(|(x, y)| row.contains(Position::new(x, y)));
+        let copy = "[copy]";
+        let copy_width = display_width(copy) as u16;
+        let command_area = Rect::new(
+            row.x + 1,
+            row.y,
+            row.width.saturating_sub(copy_width + 2),
+            1,
         );
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                command,
+                Style::new().fg(if hot { t.accent } else { t.text }),
+            )),
+            command_area,
+        );
+        if copy_width < row.width {
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    copy,
+                    Style::new()
+                        .fg(if hot { t.accent } else { t.subtext0 })
+                        .bold(),
+                )),
+                Rect::new(row.right().saturating_sub(copy_width), row.y, copy_width, 1),
+            );
+        }
+        app.changelog_copy_rects.push((row, command.to_string()));
         top += 1;
     }
     hline(f, inner.x, top, inner.width, t);
@@ -450,7 +477,7 @@ fn hline(f: &mut RenderTarget, x: u16, y: u16, w: u16, t: &Theme) {
 
 #[cfg(test)]
 mod tests {
-    use super::{CHANGELOG_URL, RECENT};
+    use super::{BREW_UPDATE_COMMAND, CHANGELOG_URL, CURL_UPDATE_COMMAND, RECENT};
     use crate::app::App;
     use crate::changelog::{Seg, CHANGELOG};
     use ratatui::backend::TestBackend;
@@ -753,9 +780,9 @@ mod tests {
     }
 
     #[test]
-    fn update_guide_shows_complete_commands() {
+    fn update_guide_shows_only_the_copyable_brew_and_curl_commands() {
         let _env = crate::persist::test_env("cl-update-guide");
-        let (_app, term) = open();
+        let (app, term) = open();
         let screen: String = term
             .backend()
             .buffer()
@@ -763,9 +790,32 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(screen.contains("curl -fsSL https://luvus.dev/install.sh | sh"));
-        assert!(screen.contains("brew upgrade luvus"));
-        assert!(screen.contains("cargo install luvus"));
+        assert!(screen.contains(CURL_UPDATE_COMMAND));
+        assert!(screen.contains(BREW_UPDATE_COMMAND));
+        assert!(!screen.contains("cargo install luvus"));
+        assert_eq!(
+            app.changelog_copy_rects
+                .iter()
+                .map(|(_, command)| command.as_str())
+                .collect::<Vec<_>>(),
+            vec![CURL_UPDATE_COMMAND, BREW_UPDATE_COMMAND]
+        );
+    }
+
+    #[test]
+    fn clicking_each_update_command_copies_it_without_closing_the_modal() {
+        let _env = crate::persist::test_env("cl-update-copy");
+        let (mut app, _term) = open();
+        let commands = app.changelog_copy_rects.clone();
+
+        for (rect, command) in commands {
+            app.pending_clipboard = None;
+            app.toast = None;
+            click(&mut app, rect.x + 1, rect.y);
+            assert_eq!(app.pending_clipboard.as_deref(), Some(command.as_str()));
+            assert!(app.toast.is_some(), "copy reports success");
+            assert!(app.changelog_open, "copy leaves the modal open");
+        }
     }
 
     #[test]

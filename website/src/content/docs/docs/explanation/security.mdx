@@ -19,18 +19,44 @@ and each socket to **0600** at every start, never left to the umask.
   confirmation before anything executes. Builds run with a scrubbed
   environment, manifests can't change silently post-install, and uninstall only
   deletes luvus-managed paths.
+- **Themes** are data-only TOML: schema 1 accepts bounded metadata and explicit
+  semantic colors, never scripts, CSS, commands, keybindings, or paths. Remote
+  installs require HTTPS, are capped at 64 KiB, validate before atomic storage,
+  and ask for confirmation unless `--yes` is explicit.
 - **Integration hooks** write a single small script and one settings entry in
   the agent's config, and uninstall removes exactly those and nothing else.
 - **Git-tab actions** validate refs before anything reaches your shell, so a
   hostile branch name from a cloned repo can't smuggle shell metacharacters.
+- **DIFF review** invokes Git with explicit arguments, disables pagers, external
+  diff drivers, text conversion, color, and submodule recursion, and strips
+  terminal controls from displayed code. It has no staging, discard, commit,
+  push, or GitHub-publishing action.
 - **Orchestration workers** start only on your explicit action, and merges
   happen in an isolated worktree, never your checkout.
+
+## Local review data
+
+DIFF notes and viewed fingerprints live in the owner-only Luvus state root,
+under hashed repository and worktree identities. They never write into the
+repository. Note bodies, parsed patches, and agent handoffs are bounded. Source
+context is explicitly framed as untrusted review data before it is sent to an
+agent, and sending requires an explicit target and action.
+
+## Global finder data
+
+The global finder is local and read-only until you activate a result. File
+indexing reads names and paths, not file contents, skips `.git`, and does not
+follow directory symlinks. Retained-output matching uses bounded pane history
+already owned by Luvus. Running named sessions answer bounded queries over
+their owner-only control sockets. Queries and result catalogs are not persisted
+and opening the finder never starts a stopped session.
 
 ## Remote
 
 `--remote` rides plain `ssh`: your keys, your config, no luvus network
-listener of any kind. The website and binary phone nothing home. There is no
-telemetry.
+listener of any kind. Luvus has no telemetry. Network access is limited to
+explicit features such as update checks, module/skill discovery, and a requested
+HTTPS, public GitHub repository, or `community/<id>` theme installation.
 
 Found something? Please use
 [private reporting](https://github.com/RizRiyz/luvus/security/advisories/new).

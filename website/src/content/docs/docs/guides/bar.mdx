@@ -1,0 +1,155 @@
+---
+title: Luvus Bar
+description: Place compact module status and actions beside the tabs or in the bottom status row without taking space from panes.
+---
+
+**Luvus Bar** is a compact extension surface built into Luvus. It gives the
+app and installed modules a safe place to show status, progress, badges, and
+small actions without adding another row or changing pane and PTY dimensions.
+
+You do not install the Bar itself. A module declares one or more Bar widgets,
+and Luvus owns their placement, validation, theming, width, and rendering.
+
+## Where widgets appear
+
+| Placement | Location | Space Luvus always protects |
+|---|---|---|
+| **Top** | To the right of the tabs | Active tab, tab arrows, new-tab button, and sidebar controls |
+| **Bottom** | In the middle of the status row | Prefix/key hint on the left and the clickable version on the right |
+| **Off** | Hidden | The declaration and saved preference remain available |
+
+The built-in **Runtime status** widget starts at the bottom and shows a compact
+summary such as `NORMAL · 1 pane · tab 2/4`. It can be moved or hidden like a
+module widget, but its content is managed by Luvus.
+
+## Arrange the Bar
+
+Open **Settings → Layout → Luvus Bar**. Every declared widget has **Top**,
+**Bottom**, and **Off** buttons. Changes apply immediately and the selected
+placement is saved for future sessions.
+
+The same operation is available from the CLI. Use the canonical
+`module-id:widget-id` when running a command outside the module:
+
+```sh
+luvus bar list
+luvus bar move --id example.ci-bar:status --region top-right
+luvus bar move --id example.ci-bar:status --region bottom-right
+luvus bar move --id example.ci-bar:status --region off
+```
+
+`luvus bar list` returns the declared widgets, their effective placements, and
+any currently published live content. Moving a widget does not run its module
+again or create content that the module has not published.
+
+## Install a module with a Bar widget
+
+Bar widgets arrive through the normal module system:
+
+```sh
+luvus module search status
+luvus module install owner/repo
+luvus module info module.id
+luvus bar list
+```
+
+During local development, link the working directory instead. The bundled CI
+example declares a Top widget and publishes it from a startup hook:
+
+```sh
+luvus module link ./examples/modules/ci-bar
+luvus module info example.ci-bar
+luvus bar list
+```
+
+Installing or linking an enabled module runs its one-shot startup hooks
+immediately. Disabling, unlinking, or uninstalling it removes its live widgets.
+Re-enabling it runs the startup hook again.
+
+:::note[Declarations and live content are different]
+The manifest declaration is persistent, so the widget keeps appearing in
+Settings. Its displayed content lives only in the server's memory. A module
+should publish once from a `[[startup]]` hook and again whenever its underlying
+state changes.
+:::
+
+## Publish a widget from a module
+
+First declare ownership in `luvus-module.toml`:
+
+```toml
+[[bars]]
+id = "status"
+title = "CI status"
+region = "top-right"
+priority = 60
+
+[[startup]]
+command = ["sh", "refresh.sh"]
+```
+
+Then publish structured segments from `refresh.sh`. Luvus injects
+`$LUVUS_MODULE_ID`, so code running as the module uses the local widget id:
+
+```sh
+#!/bin/sh
+set -eu
+
+"${LUVUS_BIN_PATH:-luvus}" bar push \
+  --id status \
+  --content '[
+    {"type":"text","text":"CI","tone":"muted"},
+    {"type":"separator"},
+    {"type":"state","state":"done","label":"passing","tone":"success"}
+  ]' \
+  --compact-content '[
+    {"type":"text","text":"CI"},
+    {"type":"state","state":"done","tone":"success"}
+  ]'
+```
+
+Each push atomically replaces the widget's complete live content. Use
+`--content-file` when JSON is easier to maintain in a separate file. Use
+`luvus bar remove --id status` to clear live content without deleting the
+declaration or its placement.
+
+Supported segments are `text`, `symbol`, `state`, `badge`, `progress`,
+`spacer`, and `separator`. Semantic tones—`normal`, `muted`, `accent`,
+`success`, `warning`, and `error`—adapt to every active theme. Raw ANSI and
+custom rendering are rejected so a widget cannot corrupt the surrounding UI.
+
+For a full manifest, actions, click values, and validation limits, see
+[Writing a Module](/docs/extend/writing-modules/#bars-compact-chrome-widgets)
+and the [Socket API reference](/docs/reference/api/#luvus-bar).
+
+## Width, compact content, and overflow
+
+Top and Bottom can each use at most **100 terminal columns**, but the available
+width may be smaller for the current client:
+
+- Top yields space to tabs and their navigation controls.
+- Bottom yields space to the prefix hint and version control.
+- Wide characters, including many emoji and CJK glyphs, consume two columns.
+- When full content does not fit, Luvus tries `compact_content`.
+- Lower-priority widgets compact or move into the read-only `… +N` overflow
+  popup before protected controls are touched.
+
+Design the compact form to preserve the most important state rather than only
+shortening labels. Expensive work belongs in startup, event, or action scripts;
+the render path should only receive already-computed segments.
+
+## Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| Widget is listed in Settings but shows no content | Run `luvus module log <id>`; its startup publisher may have failed or not run |
+| Top/Bottom selection changes but nothing appears | Placement is working, but the module has not published live content |
+| `bar push` reports an unknown widget | Confirm the module is enabled and its manifest contains the matching `[[bars]]` id |
+| Widget only appears as `… +N` | Widen the client, provide `compact_content`, shorten the segments, or raise its priority |
+| Content disappears after a server restart | Add a one-shot `[[startup]]` publisher; live content is intentionally not persisted |
+| A local example changed but Luvus still uses old manifest metadata | Unlink it and link the directory again so Luvus reloads the manifest |
+| A publisher script changed but the widget still shows old content | Run its refresh action, or disable and enable the module to rerun startup hooks |
+
+Use `luvus module log <id>` for captured command output and
+`luvus bar list` for the server's current declaration, placement, and content
+state.

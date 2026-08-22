@@ -4,11 +4,13 @@
 
 mod agent;
 mod app;
+mod bar;
 mod changelog;
 mod cli;
 mod compat;
 mod config;
 mod detect;
+mod diff;
 mod event;
 mod files;
 mod git;
@@ -23,9 +25,11 @@ mod module;
 mod orch;
 mod persist;
 mod platform;
+mod search;
 mod session;
 mod skill;
 mod terminal;
+mod theme;
 mod ui;
 mod update;
 
@@ -863,7 +867,9 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
             emit_sound();
         }
         // Advance the working spinner ~10x/s (the loop redraws every frame).
-        if last_spin.elapsed() >= Duration::from_millis(100) && app.any_working() {
+        if last_spin.elapsed() >= Duration::from_millis(100)
+            && (app.any_working() || app.bar.has_visible_working(&app.config.bars, app.compact))
+        {
             app.spinner = app.spinner.wrapping_add(1);
             last_spin = Instant::now();
         }
@@ -875,6 +881,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
         }
         app.tick_toast(Instant::now());
         app.tick_search_flash(Instant::now());
+        app.tick_bar_notifications(Instant::now());
         // A forced redraw (resize / regained focus) wipes the terminal so the next
         // draw repaints every cell, healing damage ratatui's own diff can't see.
         if std::mem::take(&mut app.force_redraw) {
@@ -1066,6 +1073,56 @@ mod tests {
             &mut term,
             &mut last,
             b"the quick brown fox jumps over the lazy dog 0123 abcdefghij\r\n",
+        );
+
+        // Luvus Bar feature cost: ten bounded widgets exercise both regions,
+        // compact selection, and overflow without adding IO to the draw path.
+        for index in 0..10 {
+            let region = if index % 2 == 0 {
+                crate::bar::BarRegion::TopRight
+            } else {
+                crate::bar::BarRegion::BottomRight
+            };
+            let widget = crate::bar::BarWidget::new(
+                crate::bar::BarWidgetKey::new("bench", format!("job-{index}")),
+                region,
+                vec![crate::bar::BarSegment::text(
+                    format!("job {index} ready"),
+                    crate::bar::BarTone::Success,
+                )],
+                vec![crate::bar::BarSegment::text(
+                    format!("j{index}"),
+                    crate::bar::BarTone::Success,
+                )],
+                index as u8,
+            )
+            .unwrap();
+            app.bar.push_widget(widget).unwrap();
+        }
+        bench("10 widgets", &mut app, &mut term, &mut last, b"x");
+
+        // Exercise the update path separately so render cost and update cost
+        // remain distinguishable in manual performance runs.
+        let updates = 2_000u32;
+        let started = std::time::Instant::now();
+        for index in 0..updates {
+            let widget = crate::bar::BarWidget::new(
+                crate::bar::BarWidgetKey::new("bench", "live"),
+                crate::bar::BarRegion::BottomRight,
+                vec![crate::bar::BarSegment::text(
+                    format!("build {}", index % 100),
+                    crate::bar::BarTone::Accent,
+                )],
+                Vec::new(),
+                50,
+            )
+            .unwrap();
+            app.bar.push_widget(widget).unwrap();
+            term.draw(|frame| ui::render(frame, &mut app)).unwrap();
+        }
+        println!(
+            "bar update @ {w}x{h}: {:>10?}/update+frame",
+            started.elapsed() / updates
         );
 
         // Breakdown of one frame (where the ~126µs goes).

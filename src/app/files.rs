@@ -15,6 +15,8 @@ use crate::files::FileView;
 use crate::ids::PaneId;
 use crate::layout::{Axis, TileLayout};
 
+const RECENT_FILE_CAP: usize = 12;
+
 /// Where a file opens.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum OpenTarget {
@@ -33,14 +35,117 @@ impl App {
     /// there is nothing to do (a few `HashSet` checks), and a no-op when the dock
     /// isn't mounted.
     pub fn ensure_file_tree(&mut self) {
-        if self.sidebars.side_of(&DockKind::Files).is_none() {
+        let dock_visible = self.sidebars.side_of(&DockKind::Files).is_some();
+        let diff_visible = self
+            .layout()
+            .leaves()
+            .into_iter()
+            .any(|id| matches!(self.views.get(&id), Some(ViewKind::Diff(_))));
+        if !dock_visible && !diff_visible {
             return;
         }
         let cwd = self.ws().cwd.clone();
         self.file_tree.set_root(cwd);
-        self.load_pending_dirs();
-        self.rescan_file_tree();
+        let dirty_views: Vec<_> = self
+            .layout()
+            .leaves()
+            .into_iter()
+            .filter(|id| matches!(self.views.get(id), Some(ViewKind::Diff(view)) if view.dirty))
+            .collect();
+        for id in dirty_views {
+            self.schedule_diff_read(id);
+        }
+        if dock_visible {
+            self.load_pending_dirs();
+            self.rescan_file_tree();
+        }
         self.refresh_git_status();
+    }
+
+    /// Park a first `files.tree` call until its root listing has returned from
+    /// the filesystem worker. Cached trees answer inline; no directory I/O is
+    /// ever moved onto the app loop just to make the CLI deterministic.
+    pub(crate) fn prepare_files_api(
+        &mut self,
+        req: crate::ipc::api::ApiRequest,
+    ) -> Option<crate::ipc::api::ApiRequest> {
+        if req.method != "files.tree" {
+            return Some(req);
+        }
+        self.prepare_file_tree_api(false);
+        if self.file_tree.root_loaded() {
+            return Some(req);
+        }
+        self.pending_file_tree_api
+            .push((self.ws().cwd.clone(), req));
+        None
+    }
+
+    pub(crate) fn finish_pending_files_api(&mut self, completed: &Path) {
+        let active_root = self.ws().cwd.clone();
+        let root_loaded = self.file_tree.root_loaded();
+        let mut pending = std::mem::take(&mut self.pending_file_tree_api);
+        for (root, req) in pending.drain(..) {
+            if !crate::platform::same_path(&root, &active_root) {
+                let _ = req.reply.send(
+                    serde_json::json!({"id":req.id,"error":{
+                        "code":"files_error",
+                        "message":"active workspace changed while FILES was loading"
+                    }})
+                    .to_string(),
+                );
+            } else if root_loaded && crate::platform::same_path(completed, &root) {
+                let response = self.handle_api(&req);
+                let _ = req.reply.send(response);
+            } else {
+                self.pending_file_tree_api.push((root, req));
+            }
+        }
+    }
+
+    /// Fail parked FILES requests for one workspace while preserving requests
+    /// whose directory workers still belong to another open workspace.
+    pub(crate) fn fail_pending_files_api_for_root(&mut self, closed_root: &Path, message: &str) {
+        let mut pending = std::mem::take(&mut self.pending_file_tree_api);
+        for (root, req) in pending.drain(..) {
+            if crate::platform::same_path(&root, closed_root) {
+                let _ = req.reply.send(
+                    serde_json::json!({"id":req.id,"error":{
+                        "code":"files_error",
+                        "message":message
+                    }})
+                    .to_string(),
+                );
+            } else {
+                self.pending_file_tree_api.push((root, req));
+            }
+        }
+    }
+
+    /// Fail every parked FILES request when no workspace remains.
+    pub(crate) fn fail_pending_files_api(&mut self, message: &str) {
+        for (_, req) in self.pending_file_tree_api.drain(..) {
+            let _ = req.reply.send(
+                serde_json::json!({"id":req.id,"error":{
+                    "code":"files_error",
+                    "message":message
+                }})
+                .to_string(),
+            );
+        }
+    }
+
+    /// Root and schedule the FILES tree for an explicit API request even when
+    /// the dock is hidden. Periodic upkeep deliberately sleeps while no FILES or
+    /// DIFF surface is visible, but `files.tree` and `files.refresh` must not
+    /// depend on a client attaching after server restore.
+    pub(crate) fn prepare_file_tree_api(&mut self, invalidate: bool) {
+        let root = self.ws().cwd.clone();
+        self.file_tree.set_root(root);
+        if invalidate {
+            self.file_tree.invalidate();
+        }
+        self.load_pending_dirs();
     }
 
     /// Re-read the directories currently on screen so files created or removed
@@ -68,24 +173,10 @@ impl App {
         });
     }
 
-    /// Refresh the FILES-dock git tint (docs/38 FILE-6) off the loop, at most
-    /// every 2s and never piling up. `git status` can be slow on a huge repo, so
-    /// it runs on a worker thread and posts `FileGitStatus` back.
+    /// Refresh the shared FILES tint and DIFF index off the loop (docs/88).
+    /// One structured status scan preserves the existing two-second cadence.
     fn refresh_git_status(&mut self) {
-        if self.git_status_inflight
-            || std::time::Instant::now().duration_since(self.last_git_status_at)
-                < std::time::Duration::from_secs(2)
-        {
-            return;
-        }
-        self.last_git_status_at = std::time::Instant::now();
-        self.git_status_inflight = true;
-        let root = self.file_tree.root().to_path_buf();
-        let tx = self.app_tx.clone();
-        std::thread::spawn(move || {
-            let map = crate::git::local::tree_status(&root);
-            let _ = tx.send(AppEvent::FileGitStatus(map));
-        });
+        self.refresh_diff_status(false);
     }
 
     /// Resolve a possibly-relative path (from the API/CLI) against the active
@@ -107,10 +198,12 @@ impl App {
             return;
         }
         let mut stale = Vec::new();
-        for (id, ViewKind::File(v)) in self.views.iter() {
-            let disk = std::fs::metadata(&v.path).and_then(|m| m.modified()).ok();
-            if disk.is_some() && disk != v.mtime {
-                stale.push((*id, v.path.clone(), disk));
+        for (id, view) in self.views.iter() {
+            if let ViewKind::File(v) = view {
+                let disk = std::fs::metadata(&v.path).and_then(|m| m.modified()).ok();
+                if disk.is_some() && disk != v.mtime {
+                    stale.push((*id, v.path.clone(), disk));
+                }
             }
         }
         for (id, path, mtime) in stale {
@@ -189,6 +282,23 @@ impl App {
         }
     }
 
+    /// Open a fuzzy-finder file result in a whole tab in its owning workspace.
+    /// Reuse an existing whole-file tab, but never redirect the user into a
+    /// preview or split pane that happens to show the same path.
+    pub fn open_file_search_result(&mut self, path: PathBuf) {
+        match self.file_open_editor() {
+            Some(cmd) => self.open_file_in_editor(path, &cmd),
+            None => {
+                self.remember_file(&path);
+                if let Some(id) = self.file_tab_showing(&path) {
+                    self.focus_pane_global(id);
+                } else {
+                    self.create_file_view(path, OpenTarget::Tab);
+                }
+            }
+        }
+    }
+
     /// The configured default open action (docs/38), resolved to an editor
     /// run-command — or `None` for the read-only viewer. A configured editor
     /// that is no longer installed degrades to read-only, so a plain click never
@@ -240,6 +350,7 @@ impl App {
                 // pane with no file view behind it, so without this the tab bar
                 // has nothing to derive a name from and falls back to the number.
                 self.editor_files.insert(id, path.clone());
+                self.remember_file(&path);
                 let ws = &mut self.workspaces[self.active_ws];
                 ws.tabs.push(Tab::panes(TileLayout::new(id)));
                 ws.active_tab = ws.tabs.len() - 1;
@@ -485,15 +596,33 @@ impl App {
 
     /// The leaf id of an open view already showing `path`, if any.
     fn view_showing(&self, path: &std::path::Path) -> Option<PaneId> {
-        self.views
+        self.ws()
+            .tabs
             .iter()
-            .find_map(|(id, ViewKind::File(v))| (v.path == path).then_some(*id))
+            .flat_map(|tab| tab.layout.leaves())
+            .find(
+                |id| matches!(self.views.get(id), Some(ViewKind::File(view)) if view.path == path),
+            )
+    }
+
+    /// A native file view that owns its whole tab, excluding preview/split panes.
+    fn file_tab_showing(&self, path: &std::path::Path) -> Option<PaneId> {
+        self.ws().tabs.iter().find_map(|tab| {
+            let leaves = tab.layout.leaves();
+            let [id] = leaves.as_slice() else {
+                return None;
+            };
+            matches!(self.views.get(id), Some(ViewKind::File(view)) if view.path == path)
+                .then_some(*id)
+        })
     }
 
     /// Open `path` in a native file view (docs/38 FILE-3). `Preview` reuses the
-    /// one preview pane; `Pane` splits a fresh permanent pane; `Tab` opens a new
-    /// tab. The file is read on a worker thread and applied via `FileRead`.
+    /// one preview pane in the active workspace; `Pane` splits a fresh permanent
+    /// pane; `Tab` opens a new tab. The file is read on a worker thread and
+    /// applied via `FileRead`.
     pub fn open_file_view(&mut self, path: PathBuf, target: OpenTarget) {
+        self.remember_file(&path);
         // Already open? Focus that view instead of opening a duplicate.
         if let Some(id) = self.view_showing(&path) {
             self.focus_pane_global(id);
@@ -501,13 +630,17 @@ impl App {
         }
         // Reuse the live preview pane: just swap its content.
         if target == OpenTarget::Preview {
-            if let Some(id) = self.preview_view.filter(|id| self.views.contains_key(id)) {
+            if let Some(id) = self.active_preview_view() {
                 self.set_view_file(id, path);
                 self.focus_pane_global(id);
                 return;
             }
         }
 
+        self.create_file_view(path, target);
+    }
+
+    fn create_file_view(&mut self, path: PathBuf, target: OpenTarget) {
         let id = PaneId::alloc();
         self.views
             .insert(id, ViewKind::File(FileView::new(path.clone())));
@@ -523,7 +656,7 @@ impl App {
             }
         }
         if target == OpenTarget::Preview {
-            self.preview_view = Some(id);
+            self.preview_views.insert(id);
         }
         self.schedule_file_read(id, path);
         self.mode = Mode::Normal;
@@ -531,10 +664,20 @@ impl App {
 
     /// Point an existing view leaf at a different file and re-read it.
     fn set_view_file(&mut self, id: PaneId, path: PathBuf) {
+        self.remember_file(&path);
         if let Some(ViewKind::File(v)) = self.views.get_mut(&id) {
             *v = FileView::new(path.clone());
         }
         self.schedule_file_read(id, path);
+    }
+
+    fn remember_file(&mut self, path: &Path) {
+        let workspace = self.ws().cwd.clone();
+        self.recent_files
+            .retain(|(cwd, existing)| cwd != &workspace || existing != path);
+        self.recent_files
+            .push_front((workspace, path.to_path_buf()));
+        self.recent_files.truncate(RECENT_FILE_CAP);
     }
 
     fn schedule_file_read(&mut self, id: PaneId, path: PathBuf) {
@@ -565,6 +708,7 @@ impl App {
                 crate::files::FileLoad::Text(lines) => Some(lines.join("\n")),
                 _ => None,
             },
+            Some(ViewKind::Diff(_)) => None,
             None => return,
         };
         match text {
@@ -652,6 +796,30 @@ mod tests {
     use super::*;
     use crate::app::{DockKind, FileMenu, FileMenuItem};
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn recent_files_are_deduplicated_newest_first_and_bounded() {
+        let _env = crate::persist::test_env("file-recent-bounded");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        for index in 0..RECENT_FILE_CAP + 3 {
+            app.remember_file(Path::new(&format!("file-{index}.rs")));
+        }
+        assert_eq!(app.recent_files.len(), RECENT_FILE_CAP);
+        assert!(app.recent_files.front().unwrap().1.ends_with("file-14.rs"));
+        assert!(app.recent_files.back().unwrap().1.ends_with("file-3.rs"));
+
+        app.remember_file(Path::new("file-8.rs"));
+        assert_eq!(app.recent_files.len(), RECENT_FILE_CAP);
+        assert!(app.recent_files.front().unwrap().1.ends_with("file-8.rs"));
+        assert_eq!(
+            app.recent_files
+                .iter()
+                .filter(|(_, path)| path.ends_with("file-8.rs"))
+                .count(),
+            1
+        );
+    }
 
     /// A file's context menu leads with open actions (read-only + one per detected
     /// editor); a folder's does not — you don't "open" a directory into an editor.
@@ -824,6 +992,18 @@ mod tests {
         assert!(text.contains("README.md"), "a file row drawn");
         // Collapsed: src's child is not visible yet.
         assert!(!text.contains("mod.rs"), "child hidden while collapsed");
+        let header_y = app.files_mode_rects[0].1.y;
+        let first_row_y = app
+            .file_tree_rects
+            .iter()
+            .map(|(_, rect)| rect.y)
+            .min()
+            .expect("the file list has rows");
+        assert_eq!(
+            first_row_y,
+            header_y + 1,
+            "the list starts directly below FILES/DIFF without an identity row"
+        );
 
         // Click the `src` row (find its rect) and re-render.
         let (idx, rect) = app
@@ -1031,7 +1211,10 @@ mod tests {
         // queued first wins. Pump until the one we need arrives.
         pump_until_file_read(&rx, &mut app, vid);
         assert_eq!(
-            app.views.get(&vid).map(|ViewKind::File(v)| v.line_count()),
+            app.views.get(&vid).and_then(|view| match view {
+                ViewKind::File(view) => Some(view.line_count()),
+                ViewKind::Diff(_) => None,
+            }),
             Some(1),
             "initial content is one line"
         );
@@ -1250,12 +1433,93 @@ mod tests {
         let paths: Vec<_> = restored
             .views
             .values()
-            .map(|ViewKind::File(v)| v.path.clone())
+            .filter_map(|view| match view {
+                ViewKind::File(view) => Some(view.path.clone()),
+                ViewKind::Diff(_) => None,
+            })
             .collect();
         assert_eq!(paths, vec![file], "the file view was rebuilt on restore");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+    #[test]
+    fn hidden_files_api_re_roots_and_reloads_after_restore() {
+        let _env = crate::persist::test_env("files-api-restore");
+        let root = std::env::temp_dir().join(format!("luvus-far-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("restored.txt"), b"restored\n").unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.workspaces[app.active_ws].cwd = root.clone();
+        app.sidebars
+            .left
+            .docks
+            .retain(|dock| dock != &DockKind::Files);
+        app.sidebars
+            .right
+            .docks
+            .retain(|dock| dock != &DockKind::Files);
+        let snapshot = crate::persist::snapshot(&app);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut restored = App::from_snapshot(snapshot, tx).expect("restore");
+        assert!(
+            restored.sidebars.side_of(&DockKind::Files).is_none(),
+            "the regression requires a hidden FILES dock"
+        );
+        assert!(restored.file_tree.root().as_os_str().is_empty());
+
+        let request_tree = |id: &str, app: &mut App| -> std::sync::mpsc::Receiver<String> {
+            let (reply, response) = std::sync::mpsc::channel();
+            app.handle_event(AppEvent::Api(crate::ipc::api::ApiRequest {
+                id: id.to_string(),
+                method: "files.tree".to_string(),
+                params: serde_json::json!({}),
+                reply,
+            }));
+            response
+        };
+
+        let first = request_tree("first", &mut restored);
+        assert!(
+            first
+                .recv_timeout(std::time::Duration::from_millis(10))
+                .is_err(),
+            "the first tree waits for its off-loop root read"
+        );
+        pump_until_dir_read(&rx, &mut restored, &root);
+        let loaded: serde_json::Value = serde_json::from_str(
+            &first
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("first populated tree"),
+        )
+        .unwrap();
+        assert_eq!(loaded["result"]["root"], root.to_string_lossy().as_ref());
+        assert!(loaded["result"]["rows"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["name"] == "restored.txt")));
+
+        restored
+            .dispatch("files.refresh", &serde_json::json!({}))
+            .unwrap();
+        let refreshed = request_tree("refreshed", &mut restored);
+        pump_until_dir_read(&rx, &mut restored, &root);
+        let refreshed: serde_json::Value = serde_json::from_str(
+            &refreshed
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("refreshed populated tree"),
+        )
+        .unwrap();
+        assert_eq!(refreshed["result"]["root"], root.to_string_lossy().as_ref());
+        assert!(refreshed["result"]["rows"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["name"] == "restored.txt")));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn file_view_frees_content_on_close() {
         let _env = crate::persist::test_env("file-mem-free");

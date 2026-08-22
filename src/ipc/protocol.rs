@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::terminal::theme_probe::TerminalColors;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -57,6 +57,12 @@ pub enum ServerMessage {
     /// the server is on another machine, and the browser you want is the one in
     /// front of you.
     OpenUrl(String),
+    /// Ask this display client to reconnect to another validated named session.
+    /// It contains no socket path or command and is resolved by the client using
+    /// the same local/remote session rules as process startup.
+    SwitchSession {
+        name: String,
+    },
     /// Tell the client to detach (server keeps running).
     Detach,
     ServerShutdown {
@@ -441,6 +447,20 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn logical_session_switch_roundtrips_without_a_socket_path() {
+        let mut bytes = Vec::new();
+        write_message(
+            &mut bytes,
+            &ServerMessage::SwitchSession { name: "api".into() },
+        )
+        .unwrap();
+        assert!(matches!(
+            read_message::<_, ServerMessage>(&mut &bytes[..]).unwrap(),
+            ServerMessage::SwitchSession { name } if name == "api"
+        ));
     }
 
     /// A wide glyph written through ratatui's own `set_string` (the path modals,

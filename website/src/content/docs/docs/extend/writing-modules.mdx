@@ -18,6 +18,7 @@ A module can reach every surface the app has:
 | Surface | Declared as | What you get |
 |---|---|---|
 | **Docks** | `[[docks]]` | A panel in either sidebar, with clickable rows |
+| **Luvus Bar** | `[[bars]]` | Compact structured status, progress, badges, and actions in the top or bottom chrome |
 | **Panes** | `[[panes]]` | A real terminal pane running your program |
 | **Tabs** | any command | Create, focus, name, and close tabs |
 | **Right-click** | `contexts` on an action | Rows in the pane / workspace / agent menus |
@@ -247,6 +248,62 @@ them. Keep hooks one-shot: restore your state, call what you need, exit. They
 are not supervised daemons, and a failure is logged without stopping the server.
 
 Startup commands get the normal environment plus `LUVUS_MODULE_EVENT=startup`.
+
+### `[[bars]]`: compact chrome widgets
+
+A bar declaration reserves one module-owned identity. It does not draw until a
+startup/event/action script publishes structured content with `luvus bar push`.
+Users can place each declaration at Top, Bottom, or Off in
+**Settings → Layout → Luvus Bar**. The declaration list itself stays stable
+while placement changes.
+
+For the user-facing placement, installation, width, and troubleshooting flow,
+see the dedicated [Luvus Bar guide](/docs/guides/bar/).
+
+```toml
+[[bars]]
+id = "ci"
+title = "CI status"
+region = "top-right"            # top-right | bottom-right
+priority = 60                   # lower priority compresses/overflows first
+
+[[startup]]
+command = ["sh", "refresh-ci.sh"]
+
+[[actions]]
+id = "details"
+title = "CI details"
+command = ["sh", "details.sh"]
+```
+
+```sh
+"${LUVUS_BIN_PATH:-luvus}" bar push \
+  --id ci --region top-right \
+  --content '[{"type":"text","text":"CI"},{"type":"state","state":"done","label":"passing"},{"type":"badge","text":"2","action":"details","value":"run-1842"}]' \
+  --compact-content '[{"type":"text","text":"CI"},{"type":"state","state":"done","action":"details","value":"run-1842"}]'
+```
+
+Available segment types are `text`, `symbol`, `state`, `badge`, `progress`,
+`spacer`, and `separator`. Semantic tones (`normal`, `muted`, `accent`,
+`success`, `warning`, `error`) adapt to the active theme. Content is one row;
+use a pane for arbitrary terminal UI or a dock for a multi-row list. Raw ANSI,
+custom colors, and module-controlled rendering are rejected.
+
+An actionable segment names an action from the same manifest. Its command gets
+`LUVUS_MODULE_BAR_ID`, `LUVUS_MODULE_BAR_SEGMENT`, and
+`LUVUS_MODULE_BAR_VALUE`. Live content is in-memory, so restore it from a
+one-shot startup hook. A repeated push is an atomic replacement, not an append.
+
+For transient status, use the bounded notification lane instead of repeatedly
+replacing a durable widget:
+
+```sh
+"${LUVUS_BIN_PATH:-luvus}" ui notification push \
+  --text "CI failed" --level error --ttl-ms 6000 --dedupe-key ci-main
+```
+
+See the complete [`ci-bar` example on GitHub](https://github.com/RizRiyz/luvus/tree/main/examples/modules/ci-bar)
+and the [Socket API reference](/docs/reference/api/#luvus-bar).
 
 ### `[[events]]`: react to lifecycle events
 

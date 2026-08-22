@@ -125,7 +125,7 @@ impl Theme {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Theme {
     // surfaces (dark → light)
     pub crust: Color,
@@ -1045,6 +1045,7 @@ mod theme_css {
             // luvus uses for focused pane edges.
             println!("  --line: {};", hex(t.surface1));
             println!("  --border: {};", hex(t.border));
+            println!("  --border-focus: {};", hex(t.border_focus));
             println!("  --overlay0: {};", hex(t.overlay0));
             println!("  --overlay1: {};", hex(t.overlay1));
             println!("  --sub: {};", hex(t.subtext0));

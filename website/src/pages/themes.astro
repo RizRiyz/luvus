@@ -1,0 +1,700 @@
+---
+import jetbrainsLatin from '@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2?url';
+import plexLatin600 from '@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-600-normal.woff2?url';
+import '@fontsource-variable/jetbrains-mono';
+import '@fontsource/ibm-plex-mono/500.css';
+import '@fontsource/ibm-plex-mono/600.css';
+import '@fontsource/orbit/400.css';
+import '../styles/themes.css';
+import { NAV_MARK } from '../lib/mark';
+import { THEMES, DEFAULT_THEME } from '../lib/themes';
+import { MAKER_THEMES, THEME_FIELDS, THEME_GROUPS, THEME_FILE_VERSION, THEME_MIN_LUVUS } from '../lib/theme-schema';
+
+const makerStyle = (theme: (typeof MAKER_THEMES)[number]) =>
+  THEME_FIELDS.map((field) => `${field.css}:${theme.colors[field.id]}`).join(';');
+
+const title = 'Luvus Theme Maker';
+const description = 'Choose a Luvus theme, edit every semantic color, preview the real interface instantly, and export a portable TOML theme.';
+const GITHUB = 'https://github.com/RizRiyz/luvus';
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href="https://luvus.dev/themes/" />
+    <link rel="preload" href={jetbrainsLatin} as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href={plexLatin600} as="font" type="font/woff2" crossorigin />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://luvus.dev/themes/" />
+    <meta property="og:image" content="https://luvus.dev/og.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <script is:inline define:vars={{ FALLBACK: DEFAULT_THEME }}>
+      try {
+        document.documentElement.setAttribute(
+          'data-bh-theme',
+          localStorage.getItem('luvus-theme') || FALLBACK
+        );
+      } catch (e) {
+        document.documentElement.setAttribute('data-bh-theme', FALLBACK);
+      }
+    </script>
+  </head>
+  <body>
+    <nav>
+      <div class="nav-inner">
+        <a class="brand" href="/">
+          <span class="mark mark-luvus" aria-hidden="true" set:html={NAV_MARK}></span>
+          <span>Luvus</span>
+        </a>
+        <div class="nav-links">
+          <a href="/docs/">Docs</a>
+          <a href="/modules/">Modules</a>
+          <a href="/themes/" aria-current="page">Themes</a>
+          <a href="/changelog/">Changelog</a>
+          <a href={GITHUB} class="gh" aria-label="Luvus on GitHub" title="GitHub">
+            <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path></svg>
+          </a>
+        </div>
+      </div>
+    </nav>
+
+    <main>
+      <header class="intro">
+        <div>
+          <p class="eyebrow">Theme maker · live preview</p>
+          <h1>Make Luvus <span>yours.</span></h1>
+          <p class="lede">Choose a palette, change any semantic color, and watch Luvus repaint immediately. Download it, install it locally, or publish it for community review.</p>
+        </div>
+        <div class="intro-actions">
+          <button type="button" class="button secondary" id="import-btn">Import TOML</button>
+          <input type="file" id="import-file" accept=".toml,text/plain" hidden />
+          <button type="button" class="button" id="download-btn">Download theme</button>
+        </div>
+      </header>
+
+      <section class="maker" aria-label="Interactive Luvus theme maker">
+        <aside class="editor">
+          <div class="editor-head">
+            <div>
+              <p class="panel-kicker">Start from</p>
+              <label class="sr-only" for="preset">Theme preset</label>
+              <select id="preset">
+                <optgroup label="Theme Maker example">
+                  <option value="warm-copper">Warm Copper</option>
+                </optgroup>
+                <optgroup label="Community themes">
+                  {MAKER_THEMES.map((theme) => <option value={theme.id}>{theme.name}</option>)}
+                </optgroup>
+                <optgroup label="Luvus built-ins">
+                  {THEMES.map((theme) => <option value={theme.id}>{theme.label}</option>)}
+                </optgroup>
+              </select>
+            </div>
+            <button type="button" class="small-button" id="reset-btn">Reset</button>
+          </div>
+
+          <details class="identity">
+            <summary>Theme identity</summary>
+            <div class="identity-grid">
+              <label>Theme ID <input id="theme-id" value="warm-copper" spellcheck="false" /></label>
+              <label>Display name <input id="display-name" value="Warm Copper" /></label>
+              <label>Description <input id="theme-description" value="A dark brown palette with a restrained copper accent." maxlength="512" /></label>
+              <label>Author <input id="theme-author" placeholder="Your GitHub username" maxlength="128" /></label>
+              <label>Version <input id="theme-version" value={THEME_FILE_VERSION} maxlength="64" spellcheck="false" /></label>
+              <label>Appearance
+                <select id="appearance"><option value="dark">Dark</option><option value="light">Light</option></select>
+              </label>
+            </div>
+          </details>
+
+          <div class="color-groups">
+            {THEME_GROUPS.map((group) => (
+              <fieldset>
+                <legend>{group}</legend>
+                {THEME_FIELDS.filter((field) => field.group === group).map((field) => (
+                  <div class="color-row" data-control={field.id}>
+                    <label for={`hex-${field.id}`} title={field.help}>
+                      <span class="color-label">{field.label}</span>
+                    </label>
+                    <div class="color-inputs">
+                      <input class="picker" type="color" id={`pick-${field.id}`} data-color={field.id} aria-label={`${field.label} color picker`} />
+                      <input class="hex" id={`hex-${field.id}`} data-hex={field.id} inputmode="text" maxlength="7" spellcheck="false" aria-describedby={`help-${field.id}`} />
+                    </div>
+                    <span class="sr-only" id={`help-${field.id}`}>{field.help}</span>
+                  </div>
+                ))}
+              </fieldset>
+            ))}
+          </div>
+        </aside>
+
+        <div class="stage">
+          <div class="stage-head">
+            <h2>Live Luvus preview</h2>
+            <div class="viewport-switch" role="group" aria-label="Preview size">
+              <button type="button" data-size="wide" class="on">Wide</button>
+              <button type="button" data-size="compact">Compact</button>
+            </div>
+          </div>
+
+          <div class="preview-wrap">
+            <section class="preview" id="theme-preview" data-size="wide" aria-label="Luvus interface theme preview">
+              <div class="app-body">
+                <aside class="sidebar" data-token="base">
+                  <div class="side-brand" data-token="text accent"><b>◉ luvus</b><span>v0.11</span><button>Menu</button></div>
+                  <div class="dock-title" data-token="subtext0">Workspaces</div>
+                  <div class="workspace selected" data-token="sel_bg accent text"><span>▾</span> sudos <small>⎇ main</small></div>
+                  <div class="workspace" data-token="subtext1"><span>▸</span> webapp <small>⎇ feat/ui</small></div>
+                  <div class="dock-title agents-title" data-token="subtext0"><span>Agents</span><small>All&nbsp; <b>Active</b></small></div>
+                  <div class="agent focused" data-token="accent text"><i class="state working"></i>claude <small>sudos</small></div>
+                  <div class="agent" data-token="text coral"><i class="state blocked"></i>copilot <small>website</small></div>
+                  <div class="agent" data-token="text mint"><i class="state done"></i>codex <small>sudos</small></div>
+                  <div class="agent" data-token="text green"><i class="state idle"></i>pi <small>docs</small></div>
+                </aside>
+
+                <section class="workspace-view" data-token="mantle">
+                  <div class="tabs" data-token="surface1">
+                    <button class="tab active" data-token="surface0 accent text">1 main</button>
+                    <button class="tab" data-token="subtext0">2 ⎇ git</button>
+                    <button class="tab" data-token="subtext0">3 ◇ orch</button>
+                    <button class="tab" data-token="subtext0">4 ⦿ ctrl</button>
+                    <span data-token="overlay0">+</span>
+                  </div>
+
+                  <div class="panes">
+                    <article class="pane pane-focused" data-token="border_focus mantle">
+                      <header data-token="surface0 accent text"><span class="state working"></span> claude · ~/sudos</header>
+                      <div class="terminal" data-token="text">
+                        <p data-token="subtext0">⏺ Reading <b data-token="accent">src/ui/theme.rs</b>…</p>
+                        <p>Every semantic token now updates the preview.</p>
+                        <p data-token="green">✓ Parsed 18 theme colors</p>
+                        <p data-token="mint">✓ Preview registry synchronized</p>
+                        <p data-token="subtext1">The exported TOML uses the same role names.</p>
+                        <p class="selection" data-token="sel_bg text">selected text shows the selection background</p>
+                        <p data-token="amber">◐ Running contrast checks…</p>
+                      </div>
+                      <div class="composer" data-token="surface0 border text"><span data-token="accent">❯</span> Adjust the accent color…<i data-token="subtext0">shift+enter newline</i></div>
+                    </article>
+
+                    <article class="pane" data-token="border mantle">
+                      <header data-token="surface0 text"><span class="state blocked"></span> copilot · ~/website</header>
+                      <div class="terminal">
+                        <p data-token="subtext0">Permission required</p>
+                        <div class="permission" data-token="surface0 border">
+                          <strong data-token="text">Publish this theme?</strong>
+                          <button data-token="accent sel_bg">❯ 1. Preview only</button>
+                          <button data-token="subtext1">&nbsp;&nbsp;2. Cancel</button>
+                        </div>
+                        <p data-token="coral">● blocked · waiting for approval</p>
+                        <p data-token="overlay1">Focused and unfocused borders use separate roles.</p>
+                      </div>
+                    </article>
+                  </div>
+                </section>
+                <div class="statusbar" data-token="crust surface1 subtext0"><b data-token="accent">⌃Space</b> prefix <span data-token="overlay0">·</span> <span data-token="coral">copilot needs you</span></div>
+              </div>
+
+            </section>
+          </div>
+
+          <div class="diagnostics">
+            <div id="quality" class="quality" role="status" aria-live="polite"></div>
+            <div class="export-head">
+              <div><p class="panel-kicker">Portable theme file</p><p>Install downloads with <code>luvus theme install ./theme.toml</code>, or publish them to the reviewed community registry. <a href="https://github.com/RizRiyz/luvus/blob/main/community/themes/README.md" target="_blank" rel="noreferrer">Read the contribution guide.</a></p></div>
+              <div class="export-actions">
+                <button type="button" class="small-button" id="copy-btn">Copy TOML</button>
+                <button type="button" class="small-button publish-button" id="publish-btn" title="Open GitHub's fork and pull request flow">Publish theme</button>
+              </div>
+            </div>
+            <textarea id="toml-output" readonly spellcheck="false" aria-label="Generated theme TOML"></textarea>
+          </div>
+        </div>
+      </section>
+
+      <section class="starters" aria-labelledby="starters-title">
+        <div class="starters-head">
+          <p class="panel-kicker">{MAKER_THEMES.length} reviewed palettes</p>
+          <h2 id="starters-title">Community themes</h2>
+          <p>Install one directly, or open it in the maker as a complete editable example.</p>
+        </div>
+        <div class="starter-grid">
+          {MAKER_THEMES.map((theme) => (
+            <article class="starter-card" style={makerStyle(theme)}>
+              <button type="button" class="starter-edit" data-maker-theme={theme.id}>
+                <span class="starter-preview" aria-hidden="true">
+                  <span class="starter-bar"><i></i><i></i><i></i></span>
+                  <span class="starter-body">
+                    <span class="starter-side"><b></b><b></b><b></b><i></i></span>
+                    <span class="starter-main">
+                      <span class="starter-tabs"><b></b><b></b><b></b></span>
+                      <span class="starter-panes"><i></i><i></i></span>
+                      <span class="starter-lines"><b></b><b></b><b></b></span>
+                    </span>
+                  </span>
+                </span>
+                <span class="starter-meta"><strong>{theme.name}</strong><span>Edit palette →</span></span>
+              </button>
+              <button type="button" class="starter-install" data-install-theme={theme.id} title={`Copy: luvus theme install community/${theme.id}`}>
+                <code>luvus theme install community/{theme.id}</code><span>Copy</span>
+              </button>
+            </article>
+          ))}
+        </div>
+      </section>
+    </main>
+
+    <footer><span>Built for the terminal. Designed in the browser.</span><a href="/docs/guides/themes/">Theming docs</a></footer>
+
+    <script>
+      import { THEMES, DEFAULT_THEME, modeOf } from '../lib/themes';
+      import {
+        MAKER_THEMES,
+        THEME_FIELDS,
+        THEME_FILE_VERSION,
+        THEME_MIN_LUVUS,
+        WARM_COPPER,
+      } from '../lib/theme-schema';
+
+      const root = document.documentElement;
+      const preview = document.getElementById('theme-preview') as HTMLElement;
+      const preset = document.getElementById('preset') as HTMLSelectElement;
+      const themeId = document.getElementById('theme-id') as HTMLInputElement;
+      const displayName = document.getElementById('display-name') as HTMLInputElement;
+      const themeDescription = document.getElementById('theme-description') as HTMLInputElement;
+      const themeAuthor = document.getElementById('theme-author') as HTMLInputElement;
+      const themeVersion = document.getElementById('theme-version') as HTMLInputElement;
+      const appearance = document.getElementById('appearance') as HTMLSelectElement;
+      const output = document.getElementById('toml-output') as HTMLTextAreaElement;
+      const quality = document.getElementById('quality') as HTMLElement;
+      const validHex = /^#[0-9a-f]{6}$/i;
+      let draft: Record<string, string> = {};
+      let base: Record<string, string> = {};
+
+      const normalize = (value: string) => value.trim().toLowerCase();
+      const esc = (value: string) => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      const titleCase = (value: string) => value.split(/[-_.\s]+/).filter(Boolean).map((part) => part[0]?.toUpperCase() + part.slice(1)).join(' ');
+
+      function readBuiltIn(id: string): Record<string, string> {
+        const previous = root.getAttribute('data-bh-theme') || DEFAULT_THEME;
+        root.setAttribute('data-bh-theme', id);
+        const style = getComputedStyle(root);
+        const colors = Object.fromEntries(THEME_FIELDS.map((field) => {
+          const value = normalize(style.getPropertyValue(field.css));
+          return [field.id, validHex.test(value) ? value : WARM_COPPER[field.id]];
+        }));
+        root.setAttribute('data-bh-theme', previous);
+        return colors;
+      }
+
+      function setColor(id: string, value: string, render = true) {
+        const normalized = normalize(value);
+        if (!validHex.test(normalized)) return false;
+        draft[id] = normalized;
+        const field = THEME_FIELDS.find((entry) => entry.id === id)!;
+        preview.style.setProperty(field.css, normalized);
+        const picker = document.querySelector<HTMLInputElement>(`[data-color="${id}"]`);
+        const hex = document.querySelector<HTMLInputElement>(`[data-hex="${id}"]`);
+        if (picker && picker.value !== normalized) picker.value = normalized;
+        if (hex && hex.value !== normalized) hex.value = normalized;
+        hex?.removeAttribute('aria-invalid');
+        if (render) refreshOutput();
+        return true;
+      }
+
+      function load(values: Record<string, string>, id: string, name: string, mode: string, metadata?: { description?: string; author?: string; version?: string }) {
+        base = { ...values };
+        draft = {};
+        themeId.value = id;
+        displayName.value = name;
+        themeDescription.value = metadata?.description ?? '';
+        themeAuthor.value = metadata?.author ?? '';
+        themeVersion.value = metadata?.version ?? THEME_FILE_VERSION;
+        appearance.value = mode;
+        THEME_FIELDS.forEach((field) => setColor(field.id, values[field.id], false));
+        refreshOutput();
+      }
+
+      function loadPreset(id: string) {
+        if (id === 'warm-copper') {
+          load(WARM_COPPER, 'warm-copper', 'Warm Copper', 'dark', { description: 'A dark brown palette with a restrained copper accent.' });
+          return;
+        }
+        const maker = MAKER_THEMES.find((theme) => theme.id === id);
+        if (maker) {
+          load(maker.colors, maker.id, maker.name, maker.appearance, { description: maker.description, author: 'Luvus' });
+          return;
+        }
+        const found = THEMES.find((theme) => theme.id === id);
+        load(readBuiltIn(id), `${id}-custom`, `${found?.label ? titleCase(found.label) : titleCase(id)} Custom`, modeOf(id), { description: found?.note ?? '', author: 'Luvus' });
+      }
+
+      function makeToml() {
+        const safeId = themeId.value.trim() || 'my-theme';
+        const name = displayName.value.trim() || titleCase(safeId);
+        const lines = [
+          'schema = 1',
+          `id = "${esc(safeId)}"`,
+          `display_name = "${esc(name)}"`,
+          `description = "${esc(themeDescription.value.trim())}"`,
+          `author = "${esc(themeAuthor.value.trim())}"`,
+          `version = "${esc(themeVersion.value.trim() || THEME_FILE_VERSION)}"`,
+          `requires_luvus = ">=${THEME_MIN_LUVUS}"`,
+          `appearance = "${appearance.value}"`,
+          '',
+          '[colors]',
+          ...THEME_FIELDS.map((field) => `${field.id} = "${draft[field.id]}"`),
+          '',
+        ];
+        return lines.join('\n');
+      }
+
+      function rgb(hex: string) {
+        return [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];
+      }
+      function luminance(hex: string) {
+        return rgb(hex).map((channel) => channel / 255).map((channel) => channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4).reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0);
+      }
+      function contrast(a: string, b: string) {
+        const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+        return (hi + 0.05) / (lo + 0.05);
+      }
+
+      function assess() {
+        const warnings: string[] = [];
+        if (!/^[a-z0-9][a-z0-9._-]*$/.test(themeId.value.trim())) warnings.push('Theme ID should use lowercase letters, numbers, dots, dashes, or underscores.');
+        if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(themeVersion.value.trim())) warnings.push('Version should be valid semantic versioning, such as 1.0.0.');
+        const textRatio = contrast(draft.text, draft.mantle);
+        const subRatio = contrast(draft.subtext1, draft.mantle);
+        if (textRatio < 4.5) warnings.push(`Primary text contrast is ${textRatio.toFixed(1)}:1; aim for at least 4.5:1.`);
+        if (subRatio < 3) warnings.push(`Secondary text contrast is ${subRatio.toFixed(1)}:1; aim for at least 3:1.`);
+        const surfaces = ['crust', 'mantle', 'base', 'surface0', 'surface1'].map((id) => draft[id]);
+        if (new Set(surfaces).size < surfaces.length) warnings.push('Two main surfaces are identical, so some UI layers may disappear.');
+        const states = ['green', 'mint', 'amber', 'coral'].map((id) => draft[id]);
+        if (new Set(states).size < states.length) warnings.push('Two agent state colors are identical.');
+        quality.classList.toggle('warn', warnings.length > 0);
+        quality.innerHTML = warnings.length
+          ? `<strong>${warnings.length} suggestion${warnings.length === 1 ? '' : 's'}</strong><ul>${warnings.map((warning) => `<li>${warning}</li>`).join('')}</ul>`
+          : `<strong>✓ Palette looks usable</strong><span> Primary text contrast ${textRatio.toFixed(1)}:1 · all 18 roles are present.</span>`;
+      }
+
+      function refreshOutput() {
+        output.value = makeToml();
+        assess();
+      }
+
+      function parseToml(text: string) {
+        const colorSection = text.split(/^\s*\[colors\]\s*$/m)[1];
+        if (!colorSection) throw new Error('Missing [colors] section.');
+        const colors: Record<string, string> = {};
+        for (const field of THEME_FIELDS) {
+          const match = colorSection.match(new RegExp(`^\\s*${field.id}\\s*=\\s*"(#[0-9a-fA-F]{6})"`, 'm'));
+          if (!match) throw new Error(`Missing or invalid ${field.id} color.`);
+          colors[field.id] = normalize(match[1]);
+        }
+        const value = (key: string) => text.match(new RegExp(`^\\s*${key}\\s*=\\s*"([^"]*)"`, 'm'))?.[1];
+        return {
+          colors,
+          id: value('id') || 'imported-theme',
+          name: value('display_name') || titleCase(value('id') || 'Imported Theme'),
+          mode: value('appearance') === 'light' ? 'light' : 'dark',
+          description: value('description') || '',
+          author: value('author') || '',
+          version: value('version') || THEME_FILE_VERSION,
+        };
+      }
+
+      preset.addEventListener('change', () => loadPreset(preset.value));
+      document.querySelectorAll<HTMLButtonElement>('[data-maker-theme]').forEach((card) => card.addEventListener('click', () => {
+        const id = card.dataset.makerTheme!;
+        preset.value = id;
+        loadPreset(id);
+        document.querySelector('.maker')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }));
+      document.querySelectorAll<HTMLButtonElement>('[data-install-theme]').forEach((button) => button.addEventListener('click', async () => {
+        const command = `luvus theme install community/${button.dataset.installTheme}`;
+        try {
+          await navigator.clipboard.writeText(command);
+          const label = button.querySelector('span');
+          if (label) {
+            label.textContent = 'Copied ✓';
+            setTimeout(() => label.textContent = 'Copy', 1200);
+          }
+        } catch {
+          window.prompt('Copy this command:', command);
+        }
+      }));
+      document.querySelectorAll<HTMLInputElement>('[data-color]').forEach((input) => input.addEventListener('input', () => setColor(input.dataset.color!, input.value)));
+      document.querySelectorAll<HTMLInputElement>('[data-hex]').forEach((input) => {
+        input.addEventListener('input', () => {
+          const ok = setColor(input.dataset.hex!, input.value);
+          input.setAttribute('aria-invalid', String(!ok));
+        });
+        input.addEventListener('blur', () => {
+          if (!validHex.test(input.value)) input.value = draft[input.dataset.hex!];
+          input.removeAttribute('aria-invalid');
+        });
+        input.addEventListener('focus', () => {
+          preview.querySelectorAll('.token-active').forEach((node) => node.classList.remove('token-active'));
+          preview.querySelectorAll(`[data-token~="${input.dataset.hex}"]`).forEach((node) => node.classList.add('token-active'));
+        });
+      });
+      document.querySelectorAll<HTMLInputElement>('[data-hex]').forEach((input) => input.addEventListener('focusout', () => preview.querySelectorAll('.token-active').forEach((node) => node.classList.remove('token-active'))));
+      [themeId, displayName, themeDescription, themeAuthor, themeVersion, appearance].forEach((input) => input.addEventListener('input', refreshOutput));
+      document.getElementById('reset-btn')?.addEventListener('click', () => load(base, themeId.value, displayName.value, appearance.value, {
+        description: themeDescription.value,
+        author: themeAuthor.value,
+        version: themeVersion.value,
+      }));
+      const sizeButtons = document.querySelectorAll<HTMLButtonElement>('.viewport-switch [data-size]');
+      sizeButtons.forEach((button) => button.addEventListener('click', () => {
+        preview.dataset.size = button.dataset.size;
+        sizeButtons.forEach((item) => item.classList.toggle('on', item === button));
+      }));
+
+      async function copyToml() {
+        try {
+          await navigator.clipboard.writeText(output.value);
+          const button = document.getElementById('copy-btn')!;
+          button.textContent = 'Copied ✓';
+          setTimeout(() => button.textContent = 'Copy TOML', 1200);
+        } catch {
+          output.select();
+          document.execCommand('copy');
+        }
+      }
+      document.getElementById('copy-btn')?.addEventListener('click', copyToml);
+      document.getElementById('publish-btn')?.addEventListener('click', () => {
+        const id = themeId.value.trim();
+        if (!/^[a-z0-9][a-z0-9._-]*$/.test(id)) {
+          assess();
+          themeId.focus();
+          return;
+        }
+        if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(themeVersion.value.trim())) {
+          assess();
+          themeVersion.focus();
+          return;
+        }
+        if (id === 'terminal' || THEMES.some((theme) => theme.id === id)) {
+          quality.classList.add('warn');
+          quality.innerHTML = '<strong>Choose a unique theme ID</strong><span> Built-in theme IDs are reserved and cannot be published.</span>';
+          themeId.focus();
+          return;
+        }
+        if (MAKER_THEMES.some((theme) => theme.id === id)) {
+          quality.classList.add('warn');
+          quality.innerHTML = '<strong>Choose a unique theme ID</strong><span> This community theme already exists; use a new ID for your variant.</span>';
+          themeId.focus();
+          return;
+        }
+        const missing = [
+          [themeDescription, 'description'],
+          [themeAuthor, 'author'],
+        ].find(([input]) => !(input as HTMLInputElement).value.trim());
+        if (missing) {
+          quality.classList.add('warn');
+          quality.innerHTML = `<strong>Add theme details</strong><span> A ${missing[1]} is required for community review.</span>`;
+          (missing[0] as HTMLInputElement).focus();
+          return;
+        }
+        const url = new URL('https://github.com/RizRiyz/luvus/new/main');
+        url.searchParams.set('filename', `community/themes/${id}.toml`);
+        url.searchParams.set('value', makeToml());
+        window.open(url.toString(), '_blank', 'noopener,noreferrer');
+      });
+      document.getElementById('download-btn')?.addEventListener('click', () => {
+        const blob = new Blob([output.value], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        const safe = themeId.value.trim().replace(/[^a-zA-Z0-9._-]+/g, '-') || 'luvus-theme';
+        link.href = url;
+        link.download = `${safe}.toml`;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+      });
+      const importFile = document.getElementById('import-file') as HTMLInputElement;
+      document.getElementById('import-btn')?.addEventListener('click', () => importFile.click());
+      importFile.addEventListener('change', async () => {
+        const file = importFile.files?.[0];
+        if (!file) return;
+        try {
+          const parsed = parseToml(await file.text());
+          preset.value = '';
+          load(parsed.colors, parsed.id, parsed.name, parsed.mode, parsed);
+        } catch (error) {
+          quality.classList.add('warn');
+          quality.innerHTML = `<strong>Could not import theme</strong><span> ${error instanceof Error ? error.message : 'Invalid TOML file.'}</span>`;
+        } finally {
+          importFile.value = '';
+        }
+      });
+
+      loadPreset('warm-copper');
+    </script>
+  </body>
+</html>
+
+<style is:global>
+  :root {
+    --font: 'JetBrains Mono Variable', ui-monospace, monospace;
+    --display: 'IBM Plex Mono', ui-monospace, monospace;
+    --gut: 2.6rem;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--bg); color: var(--text); font-family: var(--font); }
+  body { margin: 0; min-width: 320px; min-height: 100vh; background: var(--bg); }
+  button, input, select, textarea { font: inherit; }
+  button, select { cursor: pointer; }
+  a { color: inherit; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+  nav {
+    background: rgb(from var(--bg) r g b / 0.85);
+    border-bottom: 1px solid var(--line);
+  }
+  .nav-inner {
+    display: flex; justify-content: space-between; align-items: center;
+    max-width: 1440px; margin: 0 auto; padding: 0.3rem var(--gut);
+    min-height: 3.8rem;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 0.35rem;
+    color: var(--text); font-size: 1.7rem; letter-spacing: -0.05em;
+    text-decoration: none;
+  }
+  .brand span {
+    font-family: 'Orbit', var(--display); font-weight: 400; line-height: normal;
+    transform: translateY(-0.06em);
+  }
+  .mark { display: block; flex-shrink: 0; }
+  .mark-luvus { width: 42px; height: 42px; }
+  .mark-luvus svg { width: 100%; height: 100%; display: block; }
+  .nav-links {
+    display: flex; align-items: center; gap: 1.4rem;
+    color: var(--sub); font: 0.88rem 'IBM Plex Mono', ui-monospace, monospace;
+    letter-spacing: -0.01em;
+  }
+  .nav-links a { color: inherit; text-decoration: none; }
+  .nav-links a:hover { color: var(--text); }
+  .nav-links a[aria-current='page'] { color: var(--accent); }
+  .gh {
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid var(--line); padding: 0.4rem;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .gh:hover { border-color: var(--accent); color: var(--accent); }
+  main { width: 100%; max-width: 1440px; margin: 0 auto; padding: 3.2rem var(--gut) 4rem; }
+  .intro { display: flex; justify-content: space-between; align-items: end; gap: 2rem; margin-bottom: 2rem; }
+  .eyebrow, .panel-kicker { color: var(--accent); text-transform: uppercase; letter-spacing: .13em; font: 600 .7rem var(--display); margin: 0 0 .55rem; }
+  h1 { font: 600 clamp(2.1rem, 4vw, 4rem)/1.02 var(--display); letter-spacing: -.05em; margin: 0; }
+  h1 span { color: var(--accent); }
+  .lede { color: var(--sub); max-width: 760px; line-height: 1.65; margin: 1rem 0 0; }
+  .intro-actions { display: flex; gap: .65rem; flex-shrink: 0; }
+  .button, .small-button { border: 1px solid var(--accent); background: var(--accent); color: var(--bg); padding: .7rem 1rem; font-weight: 700; }
+  .button.secondary, .small-button { background: transparent; color: var(--text); border-color: var(--line); }
+  .button:hover, .small-button:hover { border-color: var(--accent); }
+  .maker { display: grid; grid-template-columns: minmax(310px, 370px) minmax(0, 1fr); border: 1px solid var(--line); min-height: 800px; }
+  .editor { background: var(--bg2); border-right: 1px solid var(--line); padding: 1rem; max-height: 100vh; overflow: auto; position: sticky; top: 0; align-self: start; scrollbar-width: thin; scrollbar-color: var(--overlay0) transparent; }
+  .editor::-webkit-scrollbar { width: 7px; height: 7px; }
+  .editor::-webkit-scrollbar-track { background: transparent; }
+  .editor::-webkit-scrollbar-thumb { background: var(--overlay0); border: 2px solid var(--bg2); }
+  .editor::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+  .editor-head { display: flex; align-items: end; justify-content: space-between; gap: .75rem; padding-bottom: 1rem; border-bottom: 1px solid var(--line); }
+  select, .identity input { width: 100%; color: var(--text); background: var(--surface); border: 1px solid var(--line); padding: .55rem .65rem; }
+  #preset { min-width: 220px; }
+  .identity { border-bottom: 1px solid var(--line); padding: .75rem 0; }
+  .identity summary { color: var(--sub2); font-size: .78rem; cursor: pointer; }
+  .identity-grid { display: grid; gap: .65rem; padding-top: .8rem; }
+  .identity-grid label { color: var(--sub); font-size: .68rem; display: grid; gap: .3rem; }
+  .color-groups fieldset { border: 0; padding: 0; margin: 1.15rem 0; }
+  .color-groups legend { color: var(--accent); font: 600 .68rem var(--display); text-transform: uppercase; letter-spacing: .1em; width: 100%; border-bottom: 1px solid var(--line); padding-bottom: .45rem; margin-bottom: .25rem; }
+  .color-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .65rem; padding: .48rem .2rem; border-bottom: 1px solid rgb(from var(--line) r g b / .5); }
+  .color-row > label { min-width: 0; }
+  .color-label { color: var(--text); font-size: .75rem; }
+  .color-inputs { display: flex; align-items: center; gap: .35rem; }
+  .picker { appearance: none; width: 28px; height: 28px; padding: 0; border: 1px solid var(--line); background: transparent; }
+  .picker::-webkit-color-swatch-wrapper { padding: 2px; }
+  .picker::-webkit-color-swatch { border: 0; }
+  .picker::-moz-color-swatch { border: 0; }
+  .hex { width: 82px; padding: .38rem .42rem; color: var(--text); background: var(--bg); border: 1px solid var(--line); font-size: .68rem; }
+  .hex:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+  .hex[aria-invalid='true'] { border-color: var(--coral); }
+  .stage { min-width: 0; background: var(--bg); padding: 1.1rem; }
+  .stage-head { display: flex; justify-content: space-between; align-items: center; gap: 1rem; margin-bottom: 1rem; }
+  .stage-head h2 { margin: 0; color: var(--text); font: 600 .82rem var(--display); }
+  .viewport-switch { display: flex; border: 1px solid var(--line); }
+  .viewport-switch button { border: 0; color: var(--sub); background: var(--bg2); padding: .35rem .6rem; font-size: .65rem; }
+  .viewport-switch button.on { background: var(--accent); color: var(--bg); }
+  .preview-wrap { overflow: auto; padding: clamp(.5rem, 2vw, 1.5rem); background-image: linear-gradient(45deg, var(--surface) 25%, transparent 25%), linear-gradient(-45deg, var(--surface) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, var(--surface) 75%), linear-gradient(-45deg, transparent 75%, var(--surface) 75%); background-size: 18px 18px; background-position: 0 0, 0 9px, 9px -9px, -9px 0; border: 1px solid var(--line); }
+  .preview { min-width: 720px; max-width: 1100px; margin: auto; color: var(--text); background: var(--bg); border: 1px solid var(--overlay0); box-shadow: 0 20px 55px rgb(0 0 0 / .35); transition: max-width .2s; }
+  .preview[data-size='compact'] { max-width: 760px; }
+  .app-body { min-height: 540px; display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+  .sidebar { width: 190px; min-height: 0; background: var(--base); border-right: 1px solid var(--line); padding: .55rem; font-size: .62rem; }
+  .side-brand { display: flex; align-items: center; gap: .45rem; padding-bottom: .65rem; border-bottom: 1px solid var(--surface); }
+  .side-brand b { color: var(--accent); }.side-brand span { color: var(--sub); }.side-brand button { margin-left: auto; border: 1px solid var(--line); color: var(--sub2); background: var(--surface); font-size: .55rem; padding: .18rem .3rem; }
+  .dock-title { color: var(--sub); text-transform: uppercase; letter-spacing: .1em; margin: .75rem .25rem .3rem; }
+  .agents-title { display: flex; justify-content: space-between; }.agents-title small b { color: var(--accent); }
+  .workspace, .agent { display: flex; align-items: center; gap: .4rem; padding: .37rem .42rem; color: var(--sub2); }
+  .workspace small, .agent small { margin-left: auto; color: var(--sub); }.workspace.selected { color: var(--text); background: var(--sel); }.workspace.selected > span { color: var(--accent); }
+  .agent.focused { border-left: 2px solid var(--accent); color: var(--text); }.state { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: 0 0 auto; }.state.working { background: var(--amber); }.state.blocked { background: var(--coral); }.state.done { background: var(--mint); }.state.idle { background: var(--green); border: 1px solid var(--green); }
+  .workspace-view { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg2); }
+  .tabs { display: flex; align-items: end; gap: 2px; height: 36px; padding: .35rem .45rem 0; border-bottom: 1px solid var(--line); background: var(--bg); }
+  .tab { border: 0; background: transparent; color: var(--sub); padding: .38rem .65rem; font-size: .6rem; }.tab.active { color: var(--text); background: var(--surface); border-top: 1px solid var(--accent); }
+  .tabs > span { color: var(--overlay0); padding: .3rem; }
+  .panes { flex: 1; display: grid; grid-template-columns: 1.18fr .82fr; gap: 5px; padding: 5px; min-height: 290px; }
+  .pane { min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--border); background: var(--bg2); }.pane-focused { border-color: var(--border-focus); box-shadow: 0 0 0 1px var(--border-focus); }
+  .pane header { height: 25px; display: flex; align-items: center; gap: .35rem; padding: 0 .5rem; border-bottom: 1px solid var(--surface); color: var(--text); background: var(--surface); font-size: .58rem; }
+  .terminal { flex: 1; padding: .55rem .65rem; color: var(--text); font-size: .58rem; line-height: 1.65; overflow: hidden; }.terminal p { margin: .12rem 0; }.terminal b { color: var(--accent); }.selection { background: var(--sel); display: inline-block; padding: 0 .2rem; }
+  .composer { margin: .35rem; padding: .42rem .5rem; background: var(--surface); border: 1px solid var(--border); font-size: .55rem; }.composer > span { color: var(--accent); }.composer i { color: var(--sub); float: right; font-style: normal; }
+  .permission { display: grid; gap: .3rem; margin: .5rem 0; padding: .55rem; background: var(--surface); border: 1px solid var(--border); }.permission button { text-align: left; border: 0; background: transparent; color: var(--sub2); font-size: .55rem; }.permission button:first-of-type { color: var(--accent); background: var(--sel); }
+  .statusbar { grid-column: 1 / -1; background: var(--bg); border-top: 1px solid var(--line); color: var(--sub); padding: .35rem .55rem; font-size: .55rem; }.statusbar b { color: var(--accent); }.statusbar span:first-of-type { color: var(--overlay0); }.statusbar span:last-of-type { color: var(--coral); }
+  .token-active { outline: 2px solid var(--accent) !important; outline-offset: -2px; animation: token-pulse .7s ease; }
+  @keyframes token-pulse { 50% { filter: brightness(1.35); } }
+  .diagnostics { margin-top: 1rem; display: grid; gap: .75rem; }
+  .quality { border: 1px solid var(--green); background: rgb(from var(--green) r g b / .08); color: var(--sub2); padding: .8rem .9rem; font-size: .85rem; line-height: 1.55; }.quality strong { color: var(--green); }.quality.warn { border-color: var(--amber); background: rgb(from var(--amber) r g b / .08); }.quality.warn strong { color: var(--amber); }.quality ul { margin: .45rem 0 0; padding-left: 1.25rem; }
+  .export-head { display: flex; align-items: end; justify-content: space-between; gap: 1rem; }.export-head p { margin: 0; }.export-head .panel-kicker { color: var(--accent); font-size: .7rem; margin-bottom: .45rem; }.export-head p:not(.panel-kicker) { color: var(--sub); font-size: .88rem; line-height: 1.6; }.export-head code, .export-head a { color: var(--accent); }
+  .export-actions { display: flex; gap: .55rem; flex-shrink: 0; }
+  .publish-button { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+  #toml-output { width: 100%; min-height: 230px; resize: vertical; overflow: auto; white-space: pre; background: var(--bg2); color: var(--sub2); border: 1px solid var(--line); padding: .9rem; font-size: .78rem; line-height: 1.6; scrollbar-width: thin; scrollbar-color: var(--overlay0) transparent; }
+  #toml-output::-webkit-scrollbar { width: 7px; height: 7px; }
+  #toml-output::-webkit-scrollbar-track { background: transparent; }
+  #toml-output::-webkit-scrollbar-thumb { background: var(--overlay0); border: 2px solid var(--bg2); }
+  #toml-output::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+  .starters { margin-top: 3.5rem; padding-top: 2.5rem; border-top: 1px solid var(--line); }
+  .starters-head { margin-bottom: 1.1rem; }
+  .starters-head h2 { margin: 0; font: 600 1.35rem var(--display); letter-spacing: -.035em; }
+  .starters-head > p:last-child { max-width: 46rem; margin: .45rem 0 0; color: var(--sub); font-size: .84rem; }
+  .starter-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .85rem; }
+  .starter-card { min-width: 0; color: var(--text); background: var(--bg2); border: 1px solid var(--line); }
+  .starter-card:hover, .starter-card:focus-within { border-color: var(--accent); transform: translateY(-2px); }
+  .starter-edit { display: block; width: 100%; padding: 0; text-align: left; color: inherit; background: transparent; border: 0; }
+  .starter-edit:focus-visible, .starter-install:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+  .starter-preview { display: block; height: 170px; overflow: hidden; color: var(--text); background: var(--bg); border-bottom: 1px solid var(--line); }
+  .starter-bar { height: 18px; display: flex; align-items: center; gap: 4px; padding: 0 7px; background: var(--bg); border-bottom: 1px solid var(--line); }
+  .starter-bar i { width: 5px; height: 5px; border-radius: 50%; background: var(--coral); }
+  .starter-bar i:nth-child(2) { background: var(--amber); }.starter-bar i:nth-child(3) { background: var(--green); }
+  .starter-body { height: 152px; display: flex; }
+  .starter-side { width: 30%; display: flex; flex-direction: column; gap: 7px; padding: 10px 8px; background: var(--base); border-right: 1px solid var(--line); }
+  .starter-side b { display: block; width: 70%; height: 4px; background: var(--sub); }.starter-side b:nth-child(2) { width: 90%; background: var(--accent); }.starter-side b:nth-child(3) { width: 58%; background: var(--sub2); }.starter-side i { display: block; width: 100%; height: 21px; margin-top: 4px; background: var(--sel); border-left: 2px solid var(--accent); }
+  .starter-main { min-width: 0; flex: 1; display: flex; flex-direction: column; background: var(--bg2); }
+  .starter-tabs { height: 25px; display: flex; align-items: end; gap: 3px; padding: 4px 5px 0; background: var(--bg); border-bottom: 1px solid var(--line); }.starter-tabs b { width: 25%; height: 14px; background: var(--surface); }.starter-tabs b:first-child { border-top: 2px solid var(--accent); }.starter-tabs b:nth-child(2) { background: transparent; border: 1px solid var(--surface); }
+  .starter-panes { flex: 1; display: grid; grid-template-columns: 1.2fr .8fr; gap: 4px; padding: 5px; }.starter-panes i { display: block; background: var(--bg2); border: 1px solid var(--border-focus); }.starter-panes i + i { border-color: var(--border); }
+  .starter-lines { display: grid; gap: 5px; padding: 0 10px 10px; }.starter-lines b { display: block; width: 74%; height: 3px; background: var(--text); }.starter-lines b:nth-child(2) { width: 48%; background: var(--accent); }.starter-lines b:nth-child(3) { width: 62%; background: var(--mint); }
+  .starter-meta { display: flex; justify-content: space-between; align-items: center; gap: .5rem; padding: .75rem .85rem; background: var(--bg2); }.starter-meta strong { color: var(--text); font: 600 .78rem var(--display); }.starter-meta span { color: var(--accent); font-size: .62rem; white-space: nowrap; }
+  .starter-install { width: 100%; min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: .55rem .85rem; color: var(--sub); background: var(--bg); border: 0; border-top: 1px solid var(--line); text-align: left; }.starter-install:hover { color: var(--accent); }.starter-install code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .6rem; }.starter-install span { color: var(--accent); font-size: .6rem; }
+  footer { max-width: 1440px; margin: 0 auto; border-top: 1px solid var(--line); padding: 2rem var(--gut); color: var(--sub); display: flex; justify-content: space-between; font-size: .7rem; } footer a { color: var(--accent); }
+  @media (max-width: 1050px) { .maker { grid-template-columns: 330px minmax(0, 1fr); }.sidebar { width: 165px; }.panes { grid-template-columns: 1fr; }.pane:not(.pane-focused) { display: none; }.starter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 900px) { :root { --gut: 1.6rem; } }
+  @media (max-width: 780px) { main { padding-top: 2rem; }.intro { align-items: start; flex-direction: column; }.maker { display: flex; flex-direction: column; }.editor { position: static; max-height: none; border-right: 0; border-bottom: 1px solid var(--line); }.stage { padding: .65rem; }.preview-wrap { padding: .5rem; }.stage-head { align-items: end; }.intro-actions { width: 100%; }.intro-actions .button { flex: 1; }.export-head { align-items: start; flex-direction: column; }.export-actions { width: 100%; }.export-actions .small-button { flex: 1; } }
+  @media (max-width: 560px) { :root { --gut: 1.15rem; }.nav-inner { flex-wrap: wrap; row-gap: .45rem; padding-top: .7rem; padding-bottom: .7rem; }.nav-links { gap: .9rem; font-size: .78rem; flex-wrap: wrap; justify-content: flex-end; }.starter-grid { grid-template-columns: 1fr; } }
+  @media (max-width: 480px) { .intro-actions { flex-direction: column; } footer { flex-direction: column; gap: .5rem; } }
+  @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; animation: none !important; transition: none !important; } }
+</style>

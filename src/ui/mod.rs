@@ -59,6 +59,7 @@ mod board;
 mod borders;
 pub(crate) mod changelog;
 mod cmdinfo;
+mod diff;
 mod files;
 mod git;
 mod help;
@@ -139,15 +140,24 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     let agent_rects = std::mem::take(&mut app.agent_rects);
     let session_rects = std::mem::take(&mut app.session_rects);
     let file_tree_rects = std::mem::take(&mut app.file_tree_rects);
+    let files_mode_rects = std::mem::take(&mut app.files_mode_rects);
+    let diff_row_rects = std::mem::take(&mut app.diff_row_rects);
+    let diff_source_rects = std::mem::take(&mut app.diff_source_rects);
+    let diff_note_rects = std::mem::take(&mut app.diff_note_rects);
     let module_dock_rects = std::mem::take(&mut app.module_dock_rects);
     let picker_rects = std::mem::take(&mut app.picker_rects);
     let settings_tab_rects = std::mem::take(&mut app.settings_tab_rects);
     let settings_ctl_rects = std::mem::take(&mut app.settings_ctl_rects);
+    let settings_theme_remove_rects = std::mem::take(&mut app.settings_theme_remove_rects);
     let settings_arrow_rects = std::mem::take(&mut app.settings_arrow_rects);
     let changelog_link_rects = std::mem::take(&mut app.changelog_link_rects);
+    let changelog_copy_rects = std::mem::take(&mut app.changelog_copy_rects);
     let switcher_rects = std::mem::take(&mut app.switcher_rects);
     let switcher_scope_rects = std::mem::take(&mut app.switcher_scope_rects);
     let mission_rows = std::mem::take(&mut app.mission_rows);
+    let bar_hits = std::mem::take(&mut app.bar.hits);
+    let bar_overflow_hits = std::mem::take(&mut app.bar.overflow_hits);
+    let bar_overflow = app.bar.overflow.clone();
     let search_rects = app
         .search
         .as_mut()
@@ -156,6 +166,13 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
         .ws_menu
         .as_mut()
         .map(|menu| std::mem::take(&mut menu.items));
+    let tab_menu_state = app.tab_menu.as_mut().map(|menu| {
+        (
+            std::mem::take(&mut menu.items),
+            std::mem::take(&mut menu.swap_rects),
+            menu.swap_open,
+        )
+    });
     let pane_menu_state = app.pane_menu.as_mut().map(|menu| {
         (
             std::mem::take(&mut menu.items),
@@ -169,6 +186,10 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
         .map(|menu| std::mem::take(&mut menu.items));
     let file_menu_items = app
         .file_menu
+        .as_mut()
+        .map(|menu| std::mem::take(&mut menu.items));
+    let diff_menu_items = app
+        .diff_menu
         .as_mut()
         .map(|menu| std::mem::take(&mut menu.items));
     let dock_menu_rects = app
@@ -238,20 +259,36 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     app.agent_rects = agent_rects;
     app.session_rects = session_rects;
     app.file_tree_rects = file_tree_rects;
+    app.files_mode_rects = files_mode_rects;
+    app.diff_row_rects = diff_row_rects;
+    app.diff_source_rects = diff_source_rects;
+    app.diff_note_rects = diff_note_rects;
     app.module_dock_rects = module_dock_rects;
     app.picker_rects = picker_rects;
     app.settings_tab_rects = settings_tab_rects;
     app.settings_ctl_rects = settings_ctl_rects;
+    app.settings_theme_remove_rects = settings_theme_remove_rects;
     app.settings_arrow_rects = settings_arrow_rects;
     app.changelog_link_rects = changelog_link_rects;
+    app.changelog_copy_rects = changelog_copy_rects;
     app.switcher_rects = switcher_rects;
     app.switcher_scope_rects = switcher_scope_rects;
     app.mission_rows = mission_rows;
+    app.bar.hits = bar_hits;
+    app.bar.overflow_hits = bar_overflow_hits;
+    app.bar.overflow = bar_overflow;
     if let (Some(rects), Some(search)) = (search_rects, app.search.as_mut()) {
         search.rects = rects;
     }
     if let (Some(items), Some(menu)) = (ws_menu_items, app.ws_menu.as_mut()) {
         menu.items = items;
+    }
+    if let (Some((items, swap_rects, swap_open)), Some(menu)) =
+        (tab_menu_state, app.tab_menu.as_mut())
+    {
+        menu.items = items;
+        menu.swap_rects = swap_rects;
+        menu.swap_open = swap_open;
     }
     if let (Some((items, tab_rects, move_open)), Some(menu)) =
         (pane_menu_state, app.pane_menu.as_mut())
@@ -264,6 +301,9 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
         menu.items = items;
     }
     if let (Some(items), Some(menu)) = (file_menu_items, app.file_menu.as_mut()) {
+        menu.items = items;
+    }
+    if let (Some(items), Some(menu)) = (diff_menu_items, app.diff_menu.as_mut()) {
         menu.items = items;
     }
     if let (Some(rects), Some(menu)) = (dock_menu_rects, app.dock_menu.as_mut()) {
@@ -305,6 +345,8 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     let cat = app.catalog;
     let area = f.area();
     f.render_widget(Block::new().style(Style::new().bg(t.mantle)), area);
+    app.bar.hits.clear();
+    app.bar.overflow_hits.clear();
 
     // An absurdly small window can't hold the chrome — say so instead of
     // drawing degraded fragments. (Every draw fn is underflow-safe regardless;
@@ -344,6 +386,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // it can also drop the bottom status bar (a dense, keyboard-oriented row that
     // just eats space on a phone) and give that row back to the content.
     app.compact = area.width < app.config.layout.compact_width;
+    app.refresh_core_bar_widgets();
     let status_h = if app.compact { 0 } else { 1 };
     let [main, status] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(status_h)]).areas(area);
@@ -449,6 +492,10 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // file instead of switching workspace (docs/29 + docs/38).
     app.files_area = Rect::ZERO;
     app.file_tree_rects.clear();
+    app.files_mode_rects.clear();
+    app.diff_row_rects.clear();
+    app.diff_source_rects.clear();
+    app.diff_note_rects.clear();
     let mut ws_rects = Vec::new();
     let mut agent_rects = Vec::new();
     let mut session_rects = Vec::new();
@@ -569,6 +616,10 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         };
     status::draw_status(f, status, app, &t);
 
+    // Read-only overflow is attachment-local geometry over server-owned bar
+    // content. Draw it above chrome and panes, below modal workflows.
+    crate::bar::render::draw_overflow(f, area, &mut app.bar, &t);
+
     // The Settings modal draws last, on top of everything, and owns the cursor.
     let settings_hits = app
         .settings
@@ -579,12 +630,14 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         app.settings_close_rect = Some(h.close);
         app.settings_tab_rects = h.tabs.clone();
         app.settings_ctl_rects = h.ctls.clone();
+        app.settings_theme_remove_rects = h.theme_remove.clone();
         app.settings_arrow_rects = h.arrows.clone();
     } else {
         app.settings_modal_rect = None;
         app.settings_close_rect = None;
         app.settings_tab_rects.clear();
         app.settings_ctl_rects.clear();
+        app.settings_theme_remove_rects.clear();
         app.settings_arrow_rects.clear();
     }
     // A module-setting prompt sits above the modal it was opened from.
@@ -611,6 +664,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         app.changelog_close_rect = None;
         app.changelog_check_rect = None;
         app.changelog_link_rects.clear();
+        app.changelog_copy_rects.clear();
     }
     // The running-command overlay (click a pane title) draws above that.
     if let Some(c) = app.cmd_inspect.as_ref() {
@@ -648,6 +702,9 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         app.modal_commit_rect = c;
         app.modal_cancel_rect = x;
     }
+    if app.tab_menu.is_some() {
+        menu::draw_tab_menu(f, area, app, cat, &t);
+    }
     if app.pane_menu.is_some() {
         menu::draw_pane_menu(f, area, app, cat, &t);
     }
@@ -660,6 +717,9 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // The FILES-dock context menu + its create/rename/delete modals (docs/38).
     if app.file_menu.is_some() {
         menu::draw_file_menu(f, area, app, &t);
+    }
+    if app.diff_menu.is_some() {
+        menu::draw_diff_menu(f, area, app, &t);
     }
     // A module dock row's own context menu (docs/52).
     if app.dock_menu.is_some() {
@@ -746,15 +806,18 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
 
     let cursor = if settings_hits.is_some()
         || picker_open
+        || app.bar.overflow.is_some()
         || app.help_open
         || app.worktree_prompt.is_some()
         || app.tab_rename.is_some()
+        || app.tab_menu.is_some()
         || app.ws_rename.is_some()
         || app.pane_rename.is_some()
         || app.ws_menu.is_some()
         || app.pane_menu.is_some()
         || app.agent_menu.is_some()
         || app.file_menu.is_some()
+        || app.diff_menu.is_some()
         || app.dock_menu.is_some()
         || app.file_prompt.is_some()
         || app.file_delete.is_some()
@@ -836,7 +899,7 @@ pub(super) fn hint_line(pairs: &[(&str, &str)], t: &Theme) -> Line<'static> {
 /// Display width of `s` in terminal columns (CJK = 2 cells, etc.). Fixed-width
 /// chrome must measure with this, not `chars().count()`, so translated/CJK labels
 /// align (docs/21).
-pub(super) fn display_width(s: &str) -> usize {
+pub(crate) fn display_width(s: &str) -> usize {
     use unicode_width::UnicodeWidthStr;
     s.width()
 }
@@ -845,7 +908,7 @@ pub(super) fn display_width(s: &str) -> usize {
 /// fit. Width-aware like `display_width` (a CJK glyph counts as two, and is never
 /// split), so a narrowed sidebar clips long node/agent/branch names gracefully
 /// instead of hard-cutting mid-glyph (docs/29).
-pub(super) fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }
@@ -980,5 +1043,39 @@ fn short_path(p: &Path, max: u16) -> String {
         format!("…{tail}")
     } else {
         s
+    }
+}
+
+#[cfg(test)]
+mod bar_projection_tests {
+    use super::*;
+
+    #[test]
+    fn secondary_viewport_preserves_active_bar_geometry_and_popup() {
+        let _env = crate::persist::test_env("bar-projection");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let hit = crate::bar::BarHit {
+            key: crate::bar::BarWidgetKey::new("module", "status"),
+            segment: 0,
+            rect: Rect::new(90, 29, 4, 1),
+            action: "open".into(),
+            value: Some("active".into()),
+        };
+        app.bar.hits = vec![hit.clone()];
+        app.bar.overflow = Some(crate::bar::OverflowPopup {
+            region: crate::bar::BarRegion::BottomRight,
+            keys: vec!["module:hidden".into()],
+            rect: Rect::new(70, 20, 24, 6),
+        });
+        let expected_popup = app.bar.overflow.as_ref().unwrap().rect;
+
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+        render_projection(&mut target, &mut app);
+
+        assert_eq!(app.bar.hits, vec![hit]);
+        assert_eq!(app.bar.overflow.as_ref().unwrap().rect, expected_popup);
     }
 }

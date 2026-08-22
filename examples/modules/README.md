@@ -1,6 +1,6 @@
 # Example modules
 
-Three complete, working luvus modules — one per language — each covering a
+Five complete, working luvus modules across three languages, each covering a
 different part of the extension surface. They are meant to be **copied and
 edited**, not installed as-is.
 
@@ -10,6 +10,7 @@ edited**, not installed as-is.
 | [`agent-ping`](agent-ping) | Python | An **event hook** on agent status, a **secret** setting, an `agent` right-click action, toasts |
 | [`scratch-pane`](scratch-pane) | Node | A **pane** entrypoint, `pane` right-click actions, reading the **selection**, **renaming a tab**, the state dir |
 | [`file-tree`](file-tree) | Bash | A **collapsible file tree** dock (per-row `toggle`/`open` actions, on-disk expand state), opening a file into a split **pane** via `pane split` + `pane run` — a no-core-edits prototype of docs/38 |
+| [`ci-bar`](ci-bar) | Bash | A multi-segment **Luvus Bar** widget, compact content, a clickable action, startup restoration, and a transient notification |
 
 Nothing here needs a build step or a dependency beyond the language runtime
 itself (`sh`, `python3`, `node`).

@@ -8,11 +8,14 @@ owner-only (`0700`).
 
 | File | Contents |
 |---|---|
-| `config.json` | theme, language, shell, layout, notifications, keybindings, and `sidebars` (each side's visible/width and its ordered docks) |
+| `config.json` | theme, language, shell, layout, notifications, keybindings, `sidebars`, and Luvus Bar placement |
 | `session.json` | the auto-saved session snapshot (workspaces → tabs → panes) |
 | `orch.json` | the orchestration task ledger + leases |
 | `modules.json` + `modules/` | installed extensions and their state |
+| `themes/*.toml` | installed data-only themes, shared by named sessions |
+| `themes/*.source.json` | source URL/path, SHA-256 digest, and install timestamp for managed theme installs |
 | `worktrees/` | worktrees created by luvus, nested per repo |
+| `reviews/` | private local DIFF notes and viewed fingerprints, keyed by hashed repository and worktree identity |
 | `luvus.sock` / `luvus-client.sock` | the control + render sockets (owner-only) |
 
 Prefer editing config through **Settings** (it applies live and writes the
@@ -23,12 +26,21 @@ cleanly across versions because unknown fields get defaults.
 
 | Key | Effect |
 |---|---|
+| `theme` | active bundled, installed, or virtual theme ID. A missing installed ID falls back visually without erasing the stored value. |
 | `layout.scrollback_bytes` | approximate memory budget per pane's retained history; defaults to `10485760` (10 MiB). The legacy `layout.scrollback` line count is read for compatibility. (See [Scrollback](/docs/guides/scrollback/).) |
 | `layout.show_titles` | show the title on each pane border |
 | `layout.resume_in_new_workspace` | resume a session into its own workspace instead of a new tab |
 | `layout.file_open` | what a click in the FILES dock does: `readonly` (default) or an editor command such as `vim` (see [Browsing & Opening Files](/docs/guides/files/)) |
+| `layout.diff_layout` | default native DIFF layout: `auto`, `split`, or `stack` |
+| `layout.diff_wrap` | wrap long diff rows instead of using horizontal navigation |
+| `layout.diff_context_lines` | unchanged Git context lines per hunk, from `0` to `20` |
+| `layout.diff_show_line_numbers` | show old and new source line gutters |
+| `layout.diff_marker_style` | changed-line indicator: `symbols` (default), `bars`, or `both` |
+| `layout.diff_color_mode` | changed-line palette: `theme` (default) follows the active theme, while `standard` uses fixed red and green review colors |
+| `layout.diff_live_refresh` | refresh visible diff views when the shared FILES status scan changes |
 | `prefix` | the command-mode prefix chord (default `ctrl+space`; e.g. `ctrl+b`). Must include `Ctrl` (see [Keybindings](/docs/reference/keybindings/)) |
 | `keybindings` | command id → key, overriding the defaults |
+| `bars.top_right` / `bars.bottom_right` / `bars.off` | canonical widget ids (`module:id`) in each Luvus Bar placement. `core:runtime-status` defaults to Bottom. Live content and notifications are never persisted. |
 
 ## Environment variables
 

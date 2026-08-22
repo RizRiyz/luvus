@@ -159,6 +159,7 @@ const entries = await Promise.all(
         <div class="nav-links">
           <a href="/docs/">Docs</a>
           <a href="/modules/">Modules</a>
+          <a href="/themes/">Themes</a>
           <a href="/changelog/" aria-current="page">Changelog</a>
   
         <a href={GITHUB} class="gh" aria-label="luvus on GitHub" title="GitHub">
@@ -355,7 +356,7 @@ const entries = await Promise.all(
 
       /* nav */
       nav {
-        position: sticky; top: 0; z-index: 10; background: rgb(from var(--bg) r g b / 0.85);
+        background: var(--bg);
         border-bottom: 1px solid var(--line);
       }
       .nav-inner {

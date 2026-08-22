@@ -25,6 +25,9 @@ pub struct FolderPicker {
     pub cursor: usize,
     /// When making a new folder, the name being typed.
     pub creating: Option<String>,
+    /// macOS-style "Go to" input. Enter navigates to this path but deliberately
+    /// does not open it as a workspace; the OpenFolder row remains confirmation.
+    pub going_to: Option<String>,
     /// Last filesystem error (e.g. permission denied), shown in the modal.
     pub error: Option<String>,
     /// Whether the browsed folder is a git repo — adds the "Open with new
@@ -39,20 +42,32 @@ pub enum Row {
     OpenFolder,
     /// Create a git worktree of the browsed repo (then open it).
     OpenWorktree,
+    /// Jump to the user's home directory without opening it.
+    Home,
     /// `..` — go to the parent directory.
     Up,
     /// `entries[idx]`.
     Entry(usize),
 }
 
+/// Mouse targets rendered by the picker. Modal is last in hit-test order so
+/// rows and the Go-to footer remain interactive while inert modal space simply
+/// keeps the picker open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerHit {
+    Row(usize),
+    GoTo,
+    Modal,
+}
+
 impl FolderPicker {
     /// Number of action rows before the directory entries: "open" + (optional)
-    /// "open with worktree" + "..".
+    /// "open with worktree" + "home" + "..".
     fn leading(&self) -> usize {
         if self.is_repo {
-            3
+            4
         } else {
-            2
+            3
         }
     }
 
@@ -66,8 +81,8 @@ impl FolderPicker {
         match (i, self.is_repo) {
             (0, _) => Row::OpenFolder,
             (1, true) => Row::OpenWorktree,
-            (1, false) => Row::Up,
-            (2, true) => Row::Up,
+            (1, false) | (2, true) => Row::Home,
+            (2, false) | (3, true) => Row::Up,
             _ => Row::Entry(i - self.leading()),
         }
     }
@@ -99,6 +114,7 @@ impl App {
             entries: Vec::new(),
             cursor: 0,
             creating: None,
+            going_to: None,
             error: None,
             is_repo: false,
         });
@@ -133,8 +149,8 @@ impl App {
                     .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
             });
             p.entries = entries;
-            p.cursor = p.cursor.min(p.row_count().saturating_sub(1));
             p.is_repo = crate::git::local::is_repo(&p.path);
+            p.cursor = p.cursor.min(p.row_count().saturating_sub(1));
         }
     }
 
@@ -176,6 +192,28 @@ impl App {
                 }
                 return;
             }
+            if let Some(buf) = p.going_to.as_mut() {
+                match key.code {
+                    KeyCode::Esc => {
+                        p.going_to = None;
+                        p.error = None;
+                    }
+                    KeyCode::Enter => {
+                        let path = buf.clone();
+                        self.picker_go_to(path);
+                    }
+                    KeyCode::Backspace => {
+                        buf.pop();
+                        p.error = None;
+                    }
+                    KeyCode::Char(c) => {
+                        buf.push(c);
+                        p.error = None;
+                    }
+                    _ => {}
+                }
+                return;
+            }
         }
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.picker_move(1),
@@ -186,9 +224,12 @@ impl App {
             KeyCode::Char('n') => {
                 if let Some(p) = self.picker.as_mut() {
                     p.creating = Some(String::new());
+                    p.going_to = None;
                     p.error = None;
                 }
             }
+            KeyCode::Char('g') => self.picker_start_go_to(),
+            KeyCode::Home | KeyCode::Char('~') => self.picker_home(),
             KeyCode::Char('w') => self.picker_make_worktree(),
             KeyCode::Esc | KeyCode::Char('q') => self.close_folder_picker(),
             _ => {}
@@ -214,6 +255,79 @@ impl App {
                 p.path = parent.to_path_buf();
                 p.cursor = 0;
             }
+        }
+        self.picker_refresh();
+    }
+
+    /// Browse the home directory without opening a workspace.
+    fn picker_home(&mut self) {
+        let Some(home) = crate::platform::home_dir().filter(|path| path.is_dir()) else {
+            let error = self.catalog.home_unavailable.to_string();
+            if let Some(p) = self.picker.as_mut() {
+                p.error = Some(error);
+            }
+            return;
+        };
+        if let Some(p) = self.picker.as_mut() {
+            p.path = home;
+            p.cursor = 0;
+            p.error = None;
+        }
+        self.picker_refresh();
+    }
+
+    /// Start the in-modal path navigator. It is intentionally separate from
+    /// opening a workspace so Enter cannot accidentally confirm a folder.
+    pub fn picker_start_go_to(&mut self) {
+        if let Some(p) = self.picker.as_mut() {
+            p.creating = None;
+            p.going_to = Some(String::new());
+            p.error = None;
+        }
+    }
+
+    /// Resolve an entered path and browse to it. Absolute paths, paths relative
+    /// to the currently browsed folder, and `~` / `~/...` are supported.
+    fn picker_go_to(&mut self, input: String) {
+        let entered = input.trim();
+        if entered.is_empty() {
+            let error = self.catalog.enter_folder_path.to_string();
+            if let Some(p) = self.picker.as_mut() {
+                p.error = Some(error);
+            }
+            return;
+        }
+
+        let current = self.picker.as_ref().map(|p| p.path.clone());
+        let target = if entered == "~" {
+            crate::platform::home_dir()
+        } else if let Some(rest) = entered
+            .strip_prefix("~/")
+            .or_else(|| entered.strip_prefix("~\\"))
+        {
+            crate::platform::home_dir().map(|home| home.join(rest))
+        } else {
+            let path = PathBuf::from(entered);
+            Some(if path.is_absolute() {
+                path
+            } else {
+                current.unwrap_or_default().join(path)
+            })
+        };
+
+        let Some(target) = target.filter(|path| path.is_dir()) else {
+            let error = format!("{}: {entered}", self.catalog.folder_not_found);
+            if let Some(p) = self.picker.as_mut() {
+                p.error = Some(error);
+            }
+            return;
+        };
+
+        if let Some(p) = self.picker.as_mut() {
+            p.path = target;
+            p.cursor = 0;
+            p.going_to = None;
+            p.error = None;
         }
         self.picker_refresh();
     }
@@ -250,6 +364,7 @@ impl App {
                 }
             }
             Row::OpenWorktree => self.picker_make_worktree(),
+            Row::Home => self.picker_home(),
             Row::Up => self.picker_up(),
             Row::Entry(_) => self.picker_descend(),
         }
@@ -300,22 +415,25 @@ mod tests {
             }],
             cursor: 0,
             creating: None,
+            going_to: None,
             error: None,
             is_repo: false,
         };
-        // Plain folder: [Open] [..] [a]
-        assert_eq!(p.row_count(), 3);
+        // Plain folder: [Open] [Home] [..] [a]
+        assert_eq!(p.row_count(), 4);
         assert!(matches!(p.row(0), Row::OpenFolder));
-        assert!(matches!(p.row(1), Row::Up));
-        assert!(matches!(p.row(2), Row::Entry(0)));
+        assert!(matches!(p.row(1), Row::Home));
+        assert!(matches!(p.row(2), Row::Up));
+        assert!(matches!(p.row(3), Row::Entry(0)));
 
         // Git repo: the worktree row appears at 1 and pushes the rest down.
         p.is_repo = true;
-        assert_eq!(p.row_count(), 4);
+        assert_eq!(p.row_count(), 5);
         assert!(matches!(p.row(0), Row::OpenFolder));
         assert!(matches!(p.row(1), Row::OpenWorktree));
-        assert!(matches!(p.row(2), Row::Up));
-        assert!(matches!(p.row(3), Row::Entry(0)));
+        assert!(matches!(p.row(2), Row::Home));
+        assert!(matches!(p.row(3), Row::Up));
+        assert!(matches!(p.row(4), Row::Entry(0)));
     }
 
     #[test]
@@ -327,6 +445,7 @@ mod tests {
             entries: Vec::new(),
             cursor: 1, // the "Open with new worktree" row
             creating: None,
+            going_to: None,
             error: None,
             is_repo: true,
         });
@@ -384,6 +503,146 @@ mod tests {
         );
         assert_eq!(app.workspaces.len(), workspaces_before + 2);
         assert_eq!(app.workspaces.last().unwrap().cwd, tmp.join("fresh"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn go_to_browses_a_path_without_opening_it() {
+        let _env = crate::persist::test_env("picker-go-to");
+        let tmp = std::env::temp_dir().join(format!("luvus-picker-go-{}", std::process::id()));
+        let target = tmp.join("nested");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&target).unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let workspaces_before = app.workspaces.len();
+        app.open_folder_picker_at(tmp.clone());
+
+        app.handle_picker_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(app.picker.as_ref().unwrap().going_to.as_deref(), Some(""));
+        for c in target.display().to_string().chars() {
+            app.handle_picker_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let picker = app.picker.as_ref().expect("navigation keeps picker open");
+        assert_eq!(picker.path, target);
+        assert!(
+            picker.going_to.is_none(),
+            "successful navigation exits input"
+        );
+        assert_eq!(
+            app.workspaces.len(),
+            workspaces_before,
+            "Go to must not open a workspace"
+        );
+
+        // Explicit confirmation is still required.
+        app.handle_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.picker.is_none());
+        assert_eq!(app.workspaces.len(), workspaces_before + 1);
+        assert_eq!(app.workspaces.last().unwrap().cwd, target);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn go_to_keeps_invalid_paths_editable() {
+        let _env = crate::persist::test_env("picker-go-to-invalid");
+        let tmp =
+            std::env::temp_dir().join(format!("luvus-picker-go-invalid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_folder_picker_at(tmp.clone());
+        app.picker_start_go_to();
+        for c in "missing".chars() {
+            app.handle_picker_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let picker = app.picker.as_ref().unwrap();
+        assert_eq!(picker.path, tmp, "failed navigation keeps current folder");
+        assert_eq!(picker.going_to.as_deref(), Some("missing"));
+        assert!(picker.error.is_some());
+
+        app.handle_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(app.picker.as_ref().unwrap().error.is_none());
+        app.handle_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let picker = app.picker.as_ref().expect("Escape only closes Go to input");
+        assert!(picker.going_to.is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn home_row_and_go_to_footer_are_interactive() {
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let _env = crate::persist::test_env("picker-home-and-footer");
+        let tmp = std::env::temp_dir().join(format!("luvus-picker-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let workspaces_before = app.workspaces.len();
+        app.open_folder_picker_at(tmp.clone());
+
+        let home_row = (0..app.picker.as_ref().unwrap().row_count())
+            .find(|&i| matches!(app.picker.as_ref().unwrap().row(i), Row::Home))
+            .unwrap();
+        app.picker.as_mut().unwrap().cursor = home_row;
+        app.picker_activate();
+        assert_eq!(
+            app.picker.as_ref().unwrap().path,
+            crate::platform::home_dir().unwrap()
+        );
+        assert_eq!(app.workspaces.len(), workspaces_before);
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("Home"));
+        assert!(screen.contains("go to"));
+
+        let modal = app
+            .picker_rects
+            .iter()
+            .find_map(|(hit, rect)| (*hit == PickerHit::Modal).then_some(*rect))
+            .expect("modal hit target");
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: modal.x,
+            row: modal.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.picker.is_some(), "clicking modal chrome keeps it open");
+
+        let go_to = app
+            .picker_rects
+            .iter()
+            .find_map(|(hit, rect)| (*hit == PickerHit::GoTo).then_some(*rect))
+            .expect("Go to footer hit target");
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: go_to.x,
+            row: go_to.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.picker.as_ref().unwrap().going_to.is_some());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

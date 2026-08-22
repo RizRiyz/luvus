@@ -1,0 +1,93 @@
+---
+title: Global Fuzzy Finder
+description: Find and open sessions, workspaces, tabs, panes, agents, files, and retained output from one overlay.
+---
+
+Press **`Ctrl+Space /`** to open the global fuzzy finder. It searches the
+selected Luvus home without adding another service or fuzzy-matching dependency.
+
+## What it searches
+
+| Scope | Sources |
+|---|---|
+| **All** | every source below |
+| **Navigate** | named sessions, workspaces, tabs, panes, and agents |
+| **Files** | eligible file names and workspace-relative paths |
+| **Output** | retained terminal rows from real PTY panes |
+
+Type approximate fragments in order. `bapi` can rank **Backend API**, and
+multiple words are AND terms that may match different fields. Exact and prefix
+matches rank above contiguous and sparse subsequence matches.
+
+Output is intentionally stricter than navigation and paths: an ordered fuzzy
+subsequence must fill at least half of its matched span, preventing distant
+characters in long terminal rows from flooding the results.
+
+The finder does not search arbitrary file contents or agent transcripts outside
+retained pane history.
+
+## Use the finder
+
+| Input | Action |
+|---|---|
+| type | update the fuzzy query |
+| `Up` / `Down`, `Ctrl+p` / `Ctrl+n` | move selection |
+| `PageUp` / `PageDown`, mouse wheel | move through results |
+| `Tab` / `Shift+Tab` | next or previous scope |
+| `Ctrl+i` | toggle case-sensitive Output matching |
+| `Enter`, click | activate the selected result |
+| `Esc` | clear the query, then close |
+
+Navigation rows render immediately. File paths, retained output, and results
+from other running named sessions may arrive afterward. Luvus keeps the selected
+result by identity while those sources merge into the ranked list.
+
+With an empty query, **Files** shows up to 12 recently opened files from
+workspaces that remain open. This list is memory-only and is not persisted.
+
+Activation uses the existing action for each result. A workspace or tab gains
+focus, a pane or agent focuses its exact pane, and a file opens in a whole tab
+inside its workspace using the normal **Open files with** setting. An output
+row focuses and scrolls its pane. Selecting another named session hands only
+the current display client to it. A stopped session is not started merely by
+opening or typing in the finder.
+
+With `luvus --remote`, all sources and sibling sessions come from that remote
+Luvus home. Local and remote catalogs are never mixed.
+
+## CLI
+
+The existing exact retained-output command is unchanged:
+
+```sh
+luvus search "build failed" --case
+```
+
+Fuzzy search is explicit:
+
+```sh
+luvus search --fuzzy "api auth"
+luvus search --fuzzy "auth rs" --scope files --limit 25
+luvus search --fuzzy "connection refused" --scope output --case
+luvus search --fuzzy "codex tests" --scope navigate --all-sessions
+```
+
+Scopes are `all`, `navigate`, `files`, and `output`. Limits must be from 1 to
+200. `--all-sessions` queries other running named sessions and reports partial
+results when a session is unavailable or incompatible. It never starts a
+stopped session.
+
+## Bounds and behavior
+
+- at most 200 visible results;
+- at most 30 retained-output matches per pane;
+- at most 8 MiB of retained source text per queried session;
+- at most 8 MiB of normalized retained-output index data and 100,000 rows per session;
+- at most 100,000 paths and 16 MiB of path bytes per workspace;
+- at most eight other running named sessions per query;
+- at most 1 MiB returned by each sibling session;
+- short-lived path catalogs use a 32 MiB global cache cap.
+
+Opening the finder performs no work while it is closed. Path discovery and
+retained-output scoring run outside the app loop. Large or unreadable sources
+show as partial instead of silently appearing complete.

@@ -251,9 +251,6 @@ if [ -f "$TAP/Formula/luvus.rb" ]; then
   bump_formula "$TAP/Formula/luvus.rb"
   git -C "$TAP" add Formula/luvus.rb
   git -C "$TAP" commit -m "luvus $TAG"
-  # The notch workflow pushes its cask to this same repo during the release, so
-  # land on top of whatever it did instead of being rejected.
-  git -C "$TAP" pull --rebase --quiet
   git -C "$TAP" push
   echo "  ✓ tap pushed — brew install $REPO/luvus now serves $TAG"
 else

@@ -2,7 +2,10 @@
 //! at the click point.
 
 use super::*;
-use crate::app::{AgentMenuItem, FileMenuItem, ModuleMenuAction, PaneMenuItem, WsMenuItem};
+use crate::app::{
+    AgentMenuItem, DiffMenuItem, FileMenuItem, ModuleMenuAction, PaneMenuItem, TabMenuItem,
+    WsMenuItem,
+};
 use crate::i18n::Catalog;
 use ratatui::widgets::{Borders, Clear};
 
@@ -106,6 +109,86 @@ pub(super) fn draw_ws_menu(
     let rects = render_popup(f, area, anchor, &rows, app.hover, t);
     if let Some(menu) = app.ws_menu.as_mut() {
         menu.items = items.into_iter().zip(rects).collect();
+    }
+}
+
+pub(super) fn draw_tab_menu(
+    f: &mut RenderTarget,
+    area: Rect,
+    app: &mut App,
+    cat: &Catalog,
+    t: &Theme,
+) {
+    let Some(menu) = app.tab_menu.as_ref() else {
+        return;
+    };
+    let anchor = menu.anchor;
+    let extras = menu.module_actions.clone();
+    let swap_targets = menu.swap_targets.clone();
+    let previous_swap_rects = menu.swap_rects.clone();
+
+    let items = app.tab_menu_items();
+    let rows: Vec<MenuRow> = items
+        .iter()
+        .map(|item| MenuRow {
+            text: tab_label(*item, cat, &extras),
+            divider: matches!(item, TabMenuItem::Divider),
+            destructive: false,
+        })
+        .collect();
+    let rects = render_popup(f, area, anchor, &rows, app.hover, t);
+    let swap_rect = items
+        .iter()
+        .zip(&rects)
+        .find(|(item, _)| **item == TabMenuItem::SwapWith)
+        .map(|(_, rect)| *rect);
+    if let Some(menu) = app.tab_menu.as_mut() {
+        menu.items = items.iter().copied().zip(rects.iter().copied()).collect();
+    }
+
+    // Keep the submenu open across the one-column gap between both popups.
+    if let (Some(parent), Some(hover)) = (swap_rect, app.hover) {
+        let in_rect = |rect: &Rect| {
+            hover.0 >= rect.x
+                && hover.0 < rect.right()
+                && hover.1 >= rect.y
+                && hover.1 < rect.bottom()
+        };
+        let over_parent = in_rect(&parent);
+        let over_submenu = previous_swap_rects.iter().any(|(_, rect)| in_rect(rect));
+        let over_other = items.iter().zip(&rects).any(|(item, rect)| {
+            !matches!(item, TabMenuItem::SwapWith | TabMenuItem::Divider) && in_rect(rect)
+        });
+        if let Some(menu) = app.tab_menu.as_mut() {
+            if over_parent || over_submenu {
+                menu.swap_open = true;
+            } else if over_other {
+                menu.swap_open = false;
+            }
+        }
+    }
+
+    let open = app.tab_menu.as_ref().is_some_and(|menu| menu.swap_open);
+    if let (Some(parent), false) = (open.then_some(()).and(swap_rect), swap_targets.is_empty()) {
+        let sub_rows: Vec<MenuRow> = swap_targets
+            .iter()
+            .map(|(_, label)| MenuRow {
+                text: label.clone(),
+                divider: false,
+                destructive: false,
+            })
+            .collect();
+        let sub_anchor = (parent.right() + 1, parent.y.saturating_sub(1));
+        let sub_rects = render_popup(f, area, sub_anchor, &sub_rows, app.hover, t);
+        if let Some(menu) = app.tab_menu.as_mut() {
+            menu.swap_rects = swap_targets
+                .iter()
+                .map(|(target, _)| target.clone())
+                .zip(sub_rects)
+                .collect();
+        }
+    } else if let Some(menu) = app.tab_menu.as_mut() {
+        menu.swap_rects.clear();
     }
 }
 
@@ -268,6 +351,17 @@ fn pane_label(it: PaneMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> S
     }
 }
 
+fn tab_label(it: TabMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> String {
+    match it {
+        TabMenuItem::Rename => cat.menu_rename.to_string(),
+        TabMenuItem::MoveLeft => format!("{} {}", cap_first(cat.act_move), cat.side_left),
+        TabMenuItem::MoveRight => format!("{} {}", cap_first(cat.act_move), cat.side_right),
+        TabMenuItem::SwapWith => format!("{} ▸", cat.tab_swap_with),
+        TabMenuItem::Divider => String::new(),
+        TabMenuItem::Module(i) => module_label(extras, i),
+    }
+}
+
 /// A module action's row label. Module titles come from the module author, so
 /// they are never translated — and a stale index renders blank rather than
 /// panicking (the registry can change while a menu is open).
@@ -302,6 +396,36 @@ pub(super) fn draw_file_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
         .collect();
     let rects = render_popup(f, area, anchor, &rows, app.hover, t);
     if let Some(menu) = app.file_menu.as_mut() {
+        menu.items = items.into_iter().zip(rects).collect();
+    }
+}
+
+pub(super) fn draw_diff_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) {
+    let Some(menu) = app.diff_menu.as_ref() else {
+        return;
+    };
+    let items = [
+        DiffMenuItem::OpenPreview,
+        DiffMenuItem::OpenPane,
+        DiffMenuItem::OpenTab,
+        DiffMenuItem::CopyPath,
+    ];
+    let rows: Vec<MenuRow> = items
+        .iter()
+        .map(|item| MenuRow {
+            text: match item {
+                DiffMenuItem::OpenPreview => "Open Preview",
+                DiffMenuItem::OpenPane => "Open in Pane",
+                DiffMenuItem::OpenTab => "Open in Tab",
+                DiffMenuItem::CopyPath => "Copy Path",
+            }
+            .to_string(),
+            divider: false,
+            destructive: false,
+        })
+        .collect();
+    let rects = render_popup(f, area, menu.anchor, &rows, app.hover, t);
+    if let Some(menu) = app.diff_menu.as_mut() {
         menu.items = items.into_iter().zip(rects).collect();
     }
 }
@@ -351,7 +475,7 @@ pub(super) fn draw_dock_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
 #[cfg(test)]
 mod label_case_tests {
     use super::*;
-    use crate::app::{AgentMenuItem, FileMenuItem, PaneMenuItem, WsMenuItem};
+    use crate::app::{AgentMenuItem, FileMenuItem, PaneMenuItem, TabMenuItem, WsMenuItem};
 
     /// Words that stay lower-case inside a title, unless they lead it.
     const MINOR: [&str; 11] = [
@@ -419,6 +543,14 @@ mod label_case_tests {
         }
         for it in PaneMenuItem::ALL.iter().copied() {
             rows.push(pane_label(it, cat, none));
+        }
+        for it in [
+            TabMenuItem::Rename,
+            TabMenuItem::MoveLeft,
+            TabMenuItem::MoveRight,
+            TabMenuItem::SwapWith,
+        ] {
+            rows.push(tab_label(it, cat, none));
         }
         // The "Move to Tab" submenu is part of the pane menu: its tab rows are
         // user content, but the trailing "New Tab" is ours (`move_targets` in

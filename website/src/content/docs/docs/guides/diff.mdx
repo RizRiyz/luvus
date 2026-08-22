@@ -1,0 +1,250 @@
+---
+title: DIFF Review
+description: Review exact Git layers, leave local notes, and send focused feedback to a live agent.
+---
+
+The **DIFF** surface is a native, read-only code review flow inside Luvus. It
+does not run a pager in a pane and never stages, discards, commits, or pushes.
+
+## Open DIFF
+
+Open the FILES dock with **`Ctrl+Space e`**, then click **DIFF** beside FILES.
+The list follows the active workspace and keeps staged, worktree, untracked,
+and conflicted versions separate. A file changed in both the index and working
+tree appears twice, with the layer shown on each row.
+
+Click a row to reuse the native preview. **Shift+click** opens it in a permanent
+pane. Right-click for explicit Preview, Pane, Tab, and Copy Path actions. The
+list begins immediately below the FILES/DIFF selector without repeating the
+workspace or branch. Press `f` in an open DIFF view to cycle **All**,
+**Unviewed**, **Changed**, and **Notes** filters.
+
+```text
+FILES  DIFF
+STAGED  2
+ M src/app.rs                    +18 -4  1 note
+ A src/diff/model.rs             +96 -0
+
+WORKTREE  1
+ M src/app.rs                     +3 -1
+```
+
+## Read the diff
+
+Luvus parses one selected file at a time and renders the same normalized data
+as **Auto**, **Split**, or **Stack**. Auto uses Split when both sides remain
+readable and falls back to Stack on a narrow local or remote viewport. Resizing
+one attachment does not change another attachment's effective layout.
+
+| Key | Action |
+|---|---|
+| `j` / `k`, arrows | next or previous source row |
+| `d` / `u` | half page down or up |
+| `g` / `G` | first or last row |
+| `h` / `l` | scroll long lines horizontally |
+| Left / Right | select the old or new side in Split |
+| `s` | cycle Auto, Split, Stack |
+| `w` | toggle wrapping preference |
+| `/` | search the loaded file diff |
+| `{` / `}` | previous or next hunk |
+| `K` / `J` | previous or next file |
+| `P` / `N` | previous or next note |
+| `-` / `+` | decrease or increase Git context |
+| `r` | refresh this file |
+| `m` | mark the current version viewed |
+| `f` | cycle All, Unviewed, Changed, and Notes filters |
+| `q` / `Esc` | close the native view |
+
+Binary files and conflicts show an explicit summary instead of misleading
+text. Large patches and lines are bounded and visibly marked **TRUNCATED**.
+Diff content cannot emit terminal control sequences.
+
+A row such as `@@ -662,9 +681,39 @@ pub fn snapshot(...)` is a Git hunk
+header. `-662,9` means the old section starts at line 662 and spans 9 lines.
+`+681,39` means the replacement starts at line 681 and spans 39 lines. The text
+after the second `@@` is nearby source context that helps identify the section.
+
+## Add local review notes
+
+Press **`n`** first to enter note-selection mode. Click an old or new source
+row and release to annotate that line, or drag across several rows to select a
+continuous range. With the keyboard, use `j` or `k` to extend the highlighted
+range and press Enter to start writing. Esc cancels selection.
+
+The personal-note editor is inserted directly beneath the selected source.
+Type the note and press Enter to save it locally. Shift+Enter inserts a
+newline. The editor and saved note cards consume real diff rows, so later code
+is moved below the note and is never hidden behind it. Saved cards show the
+file and exact `L` old-side or `R` new-side line range. Click a saved note card
+to edit that exact note inline, or select its source line and press `e`.
+
+Notes are plain text stored under
+`~/.luvus/diff/notes/<repo-id>/<review-id>/` (debug builds use
+`~/.luvus-dev/diff/notes`). Existing notes under the legacy `reviews` directory
+move automatically when first accessed. They never enter the repository. Luvus
+anchors them to a Git side, source range, and bounded context hash. When code
+moves, an unambiguous context match re-anchors the note. Otherwise it becomes
+outdated rather than silently attaching to unrelated code.
+
+| Key | Note action |
+|---|---|
+| Space | select or unselect the note on this line |
+| `e` | edit the note on this line (or click its card) |
+| `x` | resolve or reopen the note |
+| `D` | remove the note from local review storage |
+
+## Send feedback to an agent
+
+Press **`a`** to open the live-agent picker. It lists only panes Luvus currently
+recognizes as agents. When the selected line has a note, the picker starts with
+that current note. Otherwise it starts with the open notes in the current file.
+Use Tab to cycle the delivery scope: current note,
+selected notes, open notes in this file, or all open notes in the review.
+
+One bounded message is sent through the same validated PTY delivery path as
+`luvus agent send`. It contains paths, source lines, the note, and a short
+context excerpt, not the full patch. Delivery metadata is added only after the
+target PTY accepts the message. Sending never resolves a note.
+
+## Use DIFF from the CLI
+
+Run `luvus diff --help` for the installed command reference. Every
+server-facing command prints the regular Luvus JSON envelope. Command data is
+under `result`, while failures are under `error`:
+
+```json
+{"id":"1","result":{"type":"diff_list","files":[]}}
+{"id":"1","error":{"code":"diff_error","message":"..."}}
+```
+
+The examples below use `jq` only to make that JSON easier to read. It is not a
+Luvus dependency.
+
+### List exact change layers
+
+```sh
+luvus diff refresh
+luvus diff list
+luvus diff list --layer staged
+luvus diff list --layer worktree | jq '.result.files[] | {path, status, additions, deletions, notes}'
+```
+
+`diff list` returns staged, worktree, untracked, and conflict entries as
+separate changes. Its first call waits for one off-loop status scan; later calls
+return the latest shared FILES/DIFF snapshot immediately and refresh it in the
+background when due. Run `diff refresh` first when a script must wait for a new
+scan. A path can therefore appear more than once. Pass `--layer`
+to `open`, `get`, and `note add` whenever the path is present in multiple
+layers. Paths resolve from the active workspace and must remain inside its Git
+repository. Counts can be `null` in the lightweight list until that file's
+semantic diff is loaded.
+
+### Open or inspect a file
+
+```sh
+# Open the currently selected change, or the first change when none is selected.
+luvus diff open
+
+luvus diff open src/app.rs --layer worktree --view auto --placement preview
+luvus diff open src/app.rs --layer worktree --view split --placement pane
+luvus diff open src/app.rs --layer staged --view stack --placement tab
+
+# Metadata and hunk boundaries, without source text.
+luvus diff get src/app.rs --layer worktree
+
+# Include bounded semantic source rows for automation.
+luvus diff get src/app.rs --layer worktree --include-patch \
+  | jq '.result | {file, additions, deletions, binary, truncated, hunks}'
+```
+
+`--view` accepts `auto`, `split`, or `stack`. `--placement` accepts `preview`,
+`pane`, or `tab`. `diff get` omits each hunk's `lines` by default so a status
+check cannot accidentally pull a large patch. `--include-patch` includes the
+normalized old/new source line numbers, line kind, and sanitized text, subject
+to the limits below.
+
+### Add and manage local notes
+
+Exactly one of `--old-line` or `--new-line` is required. The optional
+`--end-line` extends a range on that same side. Every requested source line
+must exist in the bounded semantic diff, so rendered row numbers and hunk
+header numbers are not valid note anchors.
+
+```sh
+# One new-side line. The default kind is issue.
+luvus diff note add \
+  --file src/app.rs --layer worktree --new-line 120 \
+  --body "Handle the empty case"
+
+# A new-side range with an explicit kind.
+luvus diff note add \
+  --file src/app.rs --layer worktree --new-line 120 --end-line 123 \
+  --kind suggestion --body "Extract this validation"
+
+# An old-side line that was deleted or replaced.
+luvus diff note add \
+  --file src/app.rs --layer worktree --old-line 98 \
+  --kind question --body "Do we still need this branch?"
+
+luvus diff note list
+luvus diff note list --file src/app.rs --state open
+```
+
+The created note ID is at `.result.note.id`; list results are under
+`.result.notes`. States are `open`, `resolved`, `outdated`, or `orphaned`, and
+kinds are `question`, `issue`, `suggestion`, or `praise`.
+
+```sh
+NOTE_ID=$(luvus diff note add \
+  --file src/app.rs --layer worktree --new-line 120 \
+  --body "Handle the empty case" | jq -r '.result.note.id')
+
+luvus diff note edit "$NOTE_ID" --body "Handle empty and whitespace-only input"
+luvus diff note resolve "$NOTE_ID"
+luvus diff note reopen "$NOTE_ID"
+
+# Send one note before removing it from local storage.
+luvus diff note send --to reviewer "$NOTE_ID"
+
+# Removal is local only and requires explicit confirmation.
+luvus diff note remove "$NOTE_ID" --yes
+```
+
+`--to` accepts a live agent alias, numeric pane ID, or unique agent kind. To
+send every open note in the current review as one bounded message, use:
+
+```sh
+luvus diff note send --to reviewer --all-open
+```
+
+Sending does not resolve or remove notes. A shell pane, exited agent, ambiguous
+agent name, or failed PTY input is rejected without recording a delivery.
+
+### Common errors
+
+- **Path has more than one change layer:** repeat the command with `--layer`.
+- **Path is not present:** refresh, then use the exact path from `diff list`.
+- **Note range does not exist:** use old/new source numbers from the
+  `--include-patch` output of `luvus diff get PATH`, not the hunk header or
+  rendered row.
+- **Invalid state or kind:** use one of the documented values above.
+- **No changed files:** switch to the intended workspace or create a Git
+  change before opening DIFF.
+- **Agent target rejected:** run `luvus agent list` and use its live alias or
+  pane ID.
+
+The socket API also provides `diff.navigate` and atomic `diff.note.apply` for
+automation. They intentionally have no extra CLI subcommand; see the
+[Socket API reference](/docs/reference/api/#diff-review).
+
+## Settings and limits
+
+**Settings → Layout → DIFF** controls default layout, wrapping, context lines,
+line numbers, change markers, change colors, and live refresh. Change markers
+can use `symbols` (`+` and `-`), edge `bars`, or `both`. **Diff change colors**
+uses the active theme by default. Choose **red + green** for fixed, familiar
+review colors across every theme.
+
+One raw file patch is capped at 4 MiB, parsed rows at 20,000, one logical line
+at 16 KiB, the parsed-diff cache at 16 MiB, notes at 1,000 per review, each note
+at 8 KiB, and one agent handoff at 64 KiB.

@@ -1,0 +1,184 @@
+---
+title: Community Themes
+description: Create, compose, validate, install, publish, and select data-only Luvus themes.
+---
+
+Luvus themes are small TOML files containing metadata and 18 semantic colors.
+They cannot execute code or change panes, commands, keybindings, fonts, or
+layout. Create and preview one in the browser at the [Theme Maker](/themes/),
+or start locally:
+
+```sh
+luvus theme init my-theme
+luvus theme validate ./my-theme.toml
+luvus theme install ./my-theme.toml
+luvus theme use my-theme
+```
+
+Installed themes appear after the bundled palettes in **Settings → Theme** and
+before the virtual **Terminal** theme. Moving through the list previews each
+palette immediately. Each installed row also has a remove action on its right;
+bundled and virtual themes do not.
+
+## Install a reviewed community theme
+
+Themes accepted into `community/themes/` in the Luvus repository have a stable
+coordinate:
+
+```sh
+luvus theme install community/aurora-circuit
+luvus theme use aurora-circuit
+```
+
+`community/<id>` resolves only to the corresponding TOML file on the Luvus
+repository's `main` branch. Luvus downloads it over bounded HTTPS, shows its
+identity and source, validates it, and asks before writing. For scripts or a
+non-interactive terminal, confirm deliberately:
+
+```sh
+luvus theme install community/aurora-circuit --yes
+```
+
+You can also install a local file, an explicit HTTPS file URL, or a public
+GitHub repository containing exactly one root-level `*.toml` theme file. A
+README and subdirectories are ignored:
+
+```sh
+luvus theme install ./team-theme.toml
+luvus theme install https://example.com/luvus/team-theme.toml --yes
+luvus theme install https://github.com/example/luvus-theme --yes
+```
+
+Normal GitHub file pages are accepted too:
+
+```sh
+luvus theme install https://github.com/example/themes/blob/main/team-theme.toml --yes
+```
+
+Luvus reads the bounded GitHub root listing and downloads only the selected
+TOML file; it does not clone the repository or execute its contents. A repository
+with no root theme or multiple root TOML files is rejected. Remote sources must
+use HTTPS and theme files are capped at 64 KiB. Installation validates
+before an atomic replacement, records the source and SHA-256 digest beside the
+theme, and preserves the previous installed file if replacement fails.
+
+## Manage installed themes
+
+```sh
+luvus theme list
+luvus theme list --json
+luvus theme path
+luvus theme validate ./theme.toml --strict
+luvus theme reload
+luvus theme uninstall my-theme
+```
+
+`theme path` prints and creates the shared home-level directory, normally
+`~/.luvus/themes/` (`~/.luvus-dev/themes/` for debug builds). Manually copied
+`*.toml` files are loaded too. Invalid files are omitted from Settings and
+reported by `theme list` and `theme reload` without preventing valid themes from
+loading.
+
+The Settings remove action switches an active installed theme to the bundled
+default before removing it. The CLI remains explicit: select another theme
+before `theme uninstall`. A parent cannot be removed while an installed child
+extends it.
+
+## Schema 1
+
+A portable complete theme contains all 18 roles:
+
+```toml
+schema = 1
+id = "warm-copper"
+display_name = "Warm Copper"
+description = "A dark brown palette with a restrained copper accent."
+author = "your-github-name"
+version = "1.0.0"
+requires_luvus = ">=0.12.0"
+appearance = "dark"
+
+[colors]
+crust = "#100b08"
+mantle = "#1c1210"
+base = "#281a15"
+surface0 = "#33221b"
+surface1 = "#4a3024"
+overlay0 = "#765241"
+overlay1 = "#9c725c"
+subtext0 = "#c19a82"
+subtext1 = "#ddc0a9"
+text = "#f5e5d4"
+accent = "#e08b57"
+sel_bg = "#50301f"
+border = "#694737"
+border_focus = "#b8784f"
+green = "#a8c66c"
+mint = "#79d1b0"
+amber = "#e5ad54"
+coral = "#e4776b"
+```
+
+Schema 1 accepts only:
+
+- `#rrggbb` truecolor values;
+- `ansi(0)` through `ansi(255)` indexed colors;
+- `reset` for terminal-native foreground/background behavior.
+
+Unknown fields, malformed IDs, unsupported schemas, incompatible Luvus version
+requirements, missing resolved colors, and built-in ID collisions are rejected.
+Aesthetic checks such as low contrast or missing optional metadata are warnings;
+`--strict` promotes warnings to validation failure for community CI.
+
+## Compose a child theme
+
+A theme may extend exactly one bundled or installed parent and override only the
+roles that differ:
+
+```sh
+luvus theme init my-noir-green --extends noir
+```
+
+```toml
+schema = 1
+id = "my-noir-green"
+display_name = "My Noir Green"
+author = "your-github-name"
+version = "1.0.0"
+requires_luvus = ">=0.12.0"
+appearance = "dark"
+extends = "noir"
+
+[colors]
+accent = "#9be564"
+sel_bg = "#263d28"
+```
+
+Resolution copies the complete parent and applies the child's explicit values.
+Inheritance is deterministic, limited to eight levels, and rejects missing
+parents and cycles. Complete themes are preferred for public sharing because
+they remain portable without a separately installed parent.
+
+## Publish from the Theme Maker
+
+The Theme Maker's **Publish theme** button opens a prefilled
+`community/themes/<id>.toml` contribution on GitHub. GitHub handles sign-in,
+the contributor's fork and branch, and the pull-request form. The contributor
+still reviews and submits the commit and PR; the website never requests a
+GitHub token.
+
+Community CI parses every TOML file, resolves inheritance, rejects reserved or
+duplicate IDs, and applies strict warnings. Keep a theme pull request focused on
+one palette or one intentional parent/child family.
+
+## Servers, sessions, and Terminal
+
+Theme files and `config.theme` are shared at the Luvus-home level. `theme use`
+updates the selected server immediately and persists the choice. Other already
+running named servers retain their in-memory registry until `theme reload` or a
+restart; target one explicitly with `luvus --session <name> theme reload`.
+
+Normal custom themes are rendered by the server, so every attached client sees
+the same palette. **Terminal** remains special and client-derived. A custom
+palette containing `reset` may also depend on the foreground terminal and is
+reported with a warning unless its appearance is `terminal`.

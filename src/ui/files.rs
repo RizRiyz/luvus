@@ -14,9 +14,19 @@ use crate::files::{FileLoad, FileView, SIZE_CAP};
 use crate::ui::theme::Theme;
 use crate::ui::RenderTarget;
 
+fn diff_note_count(count: usize) -> String {
+    match count {
+        0 => String::new(),
+        1 => "  1 note".to_string(),
+        count => format!("  {count} notes"),
+    }
+}
+
 pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) {
     app.files_area = area;
     app.file_tree_rects.clear();
+    app.files_mode_rects.clear();
+    app.diff_row_rects.clear();
 
     let cx = area.x + 2;
     let cw = area.width.saturating_sub(3);
@@ -29,24 +39,51 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
         }
     };
 
-    // Header: "FILES · <node>". The root follows the active node (re-rooted off
-    // the loop in `ensure_file_tree`); show its basename, or a dash before the
-    // first read lands.
-    let name = app
-        .file_tree
-        .root()
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "—".into());
-    let title = format!("{} · {name}", app.catalog.files);
-    line_at(
-        f,
-        area.y,
-        Line::from(Span::styled(title, Style::new().fg(t.overlay1).bold())),
+    // FILES and DIFF are modes of one dock. Keep their hit rectangles owned by
+    // this renderer so secondary viewport projection cannot leak geometry.
+    let files_w = 7u16.min(cw);
+    let diff_w = 6u16.min(cw.saturating_sub(files_w));
+    let files_rect = Rect::new(cx, area.y, files_w, 1);
+    let diff_rect = Rect::new(cx.saturating_add(files_w), area.y, diff_w, 1);
+    app.files_mode_rects
+        .push((crate::diff::FilesMode::Files, files_rect));
+    app.files_mode_rects
+        .push((crate::diff::FilesMode::Diff, diff_rect));
+    let mode_style = |mode| {
+        if app.files_mode == mode {
+            Style::new().fg(t.accent).bold()
+        } else {
+            Style::new().fg(t.overlay1)
+        }
+    };
+    f.buffer_mut().set_line(
+        files_rect.x,
+        files_rect.y,
+        &Line::from(Span::styled(
+            "FILES  ",
+            mode_style(crate::diff::FilesMode::Files),
+        )),
+        files_rect.width,
+    );
+    f.buffer_mut().set_line(
+        diff_rect.x,
+        diff_rect.y,
+        &Line::from(Span::styled(
+            "DIFF",
+            mode_style(crate::diff::FilesMode::Diff),
+        )),
+        diff_rect.width,
     );
 
+    // Workspace and branch are already present in Luvus chrome. Start content
+    // immediately below the selector instead of spending a dock row repeating
+    // that identity and DIFF progress.
     let list_top = area.y + 1;
     let cap = area.height.saturating_sub(1) as usize;
+    if app.files_mode == crate::diff::FilesMode::Diff {
+        draw_diff_list(f, area, list_top, cap, app, t, &line_at);
+        return;
+    }
     // Clamp scroll first (mutates `file_tree`), *then* borrow the memoized rows —
     // `visible_rows` returns a slice borrowing `file_tree`, so it must come after
     // the scroll write.
@@ -129,6 +166,128 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
         }
         line_at(f, y, Line::from(spans));
         app.file_tree_rects.push((i, rect));
+    }
+}
+
+fn draw_diff_list(
+    f: &mut RenderTarget,
+    area: Rect,
+    list_top: u16,
+    cap: usize,
+    app: &mut App,
+    t: &Theme,
+    line_at: &impl Fn(&mut RenderTarget, u16, Line),
+) {
+    if !app.diff_snapshot_matches_active_workspace() {
+        line_at(
+            f,
+            list_top,
+            Line::from(Span::styled("loading…", Style::new().fg(t.overlay1))),
+        );
+        return;
+    }
+    if let Some(error) = app.diff.error.as_deref() {
+        line_at(
+            f,
+            list_top,
+            Line::from(Span::styled(
+                clip(error, area.width.saturating_sub(3)),
+                Style::new().fg(t.coral),
+            )),
+        );
+        return;
+    }
+    if app.diff.rows.is_empty() {
+        line_at(
+            f,
+            list_top,
+            Line::from(Span::styled(
+                "working tree clean",
+                Style::new().fg(t.overlay1),
+            )),
+        );
+        return;
+    }
+    let max_scroll = app.diff.rows.len().saturating_sub(cap);
+    app.diff.scroll = app.diff.scroll.min(max_scroll);
+    if app.diff.cursor < app.diff.scroll {
+        app.diff.scroll = app.diff.cursor;
+    } else if app.diff.cursor >= app.diff.scroll.saturating_add(cap) {
+        app.diff.scroll = app.diff.cursor.saturating_sub(cap.saturating_sub(1));
+    }
+    let snapshot = app.diff.snapshot.as_ref().expect("rows require snapshot");
+    let rows = &app.diff.rows;
+    for row_index in app.diff.scroll..rows.len().min(app.diff.scroll.saturating_add(cap)) {
+        let y = list_top + row_index.saturating_sub(app.diff.scroll) as u16;
+        match &rows[row_index] {
+            crate::diff::DiffListRow::Group(layer) => {
+                let count = rows
+                    .iter()
+                    .skip(row_index + 1)
+                    .take_while(|row| !matches!(row, crate::diff::DiffListRow::Group(_)))
+                    .count();
+                line_at(
+                    f,
+                    y,
+                    Line::from(Span::styled(
+                        format!("{}  {count}", layer.label().to_uppercase()),
+                        Style::new().fg(t.overlay1).bold(),
+                    )),
+                );
+            }
+            crate::diff::DiffListRow::File(file_index) => {
+                let Some(file) = snapshot.files.get(*file_index) else {
+                    continue;
+                };
+                let selected = row_index == app.diff.cursor;
+                let fg =
+                    match file.status {
+                        crate::diff::DiffFileStatus::Added
+                        | crate::diff::DiffFileStatus::Untracked => t.mint,
+                        crate::diff::DiffFileStatus::Deleted
+                        | crate::diff::DiffFileStatus::Conflict => t.coral,
+                        crate::diff::DiffFileStatus::Renamed
+                        | crate::diff::DiffFileStatus::Copied => t.accent,
+                        _ => t.amber,
+                    };
+                let path = if file.status == crate::diff::DiffFileStatus::Renamed {
+                    match (&file.key.old_path, &file.key.new_path) {
+                        (Some(old), Some(new)) => format!("{} → {}", old.display, new.display),
+                        _ => file.key.display_path().to_string(),
+                    }
+                } else {
+                    file.key.display_path().to_string()
+                };
+                let stats = match (file.additions, file.deletions) {
+                    (Some(add), Some(del)) => format!(" +{add} -{del}"),
+                    _ => String::new(),
+                };
+                let notes = diff_note_count(file.unresolved_notes);
+                let marker = if file.modified_since_review() {
+                    "↻"
+                } else if file.viewed() {
+                    "✓"
+                } else {
+                    " "
+                };
+                let style = if selected {
+                    Style::new().fg(t.base).bg(t.accent).bold()
+                } else {
+                    Style::new().fg(t.subtext0)
+                };
+                let badge_style = if selected { style } else { Style::new().fg(fg) };
+                line_at(
+                    f,
+                    y,
+                    Line::from(vec![
+                        Span::styled(format!("{marker} {} ", file.status.badge()), badge_style),
+                        Span::styled(format!("{path}{stats}{notes}"), style),
+                    ]),
+                );
+                app.diff_row_rects
+                    .push((row_index, Rect::new(area.x, y, area.width, 1)));
+            }
+        }
     }
 }
 
@@ -481,4 +640,16 @@ pub(super) fn draw_delete_confirm(
         cancel_rect,
     );
     (Some(del_rect), Some(cancel_rect))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::diff_note_count;
+
+    #[test]
+    fn diff_note_count_uses_singular_and_plural_labels() {
+        assert_eq!(diff_note_count(0), "");
+        assert_eq!(diff_note_count(1), "  1 note");
+        assert_eq!(diff_note_count(2), "  2 notes");
+    }
 }

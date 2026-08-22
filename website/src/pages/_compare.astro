@@ -15,7 +15,7 @@ import Logo from '../components/Logo.astro';
 const GITHUB = 'https://github.com/RizRiyz/luvus';
 const title = 'Compare luvus vs Herdr, tmux, and Zellij';
 const description =
-  'How luvus compares to Herdr, tmux, and Zellij for running AI coding agents: live agent status, token and cost tracking, reboot-proof session resume, session forking, a built-in git tab, multi-agent orchestration, and a macOS notch app.';
+  'How luvus compares to Herdr, tmux, and Zellij for running AI coding agents: live agent status, token and cost tracking, reboot-proof session resume, session forking, a built-in git tab, composable extensions, and multi-agent orchestration.';
 const ogImage = 'https://luvus.dev/og.png';
 
 // Comparison cells. Each cell is { s: 'yes' | 'part' | 'no', t?: note }.
@@ -67,7 +67,6 @@ const GROUPS = [
     name: 'Interface and reach',
     rows: [
       { f: 'Mouse-native split and resize', cells: [yes, yes, part('needs config'), yes] },
-      { f: 'Native macOS notch companion app', cells: [yes, no, no, no] },
       { f: 'Right-click menus on panes, tabs, folders, agents and files', cells: [yes, part('split and switch'), no, no] },
       { f: 'Compact phone mode with a touch switcher over SSH', cells: [yes, no, no, no] },
       { f: 'Sidebar panels you can move, resize or turn off', cells: [yes, no, no, part('plugins')] },
@@ -91,7 +90,6 @@ const OVER_TMUX = [
 ];
 
 const OVER_HERDR = [
-  { k: 'Notch app', h: 'A native Mac notch app', p: 'Herdr stays in the terminal. luvus mirrors every agent into your Mac’s notch, so you can approve a prompt or jump to an agent without switching windows.' },
   { k: 'Real teamwork', h: 'A team, not just many panes', p: 'File locks so two agents never edit the same file, isolated worktrees, and a merge gate that waits for your tests. Point five agents at one repo and stay safe.' },
   { k: 'Resume', h: 'Reboot-proof resume', p: 'Not just panes that survive a detach. Each agent reloads its own conversation after a full restart, so you can close the laptop and pick up mid-thought tomorrow.' },
   { k: 'Git built in', h: 'Git built in, not bolted on', p: 'A full git tab with pull requests and issues, plus worktrees as first-class panes, so you rarely leave the terminal.' },
@@ -116,7 +114,7 @@ const LANDSCAPE = [
     cat: 'AI terminals & runners',
     tools: 'cmux · Warp',
     what: 'A terminal with AI built in, or a lightweight runner for a handful of agent sessions.',
-    fit: 'A full multiplexer that coordinates many external agents at once, with live status, what each session costs, reboot-proof resume, a git tab, and a Mac notch app on top.',
+    fit: 'A full multiplexer that coordinates many external agents at once, with live status, what each session costs, reboot-proof resume, a git tab, and composable module surfaces.',
   },
 ];
 ---
@@ -176,6 +174,7 @@ const LANDSCAPE = [
         <div class="nav-links">
           <a href="/docs/">Docs</a>
           <a href="/modules/">Modules</a>
+          <a href="/themes/">Themes</a>
           <a href="/compare/" aria-current="page">Compare</a>
           <a href="/changelog/">Changelog</a>
   
@@ -407,7 +406,7 @@ const LANDSCAPE = [
 
       /* nav */
       nav {
-        position: sticky; top: 0; z-index: 10; background: rgb(from var(--bg) r g b / 0.85);
+        background: rgb(from var(--bg) r g b / 0.85);
         border-bottom: 1px solid var(--line);
       }
       .nav-inner {

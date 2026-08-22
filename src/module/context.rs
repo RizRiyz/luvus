@@ -20,6 +20,8 @@ static CORRELATION: AtomicU64 = AtomicU64::new(1);
 #[derive(Default, Clone)]
 pub struct Target {
     pub workspace: Option<usize>,
+    /// Explicit zero-based tab within `workspace`, for a tab context-menu action.
+    pub tab: Option<usize>,
     pub pane: Option<PaneId>,
     /// The current mouse selection, when a menu was opened over one.
     pub selection: Option<String>,
@@ -36,6 +38,14 @@ impl Target {
     pub fn pane(id: PaneId) -> Self {
         Target {
             pane: Some(id),
+            ..Default::default()
+        }
+    }
+
+    pub fn tab(workspace: usize, tab: usize) -> Self {
+        Target {
+            workspace: Some(workspace),
+            tab: Some(tab),
             ..Default::default()
         }
     }
@@ -58,9 +68,17 @@ pub fn build_for(app: &App, source: &str, target: &Target) -> Value {
     let name = ws.map(|w| w.name.clone()).unwrap_or_default();
     let ws_cwd = ws.map(|w| w.cwd.display().to_string()).unwrap_or_default();
     let branch = ws.and_then(|w| w.branch.clone()).unwrap_or_default();
-    let tab_index = ws.map(|w| w.active_tab + 1).unwrap_or(1);
+    let tab_id = ws
+        .map(|w| {
+            target
+                .tab
+                .filter(|index| *index < w.tabs.len())
+                .unwrap_or(w.active_tab)
+        })
+        .unwrap_or(0);
+    let tab_index = tab_id + 1;
     let tab_name = ws
-        .and_then(|w| w.tabs.get(w.active_tab))
+        .and_then(|w| w.tabs.get(tab_id))
         .and_then(|t| t.name.clone())
         .unwrap_or_default();
 
@@ -69,6 +87,12 @@ pub fn build_for(app: &App, source: &str, target: &Target) -> Value {
     let focus = target
         .pane
         .filter(|id| app.panes.contains_key(id))
+        .or_else(|| {
+            target.tab.and_then(|_| {
+                ws.and_then(|w| w.tabs.get(tab_id))
+                    .map(|tab| tab.layout.focus)
+            })
+        })
         .unwrap_or_else(|| app.layout().focus);
     let pane_cwd = app
         .panes
@@ -125,5 +149,32 @@ fn state_str(s: State) -> &'static str {
         State::Done => "done",
         State::Idle => "idle",
         State::Unknown => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_tab_target_builds_context_for_that_tab() {
+        let _env = crate::persist::test_env("module-tab-context");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].tabs[0].name = Some("first".into());
+        app.run_cmd(crate::app::Cmd::NewTab);
+        app.workspaces[0].tabs[1].name = Some("second".into());
+        let second_pane = app.workspaces[0].tabs[1].layout.focus;
+        app.workspaces[0].active_tab = 0;
+
+        let context = build_for(&app, "menu:tab", &Target::tab(0, 1));
+        assert_eq!(context["tab"]["index"], "2");
+        assert_eq!(context["tab"]["name"], "second");
+        assert_eq!(context["pane"]["id"], second_pane.0.to_string());
+        assert_eq!(context["invocation_source"], "menu:tab");
+        assert_eq!(
+            app.workspaces[0].active_tab, 0,
+            "building context is passive"
+        );
     }
 }

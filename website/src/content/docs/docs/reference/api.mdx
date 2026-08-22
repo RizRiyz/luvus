@@ -12,10 +12,10 @@ directory in `/tmp` to stay within the operating system's path limit.
 The resolved path is injected into every pane as `$LUVUS_SOCKET_PATH`. That
 socket is the authority boundary, so methods do not need a session parameter.
 Use `luvus --session <name> <command>` from outside a pane. Inside a pane, keep
-the inherited socket so commands cannot drift to another server. The CLI is a
-thin wrapper: **every server command maps to one method**, so the easiest way
-to learn the API is to use the CLI and read its JSON output. Session list,
-stop, and delete are local lifecycle helpers that resolve the chosen socket.
+the inherited socket so commands cannot drift to another server. Server-facing
+CLI commands map to these methods. Session lifecycle and theme acquisition are
+local helpers: theme files are validated and installed client-side, then only a
+bounded registry reload is sent to the selected server.
 
 ## Wire format
 
@@ -42,19 +42,86 @@ printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.luvus/luvus.so
 | Family | Methods |
 |---|---|
 | workspaces | `workspace.list` · `workspace.open` · `workspace.focus` · `workspace.rename` · `workspace.pin` · `workspace.close` |
-| tabs | `tab.list` · `tab.new` · `tab.focus` · `tab.move` · `tab.rename` · `tab.close` |
+| tabs | `tab.list` · `tab.new` · `tab.focus` · `tab.move` · `tab.swap` · `tab.rename` · `tab.close` |
 | panes | `pane.list` · `pane.split` · `pane.move` · `pane.focus` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.close` · `attach.pane` |
 | agents | `agent.list` · `agent.get` · `agent.name` · `agent.fork` · `agent.send` · `agent.keys` · `agent.read` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.report_event` |
+| search | `search` · `search.capabilities` · `search.query` · `search.activate` |
+| files | `files.tree` · `files.open` · `files.reveal` · `files.refresh` |
 | git | `git.status` · `git.branches` · `git.log` · `git.open` |
+| diff | `diff.refresh` · `diff.list` · `diff.open` · `diff.get` · `diff.navigate` · `diff.note.add` · `diff.note.apply` · `diff.note.list` · `diff.note.edit` · `diff.note.resolve` · `diff.note.reopen` · `diff.note.remove` · `diff.note.send` |
 | worktrees | `worktree.list` · `worktree.create` · `worktree.open` · `worktree.remove` |
 | orchestration | `task.add` · `task.list` · `task.get` · `task.claim` · `task.next` · `task.start` · `task.heartbeat` · `task.update` · `task.done` · `task.merge` · `task.release` · `lease.acquire` · `lease.list` · `lease.release` |
 | modules | `module.list` · `module.info` · `module.link` · `module.unlink` · `module.enable` · `module.disable` · `module.action.list` · `module.action.invoke` · `module.pane.open` · `module.pane.focus` · `module.pane.close` · `module.config_dir` · `module.settings.list` · `module.settings.get` · `module.settings.set` · `module.log.list` |
-| ui / server | `ui.sidebar` · `ui.dock.push` · `ui.dock.list` · `ui.dock.move` · `ui.toast` · `ping` · `server.stop` · `events.subscribe` |
+| themes | `theme.list` · `theme.path` · `theme.use` · `theme.reload` |
+| ui / server | `ui.sidebar` · `ui.dock.push` · `ui.dock.list` · `ui.dock.move` · `ui.bar.push` · `ui.bar.list` · `ui.bar.move` · `ui.bar.remove` · `ui.notification.push` · `ui.notification.clear` · `ui.toast` · `ping` · `server.stop` · `events.subscribe` |
 
 Parameter shapes mirror the CLI flags (`luvus task add --paths x` →
 `{"paths": ["x"]}`). For CLI commands, an omitted pane uses
 `$LUVUS_PANE_ID` when available; a raw API request with no pane uses the
 currently focused pane.
+
+## Search
+
+The legacy `search` method remains exact retained-output search. Its existing
+request and response fields do not change.
+
+`search.query` is the typed fuzzy API:
+
+```json
+→ {
+  "id": "find-1",
+  "method": "search.query",
+  "params": {
+    "query": "api auth",
+    "scope": "all",
+    "case_sensitive": false,
+    "all_sessions": true,
+    "limit": 50
+  }
+}
+← {
+  "id": "find-1",
+  "result": {
+    "type": "search_query",
+    "query": "api auth",
+    "scope": "all",
+    "total": 3,
+    "shown": 3,
+    "partial": false,
+    "matches": [
+      {
+        "id": "workspace:0",
+        "kind": "folder",
+        "label": "api-service",
+        "detail": "default › /work/api-service",
+        "score": 4120,
+        "target": { "workspace": 0 }
+      }
+    ]
+  }
+}
+```
+
+`scope` must be `all`, `navigate`, `files`, or `output`. `query` must contain
+1 to 256 bytes after trimming, and `limit` must be 1 to 200. Case sensitivity
+applies to retained output. `all_sessions` defaults to false and queries only
+other running sessions in the selected Luvus home when true. `partial:true`
+means at least one source was capped, unreadable, unavailable, timed out, or
+incompatible.
+
+Every match has a stable result `kind` and structured `target`. Result kinds are
+`session`, `folder`, `tab`, `pane`, `agent`, `file`, and `output`. Consumers
+must not derive an action by parsing `label` or `detail`.
+
+`search.capabilities` returns the search protocol version, supported methods,
+scopes, and response limits. Cross-session callers check it before querying a
+sibling server.
+
+`search.activate` accepts one `kind` and an exact `target` returned by that same
+session. The owner revalidates workspace, tab, pane, file containment, and
+output anchors before focusing or opening anything. It is primarily used by
+Luvus during named-session handoff. Invalid or stale targets return a structured
+`invalid_request` error instead of focusing a different object.
 
 ## Organizing workspaces
 
@@ -88,7 +155,11 @@ Public tab positions are 1-based.
 |---|---|---|
 | `pane.move` | `{pane?, tab}` | `{type:"pane_move", pane, workspace, tab}` |
 | `pane.move` | `{pane?, new_tab:true}` | `{type:"pane_move", pane, workspace, tab}` |
+| `tab.focus` | `{tab}` | `{type:"ok"}` |
 | `tab.move` | `{tab, to}` | `{type:"tab_move", from, to, active}` |
+| `tab.move` | `{direction, tab?}` where direction is `"left"` or `"right"` | `{type:"tab_move", from, to, active}` |
+| `tab.swap` | `{tab, with}` | `{type:"tab_swap", tab, with, active}` |
+| `tab.rename` | `{name, tab?}` | `{type:"ok"}` |
 
 `pane.move` resolves an explicit pane anywhere, then keeps the move inside that
 pane's workspace. The pane's process and PTY stay alive, focus follows it, and
@@ -98,10 +169,18 @@ Pass exactly one of `tab` or `new_tab:true`. The result's `workspace` is the
 same zero-based workspace index used by the other workspace API results; its
 `tab` is the pane's final 1-based position after any empty source tab is removed.
 
-`tab.move` reorders the active workspace's tab vector. `to` is the desired final
-position, and the currently active tab remains active even when its number
-changes. Zero, missing, same-position, and out-of-range values return
+`tab.focus` selects one exact tab in the active workspace. `tab.move` either
+moves a tab to the requested final `to` position or moves it one position using
+`direction`. Directional movement targets the active tab when `tab` is omitted.
+`tab.swap` exchanges the positions identified by `tab` and `with`. The currently
+active tab remains active even when its number changes. Zero, missing,
+out-of-range, same-position, edge, and mixed `direction` + `to` requests return
 `invalid_request` without changing state.
+
+`tab.rename` targets the active tab when `tab` is omitted. `name` must be a
+string of at most 40 characters after trimming; an explicit empty string clears
+the custom label. Invalid, zero, or out-of-range tab positions and all dashboard
+tabs return `invalid_request` without renaming another tab.
 
 ## Pane history metrics
 
@@ -140,7 +219,168 @@ when false, the current workspace, tab, pane focus, and zoom state are preserved
 
 Unsupported agents return `unsupported_agent`; a supported agent whose session
 ID cannot be resolved returns `session_unknown`; and PTY launch failure returns
-`spawn_failed`. Validation completes before a new pane is spawned.
+`spawn_failed`. Codex requires a hook-reported or Luvus-resumed exact session
+identity and never falls back to the newest rollout in the workspace. Validation
+completes before a new pane is spawned.
+
+## Files
+
+`files.tree` returns the active workspace root and its currently expanded rows.
+When the root has not been loaded yet, including immediately after server
+restore with the FILES dock hidden, the request waits for one off-loop directory
+read rather than returning an empty root. `files.refresh` invalidates the cached
+listings and schedules that same worker immediately; it does not require a TUI
+client or visible dock.
+
+## DIFF review
+
+DIFF methods are additive and read Git state without mutating the repository.
+Paths resolve inside the active workspace. When one path exists in more than
+one layer, callers must pass `layer` instead of accepting an ambiguous result.
+
+| Method | Params | Result |
+|---|---|---|
+| `diff.refresh` | `{}` | completes one shared FILES/DIFF status refresh and returns its generation |
+| `diff.list` | `{layer?}` | cached staged, worktree, untracked, and conflict rows; schedules a bounded background refresh |
+| `diff.open` | `{path?, layer?, view?, placement?}` | opens a native preview, pane, or tab |
+| `diff.get` | `{path, layer?, include_patch?}` | bounded semantic hunks; line text is omitted by default |
+| `diff.navigate` | `{pane?, action}` | moves an open native DIFF view |
+| `diff.note.add` | `{file, layer?, old_line? or new_line?, end_line?, body, kind?}` | one local note |
+| `diff.note.apply` | `{notes:[...]}` | validates and creates the whole batch or creates nothing |
+| `diff.note.list` | `{file?, state?}` | local notes and delivery metadata |
+| `diff.note.edit` | `{id, body}` | revised note |
+| `diff.note.resolve` | `{id}` | resolved note |
+| `diff.note.reopen` | `{id}` | reopened note |
+| `diff.note.remove` | `{id}` | removes only the local note |
+| `diff.note.send` | `{to, ids? , all_open?}` | sends one bounded grouped message to one live agent |
+
+`layer` is `staged`, `worktree`, `untracked`, or `conflict`. `view` is `auto`,
+`split`, or `stack`; `placement` is `preview`, `pane`, or `tab`. A note kind is
+`question`, `issue`, `suggestion`, or `praise`. Notes are anchored to old or new
+Git source lines, not rendered rows.
+
+### Results and identifiers
+
+`diff.list` returns `result.files` from the latest shared FILES/DIFF snapshot and
+never runs Git on the app loop. On first use it waits for one off-loop scan. A
+later call returns the cache immediately and may schedule a cadence-gated
+background refresh; `result.refreshing` reports whether that refresh is in
+flight. Call `diff.refresh` when the caller must wait for a newly completed
+scan. Each file includes `path`, `old_path`, `layer`, `status`, `additions`,
+`deletions`, `binary`, unresolved `notes`, review state, and a fingerprint. Addition and deletion counts can be `null` until the
+file is loaded. If a path appears in multiple layers, all later calls for that
+path must include `layer`.
+
+`diff.get` returns file metadata, aggregate counts, truncation metadata, and
+semantic hunks. Every hunk includes its ID, old/new start lines, and header.
+Without `include_patch:true`, `lines` is `null`. With it, every line carries its
+kind, old/new source numbers where applicable, and sanitized text.
+
+`diff.open` returns the created or reused `pane` ID. Note mutations return the
+complete note under `result.note`; its `id` is used by edit, resolve, reopen,
+remove, and send. `diff.note.list` returns those objects under `result.notes`.
+
+### Navigate an open view
+
+`diff.navigate` accepts these exact actions:
+
+| Action | Behavior |
+|---|---|
+| `next`, `next_line` | next source row |
+| `previous`, `previous_line` | previous source row |
+| `next_file`, `previous_file` | next or previous changed file |
+| `next_hunk`, `previous_hunk` | next or previous hunk |
+| `next_note`, `previous_note` | next or previous local note |
+| `top`, `bottom` | first or last row |
+
+Pass the pane returned by `diff.open`. An omitted pane follows the normal API
+focus rules, but fails if that target is not a native DIFF view.
+
+```json
+→ {"id":"1","method":"diff.open","params":{"path":"src/app.rs","layer":"worktree","placement":"tab","view":"split"}}
+← {"id":"1","result":{"type":"diff_open","pane":"7","path":"src/app.rs","layer":"worktree"}}
+
+→ {"id":"2","method":"diff.navigate","params":{"pane":"7","action":"next_hunk"}}
+← {"id":"2","result":{"type":"ok","pane":"7"}}
+```
+
+### Create notes atomically
+
+One note requires exactly one positive `old_line` or `new_line`. `end_line`
+extends that anchor on the same side and cannot precede the start. Every source
+line in the range must exist in the loaded bounded diff. Luvus derives and
+stores bounded context from the actual source; clients cannot provide or forge
+anchor context.
+
+`diff.note.apply` accepts the same fields as `diff.note.add` for every array
+item. It validates every path, layer, kind, body, source range, capacity limit,
+and anchor before writing anything. One invalid item rejects the whole request.
+
+```json
+→ {
+  "id": "notes-1",
+  "method": "diff.note.apply",
+  "params": {
+    "notes": [
+      {
+        "file": "src/app.rs",
+        "layer": "worktree",
+        "new_line": 120,
+        "end_line": 123,
+        "kind": "suggestion",
+        "body": "Extract this validation"
+      },
+      {
+        "file": "src/cli.rs",
+        "layer": "staged",
+        "old_line": 88,
+        "body": "Is this fallback still required?"
+      }
+    ]
+  }
+}
+← {"id":"notes-1","result":{"type":"diff_notes_applied","notes":[{"id":"n1","path":"src/app.rs","state":"open"},{"id":"n2","path":"src/cli.rs","state":"open"}]}}
+```
+
+Note filters accept only `open`, `resolved`, `outdated`, or `orphaned`. Note
+bodies are non-empty plain text, limited to 8 KiB, and reject unsupported
+control characters. Removal deletes only local review data. Sending requires a
+live agent target and records delivery only after its PTY accepts the bounded
+message. `all_open:true` selects all open notes; otherwise pass note IDs in
+`ids`.
+
+`include_patch:true` remains subject to the 4 MiB raw patch, 20,000-row, and
+16 KiB logical-line limits. Control sequences are stripped before content can
+reach the renderer or API. `diff.note.send` uses the same live-agent validation
+as `agent.send`; a shell or exited pane is rejected, and a failed input enqueue
+does not record delivery.
+
+See [DIFF Review](/docs/guides/diff/) for the interactive flow.
+
+## Themes
+
+Theme acquisition does not accept an API URL or path. Use the CLI's bounded,
+client-side `theme install` flow, which validates and writes the shared home
+before asking the selected server to reload.
+
+| Method | Params | Result |
+|---|---|---|
+| `theme.list` | `{}` | `{themes:[...], problems:[...]}` |
+| `theme.path` | `{}` | `{type:"theme_path", path}` |
+| `theme.use` | `{id}` | `{type:"theme_selected", id}` |
+| `theme.reload` | `{}` | `{type:"themes_reloaded", count, selected_available, problems}` |
+
+`theme.list` returns built-in entries first, installed entries sorted by ID,
+and virtual `terminal` last. Every entry includes metadata, source, warnings,
+and whether it is active. Invalid local files are omitted from `themes` and
+reported in `problems`.
+
+`theme.use` validates the ID against the server's current registry before
+changing `config.theme` or rendering. Missing IDs return `not_found` without
+mutation. `theme.reload` scans and parses the home-level `themes/` directory on
+the API connection worker, then sends one validated registry to the
+single-writer app loop. If the configured theme disappeared, Luvus falls back
+visually but preserves its configured ID and reports `selected_available:false`.
 
 ## Sidebar docks
 
@@ -181,6 +421,77 @@ also set `LUVUS_MODULE_ACTION_ID`, so one script can handle the whole menu.
 The CLI wrappers are `luvus ui dock push|list|move` (`push` also reads its rows
 from stdin).
 
+## Luvus Bar
+
+Luvus Bar is the bounded single-row extension surface beside tabs and between
+the fixed bottom guidance and version control. Modules declare widget ownership
+with `[[bars]]`, then publish structured segments. Luvus validates, caches,
+themes, compresses, and renders them; raw ANSI and arbitrary terminal drawing
+are never accepted.
+
+Start with the [Luvus Bar guide](/docs/guides/bar/) for installation,
+placement, CLI use, and troubleshooting. This section documents the underlying
+socket contract.
+
+| Method | Params | Result |
+|---|---|---|
+| `ui.bar.push` | `{owner?, id, region?, content, compact_content?, priority?}` | `{type:"ok", changed, key}` |
+| `ui.bar.list` | `{}` | `{type:"bar_list", widgets:[...]}` |
+| `ui.bar.move` | `{owner?, id, region:"top-right"\|"bottom-right"\|"off"}` | `{type:"ok", key, region}` |
+| `ui.bar.remove` | `{owner?, id}` | `{type:"ok", removed}` |
+| `ui.notification.push` | `{owner?, text, level?, ttl_ms?, action?, value?, dedupe_key?}` | `{type:"ok"}` |
+| `ui.notification.clear` | `{owner?, dedupe_key?}` | `{type:"ok", removed}` |
+
+`owner` is injected automatically as `$LUVUS_MODULE_ID` when a module calls the
+CLI. A raw client may omit it only when the local widget id resolves
+unambiguously. `push` atomically replaces a widget's complete live content;
+invalid input leaves the previous valid value intact. `remove` clears only live
+content, while `move` persists presentation. Disabling, unlinking, or
+uninstalling a module clears its widgets and notifications.
+
+`content` and `compact_content` are arrays of these tagged segment shapes:
+
+```json
+[
+  {"type":"text", "text":"CI", "tone":"muted"},
+  {"type":"symbol", "symbol":"✓", "tone":"success"},
+  {"type":"state", "state":"done", "label":"passing"},
+  {"type":"badge", "text":"2", "tone":"error",
+   "action":"details", "value":"run-1842"},
+  {"type":"progress", "value":3, "total":7, "width":8},
+  {"type":"spacer", "width":1},
+  {"type":"separator"}
+]
+```
+
+Tones are `normal`, `muted`, `accent`, `success`, `warning`, and `error`.
+States are `blocked`, `working`, `done`, `idle`, and `unknown`. An action must
+belong to the widget's enabled module. Clicks expose
+`LUVUS_MODULE_BAR_ID`, `LUVUS_MODULE_BAR_SEGMENT`, and optional
+`LUVUS_MODULE_BAR_VALUE` to that action.
+
+Limits are intentionally small: 16 segments and 256 display columns per
+widget, 16 live widgets per module, 64 live widgets globally, and 30 updates per
+module per second. Text/value fields are capped at 256 bytes and reject control
+characters. A supplied notification TTL must be a positive integer and is
+clamped to 500–60,000 ms; the queue is capped at 32, and a matching `(owner, dedupe_key)` replaces the older notification.
+Top and Bottom rendering are each capped at 100 display columns for the region
+and 100 for one widget. The current viewport may provide less because tabs,
+tab navigation, shortcut guidance, and the fixed version retain their protected
+space. Extra inactive tabs use the existing tab-scroll window.
+
+The equivalent wrappers are:
+
+```sh
+luvus bar list
+luvus bar push --id status --region top-right --content '[{"type":"text","text":"CI"}]'
+luvus bar push --id status --content-file ./bar.json
+luvus bar move --id status --region bottom-right
+luvus bar remove --id status
+luvus ui notification push --text "CI passed" --level success --ttl-ms 4000
+luvus ui notification clear --dedupe-key ci-main
+```
+
 ## The event stream
 
 `events.subscribe` turns the connection into a stream: after one
@@ -205,8 +516,8 @@ still spell these `node.created` / `node.closed`) · `tab.created` · `tab.close
 ## Practical notes
 
 - **Prefer the CLI** in scripts (`luvus --verbose`-free, stable JSON to
-  stdout). Talk raw JSON only when embedding (e.g. a native companion app:
-  the macOS notch app is just another socket client).
+  stdout). Talk raw JSON only when embedding Luvus into another local client
+  or integration.
 - The socket is **owner-only** (`0600`, in a `0700` dir). Access equals
   command execution as your user. See the
   [security model](/docs/explanation/security/).

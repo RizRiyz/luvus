@@ -237,6 +237,7 @@ mod tests {
             events: vec![],
             panes: vec![],
             docks: vec![],
+            bars: vec![],
             settings,
         }
     }

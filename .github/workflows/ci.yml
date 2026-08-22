@@ -44,7 +44,7 @@ jobs:
             --config 'patch.crates-io.luvus-vte.path="vendor/vte"' \
             --config 'patch.crates-io.luvus-alacritty-terminal.path="vendor/alacritty_terminal"'
 
-  # macOS is the primary platform (notch companion, Apple-silicon binaries) -
+  # macOS is a primary platform and ships native Apple-silicon/Intel binaries;
   # run the full test suite there too, not just at release-tag time.
   macos:
     name: macos test

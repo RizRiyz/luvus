@@ -23,6 +23,7 @@ exclude = [
     "/docs",
     "/.github",
     "/assets",
+    "/community",
     "/preview.html",
     "/preview.ans",
     "/MODULE-GUIDE.md",

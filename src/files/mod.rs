@@ -115,6 +115,10 @@ impl FileTree {
         &self.root
     }
 
+    pub fn root_loaded(&self) -> bool {
+        self.is_loaded(&self.root)
+    }
+
     /// Point the tree at a new folder (the active node changed).
     ///
     /// The outgoing folder's open directories, cursor and scroll are **parked**

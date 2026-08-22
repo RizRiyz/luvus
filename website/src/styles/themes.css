@@ -1,6 +1,6 @@
 /* Generated · do not hand-edit.
    Source of truth is luvus's own palette registry (src/ui/theme.rs).
-   Regenerate:  cargo test emit_theme_css -- --ignored --nocapture
+   Regenerate:  cargo test --features dev-tools emit_theme_css -- --nocapture
    These are the real palettes the app ships, so the site cannot drift. */
 html[data-bh-theme='quattro-rally'] {
   --bg: #181926;
@@ -9,6 +9,7 @@ html[data-bh-theme='quattro-rally'] {
   --surface: #363a4f;
   --line: #494d64;
   --border: #5a5130;
+  --border-focus: #9a8a50;
   --overlay0: #6e738d;
   --overlay1: #8087a2;
   --sub: #a5adcb;
@@ -29,6 +30,7 @@ html[data-bh-theme='noir'] {
   --surface: #1a1a20;
   --line: #25252d;
   --border: #383840;
+  --border-focus: #8c8c96;
   --overlay0: #4a4a54;
   --overlay1: #686873;
   --sub: #93939f;
@@ -49,6 +51,7 @@ html[data-bh-theme='ocean'] {
   --surface: #05224a;
   --line: #123a6e;
   --border: #2a4e80;
+  --border-focus: #5a86c0;
   --overlay0: #355886;
   --overlay1: #5276a4;
   --sub: #8fa8c8;
@@ -69,6 +72,7 @@ html[data-bh-theme='dracula'] {
   --surface: #21222c;
   --line: #3c3f52;
   --border: #44475a;
+  --border-focus: #6272a4;
   --overlay0: #565869;
   --overlay1: #6272a4;
   --sub: #a0a4c0;
@@ -89,6 +93,7 @@ html[data-bh-theme='nord'] {
   --surface: #292f3a;
   --line: #434c5e;
   --border: #434c5e;
+  --border-focus: #6a7690;
   --overlay0: #4c566a;
   --overlay1: #616e88;
   --sub: #b0b8c8;
@@ -109,6 +114,7 @@ html[data-bh-theme='sky'] {
   --surface: #d6e1f0;
   --line: #c4d3e8;
   --border: #c0cde0;
+  --border-focus: #6a7a92;
   --overlay0: #93a4bd;
   --overlay1: #74849e;
   --sub: #566579;
@@ -129,6 +135,7 @@ html[data-bh-theme='catppuccin-mocha'] {
   --surface: #313244;
   --line: #45475a;
   --border: #45475a;
+  --border-focus: #7f849c;
   --overlay0: #6c7086;
   --overlay1: #7f849c;
   --sub: #a6adc8;
@@ -149,6 +156,7 @@ html[data-bh-theme='catppuccin-macchiato'] {
   --surface: #363a4f;
   --line: #494d64;
   --border: #494d64;
+  --border-focus: #8087a2;
   --overlay0: #6e738d;
   --overlay1: #8087a2;
   --sub: #a5adcb;
@@ -169,6 +177,7 @@ html[data-bh-theme='catppuccin-frappe'] {
   --surface: #414559;
   --line: #51576d;
   --border: #51576d;
+  --border-focus: #838ba7;
   --overlay0: #737994;
   --overlay1: #838ba7;
   --sub: #a5adce;
@@ -189,6 +198,7 @@ html[data-bh-theme='gruvbox'] {
   --surface: #32302f;
   --line: #504945;
   --border: #504945;
+  --border-focus: #928374;
   --overlay0: #665c54;
   --overlay1: #7c6f64;
   --sub: #a89984;
@@ -209,6 +219,7 @@ html[data-bh-theme='sunset'] {
   --surface: #1c0d2a;
   --line: #3a1d50;
   --border: #4a2a64;
+  --border-focus: #8a5aa8;
   --overlay0: #5a3a70;
   --overlay1: #7a5a90;
   --sub: #b89ad0;
@@ -229,6 +240,7 @@ html[data-bh-theme='homebrew'] {
   --surface: #061006;
   --line: #0e240e;
   --border: #1a4e1a;
+  --border-focus: #2ea82e;
   --overlay0: #1e4c1e;
   --overlay1: #2e6c2e;
   --sub: #22b422;
@@ -249,6 +261,7 @@ html[data-bh-theme='grass'] {
   --surface: #082c18;
   --line: #155830;
   --border: #287648;
+  --border-focus: #56a66c;
   --overlay0: #367850;
   --overlay1: #54966c;
   --sub: #a8c898;
@@ -269,6 +282,7 @@ html[data-bh-theme='redsands'] {
   --surface: #2c0e08;
   --line: #5c261a;
   --border: #7c3c2a;
+  --border-focus: #ba6e4c;
   --overlay0: #8a4a38;
   --overlay1: #a86854;
   --sub: #c89a80;
@@ -289,6 +303,7 @@ html[data-bh-theme='catppuccin-latte'] {
   --surface: #ccd0da;
   --line: #bcc0cc;
   --border: #acb0be;
+  --border-focus: #7c8090;
   --overlay0: #9ca0b0;
   --overlay1: #7c8090;
   --sub: #6c6f85;
@@ -309,6 +324,7 @@ html[data-bh-theme='gruvbox-light'] {
   --surface: #d5c4a1;
   --line: #bdae93;
   --border: #bdae93;
+  --border-focus: #7c6f64;
   --overlay0: #a89984;
   --overlay1: #928374;
   --sub: #665c54;
@@ -329,6 +345,7 @@ html[data-bh-theme='mono'] {
   --surface: #181818;
   --line: #282828;
   --border: #525252;
+  --border-focus: #909090;
   --overlay0: #4a4a4a;
   --overlay1: #686868;
   --sub: #939393;

@@ -184,6 +184,25 @@ fn handle_conn(stream: Conn, event_tx: Sender<AppEvent>, bus: EventBus) {
     }
 
     let (reply, reply_rx) = mpsc::channel::<String>();
+    if method == "theme.reload" {
+        // The socket connection already owns a worker thread. Scan and parse
+        // here, then send one validated registry to the single-writer app loop.
+        let registry = crate::theme::ThemeRegistry::load();
+        if event_tx
+            .send(AppEvent::ThemeReloaded {
+                id,
+                registry,
+                reply,
+            })
+            .is_err()
+        {
+            return;
+        }
+        if let Ok(resp) = reply_rx.recv() {
+            let _ = writeln!(writer, "{resp}");
+        }
+        return;
+    }
     if event_tx
         .send(AppEvent::Api(ApiRequest {
             id,
@@ -220,6 +239,43 @@ fn parse_timeout_s(params: &Value) -> Result<Option<std::time::Duration>, &'stat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_reload_scans_on_the_connection_worker_before_app_handoff() {
+        let _env = crate::persist::test_env("theme-reload-api");
+        let root = crate::persist::ensure_config_dir();
+        let path = root.join("theme-api.sock");
+        let lock = transport::acquire_server_startup_lock(&root).unwrap();
+        let listener = bind_server(&path, &lock).unwrap();
+        let (events, rx) = mpsc::channel();
+        start_server(listener, events, new_bus());
+        drop(lock);
+
+        let mut stream = transport::connect(&path).unwrap();
+        writeln!(
+            stream,
+            "{}",
+            json!({"id":"theme-1","method":"theme.reload","params":{}})
+        )
+        .unwrap();
+        let event = rx.recv().unwrap();
+        let AppEvent::ThemeReloaded {
+            id,
+            registry,
+            reply,
+        } = event
+        else {
+            panic!("theme.reload must hand off a parsed registry");
+        };
+        assert_eq!(id, "theme-1");
+        assert!(!registry.entries().is_empty());
+        reply
+            .send(json!({"id": id, "result": {"type":"ok"}}).to_string())
+            .unwrap();
+        let mut response = String::new();
+        BufReader::new(stream).read_line(&mut response).unwrap();
+        assert!(response.contains("\"type\":\"ok\""), "{response}");
+    }
 
     #[test]
     fn timeout_s_parses_without_panicking() {

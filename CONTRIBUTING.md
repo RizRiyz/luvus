@@ -91,6 +91,32 @@ perf(render): avoid repeated frame allocations
 docs: clarify module setup
 ```
 
+### AI assistance and transparency
+
+Disclose substantial use of AI tools when their output or technical direction
+is included in a commit. Add an `Assisted-by:` trailer with the tool name and
+the primary model name and version:
+
+```text
+feat(search): add global fuzzy finder
+
+Assisted-by: OpenAI Codex (GPT-5.6-sol)
+```
+
+An AI-assisted contribution must still be understood, reviewed, and owned by
+the contributor. Check generated code and documentation for correctness,
+security, licensing, performance, and compatibility before submitting it.
+
+`Co-authored-by:` does not replace `Assisted-by:`. If an AI tool substantially
+writes a pull request description or review comment, disclose that assistance
+in the description or comment as well because commit trailers only describe
+the commits.
+
+Standard formatters, deterministic editor actions, and short boilerplate
+autocomplete do not require a trailer. Research, testing, debugging, or private
+review also does not require one when no substantial AI output or technical
+direction is included in the contribution. When uncertain, disclose it.
+
 Luvus squash-merges pull requests, so follow-up commits during review are fine.
 You do not need to rebuild a perfect commit history before submitting changes.
 

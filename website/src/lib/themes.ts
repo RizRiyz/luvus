@@ -3,7 +3,7 @@
  * `src/ui/theme.rs`. The colours themselves live in `../styles/themes.css`,
  * which is generated from that same Rust registry:
  *
- *   cargo test emit_theme_css -- --ignored --nocapture > website/src/styles/themes.css
+ *   cargo test --features dev-tools emit_theme_css -- --nocapture
  *
  * Keep this list in the registry's order so the picker reads the way Settings
  * does in the app.

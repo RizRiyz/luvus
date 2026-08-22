@@ -204,6 +204,17 @@ impl App {
             let Some(pane) = self.panes.get(&id) else {
                 continue;
             };
+            let detection_rows = detect::screen_rows(
+                self.status
+                    .get(&id)
+                    .map(|status| status.agent.as_str())
+                    .unwrap_or(""),
+                self.proc_commands
+                    .get(&id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+                &self.manifests,
+            );
             let (last_generation, force_detect) = self
                 .status
                 .get(&id)
@@ -216,7 +227,7 @@ impl App {
                         Some((
                             generation,
                             engine.title().map(Arc::<str>::from),
-                            Arc::<str>::from(engine.detection_text(14)),
+                            Arc::<str>::from(engine.detection_text(detection_rows)),
                         ))
                     } else {
                         None
@@ -315,8 +326,8 @@ impl App {
                 // The screen-scraped name wins only when it's a *known* agent. If
                 // the banner text doesn't currently show one (so classify fell back
                 // to the bare shell name), don't downgrade a pane that already has a
-                // resolved agent_session: keep its disk/hook identity so the brand —
-                // and the notch logo keyed off it — stays stable across an agent's
+                // resolved agent_session: keep its disk/hook identity so the brand
+                // shown to UI and API consumers stays stable across an agent's
                 // quiet moments (Claude showing "Opus 4.8" but not "claude", etc.).
                 let detected = if self.manifests.is_agent(&det.agent) {
                     det.agent
@@ -386,8 +397,8 @@ impl App {
         };
         for (id, st, agent) in changes {
             // Publishes to subscribers and fires any module `[[events]]` hooks.
-            // Carry the pane's cwd + its node's label/branch so consumers (e.g. the
-            // notch companion, docs/24) can label the row without a second call.
+            // Carry the pane's cwd + its node's label/branch so API consumers can
+            // label the row without a second call.
             // `project` is the **node label**, matching `agent.list` exactly — a
             // consumer that patches rows from both must not see the name change
             // shape (it used to be the cwd basename here, so renaming a node made
@@ -447,12 +458,22 @@ impl App {
         // *server's* cwd — the very thing §3.3 removed.
         const WITHOUT_NODE: &[&str] = &[
             "ping",
+            "search.capabilities",
             "server.stop",
             "workspace.open",
             "node.open",
             "workspace.list",
             "node.list",
             "worktree.open",
+            "ui.bar.list",
+            "ui.bar.push",
+            "ui.bar.move",
+            "ui.bar.remove",
+            "ui.notification.push",
+            "ui.notification.clear",
+            "theme.list",
+            "theme.use",
+            "theme.path",
         ];
         if self.workspaces.is_empty() && !WITHOUT_NODE.contains(&req.method.as_str()) {
             return json!({ "id": req.id, "error": { "code": "no_session", "message": "no active session" } }).to_string();
@@ -473,6 +494,35 @@ impl App {
                 "protocol":1,
                 "session": crate::session::display_name()
             })),
+            "search.capabilities" => Ok(json!({
+                "type": "search_capabilities",
+                "version": 1,
+                "methods": ["search.query", "search.activate"],
+                "scopes": ["all", "navigate", "files", "output"],
+                "max_results": crate::search::RESULT_CAP,
+                "max_response_bytes": crate::search::federation::MAX_SESSION_RESPONSE_BYTES,
+            })),
+            "theme.list" => Ok(self.theme_registry.list_json(&self.config.theme)),
+            "theme.path" => Ok(json!({
+                "type": "theme_path",
+                "path": crate::theme::themes_dir().display().to_string(),
+            })),
+            "theme.use" => {
+                let id = p.get("id").and_then(Value::as_str).ok_or_else(|| {
+                    (
+                        "invalid_request".to_string(),
+                        "theme.use needs an id".to_string(),
+                    )
+                })?;
+                if self.theme_registry.get(id).is_none() {
+                    return Err((
+                        "not_found".to_string(),
+                        format!("theme `{id}` is not installed"),
+                    ));
+                }
+                self.apply_theme(id);
+                Ok(json!({"type": "theme_selected", "id": self.config.theme}))
+            }
             // Re-read `~/.luvus/manifests/` (built-in + managed OTA + user) into
             // the live engine, so `server update-manifest` applies without a
             // restart. Detection uses the new rules on the next tick.
@@ -696,9 +746,9 @@ impl App {
                 self.session_dirty = true;
                 Ok(json!({"type":"ok"}))
             }
-            // A precise agent lifecycle event from an integration hook (docs/24
-            // NOTCH-6): permission prompt, question, turn end. Forwarded verbatim
-            // onto the event bus as `agent.hook` for the notch companion.
+            // A precise agent lifecycle event from an integration hook:
+            // permission prompt, question, turn end. Forwarded verbatim onto the
+            // event bus as `agent.hook` for modules and API clients.
             "pane.report_event" => {
                 let id = self.resolve_pane(p).ok_or_else(not_found)?;
                 let agent = p.get("agent").and_then(|v| v.as_str()).unwrap_or("");
@@ -869,15 +919,42 @@ impl App {
                 Ok(json!({"type":"tab","tab": (self.ws().active_tab + 1).to_string()}))
             }
             "tab.focus" => {
-                if let Some(i) = param_usize(p, "tab") {
-                    self.switch_tab(i.saturating_sub(1));
-                }
+                let index = required_one_based_param(p, "tab")?;
+                self.focus_tab(index).map_err(tab_focus_error)?;
                 Ok(json!({"type":"ok"}))
             }
             "tab.move" => {
-                let from = required_one_based_param(p, "tab")?;
-                let to = required_one_based_param(p, "to")?;
-                let active = self.move_tab(from, to).map_err(tab_move_error)?;
+                let (from, to, active) = if let Some(raw_direction) =
+                    p.get("direction").filter(|direction| !direction.is_null())
+                {
+                    if p.get("to").is_some() {
+                        return Err((
+                            "invalid_request".to_string(),
+                            "direction and to cannot be used together".to_string(),
+                        ));
+                    }
+                    let direction = match raw_direction.as_str() {
+                        Some("left") => TabMoveDirection::Left,
+                        Some("right") => TabMoveDirection::Right,
+                        _ => {
+                            return Err((
+                                "invalid_request".to_string(),
+                                "direction must be left or right".to_string(),
+                            ))
+                        }
+                    };
+                    let from = p
+                        .get("tab")
+                        .map(|_| required_one_based_param(p, "tab"))
+                        .transpose()?;
+                    self.move_tab_direction(from, direction)
+                        .map_err(tab_move_error)?
+                } else {
+                    let from = required_one_based_param(p, "tab")?;
+                    let to = required_one_based_param(p, "to")?;
+                    let active = self.move_tab(from, to).map_err(tab_move_error)?;
+                    (from, to, active)
+                };
                 Ok(json!({
                     "type": "tab_move",
                     "from": (from + 1).to_string(),
@@ -885,26 +962,32 @@ impl App {
                     "active": (active + 1).to_string(),
                 }))
             }
+            "tab.swap" => {
+                let first = required_one_based_param(p, "tab")?;
+                let second = required_one_based_param(p, "with")?;
+                let active = self.swap_tabs(first, second).map_err(tab_move_error)?;
+                Ok(json!({
+                    "type": "tab_swap",
+                    "tab": (first + 1).to_string(),
+                    "with": (second + 1).to_string(),
+                    "active": (active + 1).to_string(),
+                }))
+            }
             // Name a tab from a module (docs/13 §3.9) — the same label the
             // tab-rename modal writes. An empty name clears it back to a number.
             "tab.rename" => {
-                let i = param_usize(p, "tab")
-                    .map(|i| i.saturating_sub(1))
+                let index = p
+                    .get("tab")
+                    .map(|_| required_one_based_param(p, "tab"))
+                    .transpose()?
                     .unwrap_or(self.ws().active_tab);
-                let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
-                let active = self.active_ws;
-                let tab = self.workspaces[active]
-                    .tabs
-                    .get_mut(i)
-                    .ok_or_else(not_found)?;
-                // Git/orch tabs keep their fixed labels (docs/28).
-                if tab.git.is_some() || tab.orch {
-                    return Err(module_err(
-                        "git and orch tabs cannot be renamed".to_string(),
-                    ));
-                }
-                tab.name = (!name.is_empty()).then(|| name.chars().take(40).collect());
-                self.session_dirty = true;
+                let name = p.get("name").and_then(Value::as_str).ok_or_else(|| {
+                    (
+                        "invalid_request".to_string(),
+                        "name must be a string (empty clears the tab name)".to_string(),
+                    )
+                })?;
+                self.rename_tab(index, name).map_err(tab_rename_error)?;
                 Ok(json!({"type":"ok"}))
             }
             "tab.close" => {
@@ -1303,6 +1386,205 @@ impl App {
                     Ok(json!({"type":"error","message":"sidebar is full (max 3 docks)"}))
                 }
             }
+            "ui.bar.list" => {
+                let widgets: Vec<Value> = self
+                    .bar
+                    .declarations
+                    .iter()
+                    .map(|(key, declaration)| {
+                        let live = self.bar.widgets.get(key);
+                        let region = self
+                            .config
+                            .bars
+                            .region_for(key, declaration.region)
+                            .map(crate::bar::BarRegion::as_str);
+                        json!({
+                            "id": declaration.key.id,
+                            "owner": declaration.key.owner,
+                            "key": key,
+                            "title": declaration.title,
+                            "region": region,
+                            "default_region": declaration.region.as_str(),
+                            "priority": live.map_or(declaration.priority, |widget| widget.priority),
+                            "live": live.is_some(),
+                            "content": live.map(|widget| &widget.content),
+                            "compact_content": live.map(|widget| &widget.compact_content),
+                        })
+                    })
+                    .collect();
+                Ok(json!({"type":"bar_list","widgets":widgets}))
+            }
+            "ui.bar.push" => {
+                let id = req_str(p, "id")?;
+                let owner = p.get("owner").and_then(Value::as_str);
+                let declaration = self
+                    .bar
+                    .resolve_declaration(owner, id)
+                    .map_err(module_err)?
+                    .clone();
+                if declaration.key.owner == "core" {
+                    return Err(module_err("core bar widgets cannot be updated".into()));
+                }
+                let content: Vec<crate::bar::BarSegment> = serde_json::from_value(
+                    p.get("content")
+                        .cloned()
+                        .ok_or_else(|| ("invalid_request".into(), "content is required".into()))?,
+                )
+                .map_err(|error| {
+                    (
+                        "invalid_request".into(),
+                        format!("invalid content: {error}"),
+                    )
+                })?;
+                let compact: Vec<crate::bar::BarSegment> = match p.get("compact_content") {
+                    Some(value) => serde_json::from_value(value.clone()).map_err(|error| {
+                        (
+                            "invalid_request".into(),
+                            format!("invalid compact_content: {error}"),
+                        )
+                    })?,
+                    None => Vec::new(),
+                };
+                validate_bar_actions(self, &declaration.key.owner, &content)?;
+                validate_bar_actions(self, &declaration.key.owner, &compact)?;
+                let region = match p.get("region").and_then(Value::as_str) {
+                    Some("top-right" | "top") => crate::bar::BarRegion::TopRight,
+                    Some("bottom-right" | "bottom") => crate::bar::BarRegion::BottomRight,
+                    Some(other) => {
+                        return Err((
+                            "invalid_request".into(),
+                            format!("unknown bar region {other}"),
+                        ))
+                    }
+                    None => declaration.region,
+                };
+                let priority = match p.get("priority") {
+                    None => declaration.priority,
+                    Some(value) => value
+                        .as_u64()
+                        .filter(|value| *value <= u8::MAX as u64)
+                        .map(|value| value as u8)
+                        .ok_or_else(|| {
+                            (
+                                "invalid_request".into(),
+                                "priority must be an integer from 0 to 255".into(),
+                            )
+                        })?,
+                };
+                let widget = crate::bar::BarWidget::new(
+                    declaration.key.clone(),
+                    region,
+                    content,
+                    compact,
+                    priority,
+                )
+                .map_err(|error| ("invalid_request".into(), error))?;
+                self.bar
+                    .allow_push(&declaration.key.owner, Instant::now())
+                    .map_err(|error| ("rate_limited".into(), error))?;
+                let changed = self
+                    .bar
+                    .push_widget(widget)
+                    .map_err(|error| ("limit_exceeded".into(), error))?;
+                Ok(json!({"type":"ok","changed":changed,"key":declaration.key.canonical()}))
+            }
+            "ui.bar.move" => {
+                let declaration = self
+                    .bar
+                    .resolve_declaration(p.get("owner").and_then(Value::as_str), req_str(p, "id")?)
+                    .map_err(module_err)?
+                    .clone();
+                let region = match req_str(p, "region")? {
+                    "top-right" | "top" => Some(crate::bar::BarRegion::TopRight),
+                    "bottom-right" | "bottom" => Some(crate::bar::BarRegion::BottomRight),
+                    "off" => None,
+                    other => {
+                        return Err((
+                            "invalid_request".into(),
+                            format!("unknown bar region {other}"),
+                        ))
+                    }
+                };
+                let key = declaration.key.canonical();
+                if !self.config.bars.is_explicitly_placed(&key, region) {
+                    self.config.bars.place(&key, region);
+                    crate::config::save(&self.config);
+                    self.bar.clear_geometry();
+                }
+                Ok(
+                    json!({"type":"ok","key":key,"region":region.map(crate::bar::BarRegion::as_str)}),
+                )
+            }
+            "ui.bar.remove" => {
+                let declaration = self
+                    .bar
+                    .resolve_declaration(p.get("owner").and_then(Value::as_str), req_str(p, "id")?)
+                    .map_err(module_err)?
+                    .clone();
+                if declaration.key.owner == "core" {
+                    return Err(module_err("core bar widgets cannot be removed".into()));
+                }
+                let removed = self.bar.remove_widget(&declaration.key.canonical());
+                Ok(json!({"type":"ok","removed":removed}))
+            }
+            "ui.notification.push" => {
+                let owner = p.get("owner").and_then(Value::as_str).map(String::from);
+                let text = req_str(p, "text")?.to_string();
+                let level: crate::bar::NotificationLevel = serde_json::from_value(
+                    p.get("level").cloned().unwrap_or_else(|| json!("info")),
+                )
+                .map_err(|error| ("invalid_request".into(), format!("invalid level: {error}")))?;
+                let action = opt_str(p, "action");
+                if let Some(owner) = owner.as_deref() {
+                    validate_bar_action(self, owner, action.as_deref())?;
+                } else if action.is_some() {
+                    return Err((
+                        "invalid_request".into(),
+                        "an actionable notification requires its module owner".into(),
+                    ));
+                }
+                let ttl_ms = match p.get("ttl_ms") {
+                    None => 4_000,
+                    Some(value) => value.as_u64().filter(|ttl| *ttl > 0).ok_or_else(|| {
+                        (
+                            "invalid_request".into(),
+                            "ttl_ms must be a positive integer".into(),
+                        )
+                    })?,
+                };
+                let notification = crate::bar::NotificationPush {
+                    owner,
+                    text,
+                    level,
+                    ttl_ms,
+                    action,
+                    value: opt_str(p, "value"),
+                    dedupe_key: opt_str(p, "dedupe_key"),
+                };
+                notification
+                    .validate()
+                    .map_err(|error| ("invalid_request".into(), error))?;
+                self.bar
+                    .allow_push(
+                        notification
+                            .owner
+                            .as_deref()
+                            .unwrap_or(crate::bar::UNOWNED_NOTIFICATION_OWNER),
+                        Instant::now(),
+                    )
+                    .map_err(|error| ("rate_limited".into(), error))?;
+                self.bar
+                    .push_notification(notification, Instant::now())
+                    .map_err(|error| ("invalid_request".into(), error))?;
+                Ok(json!({"type":"ok"}))
+            }
+            "ui.notification.clear" => {
+                let owner = p.get("owner").and_then(Value::as_str);
+                let removed = self
+                    .bar
+                    .clear_notifications(owner, p.get("dedupe_key").and_then(Value::as_str));
+                Ok(json!({"type":"ok","removed":removed}))
+            }
             // ── modules (docs/13) ──
             "module.list" => {
                 let arr: Vec<Value> = self.modules.modules.iter().map(module_json).collect();
@@ -1330,6 +1612,8 @@ impl App {
                         .map(|a| json!({"id": a.id, "title": a.title, "contexts": a.contexts})).collect::<Vec<_>>(),
                     "panes": m.manifest.panes.iter()
                         .map(|pe| json!({"id": pe.id, "title": pe.title, "placement": pe.placement})).collect::<Vec<_>>(),
+                    "bars": m.manifest.bars.iter()
+                        .map(|bar| json!({"id": bar.id, "title": bar.title, "region": bar.region.as_str(), "priority": bar.priority})).collect::<Vec<_>>(),
                     "events": m.manifest.events.iter().map(|e| e.on.clone()).collect::<Vec<_>>(),
                     "build_steps": m.manifest.build.len(),
                 }))
@@ -1500,6 +1784,424 @@ impl App {
                 self.close_pane(id);
                 Ok(json!({"type":"ok"}))
             }
+            // ── DIFF review (docs/88) ────────────────────────────────────
+            "diff.refresh" => {
+                self.ensure_diff_snapshot().map_err(diff_err)?;
+                let generation = self
+                    .diff
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.generation)
+                    .unwrap_or_default();
+                Ok(json!({"type":"ok","refresh":"complete","generation":generation}))
+            }
+            "diff.list" => {
+                self.ensure_diff_snapshot().map_err(diff_err)?;
+                let layer = p
+                    .get("layer")
+                    .and_then(|value| value.as_str())
+                    .map(parse_diff_layer)
+                    .transpose()?;
+                let snapshot = self
+                    .diff
+                    .snapshot
+                    .as_ref()
+                    .ok_or_else(|| diff_err("DIFF is not ready".to_string()))?;
+                let files: Vec<Value> = snapshot
+                    .files
+                    .iter()
+                    .filter(|file| layer.as_ref().is_none_or(|layer| &file.key.layer == layer))
+                    .map(diff_file_json)
+                    .collect();
+                Ok(json!({
+                    "type":"diff_list",
+                    "repo": snapshot.repo_root,
+                    "branch": snapshot.branch,
+                    "generation": snapshot.generation,
+                    "fingerprint": snapshot.fingerprint,
+                    "omitted": snapshot.omitted_files,
+                    "refreshing": self.diff.status_inflight,
+                    "files": files,
+                }))
+            }
+            "diff.open" => {
+                self.ensure_diff_snapshot().map_err(diff_err)?;
+                let target = match p
+                    .get("placement")
+                    .or_else(|| p.get("target"))
+                    .and_then(|v| v.as_str())
+                {
+                    Some("tab") => crate::app::files::OpenTarget::Tab,
+                    Some("pane") => crate::app::files::OpenTarget::Pane,
+                    Some("preview") | None => crate::app::files::OpenTarget::Preview,
+                    Some(_) => {
+                        return Err(diff_err(
+                            "placement must be preview, pane, or tab".to_string(),
+                        ))
+                    }
+                };
+                let preference = match p.get("view").and_then(Value::as_str) {
+                    None => None,
+                    Some("auto") => Some(crate::diff::DiffLayoutPreference::Auto),
+                    Some("split") => Some(crate::diff::DiffLayoutPreference::Split),
+                    Some("stack") => Some(crate::diff::DiffLayoutPreference::Stack),
+                    Some(_) => {
+                        return Err(diff_err("view must be auto, split, or stack".to_string()))
+                    }
+                };
+                let layer = p
+                    .get("layer")
+                    .and_then(|value| value.as_str())
+                    .map(parse_diff_layer)
+                    .transpose()?;
+                let raw = p.get("path").and_then(|value| value.as_str()).unwrap_or("");
+                let key = if raw.is_empty() {
+                    self.diff
+                        .selected_file()
+                        .or_else(|| {
+                            self.diff
+                                .snapshot
+                                .as_ref()
+                                .and_then(|snapshot| snapshot.files.first())
+                        })
+                        .map(|file| file.key.clone())
+                        .ok_or_else(|| diff_err("there are no changed files".to_string()))?
+                } else {
+                    self.diff_file_for_path(raw, layer.as_ref())
+                        .map_err(diff_err)?
+                        .key
+                };
+                self.open_diff_view(key.clone(), target);
+                let id = self
+                    .diff_view_showing(&key)
+                    .ok_or_else(|| diff_err("failed to open diff".to_string()))?;
+                if let (Some(preference), Some(crate::app::ViewKind::Diff(view))) =
+                    (preference, self.views.get_mut(&id))
+                {
+                    view.preference = preference;
+                }
+                Ok(
+                    json!({"type":"diff_open","pane":id.0.to_string(),"path":key.display_path(),"layer":key.layer.label()}),
+                )
+            }
+            "diff.get" => {
+                self.ensure_diff_snapshot().map_err(diff_err)?;
+                let raw = req_str(p, "path")?;
+                let layer = p
+                    .get("layer")
+                    .and_then(|value| value.as_str())
+                    .map(parse_diff_layer)
+                    .transpose()?;
+                let file = self
+                    .diff_file_for_path(raw, layer.as_ref())
+                    .map_err(diff_err)?;
+                let diff = self.load_diff_file_sync(&file).map_err(diff_err)?;
+                let include_patch = p
+                    .get("include_patch")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let hunks: Vec<Value> = diff
+                    .hunks
+                    .iter()
+                    .map(|hunk| {
+                        json!({
+                            "id":hunk.id,
+                            "old_start":hunk.old_start,
+                            "new_start":hunk.new_start,
+                            "header":hunk.header,
+                            "lines": if include_patch {
+                                serde_json::to_value(&hunk.lines).unwrap_or(Value::Null)
+                            } else {
+                                Value::Null
+                            },
+                        })
+                    })
+                    .collect();
+                Ok(json!({
+                    "type":"diff",
+                    "file":diff_file_json(&file),
+                    "additions":diff.additions,
+                    "deletions":diff.deletions,
+                    "binary":diff.binary,
+                    "truncated":diff.truncated,
+                    "omitted_lines":diff.omitted_lines,
+                    "hunks":hunks,
+                }))
+            }
+            "diff.navigate" => {
+                let id = self.resolve_pane(p).unwrap_or_else(|| self.layout().focus);
+                let action = req_str(p, "action")?;
+                let key = match action {
+                    "next" | "next_line" => KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                    "previous" | "previous_line" => KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+                    "next_file" => KeyEvent::new(KeyCode::Char('J'), KeyModifiers::NONE),
+                    "previous_file" => KeyEvent::new(KeyCode::Char('K'), KeyModifiers::NONE),
+                    "next_hunk" => KeyEvent::new(KeyCode::Char('}'), KeyModifiers::NONE),
+                    "previous_hunk" => KeyEvent::new(KeyCode::Char('{'), KeyModifiers::NONE),
+                    "next_note" => KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE),
+                    "previous_note" => KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE),
+                    "top" => KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+                    "bottom" => KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+                    _ => {
+                        return Err(diff_err(
+                            "action must target a line, file, hunk, note, top, or bottom"
+                                .to_string(),
+                        ))
+                    }
+                };
+                if !self.handle_diff_key(id, key) {
+                    return Err(diff_err("target is not an open DIFF view".to_string()));
+                }
+                Ok(json!({"type":"ok","pane":id.0.to_string()}))
+            }
+            "diff.note.list" => {
+                self.ensure_diff_snapshot().map_err(diff_err)?;
+                self.ensure_diff_notes_sync().map_err(diff_err)?;
+                let state = p
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .map(parse_note_state)
+                    .transpose()?;
+                let path = p
+                    .get("file")
+                    .or_else(|| p.get("path"))
+                    .and_then(Value::as_str);
+                let notes: Vec<Value> = self
+                    .diff
+                    .notes
+                    .iter()
+                    .filter(|note| state.is_none_or(|state| note.state == state))
+                    .filter(|note| {
+                        path.is_none_or(|path| note.anchor.diff_key.display_path() == path)
+                    })
+                    .map(note_json)
+                    .collect();
+                Ok(json!({"type":"diff_notes","notes":notes}))
+            }
+            "diff.note.apply" => {
+                self.ensure_diff_snapshot().map_err(diff_err)?;
+                self.ensure_diff_notes_sync().map_err(diff_err)?;
+                let items = p
+                    .get("notes")
+                    .and_then(Value::as_array)
+                    .filter(|items| !items.is_empty())
+                    .ok_or_else(|| diff_err("notes must be a non-empty array".to_string()))?;
+                if self.diff.notes.len().saturating_add(items.len()) > crate::diff::NOTE_CAP {
+                    return Err(diff_err(format!(
+                        "review note limit is {}",
+                        crate::diff::NOTE_CAP
+                    )));
+                }
+                let mut notes = Vec::with_capacity(items.len());
+                for item in items {
+                    let raw = item
+                        .get("file")
+                        .or_else(|| item.get("path"))
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| diff_err("every note needs a file".to_string()))?;
+                    let layer = item
+                        .get("layer")
+                        .and_then(Value::as_str)
+                        .map(parse_diff_layer)
+                        .transpose()?;
+                    let file = self
+                        .diff_file_for_path(raw, layer.as_ref())
+                        .map_err(diff_err)?;
+                    let old = diff_line_param(item, "old_line")?;
+                    let new = diff_line_param(item, "new_line")?;
+                    let (side, start) = match (old, new) {
+                        (Some(line), None) => (crate::diff::DiffSide::Old, line),
+                        (None, Some(line)) => (crate::diff::DiffSide::New, line),
+                        _ => {
+                            return Err(diff_err(
+                                "every note needs exactly one old_line or new_line".to_string(),
+                            ))
+                        }
+                    };
+                    let end = diff_line_param(item, "end_line")?.unwrap_or(start);
+                    let diff = self.load_diff_file_sync(&file).map_err(diff_err)?;
+                    let context = crate::diff::notes::anchor_context(&diff, side, start, end)
+                        .map_err(diff_err)?;
+                    let context_sha256 = crate::diff::notes::context_hash(&context);
+                    let context: String = context.chars().take(512).collect();
+                    let body = item
+                        .get("body")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| diff_err("every note needs a body".to_string()))?
+                        .to_string();
+                    let kind = parse_note_kind(
+                        item.get("kind").and_then(Value::as_str).unwrap_or("issue"),
+                    )?;
+                    let key = file.key;
+                    let now = crate::diff::notes::now_ms();
+                    notes.push(crate::diff::ReviewNote {
+                        id: crate::diff::notes::note_id(),
+                        review_id: crate::diff::notes::review_id(&key),
+                        author: "external".to_string(),
+                        kind,
+                        body,
+                        anchor: crate::diff::notes::NoteAnchor {
+                            diff_key: key,
+                            side,
+                            start_line: start,
+                            end_line: end,
+                            context_sha256,
+                            context,
+                        },
+                        state: crate::diff::NoteState::Open,
+                        deliveries: Vec::new(),
+                        revision: 1,
+                        created_at_ms: now,
+                        updated_at_ms: now,
+                    });
+                }
+                crate::diff::notes::save_batch_new(&notes).map_err(diff_err)?;
+                self.diff.notes.extend(notes.iter().cloned());
+                self.refresh_diff_note_counts();
+                Ok(json!({
+                    "type":"diff_notes_applied",
+                    "notes":notes.iter().map(note_json).collect::<Vec<_>>()
+                }))
+            }
+            "diff.note.add" => {
+                self.ensure_diff_snapshot().map_err(diff_err)?;
+                self.ensure_diff_notes_sync().map_err(diff_err)?;
+                let raw = p
+                    .get("file")
+                    .or_else(|| p.get("path"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| diff_err("file is required".to_string()))?;
+                let layer = p
+                    .get("layer")
+                    .and_then(Value::as_str)
+                    .map(parse_diff_layer)
+                    .transpose()?;
+                let file = self
+                    .diff_file_for_path(raw, layer.as_ref())
+                    .map_err(diff_err)?;
+                let (side, start) = match (
+                    diff_line_param(p, "old_line")?,
+                    diff_line_param(p, "new_line")?,
+                ) {
+                    (Some(line), None) => (crate::diff::DiffSide::Old, line),
+                    (None, Some(line)) => (crate::diff::DiffSide::New, line),
+                    _ => {
+                        return Err(diff_err(
+                            "pass exactly one of old_line or new_line".to_string(),
+                        ))
+                    }
+                };
+                let end = diff_line_param(p, "end_line")?.unwrap_or(start);
+                let diff = self.load_diff_file_sync(&file).map_err(diff_err)?;
+                let context = crate::diff::notes::anchor_context(&diff, side, start, end)
+                    .map_err(diff_err)?;
+                let context_sha256 = crate::diff::notes::context_hash(&context);
+                let context: String = context.chars().take(512).collect();
+                let body = req_str(p, "body")?.to_string();
+                let kind =
+                    parse_note_kind(p.get("kind").and_then(Value::as_str).unwrap_or("issue"))?;
+                let key = file.key;
+                let now = crate::diff::notes::now_ms();
+                let note = crate::diff::ReviewNote {
+                    id: crate::diff::notes::note_id(),
+                    review_id: crate::diff::notes::review_id(&key),
+                    author: "external".to_string(),
+                    kind,
+                    body,
+                    anchor: crate::diff::notes::NoteAnchor {
+                        diff_key: key,
+                        side,
+                        start_line: start,
+                        end_line: end,
+                        context_sha256,
+                        context,
+                    },
+                    state: crate::diff::NoteState::Open,
+                    deliveries: Vec::new(),
+                    revision: 1,
+                    created_at_ms: now,
+                    updated_at_ms: now,
+                };
+                crate::diff::notes::save(&note, None).map_err(diff_err)?;
+                self.apply_diff_note_saved(note.clone(), Ok(()));
+                Ok(json!({"type":"diff_note","note":note_json(&note)}))
+            }
+            "diff.note.edit" | "diff.note.resolve" | "diff.note.reopen" => {
+                self.ensure_diff_snapshot().map_err(diff_err)?;
+                self.ensure_diff_notes_sync().map_err(diff_err)?;
+                let id = req_str(p, "id")?;
+                let note = self
+                    .diff
+                    .notes
+                    .iter()
+                    .find(|note| note.id == id)
+                    .cloned()
+                    .ok_or_else(|| diff_err("review note not found".to_string()))?;
+                let mut updated = note.clone();
+                match method {
+                    "diff.note.edit" => updated.body = req_str(p, "body")?.to_string(),
+                    "diff.note.resolve" => updated.state = crate::diff::NoteState::Resolved,
+                    "diff.note.reopen" => updated.state = crate::diff::NoteState::Open,
+                    _ => unreachable!(),
+                }
+                updated.revision = updated.revision.saturating_add(1);
+                updated.updated_at_ms = crate::diff::notes::now_ms();
+                crate::diff::notes::save(&updated, Some(note.revision)).map_err(diff_err)?;
+                self.apply_diff_note_saved(updated.clone(), Ok(()));
+                Ok(json!({"type":"diff_note","note":note_json(&updated)}))
+            }
+            "diff.note.remove" => {
+                self.ensure_diff_snapshot().map_err(diff_err)?;
+                self.ensure_diff_notes_sync().map_err(diff_err)?;
+                let id = req_str(p, "id")?;
+                let note = self
+                    .diff
+                    .notes
+                    .iter()
+                    .find(|note| note.id == id)
+                    .cloned()
+                    .ok_or_else(|| diff_err("review note not found".to_string()))?;
+                crate::diff::notes::remove(&note, Some(note.revision)).map_err(diff_err)?;
+                self.apply_diff_note_removed(id.to_string(), Ok(()));
+                Ok(json!({"type":"ok","removed":id}))
+            }
+            "diff.note.send" => {
+                self.ensure_diff_snapshot().map_err(diff_err)?;
+                self.ensure_diff_notes_sync().map_err(diff_err)?;
+                let target = req_str(p, "to")?;
+                let all_open = p.get("all_open").and_then(Value::as_bool).unwrap_or(false);
+                let ids: Vec<&str> = p
+                    .get("ids")
+                    .and_then(Value::as_array)
+                    .map(|items| items.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                let selected: Vec<crate::diff::ReviewNote> = self
+                    .diff
+                    .notes
+                    .iter()
+                    .filter(|note| {
+                        if all_open {
+                            note.state == crate::diff::NoteState::Open
+                        } else {
+                            ids.contains(&note.id.as_str())
+                        }
+                    })
+                    .cloned()
+                    .collect();
+                if selected.is_empty() {
+                    return Err(diff_err("select at least one review note".to_string()));
+                }
+                let params = json!({"target":target});
+                let pane_id = self.resolve_agent_target(&params)?;
+                let selected_ids: Vec<String> =
+                    selected.iter().map(|note| note.id.clone()).collect();
+                let count = self
+                    .deliver_diff_notes(pane_id, target, &selected_ids)
+                    .map_err(diff_err)?;
+                Ok(
+                    json!({"type":"diff_note_send","pane":pane_id.0.to_string(),"target":target,"count":count}),
+                )
+            }
             // ── git (docs/17) — fast local-git reads + open the git tab ──
             "git.status" => {
                 let cwd = self.git_workspace_cwd(p);
@@ -1558,6 +2260,7 @@ impl App {
                 Ok(json!({"type":"ok"}))
             }
             "files.tree" => {
+                self.prepare_file_tree_api(false);
                 let rows: Vec<Value> = self
                     .file_tree
                     .visible_rows()
@@ -1588,7 +2291,7 @@ impl App {
                 Ok(json!({"type":"ok"}))
             }
             "files.refresh" => {
-                self.file_tree.invalidate();
+                self.prepare_file_tree_api(true);
                 Ok(json!({"type":"ok"}))
             }
             // ── worktrees (docs/18 WT-3) ──
@@ -1980,7 +2683,7 @@ impl App {
 
     /// Whether `pane` currently hosts a recognised agent (detection) or a bound
     /// agent session — the same test `agent.list` uses to decide what is an agent.
-    fn is_agent_pane(&self, pane: PaneId) -> bool {
+    pub(crate) fn is_agent_pane(&self, pane: PaneId) -> bool {
         self.status
             .get(&pane)
             .is_some_and(|s| self.manifests.is_agent(&s.agent) || s.agent_session.is_some())
@@ -2084,6 +2787,24 @@ fn tab_move_error(err: TabMoveError) -> (String, String) {
     let message = match err {
         TabMoveError::PositionOutOfRange => "tab position is out of range",
         TabMoveError::SamePosition => "source and destination tab positions must differ",
+        TabMoveError::AlreadyFirst => "tab is already at the left edge",
+        TabMoveError::AlreadyLast => "tab is already at the right edge",
+    };
+    ("invalid_request".to_string(), message.to_string())
+}
+
+fn tab_focus_error(err: TabFocusError) -> (String, String) {
+    let message = match err {
+        TabFocusError::PositionOutOfRange => "tab position is out of range",
+    };
+    ("invalid_request".to_string(), message.to_string())
+}
+
+fn tab_rename_error(err: TabRenameError) -> (String, String) {
+    let message = match err {
+        TabRenameError::PositionOutOfRange => "tab position is out of range",
+        TabRenameError::Dashboard => "dashboard tabs cannot be renamed",
+        TabRenameError::NameTooLong => "tab name must be at most 40 characters",
     };
     ("invalid_request".to_string(), message.to_string())
 }
@@ -2199,6 +2920,104 @@ fn git_err(e: String) -> (String, String) {
     ("git_error".to_string(), e)
 }
 
+fn diff_err(e: String) -> (String, String) {
+    ("diff_error".to_string(), e)
+}
+
+fn parse_diff_layer(value: &str) -> Result<crate::diff::DiffLayer, (String, String)> {
+    match value {
+        "staged" => Ok(crate::diff::DiffLayer::Staged),
+        "worktree" | "unstaged" => Ok(crate::diff::DiffLayer::Worktree),
+        "untracked" => Ok(crate::diff::DiffLayer::Untracked),
+        "conflict" => Ok(crate::diff::DiffLayer::Conflict),
+        _ => Err(diff_err(
+            "layer must be staged, worktree, untracked, or conflict".to_string(),
+        )),
+    }
+}
+
+fn diff_file_json(file: &crate::diff::DiffFile) -> Value {
+    json!({
+        "path":file.key.display_path(),
+        "path_raw_hex":file.key.new_path.as_ref().or(file.key.old_path.as_ref()).map(|path| path.raw_hex.as_str()),
+        "old_path":file.key.old_path.as_ref().map(|path| path.display.as_str()),
+        "old_path_raw_hex":file.key.old_path.as_ref().map(|path| path.raw_hex.as_str()),
+        "layer":file.key.layer.label(),
+        "status":file.status.badge(),
+        "additions":file.additions,
+        "deletions":file.deletions,
+        "binary":file.binary,
+        "notes":file.unresolved_notes,
+        "viewed":file.viewed(),
+        "modified_since_review":file.modified_since_review(),
+        "fingerprint":file.fingerprint,
+    })
+}
+
+fn parse_note_kind(value: &str) -> Result<crate::diff::NoteKind, (String, String)> {
+    match value {
+        "question" => Ok(crate::diff::NoteKind::Question),
+        "issue" => Ok(crate::diff::NoteKind::Issue),
+        "suggestion" => Ok(crate::diff::NoteKind::Suggestion),
+        "praise" => Ok(crate::diff::NoteKind::Praise),
+        _ => Err(diff_err(
+            "note kind must be question, issue, suggestion, or praise".to_string(),
+        )),
+    }
+}
+
+fn parse_note_state(value: &str) -> Result<crate::diff::NoteState, (String, String)> {
+    match value {
+        "open" => Ok(crate::diff::NoteState::Open),
+        "resolved" => Ok(crate::diff::NoteState::Resolved),
+        "outdated" => Ok(crate::diff::NoteState::Outdated),
+        "orphaned" => Ok(crate::diff::NoteState::Orphaned),
+        _ => Err(diff_err(
+            "note state must be open, resolved, outdated, or orphaned".to_string(),
+        )),
+    }
+}
+
+fn diff_line_param(value: &Value, key: &str) -> Result<Option<u32>, (String, String)> {
+    let Some(raw) = value.get(key) else {
+        return Ok(None);
+    };
+    let number = raw
+        .as_u64()
+        .filter(|number| *number > 0 && *number <= u32::MAX as u64)
+        .ok_or_else(|| diff_err(format!("{key} must be a positive line number")))?;
+    Ok(Some(number as u32))
+}
+
+fn note_state_label(state: crate::diff::NoteState) -> &'static str {
+    match state {
+        crate::diff::NoteState::Open => "open",
+        crate::diff::NoteState::Resolved => "resolved",
+        crate::diff::NoteState::Outdated => "outdated",
+        crate::diff::NoteState::Orphaned => "orphaned",
+    }
+}
+
+fn note_json(note: &crate::diff::ReviewNote) -> Value {
+    json!({
+        "id":note.id,
+        "review":note.review_id,
+        "author":note.author,
+        "kind":note.kind.label(),
+        "body":note.body,
+        "state":note_state_label(note.state),
+        "path":note.anchor.diff_key.display_path(),
+        "layer":note.anchor.diff_key.layer.label(),
+        "side":note.anchor.side.label(),
+        "start_line":note.anchor.start_line,
+        "end_line":note.anchor.end_line,
+        "revision":note.revision,
+        "deliveries":note.deliveries,
+        "created_at_ms":note.created_at_ms,
+        "updated_at_ms":note.updated_at_ms,
+    })
+}
+
 /// Required `path` string param → a `PathBuf`.
 fn param_path(p: &Value) -> Result<PathBuf, (String, String)> {
     p.get("path")
@@ -2209,6 +3028,35 @@ fn param_path(p: &Value) -> Result<PathBuf, (String, String)> {
 
 fn module_err(e: String) -> (String, String) {
     ("module_error".to_string(), e)
+}
+
+fn validate_bar_actions(
+    app: &App,
+    owner: &str,
+    segments: &[crate::bar::BarSegment],
+) -> Result<(), (String, String)> {
+    for segment in segments {
+        validate_bar_action(app, owner, segment.action.as_deref())?;
+    }
+    Ok(())
+}
+
+fn validate_bar_action(
+    app: &App,
+    owner: &str,
+    action: Option<&str>,
+) -> Result<(), (String, String)> {
+    let module = app
+        .modules
+        .find(owner)
+        .filter(|module| module.is_runnable())
+        .ok_or_else(|| module_err(format!("module {owner} is unavailable")))?;
+    if let Some(action) = action {
+        if module.manifest.action(action).is_none() {
+            return Err(module_err(format!("module {owner} has no action {action}")));
+        }
+    }
+    Ok(())
 }
 
 /// Require a non-empty string param.
@@ -2258,6 +3106,7 @@ fn module_json(m: &crate::module::InstalledModule) -> Value {
         "source": m.source,
         "actions": m.manifest.actions.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
         "panes": m.manifest.panes.iter().map(|pe| pe.id.clone()).collect::<Vec<_>>(),
+        "bars": m.manifest.bars.iter().map(|bar| bar.id.clone()).collect::<Vec<_>>(),
         "warning": m.warning,
     })
 }
@@ -2314,6 +3163,274 @@ fn state_str(s: State) -> &'static str {
 mod tests {
     use super::*;
     use crate::app::App;
+
+    fn run_git(repo: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git should run");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn diff_api_validates_anchors_and_preserves_atomic_note_lifecycle() {
+        let _env = crate::persist::test_env("diff-api");
+        let repo = std::path::PathBuf::from(std::env::var_os("LUVUS_HOME").unwrap()).join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-q"]);
+        run_git(&repo, &["config", "user.name", "Luvus Test"]);
+        run_git(&repo, &["config", "user.email", "luvus@example.invalid"]);
+        std::fs::write(repo.join("file.txt"), "old line\nstable\n").unwrap();
+        run_git(&repo, &["add", "file.txt"]);
+        run_git(&repo, &["commit", "-q", "-m", "base"]);
+        std::fs::write(repo.join("file.txt"), "new line\nstable\n").unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.workspaces[0].cwd = repo;
+
+        let token = 1;
+        app.diff.status_generation = token;
+        let snapshot = crate::diff::git::scan(&app.workspaces[0].cwd, token).unwrap();
+        assert!(app.apply_diff_status(token, app.workspaces[0].cwd.clone(), Ok(snapshot)));
+        let refreshed = app.dispatch("diff.refresh", &json!({})).unwrap();
+        assert_eq!(refreshed["refresh"], "complete");
+        let listed = app
+            .dispatch("diff.list", &json!({"layer":"worktree"}))
+            .unwrap();
+        assert_eq!(listed["files"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["files"][0]["path"], "file.txt");
+
+        let loaded = app
+            .dispatch(
+                "diff.get",
+                &json!({"path":"file.txt","layer":"worktree","include_patch":true}),
+            )
+            .unwrap();
+        assert_eq!(loaded["additions"], 1);
+        assert_eq!(loaded["deletions"], 1);
+        assert!(loaded["hunks"][0]["lines"].is_array());
+
+        let opened = app
+            .dispatch(
+                "diff.open",
+                &json!({"path":"file.txt","layer":"worktree","placement":"tab","view":"stack"}),
+            )
+            .unwrap();
+        let pane = opened["pane"].as_str().unwrap();
+        assert!(app
+            .dispatch("diff.navigate", &json!({"pane":pane,"action":"next_line"}))
+            .is_ok());
+
+        let invalid_state = app
+            .dispatch("diff.note.list", &json!({"state":"unknown"}))
+            .expect_err("unknown note states must not silently produce an empty list");
+        assert_eq!(invalid_state.0, "diff_error");
+
+        let empty_send = app
+            .dispatch("diff.note.send", &json!({"to":"missing-agent","ids":[]}))
+            .expect_err("empty review selection must fail before target resolution");
+        assert_eq!(empty_send.0, "diff_error");
+        assert_eq!(empty_send.1, "select at least one review note");
+
+        let invalid_anchor = app
+            .dispatch(
+                "diff.note.add",
+                &json!({"file":"file.txt","layer":"worktree","new_line":99,"body":"missing"}),
+            )
+            .expect_err("a note must reference a source line in the loaded diff");
+        assert_eq!(invalid_anchor.0, "diff_error");
+        assert!(app.diff.notes.is_empty());
+
+        let added = app
+            .dispatch(
+                "diff.note.add",
+                &json!({"file":"file.txt","layer":"worktree","new_line":1,"body":"check this"}),
+            )
+            .unwrap();
+        let note_id = added["note"]["id"].as_str().unwrap().to_string();
+        assert_eq!(app.diff.notes[0].anchor.context, "new line");
+        assert_ne!(
+            app.diff.notes[0].anchor.context_sha256,
+            crate::diff::notes::context_hash("")
+        );
+        let open = app
+            .dispatch("diff.note.list", &json!({"state":"open"}))
+            .unwrap();
+        assert_eq!(open["notes"].as_array().unwrap().len(), 1);
+
+        let edited = app
+            .dispatch("diff.note.edit", &json!({"id":note_id,"body":"updated"}))
+            .unwrap();
+        assert_eq!(edited["note"]["body"], "updated");
+        let resolved = app
+            .dispatch("diff.note.resolve", &json!({"id":note_id}))
+            .unwrap();
+        assert_eq!(resolved["note"]["state"], "resolved");
+        let reopened = app
+            .dispatch("diff.note.reopen", &json!({"id":note_id}))
+            .unwrap();
+        assert_eq!(reopened["note"]["state"], "open");
+        app.dispatch("diff.note.remove", &json!({"id":note_id}))
+            .unwrap();
+        assert!(app.diff.notes.is_empty());
+
+        let batch = app
+            .dispatch(
+                "diff.note.apply",
+                &json!({"notes":[
+                    {"file":"file.txt","layer":"worktree","new_line":1,"body":"valid"},
+                    {"file":"file.txt","layer":"worktree","new_line":99,"body":"invalid"}
+                ]}),
+            )
+            .expect_err("one invalid anchor must reject the whole batch");
+        assert_eq!(batch.0, "diff_error");
+        assert!(app.diff.notes.is_empty());
+        assert!(crate::diff::notes::load(
+            &app.diff.snapshot.as_ref().unwrap().repo_id,
+            app.diff.loaded_review.as_ref().unwrap()
+        )
+        .unwrap()
+        .is_empty());
+    }
+
+    #[test]
+    fn theme_api_lists_validates_and_applies_registry_entries() {
+        let _env = crate::persist::test_env("theme-api");
+        let source = crate::persist::ensure_config_dir().join("api-theme.toml");
+        crate::theme::install::init(&source, "api-theme", Some("noir")).unwrap();
+        crate::theme::install::install(source.to_str().unwrap(), true).unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        let listed = app.dispatch("theme.list", &json!({})).unwrap();
+        assert!(listed["themes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == "api-theme"));
+        assert!(app
+            .dispatch("theme.use", &json!({"id": "missing"}))
+            .is_err());
+        let selected = app
+            .dispatch("theme.use", &json!({"id": "api-theme"}))
+            .unwrap();
+        assert_eq!(selected["id"], "api-theme");
+        assert_eq!(app.config.theme, "api-theme");
+    }
+
+    #[test]
+    fn bar_api_validates_ownership_and_preserves_the_last_valid_widget() {
+        let _env = crate::persist::test_env("bar-api");
+        let module =
+            std::path::PathBuf::from(std::env::var_os("LUVUS_HOME").unwrap()).join("bar-module");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(
+            module.join("luvus-module.toml"),
+            r#"
+id = "you.ci"
+name = "CI"
+version = "0.1.0"
+min_luvus_version = "0.1.0"
+
+[[bars]]
+id = "status"
+title = "CI status"
+region = "top-right"
+priority = 60
+
+[[actions]]
+id = "details"
+title = "Details"
+command = ["true"]
+"#,
+        )
+        .unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.module_link_with(&module, true, None).unwrap();
+
+        let valid = json!({
+            "owner": "you.ci",
+            "id": "status",
+            "content": [
+                {"type":"text","text":"CI"},
+                {"type":"state","state":"done","action":"details","value":"run-1"}
+            ],
+            "compact_content": [{"type":"state","state":"done"}]
+        });
+        let result = app.dispatch("ui.bar.push", &valid).unwrap();
+        assert_eq!(result["changed"], true);
+        let before = app.bar.widgets["you.ci:status"].clone();
+
+        let mut invalid = valid;
+        invalid["content"] = json!([{"type":"text","text":"\u{1b}[31mraw"}]);
+        assert!(app.dispatch("ui.bar.push", &invalid).is_err());
+        assert_eq!(app.bar.widgets["you.ci:status"], before);
+
+        let mut wrong_action = invalid;
+        wrong_action["content"] =
+            json!([{"type":"text","text":"bad","action":"other-module-action"}]);
+        assert!(app.dispatch("ui.bar.push", &wrong_action).is_err());
+        assert_eq!(app.bar.widgets["you.ci:status"], before);
+
+        app.dispatch(
+            "ui.bar.move",
+            &json!({"owner":"you.ci","id":"status","region":"bottom-right"}),
+        )
+        .unwrap();
+        assert_eq!(
+            app.config
+                .bars
+                .region_for("you.ci:status", crate::bar::BarRegion::TopRight),
+            Some(crate::bar::BarRegion::BottomRight)
+        );
+        app.config.bars.bottom_right.push("other:widget".into());
+        let order = app.config.bars.bottom_right.clone();
+        app.dispatch(
+            "ui.bar.move",
+            &json!({"owner":"you.ci","id":"status","region":"bottom-right"}),
+        )
+        .unwrap();
+        assert_eq!(
+            app.config.bars.bottom_right, order,
+            "an identical move must not rewrite or reorder persisted placement"
+        );
+        app.module_set_enabled("you.ci", false).unwrap();
+        assert!(!app.bar.widgets.contains_key("you.ci:status"));
+    }
+
+    #[test]
+    fn unowned_notifications_share_the_same_rate_limit() {
+        let _env = crate::persist::test_env("anonymous-notification-rate");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let request = json!({"text":"build finished"});
+
+        for invalid in [
+            json!({"text":"build finished","ttl_ms":0}),
+            json!({"text":"bad\u{1b}content"}),
+        ] {
+            for _ in 0..40 {
+                let error = app
+                    .dispatch("ui.notification.push", &invalid)
+                    .expect_err("invalid payloads must be rejected before rate limiting");
+                assert_eq!(error.0, "invalid_request");
+            }
+        }
+        for _ in 0..30 {
+            app.dispatch("ui.notification.push", &request).unwrap();
+        }
+        let error = app
+            .dispatch("ui.notification.push", &request)
+            .expect_err("the shared anonymous bucket must be bounded");
+        assert_eq!(error.0, "rate_limited");
+    }
 
     #[test]
     fn strip_title_icon_drops_a_leading_glyph_only() {
@@ -2409,7 +3526,7 @@ mod tests {
         // `dock_menu_click_spawns_the_action_with_the_clicked_rows_env`.
     }
 
-    /// The notch companion (docs/24) patches its rows from **both** `agent.list`
+    /// External clients patch their rows from **both** `agent.list`
     /// and `pane.agent_status_changed`. If the two disagree about what `project`
     /// means, a renamed node visibly alternates between its label and its folder
     /// basename as snapshots and events interleave. Pin the contract: both carry
@@ -2434,7 +3551,7 @@ mod tests {
         let row = &out["agents"][0];
         assert_eq!(row["agent"], "claude");
         assert_eq!(row["status"], "working");
-        // The label the notch renders, and the legacy field it falls back to.
+        // The label an API client renders, and the legacy field it falls back to.
         assert_eq!(row["project"], "renamed-node");
         assert_eq!(row["workspace_name"], "renamed-node");
         assert_eq!(row["branch"], "feat/x");
@@ -2937,6 +4054,30 @@ mod tests {
             Some("c")
         );
 
+        let out = app
+            .dispatch("tab.move", &json!({"tab": 3, "to": 1, "direction": null}))
+            .expect("null direction uses explicit tab positions");
+        assert_eq!(
+            out,
+            json!({
+                "type": "tab_move",
+                "from": "3",
+                "to": "1",
+                "active": "3",
+            })
+        );
+        let names = app
+            .ws()
+            .tabs
+            .iter()
+            .map(|tab| tab.name.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["a", "b", "c"]);
+        assert_eq!(
+            app.ws().tabs[app.ws().active_tab].name.as_deref(),
+            Some("c")
+        );
+
         for params in [
             json!({"tab": 0, "to": 1}),
             json!({"tab": 1, "to": 1}),
@@ -2948,6 +4089,183 @@ mod tests {
                 .expect_err("invalid tab move must fail");
             assert_eq!(err.0, "invalid_request", "params: {params}");
         }
+    }
+
+    #[test]
+    fn tab_move_api_supports_directional_active_and_explicit_targets() {
+        let _env = crate::persist::test_env("tab-move-direction-api");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].tabs[0].name = Some("a".into());
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        app.workspaces[0].tabs[1].name = Some("b".into());
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        app.workspaces[0].tabs[2].name = Some("c".into());
+
+        let out = app
+            .dispatch("tab.move", &json!({"direction": "left"}))
+            .expect("active tab moves left");
+        assert_eq!(
+            out,
+            json!({"type":"tab_move", "from":"3", "to":"2", "active":"2"})
+        );
+        let names = |app: &App| {
+            app.ws()
+                .tabs
+                .iter()
+                .map(|tab| tab.name.clone().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&app), ["a", "c", "b"]);
+
+        let out = app
+            .dispatch("tab.move", &json!({"direction": "right", "tab": 1}))
+            .expect("explicit tab moves right");
+        assert_eq!(
+            out,
+            json!({"type":"tab_move", "from":"1", "to":"2", "active":"1"})
+        );
+        assert_eq!(names(&app), ["c", "a", "b"]);
+        assert_eq!(
+            app.ws().tabs[app.ws().active_tab].name.as_deref(),
+            Some("c"),
+            "active tab identity is preserved"
+        );
+
+        for params in [
+            json!({"direction": "left", "tab": 1}),
+            json!({"direction": "right", "tab": 3}),
+            json!({"direction": "up"}),
+            json!({"direction": "left", "to": 1}),
+            json!({"direction": "right", "tab": 0}),
+        ] {
+            let before = names(&app);
+            let err = app
+                .dispatch("tab.move", &params)
+                .expect_err("invalid directional move must fail");
+            assert_eq!(err.0, "invalid_request", "params: {params}");
+            assert_eq!(names(&app), before, "failure is atomic: {params}");
+        }
+    }
+
+    #[test]
+    fn tab_swap_api_exchanges_positions_and_preserves_active_identity() {
+        let _env = crate::persist::test_env("tab-swap-api");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].tabs[0].name = Some("a".into());
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        app.workspaces[0].tabs[1].name = Some("b".into());
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        app.workspaces[0].tabs[2].name = Some("c".into());
+
+        let out = app
+            .dispatch("tab.swap", &json!({"tab": 1, "with": "3"}))
+            .expect("valid tab swap");
+        assert_eq!(
+            out,
+            json!({"type":"tab_swap", "tab":"1", "with":"3", "active":"1"})
+        );
+        let names = |app: &App| {
+            app.ws()
+                .tabs
+                .iter()
+                .map(|tab| tab.name.clone().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&app), ["c", "b", "a"]);
+        assert_eq!(
+            app.ws().tabs[app.ws().active_tab].name.as_deref(),
+            Some("c")
+        );
+
+        for params in [
+            json!({}),
+            json!({"tab": 0, "with": 1}),
+            json!({"tab": 1, "with": 1}),
+            json!({"tab": 1, "with": 9}),
+        ] {
+            let before = names(&app);
+            let err = app
+                .dispatch("tab.swap", &params)
+                .expect_err("invalid tab swap must fail");
+            assert_eq!(err.0, "invalid_request", "params: {params}");
+            let after = names(&app);
+            assert_eq!(after, before, "failure is atomic: {params}");
+        }
+    }
+
+    #[test]
+    fn tab_focus_api_requires_an_existing_one_based_position() {
+        let _env = crate::persist::test_env("tab-focus-api");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+
+        assert_eq!(
+            app.dispatch("tab.focus", &json!({"tab": "1"})),
+            Ok(json!({"type": "ok"}))
+        );
+        assert_eq!(app.ws().active_tab, 0);
+
+        for params in [json!({}), json!({"tab": 0}), json!({"tab": 3})] {
+            let before = app.ws().active_tab;
+            let err = app
+                .dispatch("tab.focus", &params)
+                .expect_err("invalid focus must fail");
+            assert_eq!(err.0, "invalid_request", "params: {params}");
+            assert_eq!(app.ws().active_tab, before, "failure is atomic");
+        }
+    }
+
+    #[test]
+    fn tab_rename_api_validates_target_name_and_dashboard_kind() {
+        let _env = crate::persist::test_env("tab-rename-api");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+
+        app.dispatch("tab.rename", &json!({"name": "active"}))
+            .expect("omitting tab targets the active tab");
+        assert_eq!(app.ws().tabs[1].name.as_deref(), Some("active"));
+
+        app.dispatch("tab.rename", &json!({"tab": 1, "name": " first "}))
+            .expect("explicit one-based tab is accepted");
+        assert_eq!(app.ws().tabs[0].name.as_deref(), Some("first"));
+        app.dispatch("tab.rename", &json!({"tab": 1, "name": ""}))
+            .expect("an explicit empty name clears the label");
+        assert_eq!(app.ws().tabs[0].name, None);
+
+        let names = |app: &App| {
+            app.ws()
+                .tabs
+                .iter()
+                .map(|tab| tab.name.clone())
+                .collect::<Vec<_>>()
+        };
+        for params in [
+            json!({"tab": 0, "name": "wrong"}),
+            json!({"tab": "nope", "name": "wrong"}),
+            json!({"tab": 9, "name": "wrong"}),
+            json!({"tab": 1}),
+            json!({"tab": 1, "name": 7}),
+            json!({"tab": 1, "name": "x".repeat(41)}),
+        ] {
+            let before = names(&app);
+            let err = app
+                .dispatch("tab.rename", &params)
+                .expect_err("invalid rename must fail");
+            assert_eq!(err.0, "invalid_request", "params: {params}");
+            assert_eq!(names(&app), before, "failure is atomic: {params}");
+        }
+
+        app.open_mission_control(0);
+        let mission = app.ws().active_tab + 1;
+        let err = app
+            .dispatch("tab.rename", &json!({"tab": mission, "name": "wrong"}))
+            .expect_err("dashboard rename must fail");
+        assert_eq!(err.0, "invalid_request");
+        assert!(app.ws().tabs[mission - 1].name.is_none());
     }
 
     #[test]

@@ -19,10 +19,13 @@ pub fn is_cli(args: &[String]) -> bool {
                 | "workspace"
                 | "tab"
                 | "agent"
+                | "bar"
                 | "ui"
                 | "events"
                 | "module"
+                | "theme"
                 | "git"
+                | "diff"
                 | "files"
                 | "worktree"
                 | "task"
@@ -53,10 +56,13 @@ Commands:
   agent        Start, fork, message, inspect, and resume coding agents
   files        Browse and open workspace files
   git          Inspect repository state and open the Git UI
+  diff         Review Git diffs, notes, and agent feedback
   worktree     Create, open, list, and remove Git worktrees
   task         Coordinate work across multiple coding agents
   lease        Reserve file paths for active tasks
   module       Find, install, configure, and run extensions
+  theme        List, create, validate, install, and select themes
+  bar          Publish and arrange top and bottom status widgets
   ui           Configure sidebars, docks, and notifications
   session      List, attach, stop, and delete server sessions
   server       Inspect and manage the selected background server
@@ -115,7 +121,9 @@ tabs:
   tab list                   list tabs in the current workspace
   tab new                    new tab
   tab focus <n>              focus tab n (1-based)
-  tab move <from> <to>       reorder tabs in the current workspace (1-based)
+  tab move <from> <to>       move a tab to an exact position (1-based)
+  tab move left|right        move the active tab one position (--tab N targets one)
+  tab swap <first> <second>  exchange two tab positions (1-based)
   tab rename <name>          name a tab (--tab N to target one; empty clears it)
   tab close [<n>]            close a tab (default: active)
 
@@ -156,6 +164,28 @@ panes / agents:
 search:
   search <text...> [--case]  find text across every pane's scrollback (docs/63);
                              --case is case-sensitive; returns matches as JSON
+  search --fuzzy <query...> [--scope all|navigate|files|output] [--all-sessions]
+                           [--limit <1-200>] [--case] [--json]
+                             rank navigation, file paths, and retained output;
+                             legacy search stays exact unless --fuzzy is passed
+
+themes:
+  theme list [--json]       list built-in, installed, and virtual themes
+  theme path                print/create the shared themes directory
+  theme init <id> [--extends <id>]   write an editable TOML starter
+  theme validate <path> [--strict] [--json]   validate without installing
+  theme install <source> [--yes]     install a local file, HTTPS URL, GitHub repo, or community/<id>
+  theme use <id>            select and persist a registered theme
+  theme uninstall <id>      remove an inactive local theme
+  theme reload              rescan installed themes in the selected server
+
+bars:
+  bar list                   list declared Luvus Bar widgets and live content
+  bar push --id <id> [--region top-right|bottom-right] --content <json>
+                             publish validated live widget segments;
+                             --content-file, --compact-content, --text and --state supported
+  bar move --id <id> --region top-right|bottom-right|off
+  bar remove --id <id>       clear live widget content, preserving placement
 
 appearance:
   ui sidebar [--side left|right] --width <n>     set a sidebar's width (columns)
@@ -165,6 +195,8 @@ appearance:
   ui dock push --id <id> [--title <t>] [--side left|right] [--rows <json>]
                              feed a module's sidebar dock its rows (JSON array,
                              or piped on stdin). See docs/29 + the website
+  ui notification push --text <text> [--level info|success|warning|error]
+  ui notification clear [--dedupe-key <key>]
   ui toast <text>            flash a one-line message in the UI
 
 modules (extensions):
@@ -195,6 +227,20 @@ git:
   files open <path> [--target pane|tab|preview]   open a file in a view
   files reveal <path>        expand the tree to a path
   files refresh              re-read the tree from disk
+
+diff review:
+  diff list [--layer staged|worktree|untracked|conflict]   list exact diff layers
+  diff open [<path>] [--layer <layer>] [--view auto|split|stack]
+                             [--placement preview|pane|tab]
+  diff get <path> [--layer <layer>] [--include-patch]   inspect a bounded semantic diff
+  diff refresh               refresh the shared FILES and DIFF index
+  diff note add --file <path> (--old-line N|--new-line N) --body <text>
+                             [--end-line N] [--kind question|issue|suggestion|praise]
+  diff note list [--file <path>] [--state open|resolved|outdated|orphaned]
+  diff note edit <id> --body <text>
+  diff note resolve|reopen <id>
+  diff note remove <id> --yes
+  diff note send --to <agent> [<id>...] [--all-open]
 
 worktrees:
   worktree list              list the current repo's worktrees
@@ -281,6 +327,9 @@ pub fn run(args: &[String]) -> Result<i32> {
     }
     if args.get(1).map(String::as_str) == Some("session") {
         return session_cmd(&args[2.min(args.len())..]);
+    }
+    if args.get(1).map(String::as_str) == Some("theme") {
+        return theme_cmd(&args[2.min(args.len())..]);
     }
     // `doctor` is a local environment check — no server needed.
     if args.get(1).map(String::as_str) == Some("doctor") {
@@ -401,10 +450,13 @@ fn help_topic_has_subcommands(topic: &str) -> bool {
             | "agent"
             | "files"
             | "git"
+            | "diff"
             | "worktree"
             | "task"
             | "lease"
             | "module"
+            | "theme"
+            | "bar"
             | "ui"
             | "session"
             | "server"
@@ -417,8 +469,10 @@ fn help_topic_has_subcommands(topic: &str) -> bool {
 fn normalize_help_topic(topic: &str) -> Option<&str> {
     match topic {
         "workspace" | "tab" | "pane" | "agent" | "files" | "git" | "worktree" | "task"
-        | "lease" | "module" | "ui" | "session" | "server" | "integration" | "skill" | "wait"
-        | "search" | "events" | "ping" | "doctor" | "attach" => Some(topic),
+        | "lease" | "module" | "theme" | "bar" | "ui" | "session" | "server" | "integration"
+        | "diff" | "skill" | "wait" | "search" | "events" | "ping" | "doctor" | "attach" => {
+            Some(topic)
+        }
         "node" => Some("pane"),
         "remote" | "--remote" => Some("remote"),
         _ => None,
@@ -475,11 +529,19 @@ fn write_topic_help(
             detailed_section("panes / agents:\n", "\nsearch:\n"),
         ),
         "search" => (
-            "luvus search <text...> [--case]",
-            detailed_section("search:\n", "\nappearance:\n"),
+            "luvus search <text...> [--case]\n       luvus search --fuzzy <query...> [--scope all|navigate|files|output] [--all-sessions] [--limit 1-200] [--case] [--json]",
+            detailed_section("search:\n", "\nthemes:\n"),
+        ),
+        "theme" => (
+            "luvus theme <list|path|init|validate|install|use|uninstall|reload> [args]",
+            detailed_section("themes:\n", "\nbars:\n"),
+        ),
+        "bar" => (
+            "luvus bar <list|push|move|remove> [args]",
+            detailed_section("bars:\n", "\nappearance:\n"),
         ),
         "ui" => (
-            "luvus ui <sidebar|dock|toast> [args]",
+            "luvus ui <sidebar|dock|notification|toast> [args]",
             detailed_section("appearance:\n", "\nmodules (extensions):\n"),
         ),
         "module" => (
@@ -488,11 +550,15 @@ fn write_topic_help(
         ),
         "git" => (
             "luvus git <status|branches|log|open> [args]",
-            detailed_section("git:\n", "\nworktrees:\n"),
+            detailed_section("git:\n", "\ndiff review:\n"),
         ),
         "files" => (
             "luvus files <tree|open|reveal|refresh> [args]",
-            detailed_section("git:\n", "\nworktrees:\n"),
+            detailed_section("git:\n", "\ndiff review:\n"),
+        ),
+        "diff" => (
+            "luvus diff <list|open|get|refresh|note> [args]",
+            detailed_section("diff review:\n", "\nworktrees:\n"),
         ),
         "worktree" => (
             "luvus worktree <command> [args]",
@@ -746,6 +812,268 @@ fn session_error(code: &str, message: &str, json_output: bool) -> Result<i32> {
     Ok(1)
 }
 
+fn theme_cmd(args: &[String]) -> Result<i32> {
+    let subcommand = args.first().map(String::as_str).unwrap_or("list");
+    let json_output = args.iter().any(|arg| arg == "--json");
+    match subcommand {
+        "list" => {
+            if args.iter().skip(1).any(|arg| arg != "--json") {
+                return Err(anyhow!("usage: luvus theme list [--json]"));
+            }
+            let registry = crate::theme::ThemeRegistry::load();
+            let active = crate::config::load().theme;
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&registry.list_json(&active))?
+                );
+            } else {
+                for entry in registry.entries() {
+                    let marker = if crate::ui::theme::canonical(&active) == entry.id {
+                        '*'
+                    } else {
+                        ' '
+                    };
+                    let source = match &entry.source {
+                        crate::theme::registry::ThemeSource::BuiltIn => "built-in",
+                        crate::theme::registry::ThemeSource::Local { .. } => "local",
+                        crate::theme::registry::ThemeSource::Virtual => "virtual",
+                    };
+                    println!(
+                        "{marker} {:<28} {:<9} {}",
+                        entry.id, source, entry.description
+                    );
+                    for warning in &entry.warnings {
+                        println!("    warning: {warning}");
+                    }
+                }
+                for problem in registry.problems() {
+                    eprintln!("invalid {}: {}", problem.path, problem.message);
+                }
+            }
+            Ok(if registry.problems().is_empty() { 0 } else { 1 })
+        }
+        "path" => {
+            reject_theme_extras(args, 1, "usage: luvus theme path")?;
+            println!("{}", crate::theme::ensure_themes_dir()?.display());
+            Ok(0)
+        }
+        "init" => {
+            let id = args
+                .get(1)
+                .filter(|arg| !arg.starts_with('-'))
+                .ok_or_else(|| anyhow!("usage: luvus theme init <id> [--extends <id>]"))?;
+            if !matches!(args.len(), 2 | 4)
+                || (args.len() == 4 && args.get(2).map(String::as_str) != Some("--extends"))
+            {
+                return Err(anyhow!("usage: luvus theme init <id> [--extends <id>]"));
+            }
+            let parent = flag(args, "--extends");
+            let path = std::path::PathBuf::from(format!("{id}.toml"));
+            crate::theme::install::init(&path, id, parent.as_deref())?;
+            println!("created {}", path.display());
+            Ok(0)
+        }
+        "validate" => {
+            let path = args
+                .get(1)
+                .filter(|arg| !arg.starts_with('-'))
+                .ok_or_else(|| anyhow!("usage: luvus theme validate <path> [--strict] [--json]"))?;
+            if args
+                .iter()
+                .skip(2)
+                .any(|arg| !matches!(arg.as_str(), "--strict" | "--json"))
+            {
+                return Err(anyhow!(
+                    "usage: luvus theme validate <path> [--strict] [--json]"
+                ));
+            }
+            let strict = args.iter().any(|arg| arg == "--strict");
+            let (file, warnings) =
+                match crate::theme::install::validate_path(std::path::Path::new(path), strict) {
+                    Ok(validated) => validated,
+                    Err(error) if json_output => {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&json!({
+                                "valid": false,
+                                "error": format!("{error:#}"),
+                            }))?
+                        );
+                        return Ok(1);
+                    }
+                    Err(error) => return Err(error),
+                };
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "valid": true,
+                        "id": file.id,
+                        "display_name": file.display_name,
+                        "warnings": warnings,
+                    }))?
+                );
+            } else {
+                println!("valid theme: {} ({})", file.display_name, file.id);
+                for warning in warnings {
+                    println!("warning: {warning}");
+                }
+            }
+            Ok(0)
+        }
+        "install" => {
+            let source = args
+                .get(1)
+                .filter(|arg| !arg.starts_with('-'))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "usage: luvus theme install <path|https-url|github-repo|community/id> [--yes]"
+                    )
+                })?;
+            if args
+                .iter()
+                .skip(2)
+                .any(|arg| !matches!(arg.as_str(), "--yes" | "-y"))
+            {
+                return Err(anyhow!(
+                    "usage: luvus theme install <path|https-url|github-repo|community/id> [--yes]"
+                ));
+            }
+            let yes = args
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "--yes" | "-y"));
+            let installed = crate::theme::install::install(source, yes)?;
+            let reloaded = reload_theme_server()?;
+            println!(
+                "installed {} ({}) from {} to {}{}",
+                installed.display_name,
+                installed.id,
+                installed.source,
+                installed.path.display(),
+                if reloaded {
+                    " and reloaded the selected server"
+                } else {
+                    " — start or reload Luvus to use it"
+                }
+            );
+            for warning in installed.warnings {
+                println!("warning: {warning}");
+            }
+            Ok(0)
+        }
+        "use" => {
+            let id = args
+                .get(1)
+                .filter(|arg| !arg.starts_with('-'))
+                .ok_or_else(|| anyhow!("usage: luvus theme use <id>"))?;
+            reject_theme_extras(args, 2, "usage: luvus theme use <id>")?;
+            let registry = crate::theme::ThemeRegistry::load();
+            let entry = registry
+                .get(id)
+                .ok_or_else(|| anyhow!("theme `{id}` is not installed"))?;
+            let selected = entry.id.clone();
+            match send_request("theme.use", json!({"id": selected})) {
+                Ok(response) if !is_unknown_method(&response, "theme.use") => {
+                    ensure_api_success(&response)?;
+                    println!("using theme {}", entry.id);
+                }
+                Ok(_) | Err(_) => {
+                    let mut config = crate::config::load();
+                    config.theme = selected;
+                    crate::config::save(&config);
+                    println!("using theme {} — applies when Luvus starts", entry.id);
+                }
+            }
+            Ok(0)
+        }
+        "uninstall" => {
+            let id = args
+                .get(1)
+                .filter(|arg| !arg.starts_with('-'))
+                .ok_or_else(|| anyhow!("usage: luvus theme uninstall <id>"))?;
+            reject_theme_extras(args, 2, "usage: luvus theme uninstall <id>")?;
+            let path = crate::theme::install::uninstall(id)?;
+            let reloaded = reload_theme_server()?;
+            println!(
+                "uninstalled {id} ({}){}",
+                path.display(),
+                if reloaded {
+                    " and reloaded the selected server"
+                } else {
+                    ""
+                }
+            );
+            Ok(0)
+        }
+        "reload" => {
+            reject_theme_extras(args, 1, "usage: luvus theme reload")?;
+            let registry = crate::theme::ThemeRegistry::load();
+            if !registry.problems().is_empty() {
+                for problem in registry.problems() {
+                    eprintln!("invalid {}: {}", problem.path, problem.message);
+                }
+            }
+            if reload_theme_server()? {
+                println!("reloaded {} themes", registry.entries().len());
+            } else {
+                println!(
+                    "validated {} themes — start Luvus to load them",
+                    registry.entries().len()
+                );
+            }
+            Ok(if registry.problems().is_empty() { 0 } else { 1 })
+        }
+        "help" | "--help" | "-h" => {
+            write_topic_help(std::io::stdout().lock(), "theme", None)?;
+            Ok(0)
+        }
+        _ => Err(anyhow!(
+            "usage: luvus theme <list|path|init|validate|install|use|uninstall|reload>"
+        )),
+    }
+}
+
+fn reject_theme_extras(args: &[String], expected: usize, usage: &str) -> Result<()> {
+    if args.len() != expected {
+        return Err(anyhow!(usage.to_string()));
+    }
+    Ok(())
+}
+
+fn is_unknown_method(response: &Value, method: &str) -> bool {
+    response
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .and_then(|message| message.strip_prefix("unknown method: "))
+        == Some(method)
+}
+
+fn ensure_api_success(response: &Value) -> Result<()> {
+    if let Some(error) = response.get("error") {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("theme request failed");
+        return Err(anyhow!(message.to_string()));
+    }
+    Ok(())
+}
+
+fn reload_theme_server() -> Result<bool> {
+    match send_request("theme.reload", json!({})) {
+        Ok(response) => {
+            if is_unknown_method(&response, "theme.reload") {
+                return Ok(false);
+            }
+            ensure_api_success(&response)?;
+            Ok(true)
+        }
+        Err(_) => Ok(false),
+    }
+}
+
 /// `luvus module install owner/repo[/sub] [--ref REF] [--yes]` — clone + build
 /// locally, then register over the socket (or directly if the server is down).
 fn module_install(args: &[String]) -> Result<i32> {
@@ -876,9 +1204,13 @@ fn doctor() -> i32 {
             println!("  ✓ keys    Shift+Enter works (terminal reports modified keys)");
         }
         KeyProto::Unsupported => {
-            println!("  ✗ keys    Shift+Enter can't be distinguished from Enter here");
-            println!("           ↳ use Option+Enter instead, or switch to a terminal with");
-            println!("             the keyboard protocol (Ghostty · Kitty · WezTerm · iTerm2)");
+            let is_wsl = std::env::var_os("WSL_DISTRO_NAME").is_some()
+                || std::env::var_os("WSL_INTEROP").is_some();
+            let in_windows_terminal = std::env::var_os("WT_SESSION").is_some();
+            let (detail, action) = unsupported_key_guidance(is_wsl, in_windows_terminal);
+            println!("  ! keys    Shift+Enter isn't distinguishable here · optional");
+            println!("           ↳ {detail}");
+            println!("             {action}");
         }
     }
 
@@ -900,6 +1232,30 @@ enum KeyProto {
     /// Queried from inside a luvus pane, which answers for *luvus's* PTY rather
     /// than the real terminal — so the result would be misleading.
     InsidePane,
+}
+
+/// Reassure users that a missing modified-key protocol is not a Luvus failure,
+/// then provide the repair that matches the terminal path they are actually
+/// using. Windows Terminal gained the protocol in 1.25; older releases can
+/// send Luvus's existing newline sequence with a `sendInput` binding.
+fn unsupported_key_guidance(
+    is_wsl: bool,
+    in_windows_terminal: bool,
+) -> (&'static str, &'static str) {
+    match (is_wsl, in_windows_terminal) {
+        (true, true) => (
+            "WSL in Windows Terminal detected; all other features still work",
+            "update Windows Terminal to 1.25+, or bind Shift+Enter to ESC CR",
+        ),
+        (true, false) => (
+            "WSL detected; all other features still work",
+            "use Windows Terminal 1.25+ or bind Shift+Enter to ESC CR",
+        ),
+        (false, _) => (
+            "Luvus still works; only the modified-Enter shortcut is affected",
+            "use Alt/Option+Enter or a terminal with the keyboard protocol",
+        ),
+    }
 }
 
 /// Ask the terminal whether it supports progressive keyboard enhancement. The
@@ -1657,21 +2013,89 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
     Ok(match (noun, verb) {
         ("ping", _) => ("ping".into(), json!({})),
         ("events", _) => ("events.subscribe".into(), json!({})),
-        // `luvus search <text...> [--case]` — scan every pane's scrollback
-        // (docs/63). Everything after `search`, minus flags, is the query.
+        // Exact scrollback search remains the default for script compatibility.
+        // The universal finder is deliberately opt-in through `--fuzzy`.
         ("search", _) => {
-            let case = args
+            let search_args = &args[2.min(args.len())..];
+            let fuzzy = search_args
                 .iter()
-                .any(|a| a == "--case" || a == "--case-sensitive");
-            let query: Vec<&str> = args[2.min(args.len())..]
-                .iter()
-                .filter(|a| !a.starts_with("--"))
-                .map(String::as_str)
-                .collect();
-            (
-                "search".into(),
-                json!({ "query": query.join(" "), "case_sensitive": case }),
-            )
+                .take_while(|arg| arg.as_str() != "--")
+                .any(|arg| arg == "--fuzzy");
+            let mut query: Vec<String> = Vec::new();
+            let mut case_sensitive = false;
+            let mut scope = "all".to_string();
+            let mut all_sessions = false;
+            let mut limit = crate::search::RESULT_CAP as u64;
+            let mut index = 0;
+            while index < search_args.len() {
+                match search_args[index].as_str() {
+                    "--" => {
+                        query.extend_from_slice(&search_args[index + 1..]);
+                        break;
+                    }
+                    "--fuzzy" | "--json" => index += 1,
+                    "--case" | "--case-sensitive" => {
+                        case_sensitive = true;
+                        index += 1;
+                    }
+                    "--all-sessions" if fuzzy => {
+                        all_sessions = true;
+                        index += 1;
+                    }
+                    "--scope" if fuzzy => {
+                        let value = search_args
+                            .get(index + 1)
+                            .ok_or_else(|| anyhow!("--scope requires a value"))?;
+                        if !matches!(value.as_str(), "all" | "navigate" | "files" | "output") {
+                            return Err(anyhow!("--scope must be all, navigate, files, or output"));
+                        }
+                        scope = value.clone();
+                        index += 2;
+                    }
+                    "--limit" if fuzzy => {
+                        let value = search_args
+                            .get(index + 1)
+                            .ok_or_else(|| anyhow!("--limit requires a value"))?;
+                        limit = value
+                            .parse::<u64>()
+                            .ok()
+                            .filter(|value| (1..=crate::search::RESULT_CAP as u64).contains(value))
+                            .ok_or_else(|| anyhow!("--limit must be between 1 and 200"))?;
+                        index += 2;
+                    }
+                    flag if flag.starts_with("--") => {
+                        return Err(anyhow!("unknown search option: {flag}"));
+                    }
+                    value => {
+                        query.push(value.to_string());
+                        index += 1;
+                    }
+                }
+            }
+            if query.is_empty() {
+                return Err(anyhow!(if fuzzy {
+                    "usage: luvus search --fuzzy <query...> [--scope all|navigate|files|output] [--all-sessions] [--limit 1-200] [--case] [--json]"
+                } else {
+                    "usage: luvus search <text...> [--case]"
+                }));
+            }
+            if fuzzy {
+                (
+                    "search.query".into(),
+                    json!({
+                        "query": query.join(" "),
+                        "scope": scope,
+                        "all_sessions": all_sessions,
+                        "limit": limit,
+                        "case_sensitive": case_sensitive,
+                    }),
+                )
+            } else {
+                (
+                    "search".into(),
+                    json!({ "query": query.join(" "), "case_sensitive": case_sensitive }),
+                )
+            }
         }
         ("agent", "sessions") => ("agent.sessions".into(), json!({})),
         ("agent", "resume") => ("agent.resume".into(), one("session_id", arg0())),
@@ -1832,6 +2256,156 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
                 _ => ("ui.dock.list".into(), json!({})),
             }
         }
+        ("bar", sub) => {
+            let mut obj = serde_json::Map::new();
+            if let Ok(owner) = std::env::var("LUVUS_MODULE_ID") {
+                obj.insert("owner".into(), json!(owner));
+            }
+            match sub {
+                "push" => {
+                    let usage = "usage: luvus bar push --id <id> [--region top-right|bottom-right] (--content <json>|--content-file <path>|--text <text>|--state <state>)";
+                    let id = flag(args, "--id").ok_or_else(|| anyhow!(usage))?;
+                    obj.insert("id".into(), json!(id));
+                    if let Some(region) = flag(args, "--region") {
+                        if !matches!(
+                            region.as_str(),
+                            "top" | "top-right" | "bottom" | "bottom-right"
+                        ) {
+                            return Err(anyhow!("--region must be top-right or bottom-right"));
+                        }
+                        obj.insert("region".into(), json!(region));
+                    }
+                    if let Some(priority) = flag(args, "--priority") {
+                        let priority = priority
+                            .parse::<u8>()
+                            .map_err(|_| anyhow!("--priority must be 0..255"))?;
+                        obj.insert("priority".into(), json!(priority));
+                    }
+                    let inline = flag(args, "--content");
+                    let file = flag(args, "--content-file");
+                    if inline.is_some() && file.is_some() {
+                        return Err(anyhow!("use only one of --content and --content-file"));
+                    }
+                    let content = if let Some(raw) = inline {
+                        serde_json::from_str(&raw).map_err(|error| {
+                            anyhow!("--content must be a JSON segment array: {error}")
+                        })?
+                    } else if let Some(path) = file {
+                        let raw = std::fs::read_to_string(&path)
+                            .map_err(|error| anyhow!("cannot read {path}: {error}"))?;
+                        serde_json::from_str(&raw).map_err(|error| {
+                            anyhow!("{path} must contain a JSON segment array: {error}")
+                        })?
+                    } else {
+                        let mut segments = Vec::new();
+                        if let Some(text) = flag(args, "--text") {
+                            segments.push(json!({"type":"text","text":text}));
+                        }
+                        if let Some(state) = flag(args, "--state") {
+                            segments.push(json!({"type":"state","state":state}));
+                        }
+                        if segments.is_empty() {
+                            return Err(anyhow!(usage));
+                        }
+                        if let Some(last) = segments.last_mut().and_then(Value::as_object_mut) {
+                            if let Some(action) = flag(args, "--action") {
+                                last.insert("action".into(), json!(action));
+                            }
+                            if let Some(value) = flag(args, "--value") {
+                                last.insert("value".into(), json!(value));
+                            }
+                        }
+                        Value::Array(segments)
+                    };
+                    if !content.is_array() {
+                        return Err(anyhow!("bar content must be a JSON segment array"));
+                    }
+                    obj.insert("content".into(), content);
+                    if let Some(raw) = flag(args, "--compact-content") {
+                        let compact: Value = serde_json::from_str(&raw).map_err(|error| {
+                            anyhow!("--compact-content must be a JSON segment array: {error}")
+                        })?;
+                        if !compact.is_array() {
+                            return Err(anyhow!(
+                                "compact bar content must be a JSON segment array"
+                            ));
+                        }
+                        obj.insert("compact_content".into(), compact);
+                    }
+                    ("ui.bar.push".into(), Value::Object(obj))
+                }
+                "move" => {
+                    let id = flag(args, "--id").ok_or_else(|| {
+                        anyhow!(
+                            "usage: luvus bar move --id <id> --region top-right|bottom-right|off"
+                        )
+                    })?;
+                    let region =
+                        flag(args, "--region").ok_or_else(|| anyhow!("--region is required"))?;
+                    if !matches!(
+                        region.as_str(),
+                        "top" | "top-right" | "bottom" | "bottom-right" | "off"
+                    ) {
+                        return Err(anyhow!("--region must be top-right, bottom-right, or off"));
+                    }
+                    obj.insert("id".into(), json!(id));
+                    obj.insert("region".into(), json!(region));
+                    ("ui.bar.move".into(), Value::Object(obj))
+                }
+                "remove" => {
+                    let id = flag(args, "--id")
+                        .ok_or_else(|| anyhow!("usage: luvus bar remove --id <id>"))?;
+                    obj.insert("id".into(), json!(id));
+                    ("ui.bar.remove".into(), Value::Object(obj))
+                }
+                "" | "list" => ("ui.bar.list".into(), Value::Object(obj)),
+                _ => return Err(anyhow!("usage: luvus bar list|push|move|remove")),
+            }
+        }
+        ("ui", "notification") => {
+            let sub = rest.first().map(String::as_str).unwrap_or("push");
+            let mut obj = serde_json::Map::new();
+            if let Ok(owner) = std::env::var("LUVUS_MODULE_ID") {
+                obj.insert("owner".into(), json!(owner));
+            }
+            match sub {
+                "push" => {
+                    let text = flag(args, "--text").ok_or_else(|| anyhow!("usage: luvus ui notification push --text <text> [--level info|success|warning|error] [--ttl-ms <n>]"))?;
+                    obj.insert("text".into(), json!(text));
+                    if let Some(level) = flag(args, "--level") {
+                        if !matches!(level.as_str(), "info" | "success" | "warning" | "error") {
+                            return Err(anyhow!("unknown notification level {level}"));
+                        }
+                        obj.insert("level".into(), json!(level));
+                    }
+                    if let Some(ttl) = flag(args, "--ttl-ms") {
+                        obj.insert(
+                            "ttl_ms".into(),
+                            json!(ttl
+                                .parse::<u64>()
+                                .map_err(|_| anyhow!("--ttl-ms must be a positive integer"))?),
+                        );
+                    }
+                    for (flag_name, key) in [
+                        ("--action", "action"),
+                        ("--value", "value"),
+                        ("--dedupe-key", "dedupe_key"),
+                    ] {
+                        if let Some(value) = flag(args, flag_name) {
+                            obj.insert(key.into(), json!(value));
+                        }
+                    }
+                    ("ui.notification.push".into(), Value::Object(obj))
+                }
+                "clear" => {
+                    if let Some(key) = flag(args, "--dedupe-key") {
+                        obj.insert("dedupe_key".into(), json!(key));
+                    }
+                    ("ui.notification.clear".into(), Value::Object(obj))
+                }
+                _ => return Err(anyhow!("usage: luvus ui notification push|clear")),
+            }
+        }
 
         ("workspace" | "node", "new") => ("workspace.new".into(), json!({})),
         ("workspace" | "node", "open") => ("workspace.open".into(), one("path", arg0())),
@@ -1882,10 +2456,53 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         }
 
         ("tab", "new") => ("tab.new".into(), json!({})),
-        ("tab", "focus") => ("tab.focus".into(), one("tab", arg0())),
+        ("tab", "focus") => {
+            if rest.len() != 1 {
+                return Err(anyhow!("usage: luvus tab focus <n>"));
+            }
+            let tab = rest[0]
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| anyhow!("tab position must be a positive 1-based number"))?;
+            ("tab.focus".into(), json!({"tab": tab.to_string()}))
+        }
         ("tab", "move") => {
+            let parse_position = |raw: &str| -> Result<String> {
+                raw.parse::<usize>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .map(|n| n.to_string())
+                    .ok_or_else(|| anyhow!("tab positions must be positive 1-based numbers"))
+            };
+            let usage = "usage: luvus tab move <from> <to> | left|right [--tab N]";
+            if rest
+                .first()
+                .is_some_and(|arg| matches!(arg.as_str(), "left" | "right"))
+            {
+                let valid_shape = rest.len() == 1 || (rest.len() == 3 && rest[1] == "--tab");
+                if !valid_shape {
+                    return Err(anyhow!(usage));
+                }
+                let mut params = serde_json::Map::new();
+                params.insert("direction".to_string(), json!(rest[0]));
+                if rest.len() == 3 {
+                    params.insert("tab".to_string(), json!(parse_position(&rest[2])?));
+                }
+                ("tab.move".into(), Value::Object(params))
+            } else {
+                if rest.len() != 2 {
+                    return Err(anyhow!(usage));
+                }
+                let from = parse_position(&rest[0])?;
+                let to = parse_position(&rest[1])?;
+                ("tab.move".into(), json!({"tab": from, "to": to}))
+            }
+        }
+        ("tab", "swap") => {
+            let usage = "usage: luvus tab swap <first> <second>";
             if rest.len() != 2 {
-                return Err(anyhow!("usage: luvus tab move <from> <to>"));
+                return Err(anyhow!(usage));
             }
             let parse_position = |raw: &str| -> Result<String> {
                 raw.parse::<usize>()
@@ -1894,16 +2511,54 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
                     .map(|n| n.to_string())
                     .ok_or_else(|| anyhow!("tab positions must be positive 1-based numbers"))
             };
-            let from = parse_position(&rest[0])?;
-            let to = parse_position(&rest[1])?;
-            ("tab.move".into(), json!({"tab": from, "to": to}))
+            let first = parse_position(&rest[0])?;
+            let second = parse_position(&rest[1])?;
+            if first == second {
+                return Err(anyhow!("tab positions must differ"));
+            }
+            ("tab.swap".into(), json!({"tab": first, "with": second}))
         }
         ("tab", "close") => ("tab.close".into(), one("tab", arg0())),
         // `tab rename <name>` names the active tab; `--tab N` targets another.
         ("tab", "rename") => {
+            let mut words = Vec::new();
+            let mut tab = None;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--tab" => {
+                        if tab.is_some() || i + 1 >= rest.len() {
+                            return Err(anyhow!("usage: luvus tab rename <name> [--tab N]"));
+                        }
+                        let position = rest[i + 1]
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|n| *n > 0)
+                            .ok_or_else(|| {
+                                anyhow!("tab position must be a positive 1-based number")
+                            })?;
+                        tab = Some(position.to_string());
+                        i += 2;
+                    }
+                    arg if arg.starts_with("--") => {
+                        return Err(anyhow!("unknown tab rename option `{arg}`"));
+                    }
+                    _ => {
+                        words.push(rest[i].as_str());
+                        i += 1;
+                    }
+                }
+            }
+            let name = words.join(" ");
+            if name.chars().count() > crate::app::TAB_NAME_MAX {
+                return Err(anyhow!(
+                    "tab name must be at most {} characters",
+                    crate::app::TAB_NAME_MAX
+                ));
+            }
             let mut obj = serde_json::Map::new();
-            obj.insert("name".to_string(), json!(rest_text()));
-            if let Some(n) = flag(args, "--tab") {
+            obj.insert("name".to_string(), json!(name));
+            if let Some(n) = tab {
                 obj.insert("tab".to_string(), json!(n));
             }
             ("tab.rename".into(), Value::Object(obj))
@@ -2148,6 +2803,207 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         }
         ("module", _) => ("module.list".into(), json!({})),
 
+        ("diff", "refresh") => {
+            if !rest.is_empty() {
+                return Err(anyhow!("usage: luvus diff refresh"));
+            }
+            ("diff.refresh".into(), json!({}))
+        }
+        ("diff", "" | "list") => {
+            let mut obj = serde_json::Map::new();
+            if let Some(layer) = flag(args, "--layer") {
+                obj.insert("layer".into(), json!(layer));
+            }
+            ("diff.list".into(), Value::Object(obj))
+        }
+        ("diff", "open") => {
+            let mut obj = serde_json::Map::new();
+            if let Some(path) = rest.first().filter(|value| !value.starts_with("--")) {
+                obj.insert("path".into(), json!(path));
+            }
+            if let Some(layer) = flag(args, "--layer") {
+                obj.insert("layer".into(), json!(layer));
+            }
+            if let Some(view) = flag(args, "--view") {
+                if !matches!(view.as_str(), "auto" | "split" | "stack") {
+                    return Err(anyhow!("--view must be auto, split, or stack"));
+                }
+                obj.insert("view".into(), json!(view));
+            }
+            if let Some(placement) = flag(args, "--placement") {
+                if !matches!(placement.as_str(), "preview" | "pane" | "tab") {
+                    return Err(anyhow!("--placement must be preview, pane, or tab"));
+                }
+                obj.insert("placement".into(), json!(placement));
+            }
+            ("diff.open".into(), Value::Object(obj))
+        }
+        ("diff", "get") => {
+            let path = rest
+                .first()
+                .filter(|value| !value.starts_with("--"))
+                .ok_or_else(|| {
+                    anyhow!("usage: luvus diff get <path> [--layer <layer>] [--include-patch]")
+                })?;
+            let mut obj = serde_json::Map::new();
+            obj.insert("path".into(), json!(path));
+            if let Some(layer) = flag(args, "--layer") {
+                obj.insert("layer".into(), json!(layer));
+            }
+            if args.iter().any(|arg| arg == "--include-patch") {
+                obj.insert("include_patch".into(), json!(true));
+            }
+            ("diff.get".into(), Value::Object(obj))
+        }
+        ("diff", "note") => {
+            let sub = rest.first().map(String::as_str).unwrap_or("list");
+            let positionals: Vec<&String> = {
+                let mut values = Vec::new();
+                let mut index = 1;
+                while index < rest.len() {
+                    match rest[index].as_str() {
+                        "--yes" if sub == "remove" => index += 1,
+                        "--all-open" if sub == "send" => index += 1,
+                        flag if matches!(
+                            (sub, flag),
+                            ("list", "--file" | "--state")
+                                | (
+                                    "add",
+                                    "--file"
+                                        | "--body"
+                                        | "--old-line"
+                                        | "--new-line"
+                                        | "--end-line"
+                                        | "--layer"
+                                        | "--kind"
+                                )
+                                | ("edit", "--body")
+                                | ("send", "--to")
+                        ) =>
+                        {
+                            if rest.get(index + 1).is_none() {
+                                return Err(anyhow!("{} requires a value", rest[index]));
+                            }
+                            index += 2;
+                        }
+                        flag if flag.starts_with("--") => {
+                            return Err(anyhow!("unknown diff note option `{flag}`"));
+                        }
+                        _ => {
+                            values.push(&rest[index]);
+                            index += 1;
+                        }
+                    }
+                }
+                values
+            };
+            let line_flag = |name: &str| -> Result<Option<u64>> {
+                flag(args, name)
+                    .map(|value| {
+                        value
+                            .parse::<u64>()
+                            .ok()
+                            .filter(|line| *line > 0 && *line <= u32::MAX as u64)
+                            .ok_or_else(|| anyhow!("{name} must be a positive line number"))
+                    })
+                    .transpose()
+            };
+            let mut obj = serde_json::Map::new();
+            match sub {
+                "list" => {
+                    if let Some(path) = flag(args, "--file") {
+                        obj.insert("file".into(), json!(path));
+                    }
+                    if let Some(state) = flag(args, "--state") {
+                        if !matches!(
+                            state.as_str(),
+                            "open" | "resolved" | "outdated" | "orphaned"
+                        ) {
+                            return Err(anyhow!(
+                                "--state must be open, resolved, outdated, or orphaned"
+                            ));
+                        }
+                        obj.insert("state".into(), json!(state));
+                    }
+                    ("diff.note.list".into(), Value::Object(obj))
+                }
+                "add" => {
+                    let file = flag(args, "--file").ok_or_else(|| anyhow!("--file is required"))?;
+                    let body = flag(args, "--body").ok_or_else(|| anyhow!("--body is required"))?;
+                    obj.insert("file".into(), json!(file));
+                    obj.insert("body".into(), json!(body));
+                    if let Some(line) = line_flag("--old-line")? {
+                        obj.insert("old_line".into(), json!(line));
+                    }
+                    if let Some(line) = line_flag("--new-line")? {
+                        obj.insert("new_line".into(), json!(line));
+                    }
+                    if let Some(line) = line_flag("--end-line")? {
+                        obj.insert("end_line".into(), json!(line));
+                    }
+                    if let Some(layer) = flag(args, "--layer") {
+                        obj.insert("layer".into(), json!(layer));
+                    }
+                    if let Some(kind) = flag(args, "--kind") {
+                        obj.insert("kind".into(), json!(kind));
+                    }
+                    ("diff.note.add".into(), Value::Object(obj))
+                }
+                "edit" => {
+                    let id = positionals
+                        .first()
+                        .ok_or_else(|| anyhow!("note id is required"))?;
+                    let body = flag(args, "--body").ok_or_else(|| anyhow!("--body is required"))?;
+                    obj.insert("id".into(), json!(id));
+                    obj.insert("body".into(), json!(body));
+                    ("diff.note.edit".into(), Value::Object(obj))
+                }
+                "resolve" | "reopen" => {
+                    let id = positionals
+                        .first()
+                        .ok_or_else(|| anyhow!("note id is required"))?;
+                    obj.insert("id".into(), json!(id));
+                    (format!("diff.note.{sub}"), Value::Object(obj))
+                }
+                "remove" => {
+                    if !args.iter().any(|arg| arg == "--yes") {
+                        return Err(anyhow!("diff note remove requires --yes"));
+                    }
+                    let id = positionals
+                        .first()
+                        .ok_or_else(|| anyhow!("note id is required"))?;
+                    obj.insert("id".into(), json!(id));
+                    ("diff.note.remove".into(), Value::Object(obj))
+                }
+                "send" => {
+                    let target = flag(args, "--to").ok_or_else(|| anyhow!("--to is required"))?;
+                    obj.insert("to".into(), json!(target));
+                    let all_open = args.iter().any(|arg| arg == "--all-open");
+                    if all_open {
+                        obj.insert("all_open".into(), json!(true));
+                    }
+                    let ids: Vec<_> = positionals.into_iter().cloned().collect();
+                    if ids.is_empty() && !all_open {
+                        return Err(anyhow!(
+                            "diff note send needs at least one note id or --all-open"
+                        ));
+                    }
+                    obj.insert("ids".into(), json!(ids));
+                    ("diff.note.send".into(), Value::Object(obj))
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "usage: luvus diff note add|list|edit|resolve|reopen|remove|send"
+                    ))
+                }
+            }
+        }
+        ("diff", other) => {
+            return Err(anyhow!(
+                "unknown diff command `{other}`. Try `luvus help diff`."
+            ))
+        }
+
         ("git", "branches") => ("git.branches".into(), json!({})),
         ("git", "log") => {
             let mut obj = serde_json::Map::new();
@@ -2367,6 +3223,32 @@ mod tests {
     }
 
     #[test]
+    fn theme_cli_is_recognized_and_validates_command_shapes() {
+        assert!(is_cli(&argv("luvus theme list")));
+        assert_eq!(
+            command_help_request(&argv("luvus theme install --help")),
+            Some(("theme", Some("install")))
+        );
+        for invalid in [
+            vec!["list".into(), "extra".into()],
+            vec!["path".into(), "extra".into()],
+            vec![
+                "init".into(),
+                "new-theme".into(),
+                "--bad".into(),
+                "noir".into(),
+            ],
+            vec!["validate".into(), "x.toml".into(), "--bad".into()],
+            vec!["install".into(), "x.toml".into(), "--bad".into()],
+            vec!["use".into(), "noir".into(), "extra".into()],
+            vec!["uninstall".into(), "x".into(), "extra".into()],
+            vec!["reload".into(), "extra".into()],
+        ] {
+            assert!(theme_cmd(&invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
     fn maps_commands() {
         std::env::remove_var("LUVUS_PANE_ID");
         let (m, _) = parse(&argv("luvus ping")).unwrap();
@@ -2393,6 +3275,64 @@ mod tests {
         assert_eq!(m, "tab.new");
         let (m, _) = parse(&argv("luvus agent list")).unwrap();
         assert_eq!(m, "agent.list");
+    }
+
+    #[test]
+    fn search_keeps_exact_contract_and_fuzzy_is_explicit() {
+        let (method, params) = parse(&argv("luvus search build failed --case")).unwrap();
+        assert_eq!(method, "search");
+        assert_eq!(
+            params,
+            json!({"query": "build failed", "case_sensitive": true})
+        );
+
+        let (method, params) =
+            parse(&argv("luvus search --fuzzy -- --case --scope output")).unwrap();
+        assert_eq!(method, "search.query");
+        assert_eq!(
+            params,
+            json!({
+                "query": "--case --scope output",
+                "scope": "all",
+                "all_sessions": false,
+                "limit": 200,
+                "case_sensitive": false,
+            })
+        );
+
+        let (method, params) = parse(&argv("luvus search -- --fuzzy --case")).unwrap();
+        assert_eq!(method, "search");
+        assert_eq!(
+            params,
+            json!({"query": "--fuzzy --case", "case_sensitive": false})
+        );
+
+        let (method, params) = parse(&argv(
+            "luvus search --fuzzy api auth --scope files --all-sessions --limit 25 --case --json",
+        ))
+        .unwrap();
+        assert_eq!(method, "search.query");
+        assert_eq!(
+            params,
+            json!({
+                "query": "api auth",
+                "scope": "files",
+                "all_sessions": true,
+                "limit": 25,
+                "case_sensitive": true,
+            })
+        );
+
+        for bad in [
+            "luvus search --fuzzy",
+            "luvus search --fuzzy api --scope unknown",
+            "luvus search --fuzzy api --limit 0",
+            "luvus search --fuzzy api --limit 201",
+            "luvus search api --all-sessions",
+            "luvus search api --unknown",
+        ] {
+            assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
+        }
     }
 
     #[test]
@@ -2447,6 +3387,22 @@ mod tests {
         assert_eq!(m, "tab.move");
         assert_eq!(p, json!({"tab": "3", "to": "1"}));
 
+        let (m, p) = parse(&argv("luvus tab move left")).unwrap();
+        assert_eq!(m, "tab.move");
+        assert_eq!(p, json!({"direction": "left"}));
+
+        let (m, p) = parse(&argv("luvus tab move right --tab 3")).unwrap();
+        assert_eq!(m, "tab.move");
+        assert_eq!(p, json!({"direction": "right", "tab": "3"}));
+
+        let (m, p) = parse(&argv("luvus tab focus 2")).unwrap();
+        assert_eq!(m, "tab.focus");
+        assert_eq!(p, json!({"tab": "2"}));
+
+        let (m, p) = parse(&argv("luvus tab swap 1 3")).unwrap();
+        assert_eq!(m, "tab.swap");
+        assert_eq!(p, json!({"tab": "1", "with": "3"}));
+
         for bad in [
             "luvus pane move 7",
             "luvus pane move 7 --tab 0",
@@ -2458,11 +3414,51 @@ mod tests {
             "luvus tab move 1",
             "luvus tab move 0 1",
             "luvus tab move 1 two",
+            "luvus tab move left --tab 0",
+            "luvus tab move right --tab",
+            "luvus tab move left right",
+            "luvus tab move up",
+            "luvus tab swap 1",
+            "luvus tab swap 0 1",
+            "luvus tab swap 1 two",
+            "luvus tab swap 2 2",
+            "luvus tab swap 1 2 extra",
+            "luvus tab focus",
+            "luvus tab focus 0",
+            "luvus tab focus two",
+            "luvus tab focus 1 extra",
             "luvus pane teleport 7",
             "luvus tab reorder 2 1",
         ] {
             assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
         }
+    }
+
+    #[test]
+    fn tab_rename_validates_optional_target_and_name_length() {
+        let (method, params) = parse(&argv("luvus tab rename review notes --tab 2")).unwrap();
+        assert_eq!(method, "tab.rename");
+        assert_eq!(params, json!({"name": "review notes", "tab": "2"}));
+
+        let (method, params) = parse(&argv("luvus tab rename")).unwrap();
+        assert_eq!(method, "tab.rename");
+        assert_eq!(params, json!({"name": ""}));
+
+        for bad in [
+            "luvus tab rename review --tab 0",
+            "luvus tab rename review --tab nope",
+            "luvus tab rename review --tab",
+            "luvus tab rename review --tab 1 --tab 2",
+            "luvus tab rename review --unknown value",
+        ] {
+            assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
+        }
+
+        let long = format!("luvus tab rename {}", "x".repeat(41));
+        assert!(
+            parse(&argv(&long)).is_err(),
+            "41-character name is rejected"
+        );
     }
 
     #[test]
@@ -2489,6 +3485,73 @@ mod tests {
             "luvus agent fork 7 --name one --name two",
             "luvus agent fork 7 --no-focus --no-focus",
             "luvus agent fork 7 --down",
+        ] {
+            assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
+        }
+    }
+
+    #[test]
+    fn maps_diff_review_commands() {
+        assert!(is_cli(&argv("luvus diff list")));
+        let (method, params) = parse(&argv("luvus diff list --layer staged")).unwrap();
+        assert_eq!(method, "diff.list");
+        assert_eq!(params, json!({"layer":"staged"}));
+
+        let (method, params) = parse(&argv(
+            "luvus diff open src/lib.rs --layer worktree --view split --placement pane",
+        ))
+        .unwrap();
+        assert_eq!(method, "diff.open");
+        assert_eq!(params["path"], "src/lib.rs");
+        assert_eq!(params["view"], "split");
+        assert_eq!(params["placement"], "pane");
+
+        let (method, params) = parse(&argv("luvus diff get src/lib.rs --include-patch")).unwrap();
+        assert_eq!(method, "diff.get");
+        assert_eq!(params, json!({"path":"src/lib.rs","include_patch":true}));
+
+        let (method, params) = parse(&argv(
+            "luvus diff note add --file src/lib.rs --new-line 12 --end-line 14 --body check",
+        ))
+        .unwrap();
+        assert_eq!(method, "diff.note.add");
+        assert_eq!(params["new_line"], 12);
+        assert_eq!(params["end_line"], 14);
+
+        let (method, params) = parse(&argv("luvus diff note edit --body updated n1")).unwrap();
+        assert_eq!(method, "diff.note.edit");
+        assert_eq!(params, json!({"id":"n1","body":"updated"}));
+
+        let (method, params) = parse(&argv("luvus diff note remove --yes n1")).unwrap();
+        assert_eq!(method, "diff.note.remove");
+        assert_eq!(params, json!({"id":"n1"}));
+
+        let (method, params) = parse(&argv("luvus diff note send --to reviewer n1 n2")).unwrap();
+        assert_eq!(method, "diff.note.send");
+        assert_eq!(params["to"], "reviewer");
+        assert_eq!(params["ids"], json!(["n1", "n2"]));
+
+        let (method, params) = parse(&argv("luvus diff note send same --to same")).unwrap();
+        assert_eq!(method, "diff.note.send");
+        assert_eq!(params["to"], "same");
+        assert_eq!(params["ids"], json!(["same"]));
+
+        let (method, params) =
+            parse(&argv("luvus diff note send --to reviewer --all-open")).unwrap();
+        assert_eq!(method, "diff.note.send");
+        assert_eq!(params["all_open"], true);
+        assert_eq!(params["ids"], json!([]));
+
+        for bad in [
+            "luvus diff open src/lib.rs --view columns",
+            "luvus diff open src/lib.rs --placement replace",
+            "luvus diff note add --file src/lib.rs --new-line zero --body check",
+            "luvus diff note list --state unknown",
+            "luvus diff note remove n1",
+            "luvus diff note send n1",
+            "luvus diff note send --to reviewer",
+            "luvus diff note edit n1 --state open --body check",
+            "luvus diff note edit n1 --body",
         ] {
             assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
         }
@@ -2539,6 +3602,50 @@ mod tests {
         let (m, p) = parse(&argv("luvus ui sidebar --side right --width 30")).unwrap();
         assert_eq!(m, "ui.sidebar");
         assert_eq!(p.get("side").and_then(|v| v.as_str()), Some("right"));
+    }
+
+    #[test]
+    fn maps_luvus_bar_and_notification_commands() {
+        let _env = crate::persist::test_env("cli-bar");
+        std::env::set_var("LUVUS_MODULE_ID", "you.ci");
+        let args = vec![
+            "luvus".into(),
+            "bar".into(),
+            "push".into(),
+            "--id".into(),
+            "status".into(),
+            "--region".into(),
+            "top-right".into(),
+            "--content".into(),
+            r#"[{"type":"text","text":"CI"},{"type":"state","state":"done"}]"#.into(),
+        ];
+        let (method, params) = parse(&args).unwrap();
+        assert_eq!(method, "ui.bar.push");
+        assert_eq!(params["owner"], "you.ci");
+        assert_eq!(params["content"].as_array().unwrap().len(), 2);
+
+        let (method, params) =
+            parse(&argv("luvus bar move --id status --region bottom-right")).unwrap();
+        assert_eq!(method, "ui.bar.move");
+        assert_eq!(params["region"], "bottom-right");
+
+        let (method, params) = parse(&argv(
+            "luvus ui notification push --text failed --level error --ttl-ms 6000",
+        ))
+        .unwrap();
+        assert_eq!(method, "ui.notification.push");
+        assert_eq!(params["ttl_ms"], 6000);
+        assert_eq!(params["owner"], "you.ci");
+        std::env::remove_var("LUVUS_MODULE_ID");
+
+        for bad in [
+            "luvus bar push --id status",
+            "luvus bar move --id status --region middle",
+            "luvus ui bar list",
+            "luvus ui notification push --text bad --level urgent",
+        ] {
+            assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
+        }
     }
 
     #[test]
@@ -2723,10 +3830,40 @@ mod tests {
         assert_eq!(p.get("path").and_then(|v| v.as_str()), Some("/tmp/wt"));
     }
 
+    #[test]
+    fn unsupported_keys_explain_wsl_repairs_without_calling_luvus_broken() {
+        let (detail, action) = unsupported_key_guidance(true, true);
+        assert!(detail.contains("all other features still work"));
+        assert!(action.contains("Windows Terminal to 1.25+"));
+        assert!(action.contains("ESC CR"));
+
+        let (detail, action) = unsupported_key_guidance(true, false);
+        assert!(detail.starts_with("WSL detected"));
+        assert!(action.contains("Windows Terminal 1.25+"));
+
+        let (detail, action) = unsupported_key_guidance(false, false);
+        assert!(detail.contains("only the modified-Enter shortcut is affected"));
+        assert!(action.contains("Alt/Option+Enter"));
+    }
+
     // The docs site's CLI reference (website/…/reference/cli.mdx) carries the
     // `luvus help all` text VERBATIM — this guard fails CI if a command changes
     // without the docs page being regenerated, so the two can never drift.
     // Regenerate with:  luvus help all  →  the page's ```txt block.
+    #[test]
+    fn unknown_method_detection_is_method_specific() {
+        let response = json!({"error": {
+            "code": "invalid_request",
+            "message": "unknown method: theme.use"
+        }});
+        assert!(is_unknown_method(&response, "theme.use"));
+        assert!(!is_unknown_method(&response, "theme.reload"));
+        assert!(!is_unknown_method(
+            &json!({"error": {"message": "theme.use failed"}}),
+            "theme.use"
+        ));
+    }
+
     #[test]
     fn docs_cli_reference_matches_help() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

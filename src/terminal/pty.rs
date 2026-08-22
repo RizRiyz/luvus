@@ -510,6 +510,16 @@ impl Pane {
         let _ = self.input_tx.send(bytes.to_vec());
     }
 
+    /// Enqueue input and report a closed PTY writer instead of silently
+    /// treating it as delivery. Review-note handoff uses this before recording
+    /// delivery metadata; ordinary interactive input keeps the infallible API.
+    pub fn try_send(&self, bytes: &[u8]) -> Result<(), String> {
+        self.rearm_pty_notify();
+        self.input_tx
+            .send(bytes.to_vec())
+            .map_err(|_| "target pane closed before input was delivered".to_string())
+    }
+
     /// Enqueue `bytes` after `delay`, off-thread. Used to follow a pasted prompt
     /// with a submit key once the child has ingested the paste: an agent's input
     /// widget needs the paste to land before the Enter, or the Enter is swallowed
@@ -671,6 +681,15 @@ impl Pane {
             .map(|e| e.bracketed_paste())
             .unwrap_or(false);
         self.send(&wrap_paste(text, bracketed));
+    }
+
+    pub fn try_send_paste(&self, text: &str) -> Result<(), String> {
+        let bracketed = self
+            .engine
+            .lock()
+            .map(|engine| engine.bracketed_paste())
+            .unwrap_or(false);
+        self.try_send(&wrap_paste(text, bracketed))
     }
 
     /// Resize the PTY + engine. Returns whether the size actually changed (so the

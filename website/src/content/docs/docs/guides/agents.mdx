@@ -127,6 +127,13 @@ The TUI action only appears for supported agents and otherwise remains a no-op.
 The CLI reports a structured error instead, so automation never mistakes an
 unsupported or unresolved fork for success.
 
+Codex forks require the exact session identity reported by its integration or
+recorded when Luvus resumes a session. Luvus never guesses the newest Codex
+rollout in a shared folder, because that could fork another pane's active
+conversation. Install or refresh the hook with
+`luvus integration install codex`; its SessionStart hook binds both new and
+resumed Codex panes to their exact rollout.
+
 ## Precise events: the integration hook
 
 Screen-based detection needs no setup and works for everything. The optional
@@ -150,10 +157,8 @@ toggle) surgically removes **only luvus's hook entry**. Your other settings
 and the agent installation itself are never touched.
 
 :::note
-The hook powers the richer per-agent detail in the
-[macOS notch companion](https://github.com/RizRiyz/luvus#the-macos-notch-companion)
-too, including permission cards you can approve from the notch and exact turn
-boundaries.
+The hook also emits precise `agent.hook` lifecycle events for module
+automation, including permission requests and exact turn boundaries.
 :::
 
 ## Custom detection rules

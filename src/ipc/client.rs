@@ -45,10 +45,18 @@ where
         DisableBracketedPaste
     );
     ratatui::restore();
-    result
+    match result? {
+        ClientExit::Done => Ok(()),
+        ClientExit::SwitchSession(name) => switch_session_process(&name),
+    }
 }
 
-fn run_inner<R, W>(reader: R, mut writer: W, terminal: &mut DefaultTerminal) -> Result<()>
+enum ClientExit {
+    Done,
+    SwitchSession(String),
+}
+
+fn run_inner<R, W>(reader: R, mut writer: W, terminal: &mut DefaultTerminal) -> Result<ClientExit>
 where
     R: Read,
     W: Write + Send + 'static,
@@ -113,7 +121,7 @@ where
     // Main thread: paint frames as they arrive. A full frame repaints the screen; a
     // diff writes only its changed cells straight to the terminal (no full re-blit,
     // no reconstructed frame) — so a busy session costs O(changed cells), not O(screen).
-    loop {
+    let exit = loop {
         match protocol::read_message::<_, ServerMessage>(&mut reader) {
             // A full frame repaints the whole screen; a diff writes *only its changed
             // cells* straight to the terminal (O(changed), not a whole re-blit). Each
@@ -139,12 +147,60 @@ where
             Ok(ServerMessage::Sound) => crate::emit_sound(),
             Ok(ServerMessage::Clipboard(text)) => crate::emit_clipboard(&text),
             Ok(ServerMessage::OpenUrl(url)) => crate::platform::open_url(&url),
-            Ok(ServerMessage::Detach) | Ok(ServerMessage::ServerShutdown { .. }) => break,
+            Ok(ServerMessage::SwitchSession { name }) => break ClientExit::SwitchSession(name),
+            Ok(ServerMessage::Detach) | Ok(ServerMessage::ServerShutdown { .. }) => {
+                break ClientExit::Done
+            }
             Ok(_) => {}
-            Err(_) => break, // server gone
+            Err(_) => break ClientExit::Done, // server gone
         }
+    };
+    Ok(exit)
+}
+
+/// Hand this thin client process to the same launch mode targeting another
+/// logical session. Unix replaces the process. Windows starts the successor
+/// and immediately lets this process exit, so the old terminal-input thread is
+/// never left reading alongside the new client. Local launches and `--remote`
+/// retain their existing arguments and SSH options.
+fn switch_session_process(name: &str) -> Result<()> {
+    crate::session::validate_name(name).map_err(anyhow::Error::msg)?;
+    let raw: Vec<String> = std::env::args().collect();
+    let args = switched_args(&raw, name);
+    let exe = std::env::current_exe()?;
+    let mut command = std::process::Command::new(exe);
+    command
+        .args(args)
+        .env_remove("LUVUS_SOCKET_PATH")
+        .env_remove("BOHAY_SOCKET_PATH");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        Err(command.exec().into())
     }
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        command.spawn()?;
+        Ok(())
+    }
+}
+
+fn switched_args(raw: &[String], name: &str) -> Vec<String> {
+    let mut out = vec!["--session".to_string(), name.to_string()];
+    let mut index = 1;
+    while index < raw.len() {
+        if raw[index] == "--session" {
+            index = (index + 2).min(raw.len());
+            continue;
+        }
+        if raw[index].starts_with("--session=") {
+            index += 1;
+            continue;
+        }
+        out.push(raw[index].clone());
+        index += 1;
+    }
+    out
 }
 
 fn input_loop<W: Write>(mut writer: W, pending: Vec<Event>) {
@@ -194,7 +250,8 @@ pub fn remote_bridge(sock: &Path) -> Result<()> {
 
 /// Pump bytes both directions: `input → local_writer` (a background thread) and
 /// `local_reader → output` (this thread). Returns when either side closes.
-/// Protocol-agnostic — it just copies bytes.
+/// Protocol-agnostic — it copies and flushes each available chunk so a
+/// long-lived SSH pipe cannot buffer interactive frames indefinitely.
 pub fn relay<LR, LW, I, O>(
     local_reader: LR,
     local_writer: LW,
@@ -210,11 +267,33 @@ where
     let mut local_writer = local_writer;
     let mut input = input;
     thread::spawn(move || {
-        let _ = std::io::copy(&mut input, &mut local_writer);
+        let _ = copy_and_flush(&mut input, &mut local_writer);
     });
     let mut local_reader = local_reader;
-    std::io::copy(&mut local_reader, &mut output)?;
+    copy_and_flush(&mut local_reader, &mut output)?;
     Ok(())
+}
+
+/// Copy a stream without adding user-space batching latency. `Read` may return
+/// any protocol fragment, so flushing per read preserves byte transparency
+/// while making every currently available chunk visible to the next hop.
+fn copy_and_flush<R: Read, W: Write>(reader: &mut R, writer: &mut W) -> std::io::Result<u64> {
+    let mut buf = [0u8; 16 * 1024];
+    let mut copied = 0u64;
+
+    loop {
+        let read = match reader.read(&mut buf) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if read == 0 {
+            writer.flush()?;
+            return Ok(copied);
+        }
+        writer.write_all(&buf[..read])?;
+        writer.flush()?;
+        copied += read as u64;
+    }
 }
 
 /// Begin/end a DEC 2026 synchronized update so a frame paints atomically (no
@@ -333,9 +412,11 @@ where
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::relay;
+    use super::{copy_and_flush, relay};
+    use std::cell::RefCell;
     use std::io::{Cursor, Read, Write};
     use std::os::unix::net::UnixStream;
+    use std::rc::Rc;
     use std::thread;
 
     /// The blit skips wide-char continuation cells (empty symbol) instead of
@@ -397,6 +478,79 @@ mod tests {
 
         assert_eq!(&srv.join().unwrap(), b"hello", "input forwarded to server");
         assert_eq!(output, b"world", "server reply forwarded to output");
+    }
+
+    #[test]
+    fn streaming_copy_flushes_each_chunk_and_retries_interrupts() {
+        #[derive(Default)]
+        struct WriterState {
+            pending: Vec<u8>,
+            visible: Vec<u8>,
+            flushes: usize,
+        }
+
+        struct BufferedWriter(Rc<RefCell<WriterState>>);
+
+        impl Write for BufferedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.borrow_mut().pending.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                let mut state = self.0.borrow_mut();
+                let pending = std::mem::take(&mut state.pending);
+                state.visible.extend_from_slice(&pending);
+                state.flushes += 1;
+                Ok(())
+            }
+        }
+
+        struct ControlledReader {
+            step: u8,
+            writer: Rc<RefCell<WriterState>>,
+        }
+
+        impl Read for ControlledReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let chunk = match self.step {
+                    0 => b"interactive ".as_slice(),
+                    1 => {
+                        let state = self.writer.borrow();
+                        assert_eq!(state.visible, b"interactive ");
+                        assert_eq!(state.flushes, 1, "first chunk flushed before next read");
+                        self.step += 1;
+                        return Err(std::io::ErrorKind::Interrupted.into());
+                    }
+                    2 => b"frame".as_slice(),
+                    3 => {
+                        let state = self.writer.borrow();
+                        assert_eq!(state.visible, b"interactive frame");
+                        assert_eq!(state.flushes, 2, "second chunk flushed before EOF");
+                        self.step += 1;
+                        return Ok(0);
+                    }
+                    _ => return Ok(0),
+                };
+                buf[..chunk.len()].copy_from_slice(chunk);
+                self.step += 1;
+                Ok(chunk.len())
+            }
+        }
+
+        let state = Rc::new(RefCell::new(WriterState::default()));
+        let mut reader = ControlledReader {
+            step: 0,
+            writer: Rc::clone(&state),
+        };
+        let mut writer = BufferedWriter(Rc::clone(&state));
+        let copied = copy_and_flush(&mut reader, &mut writer).unwrap();
+
+        assert_eq!(copied, 17);
+        let state = state.borrow();
+        assert_eq!(state.visible, b"interactive frame");
+        assert!(state.pending.is_empty());
+        assert_eq!(state.flushes, 3, "two chunk flushes plus the EOF flush");
     }
 
     /// A real scratch server must negotiate a client-owned terminal palette and
@@ -549,6 +703,22 @@ mod render_tests {
     use super::*;
     use ratatui::backend::TestBackend;
 
+    #[test]
+    fn session_handoff_replaces_only_the_session_selector() {
+        let raw = vec![
+            "luvus".to_string(),
+            "--session".to_string(),
+            "old".to_string(),
+            "--remote".to_string(),
+            "host".to_string(),
+            "-p".to_string(),
+            "2222".to_string(),
+        ];
+        assert_eq!(
+            switched_args(&raw, "new"),
+            ["--session", "new", "--remote", "host", "-p", "2222"]
+        );
+    }
     #[test]
     fn incremental_diff_reconstructs_the_screen() {
         let cell = |s: &str| protocol::CellData {
