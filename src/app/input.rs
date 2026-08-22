@@ -1593,9 +1593,9 @@ impl App {
                 self.git_toggle_contributors();
                 return;
             }
-            // Clicking a file row in the Status section opens its diff in-tab.
+            // Clicking a file row in the Status section opens its diff.
             if let Some((path, staged)) = self.git_status_file_at(m.column, m.row) {
-                self.fetch_file_diff(path, staged);
+                self.git_open_status_diff_with(Some((path, staged)));
                 return;
             }
             // Clicking a list row opens its detail in-tab (docs/17) — commit `git

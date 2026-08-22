@@ -416,78 +416,6 @@ impl App {
         });
     }
 
-    // ── file diff view: in-tab unified diff for a Status file ────────────────
-
-    /// Fetch `git diff` for a file on a thread and show the in-tab diff view.
-    pub fn fetch_file_diff(&mut self, path: String, staged: bool) {
-        let Some(g) = self.active_git() else {
-            return;
-        };
-        let (id, root) = (g.id, g.repo_root.clone());
-        if let Some(g) = self.active_git_mut() {
-            g.status_scroll = g.scroll;
-            g.open_file_diff = Some(path.clone());
-            g.open_file_diff_staged = staged;
-            g.file_diff = Load::Loading;
-            g.scroll = 0;
-        }
-        let tx = self.app_tx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(AppEvent::GitData {
-                view: id,
-                payload: GitPayload::FileDiff(
-                    Box::new(local::file_diff(&root, &path, staged)),
-                    path,
-                    staged,
-                ),
-            });
-        });
-    }
-
-    /// Close the file diff view (back to the Status list).
-    fn git_close_file_diff(&mut self) {
-        if let Some(g) = self.active_git_mut() {
-            g.open_file_diff = None;
-            g.file_diff = Load::Idle;
-            g.scroll = g.status_scroll;
-        }
-    }
-
-    /// Keys while the file diff is open: `esc`/`q` back, `j`/`k`/arrows scroll,
-    /// PgUp/PgDn page, `g`/`G` top/bottom.
-    fn handle_file_diff_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.git_close_file_diff(),
-            KeyCode::Char('j') | KeyCode::Down => self.git_scroll(1),
-            KeyCode::Char('k') | KeyCode::Up => self.git_scroll(-1),
-            KeyCode::PageUp => {
-                let page = self
-                    .active_git()
-                    .map(|g| g.list_area.height.saturating_sub(1) as i32)
-                    .unwrap_or(20);
-                self.git_scroll(-page);
-            }
-            KeyCode::PageDown => {
-                let page = self
-                    .active_git()
-                    .map(|g| g.list_area.height.saturating_sub(1) as i32)
-                    .unwrap_or(20);
-                self.git_scroll(page);
-            }
-            KeyCode::Char('g') | KeyCode::Home => {
-                if let Some(g) = self.active_git_mut() {
-                    g.scroll = 0;
-                }
-            }
-            KeyCode::Char('G') | KeyCode::End => {
-                if let Some(g) = self.active_git_mut() {
-                    g.scroll = usize::MAX;
-                }
-            }
-            _ => {}
-        }
-    }
-
     /// The file path at the viewport center in the Status section, if it lands
     /// on a staged or unstaged file row. Falls back to the first available file.
     fn git_status_selected_file(&self) -> Option<(String, bool)> {
@@ -529,7 +457,7 @@ impl App {
     /// in the Status section. Returns `(path, staged)` if so.
     pub fn git_status_file_at(&self, col: u16, row: u16) -> Option<(String, bool)> {
         let g = self.active_git()?;
-        if g.section != Section::Status || g.open_file_diff.is_some() {
+        if g.section != Section::Status {
             return None;
         }
         let la = g.list_area;
@@ -672,18 +600,14 @@ impl App {
     /// always lands on a list.
     pub fn git_click_section(&mut self, section: Section) {
         if let Some(g) = self.active_git_mut() {
-            let had_detail = g.open_pr.is_some()
-                || g.open_commit.is_some()
-                || g.open_issue.is_some()
-                || g.open_file_diff.is_some();
+            let had_detail =
+                g.open_pr.is_some() || g.open_commit.is_some() || g.open_issue.is_some();
             g.open_pr = None;
             g.detail = Load::Idle;
             g.open_commit = None;
             g.commit_detail = Load::Idle;
             g.open_issue = None;
             g.issue_detail = Load::Idle;
-            g.open_file_diff = None;
-            g.file_diff = Load::Idle;
             if g.section != section || had_detail {
                 g.section = section;
                 g.cursor = 0;
@@ -702,10 +626,7 @@ impl App {
             g.section,
             Section::Commits | Section::Prs | Section::Issues | Section::Branches
         );
-        let detail_open = g.open_pr.is_some()
-            || g.open_commit.is_some()
-            || g.open_issue.is_some()
-            || g.open_file_diff.is_some();
+        let detail_open = g.open_pr.is_some() || g.open_commit.is_some() || g.open_issue.is_some();
         if !is_list || detail_open || g.filtering {
             return None;
         }
@@ -822,14 +743,6 @@ impl App {
             self.handle_issue_detail_key(key);
             return;
         }
-        // The file diff view captures keys while open.
-        if self
-            .active_git()
-            .is_some_and(|g| g.open_file_diff.is_some())
-        {
-            self.handle_file_diff_key(key);
-            return;
-        }
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.git_scroll(1),
             KeyCode::Char('k') | KeyCode::Up => self.git_scroll(-1),
@@ -928,10 +841,7 @@ impl App {
     pub fn git_scroll(&mut self, delta: i32) {
         // The PR / commit / issue / file-diff detail views all scroll as a block.
         if self.active_git().is_some_and(|g| {
-            g.open_pr.is_some()
-                || g.open_commit.is_some()
-                || g.open_issue.is_some()
-                || g.open_file_diff.is_some()
+            g.open_pr.is_some() || g.open_commit.is_some() || g.open_issue.is_some()
         }) {
             if let Some(g) = self.active_git_mut() {
                 g.scroll = (g.scroll as i64 + delta as i64).max(0) as usize;
@@ -1031,11 +941,9 @@ impl App {
             self.git_open_issue_detail();
             return;
         }
-        // A Status file row opens its diff in-tab.
+        // A Status file row opens its diff in the native diff viewer.
         if self.active_git().map(|g| g.section) == Some(Section::Status) {
-            if let Some((path, staged)) = self.git_status_selected_file() {
-                self.fetch_file_diff(path, staged);
-            }
+            self.git_open_status_diff();
             return;
         }
         // Branch checkout is handled directly so we can refresh in place.
@@ -1058,22 +966,53 @@ impl App {
         }
     }
 
-    /// `d`: diff/show the selection in the workspace's terminal pane, or in-tab
-    /// for Status files.
+    /// `d`: diff/show the selection in the workspace's terminal pane, or in the
+    /// native diff viewer for Status files.
     fn git_diff(&mut self) {
-        // Status files open the diff in-tab (like commit detail).
+        // Status files open in the native diff viewer.
         if self
             .active_git()
             .is_some_and(|g| g.section == Section::Status)
         {
-            if let Some((path, staged)) = self.git_status_selected_file() {
-                self.fetch_file_diff(path, staged);
-                return;
-            }
+            self.git_open_status_diff();
+            return;
         }
         if let Some(cmd) = self.git_selected_command(true) {
             self.git_run_in_pane(cmd);
         }
+    }
+
+    /// Open the selected Status file in the native diff viewer. Ensures the
+    /// diff snapshot is loaded first; if not, triggers a refresh and shows a
+    /// toast so the user can retry. When `override_file` is `None`, uses the
+    /// viewport-center file from `git_status_selected_file`.
+    pub fn git_open_status_diff_with(&mut self, override_file: Option<(String, bool)>) {
+        let Some((path, staged)) = override_file.or_else(|| self.git_status_selected_file()) else {
+            return;
+        };
+        if !self.diff_snapshot_matches_active_workspace() {
+            self.refresh_diff_status(true);
+            self.show_toast("loading diff data — try again");
+            return;
+        }
+        let layer = if staged {
+            crate::diff::DiffLayer::Staged
+        } else {
+            crate::diff::DiffLayer::Worktree
+        };
+        match self.diff_file_for_path(&path, Some(&layer)) {
+            Ok(file) => {
+                self.open_diff_view(file.key, super::files::OpenTarget::Preview);
+            }
+            Err(e) => {
+                self.show_toast(&e);
+            }
+        }
+    }
+
+    /// Open the viewport-center Status file in the native diff viewer.
+    fn git_open_status_diff(&mut self) {
+        self.git_open_status_diff_with(None);
     }
 
     /// The `gh`/`git` command for the selected row. `diff` chooses the diff form.
