@@ -13,6 +13,15 @@ use crate::git::{
 
 impl App {
     /// Open (or focus) the git tab for `workspace`. Idempotent — one git tab per workspace.
+    ///
+    /// `Workspace.cwd` is fixed at workspace creation and never follows a
+    /// pane's live shell `cd` (see `App::refresh_cwds`). A user who just `cd`s
+    /// into a repo inside a pane, instead of opening a dedicated workspace
+    /// there, got a silent no-op from `Ctrl+Space g`: the check ran against
+    /// the stale workspace root, correctly saw "not a repo", and stopped
+    /// (issue/67). So when the workspace root itself isn't a repo, fall back
+    /// to the now-active workspace's focused pane's actual live cwd before
+    /// giving up.
     pub fn open_git_tab(&mut self, wsi: usize) {
         if wsi >= self.workspaces.len() {
             return;
@@ -22,9 +31,41 @@ impl App {
             self.workspaces[wsi].active_tab = i;
             return;
         }
-        let root = self.workspaces[wsi].cwd.clone();
-        if !local::is_repo(&root) {
-            return; // a workspace that isn't a git repo has no git tab
+        let ws_root = self.workspaces[wsi].cwd.clone();
+        let mut root = ws_root.clone();
+        let mut check = local::repo_check(&root);
+        // Only fall back on an ordinary "not a repo" root. A workspace-root
+        // `Error` (broken `git`, bad `PATH`, ...) must still surface as a
+        // toast, even when the focused pane happens to be a valid repo.
+        if matches!(check, local::RepoCheck::NotRepo) {
+            let pane_cwd = self.focused_cwd();
+            if pane_cwd != ws_root {
+                let pane_check = local::repo_check(&pane_cwd);
+                match pane_check {
+                    local::RepoCheck::Repo => {
+                        root = pane_cwd;
+                        check = pane_check;
+                    }
+                    // The pane cwd itself failed to check (bad permissions, a
+                    // broken `git`, ...): that's worth surfacing even if the
+                    // workspace root was just an ordinary non-repo folder.
+                    local::RepoCheck::Error(_) => check = pane_check,
+                    local::RepoCheck::NotRepo => {}
+                }
+            }
+        }
+        match check {
+            local::RepoCheck::Repo => {}
+            // A workspace that genuinely isn't a git repo stays a silent
+            // no-op (the common case, e.g. a scratch folder).
+            local::RepoCheck::NotRepo => return,
+            // `git` missing or failing to run is surfaced instead of
+            // swallowed, so `Ctrl+Space g` never again looks like it did
+            // nothing (issue/67).
+            local::RepoCheck::Error(e) => {
+                self.show_toast(format!("git tab: {e}"));
+                return;
+            }
         }
         let view = GitView::new(root.clone());
         let view_id = view.id;
@@ -1441,6 +1482,45 @@ mod tests {
         assert_eq!(app.active_git().unwrap().scroll, 0); // reset on switch
         app.git_scroll(2);
         assert_eq!(app.active_git().unwrap().cursor, 2);
+    }
+
+    /// A workspace whose fixed `cwd` is not a repo, but whose focused pane
+    /// has since `cd`'d into one, still opens the git tab: `open_git_tab`
+    /// falls back to the pane's live cwd instead of silently no-op'ing
+    /// (issue/67).
+    #[test]
+    fn git_tab_falls_back_to_focused_pane_cwd() {
+        let repo =
+            std::env::temp_dir().join(format!("luvus-gittab-fallback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .output()
+            .expect("git");
+
+        let not_repo =
+            std::env::temp_dir().join(format!("luvus-gittab-notrepo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&not_repo);
+        std::fs::create_dir_all(&not_repo).unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        // The workspace root stays fixed at a non-repo folder...
+        app.workspaces[0].cwd = not_repo;
+        // ...but the focused pane (created by `App::new`) has `cd`'d into the repo.
+        let focus = app.layout().focus;
+        app.panes.get_mut(&focus).unwrap().cwd = repo.clone();
+
+        app.open_git_tab(0);
+        let view = app
+            .active_git()
+            .expect("git tab opens using the focused pane's cwd, not the stale workspace root");
+        assert_eq!(
+            view.repo_root, repo,
+            "the git tab targets the focused pane's repo, not the workspace root"
+        );
     }
 
     #[test]
