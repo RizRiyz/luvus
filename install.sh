@@ -2,7 +2,7 @@
 # luvus installer — downloads the right prebuilt binary for your OS/arch from the
 # GitHub releases and drops it on your PATH.
 #
-#   curl -fsSL https://raw.githubusercontent.com/RizRiyz/luvus/main/install.sh | sh
+#   curl -fsSL https://luvus.dev/install.sh | sh
 #
 # Overrides:
 #   LUVUS_VERSION=v0.1.0   install a specific tag (default: latest release)

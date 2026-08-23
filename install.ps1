@@ -2,7 +2,7 @@
 # luvus installer for Windows — downloads the prebuilt binary from the GitHub
 # releases and adds it to your PATH (no admin needed).
 #
-#   irm https://raw.githubusercontent.com/RizRiyz/luvus/main/install.ps1 | iex
+#   irm https://luvus.dev/install.ps1 | iex
 #
 # Overrides (set before running):
 #   $env:LUVUS_VERSION     = 'v0.1.0'    # a specific tag (default: latest release)

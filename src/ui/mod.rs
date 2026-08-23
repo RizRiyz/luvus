@@ -632,6 +632,9 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         app.settings_ctl_rects = h.ctls.clone();
         app.settings_theme_remove_rects = h.theme_remove.clone();
         app.settings_arrow_rects = h.arrows.clone();
+        if let Some(settings) = app.settings.as_mut() {
+            settings.layout_scroll = h.layout_scroll;
+        }
     } else {
         app.settings_modal_rect = None;
         app.settings_close_rect = None;

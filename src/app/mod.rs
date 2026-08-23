@@ -2495,10 +2495,12 @@ impl App {
     }
 
     /// The **dock registry** (docs/29): every dock the settings can place —
-    /// built-ins plus every dock declared by an installed, runnable module, plus
-    /// any currently-mounted dock not otherwise listed (e.g. a stale config
-    /// entry). Deduplicated, built-ins first. Its current side is
-    /// `sidebars.side_of(kind)` (`None` = not placed yet).
+    /// built-ins plus every dock declared by an installed, runnable module, then
+    /// live/configured fallback docks sorted by id. The fallback order is
+    /// deliberately independent from sidebar placement: moving a dock appends it
+    /// on that side, but must not move its Settings row under the pointer.
+    /// Deduplicated, built-ins first. Its current side is `sidebars.side_of(kind)`
+    /// (`None` = not placed yet).
     pub fn available_docks(&self) -> Vec<DockKind> {
         let mut v = vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files];
         for m in self.modules.modules.iter().filter(|m| m.is_runnable()) {
@@ -2509,7 +2511,21 @@ impl App {
                 }
             }
         }
-        for k in self.docks_flat() {
+
+        // A live API dock can exist without a currently-runnable declaration,
+        // and an explicitly-off stale dock exists only in `docks_off`. Keep all
+        // of them placeable, but sort this fallback set instead of deriving its
+        // order from left/right sidebar vectors that placement mutates.
+        let mut fallback: Vec<DockKind> = self
+            .module_docks
+            .keys()
+            .chain(self.config.docks_off.iter())
+            .map(|id| DockKind::Module(id.clone()))
+            .chain(self.docks_flat())
+            .collect();
+        fallback.sort_by(|a, b| a.id().cmp(b.id()));
+        fallback.dedup();
+        for k in fallback {
             if !v.contains(&k) {
                 v.push(k);
             }
@@ -9290,6 +9306,7 @@ mod tests {
         app.settings = Some(SettingsUi {
             tab: SettingsTab::Layout,
             cursor: idx,
+            layout_scroll: 0,
             capturing: false,
         });
         app.handle_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));

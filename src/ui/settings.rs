@@ -14,6 +14,7 @@ pub(super) struct SettingsHits {
     pub ctls: Vec<(usize, Rect)>,
     pub theme_remove: Vec<(String, Rect)>,
     pub arrows: Vec<(usize, i32, Rect)>,
+    pub layout_scroll: usize,
 }
 
 fn format_history_budget(bytes: usize) -> String {
@@ -55,11 +56,11 @@ pub(super) fn draw_settings(
     let inner = block.inner(modal);
     f.render_widget(block, modal);
 
-    let (tab, cursor) = app
+    let (tab, cursor, layout_scroll) = app
         .settings
         .as_ref()
-        .map(|u| (u.tab, u.cursor))
-        .unwrap_or((SettingsTab::Theme, 0));
+        .map(|u| (u.tab, u.cursor, u.layout_scroll))
+        .unwrap_or((SettingsTab::Theme, 0, 0));
 
     // ── title bar ──
     f.render_widget(
@@ -105,7 +106,8 @@ pub(super) fn draw_settings(
         inner.width,
         inner.height.saturating_sub(6),
     );
-    let (ctls, theme_remove, arrows) = draw_content(f, content, tab, cursor, app, t);
+    let (ctls, theme_remove, arrows, layout_scroll) =
+        draw_content(f, content, tab, cursor, layout_scroll, app, t);
 
     // ── footer hint (Keys tab gets its own rebind/reset hints) ──
     let footer_y = inner.bottom().saturating_sub(1);
@@ -161,6 +163,7 @@ pub(super) fn draw_settings(
         ctls,
         theme_remove,
         arrows,
+        layout_scroll,
     }
 }
 
@@ -168,6 +171,7 @@ type Content = (
     Vec<(usize, Rect)>,
     Vec<(String, Rect)>,
     Vec<(usize, i32, Rect)>,
+    usize,
 );
 
 fn draw_content(
@@ -175,12 +179,14 @@ fn draw_content(
     area: Rect,
     tab: SettingsTab,
     cursor: usize,
+    layout_scroll: usize,
     app: &App,
     t: &Theme,
 ) -> Content {
     let mut ctls = Vec::new();
     let mut theme_remove = Vec::new();
     let mut arrows = Vec::new();
+    let mut resolved_layout_scroll = layout_scroll;
     let cat = app.catalog;
     match tab {
         SettingsTab::Theme => {
@@ -347,9 +353,8 @@ fn draw_content(
                 .iter()
                 .position(|v| matches!(v, V::Ctl(i) if *i == cursor))
                 .unwrap_or(0);
-            let scroll = cur_vis
-                .saturating_sub(avail.saturating_sub(1))
-                .min(vis.len().saturating_sub(avail));
+            let scroll = keep_visible_scroll(layout_scroll, cur_vis, avail, vis.len());
+            resolved_layout_scroll = scroll;
             for (row_i, v) in vis.iter().enumerate().skip(scroll).take(avail) {
                 let y = area.y + (row_i - scroll) as u16;
                 let i = match v {
@@ -1122,7 +1127,20 @@ fn draw_content(
             }
         }
     }
-    (ctls, theme_remove, arrows)
+    (ctls, theme_remove, arrows, resolved_layout_scroll)
+}
+
+/// Preserve the current viewport whenever the selected row is already visible;
+/// move it only far enough to reveal keyboard navigation beyond either edge.
+fn keep_visible_scroll(scroll: usize, cursor: usize, viewport: usize, total: usize) -> usize {
+    let viewport = viewport.max(1);
+    let mut scroll = scroll.min(total.saturating_sub(viewport));
+    if cursor < scroll {
+        scroll = cursor;
+    } else if cursor >= scroll.saturating_add(viewport) {
+        scroll = cursor.saturating_add(1).saturating_sub(viewport);
+    }
+    scroll.min(total.saturating_sub(viewport))
 }
 
 /// The one-line summary of what a module contributes, e.g. `· 2 actions · 1 dock`.
@@ -1456,5 +1474,19 @@ fn fill_bg(f: &mut RenderTarget, rect: Rect, color: ratatui::style::Color) {
         for x in rect.x..rect.right() {
             buf[(x, y)].set_bg(color);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::keep_visible_scroll;
+
+    #[test]
+    fn layout_scroll_moves_only_when_selection_leaves_the_viewport() {
+        assert_eq!(keep_visible_scroll(10, 15, 12, 40), 10);
+        assert_eq!(keep_visible_scroll(10, 10, 12, 40), 10);
+        assert_eq!(keep_visible_scroll(10, 9, 12, 40), 9);
+        assert_eq!(keep_visible_scroll(10, 22, 12, 40), 11);
+        assert_eq!(keep_visible_scroll(30, 15, 12, 20), 8);
     }
 }

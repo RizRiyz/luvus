@@ -72,6 +72,10 @@ impl SettingsTab {
 pub struct SettingsUi {
     pub tab: SettingsTab,
     pub cursor: usize,
+    /// First visual row shown in the Layout tab. Persisting this while the modal
+    /// is open prevents a visible dock/bar button click from re-anchoring the
+    /// list around its newly selected row.
+    pub layout_scroll: usize,
     /// In the Keys tab: capturing the next key press to rebind `cursor`'s command.
     pub capturing: bool,
 }
@@ -228,6 +232,7 @@ impl App {
         self.settings = Some(SettingsUi {
             tab: SettingsTab::General,
             cursor: 0,
+            layout_scroll: 0,
             capturing: false,
         });
     }
@@ -273,6 +278,7 @@ impl App {
             tab,
             cursor,
             capturing,
+            ..
         }) = self.settings.as_ref()
         else {
             return;
@@ -430,6 +436,7 @@ impl App {
         if let Some(ui) = self.settings.as_mut() {
             ui.tab = tab;
             ui.cursor = cursor;
+            ui.layout_scroll = 0;
         }
     }
 
@@ -1261,6 +1268,79 @@ mod tests {
             app.config.bars.place("example:ci", region);
             assert_eq!(app.bar_setting_keys(), expected);
         }
+    }
+
+    #[test]
+    fn dock_settings_rows_stay_stable_when_placement_changes() {
+        let _env = crate::persist::test_env("dock-settings-stable");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let alpha = DockKind::Module("example:alpha".into());
+        let beta = DockKind::Module("example:beta".into());
+        assert!(app.move_dock(&alpha, Side::Right));
+        assert!(app.move_dock(&beta, Side::Right));
+        let expected = app.available_docks();
+
+        assert!(app.move_dock(&alpha, Side::Left));
+        assert_eq!(app.available_docks(), expected);
+        app.unmount_dock(&alpha);
+        assert_eq!(app.available_docks(), expected);
+    }
+
+    #[test]
+    fn clicking_a_visible_placement_button_keeps_the_layout_viewport() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("settings-placement-scroll");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(100, 24, tx).unwrap();
+        let declaration = crate::bar::BarDeclaration {
+            key: crate::bar::BarWidgetKey::new("example", "status"),
+            title: "Example status".into(),
+            region: crate::bar::BarRegion::BottomRight,
+            priority: 50,
+        };
+        app.bar
+            .declarations
+            .insert(declaration.key.canonical(), declaration);
+        app.open_settings();
+        let last = app.layout_rows().len().saturating_sub(1);
+        if let Some(settings) = app.settings.as_mut() {
+            settings.tab = SettingsTab::Layout;
+            settings.cursor = last;
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let before = app.settings.as_ref().unwrap().layout_scroll;
+        assert!(before > 0, "the regression requires a scrolled Layout list");
+
+        let rows = app.layout_rows();
+        let (_, _, button) = app
+            .settings_arrow_rects
+            .iter()
+            .find(|(index, delta, _)| {
+                *delta == 2
+                    && *index != last
+                    && matches!(
+                        rows.get(*index),
+                        Some(LayoutRow::Dock(_) | LayoutRow::Bar(_))
+                    )
+            })
+            .copied()
+            .expect("a visible placement button above the selected row");
+        app.handle_settings_click(button.x, button.y);
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        assert_eq!(
+            app.settings.as_ref().unwrap().layout_scroll,
+            before,
+            "clicking a visible placement button must not re-anchor the modal"
+        );
     }
 
     #[test]
