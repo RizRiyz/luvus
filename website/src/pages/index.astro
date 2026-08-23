@@ -14,6 +14,7 @@ import '@fontsource/ibm-plex-mono/600.css';
 import '@fontsource/ibm-plex-mono/700.css';
 import '@fontsource/orbit/400.css'; // the wordmark face
 import Logo from '../components/Logo.astro';
+import XLogo from '../components/XLogo.astro';
 // The surviving Luvus mark. Imported raw and retinted at build time so it can be a
 // theme-aware line drawing rather than a flat image:
 //   * the white backing rect goes, or it would be a white square on a dark page;
@@ -73,6 +74,7 @@ import IconAider from '../assets/icons/aider.svg';
 import droidMask from '../assets/icons/droid-mask.png';
 
 const GITHUB = 'https://github.com/RizRiyz/luvus';
+const X = 'https://x.com/luvusdev';
 
 // Every agent in `detect::KNOWN_AGENTS` (14), which CLAUDE.md requires this
 // grid to stay truthful to. `aider` and `droid` have no icon in assets/icons,
@@ -169,6 +171,7 @@ const ogImage = 'https://luvus.dev/og.png';
             ></path></svg
           >
         </a>
+        <a href={X} class="gh" aria-label="Luvus on X" title="X"><XLogo /></a>
       </div>
       </div>
     </nav>
@@ -473,6 +476,42 @@ const ogImage = 'https://luvus.dev/og.png';
         </article>
 
         <article class="frow">
+          <span class="fr-k">Review</span>
+          <div class="fr-text">
+            <h3>Review every change where the work happens</h3>
+            <p>DIFF keeps staged, worktree, untracked, and conflicted changes separate, then renders each file in Auto, Split, or Stack view. Leave a local note on one line or a range and send only that focused feedback to a live agent. It is read-only and never stages, discards, commits, or pushes.</p>
+            <a class="fc-go" href="/docs/guides/diff/">Native DIFF review →</a>
+          </div>
+          <div class="fm diff-mock" aria-hidden="true">
+            <div class="fm-head"><span>▴ DIFF · src/app.rs</span><em><b class="fd-add">+5</b> <b class="fd-del">-2</b> · SPLIT</em></div>
+            <div class="fd-hunk">@@ -42,4 +42,5 @@ fn dispatch</div>
+            <div class="fd-labels"><span>OLD</span><span>NEW</span></div>
+            <div class="fd-row">
+              <span class="fd-code del"><i>42 −</i><code>if input.is_empty() &#123;</code></span>
+              <span class="fd-code add"><i>42 +</i><code>let value = input.trim();</code></span>
+            </div>
+            <div class="fd-row">
+              <span class="fd-code del"><i>43 −</i><code>return Err(Empty);</code></span>
+              <span class="fd-code add"><i>43 +</i><code>if value.is_empty() &#123;</code></span>
+            </div>
+            <div class="fd-row">
+              <span class="fd-code gap"><i></i><code></code></span>
+              <span class="fd-code add"><i>44 +</i><code>return Err(Empty);</code></span>
+            </div>
+            <div class="fd-row">
+              <span class="fd-code ctx"><i>44</i><code>&#125;</code></span>
+              <span class="fd-code ctx"><i>45</i><code>&#125;</code></span>
+            </div>
+            <div class="fd-note">
+              <span><b>NOTE · R42-R44</b><em>local</em></span>
+              <p>Good guard. Add the whitespace-only case.</p>
+              <i>send → codex</i>
+            </div>
+            <div class="fm-foot">s split/stack · n note · a send to agent · f filter</div>
+          </div>
+        </article>
+
+        <article class="frow">
           <span class="fr-k">Read</span>
           <div class="fr-text">
             <h3>Read what agents touch</h3>
@@ -529,6 +568,36 @@ const ogImage = 'https://luvus.dev/og.png';
         </article>
 
         <article class="frow">
+          <span class="fr-k">Extend</span>
+          <div class="fr-text">
+            <h3>Put live status in the Luvus Bar</h3>
+            <p>Modules can publish compact, theme-aware widgets beside the tabs or inside the bottom status row without taking space from a pane. Move each widget to Top, Bottom, or Off from Layout settings or the CLI. When space gets tight, Luvus compacts widgets before protected tabs, key hints, or the version are touched.</p>
+            <a class="fc-go" href="/docs/guides/bar/">Build for the Luvus Bar →</a>
+          </div>
+          <div class="fm bar-mock" aria-hidden="true">
+            <div class="fb-shell">
+              <div class="fb-top">
+                <span class="fb-tab on">1 main</span>
+                <span class="fb-tab">2 ▴ diff</span>
+                <span class="fb-tab add">+</span>
+                <span class="fb-widget"><i></i> CI <b>14/14</b></span>
+              </div>
+              <div class="fb-pane">
+                <span><i>❯</i> cargo test --workspace</span>
+                <span class="dim">running 14 focused checks…</span>
+                <span class="pass">✓ all checks passed in 4.2s</span>
+              </div>
+              <div class="fb-bottom">
+                <span class="fb-prefix">⌃Space · prefix</span>
+                <span class="fb-runtime">NORMAL · 2 panes · tab 1/3</span>
+                <span class="fb-version">v0.11.0</span>
+              </div>
+            </div>
+            <div class="fm-foot"><b>CI status</b> · Top &nbsp; Bottom &nbsp; Off</div>
+          </div>
+        </article>
+
+        <article class="frow">
           <span class="fr-k">Reach</span>
           <div class="fr-text">
             <h3>Drive another machine</h3>
@@ -568,7 +637,7 @@ const ogImage = 'https://luvus.dev/og.png';
         <a href="/docs/extend/writing-modules/">modules in any language</a> ·
         <a href="/docs/reference/keybindings/">remappable keys</a> ·
         <a href="/docs/guides/layout/">movable panels and themes</a> ·
-        <a href="/docs/guides/bar/">a composable status bar</a>
+        <a href="/docs/guides/search/">global fuzzy search</a>
       </p>
     </section>
 
@@ -1354,7 +1423,8 @@ const ogImage = 'https://luvus.dev/og.png';
       .nav-links a:hover { color: var(--text); }
       .gh {
         display: inline-flex; align-items: center; justify-content: center;
-        border: 1px solid var(--line); padding: 0.4rem;
+        width: 33px; height: 33px; flex: 0 0 33px; box-sizing: border-box;
+        border: 1px solid var(--line); padding: 0;
         transition: border-color 0.15s, color 0.15s;
       }
       .gh:hover { border-color: var(--accent); color: var(--accent); }
@@ -1923,6 +1993,106 @@ const ogImage = 'https://luvus.dev/og.png';
       .fm-row .g { width: 3px; height: 0.75rem; border-radius: 2px; background: var(--line); flex: none; }
       .fm-row .g.m { background: var(--amber); }
       .fm-row .g.a { background: var(--green); }
+
+      /* Native DIFF mock. Paired rows keep old and new source aligned while
+         the colored edge, background, and +/- symbol mirror the three marker
+         options in Settings. The note occupies its own row just like the real
+         review surface, so it never covers source text. */
+      .diff-mock { gap: 0; }
+      .diff-mock .fm-head b { font-weight: 600; }
+      .fd-add { color: var(--mint); }
+      .fd-del { color: var(--coral); }
+      .fd-hunk {
+        padding: 0.22rem 0.35rem; color: var(--amber);
+        background: rgb(from var(--amber) r g b / 0.07);
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .fd-labels, .fd-row { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; }
+      .fd-labels {
+        color: var(--overlay1); font-size: 0.55rem; letter-spacing: 0.09em;
+        padding: 0.24rem 0 0.12rem;
+      }
+      .fd-labels span { padding-left: 0.35rem; }
+      .fd-code {
+        display: grid; grid-template-columns: 2.35rem minmax(0, 1fr); gap: 0.25rem;
+        min-width: 0; padding: 0.16rem 0.25rem; border-left: 3px solid transparent;
+      }
+      .fd-code i { font-style: normal; color: var(--overlay1); text-align: right; }
+      .fd-code code {
+        min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        color: var(--sub2); font: inherit;
+      }
+      .fd-code.del {
+        border-color: var(--coral); background: rgb(from var(--coral) r g b / 0.14);
+      }
+      .fd-code.add {
+        border-color: var(--mint); background: rgb(from var(--mint) r g b / 0.14);
+      }
+      .fd-code.gap {
+        background: repeating-linear-gradient(
+          -45deg,
+          transparent 0 5px,
+          rgb(from var(--line) r g b / 0.42) 5px 6px
+        );
+      }
+      .fd-code.del i { color: var(--coral); }
+      .fd-code.add i { color: var(--mint); }
+      .fd-note {
+        margin: 0.42rem 0.1rem 0.1rem; padding: 0.42rem 0.5rem;
+        border: 1px solid rgb(from var(--accent) r g b / 0.7);
+        background: rgb(from var(--accent) r g b / 0.07);
+      }
+      .fd-note > span { display: flex; justify-content: space-between; gap: 0.5rem; }
+      .fd-note b { color: var(--accent); font-size: 0.58rem; letter-spacing: 0.06em; }
+      .fd-note em { color: var(--overlay1); font-style: normal; font-size: 0.58rem; }
+      .fd-note p { margin: 0.25rem 0; color: var(--sub2); line-height: 1.45; }
+      .fd-note > i { display: block; color: var(--mint); font-style: normal; text-align: right; }
+
+      /* Luvus Bar mock. The shell protects the three pieces real clients
+         protect: tabs on top, prefix help at bottom-left, and the clickable
+         version at bottom-right. Module content lives only in the remaining
+         space and therefore cannot change pane geometry. */
+      .fm.bar-mock { padding: 0; border: 0; background: none; }
+      .fb-shell { border: 1px solid var(--line); background: var(--bg2); overflow: hidden; }
+      .fb-top {
+        display: flex; align-items: center; gap: 0.22rem; min-width: 0;
+        padding: 0.3rem 0.38rem; border-bottom: 1px solid var(--line);
+      }
+      .fb-tab {
+        min-width: 0; padding: 0.08rem 0.3rem; color: var(--overlay1);
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .fb-tab.on { color: var(--text); border-bottom: 1px solid var(--accent); }
+      .fb-tab.add { flex: none; color: var(--accent); }
+      .fb-widget {
+        display: inline-flex; align-items: center; gap: 0.28rem;
+        flex: none; margin-left: auto; padding: 0.1rem 0.34rem;
+        color: var(--sub2); border: 1px solid rgb(from var(--mint) r g b / 0.45);
+        background: rgb(from var(--mint) r g b / 0.08);
+      }
+      .fb-widget i { width: 5px; height: 5px; border-radius: 50%; background: var(--mint); }
+      .fb-widget b { color: var(--mint); font-weight: 600; }
+      .fb-pane {
+        min-height: 6.7rem; display: flex; flex-direction: column; justify-content: center;
+        gap: 0.34rem; padding: 0.75rem 0.8rem; color: var(--sub2);
+      }
+      .fb-pane span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .fb-pane i { color: var(--accent); font-style: normal; }
+      .fb-pane .dim { color: var(--overlay1); }
+      .fb-pane .pass { color: var(--mint); }
+      .fb-bottom {
+        display: flex; align-items: center; gap: 0.5rem; min-width: 0;
+        padding: 0.28rem 0.42rem; border-top: 1px solid var(--line);
+        color: var(--overlay1); font-size: 0.59rem;
+      }
+      .fb-prefix, .fb-version { flex: none; }
+      .fb-runtime {
+        min-width: 0; margin-left: auto; overflow: hidden;
+        text-overflow: ellipsis; white-space: nowrap; color: var(--sub2);
+      }
+      .fb-version { color: var(--accent); }
+      .bar-mock .fm-foot { display: flex; justify-content: flex-end; gap: 0.25rem; }
+      .bar-mock .fm-foot b { color: var(--sub2); font-weight: 500; margin-right: auto; }
 
       .fm .d { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--overlay0); }
       .fm .d.run { background: var(--accent); }

@@ -22,9 +22,11 @@ import '@fontsource/ibm-plex-mono/600.css';
 import '@fontsource/ibm-plex-mono/700.css';
 import '@fontsource/orbit/400.css'; // the wordmark face
 import Logo from '../components/Logo.astro';
+import XLogo from '../components/XLogo.astro';
 import { NAV_MARK } from '../lib/mark';
 
 const GITHUB = 'https://github.com/RizRiyz/luvus';
+const X = 'https://x.com/luvusdev';
 const TOPIC = 'luvus-module';
 const TOPIC_URL = `https://github.com/topics/${TOPIC}`;
 const SEARCH_API = `https://api.github.com/search/repositories?q=topic:${TOPIC}&sort=stars&order=desc&per_page=60`;
@@ -232,6 +234,7 @@ const examples = [
               ></path></svg
             >
             </a>
+          <a href={X} class="gh" aria-label="Luvus on X" title="X"><XLogo /></a>
         </div>
       </div>
     </nav>
@@ -644,7 +647,8 @@ const examples = [
       .nav-links a[aria-current='page'] { color: var(--accent); }
       .gh {
         display: inline-flex; align-items: center; justify-content: center;
-        border: 1px solid var(--line); padding: 0.4rem;
+        width: 33px; height: 33px; flex: 0 0 33px; box-sizing: border-box;
+        border: 1px solid var(--line); padding: 0;
         transition: border-color 0.15s, color 0.15s;
       }
       .gh:hover { border-color: var(--accent); color: var(--accent); }

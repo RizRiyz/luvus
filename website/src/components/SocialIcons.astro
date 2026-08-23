@@ -4,7 +4,10 @@
 // the site header rather than like a separate documentation site. Starlight
 // renders this group in the header on desktop and in the mobile menu below it,
 // which is exactly where a site nav belongs on both.
+import XLogo from './XLogo.astro';
+
 const GITHUB = 'https://github.com/RizRiyz/luvus';
+const X = 'https://x.com/luvusdev';
 
 const LINKS = [
   { label: 'Docs', href: '/docs/' },
@@ -33,6 +36,9 @@ const path = Astro.url.pathname;
       ></path></svg
     >
   </a>
+  <a href={X} class="gh" aria-label="Luvus on X" title="X">
+    <XLogo />
+  </a>
 </nav>
 
 <style>
@@ -60,8 +66,12 @@ const path = Astro.url.pathname;
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    width: 33px;
+    height: 33px;
+    flex: 0 0 33px;
+    box-sizing: border-box;
     border: 1px solid var(--line);
-    padding: 0.4rem;
+    padding: 0;
     transition: border-color 0.15s, color 0.15s;
   }
   .gh:hover {

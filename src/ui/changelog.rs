@@ -21,6 +21,7 @@ pub const RECENT: usize = 3;
 /// Where the footer link goes. The site renders the same `changelog/*.md` files,
 /// so it can never disagree with what is embedded here.
 pub const CHANGELOG_URL: &str = "https://luvus.dev/changelog";
+pub const LUVUS_UPDATE_COMMAND: &str = "luvus update";
 pub const CURL_UPDATE_COMMAND: &str = "curl -fsSL https://luvus.dev/install.sh | sh";
 pub const BREW_UPDATE_COMMAND: &str = "brew upgrade luvus";
 
@@ -88,9 +89,8 @@ pub(super) fn draw_changelog(f: &mut RenderTarget, area: Rect, app: &mut App, t:
     hline(f, inner.x, inner.y + 1, inner.width, t);
 
     // ── "how to update" header, always shown above the notes ──
-    // Luvus cannot replace its running executable, so these rows copy the two
-    // supported upgrade commands instead. When the background check found a
-    // newer release, an accent headline leads.
+    // These rows copy the updater and package-specific upgrade commands. When
+    // the background check found a newer release, an accent headline leads.
     let mut top = inner.y + 2;
     if let Some(v) = app.update_available.clone() {
         f.render_widget(
@@ -115,7 +115,11 @@ pub(super) fn draw_changelog(f: &mut RenderTarget, area: Rect, app: &mut App, t:
     top += 1;
 
     app.changelog_copy_rects.clear();
-    for command in [CURL_UPDATE_COMMAND, BREW_UPDATE_COMMAND] {
+    for command in [
+        LUVUS_UPDATE_COMMAND,
+        CURL_UPDATE_COMMAND,
+        BREW_UPDATE_COMMAND,
+    ] {
         let row = Rect::new(inner.x + 1, top, inner.width.saturating_sub(2), 1);
         let hot = app
             .hover
@@ -477,7 +481,9 @@ fn hline(f: &mut RenderTarget, x: u16, y: u16, w: u16, t: &Theme) {
 
 #[cfg(test)]
 mod tests {
-    use super::{BREW_UPDATE_COMMAND, CHANGELOG_URL, CURL_UPDATE_COMMAND, RECENT};
+    use super::{
+        BREW_UPDATE_COMMAND, CHANGELOG_URL, CURL_UPDATE_COMMAND, LUVUS_UPDATE_COMMAND, RECENT,
+    };
     use crate::app::App;
     use crate::changelog::{Seg, CHANGELOG};
     use ratatui::backend::TestBackend;
@@ -780,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn update_guide_shows_only_the_copyable_brew_and_curl_commands() {
+    fn update_guide_shows_the_copyable_luvus_brew_and_curl_commands() {
         let _env = crate::persist::test_env("cl-update-guide");
         let (app, term) = open();
         let screen: String = term
@@ -790,6 +796,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
+        assert!(screen.contains(LUVUS_UPDATE_COMMAND));
         assert!(screen.contains(CURL_UPDATE_COMMAND));
         assert!(screen.contains(BREW_UPDATE_COMMAND));
         assert!(!screen.contains("cargo install luvus"));
@@ -798,7 +805,11 @@ mod tests {
                 .iter()
                 .map(|(_, command)| command.as_str())
                 .collect::<Vec<_>>(),
-            vec![CURL_UPDATE_COMMAND, BREW_UPDATE_COMMAND]
+            vec![
+                LUVUS_UPDATE_COMMAND,
+                CURL_UPDATE_COMMAND,
+                BREW_UPDATE_COMMAND
+            ]
         );
     }
 

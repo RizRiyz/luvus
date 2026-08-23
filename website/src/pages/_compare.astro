@@ -11,8 +11,10 @@ import '@fontsource/ibm-plex-mono/500.css';
 import '@fontsource/ibm-plex-mono/600.css';
 import '@fontsource/ibm-plex-mono/700.css';
 import Logo from '../components/Logo.astro';
+import XLogo from '../components/XLogo.astro';
 
 const GITHUB = 'https://github.com/RizRiyz/luvus';
+const X = 'https://x.com/luvusdev';
 const title = 'Compare luvus vs Herdr, tmux, and Zellij';
 const description =
   'How luvus compares to Herdr, tmux, and Zellij for running AI coding agents: live agent status, token and cost tracking, reboot-proof session resume, session forking, a built-in git tab, composable extensions, and multi-agent orchestration.';
@@ -186,6 +188,7 @@ const LANDSCAPE = [
               ></path></svg
             >
             </a>
+          <a href={X} class="gh" aria-label="Luvus on X" title="X"><XLogo /></a>
         </div>
       </div>
     </nav>
@@ -423,7 +426,8 @@ const LANDSCAPE = [
       .nav-links a[aria-current='page'] { color: var(--accent); }
       .gh {
         display: inline-flex; align-items: center; justify-content: center;
-        border: 1px solid var(--line); padding: 0.4rem;
+        width: 33px; height: 33px; flex: 0 0 33px; box-sizing: border-box;
+        border: 1px solid var(--line); padding: 0;
         transition: border-color 0.15s, color 0.15s;
       }
       .gh:hover { border-color: var(--accent); color: var(--accent); }
