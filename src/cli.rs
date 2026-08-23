@@ -150,8 +150,10 @@ panes / agents:
   agent fork <target> [--name <alias>] [--no-focus]
                              fork a supported agent's session into a sibling pane
   agent name <name>          alias the current agent, same as pane name (--clear to drop)
+  agent prompt <target> <text> [--wait] [--until STATE] [--timeout <s>]
+                             atomically prompt and optionally wait (send is an alias)
   agent send <target> <text> [--wait] [--until STATE] [--timeout <s>]
-                             prompt an agent (target = a name, pane id, or kind)
+                             compatibility alias for agent prompt
   agent keys <target> <key>...   send control keys (enter, esc, ctrl+c, up, …)
   agent read <target> [--lines N] [--source visible|recent]   print an agent's output
   agent get <target>         one agent's live info (pane, name, kind, status, cwd)
@@ -409,13 +411,13 @@ pub fn run(args: &[String]) -> Result<i32> {
     if args.get(1).map(String::as_str) == Some("wait") {
         return wait_cmd(args);
     }
-    // `agent send` is a submit-then-optionally-wait flow, not a one-shot request.
+    // Agent prompt/send and start are server-owned workflows, not plain
+    // dispatch calls; their one connection stays parked for the optional wait.
     if args.get(1).map(String::as_str) == Some("agent")
-        && args.get(2).map(String::as_str) == Some("send")
+        && matches!(args.get(2).map(String::as_str), Some("prompt" | "send"))
     {
         return agent_send_cmd(args);
     }
-    // `agent start` orchestrates split + run + wait-ready + name, not one request.
     if args.get(1).map(String::as_str) == Some("agent")
         && args.get(2).map(String::as_str) == Some("start")
     {
@@ -492,7 +494,10 @@ fn command_help_request(args: &[String]) -> Option<(&str, Option<&str>)> {
 fn trailing_help_is_pass_through_payload(args: &[String], topic: &str) -> bool {
     match topic {
         "pane" => matches!(args.get(2).map(String::as_str), Some("run" | "send")),
-        "agent" => matches!(args.get(2).map(String::as_str), Some("send" | "keys")),
+        "agent" => matches!(
+            args.get(2).map(String::as_str),
+            Some("prompt" | "send" | "keys")
+        ),
         // `--remote <host> [ssh args]` forwards everything after the host to SSH.
         "remote" => args.len() > 3,
         _ => false,
@@ -1579,78 +1584,66 @@ fn agent_start_cmd(args: &[String]) -> Result<i32> {
     let name = args.get(3).cloned().ok_or_else(|| {
         anyhow!("usage: luvus agent start <name> --kind <kind> [--pane <id> | --anchor <id>] [--down] [--timeout S] [-- <extra>]")
     })?;
-    let kind = flag(args, "--kind").ok_or_else(|| anyhow!("agent start requires --kind <kind>"))?;
-    // Native agent args after `--` are appended to the launch command.
-    let extra = args
-        .iter()
-        .position(|a| a == "--")
-        .map(|i| args[i + 1..].join(" "))
+    let separator = args.iter().position(|arg| arg == "--");
+    let options = &args[..separator.unwrap_or(args.len())];
+    validate_agent_start_options(options)?;
+    let kind =
+        flag(options, "--kind").ok_or_else(|| anyhow!("agent start requires --kind <kind>"))?;
+    let extra = separator
+        .map(|index| args[index + 1..].to_vec())
         .unwrap_or_default();
-    let cmd = if extra.is_empty() {
-        kind.clone()
-    } else {
-        format!("{kind} {extra}")
-    };
-
-    // `--pane` reuses an existing pane. `--anchor` creates a background sibling
-    // beside an explicit pane. Without either, a managed caller pane is the anchor.
-    let target = parse_agent_start_target(args, std::env::var("LUVUS_PANE_ID").ok())?;
-    let pane = match target {
-        AgentStartTarget::Existing(pane) => pane,
+    let target = parse_agent_start_target(options, std::env::var("LUVUS_PANE_ID").ok())?;
+    let mut params = serde_json::Map::new();
+    params.insert("name".into(), json!(name));
+    params.insert("kind".into(), json!(kind));
+    params.insert("args".into(), json!(extra));
+    match target {
+        AgentStartTarget::Existing(pane) => {
+            params.insert("pane".into(), json!(pane));
+        }
         AgentStartTarget::Split { anchor, down } => {
-            let mut split = serde_json::Map::new();
             if let Some(anchor) = anchor {
-                split.insert("pane".to_string(), json!(anchor));
+                params.insert("anchor".into(), json!(anchor));
             }
-            if down {
-                split.insert("direction".to_string(), json!("down"));
-            }
-            split.insert("focus".to_string(), json!(false));
-            let v = send_request("pane.split", Value::Object(split))?;
-            v.get("result")
-                .and_then(|r| r.get("pane"))
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| anyhow!("agent start: could not create a pane"))?
-                .to_string()
+            params.insert(
+                "direction".into(),
+                json!(if down { "down" } else { "right" }),
+            );
         }
-    };
-
-    // Launch the agent in the pane.
-    send_request("pane.run", json!({ "pane": pane, "command": cmd }))?;
-
-    // Wait until detection recognizes the kind as the pane's foreground agent.
-    let secs = flag(args, "--timeout")
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(30.0);
-    let deadline = Instant::now() + Duration::from_secs_f64(secs);
-    let mut ready = false;
-    loop {
-        let v = send_request("pane.status", json!({ "pane": pane }))?;
-        let agent = v
-            .get("result")
-            .and_then(|r| r.get("agent"))
-            .and_then(|x| x.as_str())
-            .unwrap_or("");
-        if agent.eq_ignore_ascii_case(&kind) {
-            ready = true;
-            break;
-        }
-        if Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(300));
     }
-
-    // Name it either way, so it is addressable even if readiness was not confirmed.
-    send_request("agent.name", json!({ "pane": pane, "name": name }))?;
+    if let Some(timeout) = flag(options, "--timeout") {
+        let timeout = timeout
+            .parse::<f64>()
+            .map_err(|_| anyhow!("--timeout must be seconds between 0 and 3600"))?;
+        params.insert("timeout_s".into(), json!(timeout));
+    }
+    let response = send_request("agent.start", Value::Object(params))?;
+    let ready = response["result"]["ready"].as_bool().unwrap_or(false);
     println!(
         "{}",
-        serde_json::to_string_pretty(&json!({
-            "result": {"name": name, "pane": pane, "kind": kind, "ready": ready}
-        }))
-        .unwrap_or_default()
+        serde_json::to_string_pretty(&response).unwrap_or_default()
     );
     Ok(if ready { 0 } else { 2 })
+}
+
+fn validate_agent_start_options(args: &[String]) -> Result<()> {
+    let mut index = 4;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--kind" | "--pane" | "--anchor" | "--timeout" => {
+                if args.get(index + 1).is_none() {
+                    return Err(anyhow!("{} requires a value", args[index]));
+                }
+                index += 2;
+            }
+            "--down" => index += 1,
+            option if option.starts_with("--") => {
+                return Err(anyhow!("unknown agent start option: {option}"));
+            }
+            value => return Err(anyhow!("unexpected agent start argument: {value}")),
+        }
+    }
+    Ok(())
 }
 
 fn confirm_legacy_all_from(
@@ -1871,84 +1864,89 @@ fn skill_cmd(rest: &[String]) -> Result<i32> {
     }
 }
 
-/// `luvus agent send <target> <text…> [--wait] [--until STATE] [--timeout S]` —
-/// submit a prompt to a target agent, then optionally block until it reaches a
-/// state (default `idle`). Exit 0 on the state, 2 on timeout, like `wait`.
+/// `luvus agent prompt <target> <text…> [--wait] [--until STATE] [--timeout S]`
+/// submits and waits as one server-owned operation. `agent send` remains a
+/// compatibility alias.
 fn agent_send_cmd(args: &[String]) -> Result<i32> {
     let target = args.get(3).cloned().ok_or_else(|| {
-        anyhow!("usage: luvus agent send <target> <text> [--wait] [--until STATE] [--timeout S]")
+        anyhow!("usage: luvus agent prompt <target> <text> [--wait] [--until STATE] [--timeout S]")
     })?;
-    // Text is every positional before the first flag, so `--wait` and friends can
-    // follow an unquoted multi-word prompt.
-    let text = args[4.min(args.len())..]
-        .iter()
-        .take_while(|a| !a.starts_with("--"))
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let mut text_parts = Vec::new();
+    let mut wait = false;
+    let mut until = Vec::new();
+    let mut timeout = None;
+    let mut positional_only = false;
+    let mut index = 4;
+    while index < args.len() {
+        let arg = &args[index];
+        if positional_only {
+            text_parts.push(arg.clone());
+            index += 1;
+            continue;
+        }
+        match arg.as_str() {
+            "--" => {
+                positional_only = true;
+                index += 1;
+            }
+            "--wait" => {
+                wait = true;
+                index += 1;
+            }
+            "--until" => {
+                until.push(
+                    args.get(index + 1)
+                        .ok_or_else(|| anyhow!("--until requires a state"))?
+                        .clone(),
+                );
+                index += 2;
+            }
+            "--timeout" => {
+                timeout = Some(
+                    args.get(index + 1)
+                        .ok_or_else(|| anyhow!("--timeout requires seconds"))?
+                        .parse::<f64>()
+                        .map_err(|_| anyhow!("--timeout must be seconds between 0 and 3600"))?,
+                );
+                index += 2;
+            }
+            option if option.starts_with("--") => {
+                return Err(anyhow!("unknown agent prompt option: {option}"));
+            }
+            _ => {
+                text_parts.push(arg.clone());
+                index += 1;
+            }
+        }
+    }
+    let text = text_parts.join(" ");
     if text.is_empty() {
-        return Err(anyhow!("agent send requires text"));
+        return Err(anyhow!("agent prompt requires text"));
     }
-    let v = send_request("agent.send", json!({ "target": target, "text": text }))?;
-    if v.get("error").is_some() {
-        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
-        return Ok(1);
+    let mut params = serde_json::Map::new();
+    params.insert("target".into(), json!(target));
+    params.insert("text".into(), json!(text));
+    params.insert("wait".into(), json!(wait));
+    if !until.is_empty() {
+        params.insert("until".into(), json!(until));
     }
-    if !args.iter().any(|a| a == "--wait") {
-        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
-        return Ok(0);
+    if let Some(timeout) = timeout {
+        params.insert("timeout_s".into(), json!(timeout));
     }
-    let pane = v
-        .get("result")
-        .and_then(|r| r.get("pane"))
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| anyhow!("agent send: server did not return a pane"))?
-        .to_string();
-    // Default timeout 300s (bounded so a stuck worker never hangs forever).
-    let deadline = Instant::now()
-        + Duration::from_secs_f64(
-            flag(args, "--timeout")
-                .and_then(|s| s.parse::<f64>().ok())
-                .unwrap_or(300.0),
-        );
-    // An explicit `--until STATE` waits for exactly that state. Otherwise wait for
-    // the agent to settle, with a stall guard so a prompt that lands on nothing
-    // (or a broken/idle worker) returns fast instead of blocking to the timeout.
-    match flag(args, "--until") {
-        Some(until) => wait_status_stream(&pane, &until, Some(deadline)),
-        None => agent_wait_settled(&pane, deadline),
-    }
-}
-
-/// Wait for a just-prompted agent to finish, like prompt-and-wait tools do:
-/// the prompt must produce a lifecycle change within a few seconds or we
-/// call it **stalled** (exit 3) rather than hang; then we wait until the agent
-/// settles at `idle`/`done`/`blocked` (exit 0), or the deadline passes (exit 2).
-fn agent_wait_settled(pane: &str, deadline: Instant) -> Result<i32> {
-    const STALL: Duration = Duration::from_secs(5);
-    let stall_by = Instant::now() + STALL;
-    let mut ever_worked = false;
-    loop {
-        match pane_status(pane)?.as_deref() {
-            Some("working") => ever_worked = true,
-            // Settled — but only count it once the prompt actually started work,
-            // so a target that was already idle when we sent isn't read as "done".
-            Some("idle") | Some("done") | Some("blocked") if ever_worked => return Ok(0),
-            _ => {}
-        }
-        let now = Instant::now();
-        if !ever_worked && now >= stall_by {
-            eprintln!(
-                "agent send: no response within 5s — the prompt may not have landed (stalled)"
-            );
-            return Ok(3);
-        }
-        if now >= deadline {
-            eprintln!("agent send: timed out waiting for the agent to settle");
-            return Ok(2);
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
+    let response = send_request("agent.prompt", Value::Object(params))?;
+    let ok = response.get("error").is_none();
+    let matched = response["result"]["matched"].as_bool().unwrap_or(!wait);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response).unwrap_or_default()
+    );
+    Ok(if !ok {
+        1
+    } else if wait && !matched {
+        2
+    } else {
+        0
+    })
 }
 
 /// Current agent status of `pane` (global lookup via `pane.status`).
@@ -3419,6 +3417,8 @@ mod tests {
             "luvus pane send 9 -h",
             "luvus agent send reviewer --help",
             "luvus agent send reviewer -h",
+            "luvus agent prompt reviewer --help",
+            "luvus agent prompt reviewer -h",
             "luvus agent keys reviewer --help",
             "luvus agent keys reviewer -h",
             "luvus --remote devbox --help",

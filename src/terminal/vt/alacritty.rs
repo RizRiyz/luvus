@@ -1140,14 +1140,66 @@ mod tests {
     }
 
     #[test]
-    fn alt_screen_has_no_scrollback() {
+    fn alt_screen_retains_bounded_capture_history_without_host_scrolling() {
         let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 2_000));
-        feed_lines(&mut e, 20);
+        let mut e = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 20));
         e.advance(b"\x1b[?1049h"); // enter the alternate screen
         assert!(e.alt_screen());
+        for i in 0..20 {
+            e.advance(format!("alternate {i}\r\n").as_bytes());
+        }
+        assert!(
+            e.history_len() > 0,
+            "scrolled-off alternate rows are retained"
+        );
+        let capture = e.backend_capture(CaptureMode::RecentUnwrapped, 20, false, 4096);
+        assert!(
+            capture.text.contains("alternate 1"),
+            "capture reaches rows no longer visible: {:?}",
+            capture.text
+        );
         e.scroll(5);
-        assert_eq!(e.scroll_offset(), 0, "the alt screen ignores scrollback");
+        assert_eq!(
+            e.scroll_offset(),
+            0,
+            "the host viewport still never scrolls an alternate-screen app"
+        );
+
+        e.advance(b"\x1b[?1049l");
+        assert!(!e.alt_screen());
+        assert_eq!(
+            e.history_len(),
+            0,
+            "alternate history is reclaimed instead of leaking into the primary screen"
+        );
+    }
+
+    #[test]
+    fn alternate_history_displaces_primary_rows_only_as_it_grows() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 20));
+        feed_lines(&mut engine, 30);
+        let primary_before = engine.history_len();
+        assert_eq!(primary_before, 20);
+
+        engine.advance(b"\x1b[?1049h");
+        for i in 0..8 {
+            engine.advance(format!("alternate {i}\r\n").as_bytes());
+        }
+        let alternate_rows = engine.history_len();
+        assert!(alternate_rows > 0);
+        engine.advance(b"\x1b[?1049l");
+
+        let primary_after = engine.history_len();
+        assert_eq!(
+            primary_after + alternate_rows,
+            primary_before,
+            "alternate rows consume the shared budget one for one"
+        );
+        assert!(
+            primary_after > primary_before / 2,
+            "entering alternate mode alone does not discard half the primary transcript"
+        );
     }
 
     #[test]

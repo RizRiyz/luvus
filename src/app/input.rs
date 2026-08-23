@@ -335,6 +335,16 @@ impl App {
                     );
                     return true;
                 }
+                AppEvent::AgentStart { id, reply, .. }
+                | AppEvent::AgentPrompt { id, reply, .. } => {
+                    let _ = reply.send(
+                        json!({ "id": id, "error": {
+                            "code": "no_session", "message": "no active session"
+                        }})
+                        .to_string(),
+                    );
+                    return true;
+                }
                 // Closing the last workspace empties `workspaces` and sets
                 // `should_quit`; the loop drains the rest of the event batch
                 // before it checks that flag, so ignore everything else here
@@ -459,6 +469,24 @@ impl App {
                         );
                     }
                 }
+                true
+            }
+            AppEvent::AgentStart {
+                id,
+                params,
+                reply,
+                cancelled,
+            } => {
+                self.start_agent_launch(id, params, reply, cancelled);
+                true
+            }
+            AppEvent::AgentPrompt {
+                id,
+                params,
+                reply,
+                cancelled,
+            } => {
+                self.start_agent_prompt(id, params, reply, cancelled);
                 true
             }
             AppEvent::ModuleCommandFinished {

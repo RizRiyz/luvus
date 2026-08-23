@@ -48,9 +48,9 @@ printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.luvus/luvus.so
 |---|---|
 | workspaces | `workspace.list` · `workspace.open` · `workspace.focus` · `workspace.rename` · `workspace.pin` · `workspace.close` |
 | tabs | `tab.list` · `tab.new` · `tab.focus` · `tab.move` · `tab.swap` · `tab.rename` · `tab.close` |
-| UHP Runtime profile | `runtime.capabilities` · `session.snapshot` · `events.subscribe` |
+| UHP Runtime profile | `runtime.capabilities` · `session.snapshot` · `agent.start` · `agent.prompt` · `agent.wait` · `events.subscribe` |
 | panes | `pane.list` · `pane.split` · `pane.move` · `pane.focus` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.processes` · `pane.close` · `attach.pane` |
-| agents | `agent.list` · `agent.get` · `agent.explain` · `agent.report` · `agent.release` · `agent.wait` · `agent.name` · `agent.fork` · `agent.send` · `agent.keys` · `agent.read` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.report_event` |
+| agents | `agent.list` · `agent.get` · `agent.explain` · `agent.report` · `agent.release` · `agent.start` · `agent.prompt` · `agent.wait` · `agent.name` · `agent.fork` · `agent.send` · `agent.keys` · `agent.read` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.report_event` |
 | search | `search` · `search.capabilities` · `search.query` · `search.activate` |
 | files | `files.tree` · `files.open` · `files.reveal` · `files.refresh` |
 | git | `git.status` · `git.branches` · `git.log` · `git.open` |
@@ -113,6 +113,22 @@ initial comparison and registration are atomic on the app loop, so it has no
 subscribe-then-check race and performs no polling. The existing
 `luvus wait agent-status` command uses this method and falls back only when it
 talks to an older server.
+
+`agent.start` takes `name`, `kind`, optional `pane` or `anchor`, optional
+`direction`, an `args` string array, and `timeout_s`. Luvus selects or creates
+the pane, queues the launch as one submitted shell action, reserves the unique
+name, and waits for manifest-driven detection without composing separate socket
+requests.
+
+`agent.prompt` takes `target`, `text`, `wait`, optional `until`, and optional
+`timeout_s`. Paste and Enter are one PTY queue action. With `wait:true`, the
+response is held until a requested state has post-submission evidence. Luvus
+accepts a detected Working transition or a newer output revision followed by a
+short quiet window, so a fast turn cannot disappear between detector ticks. A
+timeout returns `submitted:true`, `matched:false`, and `evidence:"timeout"`.
+Never resend that prompt automatically because it may already have executed.
+Only one waiting prompt may own a pane at a time. A conflicting call returns
+`agent_prompt_busy` before Luvus queues its text.
 
 ## Search
 

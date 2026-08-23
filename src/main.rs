@@ -859,6 +859,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
         // Parked `wait.output` deadlines lapse on the tick (docs/81).
         app.tick_output_waits(Instant::now());
         app.tick_agent_waits(Instant::now());
+        app.tick_agent_workflows(Instant::now());
         app.tick_backend_revision_waits(Instant::now());
         if app.should_quit || app.detach_requested {
             break;

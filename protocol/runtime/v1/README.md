@@ -38,6 +38,8 @@ its separate UTF-8 byte limit for complete request and response frames.
 | `agent.explain` | Explain the identity and state evidence currently winning for one target |
 | `agent.report` | Acquire or renew an authoritative agent-state lease for one pane and source |
 | `agent.release` | Release the caller's authority lease explicitly |
+| `agent.start` | Select or create a pane, queue one validated agent launch, reserve its name, and wait for detection as one server-owned workflow |
+| `agent.prompt` | Atomically queue prompt text plus Enter and optionally wait for post-submission lifecycle or settled-output evidence |
 | `agent.wait` | Wait for one pane to reach one semantic agent state within the announced bound |
 | `events.subscribe` | Stream bounded sequenced session and agent events after acknowledgment |
 
@@ -62,6 +64,22 @@ server replacement requires a fresh subscription and snapshot.
 The profile is bounded by the limits returned from `runtime.capabilities`.
 Callers must cancel outstanding waits on disconnect and must never interpret
 unavailable process evidence as proof that no child process exists.
+
+`agent.prompt` returns `submitted:true` once the one-piece input action is
+queued. A waiting call does not treat the target's pre-existing idle state as
+completion. It first requires post-submission evidence: an observed Working
+state, or a newer content revision that remains quiet for the bounded settle
+window. This also covers fast turns that begin and finish between detection
+ticks. A timeout reports `matched:false` while preserving `submitted:true`, so
+consumers must inspect state or capture output and must never resend blindly.
+Only one waiting `agent.prompt` may own a pane at a time. A conflicting request
+is rejected before its input is queued, because terminal output has no native
+turn identifier that could safely attribute one transition to two callers.
+
+`agent.start` owns pane selection or creation, safe argument quoting, command
+submission, name reservation, and readiness observation in one request. A
+`ready:false` timeout does not kill the pane because the command may still be
+starting; consumers can inspect it without repeating the launch.
 
 ## Installed contract and conformance
 

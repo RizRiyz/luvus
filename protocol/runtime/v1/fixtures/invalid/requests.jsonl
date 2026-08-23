@@ -10,3 +10,7 @@
 {"id":"ttl","method":"agent.report","params":{"pane":"7","source":"fx/plugin","agent":"fx","status":"working","ttl_s":0}}
 {"id":"release","method":"agent.release","params":{"pane":"7"}}
 {"id":"wait","method":"agent.wait","params":{"pane":"7","status":"working","timeout_s":3601}}
+{"id":"start-targets","method":"agent.start","params":{"name":"worker","kind":"codex","pane":"7","anchor":"8"}}
+{"id":"start-args","method":"agent.start","params":{"name":"worker","kind":"codex","args":["bad\narg"]}}
+{"id":"prompt-options","method":"agent.prompt","params":{"target":"worker","text":"test","wait":false,"timeout_s":5}}
+{"id":"prompt-state","method":"agent.prompt","params":{"target":"worker","text":"test","wait":true,"until":["idle","idle"]}}

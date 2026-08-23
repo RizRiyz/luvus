@@ -510,9 +510,13 @@ impl<T> Term<T> {
         self.event_proxy.send_event(title_event);
 
         if self.mode.contains(TermMode::ALT_SCREEN) {
-            self.inactive_grid.update_history(self.config.scrolling_history);
+            self.rebalance_alt_history();
         } else {
             self.grid.update_history(self.config.scrolling_history);
+            // Alternate history belongs only to the active alternate-screen
+            // lifetime. Reclaim it once the primary screen is active.
+            self.inactive_grid.clear_history();
+            self.inactive_grid.update_history(0);
         }
 
         if self.config.kitty_keyboard != old_config.kitty_keyboard {
@@ -702,6 +706,9 @@ impl<T> Term<T> {
         let is_alt = self.mode.contains(TermMode::ALT_SCREEN);
         self.grid.resize(!is_alt, num_lines, num_cols);
         self.inactive_grid.resize(is_alt, num_lines, num_cols);
+        if is_alt {
+            self.rebalance_alt_history();
+        }
 
         // Invalidate selection and tabs only when necessary.
         if old_cols != num_cols {
@@ -738,7 +745,8 @@ impl<T> Term<T> {
 
     /// Swap primary and alternate screen buffer.
     pub fn swap_alt(&mut self) {
-        if !self.mode.contains(TermMode::ALT_SCREEN) {
+        let entering = !self.mode.contains(TermMode::ALT_SCREEN);
+        if entering {
             // Set alt screen cursor to the current primary screen cursor.
             self.inactive_grid.cursor = self.grid.cursor.clone();
 
@@ -746,7 +754,17 @@ impl<T> Term<T> {
             self.grid.saved_cursor = self.grid.cursor.clone();
 
             // Reset alternate screen contents.
+            self.inactive_grid.clear_history();
             self.inactive_grid.reset_region(..);
+
+            // Standard alternate screens are not user-scrollable, but Luvus
+            // needs a passive, bounded transcript for automation reads. Let
+            // the empty alternate grid grow into the existing pane allowance;
+            // `rebalance_alt_history` evicts the oldest primary rows one for
+            // one as alternate rows arrive, rather than discarding half of the
+            // primary transcript merely because alternate mode was entered.
+            self.grid.update_history(self.config.scrolling_history);
+            self.inactive_grid.update_history(self.config.scrolling_history);
         }
 
         mem::swap(&mut self.keyboard_mode_stack, &mut self.inactive_keyboard_mode_stack);
@@ -756,6 +774,16 @@ impl<T> Term<T> {
 
         mem::swap(&mut self.grid, &mut self.inactive_grid);
         self.mode ^= TermMode::ALT_SCREEN;
+        if entering {
+            self.rebalance_alt_history();
+        } else {
+            // The alternate transcript is useful only while that application
+            // owns the screen. Drop it on return and restore the primary grid's
+            // full configured allowance.
+            self.inactive_grid.clear_history();
+            self.inactive_grid.update_history(0);
+            self.grid.update_history(self.config.scrolling_history);
+        }
         self.selection = None;
         self.mark_fully_damaged();
     }
@@ -804,6 +832,9 @@ impl<T> Term<T> {
         self.selection = self.selection.take().and_then(|s| s.rotate(self, &region, lines as i32));
 
         self.grid.scroll_up(&region, lines);
+        if self.mode.contains(TermMode::ALT_SCREEN) {
+            self.rebalance_alt_history();
+        }
 
         // Scroll vi mode cursor.
         let viewport_top = Line(-(self.grid.display_offset() as i32));
@@ -813,6 +844,18 @@ impl<T> Term<T> {
             *line = cmp::max(*line - lines, top);
         }
         self.mark_fully_damaged();
+    }
+
+    /// Keep the retained rows across primary and alternate grids within one
+    /// configured history allowance. The active alternate transcript takes
+    /// only the rows it has actually produced; older primary rows yield as it
+    /// grows. Both visible screens remain outside this history allowance.
+    fn rebalance_alt_history(&mut self) {
+        let limit = self.config.scrolling_history;
+        self.grid.update_history(limit);
+        let alternate_rows = self.grid.history_size().min(limit);
+        self.inactive_grid
+            .update_history(limit.saturating_sub(alternate_rows));
     }
 
     fn deccolm(&mut self)

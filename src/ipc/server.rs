@@ -343,6 +343,8 @@ pub fn run() -> Result<()> {
         // Parked `wait.output` deadlines lapse on the tick (docs/81); a no-op
         // while nobody is waiting.
         app.tick_output_waits(now);
+        app.tick_agent_waits(now);
+        app.tick_agent_workflows(now);
         app.tick_backend_revision_waits(now);
         for msg in app.pending_notify.drain(..) {
             broadcast(&mut clients, ServerMessage::Notify(msg));

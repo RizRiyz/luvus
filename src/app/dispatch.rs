@@ -10,6 +10,9 @@ pub(crate) const MAX_AGENT_WAITS_TOTAL: usize = 1024;
 pub(crate) const MAX_AGENT_WAITS_PER_PANE: usize = 64;
 pub(crate) const MAX_AGENT_REPORT_TTL_S: u64 = 86400;
 pub(crate) const MAX_AGENT_REPORT_MESSAGE_CHARS: usize = 4096;
+pub(crate) const MAX_AGENT_PROMPT_CHARS: usize = 262_144;
+pub(crate) const MAX_AGENT_START_ARGS: usize = 64;
+const AGENT_PROMPT_QUIET: Duration = Duration::from_millis(1200);
 
 /// A parked `wait.output` request (docs/81): reply when the pane's recent
 /// output contains `needle`, or the optional deadline passes.
@@ -29,6 +32,34 @@ pub struct AgentWait {
     pub reply: Sender<String>,
     pub deadline: Instant,
     pub cancelled: Arc<AtomicBool>,
+}
+
+/// One launch whose pane and command have already been committed, waiting only
+/// for Luvus to recognize the requested agent as interactive.
+pub struct AgentStart {
+    request_id: String,
+    name: String,
+    kind: String,
+    reply: Sender<String>,
+    deadline: Instant,
+    cancelled: Arc<AtomicBool>,
+}
+
+/// A submitted prompt waiting for post-submission evidence. `saw_output`
+/// closes the fast-turn gap where an agent starts and settles between two
+/// semantic detection ticks; the quiet window prevents prompt echo alone from
+/// being reported as completion immediately.
+pub struct AgentPrompt {
+    request_id: String,
+    until: Vec<State>,
+    baseline_revision: u64,
+    last_revision: u64,
+    last_output_at: Instant,
+    saw_output: bool,
+    saw_working: bool,
+    reply: Sender<String>,
+    deadline: Instant,
+    cancelled: Arc<AtomicBool>,
 }
 
 /// The canonical `wait.output` response: `matched` says whether the marker
@@ -54,6 +85,33 @@ fn agent_wait_response(
             "matched": matched,
             "pane": pane.map(|id| id.0.to_string()),
             "status": state.map(state_str),
+        }
+    })
+    .to_string()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn agent_prompt_response(
+    request_id: &str,
+    pane: PaneId,
+    submitted: bool,
+    matched: bool,
+    state: Option<State>,
+    baseline_revision: u64,
+    content_revision: u64,
+    evidence: &str,
+) -> String {
+    json!({
+        "id":request_id,
+        "result":{
+            "type":"agent_prompt",
+            "pane":pane.0.to_string(),
+            "submitted":submitted,
+            "matched":matched,
+            "status":state.map(state_str),
+            "baseline_revision":baseline_revision,
+            "content_revision":content_revision,
+            "evidence":evidence,
         }
     })
     .to_string()
@@ -606,6 +664,9 @@ impl App {
                 "agent_states":["idle", "working", "blocked", "done"],
                 "limits":{
                     "agent_wait_timeout_s":MAX_AGENT_WAIT.as_secs(),
+                    "agent_prompt_characters":MAX_AGENT_PROMPT_CHARS,
+                    "agent_prompt_quiet_ms":AGENT_PROMPT_QUIET.as_millis(),
+                    "agent_start_arguments":MAX_AGENT_START_ARGS,
                     "agent_report_ttl_s":MAX_AGENT_REPORT_TTL_S,
                     "agent_report_message_characters":MAX_AGENT_REPORT_MESSAGE_CHARS,
                     "agent_waits_per_pane":MAX_AGENT_WAITS_PER_PANE,
@@ -3175,6 +3236,435 @@ impl App {
         }
     }
 
+    /// Begin one server-owned launch. Pane selection/creation, command queueing,
+    /// alias reservation, and readiness observation are committed on this app
+    /// loop turn, so no other client can target a half-configured workflow.
+    pub(crate) fn start_agent_launch(
+        &mut self,
+        request_id: String,
+        p: Value,
+        reply: Sender<String>,
+        cancelled: Arc<AtomicBool>,
+    ) {
+        let fail = |code: &str, message: String| {
+            let _ = reply
+                .send(json!({"id":request_id,"error":{"code":code,"message":message}}).to_string());
+        };
+        if cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        if let Err((code, message)) = reject_api_fields(
+            &p,
+            &[
+                "name",
+                "kind",
+                "pane",
+                "anchor",
+                "direction",
+                "args",
+                "timeout_s",
+            ],
+        ) {
+            fail(&code, message);
+            return;
+        }
+        let name = p.get("name").and_then(Value::as_str).unwrap_or("");
+        let kind = p.get("kind").and_then(Value::as_str).unwrap_or("");
+        if !valid_agent_name(name) || !valid_agent_name(kind) {
+            fail(
+                "invalid_request",
+                "name and kind must match [a-z][a-z0-9_-]{0,31}".to_string(),
+            );
+            return;
+        }
+        if !self.manifests.is_agent(kind) {
+            fail("unsupported_agent", format!("unknown agent kind: {kind}"));
+            return;
+        }
+        if self.agent_names.contains_key(name) {
+            fail("name_in_use", format!("agent name already exists: {name}"));
+            return;
+        }
+        let timeout = match agent_timeout(&p, 30.0) {
+            Ok(timeout) => timeout,
+            Err(message) => {
+                fail("invalid_request", message);
+                return;
+            }
+        };
+        let args = match agent_start_args(&p) {
+            Ok(args) => args,
+            Err(message) => {
+                fail("invalid_request", message);
+                return;
+            }
+        };
+        if !matches!(
+            p.get("direction").and_then(Value::as_str),
+            None | Some("right" | "down")
+        ) {
+            fail(
+                "invalid_request",
+                "direction must be right or down".to_string(),
+            );
+            return;
+        }
+        let (pane, created) = match (p.get("pane"), p.get("anchor")) {
+            (Some(_), Some(_)) => {
+                fail(
+                    "invalid_request",
+                    "agent.start accepts either pane or anchor, not both".to_string(),
+                );
+                return;
+            }
+            (Some(_), None) => match self.resolve_pane(&json!({"pane":p["pane"]})) {
+                Some(id) => (id, false),
+                None => {
+                    fail("not_found", "pane not found".to_string());
+                    return;
+                }
+            },
+            (_, _) => {
+                let mut split = serde_json::Map::new();
+                if let Some(anchor) = p.get("anchor") {
+                    let Some(anchor) = self.resolve_pane(&json!({"pane":anchor})) else {
+                        fail("not_found", "anchor pane not found".to_string());
+                        return;
+                    };
+                    split.insert("pane".into(), json!(anchor.0.to_string()));
+                }
+                split.insert("focus".into(), json!(false));
+                if let Some(direction) = p.get("direction") {
+                    split.insert("direction".into(), direction.clone());
+                }
+                match self.dispatch("pane.split", &Value::Object(split)) {
+                    Ok(value) => match value["pane"]
+                        .as_str()
+                        .and_then(|pane| pane.parse::<u32>().ok())
+                        .map(PaneId)
+                    {
+                        Some(id) => (id, true),
+                        None => {
+                            fail("spawn_failed", "agent pane was not created".to_string());
+                            return;
+                        }
+                    },
+                    Err((code, message)) => {
+                        fail(&code, message);
+                        return;
+                    }
+                }
+            }
+        };
+        if self.is_agent_pane(pane) || self.agent_starts.contains_key(&pane) {
+            fail(
+                "agent_pane_busy",
+                "target pane already hosts or is starting an agent".to_string(),
+            );
+            return;
+        }
+        let Some(target) = self.panes.get(&pane) else {
+            fail("not_found", "pane not found".to_string());
+            return;
+        };
+        let shell = target.command.clone();
+        let mut command = match shell_word(kind, &shell) {
+            Ok(word) => word,
+            Err(message) => {
+                if created {
+                    self.close_pane(pane);
+                }
+                fail("invalid_request", message);
+                return;
+            }
+        };
+        for arg in args {
+            command.push(' ');
+            let word = match shell_word(&arg, &shell) {
+                Ok(word) => word,
+                Err(message) => {
+                    if created {
+                        self.close_pane(pane);
+                    }
+                    fail("invalid_request", message);
+                    return;
+                }
+            };
+            command.push_str(&word);
+        }
+        if let Err(message) = target.try_submit_text(&command) {
+            if created {
+                self.close_pane(pane);
+            }
+            fail("send_failed", message);
+            return;
+        }
+        self.set_agent_name(pane, Some(name));
+        self.agent_starts.insert(
+            pane,
+            AgentStart {
+                request_id,
+                name: name.to_string(),
+                kind: kind.to_string(),
+                reply,
+                deadline: Instant::now() + timeout,
+                cancelled,
+            },
+        );
+    }
+
+    /// Atomically submit a prompt and, when requested, retain the response until
+    /// the post-submission lifecycle has settled. The single queued PTY action
+    /// guarantees that paste and Enter cannot be accepted independently.
+    pub(crate) fn start_agent_prompt(
+        &mut self,
+        request_id: String,
+        p: Value,
+        reply: Sender<String>,
+        cancelled: Arc<AtomicBool>,
+    ) {
+        let fail = |code: &str, message: String| {
+            let _ = reply
+                .send(json!({"id":request_id,"error":{"code":code,"message":message}}).to_string());
+        };
+        if cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        if let Err((code, message)) =
+            reject_api_fields(&p, &["target", "text", "wait", "until", "timeout_s"])
+        {
+            fail(&code, message);
+            return;
+        }
+        let pane = match self.resolve_agent_target(&p) {
+            Ok(pane) if self.is_agent_pane(pane) => pane,
+            Ok(_) => {
+                fail(
+                    "agent_not_ready",
+                    "target pane is not a running agent".to_string(),
+                );
+                return;
+            }
+            Err((code, message)) => {
+                fail(&code, message);
+                return;
+            }
+        };
+        let text = p.get("text").and_then(Value::as_str).unwrap_or("");
+        if text.is_empty() || text.chars().count() > MAX_AGENT_PROMPT_CHARS {
+            fail(
+                "invalid_request",
+                format!("text must contain 1 to {MAX_AGENT_PROMPT_CHARS} characters"),
+            );
+            return;
+        }
+        let wait = match p.get("wait") {
+            None => false,
+            Some(Value::Bool(wait)) => *wait,
+            Some(_) => {
+                fail("invalid_request", "wait must be a boolean".to_string());
+                return;
+            }
+        };
+        if !wait && (p.get("until").is_some() || p.get("timeout_s").is_some()) {
+            fail(
+                "invalid_request",
+                "until and timeout_s require wait=true".to_string(),
+            );
+            return;
+        }
+        let until = match prompt_states(&p) {
+            Ok(states) => states,
+            Err(message) => {
+                fail("invalid_request", message);
+                return;
+            }
+        };
+        let timeout = match agent_timeout(&p, 300.0) {
+            Ok(timeout) => timeout,
+            Err(message) => {
+                fail("invalid_request", message);
+                return;
+            }
+        };
+        if wait {
+            let total: usize = self.agent_prompts.values().map(Vec::len).sum();
+            if total >= MAX_AGENT_WAITS_TOTAL {
+                fail(
+                    "unavailable",
+                    "agent prompt wait capacity is full".to_string(),
+                );
+                return;
+            }
+            // A terminal stream has no turn identifier. Refuse a second
+            // server-owned turn instead of letting both callers claim the same
+            // state/output transition as their completion evidence.
+            if self.agent_prompts.contains_key(&pane) {
+                fail(
+                    "agent_prompt_busy",
+                    "target agent already has a prompt waiting for completion".to_string(),
+                );
+                return;
+            }
+        }
+        let Some(target) = self.panes.get(&pane) else {
+            fail("not_found", "pane not found".to_string());
+            return;
+        };
+        let baseline_revision = target.content_revision();
+        if let Err(message) = target.try_submit_text(text) {
+            fail("send_failed", message);
+            return;
+        }
+        let status = self.status.get(&pane).map(|status| status.state);
+        if !wait {
+            let _ = reply.send(agent_prompt_response(
+                &request_id,
+                pane,
+                true,
+                false,
+                status,
+                baseline_revision,
+                baseline_revision,
+                "queued",
+            ));
+            return;
+        }
+        let now = Instant::now();
+        self.agent_prompts
+            .entry(pane)
+            .or_default()
+            .push(AgentPrompt {
+                request_id,
+                until,
+                baseline_revision,
+                last_revision: baseline_revision,
+                last_output_at: now,
+                saw_output: false,
+                saw_working: status == Some(State::Working),
+                reply,
+                deadline: now + timeout,
+                cancelled,
+            });
+    }
+
+    /// Progress only active launch/prompt workflows. With no pending workflow
+    /// this is O(1) and allocates nothing; PTY/output work remains event driven.
+    pub(crate) fn tick_agent_workflows(&mut self, now: Instant) {
+        let starts: Vec<PaneId> = self.agent_starts.keys().copied().collect();
+        for pane in starts {
+            let outcome = self.agent_starts.get(&pane).and_then(|start| {
+                if start.cancelled.load(Ordering::Acquire) {
+                    return Some(None);
+                }
+                let status = self.status.get(&pane);
+                if status.is_some_and(|status| {
+                    status.agent.eq_ignore_ascii_case(&start.kind)
+                        && matches!(status.state, State::Idle | State::Done)
+                        && self.is_agent_pane(pane)
+                }) {
+                    return Some(Some((true, status.map(|status| status.state))));
+                }
+                if !self.panes.contains_key(&pane) || now >= start.deadline {
+                    return Some(Some((false, status.map(|status| status.state))));
+                }
+                None
+            });
+            if let Some(outcome) = outcome {
+                let start = self.agent_starts.remove(&pane).expect("start exists");
+                match outcome {
+                    None => {}
+                    Some((ready, status)) => {
+                        let _ = start.reply.send(
+                            json!({"id":start.request_id,"result":{
+                                "type":"agent_start","name":start.name,"kind":start.kind,
+                                "pane":pane.0.to_string(),"ready":ready,
+                                "status":status.map(state_str),
+                            }})
+                            .to_string(),
+                        );
+                    }
+                }
+            }
+        }
+
+        let panes: Vec<PaneId> = self.agent_prompts.keys().copied().collect();
+        for pane in panes {
+            let revision = self
+                .panes
+                .get(&pane)
+                .map(crate::terminal::pty::Pane::content_revision);
+            let state = self.status.get(&pane).map(|status| status.state);
+            let Some(waiters) = self.agent_prompts.get_mut(&pane) else {
+                continue;
+            };
+            waiters.retain_mut(|waiter| {
+                if waiter.cancelled.load(Ordering::Acquire) {
+                    return false;
+                }
+                let Some(revision) = revision else {
+                    let _ = waiter.reply.send(agent_prompt_response(
+                        &waiter.request_id,
+                        pane,
+                        true,
+                        false,
+                        None,
+                        waiter.baseline_revision,
+                        waiter.last_revision,
+                        "pane_closed",
+                    ));
+                    return false;
+                };
+                if revision != waiter.last_revision {
+                    waiter.last_revision = revision;
+                    waiter.last_output_at = now;
+                    waiter.saw_output = revision > waiter.baseline_revision;
+                }
+                if state == Some(State::Working) {
+                    waiter.saw_working = true;
+                }
+                let target = state.is_some_and(|state| waiter.until.contains(&state));
+                let quiet = waiter.saw_output
+                    && now.saturating_duration_since(waiter.last_output_at) >= AGENT_PROMPT_QUIET;
+                if target && (waiter.saw_working || quiet) {
+                    let evidence = if waiter.saw_working {
+                        "state_transition"
+                    } else {
+                        "output_settled"
+                    };
+                    let _ = waiter.reply.send(agent_prompt_response(
+                        &waiter.request_id,
+                        pane,
+                        true,
+                        true,
+                        state,
+                        waiter.baseline_revision,
+                        revision,
+                        evidence,
+                    ));
+                    return false;
+                }
+                if now >= waiter.deadline {
+                    let _ = waiter.reply.send(agent_prompt_response(
+                        &waiter.request_id,
+                        pane,
+                        true,
+                        false,
+                        state,
+                        waiter.baseline_revision,
+                        revision,
+                        "timeout",
+                    ));
+                    return false;
+                }
+                true
+            });
+            if waiters.is_empty() {
+                self.agent_prompts.remove(&pane);
+            }
+        }
+    }
+
     pub(crate) fn register_agent_wait(
         &mut self,
         id: PaneId,
@@ -3270,6 +3760,28 @@ impl App {
                     waiter
                         .reply
                         .send(agent_wait_response(&waiter.request_id, false, None, None));
+            }
+        }
+        if let Some(start) = self.agent_starts.remove(&id) {
+            let _ = start.reply.send(
+                json!({"id":start.request_id,"error":{
+                    "code":"agent_not_running","message":"agent pane closed during startup"
+                }})
+                .to_string(),
+            );
+        }
+        if let Some(prompts) = self.agent_prompts.remove(&id) {
+            for prompt in prompts {
+                let _ = prompt.reply.send(agent_prompt_response(
+                    &prompt.request_id,
+                    id,
+                    true,
+                    false,
+                    None,
+                    prompt.baseline_revision,
+                    prompt.last_revision,
+                    "pane_closed",
+                ));
             }
         }
     }
@@ -3775,6 +4287,107 @@ pub(crate) fn parse_agent_wait_state(value: &str) -> Option<State> {
         "blocked" => Some(State::Blocked),
         "done" => Some(State::Done),
         _ => None,
+    }
+}
+
+fn agent_timeout(p: &Value, default_s: f64) -> Result<Duration, String> {
+    let seconds = p
+        .get("timeout_s")
+        .map(|value| {
+            value
+                .as_f64()
+                .filter(|seconds| seconds.is_finite())
+                .ok_or_else(|| "timeout_s must be a finite number".to_string())
+        })
+        .transpose()?
+        .unwrap_or(default_s);
+    if !(0.0..=MAX_AGENT_WAIT.as_secs_f64()).contains(&seconds) {
+        return Err(format!(
+            "timeout_s must be between 0 and {}",
+            MAX_AGENT_WAIT.as_secs()
+        ));
+    }
+    Duration::try_from_secs_f64(seconds)
+        .map_err(|_| "timeout_s is outside the supported range".to_string())
+}
+
+fn prompt_states(p: &Value) -> Result<Vec<State>, String> {
+    let Some(until) = p.get("until") else {
+        return Ok(vec![State::Idle, State::Done, State::Blocked]);
+    };
+    let values = until
+        .as_array()
+        .filter(|values| !values.is_empty() && values.len() <= 4)
+        .ok_or_else(|| "until must contain 1 to 4 agent states".to_string())?;
+    let mut states = Vec::with_capacity(values.len());
+    for value in values {
+        let state = value
+            .as_str()
+            .and_then(parse_agent_wait_state)
+            .ok_or_else(|| "until states must be idle, working, blocked, or done".to_string())?;
+        if !states.contains(&state) {
+            states.push(state);
+        }
+    }
+    Ok(states)
+}
+
+fn agent_start_args(p: &Value) -> Result<Vec<String>, String> {
+    let Some(args) = p.get("args") else {
+        return Ok(Vec::new());
+    };
+    let args = args
+        .as_array()
+        .filter(|args| args.len() <= MAX_AGENT_START_ARGS)
+        .ok_or_else(|| format!("args must contain at most {MAX_AGENT_START_ARGS} strings"))?;
+    args.iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|arg| arg.chars().count() <= 4096 && !arg.contains(['\n', '\r', '\0']))
+                .map(String::from)
+                .ok_or_else(|| {
+                    "each agent argument must be a string of at most 4096 characters without control lines"
+                        .to_string()
+                })
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn shell_word(value: &str, _shell: &str) -> Result<String, String> {
+    Ok(format!("'{}'", value.replace('\'', "'\"'\"'")))
+}
+
+#[cfg(windows)]
+fn shell_word(value: &str, shell: &str) -> Result<String, String> {
+    let base = std::path::Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(shell)
+        .trim_end_matches(".exe")
+        .to_ascii_lowercase();
+    match base.as_str() {
+        "sh" | "bash" | "zsh" | "dash" | "ksh" | "fish" => {
+            Ok(format!("'{}'", value.replace('\'', "'\"'\"'")))
+        }
+        "cmd" => {
+            // cmd.exe expands percent/bang variables and treats these glyphs as
+            // syntax even inside some quoting contexts. Refuse ambiguous input
+            // instead of turning an argument into an injected shell command.
+            if value.chars().any(|ch| {
+                ch.is_control()
+                    || matches!(
+                        ch,
+                        '"' | '%' | '!' | '^' | '&' | '|' | '<' | '>' | '(' | ')'
+                    )
+            }) {
+                Err("agent arguments for cmd.exe cannot contain shell metacharacters".to_string())
+            } else {
+                Ok(format!("\"{value}\""))
+            }
+        }
+        _ => Ok(format!("'{}'", value.replace('\'', "''"))),
     }
 }
 
@@ -4445,6 +5058,112 @@ command = ["true"]
                 .0,
             "not_found"
         );
+    }
+
+    #[test]
+    fn atomic_agent_prompt_uses_output_evidence_for_a_fast_settled_turn() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "codex".into();
+        let (reply, response) = std::sync::mpsc::channel();
+        let started = Instant::now();
+        app.start_agent_prompt(
+            "prompt-1".into(),
+            json!({
+                "target":pane.0.to_string(), "text":"review this", "wait":true,
+                "until":["idle", "done", "blocked"], "timeout_s":10,
+            }),
+            reply,
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(
+            response.try_recv().is_err(),
+            "idle before evidence is not completion"
+        );
+
+        let revision = app.panes[&pane].content_revision_handle();
+        revision.fetch_add(1, Ordering::Release);
+        app.tick_agent_workflows(started + Duration::from_millis(10));
+        app.tick_agent_workflows(started + AGENT_PROMPT_QUIET + Duration::from_millis(20));
+        let value: Value = serde_json::from_str(&response.recv().unwrap()).unwrap();
+        assert_eq!(value["result"]["type"], "agent_prompt");
+        assert_eq!(value["result"]["submitted"], true);
+        assert_eq!(value["result"]["matched"], true);
+        assert_eq!(value["result"]["evidence"], "output_settled");
+        assert!(app.agent_prompts.is_empty());
+    }
+
+    #[test]
+    fn atomic_agent_prompt_reports_queued_timeout_without_resubmitting() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "codex".into();
+        let (reply, response) = std::sync::mpsc::channel();
+        app.start_agent_prompt(
+            "prompt-timeout".into(),
+            json!({"target":pane.0.to_string(), "text":"review", "wait":true, "timeout_s":0}),
+            reply,
+            Arc::new(AtomicBool::new(false)),
+        );
+        app.tick_agent_workflows(Instant::now());
+        let value: Value = serde_json::from_str(&response.recv().unwrap()).unwrap();
+        assert_eq!(value["result"]["submitted"], true);
+        assert_eq!(value["result"]["matched"], false);
+        assert_eq!(value["result"]["evidence"], "timeout");
+    }
+
+    #[test]
+    fn atomic_agent_prompt_rejects_an_overlapping_wait_before_queueing() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "codex".into();
+        let (first_reply, _first_response) = std::sync::mpsc::channel();
+        app.start_agent_prompt(
+            "prompt-first".into(),
+            json!({"target":pane.0.to_string(), "text":"first", "wait":true}),
+            first_reply,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        let (second_reply, second_response) = std::sync::mpsc::channel();
+        app.start_agent_prompt(
+            "prompt-second".into(),
+            json!({"target":pane.0.to_string(), "text":"second", "wait":true}),
+            second_reply,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let value: Value = serde_json::from_str(&second_response.recv().unwrap()).unwrap();
+        assert_eq!(value["error"]["code"], "agent_prompt_busy");
+        assert_eq!(app.agent_prompts[&pane].len(), 1);
+    }
+
+    #[test]
+    fn server_owned_agent_start_reserves_name_and_waits_for_detection() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (reply, response) = std::sync::mpsc::channel();
+        app.start_agent_launch(
+            "start-1".into(),
+            json!({
+                "name":"reviewer", "kind":"codex", "pane":pane.0.to_string(),
+                "args":[], "timeout_s":10,
+            }),
+            reply,
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert_eq!(app.agent_names.get("reviewer"), Some(&pane));
+        assert!(response.try_recv().is_err());
+
+        app.status.get_mut(&pane).unwrap().agent = "codex".into();
+        app.tick_agent_workflows(Instant::now());
+        let value: Value = serde_json::from_str(&response.recv().unwrap()).unwrap();
+        assert_eq!(value["result"]["type"], "agent_start");
+        assert_eq!(value["result"]["ready"], true);
+        assert_eq!(value["result"]["name"], "reviewer");
     }
 
     #[test]

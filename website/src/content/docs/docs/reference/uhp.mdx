@@ -61,6 +61,8 @@ renders the Luvus interface and is not a harness automation API.
 | List the whole session and current agent states | Runtime `session.snapshot` |
 | Learn why a pane was identified as an agent | Runtime `agent.explain` |
 | Publish precise state from a new agent integration | Runtime `agent.report` |
+| Start and name an agent as one workflow | Runtime `agent.start` |
+| Submit a prompt and optionally wait for that turn | Runtime `agent.prompt` |
 | Wait for an agent to become blocked or done | Runtime `agent.wait` |
 | List every live PTY, including plain shells | Terminal `terminal.backend.inventory` |
 | Read bounded terminal output | Terminal `terminal.backend.capture` |
@@ -192,6 +194,8 @@ Use event-driven waits instead of polling capture:
 - `terminal.backend.wait_change` waits for a newer content revision
 - `terminal.backend.wait_output` waits for bounded literal output after a
   revision
+- `agent.prompt` atomically submits once and can wait for post-submission state
+  or settled-output evidence
 - `agent.wait` waits for one semantic agent state
 
 All waits are bounded by the server's advertised limits and are cancelled when

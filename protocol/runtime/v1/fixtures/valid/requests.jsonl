@@ -4,5 +4,7 @@
 {"id":"explain","method":"agent.explain","params":{"target":"review"}}
 {"id":"report","method":"agent.report","params":{"pane":"7","source":"fx/plugin","agent":"fx","status":"working","sequence":4,"ttl_s":300}}
 {"id":"release","method":"agent.release","params":{"pane":"7","source":"fx/plugin"}}
+{"id":"start","method":"agent.start","params":{"name":"reviewer","kind":"codex","anchor":"7","direction":"right","args":["--model","gpt-5.6-sol"],"timeout_s":30}}
+{"id":"prompt","method":"agent.prompt","params":{"target":"reviewer","text":"Review the current diff","wait":true,"until":["idle","done","blocked"],"timeout_s":300}}
 {"id":"wait","method":"agent.wait","params":{"pane":"7","status":"blocked","timeout_s":30}}
 {"id":"events","method":"events.subscribe","params":{}}

@@ -54,7 +54,7 @@ never follows a moved terminal implicitly for a write.
 | `inventory` | `terminal.backend.inventory` | Every started PTY across ordinary tabs, with route, cwd, title, label, PID, and start marker |
 | `validate` | `terminal.backend.validate` | Returns `alive`, `gone`, or `unknown` without mutating state |
 | `process_inspection` | `terminal.backend.processes` | Cached executable identities under a validated root; never full argv |
-| `capture` | `terminal.backend.capture` | Bounded `visible`, `recent_unwrapped`, or detection text; optional safe SGR for the first two |
+| `capture` | `terminal.backend.capture` | Bounded `visible`, `recent_unwrapped`, or detection text; optional safe SGR for the first two; recent capture includes passively retained alternate-screen rows |
 | `type_literal` | `terminal.backend.type_literal` | Literal UTF-8 with no implicit Enter |
 | `submit_text` | `terminal.backend.submit_text` | One atomic paste-and-Enter queue action |
 | `send_key` | `terminal.backend.send_key` | One documented logical key with terminal-mode-aware navigation |
@@ -79,6 +79,14 @@ The reference consumer replays output, metadata, and close events against the
 snapshot. It requests a new snapshot for created, moved, or exited terminals
 because those deliberately compact events do not repeat the full inventory
 record.
+
+While a full-screen agent owns the alternate screen, Luvus passively retains
+rows that scroll above that screen and includes them in `recent_unwrapped`.
+Capture never sends mouse-wheel or navigation input into the child and never
+moves the user's viewport. Primary and alternate history share the existing
+per-pane Scrollback Memory allowance. Alternate rows displace the oldest
+primary rows only as they are produced, and alternate history is reclaimed
+when the child returns to the primary screen.
 
 ## Installed introspection
 

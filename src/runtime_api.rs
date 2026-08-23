@@ -13,6 +13,8 @@ pub const METHODS: &[&str] = &[
     "agent.explain",
     "agent.report",
     "agent.release",
+    "agent.start",
+    "agent.prompt",
     "agent.wait",
     "events.subscribe",
 ];

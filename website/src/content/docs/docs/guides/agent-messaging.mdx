@@ -18,7 +18,7 @@ commands you would type yourself.
 ```sh
 luvus agent list                       # every live agent: name, pane, kind, status, cwd
 luvus agent name reviewer              # alias the current agent (or --pane <id>)
-luvus agent send reviewer "Review the diff" --wait --until idle --timeout 600
+luvus agent prompt reviewer "Review the diff" --wait --until idle --timeout 600
 luvus agent read reviewer --lines 120  # read what it produced
 luvus agent keys reviewer enter        # answer a blocked approval (esc, ctrl+c, up, ...)
 ```
@@ -29,7 +29,7 @@ A `<target>` is one of three things:
 - a **pane id** (the `pane` field from `agent list`),
 - an **agent kind** (`claude`, `kimi`, `codex`, ...) when exactly one agent of that kind is running. Two of the same kind is ambiguous, and the error names the candidates so you pick a pane id or a name.
 
-`agent send` and `agent keys` only target a pane that is actually running an agent, so a plain shell is refused.
+`agent prompt` and `agent keys` only target a pane that is actually running an agent, so a plain shell is refused. `agent send` remains a compatibility alias.
 
 For line-specific feedback, the native [DIFF review](/docs/guides/diff/) uses
 the same target validation. It groups selected local notes into one bounded
@@ -43,7 +43,7 @@ Run `luvus agent list` (each row has `pane`, `agent` kind, `name`, `cwd`, `works
 ```sh
 luvus agent name api --pane 1     # or run `luvus pane name api` inside that pane
 luvus agent name web --pane 4
-luvus agent send api "add the /health endpoint" --wait
+luvus agent prompt api "add the /health endpoint" --wait
 ```
 
 The AGENTS sidebar also shows each agent's delegation token on its second line:
@@ -55,50 +55,48 @@ Start an agent in a sibling pane, name it, hand it the task, and collect the
 result:
 
 ```sh
-new=$(luvus pane split "$LUVUS_PANE_ID" | jq -r .result.pane)  # split beside you
-luvus pane focus "$LUVUS_PANE_ID"                              # keep your own focus
-luvus pane run "$new" codex                                    # launch the agent
-luvus wait agent-status "$new" --status idle --timeout 60      # wait until it is ready
-luvus agent name codex --pane "$new"                           # give it a name
+luvus agent start codex --kind codex --anchor "$LUVUS_PANE_ID" --timeout 60
 
-luvus agent send codex "Implement the CSV parser in src/parse.rs and add a test." \
+luvus agent prompt codex "Implement the CSV parser in src/parse.rs and add a test." \
   --wait --until idle --timeout 600                            # send and wait
 luvus agent read codex --lines 120                             # read the result
 ```
 
-`agent send --wait` blocks until the agent settles, using luvus's screen-based
-detection (`idle`, `working`, `blocked`, `done`). Treat those as strong hints,
-not a hard contract. If a send returns while the agent is `blocked`, inspect it
+`agent prompt --wait` blocks until the agent settles, using Luvus's state
+detection plus post-submission output revisions (`idle`, `working`, `blocked`,
+`done`). A fast turn that starts and finishes between detector ticks is accepted
+only after its newer output becomes quiet. If a prompt returns while the agent is `blocked`, inspect it
 with `agent read` and answer with `agent keys`.
 
 ## Hand off (the default), or wait
 
-By default, delegation does **not** block the sender. `luvus agent send` without
+By default, delegation does **not** block the sender. `luvus agent prompt` without
 `--wait` returns the moment the prompt is queued, so the sender is free. The
 clean pattern is: name yourself, send without `--wait` with a report-back
 instruction, then end the turn.
 
 ```sh
 luvus agent name lead        # a name the worker can reply to
-luvus agent send codex "Build the parser. When done, run: luvus agent send lead 'done: <summary>'"
+luvus agent prompt codex "Build the parser. When done, run: luvus agent prompt lead 'done: <summary>'"
 ```
 
 The sender is not blocked; it picks the task back up only when the worker runs
-that `agent send lead …` and hands it back.
+that `agent prompt lead …` and hands it back.
 
 **Wait only when you ask for it.** Add `--wait` when the very next step needs the
 result in the same reply:
 
 ```sh
-luvus agent send codex "Build the CSV parser and add a test." --wait
+luvus agent prompt codex "Build the CSV parser and add a test." --wait
 luvus agent read codex --lines 120
 ```
 
-`--wait` **blocks** the sender until the worker settles, but it is safe: a
-**stall guard** returns *stalled* (exit 3) if there is no response within ~5s,
-and it is bounded by `--timeout` (default 300s, exit 2 on timeout; exit 0 on
-settle). So a broken worker never traps you — but since it blocks, reach for it
-only when you actually need to wait.
+`--wait` **blocks** the sender until the worker settles and is bounded by
+`--timeout` (default 300s, exit 2 on timeout; exit 0 on settle). A timeout still
+reports `submitted:true`, so inspect the agent and do not blindly send the same
+prompt twice. Since it blocks, reach for it only when the next step needs the
+answer. Luvus permits one waiting prompt per pane and rejects an overlapping
+wait before queuing its text.
 
 ## The `=` shorthand
 
@@ -112,7 +110,7 @@ of a line and the rest of it goes to that agent:
 ```
 
 `=codex` addresses the pane named codex. An agent name or a pane id work the same
-way, so `=reviewer` and `=7` both resolve. The same targets `agent send` takes.
+way, so `=reviewer` and `=7` both resolve. The same targets `agent prompt` takes.
 The marker is recognized only as the first non-whitespace character on a line,
 so equations and shell assignments do not trigger delegation. Codex keeps `$`
 for invoking skills such as `$luvus` or `$changelog`.

@@ -19,6 +19,8 @@ RESULT_TYPES = {
     "agent_explanation",
     "agent_report",
     "agent_release",
+    "agent_start",
+    "agent_prompt",
     "agent_wait",
     "subscription_started",
 }
@@ -32,6 +34,8 @@ FIELDS = {
         "sequence", "ttl_s",
     },
     "agent.release": {"pane", "source"},
+    "agent.start": {"name", "kind", "pane", "anchor", "direction", "args", "timeout_s"},
+    "agent.prompt": {"target", "text", "wait", "until", "timeout_s"},
     "agent.wait": {"pane", "status", "timeout_s"},
     "events.subscribe": set(),
 }
@@ -81,9 +85,9 @@ def valid_request(value):
         if "pane" in params:
             return pane(params["pane"])
         return bounded_string(params.get("target"), 128, allow_empty=False)
-    if not pane(params.get("pane")):
-        return False
     if method == "agent.report":
+        if not pane(params.get("pane")):
+            return False
         if not {"pane", "source", "agent", "status"} <= set(params):
             return False
         if not isinstance(params["source"], str) or SOURCE.fullmatch(params["source"]) is None:
@@ -103,12 +107,54 @@ def valid_request(value):
         return True
     if method == "agent.release":
         return (
-            set(params) == {"pane", "source"}
+            pane(params.get("pane"))
+            and set(params) == {"pane", "source"}
             and isinstance(params["source"], str)
             and SOURCE.fullmatch(params["source"]) is not None
         )
+    if method == "agent.start":
+        if not {"name", "kind"} <= set(params) or {"pane", "anchor"} <= set(params):
+            return False
+        if (
+            not isinstance(params["name"], str)
+            or AGENT.fullmatch(params["name"]) is None
+            or not isinstance(params["kind"], str)
+            or AGENT.fullmatch(params["kind"]) is None
+        ):
+            return False
+        if "pane" in params and not pane(params["pane"]):
+            return False
+        if "anchor" in params and not pane(params["anchor"]):
+            return False
+        if params.get("direction", "right") not in {"right", "down"}:
+            return False
+        args = params.get("args", [])
+        if not isinstance(args, list) or len(args) > 64:
+            return False
+        if not all(bounded_string(arg, 4096) and not any(c in arg for c in "\0\r\n") for arg in args):
+            return False
+        timeout = params.get("timeout_s", 30)
+        return type(timeout) in {int, float} and 0 <= timeout <= 3600
+    if method == "agent.prompt":
+        if not {"target", "text", "wait"} <= set(params):
+            return False
+        if not bounded_string(params["target"], 128, allow_empty=False):
+            return False
+        if not bounded_string(params["text"], 262144, allow_empty=False):
+            return False
+        if type(params["wait"]) is not bool:
+            return False
+        if not params["wait"] and ({"until", "timeout_s"} & set(params)):
+            return False
+        until = params.get("until", ["idle", "done", "blocked"])
+        if not isinstance(until, list) or not 1 <= len(until) <= 4:
+            return False
+        if len(set(until)) != len(until) or not set(until) <= STATES:
+            return False
+        timeout = params.get("timeout_s", 300)
+        return type(timeout) in {int, float} and 0 <= timeout <= 3600
     if method == "agent.wait":
-        if not {"pane", "status"} <= set(params) or params["status"] not in STATES:
+        if not pane(params.get("pane")) or not {"pane", "status"} <= set(params) or params["status"] not in STATES:
             return False
         timeout = params.get("timeout_s", 0)
         return type(timeout) in {int, float} and 0 <= timeout <= 3600

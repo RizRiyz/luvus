@@ -66,8 +66,10 @@ panes / agents:
   agent fork <target> [--name <alias>] [--no-focus]
                              fork a supported agent's session into a sibling pane
   agent name <name>          alias the current agent, same as pane name (--clear to drop)
+  agent prompt <target> <text> [--wait] [--until STATE] [--timeout <s>]
+                             atomically prompt and optionally wait (send is an alias)
   agent send <target> <text> [--wait] [--until STATE] [--timeout <s>]
-                             prompt an agent (target = a name, pane id, or kind)
+                             compatibility alias for agent prompt
   agent keys <target> <key>...   send control keys (enter, esc, ctrl+c, up, …)
   agent read <target> [--lines N] [--source visible|recent]   print an agent's output
   agent get <target>         one agent's live info (pane, name, kind, status, cwd)

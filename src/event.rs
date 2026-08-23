@@ -230,4 +230,22 @@ pub enum AppEvent {
         reply: Sender<String>,
         cancelled: Arc<AtomicBool>,
     },
+    /// One server-owned agent launch. Pane selection/creation, command
+    /// submission, readiness detection, and naming stay on the app loop so a
+    /// client cannot interleave independent requests between those phases.
+    AgentStart {
+        id: String,
+        params: serde_json::Value,
+        reply: Sender<String>,
+        cancelled: Arc<AtomicBool>,
+    },
+    /// Atomically queue one prompt and optionally park until the resulting turn
+    /// reaches a requested semantic state. Output revision evidence covers fast
+    /// turns whose Working state starts and finishes between detection ticks.
+    AgentPrompt {
+        id: String,
+        params: serde_json::Value,
+        reply: Sender<String>,
+        cancelled: Arc<AtomicBool>,
+    },
 }

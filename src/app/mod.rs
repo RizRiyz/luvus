@@ -1431,6 +1431,10 @@ pub struct App {
     /// subscribe/poll composition, registration and the initial state check are
     /// atomic on the app loop, so a transition cannot fall through the gap.
     agent_waits: HashMap<PaneId, Vec<crate::app::dispatch::AgentWait>>,
+    /// Atomic launch/readiness workflows keyed by their new or selected pane.
+    agent_starts: HashMap<PaneId, crate::app::dispatch::AgentStart>,
+    /// Submitted prompts waiting for post-submission state/output evidence.
+    agent_prompts: HashMap<PaneId, Vec<crate::app::dispatch::AgentPrompt>>,
     /// Throttle for re-scanning parked waiters — the scan locks each waiting
     /// pane's VT engine and rebuilds its recent text, so it runs at ~100ms,
     /// not at the render frame rate. Deadline expiry still runs every tick.
@@ -1811,6 +1815,8 @@ impl App {
             detection_skips: 0,
             output_waits: HashMap::new(),
             agent_waits: HashMap::new(),
+            agent_starts: HashMap::new(),
+            agent_prompts: HashMap::new(),
             last_output_wait_scan: Instant::now(),
             workspaces_scroll: 0,
             agents_scroll: 0,
@@ -2325,6 +2331,8 @@ impl App {
             detection_skips: 0,
             output_waits: HashMap::new(),
             agent_waits: HashMap::new(),
+            agent_starts: HashMap::new(),
+            agent_prompts: HashMap::new(),
             last_output_wait_scan: Instant::now(),
             workspaces_scroll: 0,
             agents_scroll: 0,

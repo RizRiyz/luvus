@@ -421,6 +421,8 @@ fn handle_conn(stream: Conn, event_tx: Sender<AppEvent>, bus: EventBus) {
             | "agent.explain"
             | "agent.report"
             | "agent.release"
+            | "agent.start"
+            | "agent.prompt"
             | "agent.wait"
             | "events.subscribe"
     );
@@ -569,6 +571,33 @@ fn handle_conn(stream: Conn, event_tx: Sender<AppEvent>, bus: EventBus) {
         }
         if let Some(resp) = wait_for_parked_reply(&mut reader, &reply_rx, &cancelled) {
             let _ = write_response(&mut writer, &id, &resp);
+        }
+        return;
+    }
+
+    if matches!(method.as_str(), "agent.start" | "agent.prompt") {
+        let (reply, reply_rx) = mpsc::channel::<String>();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let event = if method == "agent.start" {
+            AppEvent::AgentStart {
+                id: id.clone(),
+                params,
+                reply,
+                cancelled: cancelled.clone(),
+            }
+        } else {
+            AppEvent::AgentPrompt {
+                id: id.clone(),
+                params,
+                reply,
+                cancelled: cancelled.clone(),
+            }
+        };
+        if event_tx.send(event).is_err() {
+            return;
+        }
+        if let Some(response) = wait_for_parked_reply(&mut reader, &reply_rx, &cancelled) {
+            let _ = write_response(&mut writer, &id, &response);
         }
         return;
     }

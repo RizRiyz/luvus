@@ -4,7 +4,7 @@
   "type":"object",
   "properties":{
     "id":{"type":"string","minLength":1,"maxLength":128},
-    "result":{"type":"object","properties":{"type":{"enum":["runtime_capabilities","session_snapshot","pane_processes","agent_explanation","agent_report","agent_release","agent_wait","subscription_started"]}},"required":["type"]},
+    "result":{"type":"object","properties":{"type":{"enum":["runtime_capabilities","session_snapshot","pane_processes","agent_explanation","agent_report","agent_release","agent_start","agent_prompt","agent_wait","subscription_started"]}},"required":["type"]},
     "error":{"type":"object","properties":{"code":{"type":"string"},"message":{"type":"string","maxLength":512}},"required":["code","message"]}
   },
   "required":["id"],
