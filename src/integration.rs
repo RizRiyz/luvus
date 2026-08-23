@@ -231,6 +231,7 @@ fn install_shell_hook(agent: &str) -> Result<PathBuf> {
         spec.event,
         spec.matcher,
         &script.to_string_lossy(),
+        None,
     );
     fs::write(&cfg_path, serde_json::to_string_pretty(&cfg)?)?;
     let _ = fs::remove_file(spec.dir.join("bohay-agent-hook.sh"));
@@ -248,7 +249,7 @@ pub fn install_claude() -> Result<PathBuf> {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| json!({}));
     for evt in ["Notification", "Stop"] {
-        register_hook(&mut cfg, evt, None, &script.to_string_lossy());
+        register_hook(&mut cfg, evt, None, &script.to_string_lossy(), None);
     }
     fs::write(&cfg_path, serde_json::to_string_pretty(&cfg)?)?;
     Ok(dir)
@@ -274,6 +275,7 @@ pub fn install_codex() -> Result<PathBuf> {
         "UserPromptSubmit",
         None,
         &script.to_string_lossy(),
+        Some(5),
     );
     fs::write(&cfg_path, serde_json::to_string_pretty(&cfg)?)?;
     Ok(dir)
@@ -590,7 +592,13 @@ pub fn is_installed(agent: &str) -> bool {
 
 /// Insert a command hook under `hooks.<event>` pointing at `script` (with an
 /// optional group `matcher`), removing any prior luvus entry first.
-fn register_hook(settings: &mut Value, event: &str, matcher: Option<&str>, script: &str) {
+fn register_hook(
+    settings: &mut Value,
+    event: &str,
+    matcher: Option<&str>,
+    script: &str,
+    timeout_seconds: Option<u64>,
+) {
     if !settings.is_object() {
         *settings = json!({});
     }
@@ -613,7 +621,11 @@ fn register_hook(settings: &mut Value, event: &str, matcher: Option<&str>, scrip
     let arr = session_start.as_array_mut().unwrap();
     // Drop any previous luvus entries (idempotent reinstall).
     arr.retain(|group| !group_mentions_luvus(group));
-    let mut group = json!({ "hooks": [ { "type": "command", "command": script } ] });
+    let mut command = json!({ "type": "command", "command": script });
+    if let Some(timeout_seconds) = timeout_seconds {
+        command["timeout"] = json!(timeout_seconds);
+    }
+    let mut group = json!({ "hooks": [command] });
     if let Some(m) = matcher {
         group["matcher"] = json!(m);
     }
@@ -827,10 +839,16 @@ mod tests {
         assert_eq!(start_luvus.len(), 1);
         assert_eq!(start_luvus[0]["matcher"].as_str(), Some("startup|resume"));
         let prompt = hooks["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        let prompt_luvus: Vec<&Value> = prompt.iter().filter(|g| group_mentions_luvus(g)).collect();
         assert_eq!(
-            prompt.iter().filter(|g| group_mentions_luvus(g)).count(),
+            prompt_luvus.len(),
             1,
             "one prompt hook remains after an idempotent reinstall"
+        );
+        assert_eq!(
+            prompt_luvus[0]["hooks"][0]["timeout"].as_u64(),
+            Some(5),
+            "prompt reporting has a bounded hook timeout"
         );
         assert!(
             script.contains("LUVUS_BIN_PATH"),
