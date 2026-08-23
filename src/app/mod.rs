@@ -8798,18 +8798,23 @@ mod tests {
             app.settings.as_ref().unwrap().tab,
             crate::app::SettingsTab::Layout
         );
+        let sidebar_width_row = app
+            .layout_rows()
+            .iter()
+            .position(|row| matches!(row, crate::app::settings::LayoutRow::SidebarWidth))
+            .expect("the Layout tab has a Left sidebar width row");
+        app.settings.as_mut().unwrap().cursor = sidebar_width_row;
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
-
         let left = app
             .settings_arrow_rects
             .iter()
-            .find(|(_, d, _)| *d < 0)
+            .find(|(row, d, _)| *row == sidebar_width_row && *d < 0)
             .unwrap()
             .2;
         let right = app
             .settings_arrow_rects
             .iter()
-            .find(|(_, d, _)| *d > 0)
+            .find(|(row, d, _)| *row == sidebar_width_row && *d > 0)
             .unwrap()
             .2;
         let click = |app: &mut App, r: Rect| {
