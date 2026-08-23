@@ -2862,16 +2862,11 @@ impl App {
         if let Some(nst) = self.status.get_mut(&new_id) {
             nst.agent = agent.clone();
         }
-        // Pin the *source* pane to the session we just forked from.
-        //
-        // We resolved `sid` above, so this pane's session is known right now —
-        // but the fork is about to write a *newer* session into the same folder,
-        // and a pane with no recorded session is resolved at save time by
-        // "newest in this folder" (`persist::resolve_pane_sessions`). Without
-        // this, the parent would later be attributed its own child's session,
-        // and the fork would be left with none. Recording it now keeps both
-        // panes pointing at the right conversation. A hook report still wins:
-        // it overwrites this, and we only fill a pane that had nothing.
+        // Pin the *source* pane to the session we just forked from. The fork is
+        // about to create another session in the same folder, and disk discovery
+        // deliberately refuses ambiguous ownership at save time. Recording this
+        // exact binding keeps the parent resumable until the fork reports its own
+        // session. A hook report still wins because we only fill an empty binding.
         if let Some(st) = self.status.get_mut(&pane) {
             if st.agent_session.is_none() {
                 st.agent_session = Some(AgentSession {
@@ -3677,10 +3672,7 @@ impl App {
             return;
         }
         let move_targets = self.pane_move_targets();
-        let can_fork = self
-            .status
-            .get(&pane)
-            .is_some_and(|st| crate::agent::can_fork(&st.agent));
+        let can_fork = self.can_fork_pane(pane);
         let link = self.link_at_screen(col, row).map(|h| h.target);
         self.pane_menu = Some(PaneMenu {
             pane,
@@ -3693,6 +3685,30 @@ impl App {
             can_fork,
             link,
         });
+    }
+
+    /// Whether `pane` has both a native fork implementation and a safe source
+    /// session. Codex deliberately has no cwd-based fallback: several rollouts
+    /// commonly share a directory, so showing Fork without its exact binding
+    /// would offer an action that must fail or fork the wrong conversation.
+    fn can_fork_pane(&self, pane: PaneId) -> bool {
+        let Some(st) = self.status.get(&pane) else {
+            return false;
+        };
+        if !crate::agent::can_fork(&st.agent) {
+            return false;
+        }
+        let Some(cwd) = self.panes.get(&pane).map(|pane| &pane.cwd) else {
+            return false;
+        };
+        crate::agent::fork_session_id(
+            &st.agent,
+            st.agent_session
+                .as_ref()
+                .map(|session| session.session_id.as_str()),
+            cwd,
+        )
+        .is_some()
     }
 
     /// The tabs this pane could move into: every other real pane tab in the
@@ -5112,7 +5128,11 @@ mod tests {
     fn delete_worktree_absent_for_a_plain_workspace() {
         let _env = crate::persist::test_env("wt-del-menu");
         let (tx, _rx) = mpsc::channel();
-        let app = App::new(80, 24, tx).unwrap();
+        let mut app = App::new(80, 24, tx).unwrap();
+        // `App::new` uses the test process's cwd. Test runs may themselves be
+        // launched from a linked Git worktree, so explicitly construct the plain
+        // workspace this test is about instead of depending on the checkout.
+        app.workspaces[0].worktree = None;
         let items = app.ws_menu_items(0);
         assert!(
             !items.contains(&WsMenuItem::DeleteWorktree),
@@ -5129,6 +5149,9 @@ mod tests {
         let _env = crate::persist::test_env("wt-del-confirm");
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
+        // See `delete_worktree_absent_for_a_plain_workspace`: never let this
+        // guard-path test act on the worktree that happens to run the suite.
+        app.workspaces[0].worktree = None;
 
         // A non-confirm key dismisses the modal.
         app.worktree_delete = Some(0);
@@ -6431,12 +6454,11 @@ mod tests {
         );
     }
 
-    /// Panes must line up with sessions by age: the pane started first owns the
-    /// session started first. Resolving oldest-pane-first while each takes the
-    /// *newest* unclaimed session pairs them backwards, so two agent panes in one
-    /// folder swap conversations — each restores into the other's session.
+    /// Disk discovery cannot prove which of multiple sessions belongs to which
+    /// unbound pane, even if their pane and session creation orders happen to
+    /// match. It must preserve safety by leaving both panes unbound.
     #[test]
-    fn two_agent_panes_keep_their_own_sessions_by_age() {
+    fn ambiguous_unbound_sessions_do_not_guess_by_pane_age() {
         let _env = crate::persist::test_env("session-pairing");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
@@ -6483,16 +6505,67 @@ mod tests {
         std::env::remove_var("CLAUDE_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&store);
 
-        assert_eq!(
-            by_pane.get(&newer.0),
-            Some(&Some("new-sess".to_string())),
-            "the newer pane owns the newer session"
-        );
-        assert_eq!(
-            by_pane.get(&older.0),
-            Some(&Some("old-sess".to_string())),
-            "the older pane keeps its own, not its neighbour's"
-        );
+        assert_eq!(by_pane.get(&newer.0), Some(&None));
+        assert_eq!(by_pane.get(&older.0), Some(&None));
+    }
+
+    /// Regression: tabs do not establish a native agent-session boundary. A user
+    /// can create the second tab first and then start its agent before starting
+    /// one in the first tab, so global pane ids cannot be used to pair the two
+    /// session files. Restarting must not move either conversation across tabs.
+    #[test]
+    fn ambiguous_sessions_across_tabs_are_not_reassigned() {
+        let _env = crate::persist::test_env("cross-tab-session-pairing");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let first_tab_pane = app.layout().focus;
+        let cwd = app.panes.get(&first_tab_pane).unwrap().cwd.clone();
+
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        let second_tab_pane = app.layout().focus;
+        assert_ne!(first_tab_pane, second_tab_pane);
+        assert_eq!(app.ws().tabs.len(), 2, "two tabs are present");
+        assert_eq!(app.panes.get(&second_tab_pane).unwrap().cwd, cwd);
+
+        let store =
+            std::env::temp_dir().join(format!("luvus-cross-tab-pairing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&store);
+        let enc: String = cwd
+            .to_string_lossy()
+            .chars()
+            .map(|c| {
+                if matches!(c, '/' | '\\' | '.') {
+                    '-'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        let proj = store.join("projects").join(enc);
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("first-session.jsonl"), "{}").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(proj.join("second-session.jsonl"), "{}").unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", &store);
+
+        for id in [first_tab_pane, second_tab_pane] {
+            let status = app.status.get_mut(&id).unwrap();
+            status.agent = "claude".into();
+            status.agent_session = None;
+        }
+
+        let snap = crate::persist::snapshot(&app);
+        let by_pane: std::collections::HashMap<u32, Option<String>> = snap.workspaces[0]
+            .tabs
+            .iter()
+            .flat_map(|tab| &tab.panes)
+            .map(|(raw, ps)| (*raw, ps.agent_session.as_ref().map(|(_, sid)| sid.clone())))
+            .collect();
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&store);
+
+        assert_eq!(by_pane.get(&first_tab_pane.0), Some(&None));
+        assert_eq!(by_pane.get(&second_tab_pane.0), Some(&None));
     }
 
     #[test]
@@ -8344,6 +8417,22 @@ mod tests {
         let fork = app.layout().focus;
         assert_ne!(fork, src);
         assert_eq!(app.status.get(&fork).unwrap().agent, "codex");
+    }
+
+    #[test]
+    fn codex_pane_menu_hides_fork_without_an_exact_session() {
+        let _env = crate::persist::test_env("fork-codex-menu-unbound");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "codex".into();
+
+        app.open_pane_menu(pane, 1, 1);
+
+        assert!(
+            !app.pane_menu_items().contains(&PaneMenuItem::ForkPane),
+            "Codex needs the exact session bound to this pane before Fork is offered"
+        );
     }
 
     #[test]

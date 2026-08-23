@@ -551,56 +551,49 @@ pub fn client_socket_path() -> PathBuf {
 }
 
 /// Build a snapshot from the live app.
-/// Resolve every pane's native agent session for the snapshot, guaranteeing
-/// that **no two panes claim the same session**.
+/// Resolve every pane's native agent session for the snapshot without assigning
+/// a conversation to the wrong pane.
 ///
-/// A hook-reported id names its own pane exactly, so those are claimed first and
-/// always win. Every other pane falls back to `agent::latest_session(agent,
-/// cwd)`, which answers "the newest session for this agent in this folder" — a
-/// key shared by *every* pane in that folder, with tabs not part of it at all.
-/// Unchecked, several panes record the same id and all restore into one
-/// conversation: a session reappears in a pane it was never in, the same
-/// conversation shows up in two tabs, and the transcript is corrupted once two
-/// agents append to it.
+/// A hook-reported id names its pane exactly, so it is always the source of
+/// truth. Disk discovery can recover an unbound pane only when the mapping is
+/// unambiguous: exactly one unbound pane and exactly one unclaimed session for
+/// an `(agent, cwd)` pair.
 ///
-/// Each guessing pane takes the newest session **not already claimed**, so panes
-/// sharing a folder line up with distinct conversations instead of colliding on
-/// one. That matters most after a fork: the parent is live, so its transcript is
-/// usually the newest file in the folder, and a fork that could only ever see
-/// "the newest" would find it taken and fall back to a bare shell. Falling
-/// through to the next-newest gives the fork its own session back.
-///
-/// Guessing panes are matched to sessions **by age**: pane ids are handed out in
-/// order, so the newest pane is resolved first and takes the newest session, the
-/// next-newest takes the one after it, and so on. Pairing them the other way
-/// round (oldest pane first, still taking the *newest* session) hands each pane
-/// its neighbour's conversation, which is how two agent panes in one folder ended
-/// up swapping sessions across a restart.
-///
-/// A pane with nothing left to claim records nothing and restores as a plain
-/// shell. Losing a resume is much better than duplicating a live session, and
-/// the guess was never evidence that *this* pane owned it.
+/// Pane creation order is not agent-session creation order. In particular, a
+/// user can make panes in several tabs and start their agents later in any order.
+/// Matching the newest session to the newest pane therefore swaps conversations
+/// between tabs on restart. When discovery cannot prove ownership, the pane
+/// restores as a shell instead. That is recoverable and safe; resuming the wrong
+/// conversation is neither.
 fn resolve_pane_sessions(app: &App) -> HashMap<PaneId, Option<(String, String)>> {
     let mut out: HashMap<PaneId, Option<(String, String)>> = HashMap::new();
-    let mut claimed: HashSet<String> = HashSet::new();
+    let mut claimed: HashSet<(String, String)> = HashSet::new();
     let mut ids: Vec<PaneId> = app.status.keys().copied().collect();
     ids.sort_by_key(|p| p.0);
 
     // Pass 1: precise, hook-reported sessions take their id outright.
     for id in &ids {
         if let Some(a) = app.status.get(id).and_then(|s| s.agent_session.as_ref()) {
-            claimed.insert(a.session_id.clone());
-            out.insert(*id, Some((a.agent.clone(), a.session_id.clone())));
+            let key = (a.agent.clone(), a.session_id.clone());
+            if claimed.insert(key.clone()) {
+                out.insert(*id, Some(key));
+            } else {
+                // A malformed or duplicate integration report must not make two
+                // panes resume and write to the same native conversation.
+                out.insert(*id, None);
+            }
         }
     }
-    // Pass 2: everyone else takes the newest session for their folder that is
-    // still unclaimed, so panes sharing a folder get distinct conversations.
-    // Newest pane first, so pane age lines up with session age (see above).
-    for id in ids.iter().rev() {
-        if out.contains_key(id) {
+
+    // Pass 2: group unbound panes before looking at native session stores. A
+    // `(agent, cwd)` identifies a set of possible conversations, not a pane.
+    // Only a one-pane / one-session group can be recovered safely.
+    let mut unbound: HashMap<(String, PathBuf), Vec<PaneId>> = HashMap::new();
+    for id in ids {
+        if out.contains_key(&id) {
             continue;
         }
-        let Some(st) = app.status.get(id) else {
+        let Some(st) = app.status.get(&id) else {
             continue;
         };
         // The sidebar label is updated asynchronously. A restart can happen
@@ -613,18 +606,31 @@ fn resolve_pane_sessions(app: &App) -> HashMap<PaneId, Option<(String, String)>>
         // the UI state or lifecycle bookkeeping.
         let agent = snapshot_agent(
             &app.manifests,
-            app.proc_commands.get(id).map(Vec::as_slice),
+            app.proc_commands.get(&id).map(Vec::as_slice),
             &st.agent,
         );
-        let guess = app.panes.get(id).and_then(|p| {
-            crate::agent::sessions_for(&agent, &p.cwd)
-                .into_iter()
-                .find(|sid| !claimed.contains(sid))
-        });
-        if let Some(sid) = &guess {
-            claimed.insert(sid.clone());
+        if let Some(pane) = app.panes.get(&id) {
+            unbound
+                .entry((agent, pane.cwd.clone()))
+                .or_default()
+                .push(id);
         }
-        out.insert(*id, guess.map(|sid| (agent, sid)));
+    }
+    for ((agent, cwd), pane_ids) in unbound {
+        let sessions: Vec<String> = crate::agent::sessions_for(&agent, &cwd)
+            .into_iter()
+            .filter(|sid| !claimed.contains(&(agent.clone(), sid.clone())))
+            .collect();
+        if pane_ids.len() == 1 && sessions.len() == 1 {
+            let id = pane_ids[0];
+            let sid = sessions.into_iter().next().expect("length checked");
+            claimed.insert((agent.clone(), sid.clone()));
+            out.insert(id, Some((agent, sid)));
+        } else {
+            for id in pane_ids {
+                out.insert(id, None);
+            }
+        }
     }
     out
 }
