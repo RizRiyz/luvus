@@ -59,7 +59,7 @@ def pane(value):
 
 
 def bounded_string(value, maximum, allow_empty=True):
-    return isinstance(value, str) and (allow_empty or bool(value)) and len(value.encode()) <= maximum
+    return isinstance(value, str) and (allow_empty or bool(value)) and len(value) <= maximum
 
 
 def valid_request(value):

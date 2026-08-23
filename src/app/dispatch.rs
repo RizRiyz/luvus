@@ -2,7 +2,14 @@
 //! per-pane agent-detection tick. Methods on [`App`](super::App).
 
 use super::*;
-use std::sync::mpsc::Sender;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc::Sender, Arc};
+
+pub(crate) const MAX_AGENT_WAIT: Duration = Duration::from_secs(3600);
+pub(crate) const MAX_AGENT_WAITS_TOTAL: usize = 1024;
+pub(crate) const MAX_AGENT_WAITS_PER_PANE: usize = 64;
+pub(crate) const MAX_AGENT_REPORT_TTL_S: u64 = 86400;
+pub(crate) const MAX_AGENT_REPORT_MESSAGE_CHARS: usize = 4096;
 
 /// A parked `wait.output` request (docs/81): reply when the pane's recent
 /// output contains `needle`, or the optional deadline passes.
@@ -11,6 +18,7 @@ pub struct OutputWait {
     pub needle: String,
     pub reply: Sender<String>,
     pub deadline: Option<Instant>,
+    pub cancelled: Arc<AtomicBool>,
 }
 
 /// A parked `agent.wait` request. State transitions resolve these directly on
@@ -20,6 +28,7 @@ pub struct AgentWait {
     pub state: State,
     pub reply: Sender<String>,
     pub deadline: Instant,
+    pub cancelled: Arc<AtomicBool>,
 }
 
 /// The canonical `wait.output` response: `matched` says whether the marker
@@ -596,11 +605,11 @@ impl App {
                 "agent_authorities":["integration_report", "process_tree", "launch_command", "osc_title", "screen_text", "prior_identity", "command_fallback"],
                 "agent_states":["idle", "working", "blocked", "done"],
                 "limits":{
-                    "agent_wait_timeout_s":3600,
-                    "agent_report_ttl_s":86400,
-                    "agent_report_message_bytes":4096,
-                    "agent_waits_per_pane":64,
-                    "agent_waits_total":1024,
+                    "agent_wait_timeout_s":MAX_AGENT_WAIT.as_secs(),
+                    "agent_report_ttl_s":MAX_AGENT_REPORT_TTL_S,
+                    "agent_report_message_characters":MAX_AGENT_REPORT_MESSAGE_CHARS,
+                    "agent_waits_per_pane":MAX_AGENT_WAITS_PER_PANE,
+                    "agent_waits_total":MAX_AGENT_WAITS_TOTAL,
                 }
                 }))
             }
@@ -1374,6 +1383,18 @@ impl App {
                         "agent.explain needs exactly one of target or pane".to_string(),
                     ));
                 }
+                if let Some(target) = p.get("target") {
+                    let valid = target
+                        .as_str()
+                        .is_some_and(|target| !target.is_empty() && target.chars().count() <= 128);
+                    if !valid {
+                        return Err((
+                            "invalid_request".to_string(),
+                            "target must be a non-empty string of at most 128 characters"
+                                .to_string(),
+                        ));
+                    }
+                }
                 let id = self
                     .resolve_agent_pane(p)
                     .or_else(|| self.resolve_pane(p))
@@ -1421,10 +1442,11 @@ impl App {
                             "status must be idle, working, blocked, or done".to_string(),
                         )
                     })?;
-                let message = optional_bounded_string(p, "message", 4096)?;
+                let message =
+                    optional_bounded_string(p, "message", MAX_AGENT_REPORT_MESSAGE_CHARS)?;
                 let session_id = optional_bounded_string(p, "session_id", 512)?;
                 let ttl_s = p.get("ttl_s").and_then(Value::as_u64).unwrap_or(3600);
-                if !(1..=86400).contains(&ttl_s) {
+                if !(1..=MAX_AGENT_REPORT_TTL_S).contains(&ttl_s) {
                     return Err((
                         "invalid_request".to_string(),
                         "ttl_s must be between 1 and 86400".to_string(),
@@ -3048,16 +3070,19 @@ impl App {
         needle: String,
         reply: Sender<String>,
         timeout: Option<Duration>,
+        cancelled: Arc<AtomicBool>,
     ) {
+        if cancelled.load(Ordering::Acquire) {
+            return;
+        }
         let recent = self.pane_recent_text(id);
         if recent.contains(&needle) {
             let _ = reply.send(wait_response(&request_id, true, Some(id)));
             return;
         }
-        // Always bound the wait: a client that disconnects cannot be detected on
-        // the reply channel, so an uncapped waiter would be re-scanned forever.
-        // A shorter caller-specified timeout still wins; a longer one (or none)
-        // is capped so an abandoned waiter is reclaimed within an hour.
+        // Always bound the wait as a second line of defence. Socket workers mark
+        // disconnected clients immediately; this cap also protects against a
+        // worker failure or a client that stays connected but never consumes.
         const MAX_WAIT: Duration = Duration::from_secs(3600);
         let deadline = Some(Instant::now() + timeout.unwrap_or(MAX_WAIT).min(MAX_WAIT));
         self.output_waits.entry(id).or_default().push(OutputWait {
@@ -3065,6 +3090,7 @@ impl App {
             needle,
             reply,
             deadline,
+            cancelled,
         });
     }
 
@@ -3080,7 +3106,9 @@ impl App {
         };
         let mut keep = Vec::with_capacity(waiters.len());
         for waiter in waiters.drain(..) {
-            if text.contains(&waiter.needle) {
+            if waiter.cancelled.load(Ordering::Acquire) {
+                continue;
+            } else if text.contains(&waiter.needle) {
                 let _ = waiter
                     .reply
                     .send(wait_response(&waiter.request_id, true, Some(id)));
@@ -3120,7 +3148,9 @@ impl App {
         }
         for waiters in self.output_waits.values_mut() {
             waiters.retain(|waiter| {
-                if waiter.deadline.is_some_and(|d| now >= d) {
+                if waiter.cancelled.load(Ordering::Acquire) {
+                    false
+                } else if waiter.deadline.is_some_and(|d| now >= d) {
                     let _ = waiter
                         .reply
                         .send(wait_response(&waiter.request_id, false, None));
@@ -3152,20 +3182,22 @@ impl App {
         state: State,
         reply: Sender<String>,
         timeout: Option<Duration>,
+        cancelled: Arc<AtomicBool>,
     ) {
+        if cancelled.load(Ordering::Acquire) {
+            return;
+        }
         let current = self.status.get(&id).map(|status| status.state);
         if current == Some(state) {
             let _ = reply.send(agent_wait_response(&request_id, true, Some(id), current));
             return;
         }
-        const MAX_TOTAL: usize = 1024;
-        const MAX_PER_PANE: usize = 64;
         let total: usize = self.agent_waits.values().map(Vec::len).sum();
-        if total >= MAX_TOTAL
+        if total >= MAX_AGENT_WAITS_TOTAL
             || self
                 .agent_waits
                 .get(&id)
-                .is_some_and(|waits| waits.len() >= MAX_PER_PANE)
+                .is_some_and(|waits| waits.len() >= MAX_AGENT_WAITS_PER_PANE)
         {
             let _ = reply.send(
                 json!({"id":request_id,"error":{"code":"unavailable","message":"agent wait capacity is full"}})
@@ -3173,12 +3205,12 @@ impl App {
             );
             return;
         }
-        const MAX_WAIT: Duration = Duration::from_secs(3600);
         self.agent_waits.entry(id).or_default().push(AgentWait {
             request_id,
             state,
             reply,
-            deadline: Instant::now() + timeout.unwrap_or(MAX_WAIT).min(MAX_WAIT),
+            deadline: Instant::now() + timeout.unwrap_or(MAX_AGENT_WAIT).min(MAX_AGENT_WAIT),
+            cancelled,
         });
     }
 
@@ -3190,7 +3222,9 @@ impl App {
             return;
         };
         waiters.retain(|waiter| {
-            if waiter.state == current {
+            if waiter.cancelled.load(Ordering::Acquire) {
+                false
+            } else if waiter.state == current {
                 let _ = waiter.reply.send(agent_wait_response(
                     &waiter.request_id,
                     true,
@@ -3211,7 +3245,9 @@ impl App {
         for (id, waiters) in self.agent_waits.iter_mut() {
             let current = self.status.get(id).map(|status| status.state);
             waiters.retain(|waiter| {
-                if now >= waiter.deadline {
+                if waiter.cancelled.load(Ordering::Acquire) {
+                    false
+                } else if now >= waiter.deadline {
                     let _ = waiter.reply.send(agent_wait_response(
                         &waiter.request_id,
                         false,
@@ -3238,8 +3274,8 @@ impl App {
         }
     }
 
-    /// The live alias pointing at `pane`, if any (set by `agent.name`). Reverse of
-    /// the `agent_names` map; the map is small, so a linear scan is fine.
+    /// The display label for `pane`: a terminal-backend title when present,
+    /// otherwise the live alias set by `agent.name`.
     pub(crate) fn agent_name_for(&self, pane: PaneId) -> Option<&str> {
         self.backend_labels
             .get(&pane)
@@ -3782,14 +3818,16 @@ fn reject_api_fields(p: &Value, allowed: &[&str]) -> Result<(), (String, String)
 fn optional_bounded_string(
     p: &Value,
     key: &str,
-    max_bytes: usize,
+    max_characters: usize,
 ) -> Result<Option<String>, (String, String)> {
     match p.get(key) {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) if value.len() <= max_bytes => Ok(Some(value.clone())),
+        Some(Value::String(value)) if value.chars().count() <= max_characters => {
+            Ok(Some(value.clone()))
+        }
         Some(Value::String(_)) => Err((
             "invalid_request".to_string(),
-            format!("{key} exceeds {max_bytes} bytes"),
+            format!("{key} exceeds {max_characters} characters"),
         )),
         Some(_) => Err((
             "invalid_request".to_string(),
@@ -3806,34 +3844,13 @@ fn process_executables(commands: &[String]) -> Vec<String> {
     for command in commands.iter().take(128) {
         let mut words = command.split_whitespace();
         let Some(first) = words.next() else { continue };
-        let first = process_basename(first);
+        let first = crate::detect::binary_name(first);
         if !first.is_empty() && !result.iter().any(|item| item == first) {
             result.push(first.to_string());
         }
-        if matches!(
-            first,
-            "node"
-                | "nodejs"
-                | "bun"
-                | "deno"
-                | "npx"
-                | "pnpm"
-                | "yarn"
-                | "python"
-                | "python3"
-                | "py"
-                | "uv"
-                | "uvx"
-                | "ruby"
-                | "perl"
-                | "env"
-                | "sh"
-                | "bash"
-                | "zsh"
-                | "fish"
-        ) {
+        if crate::detect::is_interpreter(first) {
             if let Some(script) = words.find(|word| !word.starts_with('-')) {
-                let script = process_basename(script);
+                let script = crate::detect::binary_name(script);
                 if !script.is_empty() && !result.iter().any(|item| item == script) {
                     result.push(script.to_string());
                 }
@@ -3841,15 +3858,6 @@ fn process_executables(commands: &[String]) -> Vec<String> {
         }
     }
     result
-}
-
-fn process_basename(value: &str) -> &str {
-    value
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(value)
-        .trim_start_matches('-')
-        .trim_end_matches(".exe")
 }
 
 fn state_str(s: State) -> &'static str {
@@ -4451,6 +4459,7 @@ command = ["true"]
             State::Blocked,
             reply,
             Some(Duration::from_secs(1)),
+            Arc::new(AtomicBool::new(false)),
         );
 
         let reported = app
@@ -4630,6 +4639,19 @@ command = ["true"]
         }
         app.handle_pane_rename_key(KeyEvent::from(KeyCode::Enter));
         assert_eq!(app.agent_name_for(pane), None);
+    }
+
+    #[test]
+    fn pane_rename_does_not_turn_backend_label_into_alias() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.backend_labels.insert(pane, "harness-shell".into());
+
+        app.open_pane_rename(pane);
+        assert_eq!(app.pane_rename.as_ref().unwrap().buffer, "");
+        assert!(app.agent_names.values().all(|target| *target != pane));
+        assert_eq!(app.agent_name_for(pane), Some("harness-shell"));
     }
 
     #[test]
@@ -5170,6 +5192,21 @@ command = ["true"]
         assert!(!valid_agent_name(&"x".repeat(33))); // too long
     }
 
+    #[test]
+    fn runtime_string_limits_count_unicode_codepoints() {
+        let accepted = "é".repeat(MAX_AGENT_REPORT_MESSAGE_CHARS);
+        assert_eq!(
+            optional_bounded_string(&json!({"message":accepted}), "message", 4096)
+                .unwrap()
+                .unwrap()
+                .chars()
+                .count(),
+            4096
+        );
+        let rejected = "é".repeat(MAX_AGENT_REPORT_MESSAGE_CHARS + 1);
+        assert!(optional_bounded_string(&json!({"message":rejected}), "message", 4096).is_err());
+    }
+
     /// `wait.output` never polls: an already-visible marker resolves on
     /// registration, fresh output resolves on the next output event, and a
     /// deadline lapses on the loop tick (docs/81).
@@ -5190,7 +5227,14 @@ command = ["true"]
             .unwrap()
             .advance(b"ready NOW\r\n");
         let (reply, rx): (_, Receiver<String>) = std::sync::mpsc::channel();
-        app.register_output_wait(pane, "t1".into(), "NOW".into(), reply, None);
+        app.register_output_wait(
+            pane,
+            "t1".into(),
+            "NOW".into(),
+            reply,
+            None,
+            Arc::new(AtomicBool::new(false)),
+        );
         assert!(rx
             .recv_timeout(Duration::from_secs(1))
             .unwrap()
@@ -5198,7 +5242,14 @@ command = ["true"]
 
         // Parked: resolves only when the pane produces matching output.
         let (reply, rx): (_, Receiver<String>) = std::sync::mpsc::channel();
-        app.register_output_wait(pane, "t2".into(), "LATER".into(), reply, None);
+        app.register_output_wait(
+            pane,
+            "t2".into(),
+            "LATER".into(),
+            reply,
+            None,
+            Arc::new(AtomicBool::new(false)),
+        );
         assert_eq!(
             rx.recv_timeout(Duration::from_millis(50)),
             Err(RecvTimeoutError::Timeout)
@@ -5224,6 +5275,7 @@ command = ["true"]
             "NEVER".into(),
             reply,
             Some(Duration::from_millis(10)),
+            Arc::new(AtomicBool::new(false)),
         );
         app.tick_output_waits(Instant::now() + Duration::from_secs(1));
         assert!(rx
@@ -5233,7 +5285,14 @@ command = ["true"]
 
         // A closed pane fails its parked waiters.
         let (reply, rx): (_, Receiver<String>) = std::sync::mpsc::channel();
-        app.register_output_wait(pane, "t4".into(), "NEVER".into(), reply, None);
+        app.register_output_wait(
+            pane,
+            "t4".into(),
+            "NEVER".into(),
+            reply,
+            None,
+            Arc::new(AtomicBool::new(false)),
+        );
         app.cancel_output_waits(pane);
         assert!(rx
             .recv_timeout(Duration::from_secs(1))
@@ -5251,9 +5310,59 @@ command = ["true"]
         let mut app = App::new(80, 24, tx).unwrap();
         let pane = app.layout().focus;
         let (reply, _rx): (_, std::sync::mpsc::Receiver<String>) = std::sync::mpsc::channel();
-        app.register_output_wait(pane, "t".into(), "NEVER".into(), reply, None);
+        app.register_output_wait(
+            pane,
+            "t".into(),
+            "NEVER".into(),
+            reply,
+            None,
+            Arc::new(AtomicBool::new(false)),
+        );
         let waiter = &app.output_waits[&pane][0];
         assert!(waiter.deadline.is_some(), "an abandoned waiter must expire");
+    }
+
+    #[test]
+    fn disconnected_clients_reclaim_parked_waiters_without_replies() {
+        use std::sync::mpsc::TryRecvError;
+
+        let _env = crate::persist::test_env("wait-disconnect");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+
+        let output_cancelled = Arc::new(AtomicBool::new(false));
+        let (output_reply, output_rx) = std::sync::mpsc::channel();
+        app.register_output_wait(
+            pane,
+            "output-disconnect".into(),
+            "NEVER".into(),
+            output_reply,
+            None,
+            output_cancelled.clone(),
+        );
+
+        let agent_cancelled = Arc::new(AtomicBool::new(false));
+        let (agent_reply, agent_rx) = std::sync::mpsc::channel();
+        app.register_agent_wait(
+            pane,
+            "agent-disconnect".into(),
+            State::Blocked,
+            agent_reply,
+            None,
+            agent_cancelled.clone(),
+        );
+
+        output_cancelled.store(true, Ordering::Release);
+        agent_cancelled.store(true, Ordering::Release);
+        let now = Instant::now();
+        app.tick_output_waits(now);
+        app.tick_agent_waits(now);
+
+        assert!(app.output_waits.is_empty());
+        assert!(app.agent_waits.is_empty());
+        assert_eq!(output_rx.try_recv(), Err(TryRecvError::Disconnected));
+        assert_eq!(agent_rx.try_recv(), Err(TryRecvError::Disconnected));
     }
 
     /// Every pane-close path funnels through `drop_leaf_runtime`, so closing a
@@ -5265,7 +5374,14 @@ command = ["true"]
         let mut app = App::new(80, 24, tx).unwrap();
         let pane = app.layout().focus;
         let (reply, rx): (_, std::sync::mpsc::Receiver<String>) = std::sync::mpsc::channel();
-        app.register_output_wait(pane, "t".into(), "NEVER".into(), reply, None);
+        app.register_output_wait(
+            pane,
+            "t".into(),
+            "NEVER".into(),
+            reply,
+            None,
+            Arc::new(AtomicBool::new(false)),
+        );
         app.close_workspace(0);
         assert!(
             rx.recv_timeout(Duration::from_secs(1))

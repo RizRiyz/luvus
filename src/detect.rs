@@ -344,7 +344,7 @@ impl Manifests {
             if r.conds.iter().all(|c| c.holds(text))
                 && best
                     .as_ref()
-                    .is_none_or(|matched| r.priority > matched.priority)
+                    .is_none_or(|matched| r.priority >= matched.priority)
             {
                 best = Some(RuleMatch {
                     state: r.state,
@@ -856,7 +856,7 @@ pub fn classify(
         manifests
             .agent_in_processes(running)
             .map(|agent| (agent, "process_tree"))
-            .unwrap_or_else(|| (base_command.to_string(), "process_tree"))
+            .unwrap_or_else(|| (base_command.to_string(), "command_fallback"))
     };
 
     // A recognised agent is *working* only on positive evidence — a spinner or
@@ -1025,7 +1025,7 @@ impl Manifests {
 
 /// The bare binary name of an argv token: no directory, no `.exe`, and no
 /// leading `-` (login shells appear as `-zsh`).
-fn binary_name(token: &str) -> &str {
+pub(crate) fn binary_name(token: &str) -> &str {
     token
         .rsplit(['/', '\\'])
         .next()
@@ -1036,7 +1036,7 @@ fn binary_name(token: &str) -> &str {
 
 /// Runtimes that execute an agent as a script, so the name to look for is the
 /// argument rather than argv[0].
-fn is_interpreter(base: &str) -> bool {
+pub(crate) fn is_interpreter(base: &str) -> bool {
     matches!(
         base,
         "node"
@@ -1585,6 +1585,54 @@ mod tests {
             &m,
         );
         assert_eq!(d2.state, State::Idle, "user rule is scoped to its agent");
+    }
+
+    #[test]
+    fn later_equal_priority_rule_overrides_managed_rule() {
+        let rules = r#"
+            agent = "claude"
+            [[rule]]
+            state = "working"
+            priority = 250
+            region = "screen"
+            any = ["same marker"]
+            [[rule]]
+            state = "blocked"
+            priority = 250
+            region = "screen"
+            any = ["same marker"]
+        "#;
+        let mut manifests = Manifests::builtin();
+        manifests
+            .rules
+            .extend(toml::from_str::<ManifestFile>(rules).unwrap().into_rules());
+        let detection = classify(
+            Some("claude"),
+            "same marker",
+            true,
+            false,
+            "claude",
+            "claude",
+            &[],
+            &manifests,
+        );
+        assert_eq!(detection.state, State::Blocked);
+    }
+
+    #[test]
+    fn successful_process_scan_without_agent_is_command_fallback() {
+        let detection = classify(
+            Some("claude"),
+            "claude welcome",
+            true,
+            false,
+            "zsh",
+            "claude",
+            &["cargo test".to_string()],
+            &Manifests::builtin(),
+        );
+        assert_eq!(detection.agent, "zsh");
+        assert_eq!(detection.identity_source, "command_fallback");
     }
 
     /// A pane is named after the agent *running in it*, never after a word that

@@ -4,7 +4,7 @@
     {"path":"valid/requests.jsonl","kind":"request","expect":"valid","count":17},
     {"path":"valid/responses.jsonl","kind":"response","expect":"valid","count":10},
     {"path":"valid/events.jsonl","kind":"event","expect":"valid","count":3},
-    {"path":"invalid/requests.jsonl","kind":"request","expect":"invalid","count":6}
+    {"path":"invalid/requests.jsonl","kind":"request","expect":"invalid","count":7}
   ],
   "framing":[
     {"name":"missing_lf","expect":"invalid_request","dispatch":"not_started"},

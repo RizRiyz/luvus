@@ -237,29 +237,73 @@ pub fn schema_bundle() -> Value {
     fn schema(source: &str) -> Value {
         serde_json::from_str(source).expect("embedded terminal backend schema is valid JSON")
     }
+    const BASE: &str = "https://luvus.dev/protocol/terminal-backend/v1/schema";
+    let request = schema(include_str!(
+        "../../../protocol/terminal-backend/v1/schema/request.schema.json"
+    ));
+    let response = schema(include_str!(
+        "../../../protocol/terminal-backend/v1/schema/response.schema.json"
+    ));
+    let event = schema(include_str!(
+        "../../../protocol/terminal-backend/v1/schema/event.schema.json"
+    ));
+    let common = schema(include_str!(
+        "../../../protocol/terminal-backend/v1/schema/common.schema.json"
+    ));
+    let methods = json!({
+        "capabilities":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/capabilities.schema.json")),
+        "inventory":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/inventory.schema.json")),
+        "snapshot":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/snapshot.schema.json")),
+        "validate":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/validate.schema.json")),
+        "processes":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/processes.schema.json")),
+        "capture":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/capture.schema.json")),
+        "type_literal":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/type-literal.schema.json")),
+        "submit_text":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/submit-text.schema.json")),
+        "send_key":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/send-key.schema.json")),
+        "set_title":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/set-title.schema.json")),
+        "notify":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/notify.schema.json")),
+        "create":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/create.schema.json")),
+        "close":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/close.schema.json")),
+        "events":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/events.schema.json")),
+        "wait_change":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/wait-change.schema.json")),
+        "wait_output":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/wait-output.schema.json")),
+    });
+    let mut documents = serde_json::Map::new();
+    documents.insert(format!("{BASE}/request.schema.json"), request.clone());
+    documents.insert(format!("{BASE}/response.schema.json"), response.clone());
+    documents.insert(format!("{BASE}/event.schema.json"), event.clone());
+    documents.insert(format!("{BASE}/common.schema.json"), common);
+    let method_files = [
+        ("capabilities", "capabilities"),
+        ("inventory", "inventory"),
+        ("snapshot", "snapshot"),
+        ("validate", "validate"),
+        ("processes", "processes"),
+        ("capture", "capture"),
+        ("type_literal", "type-literal"),
+        ("submit_text", "submit-text"),
+        ("send_key", "send-key"),
+        ("set_title", "set-title"),
+        ("notify", "notify"),
+        ("create", "create"),
+        ("close", "close"),
+        ("events", "events"),
+        ("wait_change", "wait-change"),
+        ("wait_output", "wait-output"),
+    ];
+    for (name, file) in method_files {
+        documents.insert(
+            format!("{BASE}/methods/{file}.schema.json"),
+            methods[name].clone(),
+        );
+    }
     json!({
         "protocol":{"name":PROTOCOL_NAME,"major":PROTOCOL_MAJOR,"minor":PROTOCOL_MINOR},
-        "request":schema(include_str!("../../../protocol/terminal-backend/v1/schema/request.schema.json")),
-        "response":schema(include_str!("../../../protocol/terminal-backend/v1/schema/response.schema.json")),
-        "event":schema(include_str!("../../../protocol/terminal-backend/v1/schema/event.schema.json")),
-        "methods":{
-            "capabilities":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/capabilities.schema.json")),
-            "inventory":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/inventory.schema.json")),
-            "snapshot":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/snapshot.schema.json")),
-            "validate":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/validate.schema.json")),
-            "processes":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/processes.schema.json")),
-            "capture":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/capture.schema.json")),
-            "type_literal":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/type-literal.schema.json")),
-            "submit_text":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/submit-text.schema.json")),
-            "send_key":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/send-key.schema.json")),
-            "set_title":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/set-title.schema.json")),
-            "notify":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/notify.schema.json")),
-            "create":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/create.schema.json")),
-            "close":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/close.schema.json")),
-            "events":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/events.schema.json")),
-            "wait_change":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/wait-change.schema.json")),
-            "wait_output":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/wait-output.schema.json")),
-        }
+        "request":request,
+        "response":response,
+        "event":event,
+        "methods":methods,
+        "documents":documents,
     })
 }
 
@@ -287,6 +331,59 @@ mod tests {
         assert!(valid_id(&first));
         assert!(valid_id(&second));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn schema_bundle_resolves_every_external_reference() {
+        fn refs(value: &Value, found: &mut Vec<String>) {
+            match value {
+                Value::Object(object) => {
+                    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+                        if !reference.starts_with('#') {
+                            found.push(reference.to_string());
+                        }
+                    }
+                    for value in object.values() {
+                        refs(value, found);
+                    }
+                }
+                Value::Array(values) => {
+                    for value in values {
+                        refs(value, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        fn resolve(base: &str, reference: &str) -> String {
+            let relative = reference.split('#').next().unwrap_or_default();
+            let mut parts: Vec<&str> = base.rsplit_once('/').unwrap().0.split('/').collect();
+            for part in relative.split('/') {
+                match part {
+                    "" | "." => {}
+                    ".." => {
+                        parts.pop();
+                    }
+                    part => parts.push(part),
+                }
+            }
+            parts.join("/")
+        }
+
+        let bundle = schema_bundle();
+        let documents = bundle["documents"].as_object().unwrap();
+        for (uri, schema) in documents {
+            let mut references = Vec::new();
+            refs(schema, &mut references);
+            for reference in references {
+                let target = resolve(uri, &reference);
+                assert!(
+                    documents.contains_key(&target),
+                    "{uri} references missing schema {target}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -3667,7 +3667,12 @@ impl App {
 
     /// Open the pane-rename modal for `pane`, pre-filled with its current name.
     pub fn open_pane_rename(&mut self, pane: PaneId) {
-        let buffer = self.agent_name_for(pane).unwrap_or("").to_string();
+        let buffer = self
+            .agent_names
+            .iter()
+            .find_map(|(name, target)| (*target == pane).then_some(name.as_str()))
+            .unwrap_or("")
+            .to_string();
         self.pane_rename = Some(PaneRename { pane, buffer });
     }
 

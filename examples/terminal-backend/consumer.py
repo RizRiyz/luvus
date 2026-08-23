@@ -50,7 +50,17 @@ def parse_unique(line):
 
 
 def locator_ok(params):
-    return OPAQUE.fullmatch(params.get("server_generation", "")) is not None and OPAQUE.fullmatch(params.get("terminal_id", "")) is not None and re.fullmatch(r"[1-9][0-9]{0,9}", params.get("pane_id", "")) is not None
+    generation = params.get("server_generation")
+    terminal_id = params.get("terminal_id")
+    pane_id = params.get("pane_id")
+    return (
+        isinstance(generation, str)
+        and OPAQUE.fullmatch(generation) is not None
+        and isinstance(terminal_id, str)
+        and OPAQUE.fullmatch(terminal_id) is not None
+        and isinstance(pane_id, str)
+        and re.fullmatch(r"[1-9][0-9]{0,9}", pane_id) is not None
+    )
 
 
 def valid_request(value):
@@ -85,6 +95,9 @@ def valid_request(value):
         return params.get("mode") in {"visible", "recent_unwrapped", "detection"} and isinstance(params.get("lines"), int) and 1 <= params["lines"] <= 300 and isinstance(params.get("ansi"), bool) and not (params["mode"] == "detection" and params["ansi"])
     if method == "terminal.backend.send_key":
         return params.get("key") in KEYS
+    if method in {"terminal.backend.type_literal", "terminal.backend.submit_text"}:
+        text = params.get("text")
+        return isinstance(text, str) and 1 <= len(text.encode()) <= 262144
     return True
 
 
@@ -281,7 +294,7 @@ def validate_unix_endpoint(sock_path):
                 raise RuntimeError("endpoint ancestor is group- or world-writable")
     if path.resolve(strict=True) != path:
         raise RuntimeError("endpoint canonical path changed")
-    return socket_info.st_dev, socket_info.st_ino
+    return socket_info.st_dev, socket_info.st_ino, socket_info.st_ctime_ns
 
 
 def request(sock_path, request_value, endpoint_evidence=None):

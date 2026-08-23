@@ -218,6 +218,7 @@ pub enum AppEvent {
         needle: String,
         timeout: Option<std::time::Duration>,
         reply: Sender<String>,
+        cancelled: Arc<AtomicBool>,
     },
     /// Park an agent-state wait on the single-writer app loop. Registration and
     /// the initial comparison happen atomically relative to state transitions.
@@ -227,5 +228,6 @@ pub enum AppEvent {
         state: String,
         timeout: Option<std::time::Duration>,
         reply: Sender<String>,
+        cancelled: Arc<AtomicBool>,
     },
 }

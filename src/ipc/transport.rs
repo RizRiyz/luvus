@@ -117,6 +117,14 @@ impl Conn {
         }
         Ok(TimeoutMode::Kernel)
     }
+
+    /// Restore blocking I/O after a named-pipe timeout fallback. Unix kernel
+    /// timeouts do not change this mode, so callers use this only when
+    /// `set_timeouts` returned [`TimeoutMode::Nonblocking`].
+    pub fn set_blocking(&self) -> io::Result<()> {
+        use interprocess::local_socket::traits::Stream as _;
+        self.0.set_nonblocking(false)
+    }
 }
 
 impl Read for Conn {

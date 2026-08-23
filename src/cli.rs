@@ -2043,7 +2043,7 @@ pub(crate) fn send_request(method: &str, params: Value) -> Result<Value> {
 /// `ssh host luvus api proxy` without opening a network listener.
 fn api_proxy() -> Result<i32> {
     let mut input = std::io::BufReader::new(std::io::stdin().lock());
-    let request = crate::ipc::api::read_response_frame(&mut input)
+    let request = crate::ipc::api::read_request_frame(&mut input)
         .map_err(|error| anyhow!("invalid request frame: {error}"))?;
     let path = crate::persist::cli_socket_path();
     let mut stream = crate::ipc::transport::connect(&path)
@@ -2052,7 +2052,18 @@ fn api_proxy() -> Result<i32> {
     let mut reader = BufReader::new(stream);
     let response = crate::ipc::api::read_response_frame(&mut reader)?;
     println!("{response}");
-    Ok(0)
+    Ok(api_response_exit_code(&response))
+}
+
+fn api_response_exit_code(response: &str) -> i32 {
+    if serde_json::from_str::<Value>(response)
+        .ok()
+        .is_some_and(|value| value.get("error").is_some())
+    {
+        1
+    } else {
+        0
+    }
 }
 
 /// Register an installed module by writing the registry file directly (used when
@@ -4129,6 +4140,18 @@ mod tests {
             &json!({"error": {"message": "theme.use failed"}}),
             "theme.use"
         ));
+    }
+
+    #[test]
+    fn api_proxy_exit_code_distinguishes_protocol_errors() {
+        assert_eq!(api_response_exit_code(r#"{"id":"1","result":{}}"#), 0);
+        assert_eq!(
+            api_response_exit_code(
+                r#"{"id":"1","error":{"code":"invalid_request","message":"bad"}}"#
+            ),
+            1
+        );
+        assert_eq!(api_response_exit_code("not json"), 0);
     }
 
     #[test]

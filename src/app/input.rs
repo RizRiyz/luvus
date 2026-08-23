@@ -410,11 +410,14 @@ impl App {
                 needle,
                 reply,
                 timeout,
+                cancelled,
             } => {
                 let params = json!({ "pane": pane });
                 match self.resolve_pane(&params) {
                     Some(id) => {
-                        self.register_output_wait(id, request_id, needle, reply, timeout);
+                        self.register_output_wait(
+                            id, request_id, needle, reply, timeout, cancelled,
+                        );
                     }
                     None => {
                         let _ = reply.send(
@@ -433,6 +436,7 @@ impl App {
                 state,
                 reply,
                 timeout,
+                cancelled,
             } => {
                 let params = json!({"pane":pane});
                 match (
@@ -440,7 +444,7 @@ impl App {
                     crate::app::dispatch::parse_agent_wait_state(&state),
                 ) {
                     (Some(id), Some(state)) => {
-                        self.register_agent_wait(id, request_id, state, reply, timeout);
+                        self.register_agent_wait(id, request_id, state, reply, timeout, cancelled);
                     }
                     (None, _) => {
                         let _ = reply.send(

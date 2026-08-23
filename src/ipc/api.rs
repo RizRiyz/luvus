@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
@@ -107,19 +107,34 @@ fn read_frame(reader: &mut impl BufRead) -> Result<Vec<u8>, FrameError> {
     }
 }
 
-/// Read one bounded ordinary API response for CLI and adapter callers.
-pub(crate) fn read_response_frame(reader: &mut impl BufRead) -> io::Result<String> {
+fn read_text_frame(reader: &mut impl BufRead, kind: &str) -> io::Result<String> {
     let frame = read_frame(reader).map_err(|error| {
         let (kind, message) = match error {
-            FrameError::TooLarge => (io::ErrorKind::InvalidData, "response frame is too large"),
-            FrameError::MissingLf => (io::ErrorKind::UnexpectedEof, "response is missing LF"),
-            FrameError::Eof => (io::ErrorKind::UnexpectedEof, "response is empty"),
-            FrameError::Io => (io::ErrorKind::Other, "response read failed"),
+            FrameError::TooLarge => (
+                io::ErrorKind::InvalidData,
+                format!("{kind} frame is too large"),
+            ),
+            FrameError::MissingLf => (
+                io::ErrorKind::UnexpectedEof,
+                format!("{kind} is missing LF"),
+            ),
+            FrameError::Eof => (io::ErrorKind::UnexpectedEof, format!("{kind} is empty")),
+            FrameError::Io => (io::ErrorKind::Other, format!("{kind} read failed")),
         };
         io::Error::new(kind, message)
     })?;
     String::from_utf8(frame[..frame.len() - 1].to_vec())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "response is not UTF-8"))
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("{kind} is not UTF-8")))
+}
+
+/// Read one bounded ordinary API request for CLI bridge callers.
+pub(crate) fn read_request_frame(reader: &mut impl BufRead) -> io::Result<String> {
+    read_text_frame(reader, "request")
+}
+
+/// Read one bounded ordinary API response for CLI and adapter callers.
+pub(crate) fn read_response_frame(reader: &mut impl BufRead) -> io::Result<String> {
+    read_text_frame(reader, "response")
 }
 
 fn write_response(writer: &mut impl Write, id: &str, response: &str) -> io::Result<()> {
@@ -391,18 +406,13 @@ fn handle_conn(stream: Conn, event_tx: Sender<AppEvent>, bus: EventBus) {
             return;
         }
     };
-    let id = val
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0")
-        .to_string();
+    let raw_id = val.get("id");
+    let id = raw_id.and_then(|v| v.as_str()).unwrap_or("0").to_string();
     let method = val
         .get("method")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let params = val.get("params").cloned().unwrap_or(Value::Null);
-
     let versioned_runtime = matches!(
         method.as_str(),
         "runtime.capabilities"
@@ -414,13 +424,20 @@ fn handle_conn(stream: Conn, event_tx: Sender<AppEvent>, bus: EventBus) {
             | "agent.wait"
             | "events.subscribe"
     );
-    if method.starts_with("terminal.backend.") || versioned_runtime {
+    let versioned_api = method.starts_with("terminal.backend.") || versioned_runtime;
+    let params = match val.get("params") {
+        None | Some(Value::Null) if versioned_api => json!({}),
+        None => Value::Null,
+        Some(params) => params.clone(),
+    };
+    if versioned_api {
         let valid_envelope = val.as_object().is_some_and(|object| {
             object
                 .keys()
                 .all(|key| matches!(key.as_str(), "id" | "method" | "params"))
+                && raw_id.is_some_and(Value::is_string)
                 && !id.is_empty()
-                && id.len() <= 128
+                && id.chars().count() <= 128
                 && params.is_object()
         });
         if !valid_envelope {
@@ -432,13 +449,14 @@ fn handle_conn(stream: Conn, event_tx: Sender<AppEvent>, bus: EventBus) {
 
     if method == "events.subscribe" || method == "terminal.backend.events.subscribe" {
         let backend = method == "terminal.backend.events.subscribe";
-        if backend && params.as_object().is_none_or(|params| !params.is_empty()) {
-            let response = json!({"id":id,"error":{"code":"invalid_params","message":"terminal backend event subscription takes no parameters"}}).to_string();
-            let _ = write_response(&mut writer, &id, &response);
-            return;
-        }
-        if !backend && params.as_object().is_none_or(|params| !params.is_empty()) {
-            let response = json!({"id":id,"error":{"code":"invalid_params","message":"runtime event subscription takes no parameters"}}).to_string();
+        if params.as_object().is_none_or(|params| !params.is_empty()) {
+            let message = if backend {
+                "terminal backend event subscription takes no parameters"
+            } else {
+                "runtime event subscription takes no parameters"
+            };
+            let response =
+                json!({"id":id,"error":{"code":"invalid_params","message":message}}).to_string();
             let _ = write_response(&mut writer, &id, &response);
             return;
         }
@@ -492,10 +510,9 @@ fn handle_conn(stream: Conn, event_tx: Sender<AppEvent>, bus: EventBus) {
         // …while this thread watches the read side: EOF/error = the client is
         // gone, so unsubscribe NOW instead of lingering in the bus until the
         // next publish happens to notice the dead channel.
-        let timeout_mode = reader
+        let _ = reader
             .get_ref()
-            .set_timeouts(std::time::Duration::from_millis(250))
-            .ok();
+            .set_timeouts(std::time::Duration::from_millis(250));
         let mut probe = [0_u8; 1024];
         while active.load(Ordering::Acquire) {
             match reader.read(&mut probe) {
@@ -503,9 +520,7 @@ fn handle_conn(stream: Conn, event_tx: Sender<AppEvent>, bus: EventBus) {
                 Ok(_) => {}
                 Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    if timeout_mode == Some(transport::TimeoutMode::Nonblocking) {
-                        thread::sleep(std::time::Duration::from_millis(25));
-                    }
+                    thread::sleep(std::time::Duration::from_millis(25));
                 }
                 Err(_) => break,
             }
@@ -538,6 +553,7 @@ fn handle_conn(stream: Conn, event_tx: Sender<AppEvent>, bus: EventBus) {
             return;
         }
         let (reply, reply_rx) = mpsc::channel::<String>();
+        let cancelled = Arc::new(AtomicBool::new(false));
         if event_tx
             .send(AppEvent::WaitOutput {
                 id: id.clone(),
@@ -545,12 +561,13 @@ fn handle_conn(stream: Conn, event_tx: Sender<AppEvent>, bus: EventBus) {
                 needle: needle.to_string(),
                 timeout,
                 reply,
+                cancelled: cancelled.clone(),
             })
             .is_err()
         {
             return;
         }
-        if let Ok(resp) = reply_rx.recv() {
+        if let Some(resp) = wait_for_parked_reply(&mut reader, &reply_rx, &cancelled) {
             let _ = write_response(&mut writer, &id, &resp);
         }
         return;
@@ -588,6 +605,7 @@ fn handle_conn(stream: Conn, event_tx: Sender<AppEvent>, bus: EventBus) {
             return;
         }
         let (reply, reply_rx) = mpsc::channel::<String>();
+        let cancelled = Arc::new(AtomicBool::new(false));
         if event_tx
             .send(AppEvent::AgentWait {
                 id: id.clone(),
@@ -595,12 +613,13 @@ fn handle_conn(stream: Conn, event_tx: Sender<AppEvent>, bus: EventBus) {
                 state: state.to_string(),
                 timeout,
                 reply,
+                cancelled: cancelled.clone(),
             })
             .is_err()
         {
             return;
         }
-        if let Ok(response) = reply_rx.recv() {
+        if let Some(response) = wait_for_parked_reply(&mut reader, &reply_rx, &cancelled) {
             let _ = write_response(&mut writer, &id, &response);
         }
         return;
@@ -640,6 +659,53 @@ fn handle_conn(stream: Conn, event_tx: Sender<AppEvent>, bus: EventBus) {
     if let Ok(resp) = reply_rx.recv() {
         let _ = write_response(&mut writer, &id, &resp);
     }
+}
+
+/// Wait for an app-owned parked reply while also watching the socket for EOF.
+/// A disconnected client marks the waiter cancelled so the app loop can reclaim
+/// it on its next tick instead of retaining it until the public timeout cap.
+fn wait_for_parked_reply(
+    reader: &mut BufReader<Conn>,
+    reply_rx: &Receiver<String>,
+    cancelled: &Arc<AtomicBool>,
+) -> Option<String> {
+    let timeout_mode = reader
+        .get_ref()
+        .set_timeouts(std::time::Duration::from_millis(100))
+        .ok();
+    let mut probe = [0_u8; 1];
+    loop {
+        match reply_rx.try_recv() {
+            Ok(response) => {
+                if timeout_mode == Some(transport::TimeoutMode::Nonblocking) {
+                    let _ = reader.get_ref().set_blocking();
+                }
+                return Some(response);
+            }
+            Err(TryRecvError::Disconnected) => {
+                cancelled.store(true, Ordering::Release);
+                return None;
+            }
+            Err(TryRecvError::Empty) => {}
+        }
+        match reader.read(&mut probe) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) =>
+            {
+                if timeout_mode == Some(transport::TimeoutMode::Nonblocking) {
+                    thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    cancelled.store(true, Ordering::Release);
+    None
 }
 
 /// Parse an optional `timeout_s` (fractional seconds) for `wait.output`.
@@ -775,6 +841,7 @@ mod tests {
             state,
             timeout,
             reply,
+            ..
         } = rx.recv().unwrap()
         else {
             panic!("agent.wait must park on the app loop");
@@ -787,6 +854,92 @@ mod tests {
             .send(json!({"id":id,"result":{"type":"agent_wait","matched":true}}).to_string())
             .unwrap();
         assert!(client.join().unwrap().contains("\"matched\":true"));
+    }
+
+    #[test]
+    fn parked_wait_marks_cancellation_when_client_disconnects() {
+        let _env = crate::persist::test_env("wait-disc");
+        let root = crate::persist::ensure_config_dir();
+        let path = root.join("w.sock");
+        let lock = transport::acquire_server_startup_lock(&root).unwrap();
+        let listener = bind_server(&path, &lock).unwrap();
+        let (events, rx) = mpsc::channel();
+        start_server(listener, events, new_bus());
+        drop(lock);
+
+        let mut client = transport::connect(&path).unwrap();
+        writeln!(
+            client,
+            "{}",
+            json!({"id":"disconnect","method":"agent.wait","params":{"pane":"7","status":"blocked"}})
+        )
+        .unwrap();
+        drop(client);
+
+        let AppEvent::AgentWait {
+            cancelled, reply, ..
+        } = rx.recv().unwrap()
+        else {
+            panic!("agent.wait must park on the app loop");
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !cancelled.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(cancelled.load(Ordering::Acquire));
+        drop(reply);
+    }
+
+    #[test]
+    fn versioned_envelopes_reject_non_string_ids_and_normalize_null_params() {
+        let _env = crate::persist::test_env("versioned-env");
+        let root = crate::persist::ensure_config_dir();
+        let path = root.join("v.sock");
+        let lock = transport::acquire_server_startup_lock(&root).unwrap();
+        let listener = bind_server(&path, &lock).unwrap();
+        let (events, rx) = mpsc::channel();
+        start_server(listener, events, new_bus());
+        drop(lock);
+
+        let mut invalid = transport::connect(&path).unwrap();
+        writeln!(
+            invalid,
+            "{}",
+            json!({"id":7,"method":"runtime.capabilities","params":{}})
+        )
+        .unwrap();
+        let mut response = String::new();
+        BufReader::new(invalid).read_line(&mut response).unwrap();
+        let response: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["id"], "0");
+        assert_eq!(response["error"]["code"], "invalid_request");
+        assert!(
+            rx.try_recv().is_err(),
+            "invalid request reached the app loop"
+        );
+
+        let client_path = path.clone();
+        let client = thread::spawn(move || {
+            let mut stream = transport::connect(&client_path).unwrap();
+            writeln!(
+                stream,
+                "{}",
+                json!({"id":"null-params","method":"runtime.capabilities","params":null})
+            )
+            .unwrap();
+            let mut response = String::new();
+            BufReader::new(stream).read_line(&mut response).unwrap();
+            response
+        });
+        let AppEvent::Api(request) = rx.recv().unwrap() else {
+            panic!("valid runtime request must reach the app loop");
+        };
+        assert_eq!(request.params, json!({}));
+        request
+            .reply
+            .send(json!({"id":request.id,"result":{"type":"ok"}}).to_string())
+            .unwrap();
+        assert!(client.join().unwrap().contains("\"type\":\"ok\""));
     }
 
     #[test]

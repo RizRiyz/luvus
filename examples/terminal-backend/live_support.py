@@ -66,7 +66,7 @@ class IsolatedServer:
                 raise RuntimeError("isolated Luvus server exited during startup")
             try:
                 info = self.socket_path.lstat()
-                evidence = (info.st_dev, info.st_ino)
+                evidence = (info.st_dev, info.st_ino, info.st_ctime_ns)
                 if evidence != previous_evidence and socket_reachable(self.socket_path):
                     return self.process
             except FileNotFoundError:

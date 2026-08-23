@@ -18,3 +18,7 @@ bundle is embedded in every Luvus binary. Runtime event envelopes are sequenced
 and bounded; consumers subscribe first, request `session.snapshot` on another
 connection, discard events through its fence, then apply later events or
 resnapshot after loss.
+
+JSON Schema string limits count Unicode code points, and the live server and
+example consumer enforce the same unit. The newline-delimited transport retains
+its separate UTF-8 byte limit for complete request and response frames.

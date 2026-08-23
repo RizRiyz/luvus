@@ -1,9 +1,12 @@
 param(
-    [string]$Luvus = (Join-Path $PSScriptRoot "..\..\target\x86_64-pc-windows-msvc\debug\luvus.exe")
+    [string]$Luvus = (Join-Path $PSScriptRoot "..\..\target\debug\luvus.exe")
 )
 
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+if (-not (Test-Path -LiteralPath $Luvus -PathType Leaf)) {
+    throw "Luvus binary not found at '$Luvus'. Run 'cargo build' first or pass -Luvus <path>."
+}
 $Binary = (Resolve-Path $Luvus).Path
 $State = Join-Path $Root "target\terminal-backend-windows-$PID"
 $PreviousHome = $env:LUVUS_HOME
@@ -51,6 +54,19 @@ function Open-PipeConnection {
     [pscustomobject]@{ Pipe = $Pipe; Reader = $Reader; Writer = $Writer }
 }
 
+function Close-PipeConnection {
+    param($Connection)
+
+    if ($null -eq $Connection) {
+        return
+    }
+    foreach ($Part in @($Connection.Reader, $Connection.Writer, $Connection.Pipe)) {
+        if ($null -ne $Part) {
+            try { $Part.Dispose() } catch { }
+        }
+    }
+}
+
 function Read-BoundedLine {
     param(
         [Parameter(Mandatory)]$Reader,
@@ -91,9 +107,7 @@ function Send-Request {
         }
         $Response
     } finally {
-        $Connection.Reader.Dispose()
-        $Connection.Writer.Dispose()
-        $Connection.Pipe.Dispose()
+        Close-PipeConnection $Connection
     }
 }
 
@@ -101,17 +115,20 @@ function Wait-TerminalEvent {
     param(
         [Parameter(Mandatory)]$Connection,
         [Parameter(Mandatory)][string]$Name,
-        [string]$TerminalId = ""
+        [string]$TerminalId = "",
+        [int]$TimeoutMs = 30000
     )
 
-    for ($Attempt = 0; $Attempt -lt 32; $Attempt++) {
-        $Event = (Read-BoundedLine $Connection.Reader) | ConvertFrom-Json
-        if ($Event.event -eq "terminal.resync_required") {
+    $Deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    while ([DateTime]::UtcNow -lt $Deadline) {
+        $RemainingMs = [Math]::Max(1, [int]($Deadline - [DateTime]::UtcNow).TotalMilliseconds)
+        $Received = (Read-BoundedLine -Reader $Connection.Reader -TimeoutMs $RemainingMs) | ConvertFrom-Json
+        if ($Received.event -eq "terminal.resync_required") {
             throw "terminal event stream overflowed during conformance"
         }
-        if ($Event.event -eq $Name -and
-            ([string]::IsNullOrEmpty($TerminalId) -or $Event.data.terminal_id -eq $TerminalId)) {
-            return $Event
+        if ($Received.event -eq $Name -and
+            ([string]::IsNullOrEmpty($TerminalId) -or $Received.data.terminal_id -eq $TerminalId)) {
+            return $Received
         }
     }
     throw "did not receive expected event $Name"
@@ -159,9 +176,7 @@ try {
             throw "discovery connected to an unexpected named-pipe server process"
         }
     } finally {
-        $IdentityProbe.Reader.Dispose()
-        $IdentityProbe.Writer.Dispose()
-        $IdentityProbe.Pipe.Dispose()
+        Close-PipeConnection $IdentityProbe
     }
 
     $Capability = Send-Request $Address @{
@@ -302,11 +317,7 @@ try {
 
     Write-Host "terminal-backend live conformance passed on Windows named pipes and ConPTY"
 } finally {
-    if ($null -ne $EventConnection) {
-        $EventConnection.Reader.Dispose()
-        $EventConnection.Writer.Dispose()
-        $EventConnection.Pipe.Dispose()
-    }
+    Close-PipeConnection $EventConnection
     try {
         if (Test-Path -LiteralPath $Binary) {
             & $Binary server stop | Out-Null

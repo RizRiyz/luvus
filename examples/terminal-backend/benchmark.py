@@ -121,19 +121,22 @@ def process_descriptors(pid):
 def macos_memory(pid):
     if sys.platform != "darwin":
         return {"physical_footprint_bytes": None, "peak_footprint_bytes": None, "live_heap_bytes": None}
-    footprint = subprocess.check_output(
-        ["footprint", "--noCategories", "-f", "bytes", "-p", str(pid)],
-        text=True,
-        stderr=subprocess.DEVNULL,
-    )
-    physical = re.search(r"phys_footprint:\s+(\d+) B", footprint)
-    peak = re.search(r"phys_footprint_peak:\s+(\d+) B", footprint)
+    try:
+        footprint = subprocess.check_output(
+            ["footprint", "--noCategories", "-f", "bytes", "-p", str(pid)],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        physical = re.search(r"phys_footprint:\s+(\d+) B", footprint)
+        peak = re.search(r"phys_footprint_peak:\s+(\d+) B", footprint)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        physical = peak = None
     try:
         heap = subprocess.check_output(
             ["heap", str(pid)], text=True, stderr=subprocess.DEVNULL
         )
         live = re.search(r"All zones:\s+\d+ nodes \((\d+) bytes\)", heap)
-    except subprocess.CalledProcessError:
+    except (FileNotFoundError, subprocess.CalledProcessError):
         live = None
     return {
         "physical_footprint_bytes": int(physical.group(1)) if physical else None,

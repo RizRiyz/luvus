@@ -12,8 +12,10 @@ On Unix:
    effective user. Require directory mode `0700` and socket mode `0600`.
 5. Reject group- or world-writable user-owned ancestors.
 6. Canonicalize after the no-follow checks and require the result to match.
-7. Record socket device and inode, repeat validation before each connection,
-   then negotiate the protocol before trusting endpoint metadata.
+7. Record socket device, inode, and change timestamp, repeat validation before
+   each connection, then negotiate the protocol before trusting endpoint
+   metadata. The timestamp prevents an immediately reused inode from making a
+   replacement endpoint look unchanged.
 
 The only world-writable ancestor exception is a long-path alias below the native
 temporary root: `/tmp` on Linux and `/private/tmp` on macOS. That root must be a

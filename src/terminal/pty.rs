@@ -5,9 +5,10 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
@@ -17,6 +18,95 @@ use crate::ids::PaneId;
 use crate::terminal::backend::TerminalRuntime;
 use crate::terminal::vt::alacritty::AlacrittyEngine;
 use crate::terminal::vt::VtEngine;
+
+const CHILD_REAPER_INTERVAL: Duration = Duration::from_millis(50);
+
+struct ReaperEntry {
+    id: PaneId,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    child_exited: Arc<AtomicBool>,
+    app_tx: Sender<AppEvent>,
+}
+
+static CHILD_REAPER: OnceLock<Sender<ReaperEntry>> = OnceLock::new();
+
+#[cfg(test)]
+static CHILD_REAPER_STARTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Hand a child to the process-wide reaper. A pane still owns dedicated reader
+/// and writer threads so one blocked PTY cannot stall another pane, but waiting
+/// for child exit needs no per-pane thread: `try_wait` is non-blocking on every
+/// portable-pty backend.
+fn register_child_reaper(
+    id: PaneId,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    child_exited: Arc<AtomicBool>,
+    app_tx: Sender<AppEvent>,
+) {
+    let reaper = CHILD_REAPER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel();
+        thread::Builder::new()
+            .name("luvus-pty-reaper".to_string())
+            .spawn(move || child_reaper_loop(rx))
+            .expect("failed to start the PTY child reaper");
+        #[cfg(test)]
+        CHILD_REAPER_STARTS.fetch_add(1, Ordering::SeqCst);
+        tx
+    });
+    let entry = ReaperEntry {
+        id,
+        child,
+        child_exited,
+        app_tx,
+    };
+    if let Err(error) = reaper.send(entry) {
+        // A panic in the shared reaper must not leave an unreaped child. This
+        // fallback is deliberately exceptional; the normal path stays at one
+        // waiter thread for the whole server.
+        let mut entry = error.0;
+        let _ = thread::Builder::new()
+            .name("luvus-pty-reaper-fallback".to_string())
+            .spawn(move || {
+                let _ = entry.child.wait();
+                finish_child(entry);
+            });
+    }
+}
+
+fn child_reaper_loop(rx: Receiver<ReaperEntry>) {
+    let mut children = Vec::<ReaperEntry>::new();
+    loop {
+        let received = if children.is_empty() {
+            rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
+        } else {
+            rx.recv_timeout(CHILD_REAPER_INTERVAL)
+        };
+        match received {
+            Ok(entry) => children.push(entry),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+        children.extend(rx.try_iter());
+
+        let mut index = 0;
+        while index < children.len() {
+            let exited = !matches!(children[index].child.try_wait(), Ok(None));
+            if exited {
+                let entry = children.swap_remove(index);
+                finish_child(entry);
+            } else {
+                index += 1;
+            }
+        }
+    }
+}
+
+fn finish_child(entry: ReaperEntry) {
+    // Publish exit before notifying the app. If the app immediately drops the
+    // pane, `Drop` must not signal a PID that the operating system may reuse.
+    entry.child_exited.store(true, Ordering::SeqCst);
+    let _ = entry.app_tx.send(AppEvent::PtyExit(entry.id));
+}
 
 pub(crate) enum InputAction {
     Bytes(Vec<u8>),
@@ -330,17 +420,12 @@ impl Pane {
         let revision = content_revision.clone();
         thread::spawn(move || read_loop(id, reader, eng, tx, pending, revision));
 
-        // Reap the child so we notice it exiting. The exit flag is set *before*
-        // the event goes out, so by the time the loop closes the pane (and drops
-        // it) `Drop` already knows not to signal a possibly-recycled pid.
+        // Reap the child so we notice it exiting. The shared reaper sets the
+        // exit flag *before* the event goes out, so by the time the loop closes
+        // the pane (and drops it) `Drop` already knows not to signal a
+        // possibly-recycled pid.
         let child_exited = Arc::new(AtomicBool::new(false));
-        let exited = child_exited.clone();
-        thread::spawn(move || {
-            let mut child = child;
-            let _ = child.wait();
-            exited.store(true, Ordering::SeqCst);
-            let _ = app_tx.send(AppEvent::PtyExit(id));
-        });
+        register_child_reaper(id, child, child_exited.clone(), app_tx);
 
         Ok(Pane {
             engine,
@@ -519,17 +604,11 @@ impl Pane {
                 };
                 *master.lock().unwrap_or_else(|p| p.into_inner()) = Some(pair.master);
                 let read_tx = tx.clone();
-                let reaper_tx = tx.clone();
                 let ready_tx = tx.clone();
                 thread::spawn(move || {
                     read_loop(id, reader, engine, read_tx, data_pending, content_revision)
                 });
-                thread::spawn(move || {
-                    let mut child = child;
-                    let _ = child.wait();
-                    child_exited.store(true, Ordering::SeqCst);
-                    let _ = reaper_tx.send(AppEvent::PtyExit(id));
-                });
+                register_child_reaper(id, child, child_exited, tx.clone());
 
                 if master_tx.send(writer).is_err() {
                     return fail();
@@ -964,6 +1043,15 @@ mod reap_tests {
             500,
         )
         .expect("spawn")
+    }
+
+    #[test]
+    fn panes_share_one_child_reaper_thread() {
+        let first = spawn_sh();
+        let second = spawn_sh();
+        assert_eq!(CHILD_REAPER_STARTS.load(Ordering::SeqCst), 1);
+        drop(first);
+        drop(second);
     }
 
     /// A deferred pane (docs/82) is fully usable before its shell exists:
