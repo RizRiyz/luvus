@@ -404,41 +404,103 @@ impl App {
         });
     }
 
-    /// The file path at the viewport center in the Status section, if it lands
-    /// on a staged or unstaged file row. Falls back to the first available file.
+    /// The explicitly selected file in the Status section, if it still exists
+    /// in the current status result.
     fn git_status_selected_file(&self) -> Option<(String, bool)> {
         let g = self.active_git()?;
         if g.section != Section::Status {
             return None;
         }
-        // Prefer the row at the viewport center.
-        let center = g.scroll + g.list_area.height as usize / 2;
-        if g.status_unstaged_rows.contains(&center) {
-            let idx = center - g.status_unstaged_rows.start;
-            if let Load::Loaded(s) = &g.status {
-                if let Some(fc) = s.unstaged.get(idx) {
-                    return Some((fc.path.clone(), false));
-                }
+        let selected = g.status_selected.as_ref()?;
+        let Load::Loaded(status) = &g.status else {
+            return None;
+        };
+        let exists = if selected.1 {
+            status.staged.iter().any(|change| change.path == selected.0)
+        } else {
+            status
+                .unstaged
+                .iter()
+                .any(|change| change.path == selected.0)
+        };
+        exists.then(|| selected.clone())
+    }
+
+    /// Status files in their display order: staged first, then unstaged.
+    fn git_status_files(&self) -> Vec<(String, bool)> {
+        let Some(g) = self.active_git() else {
+            return Vec::new();
+        };
+        if g.section != Section::Status {
+            return Vec::new();
+        }
+        let Load::Loaded(status) = &g.status else {
+            return Vec::new();
+        };
+        status
+            .staged
+            .iter()
+            .map(|change| (change.path.clone(), true))
+            .chain(
+                status
+                    .unstaged
+                    .iter()
+                    .map(|change| (change.path.clone(), false)),
+            )
+            .collect()
+    }
+
+    /// Store a Status file selection and keep its rendered row in view when
+    /// possible. The identity remains valid across a status refresh until the
+    /// file is no longer present.
+    fn git_select_status_file(&mut self, selected: (String, bool)) {
+        let Some(g) = self.active_git_mut() else {
+            return;
+        };
+        let row = match &g.status {
+            Load::Loaded(status) if selected.1 => status
+                .staged
+                .iter()
+                .position(|change| change.path == selected.0)
+                .map(|index| g.status_staged_rows.start + index),
+            Load::Loaded(status) => status
+                .unstaged
+                .iter()
+                .position(|change| change.path == selected.0)
+                .map(|index| g.status_unstaged_rows.start + index),
+            _ => None,
+        };
+        g.status_selected = Some(selected);
+        let available = g.list_area.height as usize;
+        if let Some(row) = row.filter(|_| available > 0) {
+            if row < g.scroll {
+                g.scroll = row;
+            } else if row >= g.scroll.saturating_add(available) {
+                g.scroll = row + 1 - available;
             }
         }
-        if g.status_staged_rows.contains(&center) {
-            let idx = center - g.status_staged_rows.start;
-            if let Load::Loaded(s) = &g.status {
-                if let Some(fc) = s.staged.get(idx) {
-                    return Some((fc.path.clone(), true));
-                }
-            }
+    }
+
+    /// Move the explicit Status file selection. `j`/`k` retain their existing
+    /// scrolling behavior because Status also includes repository metadata;
+    /// the arrow keys select changed files for Enter and `d`.
+    fn git_status_move(&mut self, delta: isize) {
+        let files = self.git_status_files();
+        if files.is_empty() {
+            return;
         }
-        // Fallback: first unstaged, then staged.
-        if let Load::Loaded(s) = &g.status {
-            if !s.unstaged.is_empty() {
-                return Some((s.unstaged[0].path.clone(), false));
-            }
-            if !s.staged.is_empty() {
-                return Some((s.staged[0].path.clone(), true));
-            }
-        }
-        None
+        let current = self.git_status_selected_file();
+        let index = current
+            .as_ref()
+            .and_then(|selected| files.iter().position(|file| file == selected));
+        let next = match (index, delta.cmp(&0)) {
+            (Some(index), std::cmp::Ordering::Greater) => (index + 1).min(files.len() - 1),
+            (Some(index), std::cmp::Ordering::Less) => index.saturating_sub(1),
+            (Some(index), std::cmp::Ordering::Equal) => index,
+            (None, std::cmp::Ordering::Less) => files.len() - 1,
+            (None, _) => 0,
+        };
+        self.git_select_status_file(files[next].clone());
     }
 
     /// Whether a click at `(col, row)` lands on a staged or unstaged file row
@@ -720,8 +782,16 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::Char('j') | KeyCode::Down => self.git_scroll(1),
-            KeyCode::Char('k') | KeyCode::Up => self.git_scroll(-1),
+            KeyCode::Char('j') => self.git_scroll(1),
+            KeyCode::Char('k') => self.git_scroll(-1),
+            KeyCode::Down if self.active_git().map(|g| g.section) == Some(Section::Status) => {
+                self.git_status_move(1)
+            }
+            KeyCode::Up if self.active_git().map(|g| g.section) == Some(Section::Status) => {
+                self.git_status_move(-1)
+            }
+            KeyCode::Down => self.git_scroll(1),
+            KeyCode::Up => self.git_scroll(-1),
             KeyCode::Char('g') | KeyCode::Home => self.git_set_cursor(0),
             KeyCode::Char('G') | KeyCode::End => self.git_set_cursor(usize::MAX),
             KeyCode::Tab | KeyCode::Right => self.git_switch(true),
@@ -968,9 +1038,13 @@ impl App {
     /// Open the selected Status file in the native diff viewer. Ensures the
     /// diff snapshot is loaded first; if not, triggers a refresh and shows a
     /// toast so the user can retry. When `override_file` is `None`, uses the
-    /// viewport-center file from `git_status_selected_file`.
+    /// explicit Status-row selection.
     pub fn git_open_status_diff_with(&mut self, override_file: Option<(String, bool)>) {
+        if let Some(selected) = override_file.as_ref() {
+            self.git_select_status_file(selected.clone());
+        }
         let Some((path, staged)) = override_file.or_else(|| self.git_status_selected_file()) else {
+            self.show_toast("select a changed file with ↑/↓ or click it");
             return;
         };
         if !self.diff_snapshot_matches_active_workspace() {
@@ -993,7 +1067,7 @@ impl App {
         }
     }
 
-    /// Open the viewport-center Status file in the native diff viewer.
+    /// Open the explicitly selected Status file in the native diff viewer.
     fn git_open_status_diff(&mut self) {
         self.git_open_status_diff_with(None);
     }
@@ -1110,6 +1184,74 @@ mod tests {
         for i in 1..5 {
             assert_eq!(cmd_at(&mut app, i), None, "hostile branch {i} is refused");
         }
+    }
+
+    /// Status is a scrolling overview, so activation must use an explicit file
+    /// identity rather than guessing from the viewport or falling back to the
+    /// first change. Arrow navigation and Status-row clicks both set it.
+    #[test]
+    fn status_selection_tracks_the_exact_file_for_diff_activation() {
+        use crate::git::model::{FileChange, RepoStatus};
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let mut view = GitView::new(std::env::current_dir().unwrap());
+        view.section = Section::Status;
+        view.status = Load::Loaded(RepoStatus {
+            staged: vec![
+                FileChange {
+                    code: 'M',
+                    path: "staged-first.rs".into(),
+                },
+                FileChange {
+                    code: 'A',
+                    path: "staged-second.rs".into(),
+                },
+            ],
+            unstaged: vec![FileChange {
+                code: 'M',
+                path: "worktree.rs".into(),
+            }],
+            ..RepoStatus::default()
+        });
+        let placeholder = PaneId::alloc();
+        app.workspaces[0].tabs.push(Tab {
+            layout: TileLayout::new(placeholder),
+            git: Some(Box::new(view)),
+            orch: false,
+            mission: false,
+            name: None,
+        });
+        app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
+
+        // Enter with no explicit Status selection must not silently open the
+        // first file or start a DIFF refresh for a guessed file.
+        app.handle_git_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.diff.status_inflight, "no file was guessed for Enter");
+
+        app.handle_git_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            app.git_status_selected_file(),
+            Some(("staged-first.rs".into(), true))
+        );
+        app.handle_git_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            app.git_status_selected_file(),
+            Some(("staged-second.rs".into(), true))
+        );
+        app.handle_git_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            app.git_status_selected_file(),
+            Some(("worktree.rs".into(), false))
+        );
+
+        // The mouse path passes its row identity through this same selection
+        // helper before it opens DIFF, including while a snapshot is loading.
+        app.git_select_status_file(("staged-first.rs".into(), true));
+        assert_eq!(
+            app.git_status_selected_file(),
+            Some(("staged-first.rs".into(), true))
+        );
     }
 
     /// Enter (and a click) on a commit opens its `git show` in-tab — setting
