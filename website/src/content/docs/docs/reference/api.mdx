@@ -48,14 +48,14 @@ printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.luvus/luvus.so
 |---|---|
 | workspaces | `workspace.list` · `workspace.open` · `workspace.focus` · `workspace.rename` · `workspace.pin` · `workspace.close` |
 | tabs | `tab.list` · `tab.new` · `tab.focus` · `tab.move` · `tab.swap` · `tab.rename` · `tab.close` |
-| runtime | `runtime.capabilities` · `session.snapshot` · `events.subscribe` |
+| UHP Runtime profile | `runtime.capabilities` · `session.snapshot` · `events.subscribe` |
 | panes | `pane.list` · `pane.split` · `pane.move` · `pane.focus` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.processes` · `pane.close` · `attach.pane` |
 | agents | `agent.list` · `agent.get` · `agent.explain` · `agent.report` · `agent.release` · `agent.wait` · `agent.name` · `agent.fork` · `agent.send` · `agent.keys` · `agent.read` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.report_event` |
 | search | `search` · `search.capabilities` · `search.query` · `search.activate` |
 | files | `files.tree` · `files.open` · `files.reveal` · `files.refresh` |
 | git | `git.status` · `git.branches` · `git.log` · `git.open` |
 | diff | `diff.refresh` · `diff.list` · `diff.open` · `diff.get` · `diff.navigate` · `diff.note.add` · `diff.note.apply` · `diff.note.list` · `diff.note.edit` · `diff.note.resolve` · `diff.note.reopen` · `diff.note.remove` · `diff.note.send` |
-| terminal backend | `terminal.backend.capabilities` · `terminal.backend.inventory` · `terminal.backend.snapshot` · `terminal.backend.validate` · `terminal.backend.processes` · `terminal.backend.capture` · `terminal.backend.type_literal` · `terminal.backend.submit_text` · `terminal.backend.send_key` · `terminal.backend.set_title` · `terminal.backend.notify` · `terminal.backend.create` · `terminal.backend.close` · `terminal.backend.wait_change` · `terminal.backend.wait_output` · `terminal.backend.events.subscribe` |
+| UHP Terminal profile | `terminal.backend.capabilities` · `terminal.backend.inventory` · `terminal.backend.snapshot` · `terminal.backend.validate` · `terminal.backend.processes` · `terminal.backend.capture` · `terminal.backend.type_literal` · `terminal.backend.submit_text` · `terminal.backend.send_key` · `terminal.backend.set_title` · `terminal.backend.notify` · `terminal.backend.create` · `terminal.backend.close` · `terminal.backend.wait_change` · `terminal.backend.wait_output` · `terminal.backend.events.subscribe` |
 | worktrees | `worktree.list` · `worktree.create` · `worktree.open` · `worktree.remove` |
 | orchestration | `task.add` · `task.list` · `task.get` · `task.claim` · `task.next` · `task.start` · `task.heartbeat` · `task.update` · `task.done` · `task.merge` · `task.release` · `lease.acquire` · `lease.list` · `lease.release` |
 | modules | `module.list` · `module.info` · `module.link` · `module.unlink` · `module.enable` · `module.disable` · `module.action.list` · `module.action.invoke` · `module.pane.open` · `module.pane.focus` · `module.pane.close` · `module.config_dir` · `module.settings.list` · `module.settings.get` · `module.settings.set` · `module.log.list` |
@@ -67,10 +67,12 @@ Parameter shapes mirror the CLI flags (`luvus task add --paths x` →
 `$LUVUS_PANE_ID` when available; a raw API request with no pane uses the
 currently focused pane.
 
-The `terminal.backend.*` family is a versioned automation contract and does not
+The Runtime and `terminal.backend.*` families form the
+[Universal Harness Protocol](/docs/reference/uhp/). The Terminal profile is a
+versioned automation contract and does not
 inherit the focused pane. It requires explicit runtime identity and stricter
-framing, limits, and failure evidence. See the
-[Terminal Backend Protocol](/docs/reference/terminal-backend/) reference.
+framing, limits, and failure evidence. See the detailed
+[UHP Terminal Profile](/docs/reference/terminal-backend/) reference.
 
 ## Runtime snapshots and agent authority
 
@@ -570,8 +572,8 @@ still spell these `node.created` / `node.closed`) · `tab.created` · `tab.close
 
 `terminal.backend.events.subscribe` uses the same stream framing but filters to
 `terminal.*` events. Its acknowledgment includes the current sequence and queue
-capacity. See the terminal backend reference for subscribe-first snapshot
-reconciliation.
+capacity. See the [UHP Terminal profile](/docs/reference/terminal-backend/) for
+subscribe-first snapshot reconciliation.
 
 ## Practical notes
 

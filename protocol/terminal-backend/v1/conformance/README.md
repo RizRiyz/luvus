@@ -1,4 +1,4 @@
-# Conformance
+# UHP Terminal profile conformance
 
 Run the dependency-free fixture check from the repository root:
 

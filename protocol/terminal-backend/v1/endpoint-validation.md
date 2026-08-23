@@ -1,4 +1,4 @@
-# Endpoint validation
+# UHP Terminal profile endpoint validation
 
 The Luvus control endpoint is a local-user capability that can type into and
 close terminals. A consumer must validate every discovery result before use.

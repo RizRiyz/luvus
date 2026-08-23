@@ -282,13 +282,13 @@ events:
   events                     stream live status changes
 
 api:
-  api schema                 print the installed terminal-backend JSON Schema bundle
-  api runtime-schema         print the installed app-runtime JSON Schema bundle
-  api capabilities           negotiate and print live backend capabilities
-  api snapshot               print a sequence-fenced terminal inventory
-  api events                 stream sequenced terminal lifecycle events
-  api runtime                print runtime API capabilities and limits
-  api session                print a global sequence-fenced session snapshot
+  api schema                 print the installed UHP Terminal JSON Schema bundle
+  api runtime-schema         print the installed UHP Runtime JSON Schema bundle
+  api capabilities           negotiate and print UHP Terminal capabilities
+  api snapshot               print a fenced UHP Terminal inventory
+  api events                 stream sequenced UHP Terminal events
+  api runtime                print UHP Runtime capabilities and limits
+  api session                print a fenced UHP Runtime session snapshot
   api proxy                  forward one JSON request from stdin to the local server
 
 sessions:

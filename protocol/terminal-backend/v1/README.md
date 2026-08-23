@@ -1,7 +1,13 @@
-# Luvus terminal backend protocol v1
+# UHP v1 Terminal profile
 
-This directory is the normative, harness-neutral contract for controlling live
-Luvus terminals over the existing local control endpoint. Protocol 1.0 uses one
+This directory is the normative Terminal profile of the
+[Universal Harness Protocol](../../README.md). Its compatibility wire name is
+`luvus-terminal-backend` 1.0. UHP is the public protocol-family name and does
+not replace that frozen identifier or the `terminal.backend.*` method
+namespace.
+
+The profile controls live Luvus terminals over the existing local control
+endpoint. Protocol 1.0 uses one
 UTF-8 JSON request and one JSON response per ordinary connection. The event
 method switches its connection into a bounded stream after one acknowledgment.
 Each frame is terminated by LF and is at most 1 MiB including that LF.
@@ -58,5 +64,6 @@ An installed binary exposes the same contract with `luvus api schema`, live
 negotiation with `luvus api capabilities`, the fenced inventory with
 `luvus api snapshot`, and terminal events with `luvus api events`.
 
-The full rationale, lifecycle model, and release gates are maintained in the
-project plan. This directory alone defines the public wire representation.
+The UHP overview explains how this profile composes with the Runtime profile.
+This directory alone defines the Terminal profile's public wire
+representation.
