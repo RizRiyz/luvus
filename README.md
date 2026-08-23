@@ -49,7 +49,7 @@
   use presets, select from 8 languages, and install composable local or
   community themes.
 - **Cross-platform delivery:** Install on macOS, Linux, or Windows, migrate from
-  previous releases, check for updates, and inspect the environment with
+  previous releases, update with `luvus update`, and inspect the environment with
   `luvus doctor`.
 
 ## Install
@@ -72,6 +72,7 @@ irm https://luvus.dev/install.ps1 | iex
 ```bash
 luvus          # launch or reattach to your session
 luvus doctor   # check your setup: git, gh, ssh
+luvus update   # check for and install a newer release
 ```
 
 Run Luvus in a project, split a pane, and start an agent. Luvus detects supported

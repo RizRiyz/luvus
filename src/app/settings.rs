@@ -76,9 +76,9 @@ pub struct SettingsUi {
     pub capturing: bool,
 }
 
-/// A selectable row in the Layout tab (docs/15 + docs/29). The pane-layout rows
-/// come first, then a `── Docks ──` divider, then the sidebar + dock controls.
-/// `Dock` rows carry `[Left] [Right]` place buttons.
+/// A selectable row in the Layout tab (docs/15 + docs/29). The pane-layout and
+/// DIFF rows come first, then a `── Docks ──` divider with sidebar and dock
+/// controls. `Dock` rows carry `[Left] [Right]` place buttons.
 #[derive(Clone)]
 pub enum LayoutRow {
     SidebarWidth,
@@ -162,7 +162,6 @@ impl App {
     /// dock section (used to draw the `── Docks ──` divider) is `dock_section_start`.
     pub fn layout_rows(&self) -> Vec<LayoutRow> {
         let mut v = vec![
-            LayoutRow::SidebarWidth,
             LayoutRow::ColGap,
             LayoutRow::RowGap,
             LayoutRow::Scrollback,
@@ -181,6 +180,7 @@ impl App {
         v.push(LayoutRow::DiffLiveRefresh);
         v.push(LayoutRow::LeftVisible);
         v.push(LayoutRow::RightVisible);
+        v.push(LayoutRow::SidebarWidth);
         v.push(LayoutRow::RightWidth);
         for k in self.available_docks() {
             v.push(LayoutRow::Dock(k));
@@ -214,8 +214,8 @@ impl App {
 
     /// Index of the first dock-section row (where the `── Docks ──` divider goes).
     pub fn dock_section_start(&self) -> usize {
-        // Keep in step with `layout_rows`: the pane-layout rows before the docks
-        // section (sidebar width, gaps, scrollback, titles, resume, +shell).
+        // Keep in step with `layout_rows`: the pane-layout and DIFF rows before
+        // the sidebar controls and dock-placement rows.
         self.layout_rows()
             .iter()
             .position(|row| matches!(row, LayoutRow::LeftVisible))
@@ -1203,6 +1203,39 @@ fn lang_cursor(code: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidebar_widths_are_grouped_in_the_docks_section() {
+        let _env = crate::persist::test_env("sidebar-width-settings-order");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let app = crate::app::App::new(80, 24, tx).unwrap();
+        let rows = app.layout_rows();
+        let dock_start = app.dock_section_start();
+        let left_visible = rows
+            .iter()
+            .position(|row| matches!(row, LayoutRow::LeftVisible))
+            .unwrap();
+        let right_visible = rows
+            .iter()
+            .position(|row| matches!(row, LayoutRow::RightVisible))
+            .unwrap();
+        let left_width = rows
+            .iter()
+            .position(|row| matches!(row, LayoutRow::SidebarWidth))
+            .unwrap();
+        let right_width = rows
+            .iter()
+            .position(|row| matches!(row, LayoutRow::RightWidth))
+            .unwrap();
+
+        assert_eq!(
+            dock_start, left_visible,
+            "Docks starts with sidebar controls"
+        );
+        assert_eq!(right_visible, left_visible + 1);
+        assert_eq!(left_width, right_visible + 1);
+        assert_eq!(right_width, left_width + 1);
+    }
 
     #[test]
     fn bar_settings_rows_stay_stable_when_placement_changes() {

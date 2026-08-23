@@ -154,15 +154,29 @@ touches the agent itself.
 
 ## Upgrading
 
-Install the new version through the same channel, then reload the running
-server:
+Use one command to check first and install only when a newer release exists:
+
+```sh
+luvus update
+```
+
+Direct macOS and Linux installs are downloaded from the matching GitHub Release,
+checked against its published SHA-256 digest, and replaced only after the
+downloaded binary reports the expected version. Homebrew and Cargo installs
+update through their package manager. Nix and Linux system packages are never
+overwritten; the command reports the matching package-manager action instead.
+On Windows it checks for the release, then prints the PowerShell installer
+command because Windows cannot replace the executable while it is running.
+
+The running server is left alone so active panes are not interrupted. After a
+successful update, reload it when you are ready:
 
 ```sh
 luvus server restart   # your session is saved and restored
 ```
 
-luvus warns you on attach if the running server is older than the binary you
-just installed, so an upgrade never silently half-applies.
+Development binaries under `target/debug` or `target/release` are never
+overwritten by `luvus update`. Rebuild those from source instead.
 
 ### Moving from Bohay 0.10.2 to Luvus 0.11.0
 

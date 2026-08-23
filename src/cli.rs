@@ -34,6 +34,7 @@ pub fn is_cli(args: &[String]) -> bool {
                 | "search"
                 | "help"
                 | "doctor"
+                | "update"
                 | "skill"
                 | "session"
         )
@@ -73,6 +74,7 @@ Commands:
   events       Stream live status changes
   attach       Open the TUI focused on one pane
   doctor       Check optional external tools
+  update       Check for and install a newer Luvus release
   ping         Check whether the selected server responds
 
 Examples:
@@ -105,6 +107,7 @@ usage: luvus <command> [args]
   --help, -h           show compact help
   help [all|<topic> [command]]  show compact, complete, or focused help
   doctor               check optional external tools (git, gh, …)
+  update               check for and install a newer Luvus release
   ping                 check the server
 
 workspaces:
@@ -331,6 +334,10 @@ pub fn run(args: &[String]) -> Result<i32> {
     if args.get(1).map(String::as_str) == Some("theme") {
         return theme_cmd(&args[2.min(args.len())..]);
     }
+    // Explicit update requests are local and never require a running server.
+    if args.get(1).map(String::as_str) == Some("update") {
+        return crate::update::run_cli(&args[2.min(args.len())..]);
+    }
     // `doctor` is a local environment check — no server needed.
     if args.get(1).map(String::as_str) == Some("doctor") {
         return Ok(doctor());
@@ -470,9 +477,8 @@ fn normalize_help_topic(topic: &str) -> Option<&str> {
     match topic {
         "workspace" | "tab" | "pane" | "agent" | "files" | "git" | "worktree" | "task"
         | "lease" | "module" | "theme" | "bar" | "ui" | "session" | "server" | "integration"
-        | "diff" | "skill" | "wait" | "search" | "events" | "ping" | "doctor" | "attach" => {
-            Some(topic)
-        }
+        | "diff" | "skill" | "wait" | "search" | "events" | "ping" | "doctor" | "update"
+        | "attach" => Some(topic),
         "node" => Some("pane"),
         "remote" | "--remote" => Some("remote"),
         _ => None,
@@ -604,6 +610,10 @@ fn write_topic_help(
         "doctor" => (
             "luvus doctor",
             "Check optional external tools used by Luvus.\n",
+        ),
+        "update" => (
+            "luvus update",
+            "Check for a newer release and install it through the detected safe update channel.\n",
         ),
         _ => unreachable!("normalized help topic"),
     };
@@ -3216,10 +3226,17 @@ mod tests {
             ("luvus --remote --help", Some(("--remote", None))),
             ("luvus pane split --help", Some(("pane", Some("split")))),
             ("luvus module install -h", Some(("module", Some("install")))),
+            ("luvus update --help", Some(("update", None))),
         ] {
             let args = argv(raw);
             assert_eq!(command_help_request(&args), expected, "{raw}");
         }
+    }
+
+    #[test]
+    fn update_is_a_top_level_local_cli_command() {
+        assert!(is_cli(&argv("luvus update")));
+        assert!(!help_topic_has_subcommands("update"));
     }
 
     #[test]

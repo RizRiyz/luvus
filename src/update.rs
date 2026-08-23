@@ -1,18 +1,25 @@
-//! Background "update available" check. Fetches a small version manifest from
-//! the product website (`luvus.dev/latest.json`, emitted at deploy time) and, if
-//! it names a newer release than this build, tells the UI to show the indicator
-//! by the sidebar version number.
+//! Update checks and the explicit `luvus update` installer.
 //!
-//! Notify-only by design: luvus is installed via cargo / brew / the install
-//! script / Nix, so it never replaces its own binary — it points the user at the
-//! changelog and their installer's upgrade command. The check is a single
-//! `curl`/`wget` GET on its own thread, so it never touches the event loop, and
-//! it only runs when `config.check_updates` is on.
+//! Automatic checks remain notify-only: they fetch the small manifest on a
+//! background thread and never mutate the installation. The explicit CLI
+//! command checks first, then delegates to a detected package manager or
+//! verifies a release archive before atomically replacing a direct install.
 
+#[cfg(not(windows))]
+use std::fs;
+#[cfg(not(windows))]
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
+#[cfg(not(windows))]
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{anyhow, bail, Context, Result};
+#[cfg(not(windows))]
+use sha2::{Digest, Sha256};
 
 use crate::event::AppEvent;
 
@@ -81,6 +88,416 @@ fn fetch_outcome(url: &str) -> CheckOutcome {
         Some(latest) if is_newer(&latest, CURRENT) => CheckOutcome::Newer(latest),
         Some(_) => CheckOutcome::Current,
         None => CheckOutcome::Failed,
+    }
+}
+
+/// `luvus update`: check first, then use the installation's own safe update
+/// path. This is deliberately a single command rather than an update command
+/// tree; automatic update checks stay notification-only.
+pub fn run_cli(args: &[String]) -> Result<i32> {
+    if !args.is_empty() {
+        eprintln!("usage: luvus update");
+        return Ok(2);
+    }
+
+    println!("Checking for Luvus updates...");
+    let manifest = manifest_url();
+    let latest = match fetch_outcome(&manifest) {
+        CheckOutcome::Current => {
+            println!("Luvus {CURRENT} is already up to date.");
+            return Ok(0);
+        }
+        CheckOutcome::Newer(version) => validate_release_version(&version)?,
+        CheckOutcome::Failed => {
+            bail!("could not check {manifest}; check your connection and try again")
+        }
+    };
+
+    println!("Luvus {latest} is available (current: {CURRENT}).");
+    let executable = std::env::current_exe().context("find the running Luvus binary")?;
+    let executable = executable.canonicalize().unwrap_or(executable);
+    let channel = classify_install(&executable, crate::platform::home_dir().as_deref());
+
+    match channel {
+        InstallChannel::Homebrew => {
+            run_package_update("brew", &["upgrade", "luvus"], "Homebrew")?;
+            verify_path_version(&homebrew_binary_path()?, &latest)?;
+        }
+        InstallChannel::Cargo => {
+            #[cfg(windows)]
+            bail!(
+                "Cargo cannot replace a running Windows executable; run `cargo install luvus --locked --version {latest}` after this command exits"
+            );
+            #[cfg(not(windows))]
+            {
+                run_package_update(
+                    "cargo",
+                    &["install", "luvus", "--locked", "--version", &latest],
+                    "Cargo",
+                )?;
+                verify_path_version(&executable, &latest)?;
+            }
+        }
+        InstallChannel::Direct => {
+            #[cfg(windows)]
+            bail!(
+                "Windows cannot replace the executable while it is running; close Luvus and run `irm https://luvus.dev/install.ps1 | iex`"
+            );
+            #[cfg(not(windows))]
+            install_direct_release(&latest, &executable)?;
+        }
+        InstallChannel::Development => bail!(
+            "refusing to overwrite a development binary at {}; rebuild it with `cargo build --release`",
+            executable.display()
+        ),
+        InstallChannel::Nix => bail!(
+            "this Luvus binary is managed by Nix; run `nix profile upgrade luvus` or update your NixOS/Home Manager input"
+        ),
+        InstallChannel::SystemPackage => bail!(
+            "this Luvus binary is managed by an OS package in {}; upgrade it with apt or dnf using the new release package",
+            executable.display()
+        ),
+        InstallChannel::Unknown => bail!(
+            "could not safely identify the installation channel for {}; update with the same method you originally installed Luvus",
+            executable.display()
+        ),
+    }
+
+    println!("Updated Luvus {CURRENT} -> {latest}.");
+    println!("Run `luvus server restart` when you are ready to load the new server binary.");
+    Ok(0)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InstallChannel {
+    Development,
+    Homebrew,
+    Cargo,
+    Direct,
+    Nix,
+    SystemPackage,
+    Unknown,
+}
+
+fn classify_install(executable: &Path, home: Option<&Path>) -> InstallChannel {
+    let normalized = executable.to_string_lossy().replace('\\', "/");
+    let lowered = normalized.to_ascii_lowercase();
+
+    if lowered.contains("/target/debug/luvus") || lowered.contains("/target/release/luvus") {
+        return InstallChannel::Development;
+    }
+    if lowered.contains("/cellar/luvus/") || lowered.contains("/homebrew/cellar/luvus/") {
+        return InstallChannel::Homebrew;
+    }
+    if lowered.starts_with("/nix/store/") {
+        return InstallChannel::Nix;
+    }
+    if matches!(lowered.as_str(), "/usr/bin/luvus" | "/bin/luvus") {
+        return InstallChannel::SystemPackage;
+    }
+
+    if let Some(home) = home {
+        let cargo = home.join(".cargo").join("bin").join(executable_name());
+        if crate::platform::same_path(executable, &cargo) {
+            return InstallChannel::Cargo;
+        }
+        let local = home.join(".local").join("bin").join(executable_name());
+        if crate::platform::same_path(executable, &local) {
+            return InstallChannel::Direct;
+        }
+    }
+
+    if matches!(
+        lowered.as_str(),
+        "/usr/local/bin/luvus" | "/opt/local/bin/luvus"
+    ) {
+        return InstallChannel::Direct;
+    }
+    #[cfg(windows)]
+    if lowered.ends_with("/luvus/luvus.exe") {
+        return InstallChannel::Direct;
+    }
+
+    InstallChannel::Unknown
+}
+
+#[cfg(windows)]
+fn executable_name() -> &'static str {
+    "luvus.exe"
+}
+
+#[cfg(not(windows))]
+fn executable_name() -> &'static str {
+    "luvus"
+}
+
+fn validate_release_version(version: &str) -> Result<String> {
+    let version = version.trim().trim_start_matches('v');
+    semver::Version::parse(version)
+        .map(|parsed| parsed.to_string())
+        .map_err(|_| anyhow!("the update manifest returned an invalid version: {version:?}"))
+}
+
+fn run_package_update(program: &str, args: &[&str], label: &str) -> Result<()> {
+    let status = Command::new(program)
+        .args(args)
+        .status()
+        .with_context(|| format!("start {label} updater `{program}`"))?;
+    if !status.success() {
+        bail!("{label} update failed with {status}");
+    }
+    Ok(())
+}
+
+fn homebrew_binary_path() -> Result<PathBuf> {
+    let output = Command::new("brew")
+        .args(["--prefix", "luvus"])
+        .output()
+        .context("ask Homebrew for the installed Luvus prefix")?;
+    if !output.status.success() {
+        bail!("Homebrew could not resolve the installed Luvus prefix");
+    }
+    homebrew_binary_from_prefix(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn homebrew_binary_from_prefix(prefix: &str) -> Result<PathBuf> {
+    let prefix = prefix.trim();
+    if prefix.is_empty() {
+        bail!("Homebrew returned an empty Luvus prefix");
+    }
+    Ok(PathBuf::from(prefix).join("bin").join(executable_name()))
+}
+
+fn verify_path_version(program: &Path, expected: &str) -> Result<()> {
+    let output = Command::new(program)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("verify updated binary `{}`", program.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() || stdout.split_whitespace().nth(1) != Some(expected) {
+        bail!(
+            "the updater finished but `{}` reports {:?}, not Luvus {expected}",
+            program.display(),
+            stdout.trim()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn install_direct_release(version: &str, destination: &Path) -> Result<()> {
+    let target = release_target()?;
+    let tag = format!("v{version}");
+    let stem = format!("luvus-{tag}-{target}");
+    let archive_name = format!("{stem}.tar.gz");
+    let base = std::env::var("LUVUS_UPDATE_RELEASE_BASE")
+        .unwrap_or_else(|_| format!("https://github.com/RizRiyz/luvus/releases/download/{tag}"));
+    let base = base.trim_end_matches('/');
+    let temp = UpdateTempDir::new()?;
+    let archive = temp.path().join(&archive_name);
+    let checksum = temp.path().join(format!("{stem}.sha256"));
+
+    download_file(&format!("{base}/{archive_name}"), &archive)?;
+    download_file(&format!("{base}/{stem}.sha256"), &checksum)?;
+    verify_sha256(&archive, &checksum)?;
+
+    let status = Command::new("tar")
+        .arg("-xzf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(temp.path())
+        .status()
+        .context("extract the verified Luvus release archive with tar")?;
+    if !status.success() {
+        bail!("extracting {archive_name} failed with {status}");
+    }
+
+    let candidate = temp.path().join("luvus");
+    if !candidate.is_file() {
+        bail!("the verified release archive did not contain `luvus`");
+    }
+    verify_path_version(&candidate, version)?;
+    replace_executable(&candidate, destination)?;
+    verify_path_version(destination, version)
+}
+
+#[cfg(not(windows))]
+fn release_target() -> Result<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
+        ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
+        ("linux", "aarch64") => Ok("aarch64-unknown-linux-musl"),
+        ("linux", "x86_64") => Ok("x86_64-unknown-linux-musl"),
+        (os, arch) => bail!("no prebuilt Luvus release exists for {os}/{arch}"),
+    }
+}
+
+#[cfg(not(windows))]
+fn download_file(url: &str, destination: &Path) -> Result<()> {
+    let curl = Command::new("curl")
+        .args(["-fsSL", "--max-time", "120", "-H", "User-Agent: luvus"])
+        .arg("-o")
+        .arg(destination)
+        .arg(url)
+        .status();
+    if matches!(curl, Ok(status) if status.success()) {
+        return Ok(());
+    }
+
+    let wget = Command::new("wget")
+        .args(["-q", "--timeout=120", "--header=User-Agent: luvus"])
+        .arg("-O")
+        .arg(destination)
+        .arg(url)
+        .status();
+    if matches!(wget, Ok(status) if status.success()) {
+        return Ok(());
+    }
+    bail!("download failed: {url} (install curl or wget, then try again)")
+}
+
+#[cfg(not(windows))]
+fn verify_sha256(archive: &Path, checksum_file: &Path) -> Result<()> {
+    let expected_body = fs::read_to_string(checksum_file)
+        .with_context(|| format!("read checksum {}", checksum_file.display()))?;
+    let expected = expected_body.split_whitespace().next().unwrap_or("");
+    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("release checksum is not a valid SHA-256 digest");
+    }
+
+    let mut file = fs::File::open(archive)
+        .with_context(|| format!("open downloaded archive {}", archive.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let actual = format!("{:x}", hasher.finalize());
+    if !actual.eq_ignore_ascii_case(expected) {
+        bail!("release checksum mismatch; the existing Luvus binary was not changed");
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_executable(candidate: &Path, destination: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let parent = destination
+        .parent()
+        .ok_or_else(|| anyhow!("installed binary has no parent directory"))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let staging = parent.join(format!(".luvus-update-{}-{nonce}", std::process::id()));
+
+    match fs::copy(candidate, &staging) {
+        Ok(_) => {
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o755))?;
+            if let Err(error) = fs::rename(&staging, destination) {
+                let _ = fs::remove_file(&staging);
+                return Err(error)
+                    .with_context(|| format!("atomically replace {}", destination.display()));
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            let stage_status = Command::new("sudo")
+                .args(["install", "-m", "0755"])
+                .arg(candidate)
+                .arg(&staging)
+                .status()
+                .with_context(|| {
+                    format!(
+                        "stage an update beside {} with administrator permission",
+                        destination.display(),
+                    )
+                })?;
+            if !stage_status.success() {
+                bail!(
+                    "could not stage the update beside {} with sudo ({stage_status})",
+                    destination.display(),
+                );
+            }
+
+            let replace_status = Command::new("sudo")
+                .arg("mv")
+                .arg("-f")
+                .arg(&staging)
+                .arg(destination)
+                .status()
+                .with_context(|| {
+                    format!(
+                        "atomically replace {} with administrator permission",
+                        destination.display(),
+                    )
+                })?;
+            if !replace_status.success() {
+                let _ = Command::new("sudo")
+                    .args(["rm", "-f"])
+                    .arg(&staging)
+                    .status();
+                bail!(
+                    "could not replace {} with sudo ({replace_status})",
+                    destination.display(),
+                );
+            }
+            Ok(())
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("stage update beside {}", destination.display()))
+        }
+    }
+}
+
+#[cfg(not(windows))]
+struct UpdateTempDir(PathBuf);
+
+#[cfg(not(windows))]
+impl UpdateTempDir {
+    fn new() -> Result<Self> {
+        let base = std::env::temp_dir();
+        for attempt in 0..32_u8 {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let path = base.join(format!(
+                "luvus-update-{}-{nonce}-{attempt}",
+                std::process::id()
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Err(error) =
+                        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+                    {
+                        let _ = fs::remove_dir(&path);
+                        return Err(error).context("make the update directory private");
+                    }
+                    return Ok(Self(path));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error).context("create a private update directory"),
+            }
+        }
+        bail!("could not create a unique update directory")
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+#[cfg(not(windows))]
+impl Drop for UpdateTempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -224,5 +641,81 @@ mod tests {
         // Garbage / missing field → None (no false "update available").
         assert_eq!(parse_version("not json"), None);
         assert_eq!(parse_version(r#"{"other":1}"#), None);
+    }
+
+    #[test]
+    fn validates_versions_before_using_them_in_release_urls() {
+        assert_eq!(validate_release_version("v1.2.3").unwrap(), "1.2.3");
+        assert!(validate_release_version("1.2.3/../../asset").is_err());
+        assert!(validate_release_version("latest").is_err());
+    }
+
+    #[test]
+    fn homebrew_verification_uses_the_formula_prefix() {
+        assert_eq!(
+            homebrew_binary_from_prefix("/opt/homebrew/opt/luvus\n").unwrap(),
+            Path::new("/opt/homebrew/opt/luvus")
+                .join("bin")
+                .join(executable_name())
+        );
+        assert!(homebrew_binary_from_prefix("  \n").is_err());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn classifies_supported_and_managed_install_paths() {
+        let home = Path::new("/home/alice");
+        assert_eq!(
+            classify_install(Path::new("/work/luvus/target/debug/luvus"), Some(home)),
+            InstallChannel::Development
+        );
+        assert_eq!(
+            classify_install(
+                Path::new("/opt/homebrew/Cellar/luvus/0.12.0/bin/luvus"),
+                Some(home)
+            ),
+            InstallChannel::Homebrew
+        );
+        assert_eq!(
+            classify_install(Path::new("/home/alice/.cargo/bin/luvus"), Some(home)),
+            InstallChannel::Cargo
+        );
+        assert_eq!(
+            classify_install(Path::new("/home/alice/.local/bin/luvus"), Some(home)),
+            InstallChannel::Direct
+        );
+        assert_eq!(
+            classify_install(Path::new("/nix/store/hash-luvus/bin/luvus"), Some(home)),
+            InstallChannel::Nix
+        );
+        assert_eq!(
+            classify_install(Path::new("/usr/bin/luvus"), Some(home)),
+            InstallChannel::SystemPackage
+        );
+        assert_eq!(
+            classify_install(Path::new("/opt/mise/bin/luvus"), Some(home)),
+            InstallChannel::Unknown
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn verifies_release_sha256_before_installing() {
+        let temp = UpdateTempDir::new().unwrap();
+        let archive = temp.path().join("release.tar.gz");
+        let checksum = temp.path().join("release.sha256");
+        fs::write(&archive, b"abc").unwrap();
+        fs::write(
+            &checksum,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  release.tar.gz\n",
+        )
+        .unwrap();
+        verify_sha256(&archive, &checksum).unwrap();
+
+        fs::write(&archive, b"changed").unwrap();
+        assert!(verify_sha256(&archive, &checksum)
+            .unwrap_err()
+            .to_string()
+            .contains("checksum mismatch"));
     }
 }
