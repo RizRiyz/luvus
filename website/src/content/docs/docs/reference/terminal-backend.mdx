@@ -141,3 +141,19 @@ reject remote pipe paths, and verify that the named-pipe server process belongs
 to the current user. Luvus creates its Windows listener with remote clients
 rejected and a protected owner/System DACL. Do not log prompts, captures,
 command arguments, cwd, or notification bodies by default.
+
+## Conformance and performance
+
+The repository includes independent fixture, mock, live-lifecycle, and
+failure-injection consumers under `examples/terminal-backend/`. Live tools
+always create a dedicated `LUVUS_HOME` below the checkout's `target/` directory
+and never target an installed server.
+
+Before treating a build as protocol-ready, run the release benchmark with 1,
+10, and 50 panes. It records direct-IPC latency, response sizes, idle CPU, RSS,
+threads, and descriptors. macOS additionally reports physical footprint, peak,
+and live malloc bytes. Results are host-specific engineering evidence, not
+portable guarantees; compare only matched release binaries and workloads. See
+the versioned
+[conformance guide](https://github.com/RizRiyz/luvus/tree/main/protocol/terminal-backend/v1/conformance)
+for exact commands and caveats.

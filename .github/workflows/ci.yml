@@ -36,6 +36,7 @@ jobs:
           python3 examples/runtime-api/consumer.py
           cargo build --locked
           python3 examples/terminal-backend/live_conformance.py --luvus target/debug/luvus
+          python3 examples/terminal-backend/failure_conformance.py --luvus target/debug/luvus
       - name: Test terminal support crates
         run: |
           cargo test --manifest-path vendor/vte/Cargo.toml --lib
@@ -68,6 +69,7 @@ jobs:
           python3 examples/runtime-api/consumer.py
           cargo build --locked
           python3 examples/terminal-backend/live_conformance.py --luvus target/debug/luvus
+          python3 examples/terminal-backend/failure_conformance.py --luvus target/debug/luvus
 
   windows:
     name: windows protocol · ConPTY
