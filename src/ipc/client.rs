@@ -197,8 +197,10 @@ fn switched_args(raw: &[String], name: &str) -> Vec<String> {
             index += 1;
             continue;
         }
-        out.push(raw[index].clone());
-        index += 1;
+        // Only replace an initial global selector. Later flags belong to the
+        // command itself, for example `pane report --session <native-id>`.
+        out.extend_from_slice(&raw[index..]);
+        break;
     }
     out
 }
@@ -719,6 +721,31 @@ mod render_tests {
             ["--session", "new", "--remote", "host", "-p", "2222"]
         );
     }
+
+    #[test]
+    fn session_handoff_preserves_subcommand_session_flags() {
+        let raw = vec![
+            "luvus".to_string(),
+            "--session".to_string(),
+            "old".to_string(),
+            "pane".to_string(),
+            "report".to_string(),
+            "--session".to_string(),
+            "native-rollout".to_string(),
+        ];
+        assert_eq!(
+            switched_args(&raw, "new"),
+            [
+                "--session",
+                "new",
+                "pane",
+                "report",
+                "--session",
+                "native-rollout"
+            ]
+        );
+    }
+
     #[test]
     fn incremental_diff_reconstructs_the_screen() {
         let cell = |s: &str| protocol::CellData {

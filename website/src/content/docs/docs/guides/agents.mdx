@@ -131,8 +131,8 @@ Codex forks require the exact session identity reported by its integration or
 recorded when Luvus resumes a session. Luvus never guesses the newest Codex
 rollout in a shared folder, because that could fork another pane's active
 conversation. Install or refresh the hook with
-`luvus integration install codex`; its SessionStart hook binds both new and
-resumed Codex panes to their exact rollout.
+`luvus integration install codex`; its SessionStart and prompt hooks bind new
+and resumed Codex panes to their exact rollout.
 
 ## Precise events: the integration hook
 

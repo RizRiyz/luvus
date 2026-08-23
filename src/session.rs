@@ -30,8 +30,10 @@ pub struct SessionInfo {
     pub session_dir: String,
 }
 
-/// Resolve `session attach` and global `--session` flags before normal routing.
-/// The returned argv no longer contains the selector.
+/// Resolve `session attach` and leading global `--session` flags before normal
+/// routing. A subcommand may also own a `--session` flag, such as
+/// `pane report --session <native-agent-id>`, so parsing stops at its command.
+/// The returned argv no longer contains only the global selector.
 pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
     if args.get(1).map(String::as_str) == Some("session")
         && args.get(2).map(String::as_str) == Some("attach")
@@ -81,8 +83,10 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
             index += 1;
             continue;
         }
-        cleaned.push(arg.clone());
-        index += 1;
+        // Global options belong before the command. Do not scan the remaining
+        // argv or a report's native session id would select a server namespace.
+        cleaned.extend_from_slice(&args[index..]);
+        break;
     }
 
     if let Some(name) = requested {
@@ -377,6 +381,24 @@ mod tests {
             crate::persist::cli_socket_path(),
             api_socket_path_for(Some("alpha"))
         );
+    }
+
+    #[test]
+    fn subcommand_session_flag_is_not_a_server_selector() {
+        let _env = crate::persist::test_env("session-subcommand-flag");
+        let raw = argv(&[
+            "luvus",
+            "pane",
+            "report",
+            "--agent",
+            "codex",
+            "--session",
+            "019ffe06-aacc-7131-a377-e66bb39c211b",
+        ]);
+        let cleaned = configure_from_args(&raw).unwrap();
+        assert_eq!(cleaned, raw, "the report owns its native session id");
+        assert_eq!(active_name(), None);
+        assert!(!explicit_session_requested());
     }
 
     #[test]
