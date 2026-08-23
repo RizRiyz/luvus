@@ -57,6 +57,7 @@ panes / agents:
   pane send [<id>] <text>    send raw text to a pane
   pane read [<id>]           print a pane's recent output
   pane status [<id>]         print a pane's agent status and history metrics (any workspace)
+  pane processes [<id>]      list cached executable identities without exposing arguments
   pane name <name>           name a pane so you can mention it (--pane <id>; --clear)
   pane close [<id>]          close a pane
   agent list                 list every agent across all workspaces/tabs
@@ -70,6 +71,10 @@ panes / agents:
   agent keys <target> <key>...   send control keys (enter, esc, ctrl+c, up, …)
   agent read <target> [--lines N] [--source visible|recent]   print an agent's output
   agent get <target>         one agent's live info (pane, name, kind, status, cwd)
+  agent explain <target>     show identity/state evidence and active authority
+  agent report [<pane>] --source <id> --kind <agent> --status <state>
+                             publish a leased authoritative state (integration API)
+  agent release [<pane>] --source <id>   release that integration authority
   agent sessions             list resumable sessions found on disk
   agent resume <id>          reopen a resumable session into a pane
   skill status [<agent>]      show enabled state, release, path, and integrity
@@ -191,6 +196,16 @@ orchestration (multiple agents on one project, docs/22):
 
 events:
   events                     stream live status changes
+
+api:
+  api schema                 print the installed terminal-backend JSON Schema bundle
+  api runtime-schema         print the installed app-runtime JSON Schema bundle
+  api capabilities           negotiate and print live backend capabilities
+  api snapshot               print a sequence-fenced terminal inventory
+  api events                 stream sequenced terminal lifecycle events
+  api runtime                print runtime API capabilities and limits
+  api session                print a global sequence-fenced session snapshot
+  api proxy                  forward one JSON request from stdin to the local server
 
 sessions:
   session list [--json]      list default and named server sessions

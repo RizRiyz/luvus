@@ -25,6 +25,7 @@ mod module;
 mod orch;
 mod persist;
 mod platform;
+mod runtime_api;
 mod search;
 mod session;
 mod skill;
@@ -74,6 +75,13 @@ fn main() -> Result<()> {
         _ => {}
     }
 
+    // Protocol discovery is a deliberately narrow, read-only startup route.
+    // Keep it ahead of every migration and setup hook so an adapter can list
+    // endpoints without changing the selected Luvus home in any way.
+    if is_backend_discovery_request(&args) {
+        std::process::exit(cli::run(&args)?);
+    }
+
     // Migration belongs to commands that use the runtime, not informational
     // output. In particular, `luvus --version` must stay side-effect-free and
     // must never contaminate stdout/stderr used by installers and scripts.
@@ -103,6 +111,14 @@ fn main() -> Result<()> {
     }
     // Default: attach to the session server, spawning it if needed.
     autodetect_and_attach()
+}
+
+fn is_backend_discovery_request(args: &[String]) -> bool {
+    matches!(
+        args,
+        [_, session, list, json]
+            if session == "session" && list == "list" && json == "--json"
+    ) || matches!(args, [_, api, schema] if api == "api" && matches!(schema.as_str(), "schema" | "runtime-schema"))
 }
 
 /// After `ratatui::init()` (which restores raw mode + alt-screen on panic), also
@@ -842,6 +858,8 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
         }
         // Parked `wait.output` deadlines lapse on the tick (docs/81).
         app.tick_output_waits(Instant::now());
+        app.tick_agent_waits(Instant::now());
+        app.tick_backend_revision_waits(Instant::now());
         if app.should_quit || app.detach_requested {
             break;
         }
@@ -956,6 +974,28 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    #[test]
+    fn only_exact_json_session_list_uses_discovery_route() {
+        let strings = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| item.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert!(is_backend_discovery_request(&strings(&[
+            "luvus", "session", "list", "--json"
+        ])));
+        assert!(!is_backend_discovery_request(&strings(&[
+            "luvus", "session", "list"
+        ])));
+        assert!(!is_backend_discovery_request(&strings(&[
+            "luvus", "session", "list", "--json", "extra"
+        ])));
+        assert!(is_backend_discovery_request(&strings(&[
+            "luvus", "api", "schema"
+        ])));
+    }
 
     // The synthesized "done" jingle is a well-formed 16-bit mono WAV.
     #[test]

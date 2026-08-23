@@ -30,6 +30,22 @@ pub enum AppEvent {
     PtyData(PaneId),
     /// The given pane's child process exited.
     PtyExit(PaneId),
+    /// A deferred pane finished opening its PTY and now owns a root process and
+    /// stable terminal-backend identity. Pending panes are deliberately absent
+    /// from public inventory until this event is applied by the app loop.
+    PtyReady(PaneId),
+    /// A terminal-backend create finished its filesystem and PTY work off-loop.
+    /// The app loop performs only the bounded layout/index commit and response.
+    BackendCreateReady {
+        id: String,
+        reply: Sender<String>,
+        pane_id: PaneId,
+        cwd: std::path::PathBuf,
+        branch: Option<String>,
+        worktree: Option<crate::git::WorktreeMembership>,
+        commit: crate::terminal::backend::CreateCommit,
+        result: Result<crate::terminal::pty::Pane, String>,
+    },
     /// A binary client attached (server mode); `messages` feeds its socket writer.
     ClientConnected {
         id: u64,
@@ -200,6 +216,15 @@ pub enum AppEvent {
         id: String,
         pane: String,
         needle: String,
+        timeout: Option<std::time::Duration>,
+        reply: Sender<String>,
+    },
+    /// Park an agent-state wait on the single-writer app loop. Registration and
+    /// the initial comparison happen atomically relative to state transitions.
+    AgentWait {
+        id: String,
+        pane: String,
+        state: String,
         timeout: Option<std::time::Duration>,
         reply: Sender<String>,
     },

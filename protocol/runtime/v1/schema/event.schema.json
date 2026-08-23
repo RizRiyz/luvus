@@ -1,0 +1,12 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://luvus.dev/protocol/runtime/v1/schema/event.schema.json",
+  "type":"object",
+  "properties":{
+    "event":{"type":"string","minLength":1,"maxLength":128},
+    "sequence":{"type":"integer","minimum":1},
+    "data":{"type":"object"}
+  },
+  "required":["event","sequence","data"],
+  "additionalProperties":false
+}

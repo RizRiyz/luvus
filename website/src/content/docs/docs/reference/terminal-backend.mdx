@@ -1,0 +1,143 @@
+---
+title: Terminal Backend Protocol
+description: Integrate a harness or orchestrator with every live Luvus terminal through a bounded, versioned local protocol.
+---
+
+Luvus exposes a harness-neutral terminal backend over its existing local control
+socket. It lets orchestrators discover every real PTY across all workspaces,
+capture bounded output, send exact input, and manage terminal lifecycles without
+scraping the TUI or depending on Luvus agent manifests.
+
+Protocol `1.0` is supported over Unix sockets on macOS and Linux and owner-only
+named pipes on Windows. The request, response, identity, limit, and event
+contracts are identical on every platform.
+
+## Discover and negotiate
+
+Run the one discovery-only CLI route:
+
+```sh
+luvus session list --json
+```
+
+It reads existing session entries and probes reachability without migrating
+state, creating directories, selecting a session, or starting a server. Keep a
+running row, validate its `endpoint`, then connect directly and send:
+
+```json
+{"id":"cap-1","method":"terminal.backend.capabilities","params":{"protocol":{"name":"luvus-terminal-backend","major":1,"minor":0}}}
+```
+
+The response selects the protocol version, returns a random
+`server_generation`, and announces the exact capabilities and active limits.
+Never call an unannounced capability.
+
+## Identity and lifecycle
+
+Every terminal has a random `terminal_id` for one successful PTY lifetime and a
+current `pane_id` route. Moving a pane or reordering tabs preserves the terminal
+ID. Replacing the PTY changes it. Restarting Luvus changes
+`server_generation`.
+
+Every mutation supplies all three values. An optional expected root PID and
+process-start marker adds PID-reuse protection. Luvus rejects stale routes and
+never follows a moved terminal implicitly for a write.
+
+## Operations
+
+| Capability | Method | Behavior |
+|---|---|---|
+| `inventory` | `terminal.backend.inventory` | Every started PTY across ordinary tabs, with route, cwd, title, label, PID, and start marker |
+| `validate` | `terminal.backend.validate` | Returns `alive`, `gone`, or `unknown` without mutating state |
+| `process_inspection` | `terminal.backend.processes` | Cached executable identities under a validated root; never full argv |
+| `capture` | `terminal.backend.capture` | Bounded `visible`, `recent_unwrapped`, or detection text; optional safe SGR for the first two |
+| `type_literal` | `terminal.backend.type_literal` | Literal UTF-8 with no implicit Enter |
+| `submit_text` | `terminal.backend.submit_text` | One atomic paste-and-Enter queue action |
+| `send_key` | `terminal.backend.send_key` | One documented logical key with terminal-mode-aware navigation |
+| `set_title` | `terminal.backend.set_title` | Bounded Luvus label; does not inject OSC into the child |
+| `notify_terminal` | `terminal.backend.notify` | Terminal-scoped message through the existing notification policy |
+| `create_workspace` / `create_sibling` | `terminal.backend.create` | Explicit cwd and optional argv; returns only after the PTY is live |
+| `close` | `terminal.backend.close` | Removes only the fully validated terminal |
+| `snapshot` | `terminal.backend.snapshot` | Inventory plus an event-sequence consistency fence |
+| `events` | `terminal.backend.events.subscribe` | Bounded, sequenced terminal lifecycle and output-ready events |
+| `wait_change` | `terminal.backend.wait_change` | Event-driven wait for a newer terminal content revision |
+| `wait_output` | `terminal.backend.wait_output` | Event-driven wait for bounded literal text after a revision advances |
+
+Capture responses include `content_revision`. To initialize without a race,
+subscribe first, request a snapshot on another connection, discard
+buffered events up through `event_sequence`, then apply later events. Each
+subscriber queue is bounded to 256 events, with at most 64 simultaneous event
+subscribers per server. A slow consumer is disconnected and must repeat
+subscribe plus snapshot reconciliation. The server attempts to send
+`terminal.resync_required` before closing an overflowed stream, but clients must
+also treat EOF as possible loss because the final control frame is best effort.
+The reference consumer replays output, metadata, and close events against the
+snapshot. It requests a new snapshot for created, moved, or exited terminals
+because those deliberately compact events do not repeat the full inventory
+record.
+
+## Installed introspection
+
+The binary embeds the published schema, so packaged integrations do not need a
+source checkout:
+
+```sh
+luvus api schema
+luvus api runtime-schema
+luvus api capabilities
+luvus api snapshot
+luvus api events
+```
+
+Consumers that cannot open the native local transport can forward exactly one
+bounded request and response through standard IO:
+
+```sh
+printf '%s\n' '{"id":"1","method":"terminal.backend.inventory","params":{}}' \
+  | luvus api proxy
+```
+
+The same command composes over SSH without exposing a network listener:
+
+```sh
+printf '%s\n' '{"id":"1","method":"terminal.backend.inventory","params":{}}' \
+  | ssh host luvus api proxy
+```
+
+Native socket or pipe access remains preferable for high-frequency local calls.
+The proxy is a portable bootstrap and remote-control path, not a streaming
+replacement for `terminal.backend.events.subscribe`.
+
+`schema` is local and works without a running server. The other commands target
+the selected Luvus session.
+
+## Framing and failure safety
+
+An ordinary connection carries one UTF-8 JSON object request and one response,
+each terminated by LF. The negotiated event method switches its connection to
+a stream after one acknowledgment. Every complete frame is capped at 1 MiB. Request IDs are
+strings of 1 to 128 UTF-8 bytes. Unknown fields, duplicate keys, invalid enums,
+and oversized frames are rejected before dispatch.
+
+Input success means the complete action was queued to the owned PTY writer.
+Immediate metadata and lifecycle mutations report `executed`. Mutation errors
+include `dispatch: not_started` or `dispatch: rejected`. If a client wrote a
+mutation but lost its correlated response, only the client can classify it as
+possibly executed. Do not retry it automatically. Refresh inventory instead.
+
+## Contract and example
+
+The normative schemas, limits, fixtures, endpoint rules, and conformance
+manifest live in
+[`protocol/terminal-backend/v1`](https://github.com/RizRiyz/luvus/tree/main/protocol/terminal-backend/v1).
+The repository also includes a dependency-free Python consumer that validates
+all fixtures and demonstrates capability and inventory reads. Public adapters
+should consume that package rather than copying types from Luvus source.
+
+The endpoint is a privileged local-user capability. On Unix, validate
+ownership, modes, symlinks, socket replacement, and the documented owner-only
+long-path alias. On Windows, require the discovery-supplied local pipe address,
+reject remote pipe paths, and verify that the named-pipe server process belongs
+to the current user. Luvus creates its Windows listener with remote clients
+rejected and a protected owner/System DACL. Do not log prompts, captures,
+command arguments, cwd, or notification bodies by default.

@@ -334,19 +334,33 @@ impl Manifests {
         self.agents.iter().any(|a| a.name == low)
     }
 
-    fn evaluate(&self, agent: &str, regions: &Regions) -> Option<State> {
-        let mut best: Option<(i32, State)> = None;
+    fn evaluate(&self, agent: &str, regions: &Regions) -> Option<RuleMatch> {
+        let mut best: Option<RuleMatch> = None;
         for r in &self.rules {
             if !(r.agent.is_empty() || r.agent == agent) {
                 continue;
             }
             let text = regions.get(r.region);
-            if r.conds.iter().all(|c| c.holds(text)) && best.is_none_or(|(p, _)| r.priority > p) {
-                best = Some((r.priority, r.state));
+            if r.conds.iter().all(|c| c.holds(text))
+                && best
+                    .as_ref()
+                    .is_none_or(|matched| r.priority > matched.priority)
+            {
+                best = Some(RuleMatch {
+                    state: r.state,
+                    priority: r.priority,
+                    region: r.region,
+                });
             }
         }
-        best.map(|(_, s)| s)
+        best
     }
+}
+
+struct RuleMatch {
+    state: State,
+    priority: i32,
+    region: Region,
 }
 
 fn any(subs: &[&str]) -> Cond {
@@ -769,6 +783,14 @@ impl RuleSpec {
 pub struct Detection {
     pub state: State,
     pub agent: String,
+    /// Where identity came from. Stable, machine-readable values are exposed by
+    /// `agent.explain`; no consumer needs to reverse-engineer detection order.
+    pub identity_source: &'static str,
+    /// Why the state was chosen. A manifest match includes its region/priority;
+    /// otherwise this names the deliberately conservative fallback.
+    pub state_source: &'static str,
+    pub rule_priority: Option<i32>,
+    pub rule_region: Option<&'static str>,
 }
 
 /// The recent-screen and title regions, lowercased once for matching.
@@ -821,19 +843,20 @@ pub fn classify(
     // agent's UI does not print its own name (Claude Code's bottom rows are a
     // prompt box and a model label, so a repaint would otherwise resolve to the
     // bare shell and read its own redraw as work).
-    let agent = if running.is_empty() {
+    let (agent, identity_source) = if running.is_empty() {
         manifests
             .detect_agent(title, &regions.screen, base_command)
             .or_else(|| {
                 manifests
                     .is_agent(known_agent)
-                    .then(|| known_agent.to_string())
+                    .then(|| (known_agent.to_string(), "prior_identity"))
             })
-            .unwrap_or_else(|| base_command.to_string())
+            .unwrap_or_else(|| (base_command.to_string(), "command_fallback"))
     } else {
         manifests
             .agent_in_processes(running)
-            .unwrap_or_else(|| base_command.to_string())
+            .map(|agent| (agent, "process_tree"))
+            .unwrap_or_else(|| (base_command.to_string(), "process_tree"))
     };
 
     // A recognised agent is *working* only on positive evidence — a spinner or
@@ -847,9 +870,29 @@ pub fn classify(
     } else {
         State::Idle
     };
-    let state = manifests.evaluate(&agent, &regions).unwrap_or(fallback);
+    let matched = manifests.evaluate(&agent, &regions);
+    let (state, state_source, rule_priority, rule_region) = match matched {
+        Some(rule) => (
+            rule.state,
+            "manifest_rule",
+            Some(rule.priority),
+            Some(match rule.region {
+                Region::Title => "title",
+                Region::Screen => "screen",
+            }),
+        ),
+        None if fallback == State::Working => (fallback, "shell_activity", None, None),
+        None => (fallback, "no_positive_state_evidence", None, None),
+    };
 
-    Detection { state, agent }
+    Detection {
+        state,
+        agent,
+        identity_source,
+        state_source,
+        rule_priority,
+        rule_region,
+    }
 }
 
 /// Name the agent running in a pane, in decreasing order of how deliberate the
@@ -954,18 +997,18 @@ impl Manifests {
         title: Option<&str>,
         low_bottom: &str,
         base_command: &str,
-    ) -> Option<String> {
+    ) -> Option<(String, &'static str)> {
         let cmd = base_command.to_lowercase();
         let title = title.map(|t| t.to_lowercase()).unwrap_or_default();
 
         // Deliberate signals: somebody typed this, or the agent published it.
-        for region in [&cmd, &title] {
+        for (region, source) in [(&cmd, "launch_command"), (&title, "osc_title")] {
             if let Some(a) = self
                 .agents
                 .iter()
                 .find(|a| a.all().any(|p| contains_agent_word(region, p)))
             {
-                return Some(a.name.clone());
+                return Some((a.name.clone(), source));
             }
         }
         // Incidental signal: pane output. Only names that can't be ordinary words.
@@ -976,7 +1019,7 @@ impl Manifests {
                     .iter()
                     .any(|p| contains_agent_word(low_bottom, p))
             })
-            .map(|a| a.name.clone())
+            .map(|a| (a.name.clone(), "screen_text"))
     }
 }
 

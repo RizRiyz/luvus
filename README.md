@@ -43,7 +43,7 @@
   history, use copy mode, click detected links, and run full-screen terminal apps.
 - **Extensible surfaces:** Install modules with actions, events, settings,
   startup hooks, panes, sidebar docks, and Top or Bottom Luvus Bar widgets.
-- **Automation:** Control the same state through the CLI, owner-only JSON socket
+- **Automation:** Control the same state through the CLI, owner-only local JSON
   API, event stream, output waits, and agent-state waits.
 - **Custom interface:** Move and resize two sidebars, remap keys and the prefix,
   use presets, select from 8 languages, and install composable local or

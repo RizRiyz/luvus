@@ -1,0 +1,30 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://luvus.dev/protocol/terminal-backend/v1/schema/request.schema.json",
+  "type":"object",
+  "properties":{
+    "id":{"type":"string","minLength":1,"maxLength":128},
+    "method":{"type":"string"},
+    "params":{"type":"object"}
+  },
+  "required":["id","method","params"],
+  "additionalProperties":false,
+  "oneOf":[
+    {"properties":{"method":{"const":"terminal.backend.capabilities"},"params":{"$ref":"methods/capabilities.schema.json"}}},
+    {"properties":{"method":{"const":"terminal.backend.inventory"},"params":{"$ref":"methods/inventory.schema.json"}}},
+    {"properties":{"method":{"const":"terminal.backend.snapshot"},"params":{"$ref":"methods/snapshot.schema.json"}}},
+    {"properties":{"method":{"const":"terminal.backend.validate"},"params":{"$ref":"methods/validate.schema.json"}}},
+    {"properties":{"method":{"const":"terminal.backend.processes"},"params":{"$ref":"methods/processes.schema.json"}}},
+    {"properties":{"method":{"const":"terminal.backend.capture"},"params":{"$ref":"methods/capture.schema.json"}}},
+    {"properties":{"method":{"const":"terminal.backend.type_literal"},"params":{"$ref":"methods/type-literal.schema.json"}}},
+    {"properties":{"method":{"const":"terminal.backend.submit_text"},"params":{"$ref":"methods/submit-text.schema.json"}}},
+    {"properties":{"method":{"const":"terminal.backend.send_key"},"params":{"$ref":"methods/send-key.schema.json"}}},
+    {"properties":{"method":{"const":"terminal.backend.set_title"},"params":{"$ref":"methods/set-title.schema.json"}}},
+    {"properties":{"method":{"const":"terminal.backend.notify"},"params":{"$ref":"methods/notify.schema.json"}}},
+    {"properties":{"method":{"const":"terminal.backend.create"},"params":{"$ref":"methods/create.schema.json"}}},
+    {"properties":{"method":{"const":"terminal.backend.close"},"params":{"$ref":"methods/close.schema.json"}}},
+    {"properties":{"method":{"const":"terminal.backend.events.subscribe"},"params":{"$ref":"methods/events.schema.json"}}},
+    {"properties":{"method":{"const":"terminal.backend.wait_change"},"params":{"$ref":"methods/wait-change.schema.json"}}},
+    {"properties":{"method":{"const":"terminal.backend.wait_output"},"params":{"$ref":"methods/wait-output.schema.json"}}}
+  ]
+}

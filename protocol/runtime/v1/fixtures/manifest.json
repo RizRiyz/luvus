@@ -1,0 +1,1 @@
+{"protocol":{"name":"luvus-runtime","major":1,"minor":0},"files":[{"path":"valid/requests.jsonl","kind":"request","expect":"valid","count":8},{"path":"valid/responses.jsonl","kind":"response","expect":"valid","count":8},{"path":"valid/events.jsonl","kind":"event","expect":"valid","count":3},{"path":"invalid/requests.jsonl","kind":"request","expect":"invalid","count":12}]}

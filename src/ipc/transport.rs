@@ -152,6 +152,47 @@ fn namespaced_pipe_id(path: &Path, namespace: &str) -> String {
     format!("{namespace}-{:016x}", h.finish())
 }
 
+#[cfg(windows)]
+fn private_pipe_security_descriptor(
+) -> io::Result<interprocess::os::windows::security_descriptor::SecurityDescriptor> {
+    use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+    use widestring::U16CString;
+
+    // Protected DACL: full access only to LocalSystem and the pipe object owner
+    // (the account running this Luvus server). `interprocess` creates local-only
+    // named pipes by default, adding PIPE_REJECT_REMOTE_CLIENTS independently.
+    let sddl = U16CString::from_str("D:P(A;;GA;;;SY)(A;;GA;;;OW)")
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    SecurityDescriptor::deserialize(&sddl)
+}
+
+#[cfg(windows)]
+fn validate_connected_server(stream: &Stream) -> io::Result<()> {
+    let Stream::NamedPipe(pipe) = stream;
+    let server_pid = pipe.inner().server_process_id()?;
+    if !crate::platform::process_belongs_to_current_user(server_pid) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "refusing a Luvus named pipe owned by another Windows account",
+        ));
+    }
+    Ok(())
+}
+
+/// Return the actual address a protocol consumer passes to its platform
+/// transport. Unix uses the socket path; Windows exposes the namespaced-pipe
+/// identifier instead of asking consumers to reproduce our hash.
+pub(crate) fn discovery_address(path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        format!(r"\\.\pipe\{}", pipe_id(path))
+    }
+    #[cfg(not(windows))]
+    {
+        path.display().to_string()
+    }
+}
+
 /// Connect to a server socket identified by a per-session filesystem path.
 pub fn connect(path: &Path) -> io::Result<Conn> {
     #[cfg(windows)]
@@ -159,7 +200,9 @@ pub fn connect(path: &Path) -> io::Result<Conn> {
         use interprocess::local_socket::GenericNamespaced;
         let id = pipe_id(path);
         let name = id.to_ns_name::<GenericNamespaced>()?;
-        Ok(Conn::new(Stream::connect(name)?))
+        let stream = Stream::connect(name)?;
+        validate_connected_server(&stream)?;
+        Ok(Conn::new(stream))
     }
     #[cfg(not(windows))]
     {
@@ -176,7 +219,9 @@ pub(crate) fn connect_legacy(path: &Path) -> io::Result<Conn> {
     {
         use interprocess::local_socket::GenericNamespaced;
         let name = legacy_pipe_id(path).to_ns_name::<GenericNamespaced>()?;
-        Ok(Conn::new(Stream::connect(name)?))
+        let stream = Stream::connect(name)?;
+        validate_connected_server(&stream)?;
+        Ok(Conn::new(stream))
     }
     #[cfg(not(windows))]
     {
@@ -199,9 +244,14 @@ pub fn bind(path: &Path) -> io::Result<Listener> {
     #[cfg(windows)]
     {
         use interprocess::local_socket::GenericNamespaced;
+        use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
         let id = pipe_id(path);
         let name = id.to_ns_name::<GenericNamespaced>()?;
-        ListenerOptions::new().name(name).create_sync()
+        ListenerOptions::new()
+            .name(name)
+            .reclaim_name(false)
+            .security_descriptor(private_pipe_security_descriptor()?)
+            .create_sync()
     }
     #[cfg(not(windows))]
     {
@@ -222,6 +272,38 @@ pub fn bind(path: &Path) -> io::Result<Listener> {
 /// Iterate accepted connections (errors skipped), as `Conn`s.
 pub fn incoming(listener: &Listener) -> impl Iterator<Item = Conn> + '_ {
     listener.incoming().flatten().map(Conn::new)
+}
+
+#[cfg(all(test, windows))]
+mod windows_security_tests {
+    use super::*;
+
+    fn test_pipe(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("luvus-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn private_named_pipe_accepts_the_current_user() {
+        let path = test_pipe("private-pipe");
+        let listener = bind(&path).expect("bind owner-only named pipe");
+        let client_path = path.clone();
+        let client = std::thread::spawn(move || {
+            let mut client = connect(&client_path).expect("same-user client connects");
+            client.write_all(b"luvus").unwrap();
+        });
+        let mut server = listener.accept().expect("accept same-user client");
+        let mut bytes = [0_u8; 5];
+        server.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"luvus");
+        client.join().unwrap();
+    }
+
+    #[test]
+    fn discovery_exposes_the_real_windows_pipe_address() {
+        let address = discovery_address(&test_pipe("discovery"));
+        assert!(address.starts_with(r"\\.\pipe\luvus-"));
+        assert!(!address.ends_with(".sock"));
+    }
 }
 
 #[cfg(all(test, unix))]

@@ -1,0 +1,7 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://luvus.dev/protocol/terminal-backend/v1/schema/methods/events.schema.json",
+  "type":"object",
+  "maxProperties":0,
+  "additionalProperties":false
+}

@@ -22,6 +22,7 @@ use crate::persist::{self, SessionSnapshot};
 use crate::terminal::pty::Pane;
 use crate::ui::theme::{State, Theme};
 
+mod backend;
 mod board;
 pub use board::agent_choices;
 pub(crate) mod diff;
@@ -927,6 +928,19 @@ pub struct AgentSession {
     pub session_id: String,
 }
 
+/// Explicit agent lifecycle authority supplied by an integration. It is
+/// intentionally ephemeral and bounded by a lease: a crashed adapter cannot
+/// leave a pane permanently stuck in a fabricated state.
+#[derive(Clone)]
+pub struct AgentReport {
+    pub source: String,
+    pub agent: String,
+    pub state: State,
+    pub message: Option<String>,
+    pub sequence: u64,
+    pub expires_at: Instant,
+}
+
 /// Per-pane detection state (the runtime side of agent awareness).
 pub struct PaneStatus {
     pub state: State,
@@ -976,6 +990,13 @@ pub struct PaneStatus {
     /// one-key answer. Captured **once** when the pane enters Blocked (not every
     /// tick), cleared when it leaves; `None` when the pane isn't blocked.
     pub blocked_hint: Option<String>,
+    /// Explainable evidence from the last heuristic classification.
+    pub identity_source: &'static str,
+    pub state_source: &'static str,
+    pub rule_priority: Option<i32>,
+    pub rule_region: Option<&'static str>,
+    /// Optional authoritative state lease from an agent integration.
+    pub agent_report: Option<AgentReport>,
 }
 
 impl PaneStatus {
@@ -1003,6 +1024,11 @@ impl PaneStatus {
             detected_bottom: Arc::from(""),
             force_detect: true,
             blocked_hint: None,
+            identity_source: "command_fallback",
+            state_source: "no_positive_state_evidence",
+            rule_priority: None,
+            rule_region: None,
+            agent_report: None,
         }
     }
 }
@@ -1144,6 +1170,20 @@ impl CopyMode {
 
 pub struct App {
     pub panes: HashMap<PaneId, Pane>,
+    /// One random value for this server lifetime. Harness runtimes from an old
+    /// server fail closed even if a process-local pane route is later reused.
+    pub(crate) backend_server_generation: String,
+    /// O(1) stable terminal identity → mutable pane route lookup. Pending
+    /// deferred panes are absent until `PtyReady` reaches the app loop.
+    pub(crate) backend_terminal_index: HashMap<String, PaneId>,
+    /// Harness-assigned display labels are separate from addressable agent
+    /// aliases and from child-controlled OSC titles.
+    pub(crate) backend_labels: HashMap<PaneId, String>,
+    /// Bounded, event-driven protocol waits keyed by pane. These observe the
+    /// PTY's monotonic content revision and never poll from a socket worker.
+    pub(crate) backend_revision_waits:
+        HashMap<PaneId, Vec<crate::app::backend::BackendRevisionWait>>,
+    pub(crate) last_backend_wait_scan: Instant,
     pub status: HashMap<PaneId, PaneStatus>,
     /// Live agent aliases: a human name → the pane whose agent it points at, set
     /// via `agent.name` so `agent.send` / `agent.keys` / `agent.read` can address
@@ -1387,6 +1427,10 @@ pub struct App {
     /// Pending server-side `wait.output` requests keyed by pane (docs/81).
     /// Satisfied by the pane's next output event, expired by the loop tick.
     output_waits: HashMap<PaneId, Vec<crate::app::dispatch::OutputWait>>,
+    /// Event-driven semantic waits keyed by pane. Unlike the old CLI-side
+    /// subscribe/poll composition, registration and the initial state check are
+    /// atomic on the app loop, so a transition cannot fall through the gap.
+    agent_waits: HashMap<PaneId, Vec<crate::app::dispatch::AgentWait>>,
     /// Throttle for re-scanning parked waiters — the scan locks each waiting
     /// pane's VT engine and rebuilds its recent text, so it runs at ~100ms,
     /// not at the render frame rate. Deadline expiry still runs every tick.
@@ -1640,11 +1684,25 @@ impl App {
         let command = pane.command.clone();
         let mut panes = HashMap::new();
         panes.insert(id, pane);
+        let backend_server_generation =
+            crate::terminal::backend::random_id().map_err(anyhow::Error::msg)?;
+        let backend_terminal_index = panes
+            .iter()
+            .filter_map(|(pane_id, pane)| {
+                pane.terminal_runtime()
+                    .map(|runtime| (runtime.terminal_id, *pane_id))
+            })
+            .collect();
         let mut status = HashMap::new();
         status.insert(id, PaneStatus::new(command));
 
         let mut app = App {
             panes,
+            backend_server_generation,
+            backend_terminal_index,
+            backend_labels: HashMap::new(),
+            backend_revision_waits: HashMap::new(),
+            last_backend_wait_scan: Instant::now(),
             status,
             manifests: crate::detect::Manifests::load(&crate::persist::ensure_manifests_dir()),
             editors: crate::platform::editor_choices(),
@@ -1752,6 +1810,7 @@ impl App {
             detection_extractions: 0,
             detection_skips: 0,
             output_waits: HashMap::new(),
+            agent_waits: HashMap::new(),
             last_output_wait_scan: Instant::now(),
             workspaces_scroll: 0,
             agents_scroll: 0,
@@ -2138,6 +2197,14 @@ impl App {
             return None;
         }
         let active_ws = snap.active_ws.min(workspaces.len() - 1);
+        let backend_server_generation = crate::terminal::backend::random_id().ok()?;
+        let backend_terminal_index = panes
+            .iter()
+            .filter_map(|(pane_id, pane)| {
+                pane.terminal_runtime()
+                    .map(|runtime| (runtime.terminal_id, *pane_id))
+            })
+            .collect();
 
         crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
         let theme_registry = crate::theme::ThemeRegistry::load();
@@ -2154,6 +2221,11 @@ impl App {
 
         let mut app = App {
             panes,
+            backend_server_generation,
+            backend_terminal_index,
+            backend_labels: HashMap::new(),
+            backend_revision_waits: HashMap::new(),
+            last_backend_wait_scan: Instant::now(),
             status,
             manifests: crate::detect::Manifests::load(&crate::persist::ensure_manifests_dir()),
             editors: crate::platform::editor_choices(),
@@ -2252,6 +2324,7 @@ impl App {
             detection_extractions: 0,
             detection_skips: 0,
             output_waits: HashMap::new(),
+            agent_waits: HashMap::new(),
             last_output_wait_scan: Instant::now(),
             workspaces_scroll: 0,
             agents_scroll: 0,
@@ -4764,6 +4837,10 @@ impl App {
     /// path can never again forget one map (e.g. leaking a `views` entry, which
     /// made a closed file un-reopenable).
     fn drop_leaf_runtime(&mut self, id: PaneId) {
+        self.emit_backend_terminal_event(id, "terminal.closed", serde_json::json!({}));
+        self.backend_terminal_index.retain(|_, pane| *pane != id);
+        self.backend_labels.remove(&id);
+        self.cancel_backend_revision_waits(id);
         self.panes.remove(&id);
         self.status.remove(&id);
         self.views.remove(&id);
@@ -4771,6 +4848,7 @@ impl App {
         // every close path (close_pane, close_tab, close_workspace) funnels
         // through here — so cancellation cannot be forgotten by a new path.
         self.cancel_output_waits(id);
+        self.cancel_agent_waits(id);
         self.editor_files.remove(&id); // untrack an editor pane's file (docs/38)
         self.module_panes.remove(&id); // untrack a module pane (MOD-2)
         self.preview_views.remove(&id); // forget a closed reusable preview pane

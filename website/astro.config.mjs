@@ -104,6 +104,7 @@ export default defineConfig({
           items: [
             { label: 'CLI Commands', slug: 'docs/reference/cli' },
             { label: 'Socket API', slug: 'docs/reference/api' },
+            { label: 'Terminal Backend Protocol', slug: 'docs/reference/terminal-backend' },
             { label: 'Keybindings', slug: 'docs/reference/keybindings' },
             { label: 'Configuration', slug: 'docs/reference/configuration' },
             { label: 'Supported Agents', slug: 'docs/reference/agents' },

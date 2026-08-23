@@ -1,0 +1,19 @@
+{
+  "protocol":{"name":"luvus-terminal-backend","major":1,"minor":0},
+  "files":[
+    {"path":"valid/requests.jsonl","kind":"request","expect":"valid","count":17},
+    {"path":"valid/responses.jsonl","kind":"response","expect":"valid","count":10},
+    {"path":"valid/events.jsonl","kind":"event","expect":"valid","count":3},
+    {"path":"invalid/requests.jsonl","kind":"request","expect":"invalid","count":6}
+  ],
+  "framing":[
+    {"name":"missing_lf","expect":"invalid_request","dispatch":"not_started"},
+    {"name":"request_over_1_mib","expect":"frame_too_large","dispatch":"not_started"},
+    {"name":"second_frame","expect":"first_frame_only"}
+  ],
+  "lifecycle":[
+    {"name":"stale_server","expect":"stale_server","dispatch":"rejected"},
+    {"name":"stale_route","expect":"stale_route","dispatch":"rejected"},
+    {"name":"lost_mutation_response","expect":"possibly_executed","classified_by":"client"}
+  ]
+}

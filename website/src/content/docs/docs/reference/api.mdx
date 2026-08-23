@@ -1,16 +1,21 @@
 ---
-title: Socket API
+title: Local API
 description: The JSON control API, covering wire format, methods, and the event stream.
 ---
 
-Everything the CLI does goes over a local socket speaking newline-delimited
-JSON. The default server remains at `~/.luvus/luvus.sock`. A named server
-normally uses `~/.luvus/sessions/<name>/luvus.sock`. On Unix, an unusually long
-custom `LUVUS_HOME` gets a deterministic short socket alias under an owner-only
-directory in `/tmp` to stay within the operating system's path limit.
+Everything the CLI does goes over owner-only local IPC speaking
+newline-delimited JSON: Unix sockets on macOS and Linux, and local named pipes
+on Windows. The default logical path remains `~/.luvus/luvus.sock`. A named
+server normally uses `~/.luvus/sessions/<name>/luvus.sock`. On Unix, an
+unusually long custom `LUVUS_HOME` gets a deterministic short socket alias under
+an owner-only directory in the native sticky temporary root (`/private/tmp` on
+macOS and `/tmp` on Linux) to stay within the operating system's path limit.
+Windows discovery exposes the actual `\\.\pipe\...` address instead of asking
+clients to reproduce Luvus's internal mapping.
 
-The resolved path is injected into every pane as `$LUVUS_SOCKET_PATH`. That
-socket is the authority boundary, so methods do not need a session parameter.
+The resolved logical path is injected into every pane as `$LUVUS_SOCKET_PATH`.
+The selected local endpoint is the authority boundary, so methods do not need a
+session parameter.
 Use `luvus --session <name> <command>` from outside a pane. Inside a pane, keep
 the inherited socket so commands cannot drift to another server. Server-facing
 CLI commands map to these methods. Session lifecycle and theme acquisition are
@@ -43,12 +48,14 @@ printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.luvus/luvus.so
 |---|---|
 | workspaces | `workspace.list` · `workspace.open` · `workspace.focus` · `workspace.rename` · `workspace.pin` · `workspace.close` |
 | tabs | `tab.list` · `tab.new` · `tab.focus` · `tab.move` · `tab.swap` · `tab.rename` · `tab.close` |
-| panes | `pane.list` · `pane.split` · `pane.move` · `pane.focus` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.close` · `attach.pane` |
-| agents | `agent.list` · `agent.get` · `agent.name` · `agent.fork` · `agent.send` · `agent.keys` · `agent.read` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.report_event` |
+| runtime | `runtime.capabilities` · `session.snapshot` · `events.subscribe` |
+| panes | `pane.list` · `pane.split` · `pane.move` · `pane.focus` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.processes` · `pane.close` · `attach.pane` |
+| agents | `agent.list` · `agent.get` · `agent.explain` · `agent.report` · `agent.release` · `agent.wait` · `agent.name` · `agent.fork` · `agent.send` · `agent.keys` · `agent.read` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.report_event` |
 | search | `search` · `search.capabilities` · `search.query` · `search.activate` |
 | files | `files.tree` · `files.open` · `files.reveal` · `files.refresh` |
 | git | `git.status` · `git.branches` · `git.log` · `git.open` |
 | diff | `diff.refresh` · `diff.list` · `diff.open` · `diff.get` · `diff.navigate` · `diff.note.add` · `diff.note.apply` · `diff.note.list` · `diff.note.edit` · `diff.note.resolve` · `diff.note.reopen` · `diff.note.remove` · `diff.note.send` |
+| terminal backend | `terminal.backend.capabilities` · `terminal.backend.inventory` · `terminal.backend.snapshot` · `terminal.backend.validate` · `terminal.backend.processes` · `terminal.backend.capture` · `terminal.backend.type_literal` · `terminal.backend.submit_text` · `terminal.backend.send_key` · `terminal.backend.set_title` · `terminal.backend.notify` · `terminal.backend.create` · `terminal.backend.close` · `terminal.backend.wait_change` · `terminal.backend.wait_output` · `terminal.backend.events.subscribe` |
 | worktrees | `worktree.list` · `worktree.create` · `worktree.open` · `worktree.remove` |
 | orchestration | `task.add` · `task.list` · `task.get` · `task.claim` · `task.next` · `task.start` · `task.heartbeat` · `task.update` · `task.done` · `task.merge` · `task.release` · `lease.acquire` · `lease.list` · `lease.release` |
 | modules | `module.list` · `module.info` · `module.link` · `module.unlink` · `module.enable` · `module.disable` · `module.action.list` · `module.action.invoke` · `module.pane.open` · `module.pane.focus` · `module.pane.close` · `module.config_dir` · `module.settings.list` · `module.settings.get` · `module.settings.set` · `module.log.list` |
@@ -59,6 +66,51 @@ Parameter shapes mirror the CLI flags (`luvus task add --paths x` →
 `{"paths": ["x"]}`). For CLI commands, an omitted pane uses
 `$LUVUS_PANE_ID` when available; a raw API request with no pane uses the
 currently focused pane.
+
+The `terminal.backend.*` family is a versioned automation contract and does not
+inherit the focused pane. It requires explicit runtime identity and stricter
+framing, limits, and failure evidence. See the
+[Terminal Backend Protocol](/docs/reference/terminal-backend/) reference.
+
+## Runtime snapshots and agent authority
+
+`runtime.capabilities` negotiates the app-level automation surface and its
+limits. `session.snapshot` returns every workspace, tab, terminal pane, native
+view, stable terminal identity, root process, and agent state in one response.
+It includes the current event sequence, so a consumer can subscribe first and
+reconcile later events without a snapshot race. Neither method reads terminal
+text or starts a process.
+
+`pane.processes` returns the already-cached executable names from Luvus's shared
+off-loop process scan. Full argument vectors are never exposed because they can
+contain prompts, credentials, or tokens. `scan:"unavailable"` is uncertainty,
+not proof that the pane has no children.
+
+Agent state has two paths. The built-in and manifest-driven detector remains the
+default. `agent.explain` makes its identity source, state evidence, rule region,
+priority, confidence, and active integration authority explicit. A new agent
+integration can instead publish a leased authoritative state:
+
+```json
+→ {"id":"r1","method":"agent.report","params":{"pane":"7","source":"fx/plugin","agent":"fx","status":"blocked","message":"approval required","sequence":12,"ttl_s":300}}
+← {"id":"r1","result":{"type":"agent_report","pane":"7","agent":"fx","status":"blocked","source":"fx/plugin","sequence":12,"ttl_s":300}}
+```
+
+One source owns a pane at a time. Its sequence must increase, another source is
+rejected with `authority_conflict`, and the lease expires automatically. The
+owner renews with another report or calls `agent.release`. This lets unfamiliar
+agents integrate immediately without weakening process-based fallback detection
+or leaving stale state after an adapter crashes.
+
+The normative runtime schemas and fixtures live under `protocol/runtime/v1` and
+are embedded in packaged binaries. Print that exact installed contract with
+`luvus api runtime-schema`.
+
+`agent.wait` takes `{pane, status, timeout_s?}` and parks on the server. The
+initial comparison and registration are atomic on the app loop, so it has no
+subscribe-then-check race and performs no polling. The existing
+`luvus wait agent-status` command uses this method and falls back only when it
+talks to an older server.
 
 ## Search
 
@@ -495,13 +547,16 @@ luvus ui notification clear --dedupe-key ci-main
 ## The event stream
 
 `events.subscribe` turns the connection into a stream: after one
-acknowledgment line, every event arrives as a JSON line. `luvus events` is
-exactly this.
+acknowledgment line, every event arrives as a sequenced JSON line. Subscriber
+queues are bounded, so a client that cannot keep up is disconnected instead of
+growing server memory. The acknowledgment declares
+`loss_behavior: resync_required_then_close`; overflow attempts one resync event
+before EOF. `luvus events` is exactly this.
 
 ```json
-{"event":"pane.agent_status_changed","pane":"4","status":"blocked","agent":"claude","cwd":"/Users/you/code/app","project":"app"}
-{"event":"task.gate_passed","task":"t1"}
-{"event":"lease.acquired","lease":"L2","task":"t3"}
+{"event":"pane.agent_status_changed","sequence":41,"data":{"pane":"4","status":"blocked","agent":"claude"}}
+{"event":"task.gate_passed","sequence":42,"data":{"task":"t1"}}
+{"event":"lease.acquired","sequence":43,"data":{"lease":"L2","task":"t3"}}
 ```
 
 Event names: `pane.created` · `pane.closed` · `pane.forked` · `pane.moved` · `pane.agent_status_changed` ·
@@ -513,13 +568,19 @@ still spell these `node.created` / `node.closed`) · `tab.created` · `tab.close
 `task.merge_conflict` · `task.released` · `lease.acquired` ·
 `lease.released`.
 
+`terminal.backend.events.subscribe` uses the same stream framing but filters to
+`terminal.*` events. Its acknowledgment includes the current sequence and queue
+capacity. See the terminal backend reference for subscribe-first snapshot
+reconciliation.
+
 ## Practical notes
 
 - **Prefer the CLI** in scripts (`luvus --verbose`-free, stable JSON to
   stdout). Talk raw JSON only when embedding Luvus into another local client
   or integration.
-- The socket is **owner-only** (`0600`, in a `0700` dir). Access equals
-  command execution as your user. See the
+- The endpoint is **owner-only**. Unix uses a `0600` socket in a `0700`
+  directory. Windows uses a local-only named pipe with an owner/System DACL and
+  same-user server validation. Access equals command execution as your user. See the
   [security model](/docs/explanation/security/).
 - `ping` returns the server's version and selected session name, useful for
   health checks, upgrade detection, and routing verification.

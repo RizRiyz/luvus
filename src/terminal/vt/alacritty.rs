@@ -13,6 +13,8 @@ use alacritty_terminal::vte::ansi::{Color as VtColor, Processor};
 use ratatui::style::{Color, Modifier};
 
 use super::{CodexComposerRegion, Cursor, HistoryMetrics, RenderCell, VtEngine};
+use crate::terminal::backend::{CaptureMode, CaptureResult};
+use crate::terminal::pty::InputAction;
 
 type TitleSlot = Arc<Mutex<Option<String>>>;
 
@@ -21,7 +23,7 @@ type TitleSlot = Arc<Mutex<Option<String>>>;
 /// Also captures the window title (OSC 0/2) for agent detection.
 #[derive(Clone)]
 pub struct EventProxy {
-    tx: Sender<Vec<u8>>,
+    tx: Sender<InputAction>,
     title: TitleSlot,
 }
 
@@ -29,7 +31,7 @@ impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         match event {
             Event::PtyWrite(text) => {
-                let _ = self.tx.send(text.into_bytes());
+                let _ = self.tx.send(InputAction::Bytes(text.into_bytes()));
             }
             Event::Title(t) => {
                 if let Ok(mut g) = self.title.lock() {
@@ -77,7 +79,7 @@ impl AlacrittyEngine {
     pub fn new(
         cols: u16,
         rows: u16,
-        resp_tx: Sender<Vec<u8>>,
+        resp_tx: Sender<InputAction>,
         history_budget_bytes: usize,
     ) -> Self {
         let dims = Dims {
@@ -145,6 +147,125 @@ impl AlacrittyEngine {
         output.truncate(trimmed);
         true
     }
+
+    fn retained_row_wraps(&self, index: usize) -> bool {
+        let Ok(index) = i32::try_from(index) else {
+            return false;
+        };
+        let grid = self.term.grid();
+        let line = grid.topmost_line().0.saturating_add(index);
+        if line > grid.bottommost_line().0 || grid.columns() == 0 {
+            return false;
+        }
+        grid[Line(line)][Column(grid.columns() - 1)]
+            .flags
+            .contains(Flags::WRAPLINE)
+    }
+
+    fn retained_line(&self, index: usize) -> Option<Line> {
+        let index = i32::try_from(index).ok()?;
+        let grid = self.term.grid();
+        let line = grid.topmost_line().0.saturating_add(index);
+        (line <= grid.bottommost_line().0).then_some(Line(line))
+    }
+
+    fn append_plain_grid_row(&self, line: Line, output: &mut String, max_bytes: usize) -> bool {
+        let grid = self.term.grid();
+        let row = &grid[line];
+        let last = (0..grid.columns())
+            .rfind(|column| {
+                let cell = &row[Column(*column)];
+                !cell.flags.contains(Flags::WIDE_CHAR_SPACER) && cell.c != '\0' && cell.c != ' '
+            })
+            .map_or(0, |column| column + 1);
+        let mut encoded = [0_u8; 4];
+        for column in 0..last {
+            let cell = &row[Column(column)];
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let character = if cell.c == '\0' { ' ' } else { cell.c };
+            if (!character.is_control() || character == '\t')
+                && !append_utf8_bounded(output, character.encode_utf8(&mut encoded), max_bytes)
+            {
+                return false;
+            }
+            if let Some(zerowidth) = cell.zerowidth() {
+                for character in zerowidth.iter().copied().filter(|c| !c.is_control()) {
+                    if !append_utf8_bounded(output, character.encode_utf8(&mut encoded), max_bytes)
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    fn append_ansi_grid_row(&self, line: Line, output: &mut String, max_bytes: usize) -> bool {
+        let grid = self.term.grid();
+        let row = &grid[line];
+        let last = (0..grid.columns())
+            .rfind(|column| {
+                let cell = &row[Column(*column)];
+                !cell.flags.contains(Flags::WIDE_CHAR_SPACER) && cell.c != '\0' && cell.c != ' '
+            })
+            .map_or(0, |column| column + 1);
+        let mut style = (Color::Reset, Color::Reset, Modifier::empty());
+        // Always reserve room to reset a style we emit.
+        let content_limit = max_bytes.saturating_sub(4);
+        for column in 0..last {
+            let cell = &row[Column(column)];
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let character = if cell.c == '\0' { ' ' } else { cell.c };
+            if character.is_control() && character != '\t' {
+                continue;
+            }
+            let next_style = (
+                map_color(cell.fg),
+                map_color(cell.bg),
+                map_flags(cell.flags),
+            );
+            let style_code =
+                (next_style != style).then(|| sgr(next_style.0, next_style.1, next_style.2));
+            let mut symbol = character.to_string();
+            if let Some(zerowidth) = cell.zerowidth() {
+                symbol.extend(zerowidth.iter().copied().filter(|c| !c.is_control()));
+            }
+            let needed = style_code.as_ref().map_or(0, String::len) + symbol.len();
+            if output.len().saturating_add(needed) > content_limit {
+                if style != (Color::Reset, Color::Reset, Modifier::empty()) {
+                    output.push_str("\x1b[0m");
+                }
+                return false;
+            }
+            if let Some(code) = style_code {
+                output.push_str(&code);
+                style = next_style;
+            }
+            output.push_str(&symbol);
+        }
+        if style != (Color::Reset, Color::Reset, Modifier::empty()) {
+            output.push_str("\x1b[0m");
+        }
+        true
+    }
+}
+
+fn append_utf8_bounded(output: &mut String, text: &str, max_bytes: usize) -> bool {
+    if output.len().saturating_add(text.len()) <= max_bytes {
+        output.push_str(text);
+        return true;
+    }
+    let remaining = max_bytes.saturating_sub(output.len());
+    let mut end = remaining.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    output.push_str(&text[..end]);
+    false
 }
 
 /// Conservative upper estimate for a retained terminal row. It includes more
@@ -343,6 +464,136 @@ impl VtEngine for AlacrittyEngine {
             lines[r as usize].push(if c == '\0' { ' ' } else { c });
         }
         lines
+    }
+
+    fn backend_capture(
+        &self,
+        mode: CaptureMode,
+        lines: usize,
+        ansi: bool,
+        max_bytes: usize,
+    ) -> CaptureResult {
+        let lines = lines.max(1);
+        if mode == CaptureMode::Detection {
+            let grid = self.term.grid();
+            let rows = grid.screen_lines();
+            let start = rows.saturating_sub(lines);
+            let mut text = String::new();
+            let mut count = 0;
+            let mut complete = true;
+            for row in start..rows {
+                if count > 0 && !append_utf8_bounded(&mut text, "\n", max_bytes) {
+                    complete = false;
+                    break;
+                }
+                count += 1;
+                if !self.append_plain_grid_row(Line(row as i32), &mut text, max_bytes) {
+                    complete = false;
+                    break;
+                }
+            }
+            return CaptureResult {
+                text,
+                lines: count,
+                truncated: !complete,
+            };
+        }
+
+        let grid = self.term.grid();
+        let mut output = String::new();
+        let mut returned = 0;
+        let mut truncated = false;
+        match mode {
+            CaptureMode::Visible => {
+                let rows = grid.screen_lines();
+                let start = rows.saturating_sub(lines);
+                for row in start..rows {
+                    if returned > 0 && !append_utf8_bounded(&mut output, "\n", max_bytes) {
+                        truncated = true;
+                        break;
+                    }
+                    let complete = if ansi {
+                        self.append_ansi_grid_row(Line(row as i32), &mut output, max_bytes)
+                    } else {
+                        self.append_plain_grid_row(Line(row as i32), &mut output, max_bytes)
+                    };
+                    returned += 1;
+                    if !complete {
+                        truncated = true;
+                        break;
+                    }
+                }
+            }
+            CaptureMode::RecentUnwrapped => {
+                let count = self.retained_row_count();
+                let mut logical: Vec<Vec<usize>> = Vec::new();
+                let mut current = Vec::new();
+                let mut row = String::new();
+                let mut inspected_bytes = 0usize;
+                let max_inspected_rows = max_bytes
+                    .saturating_div(std::mem::size_of::<usize>().max(1))
+                    .max(1);
+                let mut inspected_rows = 0usize;
+                for index in (0..count).rev() {
+                    let Some(line) = self.retained_line(index) else {
+                        continue;
+                    };
+                    row.clear();
+                    let remaining = max_bytes.saturating_sub(inspected_bytes);
+                    let complete = self.append_plain_grid_row(line, &mut row, remaining);
+                    if !complete || inspected_rows >= max_inspected_rows {
+                        truncated = true;
+                        if current.is_empty() {
+                            current.push(index);
+                        }
+                        logical.push(std::mem::take(&mut current));
+                        break;
+                    }
+                    inspected_rows += 1;
+                    inspected_bytes = inspected_bytes.saturating_add(row.len());
+                    current.push(index);
+                    if index == 0 || !self.retained_row_wraps(index - 1) {
+                        logical.push(std::mem::take(&mut current));
+                        if logical.len() >= lines {
+                            break;
+                        }
+                    }
+                }
+                logical.reverse();
+                for mut physical_rows in logical {
+                    if returned > 0 && !append_utf8_bounded(&mut output, "\n", max_bytes) {
+                        truncated = true;
+                        break;
+                    }
+                    physical_rows.reverse();
+                    let mut complete = true;
+                    for index in physical_rows {
+                        let Some(line) = self.retained_line(index) else {
+                            continue;
+                        };
+                        complete = if ansi {
+                            self.append_ansi_grid_row(line, &mut output, max_bytes)
+                        } else {
+                            self.append_plain_grid_row(line, &mut output, max_bytes)
+                        };
+                        if !complete {
+                            break;
+                        }
+                    }
+                    returned += 1;
+                    if !complete {
+                        truncated = true;
+                        break;
+                    }
+                }
+            }
+            CaptureMode::Detection => unreachable!(),
+        }
+        CaptureResult {
+            text: output,
+            lines: returned,
+            truncated,
+        }
     }
 
     fn title(&self) -> Option<String> {
@@ -953,5 +1204,37 @@ mod tests {
         // not be restyled as the active composer.
         e.advance(b"\x1b[1;1Htranscript\x1b[2;1H");
         assert_eq!(e.codex_composer_region(), None);
+    }
+
+    #[test]
+    fn backend_capture_is_bounded_and_never_replays_unsafe_controls() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(30, 4, tx, budget_for_rows(30, 200));
+        engine.advance(b"\x1b[31mred\x1b[0m\r\n\x1b]52;c;SECRET\x1b\\safe\r\n");
+
+        let ansi = engine.backend_capture(CaptureMode::Visible, 4, true, 512);
+        assert!(ansi.text.contains("\x1b["), "safe SGR styling is retained");
+        assert!(!ansi.text.contains("\x1b]"), "OSC is never replayed");
+        assert!(
+            !ansi.text.contains("SECRET"),
+            "OSC payload is not terminal text"
+        );
+        assert!(ansi.text.contains("safe"));
+
+        let bounded = engine.backend_capture(CaptureMode::Visible, 4, false, 5);
+        assert!(bounded.text.len() <= 5);
+        assert!(bounded.truncated);
+        assert!(std::str::from_utf8(bounded.text.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn recent_capture_joins_soft_wrapped_rows() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(5, 3, tx, budget_for_rows(5, 200));
+        engine.advance(b"abcdefghij\r\nnext\r\n");
+        let capture = engine.backend_capture(CaptureMode::RecentUnwrapped, 3, false, 512);
+        assert!(capture.text.contains("abcdefghij"), "{:?}", capture.text);
+        assert!(capture.text.contains("next"), "{:?}", capture.text);
+        assert!(capture.lines <= 3);
     }
 }

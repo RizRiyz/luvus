@@ -28,6 +28,13 @@ pub struct SessionInfo {
     pub running: bool,
     pub socket_path: String,
     pub session_dir: String,
+    pub endpoint: SessionEndpoint,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SessionEndpoint {
+    pub transport: &'static str,
+    pub address: String,
 }
 
 /// Resolve `session attach` and global `--session` flags before normal routing.
@@ -215,7 +222,13 @@ fn socket_alias_path(logical: PathBuf, namespace: &str, role: &str) -> PathBuf {
             hash = hash.wrapping_mul(0x100000001b3);
         }
         let uid = unsafe { libc::geteuid() };
-        return PathBuf::from(format!("/tmp/{namespace}-{uid}/{hash:016x}-{role}.sock"));
+        #[cfg(target_os = "macos")]
+        let temporary_root = "/private/tmp";
+        #[cfg(not(target_os = "macos"))]
+        let temporary_root = "/tmp";
+        return PathBuf::from(format!(
+            "{temporary_root}/{namespace}-{uid}/{hash:016x}-{role}.sock"
+        ));
     }
     logical
 }
@@ -234,6 +247,13 @@ pub fn session_info(name: Option<&str>) -> SessionInfo {
         running: is_running_at(&socket_path) || is_running_at(&client_socket_path),
         socket_path: socket_path.display().to_string(),
         session_dir: session_dir_for(name).display().to_string(),
+        endpoint: SessionEndpoint {
+            #[cfg(unix)]
+            transport: "unix_socket",
+            #[cfg(windows)]
+            transport: "windows_named_pipe",
+            address: crate::ipc::transport::discovery_address(&socket_path),
+        },
     }
 }
 
@@ -317,9 +337,9 @@ pub fn delete_session(name: &str) -> Result<SessionInfo, String> {
     if dir.parent() != Some(sessions_root.as_path()) {
         return Err("refusing to delete a path outside the sessions directory".to_string());
     }
-    // Long Unix paths use short aliases in /tmp. A stopped session may leave
-    // stale socket files after a crash, so remove only its deterministic aliases
-    // before deleting the validated session directory.
+    // Long Unix paths use short aliases in the native sticky temporary root. A
+    // stopped session may leave stale socket files after a crash, so remove only
+    // its deterministic aliases before deleting the validated session directory.
     #[cfg(unix)]
     for socket in [
         api_socket_path_for(Some(name)),
@@ -430,6 +450,9 @@ mod tests {
         let alpha_api = api_socket_path_for(Some("alpha"));
         let alpha_client = client_socket_path_for(Some("alpha"));
         let beta_api = api_socket_path_for(Some("beta"));
+        #[cfg(target_os = "macos")]
+        assert!(alpha_api.starts_with("/private/tmp"));
+        #[cfg(not(target_os = "macos"))]
         assert!(alpha_api.starts_with("/tmp"));
         assert!(alpha_api.as_os_str().len() < 100);
         assert_ne!(alpha_api, alpha_client);

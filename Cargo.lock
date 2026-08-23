@@ -842,6 +842,7 @@ dependencies = [
  "crossterm",
  "ed25519-dalek",
  "fs2",
+ "getrandom 0.3.4",
  "interprocess",
  "libc",
  "luvus-alacritty-terminal",
@@ -854,6 +855,8 @@ dependencies = [
  "toml",
  "toml_edit",
  "unicode-width",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

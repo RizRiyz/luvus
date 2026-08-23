@@ -1,0 +1,12 @@
+{"id":"duplicate","id":"again","method":"runtime.capabilities","params":{}}
+{"id":"extra","method":"runtime.capabilities","params":{},"extra":true}
+{"id":"unknown","method":"runtime.unknown","params":{}}
+{"id":"params","method":"runtime.capabilities","params":{"extra":true}}
+{"id":"pane","method":"pane.processes","params":{"pane":"0"}}
+{"id":"target","method":"agent.explain","params":{"target":"fx","pane":"7"}}
+{"id":"source","method":"agent.report","params":{"pane":"7","source":"bad source","agent":"fx","status":"working"}}
+{"id":"agent","method":"agent.report","params":{"pane":"7","source":"fx/plugin","agent":"FX","status":"working"}}
+{"id":"status","method":"agent.report","params":{"pane":"7","source":"fx/plugin","agent":"fx","status":"sleeping"}}
+{"id":"ttl","method":"agent.report","params":{"pane":"7","source":"fx/plugin","agent":"fx","status":"working","ttl_s":0}}
+{"id":"release","method":"agent.release","params":{"pane":"7"}}
+{"id":"wait","method":"agent.wait","params":{"pane":"7","status":"working","timeout_s":3601}}

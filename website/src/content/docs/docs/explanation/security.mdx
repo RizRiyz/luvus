@@ -1,16 +1,18 @@
 ---
 title: Security Model
-description: What luvus trusts, what it doesn't, and how the socket, modules, and hooks are protected.
+description: What luvus trusts, what it doesn't, and how local IPC, modules, and hooks are protected.
 ---
 
 luvus is a **single-user, local-trust** tool, like your shell. The boundary
 that matters is your OS user account.
 
-## The control socket
+## The local control endpoint
 
-The sockets in `~/.luvus/` can spawn commands as you, so they're protected the
-way tmux protects its socket: the state directory is forced to mode **0700**
-and each socket to **0600** at every start, never left to the umask.
+The control endpoint can spawn commands as you. On macOS and Linux, the state
+directory is forced to mode **0700** and each Unix socket to **0600** at every
+start, never left to the umask. On Windows, Luvus uses a local named pipe that
+rejects remote clients, grants access only to its owner and LocalSystem, and
+verifies that a connected server process belongs to the current Windows user.
 
 ## What runs commands, and when
 
@@ -48,7 +50,7 @@ The global finder is local and read-only until you activate a result. File
 indexing reads names and paths, not file contents, skips `.git`, and does not
 follow directory symlinks. Retained-output matching uses bounded pane history
 already owned by Luvus. Running named sessions answer bounded queries over
-their owner-only control sockets. Queries and result catalogs are not persisted
+their owner-only control endpoints. Queries and result catalogs are not persisted
 and opening the finder never starts a stopped session.
 
 ## Remote

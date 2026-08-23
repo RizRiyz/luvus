@@ -1,0 +1,6 @@
+{"id":"","method":"terminal.backend.inventory","params":{}}
+{"id":"unknown-1","method":"terminal.backend.inventory","params":{"extra":true}}
+{"id":"key-1","method":"terminal.backend.send_key","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","key":"raw-bytes"}}
+{"id":"capture-1","method":"terminal.backend.capture","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","mode":"detection","lines":301,"ansi":true}}
+{"id":"create-1","method":"terminal.backend.create","params":{"cwd":"relative/path","placement":{"kind":"workspace"},"focus":false}}
+{"id":"dup-1","method":"terminal.backend.inventory","method":"terminal.backend.close","params":{}}

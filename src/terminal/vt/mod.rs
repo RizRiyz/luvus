@@ -86,6 +86,17 @@ pub trait VtEngine: Send {
     /// untrimmed) — used to copy a mouse text selection.
     fn visible_rows(&self) -> Vec<String>;
 
+    /// Bounded public capture for harnesses. Implementations serialize only
+    /// normalized grid text and SGR styles; raw child control sequences never
+    /// cross this boundary.
+    fn backend_capture(
+        &self,
+        mode: crate::terminal::backend::CaptureMode,
+        lines: usize,
+        ansi: bool,
+        max_bytes: usize,
+    ) -> crate::terminal::backend::CaptureResult;
+
     /// Latest window title set by the child via OSC 0/2, if any.
     fn title(&self) -> Option<String>;
 

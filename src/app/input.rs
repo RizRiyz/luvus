@@ -157,6 +157,21 @@ fn extract_rows_selection(
 
 impl App {
     fn handle_api_request(&mut self, req: crate::ipc::api::ApiRequest) -> bool {
+        if req.method == "terminal.backend.create" {
+            self.start_backend_create(req);
+            return true;
+        }
+        if req.method == "terminal.backend.capture" {
+            self.start_backend_capture(req);
+            return true;
+        }
+        if matches!(
+            req.method.as_str(),
+            "terminal.backend.wait_change" | "terminal.backend.wait_output"
+        ) {
+            self.start_backend_wait(req);
+            return true;
+        }
         if req.method == "search.query" {
             self.start_search_api(req);
             return true;
@@ -207,6 +222,25 @@ impl App {
         // off-loop. Apply its completed registry before the empty-workspace guard
         // so the single writer always observes the result.
         let ev = match ev {
+            AppEvent::BackendCreateReady {
+                id,
+                reply,
+                pane_id,
+                cwd,
+                branch,
+                worktree,
+                commit,
+                result,
+            } => {
+                self.finish_backend_create(
+                    id, reply, pane_id, cwd, branch, worktree, commit, result,
+                );
+                return true;
+            }
+            AppEvent::PtyReady(id) => {
+                self.register_backend_terminal(id);
+                return true;
+            }
             AppEvent::ThemeUninstalled { id, result } => {
                 self.finish_theme_uninstall(id, result);
                 return true;
@@ -255,6 +289,21 @@ impl App {
                     reply,
                 } => return self.handle_theme_reloaded(id, registry, reply),
                 AppEvent::Api(req) => {
+                    if req.method == "terminal.backend.create" {
+                        self.start_backend_create(req);
+                        return true;
+                    }
+                    if req.method == "terminal.backend.capture" {
+                        self.start_backend_capture(req);
+                        return true;
+                    }
+                    if matches!(
+                        req.method.as_str(),
+                        "terminal.backend.wait_change" | "terminal.backend.wait_output"
+                    ) {
+                        self.start_backend_wait(req);
+                        return true;
+                    }
                     if req.method == "search.query" {
                         self.start_search_api(req);
                         return true;
@@ -269,6 +318,15 @@ impl App {
                     return true;
                 }
                 AppEvent::WaitOutput { id, reply, .. } => {
+                    let _ = reply.send(
+                        json!({ "id": id, "error": {
+                            "code": "no_session", "message": "no active session"
+                        }})
+                        .to_string(),
+                    );
+                    return true;
+                }
+                AppEvent::AgentWait { id, reply, .. } => {
                     let _ = reply.send(
                         json!({ "id": id, "error": {
                             "code": "no_session", "message": "no active session"
@@ -327,9 +385,11 @@ impl App {
                 // A parked `wait.output` for this pane just got new output to
                 // test against — resolve it on the same wake (docs/81).
                 self.check_output_waits(id);
+                self.backend_output_changed(id);
                 true // the pane's screen advanced
             }
             AppEvent::PtyExit(id) => {
+                self.emit_backend_terminal_event(id, "terminal.exited", json!({}));
                 self.close_pane(id);
                 true
             }
@@ -362,6 +422,36 @@ impl App {
                                 "code": "not_found", "message": "pane not found"
                             }})
                             .to_string(),
+                        );
+                    }
+                }
+                true
+            }
+            AppEvent::AgentWait {
+                id: request_id,
+                pane,
+                state,
+                reply,
+                timeout,
+            } => {
+                let params = json!({"pane":pane});
+                match (
+                    self.resolve_pane(&params),
+                    crate::app::dispatch::parse_agent_wait_state(&state),
+                ) {
+                    (Some(id), Some(state)) => {
+                        self.register_agent_wait(id, request_id, state, reply, timeout);
+                    }
+                    (None, _) => {
+                        let _ = reply.send(
+                            json!({"id":request_id,"error":{"code":"not_found","message":"pane not found"}})
+                                .to_string(),
+                        );
+                    }
+                    (_, None) => {
+                        let _ = reply.send(
+                            json!({"id":request_id,"error":{"code":"invalid_request","message":"status must be idle, working, blocked, or done"}})
+                                .to_string(),
                         );
                     }
                 }
@@ -480,6 +570,8 @@ impl App {
             | AppEvent::ClientInput { .. } => false,
             // Consumed by the pre-dispatch worker-result branch above.
             AppEvent::ThemeUninstalled { .. }
+            | AppEvent::BackendCreateReady { .. }
+            | AppEvent::PtyReady(_)
             | AppEvent::SearchFilesIndexed { .. }
             | AppEvent::SearchResults { .. }
             | AppEvent::SearchFederatedResults { .. }

@@ -29,6 +29,13 @@ jobs:
       # RUSTFLAGS, which would also fail on harmless dependency warnings.
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --locked
+      - name: Validate terminal backend contract
+        run: |
+          python3 examples/terminal-backend/consumer.py --fixtures
+          python3 examples/terminal-backend/mock_conformance.py
+          python3 examples/runtime-api/consumer.py
+          cargo build --locked
+          python3 examples/terminal-backend/live_conformance.py --luvus target/debug/luvus
       - name: Test terminal support crates
         run: |
           cargo test --manifest-path vendor/vte/Cargo.toml --lib
@@ -54,15 +61,43 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
+      - name: Validate terminal backend contract
+        run: |
+          python3 examples/terminal-backend/consumer.py --fixtures
+          python3 examples/terminal-backend/mock_conformance.py
+          python3 examples/runtime-api/consumer.py
+          cargo build --locked
+          python3 examples/terminal-backend/live_conformance.py --luvus target/debug/luvus
 
   windows:
-    name: windows build
+    name: windows protocol · ConPTY
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --locked
+      - run: cargo fmt --package luvus --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - name: Test Windows protocol boundaries
+        shell: pwsh
+        run: |
+          cargo test --locked platform::windows::tests
+          cargo test --locked ipc::transport::windows_
+          cargo test --locked app::backend::tests
+          cargo test --locked terminal::backend::tests
+      - name: Validate published protocol fixtures
+        run: |
+          python examples/terminal-backend/consumer.py --fixtures
+          python examples/terminal-backend/mock_conformance.py
+          python examples/runtime-api/consumer.py
+      - name: Validate named pipes and ConPTY live
+        shell: pwsh
+        run: |
+          cargo build --locked
+          .\examples\terminal-backend\live_conformance.ps1 `
+            -Luvus .\target\debug\luvus.exe
 
   # Known-vulnerability scan of the dependency tree (RustSec advisory DB).
   audit:

@@ -439,10 +439,9 @@ impl App {
     /// passed to hooks as `LUVUS_MODULE_EVENT_JSON`.
     pub fn emit_event(&mut self, name: &str, data: serde_json::Value) {
         let event_json = data.to_string();
-        api::publish(
-            &self.events,
-            json!({ "event": name, "data": data }).to_string(),
-        );
+        let backend_data = data.clone();
+        api::publish_event(&self.events, name, data);
+        self.emit_backend_lifecycle_from_pane_event(name, &backend_data);
         let mut targets: Vec<(String, Vec<String>)> = Vec::new();
         for m in &self.modules.modules {
             if !m.is_runnable() {

@@ -1,0 +1,8 @@
+{"id":"cap","method":"runtime.capabilities","params":{}}
+{"id":"snapshot","method":"session.snapshot","params":{}}
+{"id":"process","method":"pane.processes","params":{"pane":"7"}}
+{"id":"explain","method":"agent.explain","params":{"target":"review"}}
+{"id":"report","method":"agent.report","params":{"pane":"7","source":"fx/plugin","agent":"fx","status":"working","sequence":4,"ttl_s":300}}
+{"id":"release","method":"agent.release","params":{"pane":"7","source":"fx/plugin"}}
+{"id":"wait","method":"agent.wait","params":{"pane":"7","status":"blocked","timeout_s":30}}
+{"id":"events","method":"events.subscribe","params":{}}

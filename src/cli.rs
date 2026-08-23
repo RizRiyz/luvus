@@ -22,6 +22,7 @@ pub fn is_cli(args: &[String]) -> bool {
                 | "bar"
                 | "ui"
                 | "events"
+                | "api"
                 | "module"
                 | "theme"
                 | "git"
@@ -72,6 +73,7 @@ Commands:
   wait         Wait for pane output or an agent state
   search       Search across pane scrollback
   events       Stream live status changes
+  api          Inspect the automation protocol and live capabilities
   attach       Open the TUI focused on one pane
   doctor       Check optional external tools
   update       Check for and install a newer Luvus release
@@ -139,6 +141,7 @@ panes / agents:
   pane send [<id>] <text>    send raw text to a pane
   pane read [<id>]           print a pane's recent output
   pane status [<id>]         print a pane's agent status and history metrics (any workspace)
+  pane processes [<id>]      list cached executable identities without exposing arguments
   pane name <name>           name a pane so you can mention it (--pane <id>; --clear)
   pane close [<id>]          close a pane
   agent list                 list every agent across all workspaces/tabs
@@ -152,6 +155,10 @@ panes / agents:
   agent keys <target> <key>...   send control keys (enter, esc, ctrl+c, up, …)
   agent read <target> [--lines N] [--source visible|recent]   print an agent's output
   agent get <target>         one agent's live info (pane, name, kind, status, cwd)
+  agent explain <target>     show identity/state evidence and active authority
+  agent report [<pane>] --source <id> --kind <agent> --status <state>
+                             publish a leased authoritative state (integration API)
+  agent release [<pane>] --source <id>   release that integration authority
   agent sessions             list resumable sessions found on disk
   agent resume <id>          reopen a resumable session into a pane
   skill status [<agent>]      show enabled state, release, path, and integrity
@@ -274,6 +281,16 @@ orchestration (multiple agents on one project, docs/22):
 events:
   events                     stream live status changes
 
+api:
+  api schema                 print the installed terminal-backend JSON Schema bundle
+  api runtime-schema         print the installed app-runtime JSON Schema bundle
+  api capabilities           negotiate and print live backend capabilities
+  api snapshot               print a sequence-fenced terminal inventory
+  api events                 stream sequenced terminal lifecycle events
+  api runtime                print runtime API capabilities and limits
+  api session                print a global sequence-fenced session snapshot
+  api proxy                  forward one JSON request from stdin to the local server
+
 sessions:
   session list [--json]      list default and named server sessions
   session attach <name>      start or attach the named session
@@ -334,6 +351,38 @@ pub fn run(args: &[String]) -> Result<i32> {
     if args.get(1).map(String::as_str) == Some("theme") {
         return theme_cmd(&args[2.min(args.len())..]);
     }
+    if args.get(1).map(String::as_str) == Some("api")
+        && args.get(2).map(String::as_str) == Some("schema")
+    {
+        if args.len() != 3 {
+            return Err(anyhow!("usage: luvus api schema"));
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&crate::terminal::backend::schema_bundle())?
+        );
+        return Ok(0);
+    }
+    if args.get(1).map(String::as_str) == Some("api")
+        && args.get(2).map(String::as_str) == Some("runtime-schema")
+    {
+        if args.len() != 3 {
+            return Err(anyhow!("usage: luvus api runtime-schema"));
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&crate::runtime_api::schema_bundle())?
+        );
+        return Ok(0);
+    }
+    if args.get(1).map(String::as_str) == Some("api")
+        && args.get(2).map(String::as_str) == Some("proxy")
+    {
+        if args.len() != 3 {
+            return Err(anyhow!("usage: luvus api proxy"));
+        }
+        return api_proxy();
+    }
     // Explicit update requests are local and never require a running server.
     if args.get(1).map(String::as_str) == Some("update") {
         return crate::update::run_cli(&args[2.min(args.len())..]);
@@ -381,7 +430,10 @@ pub fn run(args: &[String]) -> Result<i32> {
     writeln!(stream, "{req}")?;
 
     let mut reader = BufReader::new(stream);
-    if method == "events.subscribe" {
+    if matches!(
+        method.as_str(),
+        "events.subscribe" | "terminal.backend.events.subscribe"
+    ) {
         // Stream events until the connection closes.
         for line in reader.lines() {
             match line {
@@ -392,8 +444,7 @@ pub fn run(args: &[String]) -> Result<i32> {
         return Ok(0);
     }
 
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
+    let line = crate::ipc::api::read_response_frame(&mut reader)?;
     let line = line.trim();
     // Pretty-print and set exit code on error.
     match serde_json::from_str::<Value>(line) {
@@ -470,6 +521,7 @@ fn help_topic_has_subcommands(topic: &str) -> bool {
             | "integration"
             | "skill"
             | "wait"
+            | "api"
     )
 }
 
@@ -477,8 +529,8 @@ fn normalize_help_topic(topic: &str) -> Option<&str> {
     match topic {
         "workspace" | "tab" | "pane" | "agent" | "files" | "git" | "worktree" | "task"
         | "lease" | "module" | "theme" | "bar" | "ui" | "session" | "server" | "integration"
-        | "diff" | "skill" | "wait" | "search" | "events" | "ping" | "doctor" | "update"
-        | "attach" => Some(topic),
+        | "diff" | "skill" | "wait" | "search" | "events" | "api" | "ping" | "doctor"
+        | "update" | "attach" => Some(topic),
         "node" => Some("pane"),
         "remote" | "--remote" => Some("remote"),
         _ => None,
@@ -589,7 +641,11 @@ fn write_topic_help(
         ),
         "events" => (
             "luvus events",
-            detailed_section("events:\n", "\nsessions:\n"),
+            detailed_section("events:\n", "\napi:\n"),
+        ),
+        "api" => (
+            "luvus api <schema|runtime-schema|capabilities|snapshot|events|runtime|session|proxy>",
+            detailed_section("api:\n", "\nsessions:\n"),
         ),
         "remote" => (
             "luvus [--session <name>] --remote <host> [ssh args]",
@@ -1281,7 +1337,7 @@ fn keyboard_protocol_status() -> KeyProto {
     // regardless. Reporting on the protocol would wrongly say it isn't.
     #[cfg(windows)]
     {
-        return KeyProto::Supported;
+        KeyProto::Supported
     }
     #[cfg(not(windows))]
     {
@@ -1360,7 +1416,18 @@ fn parse_wait(args: &[String]) -> Result<WaitSpec> {
         .cloned()
         .or_else(|| std::env::var("LUVUS_PANE_ID").ok())
         .ok_or_else(|| anyhow!("wait needs a pane id (or $LUVUS_PANE_ID)"))?;
-    let timeout = flag(args, "--timeout").and_then(|s| s.parse::<f64>().ok());
+    let timeout = match flag(args, "--timeout") {
+        Some(raw) => {
+            let seconds = raw
+                .parse::<f64>()
+                .map_err(|_| anyhow!("--timeout must be a non-negative number of seconds"))?;
+            if std::time::Duration::try_from_secs_f64(seconds).is_err() || seconds > 3600.0 {
+                return Err(anyhow!("--timeout must be between 0 and 3600 seconds"));
+            }
+            Some(seconds)
+        }
+        None => None,
+    };
     let condition = match kind {
         "output" => WaitFor::Output {
             needle: flag(args, "--match").ok_or_else(|| {
@@ -1445,7 +1512,39 @@ fn wait_cmd(args: &[String]) -> Result<i32> {
             }
             Ok(2)
         }
-        WaitFor::AgentStatus { status } => wait_status_stream(&spec.pane, &status, deadline),
+        WaitFor::AgentStatus { status } => {
+            let mut params = json!({"pane":spec.pane, "status":status});
+            if let Some(timeout) = spec.timeout {
+                params["timeout_s"] = json!(timeout);
+            }
+            let response = send_request("agent.wait", params)?;
+            if response
+                .get("result")
+                .and_then(|result| result.get("matched"))
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                return Ok(0);
+            }
+            let unknown = response
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.starts_with("unknown method"));
+            if unknown {
+                return wait_status_stream(&spec.pane, &status, deadline);
+            }
+            if let Some(error) = response.get("error") {
+                eprintln!(
+                    "wait agent-status: {}",
+                    error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("agent.wait failed")
+                );
+            }
+            Ok(2)
+        }
     }
 }
 
@@ -1937,6 +2036,25 @@ pub(crate) fn send_request(method: &str, params: Value) -> Result<Value> {
     serde_json::from_str(line.trim()).map_err(|e| anyhow!("bad reply: {e}"))
 }
 
+/// Transport-neutral one-frame bridge for harnesses that cannot use Unix
+/// sockets or Windows named pipes directly. This is intentionally not a shell
+/// wrapper: it forwards one bounded protocol frame to the selected session and
+/// writes one bounded response. It composes over SSH as
+/// `ssh host luvus api proxy` without opening a network listener.
+fn api_proxy() -> Result<i32> {
+    let mut input = std::io::BufReader::new(std::io::stdin().lock());
+    let request = crate::ipc::api::read_response_frame(&mut input)
+        .map_err(|error| anyhow!("invalid request frame: {error}"))?;
+    let path = crate::persist::cli_socket_path();
+    let mut stream = crate::ipc::transport::connect(&path)
+        .map_err(|_| anyhow!("no luvus server running (socket: {})", path.display()))?;
+    writeln!(stream, "{request}")?;
+    let mut reader = BufReader::new(stream);
+    let response = crate::ipc::api::read_response_frame(&mut reader)?;
+    println!("{response}");
+    Ok(0)
+}
+
 /// Register an installed module by writing the registry file directly (used when
 /// no server is running).
 fn register_directly(installed: &crate::module::install::Installed) -> Result<()> {
@@ -2023,6 +2141,23 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
     Ok(match (noun, verb) {
         ("ping", _) => ("ping".into(), json!({})),
         ("events", _) => ("events.subscribe".into(), json!({})),
+        ("api", "capabilities") => (
+            "terminal.backend.capabilities".into(),
+            json!({"protocol":{
+                "name":crate::terminal::backend::PROTOCOL_NAME,
+                "major":crate::terminal::backend::PROTOCOL_MAJOR,
+                "minor":crate::terminal::backend::PROTOCOL_MINOR,
+            }}),
+        ),
+        ("api", "snapshot") => ("terminal.backend.snapshot".into(), json!({})),
+        ("api", "events") => ("terminal.backend.events.subscribe".into(), json!({})),
+        ("api", "runtime") => ("runtime.capabilities".into(), json!({})),
+        ("api", "session") => ("session.snapshot".into(), json!({})),
+        ("api", _) => {
+            return Err(anyhow!(
+                "usage: luvus api schema|runtime-schema|capabilities|snapshot|events|runtime|session|proxy"
+            ));
+        }
         // Exact scrollback search remains the default for script compatibility.
         // The universal finder is deliberately opt-in through `--fuzzy`.
         ("search", _) => {
@@ -2185,6 +2320,69 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         ("agent", "get") => {
             // `agent get <target>` — one agent's live info
             ("agent.get".into(), one("target", rest.first().cloned()))
+        }
+        ("agent", "explain") => ("agent.explain".into(), one("target", rest.first().cloned())),
+        ("agent", "report") => {
+            let usage = "usage: luvus agent report [<pane>] --source <id> --kind <agent> --status idle|working|blocked|done [--message <text>] [--session <id>] [--sequence N] [--ttl S]";
+            let mut obj = serde_json::Map::new();
+            let pane_id = rest
+                .first()
+                .filter(|value| value.parse::<u32>().is_ok())
+                .cloned()
+                .or_else(|| std::env::var("LUVUS_PANE_ID").ok())
+                .ok_or_else(|| anyhow!(usage))?;
+            obj.insert("pane".into(), json!(pane_id));
+            obj.insert(
+                "source".into(),
+                json!(flag(args, "--source").ok_or_else(|| anyhow!(usage))?),
+            );
+            obj.insert(
+                "agent".into(),
+                json!(flag(args, "--kind").ok_or_else(|| anyhow!(usage))?),
+            );
+            obj.insert(
+                "status".into(),
+                json!(flag(args, "--status").ok_or_else(|| anyhow!(usage))?),
+            );
+            if let Some(value) = flag(args, "--message") {
+                obj.insert("message".into(), json!(value));
+            }
+            if let Some(value) = flag(args, "--session") {
+                obj.insert("session_id".into(), json!(value));
+            }
+            if let Some(value) = flag(args, "--sequence") {
+                obj.insert(
+                    "sequence".into(),
+                    json!(value
+                        .parse::<u64>()
+                        .map_err(|_| anyhow!("--sequence must be a non-negative integer"))?),
+                );
+            }
+            if let Some(value) = flag(args, "--ttl") {
+                obj.insert(
+                    "ttl_s".into(),
+                    json!(value
+                        .parse::<u64>()
+                        .map_err(|_| anyhow!("--ttl must be whole seconds"))?),
+                );
+            }
+            ("agent.report".into(), Value::Object(obj))
+        }
+        ("agent", "release") => {
+            let usage = "usage: luvus agent release [<pane>] --source <id>";
+            let mut obj = serde_json::Map::new();
+            let pane_id = rest
+                .first()
+                .filter(|value| value.parse::<u32>().is_ok())
+                .cloned()
+                .or_else(|| std::env::var("LUVUS_PANE_ID").ok())
+                .ok_or_else(|| anyhow!(usage))?;
+            obj.insert("pane".into(), json!(pane_id));
+            obj.insert(
+                "source".into(),
+                json!(flag(args, "--source").ok_or_else(|| anyhow!(usage))?),
+            );
+            ("agent.release".into(), Value::Object(obj))
         }
         ("agent", "read") => {
             // `agent read <target> [--lines N] [--source visible|recent]`
@@ -2665,6 +2863,7 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         }
         ("pane", "read") => ("pane.read".into(), with_pane(serde_json::Map::new())),
         ("pane", "status") => ("pane.status".into(), with_pane(serde_json::Map::new())),
+        ("pane", "processes") => ("pane.processes".into(), with_pane(serde_json::Map::new())),
         ("pane", "close") => ("pane.close".into(), with_pane(serde_json::Map::new())),
         // `pane name <name>` is a synonym for `agent name`: it aliases the pane so
         // you can mention it by name. The name never doubles as a pane id.
@@ -3217,6 +3416,57 @@ mod tests {
             let args = argv(raw);
             assert_eq!(command_help_request(&args), None, "{raw}");
         }
+    }
+
+    #[test]
+    fn terminal_backend_api_commands_are_first_class_cli_routes() {
+        assert!(is_cli(&argv("luvus api schema")));
+        let (method, params) = parse(&argv("luvus api capabilities")).unwrap();
+        assert_eq!(method, "terminal.backend.capabilities");
+        assert_eq!(params["protocol"]["major"], 1);
+        assert_eq!(params["protocol"]["minor"], 0);
+        let (method, params) = parse(&argv("luvus api snapshot")).unwrap();
+        assert_eq!(method, "terminal.backend.snapshot");
+        assert_eq!(params, json!({}));
+        let (method, _) = parse(&argv("luvus api events")).unwrap();
+        assert_eq!(method, "terminal.backend.events.subscribe");
+        assert_eq!(
+            parse(&argv("luvus api runtime")).unwrap().0,
+            "runtime.capabilities"
+        );
+        assert_eq!(
+            parse(&argv("luvus api session")).unwrap().0,
+            "session.snapshot"
+        );
+    }
+
+    #[test]
+    fn agent_authority_and_process_commands_map_to_structured_api() {
+        let (method, params) = parse(&argv(
+            "luvus agent report 7 --source fx/plugin --kind fx --status working --message busy --sequence 4 --ttl 30",
+        ))
+        .unwrap();
+        assert_eq!(method, "agent.report");
+        assert_eq!(params["pane"], "7");
+        assert_eq!(params["source"], "fx/plugin");
+        assert_eq!(params["agent"], "fx");
+        assert_eq!(params["status"], "working");
+        assert_eq!(params["sequence"], 4);
+        assert_eq!(params["ttl_s"], 30);
+        assert_eq!(
+            parse(&argv("luvus agent explain 7")).unwrap().0,
+            "agent.explain"
+        );
+        assert_eq!(
+            parse(&argv("luvus agent release 7 --source fx/plugin"))
+                .unwrap()
+                .0,
+            "agent.release"
+        );
+        assert_eq!(
+            parse(&argv("luvus pane processes 7")).unwrap().0,
+            "pane.processes"
+        );
     }
 
     #[test]

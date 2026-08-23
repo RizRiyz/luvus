@@ -77,10 +77,26 @@ bincode = { version = "2", features = ["serde"] }
 interprocess = "2"
 # Cross-process startup lock so concurrent clients cannot orphan a live server.
 fs2 = "0.4"
+# Opaque server- and PTY-lifetime identifiers for the public terminal-backend
+# protocol. This calls the operating-system RNG directly; identifiers are not
+# derived from pane routes, PIDs, clocks, or process-global counters.
+getrandom = "0.3"
 
 # `libc` (setsid + macOS proc_pidinfo) is only needed on Unix.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Native Windows terminal-backend safety: owner verification for named-pipe
+# peers, PID-reuse-safe process creation timestamps, and one bounded ToolHelp
+# process snapshot for agent/runtime inspection.
+[target.'cfg(windows)'.dependencies]
+widestring = "1"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
+] }
 
 [profile.release]
 lto = "thin"

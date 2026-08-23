@@ -1,0 +1,11 @@
+[
+  {"name":"owned_state_socket","platform":"unix","absolute":true,"symlink":false,"state_owner":"self","state_mode":"0700","socket_owner":"self","socket_mode":"0600","expect":"accept"},
+  {"name":"symlink_component","platform":"unix","absolute":true,"symlink":true,"expect":"reject"},
+  {"name":"world_writable_parent","platform":"unix","absolute":true,"symlink":false,"parent_owner":"self","parent_mode":"0777","expect":"reject"},
+  {"name":"safe_long_alias","platform":"linux","address":"/tmp/luvus-1000/example-api.sock","tmp_owner":"root","tmp_mode":"01777","alias_owner":"self","alias_mode":"0700","socket_owner":"self","socket_mode":"0600","expect":"accept"},
+  {"name":"safe_long_alias_macos","platform":"macos","address":"/private/tmp/luvus-1000/example-api.sock","tmp_owner":"root","tmp_mode":"01777","alias_owner":"self","alias_mode":"0700","socket_owner":"self","socket_mode":"0600","expect":"accept"},
+  {"name":"unsafe_long_alias","platform":"unix","address":"/tmp/luvus-1000/example-api.sock","tmp_owner":"root","tmp_mode":"01777","alias_owner":"other","alias_mode":"0700","socket_owner":"self","socket_mode":"0600","expect":"reject"},
+  {"name":"windows_owner_only_pipe","platform":"windows","address":"\\\\.\\pipe\\luvus-example","local_only":true,"dacl_owner":"self","server_owner":"self","expect":"accept"},
+  {"name":"windows_remote_pipe","platform":"windows","address":"\\\\host\\pipe\\luvus-example","local_only":false,"expect":"reject"},
+  {"name":"windows_foreign_server","platform":"windows","address":"\\\\.\\pipe\\luvus-example","local_only":true,"dacl_owner":"other","server_owner":"other","expect":"reject"}
+]

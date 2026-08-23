@@ -2,6 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+mod windows;
+
 /// Do two paths name the same folder? (docs/43 WIN-6.)
 ///
 /// Node lookup used to compare `PathBuf`s with `==`, so any difference in
@@ -240,6 +243,56 @@ pub fn process_cwd(_pid: u32) -> Option<PathBuf> {
     None
 }
 
+/// PID-reuse-safe process lifetime marker captured for the public terminal
+/// backend. The value is opaque on the wire and compared only on its native OS.
+#[cfg(target_os = "linux")]
+pub fn process_start_marker(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name is parenthesized and may itself contain spaces or `)`;
+    // the final `)` is followed by field 3 (state). Field 22 (starttime) is the
+    // 20th token in that suffix, indexed from zero as 19.
+    let tail = stat.rsplit_once(") ")?.1;
+    tail.split_whitespace().nth(19).map(str::to_string)
+}
+
+#[cfg(target_os = "macos")]
+pub fn process_start_marker(pid: u32) -> Option<String> {
+    use std::mem::{size_of, zeroed};
+    unsafe {
+        let mut info: libc::proc_bsdinfo = zeroed();
+        let size = size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let read = libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        );
+        if read < size {
+            return None;
+        }
+        Some(format!(
+            "{}.{:06}",
+            info.pbi_start_tvsec, info.pbi_start_tvusec
+        ))
+    }
+}
+
+#[cfg(windows)]
+pub fn process_start_marker(pid: u32) -> Option<String> {
+    windows::process_start_marker(pid)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+pub fn process_start_marker(_pid: u32) -> Option<String> {
+    None
+}
+
+#[cfg(windows)]
+pub fn process_belongs_to_current_user(pid: u32) -> bool {
+    windows::process_belongs_to_current_user(pid)
+}
+
 /// One process running under a pane, for the "what is actually running?" overlay.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProcInfo {
@@ -374,10 +427,10 @@ fn ps_command_table() -> Option<PsTable> {
     Some((cmd, children))
 }
 
-/// Command lines running under each of `roots` (the root's own included), from
-/// a **single** `ps` scan — the batched form used by agent detection, which
-/// needs an answer for every pane at once and must never spawn one process per
-/// pane. `None` means the platform cannot tell (see [`ps_table`]).
+/// Process identities running under each of `roots` (the root's own included),
+/// from one platform snapshot: command lines on Unix and executable names on
+/// Windows. This batched form lets agent detection cover every pane without one
+/// process-table operation per pane. `None` means the platform cannot tell.
 #[cfg(unix)]
 pub fn descendant_commands(roots: &[u32]) -> Option<std::collections::HashMap<u32, Vec<String>>> {
     use std::collections::{HashMap, HashSet};
@@ -405,7 +458,12 @@ pub fn descendant_commands(roots: &[u32]) -> Option<std::collections::HashMap<u3
     Some(out)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn descendant_commands(roots: &[u32]) -> Option<std::collections::HashMap<u32, Vec<String>>> {
+    windows::descendant_commands(roots)
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn descendant_commands(_roots: &[u32]) -> Option<std::collections::HashMap<u32, Vec<String>>> {
     None
 }
@@ -416,9 +474,10 @@ pub fn descendant_commands(_roots: &[u32]) -> Option<std::collections::HashMap<u
 /// those characters never reach luvus, so the screen simply cannot be expanded.
 /// The OS still knows the real argv, and luvus owns the pane's child pid.
 ///
-/// **Call on demand only** (opening the overlay), never per frame: it shells out
-/// to `ps` once and walks the result. Empty on unsupported platforms, and on any
-/// failure — the caller degrades to showing just the pane's own command.
+/// **Call on demand only** (opening the overlay), never per frame: it captures
+/// one bounded platform process snapshot and walks the result. Empty on
+/// unsupported platforms, and on any failure — the caller degrades to showing
+/// just the pane's own command.
 #[cfg(unix)]
 pub fn process_tree(root: u32) -> Vec<ProcInfo> {
     let Some((cmd, children)) = ps_table() else {
@@ -449,7 +508,12 @@ pub fn process_tree(root: u32) -> Vec<ProcInfo> {
     out
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn process_tree(root: u32) -> Vec<ProcInfo> {
+    windows::process_tree(root)
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn process_tree(_root: u32) -> Vec<ProcInfo> {
     Vec::new()
 }
@@ -548,6 +612,16 @@ pub fn open_url(url: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    #[test]
+    fn process_start_marker_is_stable_for_the_current_process() {
+        let pid = std::process::id();
+        let first = super::process_start_marker(pid).expect("supported platform marker");
+        let second = super::process_start_marker(pid).expect("same live process marker");
+        assert_eq!(first, second);
+        assert!(!first.is_empty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn process_tree_finds_this_process_and_its_children() {

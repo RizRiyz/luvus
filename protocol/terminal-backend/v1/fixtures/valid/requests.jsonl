@@ -1,0 +1,17 @@
+{"id":"cap-1","method":"terminal.backend.capabilities","params":{"protocol":{"name":"luvus-terminal-backend","major":1,"minor":0}}}
+{"id":"inv-1","method":"terminal.backend.inventory","params":{}}
+{"id":"val-1","method":"terminal.backend.validate","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","expected_root":{"pid":1234,"start_marker":null}}}
+{"id":"proc-1","method":"terminal.backend.processes","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7"}}
+{"id":"captr-1","method":"terminal.backend.capture","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","mode":"recent_unwrapped","lines":200,"ansi":false}}
+{"id":"type-1","method":"terminal.backend.type_literal","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","text":"literal\ntext"}}
+{"id":"submit-1","method":"terminal.backend.submit_text","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","text":"run tests"}}
+{"id":"key-1","method":"terminal.backend.send_key","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","key":"ctrl-c"}}
+{"id":"title-1","method":"terminal.backend.set_title","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","title":"review"}}
+{"id":"notify-1","method":"terminal.backend.notify","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","title":"Review","body":"Ready"}}
+{"id":"create-1","method":"terminal.backend.create","params":{"cwd":"/work/project","command":["codex"],"label":"review","placement":{"kind":"workspace"},"focus":false}}
+{"id":"create-2","method":"terminal.backend.create","params":{"cwd":"/work/project","placement":{"kind":"sibling","of_terminal":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7"}},"focus":false}}
+{"id":"close-1","method":"terminal.backend.close","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7"}}
+{"id":"snap-1","method":"terminal.backend.snapshot","params":{}}
+{"id":"events-1","method":"terminal.backend.events.subscribe","params":{}}
+{"id":"wait-1","method":"terminal.backend.wait_change","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","after_revision":4,"timeout_ms":30000}}
+{"id":"wait-output-1","method":"terminal.backend.wait_output","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","after_revision":4,"match":"ready","timeout_ms":30000}}
