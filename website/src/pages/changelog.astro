@@ -38,6 +38,48 @@ const videos = Object.fromEntries(
   Object.entries(videoFiles).map(([path, url]) => [path.split('/').pop(), url])
 );
 
+// Website-only release media. The app, release notes, and terminal changelog
+// continue to consume plain `changelog/*.md`; richer demos stay in the site.
+const WEBSITE_RELEASE_MEDIA = {
+  'v0.12.0': {
+    heading: 'See Luvus v0.12.0 in action',
+    intro:
+      'Five focused demos show the new review, search, customization, extension, and tab organization workflows.',
+    media: [
+      {
+        file: 'diff.mp4',
+        title: 'Review changes without leaving Luvus',
+        caption:
+          'Inspect staged, worktree, untracked, and conflicted changes in split or stacked layouts, leave line notes, and send focused feedback to a live agent.',
+      },
+      {
+        file: 'fuzzysearch.mp4',
+        title: 'Find anything across your session',
+        caption:
+          'Search sessions, workspaces, tabs, panes, agents, files, and retained terminal output from one keyboard-driven fuzzy finder.',
+      },
+      {
+        file: 'themes.mp4',
+        title: 'Build themes with a live preview',
+        caption:
+          'Compose a palette, preview every semantic color immediately, validate it, and export a portable community theme.',
+      },
+      {
+        file: 'bar.mp4',
+        title: 'Extend the top and bottom bars',
+        caption:
+          'Let modules publish compact status, progress, badges, and actions beside tabs or in the bottom status row.',
+      },
+      {
+        file: 'tabreorder.mp4',
+        title: 'Put every tab exactly where you want it',
+        caption:
+          'Right-click a tab to rename it, move it one position, or swap it precisely with another tab.',
+      },
+    ],
+  },
+};
+
 // Each file starts with `---\nversion: vX.Y.Z\ndate: YYYY-MM-DD\n---`. Pull those
 // out and hand the rest to the Markdown renderer.
 const parse = (path, text) => {
@@ -54,9 +96,9 @@ const parse = (path, text) => {
     tag,
     date: meta.date || '',
     body: m ? text.slice(m[0].length) : text,
-    video: meta.video || '',
-    videoTitle: meta.video_title || '',
-    videoCaption: meta.video_caption || '',
+    media: meta.video
+      ? [{ file: meta.video, title: meta.video_title || '', caption: meta.video_caption || '' }]
+      : [],
   };
 };
 
@@ -89,16 +131,21 @@ const parsed = Object.entries(files)
 
 const entries = await Promise.all(
   parsed.map(async (r) => {
-    const video = r.video ? videos[r.video] || '' : '';
-    const { lead, rest } = video ? splitLead(r.body) : { lead: '', rest: r.body.trim() };
+    const websiteMedia = WEBSITE_RELEASE_MEDIA[r.tag];
+    const media = (websiteMedia?.media || r.media)
+      .map((item) => ({ ...item, url: videos[item.file] || '' }))
+      .filter((item) => item.url);
+    const { lead, rest } = media.length > 0
+      ? splitLead(r.body)
+      : { lead: '', rest: r.body.trim() };
     return {
       tag: r.tag,
       date: fmtDate(r.date),
       url: `${RELEASES}/tag/${r.tag}`,
       prerelease: false,
-      video,
-      videoTitle: r.videoTitle,
-      videoCaption: r.videoCaption,
+      media,
+      mediaHeading: websiteMedia?.heading || '',
+      mediaIntro: websiteMedia?.intro || '',
       leadHtml: lead ? (await md.render(lead)).code : '',
       html: (await md.render(rest || (lead ? '' : '_No release notes._'))).code,
     };
@@ -215,29 +262,59 @@ const entries = await Promise.all(
                     <time class="date">{e.date}</time>
                   </div>
                   {e.leadHtml && <div class="notes release-lead" set:html={e.leadHtml} />}
-                  {e.video && (
-                    <figure class="release-media">
-                      <video
-                        class="release-video"
-                        data-changelog-video
-                        autoplay
-                        muted
-                        loop
-                        playsinline
-                        controls
-                        preload="metadata"
-                        aria-label={e.videoTitle || `Demo for ${e.tag}`}
-                      >
-                        <source src={e.video} type="video/mp4" />
-                        Your browser cannot play this video. <a href={e.video}>Open the demo</a>.
-                      </video>
-                      {(e.videoTitle || e.videoCaption) && (
-                        <figcaption>
-                          {e.videoTitle && <strong>{e.videoTitle}</strong>}
-                          {e.videoCaption && <span>{e.videoCaption}</span>}
-                        </figcaption>
+                  {e.media.length > 0 && (
+                    <div class="release-showcase">
+                      {(e.mediaHeading || e.mediaIntro) && (
+                        <div class="release-showcase-intro">
+                          {e.mediaHeading && <h2>{e.mediaHeading}</h2>}
+                          {e.mediaIntro && <p>{e.mediaIntro}</p>}
+                        </div>
                       )}
-                    </figure>
+                      <div class="release-media-slider" data-changelog-slider>
+                        <div class="release-media-viewport">
+                          {e.media.map((media, mediaIndex) => (
+                            <figure
+                              class="release-media"
+                              data-changelog-slide
+                              hidden={mediaIndex !== 0}
+                            >
+                            <video
+                              class="release-video"
+                              data-changelog-video
+                              muted
+                              loop
+                              playsinline
+                              controls
+                              preload="metadata"
+                              aria-label={media.title || `Demo for ${e.tag}`}
+                            >
+                              <source src={media.url} type="video/mp4" />
+                              Your browser cannot play this video. <a href={media.url}>Open the demo</a>.
+                            </video>
+                            {(media.title || media.caption) && (
+                              <figcaption>
+                                {media.title && <strong>{media.title}</strong>}
+                                {media.caption && <span>{media.caption}</span>}
+                              </figcaption>
+                            )}
+                            </figure>
+                          ))}
+                        </div>
+                        {e.media.length > 1 && (
+                          <div class="release-media-controls" aria-label={`Demo navigation for ${e.tag}`}>
+                            <button type="button" data-changelog-prev aria-label="Previous demo">
+                              <span aria-hidden="true">←</span> Previous
+                            </button>
+                            <span class="release-media-count" data-changelog-count aria-live="polite">
+                              1 / {e.media.length}
+                            </span>
+                            <button type="button" data-changelog-next aria-label="Next demo">
+                              Next <span aria-hidden="true">→</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   )}
                   <div class="notes" set:html={e.html} />
                 </article>
@@ -293,16 +370,40 @@ const entries = await Promise.all(
       </button>
     </div>
     <script>
-      // Autoplay makes short demos immediately useful, but people who request
-      // reduced motion should choose when playback starts.
-      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-        document.querySelectorAll('video[data-changelog-video]').forEach((video) => {
-          if (video instanceof HTMLVideoElement) {
-            video.autoplay = false;
-            video.pause();
-          }
-        });
-      }
+      // A release can have several demos, but only the visible slide should
+      // decode and play. People who request reduced motion start playback
+      // themselves through the native video controls.
+      const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      document.querySelectorAll('[data-changelog-slider]').forEach((slider) => {
+        if (!(slider instanceof HTMLElement)) return;
+        const slides = Array.from(slider.querySelectorAll('[data-changelog-slide]'));
+        const counter = slider.querySelector('[data-changelog-count]');
+        const previous = slider.querySelector('[data-changelog-prev]');
+        const next = slider.querySelector('[data-changelog-next]');
+        let active = 0;
+
+        const show = (index) => {
+          active = (index + slides.length) % slides.length;
+          slides.forEach((slide, slideIndex) => {
+            if (!(slide instanceof HTMLElement)) return;
+            const visible = slideIndex === active;
+            slide.hidden = !visible;
+            const video = slide.querySelector('video');
+            if (!(video instanceof HTMLVideoElement)) return;
+            if (!visible) {
+              video.pause();
+              video.currentTime = 0;
+            } else if (!reduceMotion) {
+              void video.play().catch(() => {});
+            }
+          });
+          if (counter) counter.textContent = `${active + 1} / ${slides.length}`;
+        };
+
+        previous?.addEventListener('click', () => show(active - 1));
+        next?.addEventListener('click', () => show(active + 1));
+        show(0);
+      });
     </script>
 
     <style is:global>
@@ -498,9 +599,20 @@ const entries = await Promise.all(
         border-left: 2px solid var(--line); padding-left: 0.9rem; margin: 0.6rem 0; color: var(--sub);
       }
       .release-lead > :last-child { margin-bottom: 1rem; }
-      .release-media { margin: 1rem 0 1.35rem; }
+      .release-showcase { margin: 1rem 0 1.5rem; }
+      .release-showcase-intro { margin-bottom: 0.9rem; }
+      .release-showcase-intro h2 {
+        color: var(--text); font-size: 1rem; letter-spacing: -0.02em;
+      }
+      .release-showcase-intro p {
+        color: var(--sub); font-size: 0.9rem; line-height: 1.6; margin-top: 0.35rem;
+      }
+      .release-media-slider { min-width: 0; }
+      .release-media-viewport { min-width: 0; }
+      .release-media { margin: 0; }
+      .release-media[hidden] { display: none; }
       .release-video {
-        display: block; width: 100%; height: auto; aspect-ratio: 1426 / 964;
+        display: block; width: 100%; height: auto; max-height: min(76vh, 820px);
         background: var(--bg); border: 1px solid var(--line); object-fit: contain;
       }
       .release-media figcaption {
@@ -511,6 +623,23 @@ const entries = await Promise.all(
       .release-media figcaption strong {
         color: var(--text); font-family: 'IBM Plex Mono', ui-monospace, monospace;
         font-size: 0.84rem;
+      }
+      .release-media-controls {
+        display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+        gap: 0.75rem; margin-top: 0.65rem;
+      }
+      .release-media-controls button {
+        width: fit-content; border: 1px solid var(--line); background: var(--surface);
+        color: var(--sub2); padding: 0.48rem 0.72rem; cursor: pointer;
+        font: 600 0.76rem/1.2 'JetBrains Mono Variable', ui-monospace, monospace;
+      }
+      .release-media-controls button:last-child { justify-self: end; }
+      .release-media-controls button:hover,
+      .release-media-controls button:focus-visible {
+        border-color: var(--accent); color: var(--accent); outline: none;
+      }
+      .release-media-count {
+        color: var(--sub); font: 0.76rem/1.2 'JetBrains Mono Variable', ui-monospace, monospace;
       }
 
       /* footer */
