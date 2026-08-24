@@ -246,3 +246,103 @@ mod tests {
         assert_eq!(engine.cursor().x, 2);
     }
 }
+
+#[cfg(test)]
+mod conformance {
+    //! Characterisation of the `VtEngine` contract at the cell level.
+    //!
+    //! These assert *where each grapheme cluster lands*, not just the text a
+    //! row renders to. A text comparison cannot see the difference between a
+    //! cluster held in one wide cell and the same codepoints split across two,
+    //! yet that difference moves every column after it on the line — so it is
+    //! exactly what a text-level test misses and a pane visibly gets wrong.
+    //!
+    //! They are written against the trait rather than any engine, so they hold
+    //! for whatever backs `create_engine`.
+
+    use super::*;
+    use std::sync::mpsc;
+
+    /// Visible grid as one `"col:CODEPOINT+CODEPOINT"` token per occupied cell,
+    /// row by row. Blank cells are omitted, so a token's column is the
+    /// assertion: a cluster that grew wider shows up as a gap.
+    fn cell_dump(input: &[u8], cols: u16, rows: u16) -> Vec<String> {
+        let (tx, _rx) = mpsc::channel();
+        let engine = create_engine(VtEngineKind::default(), cols, rows, tx, 64 * 1024);
+        let mut engine = engine.lock().expect("engine lock");
+        engine.advance(input);
+
+        let mut out: Vec<Vec<String>> = vec![Vec::new(); rows as usize];
+        engine.for_each_cell(&mut |row, col, symbol, _style| {
+            if symbol == " " {
+                return;
+            }
+            let points: Vec<String> = symbol
+                .chars()
+                .map(|ch| format!("{:X}", ch as u32))
+                .collect();
+            out[row as usize].push(format!("{}:{}", col, points.join("+")));
+        });
+        out.into_iter().map(|row| row.join(" ")).collect()
+    }
+
+    #[test]
+    fn ascii_lands_one_cell_per_column() {
+        assert_eq!(cell_dump(b"ab", 4, 3)[0], "0:61 1:62");
+    }
+
+    #[test]
+    fn wide_characters_occupy_two_columns() {
+        // U+65E5, U+672C: the spacer cell is not reported, so the second
+        // character starting at column 2 is what proves the first took two.
+        assert_eq!(
+            cell_dump("\u{65E5}\u{672C}".as_bytes(), 4, 3)[0],
+            "0:65E5 2:672C"
+        );
+    }
+
+    #[test]
+    fn combining_marks_stay_with_their_base_cell() {
+        // "e" + U+0301 is one cell carrying both codepoints, one column wide.
+        assert_eq!(cell_dump("e\u{301}x".as_bytes(), 4, 3)[0], "0:65+301 1:78");
+    }
+
+    #[test]
+    fn variation_selector_16_stays_narrow() {
+        // U+2764 U+FE0F occupies a single column: the "x" follows at column 1.
+        assert_eq!(
+            cell_dump("\u{2764}\u{FE0F}x".as_bytes(), 4, 3)[0],
+            "0:2764+FE0F 1:78"
+        );
+    }
+
+    #[test]
+    fn emoji_zwj_sequence_spans_two_wide_cells() {
+        // U+1F469 U+200D U+1F4BB is one grapheme cluster, but the engine keeps
+        // the joiner with the first emoji and gives the second its own wide
+        // cell - four columns in total, which fills this row and pushes the
+        // trailing "x" onto the next one. UTS #51 treats the sequence as a
+        // single width-2 cluster, so an engine following that rule would place
+        // "x" at column 2 of row 0 instead. Pinned deliberately: a swap in
+        // either direction reflows every line carrying emoji.
+        let dump = cell_dump("\u{1F469}\u{200D}\u{1F4BB}x".as_bytes(), 4, 3);
+        assert_eq!(dump[0], "0:1F469+200D 2:1F4BB");
+        assert_eq!(dump[1], "0:78");
+    }
+
+    #[test]
+    fn emoji_modifier_sequence_spans_two_wide_cells() {
+        // U+1F44D U+1F3FD, same shape as the ZWJ case: the skin-tone modifier
+        // takes its own wide cell rather than joining the base cluster.
+        let dump = cell_dump("\u{1F44D}\u{1F3FD}x".as_bytes(), 4, 3);
+        assert_eq!(dump[0], "0:1F44D 2:1F3FD");
+        assert_eq!(dump[1], "0:78");
+    }
+
+    #[test]
+    fn text_soft_wraps_at_the_right_margin() {
+        let dump = cell_dump(b"abcdefgh", 4, 3);
+        assert_eq!(dump[0], "0:61 1:62 2:63 3:64");
+        assert_eq!(dump[1], "0:65 1:66 2:67 3:68");
+    }
+}
