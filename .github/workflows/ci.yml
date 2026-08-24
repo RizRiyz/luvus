@@ -90,14 +90,17 @@ jobs:
           cargo test --locked app::backend::tests
           cargo test --locked terminal::backend::tests
       - name: Validate published protocol fixtures
+        shell: pwsh
         run: |
           python examples/terminal-backend/consumer.py --fixtures
-          python examples/terminal-backend/mock_conformance.py
+          if ($LASTEXITCODE -ne 0) { throw "terminal-backend fixture validation failed" }
           python examples/runtime-api/consumer.py
+          if ($LASTEXITCODE -ne 0) { throw "runtime-api fixture validation failed" }
       - name: Validate named pipes and ConPTY live
         shell: pwsh
         run: |
           cargo build --locked
+          if ($LASTEXITCODE -ne 0) { throw "Windows debug build failed" }
           .\examples\terminal-backend\live_conformance.ps1 `
             -Luvus .\target\debug\luvus.exe
 

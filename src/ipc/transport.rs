@@ -138,7 +138,19 @@ impl Write for Conn {
         (&*self.0).write(buf)
     }
     fn flush(&mut self) -> io::Result<()> {
-        (&*self.0).flush()
+        #[cfg(windows)]
+        {
+            // `interprocess` intentionally makes `Write::flush` on its local
+            // socket wrapper a no-op on Windows. Reach the named-pipe stream
+            // so one-shot responses are delivered before this connection is
+            // dropped instead of relying on the crate's deferred drop flush.
+            let Stream::NamedPipe(pipe) = &*self.0;
+            pipe.inner().flush()
+        }
+        #[cfg(not(windows))]
+        {
+            (&*self.0).flush()
+        }
     }
 }
 

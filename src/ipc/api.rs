@@ -166,14 +166,15 @@ pub(crate) fn read_response_frame(reader: &mut impl BufRead) -> io::Result<Strin
 
 fn write_response(writer: &mut impl Write, id: &str, response: &str) -> io::Result<()> {
     if response.len().saturating_add(1) <= crate::terminal::backend::MAX_FRAME_BYTES {
-        writeln!(writer, "{response}")
+        writeln!(writer, "{response}")?;
     } else {
         writeln!(
             writer,
             "{}",
             json!({"id":id,"error":{"code":"internal","message":"response exceeded protocol frame limit"}})
-        )
+        )?;
     }
+    writer.flush()
 }
 
 /// Reject duplicate JSON object keys before deserializing into `Value`, which
@@ -784,6 +785,33 @@ fn parse_timeout_s(params: &Value) -> Result<Option<std::time::Duration>, &'stat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct FlushProbe {
+        bytes: Vec<u8>,
+        flushes: usize,
+    }
+
+    impl Write for FlushProbe {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn responses_are_lf_framed_and_flushed_before_disconnect() {
+        let mut writer = FlushProbe::default();
+        write_response(&mut writer, "test", r#"{"id":"test","result":{}}"#).unwrap();
+
+        assert_eq!(writer.bytes, b"{\"id\":\"test\",\"result\":{}}\n");
+        assert_eq!(writer.flushes, 1);
+    }
 
     #[test]
     fn bounded_frame_requires_lf_and_stops_after_one_request() {
