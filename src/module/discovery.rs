@@ -26,10 +26,10 @@ pub fn search(query: Option<&str>) -> Result<Vec<RepoHit>> {
 
 /// Build the GitHub search URL (most-starred first, capped at 30 results).
 fn build_url(query: Option<&str>) -> String {
-    // Keep 0.10 modules discoverable during the rename window. GitHub search
-    // treats the explicit OR as a union; duplicate repositories are returned
-    // only once by the API.
-    let mut q = String::from("topic:luvus-module OR topic:bohay-module");
+    // GitHub topic qualifiers are not reliably composable with `OR` and an
+    // additional free-text query. Search the canonical topic only so keyword
+    // filtering keeps the topic constraint attached to every result.
+    let mut q = String::from("topic:luvus-module");
     if let Some(extra) = query.map(str::trim).filter(|s| !s.is_empty()) {
         q.push(' ');
         q.push_str(extra);
@@ -136,16 +136,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn url_encodes_the_topic_query() {
-        let url = build_url(None);
-        assert!(
-            url.contains("q=topic%3Aluvus-module%20OR%20topic%3Abohay-module"),
-            "{url}"
+    fn url_encodes_the_canonical_topic_query() {
+        assert_eq!(
+            build_url(None),
+            "https://api.github.com/search/repositories?q=topic%3Aluvus-module&sort=stars&order=desc&per_page=30"
         );
-        let url = build_url(Some("git status"));
-        assert!(url.contains("topic%3Abohay-module%20git%20status"), "{url}");
-        // No raw spaces or colons leak into the URL.
-        assert!(!url.contains(' ') && !url.contains("q=topic:"));
+        assert_eq!(
+            build_url(Some("git status")),
+            "https://api.github.com/search/repositories?q=topic%3Aluvus-module%20git%20status&sort=stars&order=desc&per_page=30"
+        );
+        assert_eq!(build_url(Some("  ")), build_url(None));
+        assert!(!build_url(Some("media")).contains("bohay-module"));
     }
 
     #[test]

@@ -309,39 +309,50 @@ const examples = [
 
       <div id="grid" class="grid">
         {
-          repos.map((r) => (
-            <a class="mod" href={r.url}>
-              <div class="mhead">
-                {r.avatar && (
-                  <img class="avatar" src={r.avatar} alt="" width="26" height="26" loading="lazy" />
-                )}
-                <span class="mname">{r.name}</span>
-                <span class="stars" title={`${r.stars} stars`}>
-                  ★ {r.stars}
-                </span>
-              </div>
-              <span class="mowner">{r.owner}</span>
-              <p class="mdesc">{r.description || 'No description provided.'}</p>
-              <div class="meta">
-                {r.language && (
-                  <span class="mi">
-                    <i class="dot" style={`background:${LANG_COLOR[r.language] ?? 'var(--accent)'}`} />
-                    {r.language}
+          repos.map((r) => {
+            const command = `luvus module install ${r.full_name}`;
+            return (
+              <article class="mod">
+                <div class="mhead">
+                  {r.avatar && (
+                    <img class="avatar" src={r.avatar} alt="" width="26" height="26" loading="lazy" />
+                  )}
+                  <a class="mname" href={r.url}>{r.name}</a>
+                  <span class="stars" title={`${r.stars} stars`}>
+                    ★ {r.stars}
                   </span>
-                )}
-                {r.forks > 0 && <span class="mi">{r.forks} forks</span>}
-                {r.pushed && <span class="mi">updated {rel(r.pushed)}</span>}
-              </div>
-              {r.topics.length > 0 && (
-                <div class="mfoot">
-                  {r.topics.map((t) => (
-                    <span class="chip">{t}</span>
-                  ))}
                 </div>
-              )}
-              <code class="install">luvus module install {r.full_name}</code>
-            </a>
-          ))
+                <span class="mowner">{r.owner}</span>
+                <p class="mdesc">{r.description || 'No description provided.'}</p>
+                <div class="meta">
+                  {r.language && (
+                    <span class="mi">
+                      <i class="dot" style={`background:${LANG_COLOR[r.language] ?? 'var(--accent)'}`} />
+                      {r.language}
+                    </span>
+                  )}
+                  {r.forks > 0 && <span class="mi">{r.forks} forks</span>}
+                  {r.pushed && <span class="mi">updated {rel(r.pushed)}</span>}
+                </div>
+                {r.topics.length > 0 && (
+                  <div class="mfoot">
+                    {r.topics.map((t) => (
+                      <span class="chip">{t}</span>
+                    ))}
+                  </div>
+                )}
+                <div class="install-row">
+                  <code class="install">{command}</code>
+                  <button
+                    type="button"
+                    class="copy-install"
+                    data-command={command}
+                    aria-label={`Copy install command for ${r.full_name}`}
+                  >COPY</button>
+                </div>
+              </article>
+            );
+          })
         }
       </div>
 
@@ -375,12 +386,12 @@ const examples = [
       <div class="grid">
         {
           examples.map((e) => (
-            <a class="mod" href={`${GITHUB}/tree/main/${e.path}`}>
+            <article class="mod">
               <div class="mhead">
                 <span class="avatar ex" aria-hidden="true">
                   ◇
                 </span>
-                <span class="mname">{e.name}</span>
+                <a class="mname" href={`${GITHUB}/tree/main/${e.path}`}>{e.name}</a>
                 <span class="tag">example</span>
               </div>
               <span class="mowner">{e.owner}</span>
@@ -398,8 +409,16 @@ const examples = [
                   <span class="chip">{t}</span>
                 ))}
               </div>
-              <code class="install">{e.install}</code>
-            </a>
+              <div class="install-row">
+                <code class="install">{e.install}</code>
+                <button
+                  type="button"
+                  class="copy-install"
+                  data-command={e.install}
+                  aria-label={`Copy command for ${e.name}`}
+                >COPY</button>
+              </div>
+            </article>
           ))
         }
       </div>
@@ -502,16 +521,20 @@ const examples = [
         const avatar = r.owner?.avatar_url
           ? `<img class="avatar" src="${esc(r.owner.avatar_url)}" alt="" width="26" height="26" loading="lazy">`
           : '';
-        return `<a class="mod" href="${esc(r.html_url)}">
-          <div class="mhead">${avatar}<span class="mname">${esc(r.name)}</span>
+        const command = `luvus module install ${r.full_name}`;
+        return `<article class="mod">
+          <div class="mhead">${avatar}<a class="mname" href="${esc(r.html_url)}">${esc(r.name)}</a>
             <span class="stars" title="${r.stargazers_count ?? 0} stars">★ ${r.stargazers_count ?? 0}</span>
           </div>
           <span class="mowner">${esc(r.owner?.login ?? '')}</span>
           <p class="mdesc">${esc(r.description || 'No description provided.')}</p>
           <div class="meta">${lang}${forks}${upd}</div>
           ${topics ? `<div class="mfoot">${topics}</div>` : ''}
-          <code class="install">luvus module install ${esc(r.full_name)}</code>
-        </a>`;
+          <div class="install-row">
+            <code class="install">${esc(command)}</code>
+            <button type="button" class="copy-install" data-command="${esc(command)}" aria-label="Copy install command for ${esc(r.full_name)}">COPY</button>
+          </div>
+        </article>`;
       };
 
       const paint = () => {
@@ -538,6 +561,51 @@ const examples = [
       };
 
       document.getElementById('sort')?.addEventListener('change', paint);
+
+      const writeClipboard = async (text) => {
+        if (navigator.clipboard?.writeText) {
+          try {
+            await navigator.clipboard.writeText(text);
+            return;
+          } catch {
+            // Older browser policies can expose the API but reject writes;
+            // fall through to the selection-based copy path.
+          }
+        }
+        const input = document.createElement('textarea');
+        input.value = text;
+        input.setAttribute('readonly', '');
+        input.style.position = 'fixed';
+        input.style.opacity = '0';
+        document.body.appendChild(input);
+        input.select();
+        const copied = document.execCommand('copy');
+        input.remove();
+        if (!copied) throw new Error('clipboard unavailable');
+      };
+
+      // Delegation covers both build-time cards and cards replaced by the live
+      // GitHub refresh. The command comes from one value shared by the visible
+      // code and data attribute, so COPY cannot drift from what the card shows.
+      document.addEventListener('click', async (event) => {
+        const button = event.target instanceof Element
+          ? event.target.closest('.copy-install')
+          : null;
+        if (!(button instanceof HTMLButtonElement) || button.disabled) return;
+        const command = button.dataset.command;
+        if (!command) return;
+        button.disabled = true;
+        try {
+          await writeClipboard(command);
+          button.textContent = 'COPIED';
+        } catch {
+          button.textContent = 'FAILED';
+        }
+        window.setTimeout(() => {
+          button.textContent = 'COPY';
+          button.disabled = false;
+        }, 1200);
+      });
 
       // Refresh the index in the browser so it stays current between deploys.
       // Purely additive: if this fails, the build-time markup stands.
@@ -742,9 +810,7 @@ const examples = [
         background: none;
         transition: border-color 0.18s, transform 0.18s, box-shadow 0.18s;
       }
-      .mod:hover {
-        border-color: rgb(from var(--accent) r g b / 0.34); transform: translateY(-2px);
-      }
+      .mod:hover { border-color: rgb(from var(--accent) r g b / 0.34); }
       .mhead { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
       .mhead > * { min-width: 0; }
       .avatar { border-radius: 50%; border: 1px solid var(--line); flex-shrink: 0; }
@@ -757,6 +823,10 @@ const examples = [
         font-family: 'IBM Plex Mono', monospace; font-weight: 700; font-size: 0.95rem;
         color: var(--accent); letter-spacing: -0.02em;
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+      }
+      .mname:hover { text-decoration: underline; }
+      .mname:focus-visible, .copy-install:focus-visible {
+        outline: 2px solid var(--accent); outline-offset: 2px;
       }
       .stars, .tag {
         margin-left: auto; flex-shrink: 0; color: var(--sub); font-size: 0.76rem;
@@ -791,18 +861,31 @@ const examples = [
         border: 1px solid var(--line); color: var(--sub);
         font-family: 'IBM Plex Mono', monospace; line-height: 1.5;
       }
+      .install-row {
+        display: grid; grid-template-columns: minmax(0, 1fr) auto;
+        align-items: stretch; margin-top: 0.75rem; min-width: 0;
+      }
       .install {
-        display: block; margin-top: 0.75rem; background: var(--bg);
-        border: 1px solid var(--line);
+        display: flex; align-items: center; min-width: 0; background: var(--bg);
+        border: 1px solid var(--line); border-right: 0;
         padding: 0.4rem 0.5rem; font-size: 0.68rem; color: var(--accent);
-        line-height: 1.5; min-width: 0;
-        /* Wrap rather than ellipsis: this is the line people copy, so losing
-           the tail of it defeats the point. Breaking at the spaces keeps the
-           command readable, and the card's `flex: 1` description absorbs the
-           extra row so every card in the row still ends level. */
+        line-height: 1.5;
+        /* Wrap rather than ellipsis: the visible command must remain exact. */
         white-space: normal; overflow-wrap: break-word;
       }
-      .mod:hover .install { border-color: rgb(from var(--accent) r g b / 0.22); }
+      .copy-install {
+        min-width: 4.25rem; padding: 0.4rem 0.65rem; cursor: pointer;
+        border: 1px solid var(--line); background: var(--bg2); color: var(--text);
+        font: 600 0.66rem/1.2 'IBM Plex Mono', ui-monospace, monospace;
+        letter-spacing: 0.06em;
+      }
+      .copy-install:hover:not(:disabled) {
+        border-color: var(--accent); color: var(--accent);
+      }
+      .copy-install:disabled { cursor: default; color: var(--sub); }
+      .mod:hover .install, .mod:hover .copy-install {
+        border-color: rgb(from var(--accent) r g b / 0.28);
+      }
 
       /* the two grids are one block: pull them together */
       .index { padding-bottom: 1.5rem; }
