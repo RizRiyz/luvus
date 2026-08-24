@@ -141,9 +141,9 @@ pub(super) fn draw_picker(
         hidden_rect = Some(Rect::new(
             hidden_x,
             footer_y,
-            (2 + display_width(cat.act_show_hidden)).min(
-                inner.width.saturating_sub(hidden_x - inner.x).max(1) as usize,
-            ) as u16,
+            (2 + display_width(cat.act_show_hidden))
+                .min(inner.width.saturating_sub(hidden_x - inner.x).max(1) as usize)
+                as u16,
             1,
         ));
     }
