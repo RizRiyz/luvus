@@ -1275,7 +1275,19 @@ pub fn bind_server(
 /// Accept API connections from an already-bound listener on a background thread.
 /// Requests are forwarded into the app's event channel so the loop wakes the
 /// moment one arrives instead of waiting for its idle tick.
+#[cfg(test)]
 pub fn start_server(listener: transport::Listener, event_tx: Sender<AppEvent>, bus: EventBus) {
+    start_server_with_uhp(listener, event_tx, bus, Arc::new(AtomicBool::new(true)));
+}
+
+/// Start the Socket API with the selected session's live UHP availability.
+/// The plain `start_server` wrapper keeps protocol tests concise and enabled.
+pub fn start_server_with_uhp(
+    listener: transport::Listener,
+    event_tx: Sender<AppEvent>,
+    bus: EventBus,
+    uhp_available: Arc<AtomicBool>,
+) {
     let _ = SERVER_STARTED.set(std::time::Instant::now());
     let _ = thread::Builder::new()
         .name("luvus-api-accept".into())
@@ -1301,10 +1313,11 @@ pub fn start_server(listener: transport::Listener, event_tx: Sender<AppEvent>, b
                 ACCEPTED_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
                 let event_tx = event_tx.clone();
                 let bus = bus.clone();
+                let uhp_available = Arc::clone(&uhp_available);
                 let _ = thread::Builder::new()
                     .name("luvus-api-request".into())
                     .stack_size(API_WORKER_STACK_BYTES)
-                    .spawn(move || handle_conn(stream, event_tx, bus, permit));
+                    .spawn(move || handle_conn(stream, event_tx, bus, uhp_available, permit));
             }
         });
 }
@@ -1313,6 +1326,7 @@ fn handle_conn(
     mut stream: Conn,
     event_tx: Sender<AppEvent>,
     bus: EventBus,
+    uhp_available: Arc<AtomicBool>,
     _permit: ConnectionPermit,
 ) {
     let mut writer = stream.clone();
@@ -1449,6 +1463,17 @@ fn handle_conn(
             let _ = write_response(&mut writer, &id, &response);
             return;
         }
+    }
+    if crate::api::capabilities::is_uhp_entry_method(&method)
+        && !uhp_available.load(Ordering::Acquire)
+    {
+        let response = json!({"id":id,"error":{
+            "code":"uhp_disabled",
+            "message":"UHP is disabled; run `luvus uhp enable` to make its profiles available"
+        }})
+        .to_string();
+        let _ = write_response(&mut writer, &id, &response);
+        return;
     }
 
     let delegated_scopes = match authorize_request(&method, auth) {
@@ -2406,6 +2431,57 @@ mod tests {
         }
 
         assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn disabled_uhp_is_rejected_before_app_handoff_but_socket_remains_live() {
+        let _env = crate::persist::test_env("uhp-disabled-api");
+        let root = crate::persist::ensure_config_dir();
+        let path = root.join("uhp-disabled.sock");
+        let lock = transport::acquire_server_startup_lock(&root).unwrap();
+        let listener = bind_server(&path, &lock).unwrap();
+        let (events, rx) = mpsc::channel();
+        start_server_with_uhp(
+            listener,
+            events,
+            new_bus(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        drop(lock);
+
+        let mut runtime = transport::connect(&path).unwrap();
+        writeln!(
+            runtime,
+            "{}",
+            json!({"id":"runtime","method":"runtime.capabilities","params":{}})
+        )
+        .unwrap();
+        let mut response = String::new();
+        BufReader::new(runtime).read_line(&mut response).unwrap();
+        let response: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["error"]["code"], "uhp_disabled");
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+
+        let mut socket = transport::connect(&path).unwrap();
+        writeln!(
+            socket,
+            "{}",
+            json!({"id":"socket","method":"socket.capabilities","params":{}})
+        )
+        .unwrap();
+        let AppEvent::Api(request) = rx.recv().unwrap() else {
+            panic!("Socket API request must still reach the app loop");
+        };
+        request
+            .reply
+            .send(json!({"id":"socket","result":{"type":"ok"}}).to_string())
+            .unwrap();
+        let mut response = String::new();
+        BufReader::new(socket).read_line(&mut response).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&response).unwrap()["result"]["type"],
+            "ok"
+        );
     }
 
     #[test]

@@ -87,7 +87,7 @@ def main():
             capability = request(socket_path, {"id":"cap","method":"terminal.backend.capabilities","params":{"protocol":{"name":"luvus-terminal-backend","major":1,"minor":0}}})
             assert capability["result"]["protocol"] == {"name":"luvus-terminal-backend","major":1,"minor":0}
             cli_capability = json.loads(subprocess.run(
-                [str(binary), "api", "capabilities"],
+                [str(binary), "uhp", "terminal", "capabilities"],
                 cwd=ROOT,
                 env=environment,
                 check=True,
@@ -108,7 +108,7 @@ def main():
                 "minor": 0,
             }
             proxied = json.loads(subprocess.run(
-                [str(binary), "api", "proxy"],
+                [str(binary), "socket", "proxy"],
                 cwd=ROOT,
                 env=environment,
                 input='{"id":"proxy","method":"runtime.capabilities","params":{}}\n',

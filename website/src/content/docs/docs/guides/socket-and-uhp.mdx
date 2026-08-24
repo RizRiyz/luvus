@@ -47,7 +47,7 @@ Outside a pane, select the session explicitly when using the CLI:
 
 ```sh
 luvus --session review pane list --json
-luvus --session review api socket-capabilities
+luvus --session review socket capabilities
 ```
 
 A production integration must validate that the discovered endpoint belongs to
@@ -59,22 +59,37 @@ the current user. UHP Terminal consumers should follow the complete
 Print the exact schemas embedded in the installed binary:
 
 ```sh
-luvus api socket-schema   # complete Socket API bundle and UHP profiles
-luvus api runtime-schema  # UHP Runtime 1.0
-luvus api schema          # UHP Terminal 1.0
+luvus socket schema          # complete Socket API bundle and UHP profiles
+luvus uhp runtime schema     # UHP Runtime 1.0
+luvus uhp terminal schema    # UHP Terminal 1.0
 ```
 
 Schema printing is local and does not require a running server. Query live
 capabilities for the selected session:
 
 ```sh
-luvus api socket-capabilities
-luvus api runtime
-luvus api capabilities
+luvus socket capabilities
+luvus uhp runtime capabilities
+luvus uhp terminal capabilities
 ```
 
 Call only methods and capabilities announced by that server. Do not infer
 support from the Luvus application version.
+
+UHP is enabled by default. You can disable its advertised profiles and
+profile-specific entry points without stopping the Socket API or restarting
+the server:
+
+```sh
+luvus uhp status
+luvus uhp disable
+luvus uhp enable
+```
+
+The toggle is a protocol-availability control, not a separate security layer.
+General Socket methods that Luvus's own CLI also uses remain available. A
+harness must check `luvus socket capabilities` and negotiate each enabled UHP
+profile before using it.
 
 ## Send a Socket API request
 
@@ -100,13 +115,13 @@ For one portable request, including over SSH, use the standard-IO bridge:
 
 ```sh
 printf '%s\n' '{"id":"pane-1","method":"pane.list","params":{}}' \
-  | luvus api proxy
+  | luvus socket proxy
 
 printf '%s\n' '{"id":"remote-1","method":"session.snapshot","params":{}}' \
-  | ssh host luvus api proxy
+  | ssh host luvus socket proxy
 ```
 
-`api proxy` forwards exactly one bounded request and response. It does not
+`socket proxy` forwards exactly one bounded request and response. It does not
 support event, observe, or control streams.
 
 ## Read responses correctly

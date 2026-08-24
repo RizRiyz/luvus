@@ -12,5 +12,5 @@ pub const PROTOCOL_NAME: &str = "luvus-socket";
 pub const PROTOCOL_MAJOR: u64 = 1;
 pub const PROTOCOL_MINOR: u64 = 0;
 
-pub use capabilities::capabilities;
+pub use capabilities::capabilities_with_uhp;
 pub use schema::schema_bundle;

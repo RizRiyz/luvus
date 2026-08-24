@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{mpsc::Sender, Arc};
+use std::sync::{atomic::AtomicBool, mpsc::Sender, Arc};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -1214,6 +1214,9 @@ pub struct App {
     pub catalog: &'static crate::i18n::Catalog,
     /// Persisted user configuration (theme, layout, notifications, keys).
     pub config: crate::config::Config,
+    /// Shared with socket workers so a live `luvus uhp disable` takes effect
+    /// without restarting the server.
+    pub(crate) uhp_available: Arc<AtomicBool>,
     /// Active `key → Cmd` map for prefix mode (defaults + config overrides).
     pub keymap: std::collections::HashMap<String, Cmd>,
     /// The parsed prefix chord (docs/64), from `config.prefix`. Default Ctrl+Space.
@@ -1667,6 +1670,7 @@ impl App {
         let name = ws_name(&cwd);
 
         let config = crate::config::load();
+        let uhp_available = Arc::new(AtomicBool::new(config.uhp_enabled));
         let files_show_hidden = config.layout.files_show_hidden;
         crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
         let theme_registry = crate::theme::ThemeRegistry::load();
@@ -1732,6 +1736,7 @@ impl App {
             theme_registry,
             catalog,
             config,
+            uhp_available,
             keymap,
             prefix,
             agent_names: HashMap::new(),
@@ -1952,6 +1957,7 @@ impl App {
 
     fn from_snapshot(snap: SessionSnapshot, app_tx: Sender<AppEvent>) -> Option<App> {
         let config = crate::config::load();
+        let uhp_available = Arc::new(AtomicBool::new(config.uhp_enabled));
         let files_show_hidden = config.layout.files_show_hidden;
         let keymap = keys::build_keymap(&config.keybindings);
         let prefix = keys::PrefixSpec::parse(&config.prefix).unwrap_or_default();
@@ -2253,6 +2259,7 @@ impl App {
             theme_registry,
             catalog,
             config,
+            uhp_available,
             keymap,
             prefix,
             agent_names,

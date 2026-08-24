@@ -199,17 +199,22 @@ orchestration (multiple agents on one project, docs/22):
 events:
   events                     stream live status changes
 
-api:
-  api schema                 print the installed UHP Terminal JSON Schema bundle
-  api runtime-schema         print the installed UHP Runtime JSON Schema bundle
-  api socket-schema          print the complete installed Socket API schema bundle
-  api capabilities           negotiate and print UHP Terminal capabilities
-  api snapshot               print a fenced UHP Terminal inventory
-  api events                 stream sequenced UHP Terminal events
-  api runtime                print UHP Runtime capabilities and limits
-  api session                print a fenced UHP Runtime session snapshot
-  api socket-capabilities    print live Socket API methods and limits
-  api proxy                  forward one JSON request from stdin to the local server
+universal harness protocol:
+  uhp status                 show whether UHP profiles are available
+  uhp enable                 make UHP profiles available without restarting
+  uhp disable                stop advertising and serving UHP profile entry points
+  uhp runtime capabilities   negotiate UHP Runtime capabilities and limits
+  uhp runtime snapshot       print a fenced UHP Runtime session snapshot
+  uhp runtime schema         print the installed UHP Runtime JSON Schema bundle
+  uhp terminal capabilities  negotiate UHP Terminal capabilities
+  uhp terminal snapshot      print a fenced UHP Terminal inventory
+  uhp terminal events        stream sequenced UHP Terminal events
+  uhp terminal schema        print the installed UHP Terminal JSON Schema bundle
+
+socket api:
+  socket capabilities        print live Socket API methods, profiles, and limits
+  socket schema              print the complete installed Socket API schema bundle
+  socket proxy               forward one JSON request from stdin to the local server
 
 sessions:
   session list [--json]      list default and named server sessions
@@ -236,5 +241,3 @@ server:
 (o_o)
 /|_|\
 ```
-
-

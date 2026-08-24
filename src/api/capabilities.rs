@@ -295,9 +295,13 @@ fn is_idempotent(method: &str) -> bool {
         )
 }
 
+#[cfg(test)]
 fn method_contracts() -> Vec<Value> {
-    METHODS
-        .iter()
+    method_contracts_for(METHODS.iter().copied())
+}
+
+fn method_contracts_for<'a>(methods: impl Iterator<Item = &'a str>) -> Vec<Value> {
+    methods
         .map(|method| {
             let read_only = is_read_only(method);
             json!({
@@ -310,7 +314,30 @@ fn method_contracts() -> Vec<Value> {
         .collect()
 }
 
+/// Methods whose only public role is negotiating or serving a UHP profile.
+/// Runtime operations such as `agent.prompt` intentionally remain ordinary
+/// Socket API methods when UHP is disabled so Luvus's own CLI keeps working.
+pub fn is_uhp_entry_method(method: &str) -> bool {
+    matches!(method, "runtime.capabilities" | "session.snapshot")
+        || method.starts_with("terminal.backend.")
+}
+
+#[cfg(test)]
 pub fn capabilities(event_sequence: u64) -> Value {
+    capabilities_with_uhp(event_sequence, true)
+}
+
+pub fn capabilities_with_uhp(event_sequence: u64, uhp_enabled: bool) -> Value {
+    let methods: Vec<_> = METHODS
+        .iter()
+        .copied()
+        .filter(|method| uhp_enabled || !is_uhp_entry_method(method))
+        .collect();
+    let profiles = if uhp_enabled {
+        vec!["luvus-socket", "luvus-runtime", "luvus-terminal-backend"]
+    } else {
+        vec!["luvus-socket"]
+    };
     json!({
         "type":"socket_capabilities",
         "protocol":{
@@ -319,8 +346,8 @@ pub fn capabilities(event_sequence: u64) -> Value {
             "minor":super::PROTOCOL_MINOR,
         },
         "event_sequence":event_sequence,
-        "methods":METHODS,
-        "method_contracts":method_contracts(),
+        "methods":methods,
+        "method_contracts":method_contracts_for(methods.iter().copied()),
         "limits":{
             "frame_bytes":crate::terminal::backend::MAX_FRAME_BYTES,
             "event_queue":crate::ipc::api::event_queue_capacity(),
@@ -338,7 +365,8 @@ pub fn capabilities(event_sequence: u64) -> Value {
             "layout_depth":super::topology::MAX_LAYOUT_DEPTH,
             "workspace_move_block":super::topology::MAX_WORKSPACE_MOVE_BLOCK,
         },
-        "profiles":["luvus-socket", "luvus-runtime", "luvus-terminal-backend"],
+        "profiles":profiles,
+        "uhp":{"enabled":uhp_enabled},
         "identity":{"workspace":"stable","tab":"stable","terminal":"pty_lifetime"},
         "events":{"resume":"after_sequence","loss":"resync_required"},
         "authorization":{"default":"local_owner","delegation":"scoped_ephemeral_token",
@@ -392,5 +420,22 @@ mod tests {
             assert!(is_read_only(stream));
             assert!(!is_idempotent(stream));
         }
+
+        let disabled = capabilities_with_uhp(9, false);
+        assert_eq!(disabled["uhp"]["enabled"], false);
+        assert_eq!(disabled["profiles"], json!(["luvus-socket"]));
+        assert!(!disabled["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|method| method == "runtime.capabilities"
+                || method
+                    .as_str()
+                    .is_some_and(|method| method.starts_with("terminal.backend."))));
+        assert!(disabled["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|method| method == "agent.prompt"));
     }
 }

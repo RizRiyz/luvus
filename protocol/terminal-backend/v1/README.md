@@ -71,9 +71,10 @@ stream may lease a terminal at a time. There are at most eight combined
 observe/control streams per server. Overflow requires a fresh capture and
 reconnect.
 
-An installed binary exposes the same contract with `luvus api schema`, live
-negotiation with `luvus api capabilities`, the fenced inventory with
-`luvus api snapshot`, and terminal events with `luvus api events`.
+An installed binary exposes the same contract with `luvus uhp terminal schema`,
+live negotiation with `luvus uhp terminal capabilities`, the fenced inventory
+with `luvus uhp terminal snapshot`, and terminal events with
+`luvus uhp terminal events`.
 
 The UHP overview explains how this profile composes with the Runtime profile.
 This directory alone defines the Terminal profile's public wire

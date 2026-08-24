@@ -119,7 +119,9 @@ fn is_backend_discovery_request(args: &[String]) -> bool {
         args,
         [_, session, list, json]
             if session == "session" && list == "list" && json == "--json"
-    ) || matches!(args, [_, api, schema] if api == "api" && matches!(schema.as_str(), "schema" | "runtime-schema" | "socket-schema"))
+    ) || matches!(args, [_, socket, schema] if socket == "socket" && schema == "schema")
+        || matches!(args, [_, uhp, profile, schema]
+            if uhp == "uhp" && matches!(profile.as_str(), "runtime" | "terminal") && schema == "schema")
 }
 
 /// After `ratatui::init()` (which restores raw mode + alt-screen on panic), also
@@ -831,7 +833,12 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
         let tx = tx.clone();
         thread::spawn(move || input_loop(tx, pending));
     }
-    ipc::api::start_server(api_listener, tx.clone(), events);
+    ipc::api::start_server_with_uhp(
+        api_listener,
+        tx.clone(),
+        events,
+        std::sync::Arc::clone(&app.uhp_available),
+    );
     drop(startup_lock);
     app.run_module_startup_hooks(); // docs/13 §3.7 — same point as the server role
 
@@ -995,17 +1002,13 @@ mod tests {
             "luvus", "session", "list", "--json", "extra"
         ])));
         assert!(is_backend_discovery_request(&strings(&[
-            "luvus", "api", "schema"
+            "luvus", "socket", "schema"
         ])));
         assert!(is_backend_discovery_request(&strings(&[
-            "luvus",
-            "api",
-            "runtime-schema"
+            "luvus", "uhp", "runtime", "schema"
         ])));
         assert!(is_backend_discovery_request(&strings(&[
-            "luvus",
-            "api",
-            "socket-schema"
+            "luvus", "uhp", "terminal", "schema"
         ])));
     }
 

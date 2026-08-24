@@ -28,7 +28,8 @@ UHP v1 contains two profiles that share the same local endpoint:
 The existing wire names remain intentional compatibility identifiers. UHP is
 the public name for the complete contract. It does not introduce an `uhp.*`
 RPC namespace, and a consumer must not substitute `uhp` for either profile
-name.
+name. The `luvus uhp` command is a human-facing CLI facade, not a new wire
+namespace.
 
 The relationship is:
 
@@ -108,22 +109,39 @@ See the complete
 
 ## Inspect the installed contract
 
+UHP is enabled by default. Inspect or change its live availability without
+restarting the selected server:
+
+```sh
+luvus uhp status
+luvus uhp enable
+luvus uhp disable
+```
+
+Disabling UHP removes both profiles from live Socket capability discovery and
+rejects profile negotiation plus Terminal-profile requests. It does not stop
+the owner-only Socket API or ordinary Luvus CLI commands. Runtime operations
+that are also general Socket methods, such as `agent.prompt`, remain available
+to local Luvus automation but no longer carry an advertised UHP compatibility
+contract. This switch controls protocol availability; it is not an additional
+security boundary beyond the local endpoint's existing access controls.
+
 Every Luvus binary embeds the exact UHP schemas it implements:
 
 ```sh
 # Terminal profile schema bundle
-luvus api schema
+luvus uhp terminal schema
 
 # Runtime profile schema bundle
-luvus api runtime-schema
+luvus uhp runtime schema
 
 # Live profile capabilities
-luvus api capabilities
-luvus api runtime
+luvus uhp terminal capabilities
+luvus uhp runtime capabilities
 
 # Sequence-fenced snapshots
-luvus api snapshot
-luvus api session
+luvus uhp terminal snapshot
+luvus uhp runtime snapshot
 ```
 
 Schema printing does not require a running server. Live commands target the
@@ -280,14 +298,14 @@ bounded request through standard IO:
 
 ```sh
 printf '%s\n' '{"id":"1","method":"terminal.backend.inventory","params":{}}' \
-  | luvus api proxy
+  | luvus socket proxy
 ```
 
 The same one-frame bridge composes over SSH:
 
 ```sh
 printf '%s\n' '{"id":"1","method":"terminal.backend.inventory","params":{}}' \
-  | ssh host luvus api proxy
+  | ssh host luvus socket proxy
 ```
 
 The proxy does not expose a network listener. It is suitable for bootstrap,

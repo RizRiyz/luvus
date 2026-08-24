@@ -71,7 +71,7 @@ that connection into a bounded stream. It does not turn the endpoint into a
 general multi-request session.
 
 Consumers that cannot open the native transport can forward one bounded frame
-through `luvus api proxy`, including over SSH. Native sockets or named pipes are
+through `luvus socket proxy`, including over SSH. Native sockets or named pipes are
 required for all streams and are preferred for high-frequency local calls.
 
 ## Safe startup sequence

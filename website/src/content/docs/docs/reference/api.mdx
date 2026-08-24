@@ -56,12 +56,18 @@ printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.luvus/luvus.so
 
 ## Method families
 
-`luvus api socket-schema` prints the complete installed Socket API 1.0
-contract without starting or connecting to a server. `luvus api
-socket-capabilities` queries the selected running server and returns its exact
+`luvus socket schema` prints the complete installed Socket API 1.0
+contract without starting or connecting to a server. `luvus socket
+capabilities` queries the selected running server and returns its exact
 method registry, event sequence fence, limits, supported UHP profiles, and
 graphics support. Discover capabilities instead of inferring support from the
 Luvus release number.
+
+The response includes `uhp.enabled`. When it is `false`, `profiles` contains
+only `luvus-socket` and the advertised method list omits UHP negotiation and
+Terminal-profile entry points. Use `luvus uhp enable` or `luvus uhp disable`
+to change this live. The Socket API itself remains available because Luvus's
+own CLI uses it.
 
 | Family | Methods |
 |---|---|
@@ -239,7 +245,7 @@ or leaving stale state after an adapter crashes.
 
 The normative runtime schemas and fixtures live under `protocol/runtime/v1` and
 are embedded in packaged binaries. Print that exact installed contract with
-`luvus api runtime-schema`.
+`luvus uhp runtime schema`.
 
 `agent.wait` takes `{pane, status, timeout_s?}` and parks on the server. The
 initial comparison and registration are atomic on the app loop, so it has no

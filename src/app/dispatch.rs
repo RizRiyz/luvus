@@ -177,6 +177,40 @@ mod socket_api_tests {
     }
 
     #[test]
+    fn uhp_toggle_is_live_without_disabling_the_socket_api() {
+        let (_env, mut app) = app("socket-uhp-toggle");
+        app.dispatch("config.patch", &json!({"patch":{"uhp_enabled":false}}))
+            .unwrap();
+        assert!(!app.config.uhp_enabled);
+        assert!(!app.uhp_available.load(Ordering::Acquire));
+
+        let (reply, _) = std::sync::mpsc::channel();
+        let disabled: Value = serde_json::from_str(&app.handle_api(&ApiRequest {
+            id: "runtime".into(),
+            method: "runtime.capabilities".into(),
+            params: json!({}),
+            reply: reply.clone(),
+        }))
+        .unwrap();
+        assert_eq!(disabled["error"]["code"], "uhp_disabled");
+
+        let socket: Value = serde_json::from_str(&app.handle_api(&ApiRequest {
+            id: "socket".into(),
+            method: "socket.capabilities".into(),
+            params: json!({}),
+            reply,
+        }))
+        .unwrap();
+        assert_eq!(socket["result"]["uhp"]["enabled"], false);
+        assert_eq!(socket["result"]["profiles"], json!(["luvus-socket"]));
+        assert!(socket["result"]["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|method| method == "agent.prompt"));
+    }
+
+    #[test]
     fn workspace_metadata_partial_updates_preserve_the_other_counter() {
         let (_env, mut app) = app("socket-workspace-metadata");
         app.dispatch(
@@ -819,6 +853,13 @@ impl App {
     // ── api dispatch ──────────────────────────────────────────────────────────
 
     pub fn handle_api(&mut self, req: &ApiRequest) -> String {
+        if crate::api::capabilities::is_uhp_entry_method(&req.method) && !self.config.uhp_enabled {
+            return json!({ "id": req.id, "error": {
+                "code": "uhp_disabled",
+                "message": "UHP is disabled; run `luvus uhp enable` to make its profiles available"
+            } })
+            .to_string();
+        }
         if Self::is_terminal_backend_method(&req.method) {
             return self.handle_terminal_backend(req);
         }
@@ -917,9 +958,10 @@ impl App {
             })),
             "socket.capabilities" => {
                 reject_api_fields(p, &[])?;
-                Ok(crate::api::capabilities(crate::ipc::api::current_sequence(
-                    &self.events,
-                )))
+                Ok(crate::api::capabilities_with_uhp(
+                    crate::ipc::api::current_sequence(&self.events),
+                    self.config.uhp_enabled,
+                ))
             }
             "config.get" => {
                 reject_api_fields(p, &[])?;
@@ -4878,6 +4920,8 @@ impl App {
         self.sidebars = sidebars;
         self.file_tree.show_hidden = next.layout.files_show_hidden;
         self.file_tree.scroll = 0;
+        self.uhp_available
+            .store(next.uhp_enabled, Ordering::Release);
         crate::layout::set_gaps(next.layout.col_gap, next.layout.row_gap);
         for pane in self.panes.values() {
             pane.set_history_budget(history_budget);

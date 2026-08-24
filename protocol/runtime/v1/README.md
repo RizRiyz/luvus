@@ -87,9 +87,9 @@ starting; consumers can inspect it without repeating the launch.
 An installed binary prints the exact embedded profile with:
 
 ```sh
-luvus api runtime-schema
-luvus api runtime
-luvus api session
+luvus uhp runtime schema
+luvus uhp runtime capabilities
+luvus uhp runtime snapshot
 ```
 
 The schema package and its fixture manifest are normative. Validate them

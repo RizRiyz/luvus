@@ -121,11 +121,11 @@ The binary embeds the published schema, so packaged integrations do not need a
 source checkout:
 
 ```sh
-luvus api schema
-luvus api runtime-schema
-luvus api capabilities
-luvus api snapshot
-luvus api events
+luvus uhp terminal schema
+luvus uhp runtime schema
+luvus uhp terminal capabilities
+luvus uhp terminal snapshot
+luvus uhp terminal events
 ```
 
 Consumers that cannot open the native local transport can forward exactly one
@@ -133,14 +133,14 @@ bounded request and response through standard IO:
 
 ```sh
 printf '%s\n' '{"id":"1","method":"terminal.backend.inventory","params":{}}' \
-  | luvus api proxy
+  | luvus socket proxy
 ```
 
 The same command composes over SSH without exposing a network listener:
 
 ```sh
 printf '%s\n' '{"id":"1","method":"terminal.backend.inventory","params":{}}' \
-  | ssh host luvus api proxy
+  | ssh host luvus socket proxy
 ```
 
 Native socket or pipe access remains preferable for high-frequency local calls.
