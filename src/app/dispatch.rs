@@ -177,40 +177,6 @@ mod socket_api_tests {
     }
 
     #[test]
-    fn uhp_toggle_is_live_without_disabling_the_socket_api() {
-        let (_env, mut app) = app("socket-uhp-toggle");
-        app.dispatch("config.patch", &json!({"patch":{"uhp_enabled":false}}))
-            .unwrap();
-        assert!(!app.config.uhp_enabled);
-        assert!(!app.uhp_available.load(Ordering::Acquire));
-
-        let (reply, _) = std::sync::mpsc::channel();
-        let disabled: Value = serde_json::from_str(&app.handle_api(&ApiRequest {
-            id: "runtime".into(),
-            method: "runtime.capabilities".into(),
-            params: json!({}),
-            reply: reply.clone(),
-        }))
-        .unwrap();
-        assert_eq!(disabled["error"]["code"], "uhp_disabled");
-
-        let socket: Value = serde_json::from_str(&app.handle_api(&ApiRequest {
-            id: "socket".into(),
-            method: "socket.capabilities".into(),
-            params: json!({}),
-            reply,
-        }))
-        .unwrap();
-        assert_eq!(socket["result"]["uhp"]["enabled"], false);
-        assert_eq!(socket["result"]["profiles"], json!(["luvus-socket"]));
-        assert!(socket["result"]["methods"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|method| method == "agent.prompt"));
-    }
-
-    #[test]
     fn workspace_metadata_partial_updates_preserve_the_other_counter() {
         let (_env, mut app) = app("socket-workspace-metadata");
         app.dispatch(
@@ -853,13 +819,6 @@ impl App {
     // ── api dispatch ──────────────────────────────────────────────────────────
 
     pub fn handle_api(&mut self, req: &ApiRequest) -> String {
-        if crate::api::capabilities::is_uhp_entry_method(&req.method) && !self.config.uhp_enabled {
-            return json!({ "id": req.id, "error": {
-                "code": "uhp_disabled",
-                "message": "UHP is disabled; run `luvus uhp enable` to make its profiles available"
-            } })
-            .to_string();
-        }
         if Self::is_terminal_backend_method(&req.method) {
             return self.handle_terminal_backend(req);
         }
@@ -875,8 +834,7 @@ impl App {
         // *server's* cwd — the very thing §3.3 removed.
         const WITHOUT_NODE: &[&str] = &[
             "ping",
-            "socket.capabilities",
-            "runtime.capabilities",
+            "uhp.capabilities",
             "session.snapshot",
             "search.capabilities",
             "server.stop",
@@ -904,10 +862,7 @@ impl App {
             return json!({ "id": req.id, "error": { "code": "no_session", "message": "no active session" } }).to_string();
         }
         let read_only = crate::api::capabilities::is_read_only(&req.method);
-        let revisioned = !matches!(
-            req.method.as_str(),
-            "runtime.capabilities" | "session.snapshot"
-        );
+        let revisioned = !matches!(req.method.as_str(), "uhp.capabilities" | "session.snapshot");
         let mut params = req.params.clone();
         let expected_revision = revisioned
             .then(|| {
@@ -956,12 +911,18 @@ impl App {
                 "protocol":1,
                 "session": crate::session::display_name()
             })),
-            "socket.capabilities" => {
+            "uhp.capabilities" => {
                 reject_api_fields(p, &[])?;
-                Ok(crate::api::capabilities_with_uhp(
-                    crate::ipc::api::current_sequence(&self.events),
-                    self.config.uhp_enabled,
-                ))
+                let mut capabilities =
+                    crate::api::capabilities(crate::ipc::api::current_sequence(&self.events));
+                if let Some(object) = capabilities.as_object_mut() {
+                    object.insert("session".into(), json!(crate::session::display_name()));
+                    object.insert(
+                        "server_generation".into(),
+                        json!(self.backend_server_generation),
+                    );
+                }
+                Ok(capabilities)
             }
             "config.get" => {
                 reject_api_fields(p, &[])?;
@@ -1000,32 +961,6 @@ impl App {
                 self.apply_socket_manifests(manifests);
                 let rules = self.manifests.rule_count();
                 Ok(json!({"type":"agent_manifests_reloaded","rules":rules}))
-            }
-            "runtime.capabilities" => {
-                reject_api_fields(p, &[])?;
-                Ok(json!({
-                "type":"runtime_capabilities",
-                "protocol":{
-                    "name":crate::runtime_api::PROTOCOL_NAME,
-                    "major":crate::runtime_api::PROTOCOL_MAJOR,
-                    "minor":crate::runtime_api::PROTOCOL_MINOR,
-                },
-                "session":crate::session::display_name(),
-                "event_sequence":crate::ipc::api::current_sequence(&self.events),
-                "methods":crate::runtime_api::METHODS,
-                "agent_authorities":["integration_report", "process_tree", "launch_command", "osc_title", "screen_text", "prior_identity", "command_fallback"],
-                "agent_states":["idle", "working", "blocked", "done"],
-                "limits":{
-                    "agent_wait_timeout_s":MAX_AGENT_WAIT.as_secs(),
-                    "agent_prompt_characters":MAX_AGENT_PROMPT_CHARS,
-                    "agent_prompt_quiet_ms":AGENT_PROMPT_QUIET.as_millis(),
-                    "agent_start_arguments":MAX_AGENT_START_ARGS,
-                    "agent_report_ttl_s":MAX_AGENT_REPORT_TTL_S,
-                    "agent_report_message_characters":MAX_AGENT_REPORT_MESSAGE_CHARS,
-                    "agent_waits_per_pane":MAX_AGENT_WAITS_PER_PANE,
-                    "agent_waits_total":MAX_AGENT_WAITS_TOTAL,
-                }
-                }))
             }
             "session.snapshot" => {
                 reject_api_fields(p, &[])?;
@@ -3824,9 +3759,9 @@ impl App {
         json!({
             "type":"session_snapshot",
             "protocol":{
-                "name":crate::runtime_api::PROTOCOL_NAME,
-                "major":crate::runtime_api::PROTOCOL_MAJOR,
-                "minor":crate::runtime_api::PROTOCOL_MINOR,
+                "name":crate::api::PROTOCOL_NAME,
+                "major":crate::api::PROTOCOL_MAJOR,
+                "minor":crate::api::PROTOCOL_MINOR,
             },
             "session":crate::session::display_name(),
             "server_generation":self.backend_server_generation,
@@ -4920,8 +4855,6 @@ impl App {
         self.sidebars = sidebars;
         self.file_tree.show_hidden = next.layout.files_show_hidden;
         self.file_tree.scroll = 0;
-        self.uhp_available
-            .store(next.uhp_enabled, Ordering::Release);
         crate::layout::set_gaps(next.layout.col_gap, next.layout.row_gap);
         for pane in self.panes.values() {
             pane.set_history_budget(history_budget);
@@ -6445,7 +6378,7 @@ command = ["true"]
 
         let snapshot = app.dispatch("session.snapshot", &json!({})).unwrap();
         assert_eq!(snapshot["type"], "session_snapshot");
-        assert_eq!(snapshot["protocol"]["name"], "luvus-runtime");
+        assert_eq!(snapshot["protocol"]["name"], "luvus-uhp");
         assert_eq!(
             snapshot["workspaces"][0]["tabs"][0]["panes"][0]["pane_id"],
             pane.0.to_string()

@@ -2,33 +2,32 @@ use serde_json::{json, Value};
 
 pub fn schema_bundle() -> Value {
     fn schema(source: &str) -> Value {
-        serde_json::from_str(source).expect("embedded Socket API schema is valid JSON")
+        serde_json::from_str(source).expect("embedded UHP schema is valid JSON")
     }
     let request = schema(include_str!(
-        "../../protocol/socket/v1/schema/request.schema.json"
+        "../../protocol/uhp/v1/schema/request.schema.json"
     ));
     let response = schema(include_str!(
-        "../../protocol/socket/v1/schema/response.schema.json"
+        "../../protocol/uhp/v1/schema/response.schema.json"
     ));
     let event = schema(include_str!(
-        "../../protocol/socket/v1/schema/event.schema.json"
+        "../../protocol/uhp/v1/schema/event.schema.json"
     ));
-    let runtime = crate::runtime_api::schema_bundle();
     let terminal = crate::terminal::backend::schema_bundle();
     let mut documents = terminal["documents"]
         .as_object()
         .cloned()
         .unwrap_or_default();
     documents.insert(
-        "https://luvus.dev/protocol/socket/v1/request.schema.json".into(),
+        "https://luvus.dev/protocol/uhp/v1/request.schema.json".into(),
         request.clone(),
     );
     documents.insert(
-        "https://luvus.dev/protocol/socket/v1/response.schema.json".into(),
+        "https://luvus.dev/protocol/uhp/v1/response.schema.json".into(),
         response.clone(),
     );
     documents.insert(
-        "https://luvus.dev/protocol/socket/v1/event.schema.json".into(),
+        "https://luvus.dev/protocol/uhp/v1/event.schema.json".into(),
         event.clone(),
     );
     json!({
@@ -40,10 +39,7 @@ pub fn schema_bundle() -> Value {
         "request":request,
         "response":response,
         "event":event,
-        "profiles":{
-            "runtime":runtime,
-            "terminal":terminal,
-        },
+        "terminal":terminal,
         "documents":documents,
     })
 }
@@ -68,20 +64,13 @@ mod tests {
     }
 
     #[test]
-    fn schema_bundle_publishes_strict_uhp_profiles() {
+    fn schema_bundle_publishes_one_uhp_contract_with_terminal_components() {
         let bundle = schema_bundle();
-        assert_eq!(
-            bundle["profiles"]["runtime"]["protocol"]["name"],
-            "luvus-runtime"
-        );
-        assert_eq!(bundle["profiles"]["runtime"]["protocol"]["major"], 1);
-        assert_eq!(
-            bundle["profiles"]["terminal"]["protocol"]["name"],
-            "luvus-terminal-backend"
-        );
-        assert_eq!(bundle["profiles"]["terminal"]["protocol"]["major"], 1);
-        assert!(bundle["profiles"]["terminal"]["methods"]["observe"].is_object());
-        assert!(bundle["profiles"]["terminal"]["methods"]["control"].is_object());
+        assert_eq!(bundle["protocol"]["name"], "luvus-uhp");
+        assert_eq!(bundle["protocol"]["major"], 1);
+        assert!(bundle.get("profiles").is_none());
+        assert!(bundle["terminal"]["methods"]["observe"].is_object());
+        assert!(bundle["terminal"]["methods"]["control"].is_object());
         let documents = bundle["documents"].as_object().unwrap();
         for branch in bundle["request"]["allOf"].as_array().unwrap() {
             let Some(reference) = branch["then"]["properties"]["params"]["$ref"].as_str() else {
@@ -98,7 +87,7 @@ mod tests {
 
     #[test]
     fn published_fixture_manifest_tracks_version_and_line_counts() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("protocol/socket/v1");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("protocol/uhp/v1");
         let manifest: Value =
             serde_json::from_slice(&std::fs::read(root.join("fixtures/manifest.json")).unwrap())
                 .unwrap();

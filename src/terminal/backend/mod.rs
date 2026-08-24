@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use crate::terminal::vt::VtEngine;
 
-pub const PROTOCOL_NAME: &str = "luvus-terminal-backend";
+pub const PROTOCOL_NAME: &str = "luvus-uhp";
 pub const PROTOCOL_MAJOR: u64 = 1;
 pub const PROTOCOL_MINOR: u64 = 0;
 
@@ -270,41 +270,41 @@ pub fn schema_bundle() -> Value {
     fn schema(source: &str) -> Value {
         serde_json::from_str(source).expect("embedded terminal backend schema is valid JSON")
     }
-    const BASE: &str = "https://luvus.dev/protocol/terminal-backend/v1/schema";
+    const BASE: &str = "https://luvus.dev/protocol/uhp/v1/schema/terminal";
     let request = schema(include_str!(
-        "../../../protocol/terminal-backend/v1/schema/request.schema.json"
+        "../../../protocol/uhp/v1/terminal/schema/request.schema.json"
     ));
     let response = schema(include_str!(
-        "../../../protocol/terminal-backend/v1/schema/response.schema.json"
+        "../../../protocol/uhp/v1/terminal/schema/response.schema.json"
     ));
     let event = schema(include_str!(
-        "../../../protocol/terminal-backend/v1/schema/event.schema.json"
+        "../../../protocol/uhp/v1/terminal/schema/event.schema.json"
     ));
     let common = schema(include_str!(
-        "../../../protocol/terminal-backend/v1/schema/common.schema.json"
+        "../../../protocol/uhp/v1/terminal/schema/common.schema.json"
     ));
     let control_frame = schema(include_str!(
-        "../../../protocol/terminal-backend/v1/schema/control-frame.schema.json"
+        "../../../protocol/uhp/v1/terminal/schema/control-frame.schema.json"
     ));
     let methods = json!({
-        "capabilities":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/capabilities.schema.json")),
-        "inventory":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/inventory.schema.json")),
-        "snapshot":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/snapshot.schema.json")),
-        "validate":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/validate.schema.json")),
-        "processes":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/processes.schema.json")),
-        "capture":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/capture.schema.json")),
-        "observe":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/observe.schema.json")),
-        "control":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/control.schema.json")),
-        "type_literal":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/type-literal.schema.json")),
-        "submit_text":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/submit-text.schema.json")),
-        "send_key":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/send-key.schema.json")),
-        "set_title":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/set-title.schema.json")),
-        "notify":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/notify.schema.json")),
-        "create":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/create.schema.json")),
-        "close":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/close.schema.json")),
-        "events":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/events.schema.json")),
-        "wait_change":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/wait-change.schema.json")),
-        "wait_output":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/wait-output.schema.json")),
+        "capabilities":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/capabilities.schema.json")),
+        "inventory":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/inventory.schema.json")),
+        "snapshot":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/snapshot.schema.json")),
+        "validate":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/validate.schema.json")),
+        "processes":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/processes.schema.json")),
+        "capture":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/capture.schema.json")),
+        "observe":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/observe.schema.json")),
+        "control":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/control.schema.json")),
+        "type_literal":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/type-literal.schema.json")),
+        "submit_text":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/submit-text.schema.json")),
+        "send_key":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/send-key.schema.json")),
+        "set_title":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/set-title.schema.json")),
+        "notify":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/notify.schema.json")),
+        "create":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/create.schema.json")),
+        "close":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/close.schema.json")),
+        "events":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/events.schema.json")),
+        "wait_change":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/wait-change.schema.json")),
+        "wait_output":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/wait-output.schema.json")),
     });
     let mut documents = serde_json::Map::new();
     documents.insert(format!("{BASE}/request.schema.json"), request.clone());
@@ -446,7 +446,7 @@ mod tests {
     #[test]
     fn published_contract_tracks_runtime_version_limits_and_capabilities() {
         let root =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("protocol/terminal-backend/v1");
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("protocol/uhp/v1/terminal");
         let manifest: Value =
             serde_json::from_slice(&std::fs::read(root.join("fixtures/manifest.json")).unwrap())
                 .unwrap();

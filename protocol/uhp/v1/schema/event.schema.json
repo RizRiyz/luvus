@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://luvus.dev/protocol/uhp/v1/event.schema.json",
+  "title": "Luvus Universal Harness Protocol event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event", "sequence", "data"],
+  "properties": {
+    "event": { "type": "string", "minLength": 1 },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "data": { "type": "object" }
+  }
+}

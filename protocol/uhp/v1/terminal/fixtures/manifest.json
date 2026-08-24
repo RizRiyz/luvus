@@ -1,0 +1,22 @@
+{
+  "protocol":{"name":"luvus-uhp","major":1,"minor":0},
+  "files":[
+    {"path":"valid/requests.jsonl","kind":"request","expect":"valid","count":19},
+    {"path":"valid/responses.jsonl","kind":"response","expect":"valid","count":11},
+    {"path":"valid/events.jsonl","kind":"event","expect":"valid","count":4},
+    {"path":"valid/control-frames.jsonl","kind":"control","expect":"valid","count":3},
+    {"path":"invalid/requests.jsonl","kind":"request","expect":"invalid","count":8},
+    {"path":"invalid/events.jsonl","kind":"event","expect":"invalid","count":2},
+    {"path":"invalid/control-frames.jsonl","kind":"control","expect":"invalid","count":3}
+  ],
+  "framing":[
+    {"name":"missing_lf","expect":"invalid_request","dispatch":"not_started"},
+    {"name":"request_over_1_mib","expect":"frame_too_large","dispatch":"not_started"},
+    {"name":"second_frame","expect":"first_frame_only"}
+  ],
+  "lifecycle":[
+    {"name":"stale_server","expect":"stale_server","dispatch":"rejected"},
+    {"name":"stale_route","expect":"stale_route","dispatch":"rejected"},
+    {"name":"lost_mutation_response","expect":"possibly_executed","classified_by":"client"}
+  ]
+}

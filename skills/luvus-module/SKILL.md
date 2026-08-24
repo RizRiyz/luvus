@@ -4,12 +4,12 @@ description: >-
   Write a luvus module (an extension for luvus, mission control for your AI coding agents). Use when
   the user is building or debugging a luvus module: authoring luvus-module.toml,
   adding a sidebar dock, Luvus Bar widget, right-click action, event hook,
-  module pane, module settings, or calling luvus back over its socket API.
+  module pane, module settings, or calling luvus back over its UHP.
 ---
 
 # Writing a luvus module
 
-A **luvus module** is a plugin for luvus, mission control for your AI coding agents. There is **no SDK and no scripting engine**: a module is a directory with a `luvus-module.toml` manifest that declares **argv commands** (any executable: `sh`, `python`, `node`, a compiled binary). luvus runs those commands as subprocesses with `LUVUS_*` context in the environment, and the command calls luvus back through the same socket API the `luvus` CLI uses. So a module in bash/python/node can do what a built-in feature does.
+A **luvus module** is a plugin for luvus, mission control for your AI coding agents. There is **no SDK and no scripting engine**: a module is a directory with a `luvus-module.toml` manifest that declares **argv commands** (any executable: `sh`, `python`, `node`, a compiled binary). luvus runs those commands as subprocesses with `LUVUS_*` context in the environment, and the command calls luvus back through the same UHP the `luvus` CLI uses. So a module in bash/python/node can do what a built-in feature does.
 
 Reference material in this repo (read for depth): `MODULE-GUIDE.md`, `docs/13-modules.md`, and the worked modules in `examples/modules/` (`branch-dock` = a sidebar dock, `agent-ping` = an event hook, `scratch-pane` = a pane).
 
@@ -29,7 +29,7 @@ platforms = ["macos", "linux"]  # optional; omit = all. Also per-item.
 Then any of these tables, each declaring an argv `command` (a list, run as-is, cwd = the module dir):
 
 - **`[[docks]]`** `id`, `title`, `placement` (`sidebar.left` | `sidebar.right`) — reserve a sidebar dock. luvus renders it; you fill it with `ui.dock.push` (see below).
-- **`[[bars]]`** `id`, `title`, `region` (`top-right` | `bottom-right`), optional `priority` — reserve a bounded one-row Luvus Bar widget. Publish structured segments with `luvus bar push` (`ui.bar.push` on the socket API); live content is not persisted.
+- **`[[bars]]`** `id`, `title`, `region` (`top-right` | `bottom-right`), optional `priority` — reserve a bounded one-row Luvus Bar widget. Publish structured segments with `luvus bar push` (`ui.bar.push` on the UHP); live content is not persisted.
 - **`[[startup]]`** `command` — run once when the session is up and the socket is listening (and on enable). Dock rows and bar content are **not** persisted, so this is how you repaint them after a restart.
 - **`[[events]]`** `on`, `command` — run when a luvus event fires. Valid `on` values include `workspace.created`/`closed`, `tab.created`/`closed`/`moved`, `pane.created`/`closed`/`forked`/`moved`, `pane.agent_status_changed`, `agent.hook`, and the `task.*`/`lease.*` events (see `KNOWN_EVENTS` in `src/module/manifest.rs` for the full set — an unknown `on` is a hard manifest error).
 - **`[[actions]]`** `id`, `title`, `command`, optional `contexts` — a runnable action. With `contexts = ["pane"|"workspace"|"node"|"agent"|"tab"]` it also appears in that right-click menu, acting on **what was clicked**. Without `contexts` it is CLI-only (`luvus module run <id> <action>`). Dock rows also invoke an action on click.

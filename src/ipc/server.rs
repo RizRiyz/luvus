@@ -170,12 +170,7 @@ pub fn run() -> Result<()> {
 
     let mut terminal_theme_enabled = app.config.theme == "terminal";
     let terminal_theme = Arc::new(AtomicBool::new(terminal_theme_enabled));
-    api::start_server_with_uhp(
-        api_listener,
-        tx.clone(),
-        events,
-        Arc::clone(&app.uhp_available),
-    );
+    api::start_server(api_listener, tx.clone(), events);
     start_client_listener(client_listener, tx.clone(), terminal_theme.clone());
     drop(startup_lock);
     // The session is restored and the API socket is listening, so a module's

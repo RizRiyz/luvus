@@ -1,5 +1,5 @@
 //! Module registry operations + the action/command runner, driven from the
-//! `module.*` socket API (docs/13 MOD-1). Registry edits persist immediately;
+//! `module.*` UHP (docs/13 MOD-1). Registry edits persist immediately;
 //! command runs are fire-and-forget with a `Running` log filled in when the
 //! subprocess finishes (`AppEvent::ModuleCommandFinished`).
 
@@ -127,7 +127,7 @@ impl App {
             self.bar.sync_modules(&self.modules);
         } else {
             // Make declarations visible before the asynchronous startup command
-            // can call `luvus bar push` (`ui.bar.push` on the socket API).
+            // can call `luvus bar push` (`ui.bar.push` on the UHP).
             self.bar.sync_modules(&self.modules);
             self.run_module_startup_hooks();
         }

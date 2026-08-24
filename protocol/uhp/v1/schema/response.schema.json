@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://luvus.dev/protocol/uhp/v1/response.schema.json",
+  "title": "Luvus Universal Harness Protocol response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id"],
+  "properties": {
+    "id": { "type": "string" },
+    "result": {},
+    "error": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["code", "message"],
+      "properties": { "code": { "type": "string" }, "message": { "type": "string" } }
+    }
+  },
+  "oneOf": [ { "required": ["result"] }, { "required": ["error"] } ]
+}

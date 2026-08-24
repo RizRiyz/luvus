@@ -1,4 +1,4 @@
-//! Application adapter for the versioned terminal-backend protocol.
+//! Application adapter for UHP's `terminal.backend.*` method namespace.
 
 use super::*;
 use crate::terminal::backend::{
@@ -102,7 +102,6 @@ impl App {
 
     fn dispatch_terminal_backend(&mut self, method: &str, params: &Value) -> BackendResult {
         match method {
-            "terminal.backend.capabilities" => self.backend_capabilities(params),
             "terminal.backend.inventory" => self.backend_inventory(params),
             "terminal.backend.snapshot" => self.backend_snapshot(params),
             "terminal.backend.validate" => self.backend_validate(params),
@@ -133,47 +132,6 @@ impl App {
                 "unknown terminal backend method",
             )),
         }
-    }
-
-    fn backend_capabilities(&self, params: &Value) -> BackendResult {
-        backend::reject_unknown_fields(params, &["protocol"])?;
-        let protocol = params
-            .get("protocol")
-            .and_then(Value::as_object)
-            .ok_or_else(|| BackendError::read("invalid_params", "protocol is required"))?;
-        if protocol
-            .keys()
-            .any(|key| !matches!(key.as_str(), "name" | "major" | "minor"))
-        {
-            return Err(BackendError::read(
-                "invalid_params",
-                "protocol contains an unknown field",
-            ));
-        }
-        let name = protocol.get("name").and_then(Value::as_str);
-        let major = protocol.get("major").and_then(Value::as_u64);
-        let minor = protocol.get("minor").and_then(Value::as_u64);
-        if name != Some(backend::PROTOCOL_NAME)
-            || major != Some(backend::PROTOCOL_MAJOR)
-            || minor != Some(backend::PROTOCOL_MINOR)
-        {
-            return Err(BackendError::read(
-                "incompatible_protocol",
-                "unsupported terminal backend protocol",
-            ));
-        }
-        Ok(json!({
-            "type":"terminal_backend_capabilities",
-            "protocol":{
-                "name":backend::PROTOCOL_NAME,
-                "major":backend::PROTOCOL_MAJOR,
-                "minor":backend::PROTOCOL_MINOR,
-            },
-            "server_generation":self.backend_server_generation,
-            "session_name":crate::session::display_name(),
-            "capabilities":backend::CAPABILITIES,
-            "limits":backend::limits_json(),
-        }))
     }
 
     fn backend_inventory(&self, params: &Value) -> BackendResult {
@@ -1663,34 +1621,6 @@ mod tests {
         assert_eq!(backend_key_bytes("left", false).unwrap(), b"\x1b[D");
         assert_eq!(backend_key_bytes("left", true).unwrap(), b"\x1bOD");
         assert!(backend_key_bytes("raw-escape", false).is_none());
-    }
-
-    #[test]
-    fn capability_negotiation_requires_exact_version_one_zero() {
-        let _env = crate::persist::test_env("backend-version-negotiation");
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let app = App::new(80, 24, tx).unwrap();
-        let current = app
-            .backend_capabilities(&json!({"protocol":{
-                "name":backend::PROTOCOL_NAME,"major":1,"minor":0
-            }}))
-            .unwrap();
-        assert_eq!(current["protocol"]["major"], 1);
-        assert_eq!(current["protocol"]["minor"], 0);
-        assert_eq!(
-            current["capabilities"].as_array().unwrap().len(),
-            backend::CAPABILITIES.len()
-        );
-        let incompatible = app.backend_capabilities(&json!({"protocol":{
-            "name":backend::PROTOCOL_NAME,"major":1,"minor":1
-        }}));
-        assert!(matches!(
-            incompatible,
-            Err(BackendError {
-                code: "incompatible_protocol",
-                ..
-            })
-        ));
     }
 
     #[test]

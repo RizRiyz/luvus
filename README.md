@@ -44,7 +44,7 @@
 - **Extensible surfaces:** Install modules with actions, events, settings,
   startup hooks, panes, sidebar docks, and Top or Bottom Luvus Bar widgets.
 - **Universal Harness Protocol:** Build harnesses and orchestrators on the
-  versioned UHP Runtime and Terminal profiles, with owner-only local IPC,
+  single versioned UHP 1.0 method registry, with owner-only local IPC,
   snapshots, event streams, exact input, and semantic waits.
 - **Custom interface:** Move and resize two sidebars, remap keys and the prefix,
   use presets, select from 8 languages, and install composable local or

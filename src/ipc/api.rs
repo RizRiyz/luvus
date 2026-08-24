@@ -234,11 +234,11 @@ pub fn active_terminal_streams() -> usize {
     ACTIVE_TERMINAL_STREAMS.load(Ordering::Acquire)
 }
 
-pub fn socket_stats() -> Value {
+pub fn uhp_stats() -> Value {
     let completed = REQUESTS_COMPLETED.load(Ordering::Relaxed);
     let latency = REQUEST_LATENCY_NS.load(Ordering::Relaxed);
     json!({
-        "type":"socket_stats",
+        "type":"uhp_stats",
         "uptime_ms":SERVER_STARTED.get().map(|started| started.elapsed().as_millis() as u64).unwrap_or(0),
         "connections":{
             "active":active_connections(),
@@ -290,7 +290,7 @@ fn authorize_request(
                 && crate::api::capabilities::is_read_only(method))
     });
     allowed
-        .then(|| (method == "socket.token.create").then(|| token.scopes.clone()))
+        .then(|| (method == "uhp.token.create").then(|| token.scopes.clone()))
         .ok_or("auth token scope denied")
 }
 
@@ -301,8 +301,8 @@ fn handle_auth_method(
     caller_scopes: Option<&[String]>,
 ) -> Option<String> {
     match method {
-        "socket.stats" => Some(json!({"id":id,"result":socket_stats()}).to_string()),
-        "socket.token.create" => {
+        "uhp.stats" => Some(json!({"id":id,"result":uhp_stats()}).to_string()),
+        "uhp.token.create" => {
             let valid_fields = params.as_object().is_some_and(|object| {
                 object
                     .keys()
@@ -376,16 +376,16 @@ fn handle_auth_method(
                 },
             );
             Some(
-                json!({"id":id,"result":{"type":"socket_token","id":token_id,
+                json!({"id":id,"result":{"type":"uhp_token","id":token_id,
                 "token":secret,"scopes":scopes,"expires_at":expires_unix}})
                 .to_string(),
             )
         }
-        "socket.token.list" => {
+        "uhp.token.list" => {
             if !params.as_object().is_some_and(serde_json::Map::is_empty) {
                 return Some(
                     json!({"id":id,"error":{"code":"invalid_request",
-                    "message":"socket.token.list takes no parameters"}})
+                    "message":"uhp.token.list takes no parameters"}})
                     .to_string(),
                 );
             }
@@ -402,19 +402,19 @@ fn handle_auth_method(
                 })
                 .collect();
             Some(
-                json!({"id":id,"result":{"type":"socket_tokens","tokens":tokens,
+                json!({"id":id,"result":{"type":"uhp_tokens","tokens":tokens,
                 "capacity":MAX_AUTH_TOKENS}})
                 .to_string(),
             )
         }
-        "socket.token.revoke" => {
+        "uhp.token.revoke" => {
             if params
                 .as_object()
                 .is_none_or(|object| object.keys().any(|key| key != "id"))
             {
                 return Some(
                     json!({"id":id,"error":{"code":"invalid_request",
-                    "message":"socket.token.revoke accepts only id"}})
+                    "message":"uhp.token.revoke accepts only id"}})
                     .to_string(),
                 );
             }
@@ -430,7 +430,7 @@ fn handle_auth_method(
             let before = store.tokens.len();
             store.tokens.retain(|_, token| token.id != token_id);
             Some(
-                json!({"id":id,"result":{"type":"socket_token_revoked",
+                json!({"id":id,"result":{"type":"uhp_token_revoked",
                 "id":token_id,"revoked":store.tokens.len() != before}})
                 .to_string(),
             )
@@ -1275,19 +1275,7 @@ pub fn bind_server(
 /// Accept API connections from an already-bound listener on a background thread.
 /// Requests are forwarded into the app's event channel so the loop wakes the
 /// moment one arrives instead of waiting for its idle tick.
-#[cfg(test)]
 pub fn start_server(listener: transport::Listener, event_tx: Sender<AppEvent>, bus: EventBus) {
-    start_server_with_uhp(listener, event_tx, bus, Arc::new(AtomicBool::new(true)));
-}
-
-/// Start the Socket API with the selected session's live UHP availability.
-/// The plain `start_server` wrapper keeps protocol tests concise and enabled.
-pub fn start_server_with_uhp(
-    listener: transport::Listener,
-    event_tx: Sender<AppEvent>,
-    bus: EventBus,
-    uhp_available: Arc<AtomicBool>,
-) {
     let _ = SERVER_STARTED.set(std::time::Instant::now());
     let _ = thread::Builder::new()
         .name("luvus-api-accept".into())
@@ -1313,11 +1301,10 @@ pub fn start_server_with_uhp(
                 ACCEPTED_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
                 let event_tx = event_tx.clone();
                 let bus = bus.clone();
-                let uhp_available = Arc::clone(&uhp_available);
                 let _ = thread::Builder::new()
                     .name("luvus-api-request".into())
                     .stack_size(API_WORKER_STACK_BYTES)
-                    .spawn(move || handle_conn(stream, event_tx, bus, uhp_available, permit));
+                    .spawn(move || handle_conn(stream, event_tx, bus, permit));
             }
         });
 }
@@ -1326,7 +1313,6 @@ fn handle_conn(
     mut stream: Conn,
     event_tx: Sender<AppEvent>,
     bus: EventBus,
-    uhp_available: Arc<AtomicBool>,
     _permit: ConnectionPermit,
 ) {
     let mut writer = stream.clone();
@@ -1398,8 +1384,7 @@ fn handle_conn(
     };
     let versioned_runtime = matches!(
         method.as_str(),
-        "runtime.capabilities"
-            | "session.snapshot"
+        "session.snapshot"
             | "pane.processes"
             | "agent.explain"
             | "agent.report"
@@ -1409,13 +1394,13 @@ fn handle_conn(
             | "agent.wait"
             | "events.subscribe"
     );
-    let versioned_socket = matches!(
+    let versioned_uhp = matches!(
         method.as_str(),
-        "socket.capabilities"
-            | "socket.stats"
-            | "socket.token.create"
-            | "socket.token.list"
-            | "socket.token.revoke"
+        "uhp.capabilities"
+            | "uhp.stats"
+            | "uhp.token.create"
+            | "uhp.token.list"
+            | "uhp.token.revoke"
             | "events.wait"
             | "workspace.get"
             | "workspace.move"
@@ -1442,7 +1427,7 @@ fn handle_conn(
             | "server.reload_agent_manifests"
     );
     let versioned_api =
-        method.starts_with("terminal.backend.") || versioned_runtime || versioned_socket;
+        method.starts_with("terminal.backend.") || versioned_runtime || versioned_uhp;
     let params = match val.get("params") {
         None | Some(Value::Null) if versioned_api => json!({}),
         None => Value::Null,
@@ -1464,18 +1449,6 @@ fn handle_conn(
             return;
         }
     }
-    if crate::api::capabilities::is_uhp_entry_method(&method)
-        && !uhp_available.load(Ordering::Acquire)
-    {
-        let response = json!({"id":id,"error":{
-            "code":"uhp_disabled",
-            "message":"UHP is disabled; run `luvus uhp enable` to make its profiles available"
-        }})
-        .to_string();
-        let _ = write_response(&mut writer, &id, &response);
-        return;
-    }
-
     let delegated_scopes = match authorize_request(&method, auth) {
         Ok(scopes) => scopes,
         Err(message) => {
@@ -2434,57 +2407,6 @@ mod tests {
     }
 
     #[test]
-    fn disabled_uhp_is_rejected_before_app_handoff_but_socket_remains_live() {
-        let _env = crate::persist::test_env("uhp-disabled-api");
-        let root = crate::persist::ensure_config_dir();
-        let path = root.join("uhp-disabled.sock");
-        let lock = transport::acquire_server_startup_lock(&root).unwrap();
-        let listener = bind_server(&path, &lock).unwrap();
-        let (events, rx) = mpsc::channel();
-        start_server_with_uhp(
-            listener,
-            events,
-            new_bus(),
-            Arc::new(AtomicBool::new(false)),
-        );
-        drop(lock);
-
-        let mut runtime = transport::connect(&path).unwrap();
-        writeln!(
-            runtime,
-            "{}",
-            json!({"id":"runtime","method":"runtime.capabilities","params":{}})
-        )
-        .unwrap();
-        let mut response = String::new();
-        BufReader::new(runtime).read_line(&mut response).unwrap();
-        let response: Value = serde_json::from_str(&response).unwrap();
-        assert_eq!(response["error"]["code"], "uhp_disabled");
-        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
-
-        let mut socket = transport::connect(&path).unwrap();
-        writeln!(
-            socket,
-            "{}",
-            json!({"id":"socket","method":"socket.capabilities","params":{}})
-        )
-        .unwrap();
-        let AppEvent::Api(request) = rx.recv().unwrap() else {
-            panic!("Socket API request must still reach the app loop");
-        };
-        request
-            .reply
-            .send(json!({"id":"socket","result":{"type":"ok"}}).to_string())
-            .unwrap();
-        let mut response = String::new();
-        BufReader::new(socket).read_line(&mut response).unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(&response).unwrap()["result"]["type"],
-            "ok"
-        );
-    }
-
-    #[test]
     fn timeout_s_parses_without_panicking() {
         // Absent -> no deadline.
         assert!(parse_timeout_s(&json!({})).unwrap().is_none());
@@ -2683,7 +2605,7 @@ mod tests {
         writeln!(
             invalid,
             "{}",
-            json!({"id":7,"method":"runtime.capabilities","params":{}})
+            json!({"id":7,"method":"uhp.capabilities","params":{}})
         )
         .unwrap();
         let mut response = String::new();
@@ -2702,7 +2624,7 @@ mod tests {
             writeln!(
                 stream,
                 "{}",
-                json!({"id":"null-params","method":"runtime.capabilities","params":null})
+                json!({"id":"null-params","method":"uhp.capabilities","params":null})
             )
             .unwrap();
             let mut response = String::new();
@@ -2794,7 +2716,7 @@ mod tests {
         let created: Value = serde_json::from_str(
             &handle_auth_method(
                 "create",
-                "socket.token.create",
+                "uhp.token.create",
                 &json!({"scopes":["read"],"ttl_s":60}),
                 None,
             )
@@ -2808,13 +2730,7 @@ mod tests {
             authorize_request("workspace.close", Some(secret)),
             Err("auth token scope denied")
         );
-        handle_auth_method(
-            "revoke",
-            "socket.token.revoke",
-            &json!({"id":token_id}),
-            None,
-        )
-        .unwrap();
+        handle_auth_method("revoke", "uhp.token.revoke", &json!({"id":token_id}), None).unwrap();
         assert_eq!(
             authorize_request("workspace.get", Some(secret)),
             Err("invalid or expired auth token")
@@ -2823,7 +2739,7 @@ mod tests {
         let admin: Value = serde_json::from_str(
             &handle_auth_method(
                 "admin",
-                "socket.token.create",
+                "uhp.token.create",
                 &json!({"scopes":["admin"],"ttl_s":60}),
                 None,
             )
@@ -2831,13 +2747,13 @@ mod tests {
         )
         .unwrap();
         let admin_secret = admin["result"]["token"].as_str().unwrap();
-        let caller = authorize_request("socket.token.create", Some(admin_secret))
+        let caller = authorize_request("uhp.token.create", Some(admin_secret))
             .unwrap()
             .unwrap();
         let escalated: Value = serde_json::from_str(
             &handle_auth_method(
                 "escalate",
-                "socket.token.create",
+                "uhp.token.create",
                 &json!({"scopes":["all"],"ttl_s":60}),
                 Some(&caller),
             )
@@ -2848,7 +2764,7 @@ mod tests {
         let delegated: Value = serde_json::from_str(
             &handle_auth_method(
                 "delegate",
-                "socket.token.create",
+                "uhp.token.create",
                 &json!({"scopes":["admin"],"ttl_s":60}),
                 Some(&caller),
             )

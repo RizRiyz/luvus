@@ -88,7 +88,7 @@ export default defineConfig({
             { label: 'Settings & Theming', slug: 'docs/guides/settings' },
             { label: 'Community Themes', slug: 'docs/guides/themes' },
             { label: 'Scripting luvus', slug: 'docs/guides/scripting' },
-            { label: 'Socket API & UHP', slug: 'docs/guides/socket-and-uhp' },
+            { label: 'Automating with UHP', slug: 'docs/guides/uhp' },
           ],
         },
         {
@@ -104,7 +104,7 @@ export default defineConfig({
           label: 'Reference',
           items: [
             { label: 'CLI Commands', slug: 'docs/reference/cli' },
-            { label: 'Socket API', slug: 'docs/reference/api' },
+            { label: 'UHP Methods', slug: 'docs/reference/api' },
             { label: 'Universal Harness Protocol', slug: 'docs/reference/uhp' },
             { label: 'Keybindings', slug: 'docs/reference/keybindings' },
             { label: 'Configuration', slug: 'docs/reference/configuration' },

@@ -40,7 +40,7 @@ If the UX feels right here, docs/38 is the plan to make it native.
 ## How it works (no SDK, just argv + the socket)
 
 `luvus-module.toml` reserves the dock and declares the actions. The scripts fill
-the dock over the same socket API the CLI uses:
+the dock over the same UHP the CLI uses:
 
 - `render.sh` — walks the expanded tree (explicit-stack DFS, since POSIX sh has
   no locals) and `luvus ui dock push`es it. Folders get the `toggle` action,

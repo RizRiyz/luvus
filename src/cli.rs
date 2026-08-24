@@ -77,8 +77,7 @@ Commands:
   wait         Wait for pane output or an agent state
   search       Search across pane scrollback
   events       Stream live status changes
-  uhp          Inspect, enable, disable, and use Universal Harness Protocol
-  socket       Inspect and use the local Socket API
+  uhp          Discover and use Universal Harness Protocol 1.0
   attach       Open the TUI focused on one pane
   doctor       Check optional external tools
   update       Check for and install a newer Luvus release
@@ -289,21 +288,11 @@ events:
   events                     stream live status changes
 
 universal harness protocol:
-  uhp status                 show whether UHP profiles are available
-  uhp enable                 make UHP profiles available without restarting
-  uhp disable                stop advertising and serving UHP profile entry points
-  uhp runtime capabilities   negotiate UHP Runtime capabilities and limits
-  uhp runtime snapshot       print a fenced UHP Runtime session snapshot
-  uhp runtime schema         print the installed UHP Runtime JSON Schema bundle
-  uhp terminal capabilities  negotiate UHP Terminal capabilities
-  uhp terminal snapshot      print a fenced UHP Terminal inventory
-  uhp terminal events        stream sequenced UHP Terminal events
-  uhp terminal schema        print the installed UHP Terminal JSON Schema bundle
-
-socket api:
-  socket capabilities        print live Socket API methods, profiles, and limits
-  socket schema              print the complete installed Socket API schema bundle
-  socket proxy               forward one JSON request from stdin to the local server
+  uhp capabilities          print live methods, contracts, limits, and protocol identity
+  uhp schema                print the complete installed UHP JSON Schema bundle
+  uhp snapshot              print a fenced session snapshot for harness bootstrap
+  uhp events                stream sequenced UHP events
+  uhp proxy                 forward one JSON request from stdin to the selected server
 
 sessions:
   session list [--json]      list default and named server sessions
@@ -356,7 +345,7 @@ pub fn run(args: &[String]) -> Result<i32> {
         write_topic_help(std::io::stdout().lock(), topic, command)?;
         return Ok(0);
     }
-    if matches!(args.get(1).map(String::as_str), Some("uhp" | "socket")) && args.len() == 2 {
+    if args.get(1).map(String::as_str) == Some("uhp") && args.len() == 2 {
         write_topic_help(std::io::stdout().lock(), args[1].as_str(), None)?;
         return Ok(0);
     }
@@ -370,52 +359,10 @@ pub fn run(args: &[String]) -> Result<i32> {
         return theme_cmd(&args[2.min(args.len())..]);
     }
     if args.get(1).map(String::as_str) == Some("uhp")
-        && matches!(
-            args.get(2).map(String::as_str),
-            Some("status" | "enable" | "disable")
-        )
-    {
-        return uhp_management_cmd(&args[2..]);
-    }
-    if matches!(
-        (
-            args.get(1).map(String::as_str),
-            args.get(2).map(String::as_str),
-            args.get(3).map(String::as_str),
-        ),
-        (Some("uhp"), Some("terminal"), Some("schema"))
-    ) {
-        if args.len() != 4 {
-            return Err(anyhow!("usage: luvus uhp terminal schema"));
-        }
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&crate::terminal::backend::schema_bundle())?
-        );
-        return Ok(0);
-    }
-    if matches!(
-        (
-            args.get(1).map(String::as_str),
-            args.get(2).map(String::as_str),
-            args.get(3).map(String::as_str),
-        ),
-        (Some("uhp"), Some("runtime"), Some("schema"))
-    ) {
-        if args.len() != 4 {
-            return Err(anyhow!("usage: luvus uhp runtime schema"));
-        }
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&crate::runtime_api::schema_bundle())?
-        );
-        return Ok(0);
-    }
-    if args.get(1).map(String::as_str) == Some("socket")
         && args.get(2).map(String::as_str) == Some("schema")
     {
         if args.len() != 3 {
-            return Err(anyhow!("usage: luvus socket schema"));
+            return Err(anyhow!("usage: luvus uhp schema"));
         }
         println!(
             "{}",
@@ -423,13 +370,13 @@ pub fn run(args: &[String]) -> Result<i32> {
         );
         return Ok(0);
     }
-    if args.get(1).map(String::as_str) == Some("socket")
+    if args.get(1).map(String::as_str) == Some("uhp")
         && args.get(2).map(String::as_str) == Some("proxy")
     {
         if args.len() != 3 {
-            return Err(anyhow!("usage: luvus socket proxy"));
+            return Err(anyhow!("usage: luvus uhp proxy"));
         }
-        return api_proxy();
+        return uhp_proxy();
     }
     // Explicit update requests are local and never require a running server.
     if args.get(1).map(String::as_str) == Some("update") {
@@ -570,7 +517,6 @@ fn help_topic_has_subcommands(topic: &str) -> bool {
             | "skill"
             | "wait"
             | "uhp"
-            | "socket"
     )
 }
 
@@ -578,8 +524,8 @@ fn normalize_help_topic(topic: &str) -> Option<&str> {
     match topic {
         "workspace" | "tab" | "pane" | "agent" | "files" | "git" | "worktree" | "task"
         | "lease" | "module" | "theme" | "bar" | "ui" | "session" | "server" | "integration"
-        | "diff" | "skill" | "wait" | "search" | "events" | "uhp" | "socket" | "ping"
-        | "doctor" | "update" | "attach" => Some(topic),
+        | "diff" | "skill" | "wait" | "search" | "events" | "uhp" | "ping" | "doctor"
+        | "update" | "attach" => Some(topic),
         "node" => Some("pane"),
         "remote" | "--remote" => Some("remote"),
         _ => None,
@@ -701,12 +647,8 @@ fn write_topic_help(
             detailed_section("events:\n", "\nuniversal harness protocol:\n"),
         ),
         "uhp" => (
-            "luvus uhp <status|enable|disable|runtime|terminal> [command]",
-            detailed_section("universal harness protocol:\n", "\nsocket api:\n"),
-        ),
-        "socket" => (
-            "luvus socket <capabilities|schema|proxy>",
-            detailed_section("socket api:\n", "\nsessions:\n"),
+            "luvus uhp <capabilities|schema|snapshot|events|proxy>",
+            detailed_section("universal harness protocol:\n", "\nsessions:\n"),
         ),
         "remote" => (
             "luvus [--session <name>] --remote <host> [ssh args]",
@@ -2096,8 +2038,8 @@ pub(crate) fn send_request(method: &str, params: Value) -> Result<Value> {
 /// sockets or Windows named pipes directly. This is intentionally not a shell
 /// wrapper: it forwards one bounded protocol frame to the selected session and
 /// writes one bounded response. It composes over SSH as
-/// `ssh host luvus socket proxy` without opening a network listener.
-fn api_proxy() -> Result<i32> {
+/// `ssh host luvus uhp proxy` without opening a network listener.
+fn uhp_proxy() -> Result<i32> {
     let mut input = std::io::BufReader::new(std::io::stdin().lock());
     let request = crate::ipc::api::read_request_frame(&mut input)
         .map_err(|error| anyhow!("invalid request frame: {error}"))?;
@@ -2161,90 +2103,25 @@ fn register_directly(installed: &crate::module::install::Installed) -> Result<()
     Ok(())
 }
 
-fn uhp_management_cmd(args: &[String]) -> Result<i32> {
-    let (method, params, json_output) = uhp_management_request(args)?;
-    let response = send_request(method, params)?;
-    if response.get("error").is_some() {
-        println!("{}", serde_json::to_string_pretty(&response)?);
-        return Ok(1);
-    }
-    let enabled = response
-        .pointer("/result/config/uhp_enabled")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| anyhow!("server returned an invalid UHP configuration response"))?;
-    if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({"enabled":enabled}))?
-        );
-    } else {
-        println!("UHP: {}", if enabled { "enabled" } else { "disabled" });
-    }
-    Ok(0)
-}
-
-fn uhp_management_request(args: &[String]) -> Result<(&'static str, Value, bool)> {
-    let (action, json_output) = match args {
-        [action] => (action.as_str(), false),
-        [action, flag] if flag == "--json" => (action.as_str(), true),
-        _ => return Err(anyhow!("usage: luvus uhp <status|enable|disable> [--json]")),
-    };
-    match action {
-        "status" => Ok(("config.get", json!({}), json_output)),
-        "enable" => Ok((
-            "config.patch",
-            json!({"patch":{"uhp_enabled":true}}),
-            json_output,
-        )),
-        "disable" => Ok((
-            "config.patch",
-            json!({"patch":{"uhp_enabled":false}}),
-            json_output,
-        )),
-        _ => Err(anyhow!(
-            "usage: luvus uhp <status|enable|disable|runtime|terminal>"
-        )),
-    }
-}
-
 /// Map argv to a `(method, params)` pair.
 fn parse(args: &[String]) -> Result<(String, Value)> {
     let noun = args.get(1).map(String::as_str).unwrap_or("");
     let verb = args.get(2).map(String::as_str).unwrap_or("");
     let rest = &args[3.min(args.len())..];
     if noun == "uhp" {
-        if rest.len() != 1 {
+        if !rest.is_empty() {
             return Err(anyhow!(
-                "usage: luvus uhp runtime <capabilities|snapshot|schema> | luvus uhp terminal <capabilities|snapshot|events|schema>"
+                "usage: luvus uhp <capabilities|schema|snapshot|events|proxy>"
             ));
         }
-        return match (verb, rest[0].as_str()) {
-            ("runtime", "capabilities") => Ok(("runtime.capabilities".into(), json!({}))),
-            ("runtime", "snapshot") => Ok(("session.snapshot".into(), json!({}))),
-            ("terminal", "capabilities") => Ok((
-                "terminal.backend.capabilities".into(),
-                json!({"protocol":{
-                    "name":crate::terminal::backend::PROTOCOL_NAME,
-                    "major":crate::terminal::backend::PROTOCOL_MAJOR,
-                    "minor":crate::terminal::backend::PROTOCOL_MINOR,
-                }}),
-            )),
-            ("terminal", "snapshot") => {
-                Ok(("terminal.backend.snapshot".into(), json!({})))
-            }
-            ("terminal", "events") => {
-                Ok(("terminal.backend.events.subscribe".into(), json!({})))
-            }
+        return match verb {
+            "capabilities" => Ok(("uhp.capabilities".into(), json!({}))),
+            "snapshot" => Ok(("session.snapshot".into(), json!({}))),
+            "events" => Ok(("events.subscribe".into(), json!({}))),
             _ => Err(anyhow!(
-                "usage: luvus uhp runtime <capabilities|snapshot|schema> | luvus uhp terminal <capabilities|snapshot|events|schema>"
+                "usage: luvus uhp <capabilities|schema|snapshot|events|proxy>"
             )),
         };
-    }
-    if noun == "socket" {
-        if verb == "capabilities" && rest.is_empty() {
-            return Ok(("socket.capabilities".into(), json!({})));
-        }
-        return Err(anyhow!("usage: luvus socket <capabilities|schema|proxy>"));
     }
 
     // The pane id is the first numeric positional, else $LUVUS_PANE_ID.
@@ -3578,7 +3455,6 @@ mod tests {
             ("lease", "lease"),
             ("events", "events"),
             ("uhp", "uhp"),
-            ("socket", "socket"),
             ("remote", "--remote"),
             ("server", "server"),
             ("integration", "integration"),
@@ -3637,41 +3513,27 @@ mod tests {
     }
 
     #[test]
-    fn uhp_and_socket_are_first_class_cli_routes() {
-        assert!(is_cli(&argv("luvus uhp status")));
-        assert!(is_cli(&argv("luvus socket capabilities")));
+    fn uhp_is_the_single_public_protocol_cli_route() {
+        assert!(is_cli(&argv("luvus uhp capabilities")));
         assert_eq!(
-            parse(&argv("luvus uhp runtime capabilities")).unwrap().0,
-            "runtime.capabilities"
+            parse(&argv("luvus uhp capabilities")).unwrap().0,
+            "uhp.capabilities"
         );
         assert_eq!(
-            parse(&argv("luvus uhp runtime snapshot")).unwrap().0,
+            parse(&argv("luvus uhp snapshot")).unwrap().0,
             "session.snapshot"
         );
-        let (method, params) = parse(&argv("luvus uhp terminal capabilities")).unwrap();
-        assert_eq!(method, "terminal.backend.capabilities");
-        assert_eq!(params["protocol"]["major"], 1);
         assert_eq!(
-            parse(&argv("luvus uhp terminal snapshot")).unwrap().0,
-            "terminal.backend.snapshot"
+            parse(&argv("luvus uhp events")).unwrap().0,
+            "events.subscribe"
         );
+        assert!(parse(&argv("luvus uhp capabilities extra")).is_err());
         assert_eq!(
-            parse(&argv("luvus uhp terminal events")).unwrap().0,
-            "terminal.backend.events.subscribe"
+            parse(&argv("luvus socket capabilities"))
+                .unwrap_err()
+                .to_string(),
+            "unknown command. Try `luvus --help`."
         );
-        assert_eq!(
-            parse(&argv("luvus socket capabilities")).unwrap().0,
-            "socket.capabilities"
-        );
-        assert!(parse(&argv("luvus socket capabilities extra")).is_err());
-        assert!(parse(&argv("luvus uhp runtime capabilities extra")).is_err());
-
-        let (method, params, json) =
-            uhp_management_request(&argv("luvus enable --json")[1..]).unwrap();
-        assert_eq!(method, "config.patch");
-        assert_eq!(params["patch"]["uhp_enabled"], true);
-        assert!(json);
-        assert!(uhp_management_request(&argv("luvus disable extra")[1..]).is_err());
     }
 
     #[test]

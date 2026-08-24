@@ -1,1 +1,0 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"protocol":{"type":"object","properties":{"name":{"const":"luvus-terminal-backend"},"major":{"const":1},"minor":{"const":0}},"required":["name","major","minor"],"additionalProperties":false}},"required":["protocol"],"additionalProperties":false}

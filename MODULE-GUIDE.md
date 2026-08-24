@@ -8,7 +8,7 @@ panes, environment variables, the context blob, calling back into luvus,
 distribution, and troubleshooting.
 
 **Building with an AI agent?** Point your coding agent at the module-authoring
-skill and it will know the manifest and socket API: [`skills/luvus-module/SKILL.md`](skills/luvus-module/SKILL.md).
+skill and it will know the manifest and UHP: [`skills/luvus-module/SKILL.md`](skills/luvus-module/SKILL.md).
 Install it with:
 
 ```sh

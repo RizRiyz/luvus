@@ -327,7 +327,7 @@ impl Manifests {
         self.rules.len()
     }
 
-    /// Stable, bounded discovery data for Socket API administration.
+    /// Stable, bounded discovery data for UHP administration.
     pub fn agent_names(&self) -> Vec<String> {
         self.agents.iter().map(|agent| agent.name.clone()).collect()
     }

@@ -44,11 +44,6 @@ pub struct Config {
     /// never self-updates (installed via cargo/brew/etc).
     #[serde(default = "yes")]
     pub check_updates: bool,
-    /// Whether the versioned Universal Harness Protocol profiles are available
-    /// to local automation. The ordinary Socket API and Luvus CLI remain
-    /// available when this is off.
-    #[serde(default = "yes")]
-    pub uhp_enabled: bool,
     /// Replay the CLI options an agent pane was launched with when resuming it
     /// after a restart (docs/62): a pane started as
     /// `claude --permission-mode … --model …` comes back with those options
@@ -395,7 +390,6 @@ impl Default for Config {
             layout: LayoutConfig::default(),
             notifications: NotifyConfig::default(),
             check_updates: true,
-            uhp_enabled: true,
             resume_launch_flags: false,
             keybindings: std::collections::HashMap::new(),
             prefix: default_prefix(),
@@ -563,7 +557,6 @@ mod tests {
         let from_empty: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(from_empty.theme, "quattro-rally");
         assert_eq!(from_empty.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
-        assert!(from_empty.uhp_enabled, "UHP remains available by default");
         assert_eq!(
             from_empty.bars.bottom_right,
             vec![crate::bar::CORE_RUNTIME.to_string()],

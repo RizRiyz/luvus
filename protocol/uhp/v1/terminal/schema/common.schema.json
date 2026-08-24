@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://luvus.dev/protocol/uhp/v1/schema/terminal/common.schema.json",
+  "$defs": {
+    "opaqueId": {"type":"string","pattern":"^[0-9a-f]{32}$"},
+    "paneId": {"type":"string","pattern":"^[1-9][0-9]{0,9}$"},
+    "expectedRoot": {
+      "type":"object",
+      "properties":{"pid":{"type":"integer","minimum":1,"maximum":4294967295},"start_marker":{"type":["string","null"],"maxLength":256}},
+      "required":["pid"],
+      "additionalProperties":false
+    },
+    "locatorProperties": {
+      "server_generation":{"$ref":"#/$defs/opaqueId"},
+      "terminal_id":{"$ref":"#/$defs/opaqueId"},
+      "pane_id":{"$ref":"#/$defs/paneId"},
+      "expected_root":{"$ref":"#/$defs/expectedRoot"}
+    }
+  }
+}

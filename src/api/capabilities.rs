@@ -3,11 +3,11 @@ use serde_json::{json, Value};
 /// Canonical methods and compatibility aliases accepted by the live server.
 /// Keep this registry in lockstep with dispatch and the installed schema.
 pub const METHODS: &[&str] = &[
-    "socket.capabilities",
-    "socket.stats",
-    "socket.token.create",
-    "socket.token.list",
-    "socket.token.revoke",
+    "uhp.capabilities",
+    "uhp.stats",
+    "uhp.token.create",
+    "uhp.token.list",
+    "uhp.token.revoke",
     "ping",
     "server.stop",
     "server.reload_config",
@@ -15,7 +15,6 @@ pub const METHODS: &[&str] = &[
     "server.reload_agent_manifests",
     "config.get",
     "config.patch",
-    "runtime.capabilities",
     "session.snapshot",
     "events.subscribe",
     "events.wait",
@@ -164,7 +163,6 @@ pub const METHODS: &[&str] = &[
     "ui.notification.push",
     "ui.notification.clear",
     "ui.toast",
-    "terminal.backend.capabilities",
     "terminal.backend.inventory",
     "terminal.backend.snapshot",
     "terminal.backend.validate",
@@ -185,13 +183,12 @@ pub const METHODS: &[&str] = &[
 ];
 
 const READ_ONLY_METHODS: &[&str] = &[
-    "socket.capabilities",
-    "socket.stats",
-    "socket.token.list",
+    "uhp.capabilities",
+    "uhp.stats",
+    "uhp.token.list",
     "ping",
     "server.agent_manifests",
     "config.get",
-    "runtime.capabilities",
     "session.snapshot",
     "events.subscribe",
     "events.wait",
@@ -243,7 +240,6 @@ const READ_ONLY_METHODS: &[&str] = &[
     "theme.path",
     "ui.dock.list",
     "ui.bar.list",
-    "terminal.backend.capabilities",
     "terminal.backend.inventory",
     "terminal.backend.snapshot",
     "terminal.backend.validate",
@@ -260,7 +256,7 @@ pub fn is_read_only(method: &str) -> bool {
 }
 
 pub fn required_scope(method: &str) -> &'static str {
-    if matches!(method, "socket.capabilities" | "socket.stats" | "ping") {
+    if matches!(method, "uhp.capabilities" | "uhp.stats" | "ping") {
         "read"
     } else if method.starts_with("terminal.backend.") {
         "terminal"
@@ -314,40 +310,17 @@ fn method_contracts_for<'a>(methods: impl Iterator<Item = &'a str>) -> Vec<Value
         .collect()
 }
 
-/// Methods whose only public role is negotiating or serving a UHP profile.
-/// Runtime operations such as `agent.prompt` intentionally remain ordinary
-/// Socket API methods when UHP is disabled so Luvus's own CLI keeps working.
-pub fn is_uhp_entry_method(method: &str) -> bool {
-    matches!(method, "runtime.capabilities" | "session.snapshot")
-        || method.starts_with("terminal.backend.")
-}
-
-#[cfg(test)]
 pub fn capabilities(event_sequence: u64) -> Value {
-    capabilities_with_uhp(event_sequence, true)
-}
-
-pub fn capabilities_with_uhp(event_sequence: u64, uhp_enabled: bool) -> Value {
-    let methods: Vec<_> = METHODS
-        .iter()
-        .copied()
-        .filter(|method| uhp_enabled || !is_uhp_entry_method(method))
-        .collect();
-    let profiles = if uhp_enabled {
-        vec!["luvus-socket", "luvus-runtime", "luvus-terminal-backend"]
-    } else {
-        vec!["luvus-socket"]
-    };
     json!({
-        "type":"socket_capabilities",
+        "type":"uhp_capabilities",
         "protocol":{
             "name":super::PROTOCOL_NAME,
             "major":super::PROTOCOL_MAJOR,
             "minor":super::PROTOCOL_MINOR,
         },
         "event_sequence":event_sequence,
-        "methods":methods,
-        "method_contracts":method_contracts_for(methods.iter().copied()),
+        "methods":METHODS,
+        "method_contracts":method_contracts_for(METHODS.iter().copied()),
         "limits":{
             "frame_bytes":crate::terminal::backend::MAX_FRAME_BYTES,
             "event_queue":crate::ipc::api::event_queue_capacity(),
@@ -365,10 +338,14 @@ pub fn capabilities_with_uhp(event_sequence: u64, uhp_enabled: bool) -> Value {
             "layout_depth":super::topology::MAX_LAYOUT_DEPTH,
             "workspace_move_block":super::topology::MAX_WORKSPACE_MOVE_BLOCK,
         },
-        "profiles":profiles,
-        "uhp":{"enabled":uhp_enabled},
         "identity":{"workspace":"stable","tab":"stable","terminal":"pty_lifetime"},
         "events":{"resume":"after_sequence","loss":"resync_required"},
+        "agent_authorities":["integration_report","process_tree","launch_command","osc_title","screen_text","prior_identity","command_fallback"],
+        "agent_states":["idle","working","blocked","done"],
+        "terminal":{
+            "capabilities":crate::terminal::backend::CAPABILITIES,
+            "limits":crate::terminal::backend::limits_json(),
+        },
         "authorization":{"default":"local_owner","delegation":"scoped_ephemeral_token",
             "scopes":["read","workspace","agent","terminal","orchestration","extensions","admin","all"]},
         "concurrency":{"mutation_guard":"if_revision"},
@@ -386,13 +363,12 @@ mod tests {
         let unique: std::collections::BTreeSet<_> = METHODS.iter().copied().collect();
         assert_eq!(unique.len(), METHODS.len());
         for required in [
-            "socket.capabilities",
+            "uhp.capabilities",
             "workspace.get",
             "pane.current",
             "layout.apply",
             "config.patch",
             "events.wait",
-            "terminal.backend.capabilities",
             "terminal.backend.observe",
             "terminal.backend.control",
         ] {
@@ -420,22 +396,7 @@ mod tests {
             assert!(is_read_only(stream));
             assert!(!is_idempotent(stream));
         }
-
-        let disabled = capabilities_with_uhp(9, false);
-        assert_eq!(disabled["uhp"]["enabled"], false);
-        assert_eq!(disabled["profiles"], json!(["luvus-socket"]));
-        assert!(!disabled["methods"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|method| method == "runtime.capabilities"
-                || method
-                    .as_str()
-                    .is_some_and(|method| method.starts_with("terminal.backend."))));
-        assert!(disabled["methods"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|method| method == "agent.prompt"));
+        assert_eq!(capabilities["protocol"]["name"], "luvus-uhp");
+        assert!(capabilities.get("profiles").is_none());
     }
 }

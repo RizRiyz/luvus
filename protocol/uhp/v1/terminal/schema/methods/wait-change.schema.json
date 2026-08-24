@@ -1,0 +1,15 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/wait-change.schema.json",
+  "type":"object",
+  "properties":{
+    "server_generation":{"$ref":"../common.schema.json#/$defs/opaqueId"},
+    "terminal_id":{"$ref":"../common.schema.json#/$defs/opaqueId"},
+    "pane_id":{"$ref":"../common.schema.json#/$defs/paneId"},
+    "expected_root":{"$ref":"../common.schema.json#/$defs/expectedRoot"},
+    "after_revision":{"type":"integer","minimum":0},
+    "timeout_ms":{"type":"integer","minimum":1,"maximum":300000}
+  },
+  "required":["server_generation","terminal_id","pane_id","after_revision","timeout_ms"],
+  "additionalProperties":false
+}

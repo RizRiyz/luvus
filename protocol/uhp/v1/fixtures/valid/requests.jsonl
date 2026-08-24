@@ -1,0 +1,16 @@
+{"id":"1","method":"uhp.capabilities","params":{}}
+{"id":"2","method":"workspace.get","params":{"workspace":0}}
+{"id":"3","method":"tab.get","params":{"workspace":0,"tab":1}}
+{"id":"4","method":"pane.current","params":{}}
+{"id":"5","method":"pane.neighbor","params":{"pane":"7","direction":"right"}}
+{"id":"6","method":"pane.swap","params":{"pane":"7","with":"9"}}
+{"id":"7","method":"layout.export","params":{"workspace":0,"tab":1}}
+{"id":"8","method":"layout.set_split_ratio","params":{"path":[],"ratio":0.5}}
+{"id":"9","method":"config.get","params":{}}
+{"id":"10","method":"config.patch","params":{"patch":{"check_updates":false}}}
+{"id":"11","method":"server.agent_manifests","params":{}}
+{"id":"12","method":"events.wait","params":{"event":"pane.agent_status_changed","where":{"pane":"7"},"timeout_s":30}}
+{"id":"13","method":"uhp.stats","params":{}}
+{"id":"14","method":"uhp.token.create","params":{"scopes":["read","workspace"],"ttl_s":3600}}
+{"id":"15","method":"events.subscribe","params":{"after_sequence":41}}
+{"id":"16","method":"workspace.get","auth":"luv_tok_example","params":{"workspace_id":"workspace_example"}}

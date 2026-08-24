@@ -1,0 +1,4 @@
+{"id":"1","result":{"type":"uhp_capabilities","protocol":{"name":"luvus-uhp","major":1,"minor":0}}}
+{"id":"2","result":{"type":"workspace","workspace":"0","name":"project"}}
+{"id":"3","result":{"type":"pane_neighbor","pane":"7","neighbor":"9"}}
+{"id":"4","error":{"code":"not_found","message":"pane not found"}}

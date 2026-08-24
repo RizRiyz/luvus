@@ -1,397 +1,92 @@
 ---
 title: Universal Harness Protocol
-description: Build harnesses and orchestrators on Luvus through the versioned UHP runtime and terminal profiles.
+description: The stable Luvus UHP 1.0 contract for harnesses, orchestrators, and developer tools.
 ---
 
-The **Universal Harness Protocol**, or **UHP**, is Luvus's stable integration
-surface for coding harnesses, orchestrators, editors, and local developer tools.
-It exposes the session and its real PTY terminals without making consumers
-scrape the TUI, parse human CLI output, or depend on Luvus's internal Rust
-types.
-
-UHP v1 is local, bounded, versioned, harness-neutral, and available on macOS,
-Linux, and Windows.
-
-For a step-by-step integration using discovery, capability negotiation,
-snapshots, input, streams, delegated tokens, and reconnect handling, start with
-[Automating with the Socket API and UHP](/docs/guides/socket-and-uhp/).
-
-## UHP is a protocol family
-
-UHP v1 contains two profiles that share the same local endpoint:
-
-| Profile | Wire identity | Use it for |
-| --- | --- | --- |
-| **Runtime** | `luvus-runtime` 1.0 | session layout, panes, agent evidence, agent authority, semantic waits, and runtime events |
-| **Terminal** | `luvus-terminal-backend` 1.0 | PTY discovery, stable terminal identity, capture, exact input, lifecycle, and terminal events |
-
-The existing wire names remain intentional compatibility identifiers. UHP is
-the public name for the complete contract. It does not introduce an `uhp.*`
-RPC namespace, and a consumer must not substitute `uhp` for either profile
-name. The `luvus uhp` command is a human-facing CLI facade, not a new wire
-namespace.
-
-The relationship is:
+UHP 1.0 is Luvus's single public automation protocol. It exposes the complete
+runtime and terminal state through one method registry, one schema bundle, one
+event sequence, and one version identity: `luvus-uhp` `1.0`.
 
 ```text
-Universal Harness Protocol v1
-├── Runtime profile
-│   ├── session snapshot and events
-│   ├── explainable agent state
-│   └── agent reports, leases, and waits
-└── Terminal profile
-    ├── terminal inventory and identity
-    ├── capture and exact input
-    └── create, wait, events, and close
+UHP 1.0
+├── server, config, and events
+├── workspaces, tabs, panes, and layouts
+├── agents and orchestration
+├── terminal inventory, capture, streams, and input
+├── files, Git, DIFF, and worktrees
+└── modules, themes, bars, docks, and notifications
 ```
 
-Most complete harnesses use both profiles. Agent integrations that only report
-state can use Runtime alone. Terminal drivers that do not care which agent is
-running can use Terminal alone.
+The Unix socket or Windows named pipe is only the local transport. The private
+binary protocol used to render attached Luvus clients is separate and is not a
+harness API.
 
-## What is not UHP
-
-Luvus also has a broad local Socket API for tabs, files, Git, DIFF, modules,
-themes, and UI surfaces. Those methods are useful for automation, but only the
-methods published in the versioned UHP schemas receive the UHP v1 compatibility
-contract.
-
-The binary frame protocol used by attached Luvus clients is also separate. It
-renders the Luvus interface and is not a harness automation API.
-
-## Choose the correct profile
-
-| Goal | Profile and method |
-| --- | --- |
-| List the whole session and current agent states | Runtime `session.snapshot` |
-| Learn why a pane was identified as an agent | Runtime `agent.explain` |
-| Publish precise state from a new agent integration | Runtime `agent.report` |
-| Start and name an agent as one workflow | Runtime `agent.start` |
-| Submit a prompt and optionally wait for that turn | Runtime `agent.prompt` |
-| Wait for an agent to become blocked or done | Runtime `agent.wait` |
-| List every live PTY, including plain shells | Terminal `terminal.backend.inventory` |
-| Read bounded terminal output | Terminal `terminal.backend.capture` |
-| Render live safe ANSI without polling | Terminal `terminal.backend.observe` |
-| Render and send correlated input on one stream | Terminal `terminal.backend.control` |
-| Type text without Enter | Terminal `terminal.backend.type_literal` |
-| Submit one prompt atomically | Terminal `terminal.backend.submit_text` |
-| Send Ctrl+C or a navigation key | Terminal `terminal.backend.send_key` |
-| Start or close a terminal | Terminal `terminal.backend.create` or `.close` |
-| React to output without polling | Terminal `.events.subscribe`, `.wait_change`, or `.wait_output` |
-
-## Discover a session safely
-
-Use the discovery-only command:
+## Discovery
 
 ```sh
 luvus session list --json
+luvus uhp schema
+luvus uhp capabilities
+luvus uhp snapshot
+luvus uhp events
 ```
 
-It reads existing session entries and probes reachability without starting a
-server, migrating state, selecting a session, or creating a new state
-directory. Select a running row and use its exact `endpoint` descriptor.
-
-macOS and Linux publish an owner-only Unix socket. Windows publishes a local
-named-pipe address. An endpoint path is a hint until your consumer validates
-its ownership and then completes a profile handshake.
-
-For a production integration:
-
-1. Reject an endpoint not supplied by discovery.
-2. Apply the documented Unix ownership and no-symlink checks or the Windows
-   local-pipe, DACL, and same-user server-process checks.
-3. Revalidate before every new connection.
-4. Negotiate the profile before trusting session or terminal metadata.
-5. Reject a changed server generation after reconnecting.
-
-See the complete
-[endpoint validation contract](https://github.com/RizRiyz/luvus/blob/main/protocol/terminal-backend/v1/endpoint-validation.md).
-
-## Inspect the installed contract
-
-UHP is enabled by default. Inspect or change its live availability without
-restarting the selected server:
-
-```sh
-luvus uhp status
-luvus uhp enable
-luvus uhp disable
-```
-
-Disabling UHP removes both profiles from live Socket capability discovery and
-rejects profile negotiation plus Terminal-profile requests. It does not stop
-the owner-only Socket API or ordinary Luvus CLI commands. Runtime operations
-that are also general Socket methods, such as `agent.prompt`, remain available
-to local Luvus automation but no longer carry an advertised UHP compatibility
-contract. This switch controls protocol availability; it is not an additional
-security boundary beyond the local endpoint's existing access controls.
-
-Every Luvus binary embeds the exact UHP schemas it implements:
-
-```sh
-# Terminal profile schema bundle
-luvus uhp terminal schema
-
-# Runtime profile schema bundle
-luvus uhp runtime schema
-
-# Live profile capabilities
-luvus uhp terminal capabilities
-luvus uhp runtime capabilities
-
-# Sequence-fenced snapshots
-luvus uhp terminal snapshot
-luvus uhp runtime snapshot
-```
-
-Schema printing does not require a running server. Live commands target the
-currently selected session, or the inherited `$LUVUS_SOCKET_PATH` inside a
-pane.
-
-Do not decide compatibility from the Luvus application version. Inspect the
-profile name, major, minor, methods, capabilities, and limits returned by the
-running server.
+`uhp.capabilities` is the only protocol handshake. It returns the protocol
+version, methods and contracts, server and event identity, bounded limits,
+agent authority sources, authorization scopes, and atomic operations.
+Consumers must use discovery rather than infer support from the Luvus release.
 
 ## Framing
 
-Ordinary UHP requests use one UTF-8 JSON object per connection and receive one
-JSON response. Each frame is terminated by LF and capped at 1 MiB including
-that LF.
+Ordinary UHP calls use one LF-terminated JSON request and response per
+connection:
 
 ```json
-{"id":"1","method":"runtime.capabilities","params":{}}
+{"id":"1","method":"uhp.capabilities","params":{}}
 ```
 
-A success has `id` and `result`. A failure has `id` and `error`. Request IDs
-contain 1 to 128 UTF-8 bytes. Unknown fields, duplicate keys, invalid enums,
-and oversized frames are rejected before dispatch.
+Requests require a non-empty string `id`, a known `method`, and an object
+`params`. The optional `auth` field carries a delegated token. Unknown envelope
+fields, duplicate keys, invalid parameters, and oversized frames fail before
+dispatch.
 
-An event subscription or Terminal observe/control request begins as one request
-and acknowledgment, then turns only that connection into a bounded stream.
-Ordinary connections remain one-request, one-response connections.
+Event subscriptions and terminal observe/control requests turn that one
+connection into a bounded stream after their acknowledgment.
 
-## Negotiate both profiles
+## Identity and concurrency
 
-Runtime capability discovery takes no parameters:
-
-```json
-{"id":"runtime-cap","method":"runtime.capabilities","params":{}}
-```
-
-Check that the response identifies `luvus-runtime` 1.0, then retain its
-announced methods, agent states, authority sources, event sequence, and limits.
-
-Terminal negotiation requires an exact offer:
-
-```json
-{"id":"terminal-cap","method":"terminal.backend.capabilities","params":{"protocol":{"name":"luvus-terminal-backend","major":1,"minor":0}}}
-```
-
-Retain the returned `server_generation`, capabilities, and limits. Do not call
-an operation that was not announced.
-
-There is no aggregate UHP handshake in v1. A successful Runtime response does
-not imply that the Terminal profile is compatible, and the reverse is also
-true.
-
-## Race-free snapshots and events
-
-A snapshot alone can race with an event. Use subscribe-first reconciliation
-for each stream:
-
-1. Open an event subscription.
-2. Fetch the corresponding snapshot on a second connection.
-3. Read the snapshot's sequence fence.
-4. Discard buffered events at or below that sequence.
-5. Apply later events in order.
-6. Request a new snapshot after a sequence gap, overflow notification, EOF,
-   reconnect, or server-generation change.
-
-Terminal event queues hold at most 256 events and a server accepts at most 64
-terminal event subscribers. Slow consumers are disconnected. The server tries
-to send a resynchronization event first, but EOF must still be treated as
-possible loss because a blocked transport may prevent delivery of that final
-frame.
-
-Use event-driven waits instead of polling capture:
-
-- `terminal.backend.wait_change` waits for a newer content revision
-- `terminal.backend.wait_output` waits for bounded literal output after a
-  revision
-- `agent.prompt` atomically submits once and can wait for post-submission state
-  or settled-output evidence
-- `agent.wait` waits for one semantic agent state
-
-All waits are bounded by the server's advertised limits and are cancelled when
-their terminal, workspace, connection, or server disappears.
-
-## Terminal identity
-
-A terminal mutation targets three values:
+Workspace and tab IDs survive reorder and restart. A terminal mutation uses:
 
 ```text
 server_generation + terminal_id + pane_id
 ```
 
-`server_generation` identifies one server lifetime. `terminal_id` identifies
-one successfully started PTY lifetime. `pane_id` is the terminal's current
-route through the Luvus layout.
+This rejects stale servers, replaced PTYs, and obsolete layout routes. Never
+identify a terminal from its title, prompt text, or tab position.
 
-Moving a pane or reordering tabs preserves `terminal_id` and changes only its
-route when necessary. Replacing the PTY changes `terminal_id`. Restarting the
-server changes `server_generation`.
+State results carry `revision`. A mutation can provide `if_revision` and will
+fail with `revision_conflict` if the server changed first. Compound operations
+such as `agent.start`, `agent.prompt`, `workspace.move_block`, `layout.apply`,
+and `diff.note.apply` validate and commit atomically.
 
-Never identify a terminal from its title, tab position, prompt contents, or
-visible TUI row. Before a sensitive mutation, validate the complete identity
-and optionally the expected root PID and process-start marker. Luvus rejects a
-stale server, terminal, route, or process lifetime instead of following it
-implicitly.
+## Events and waits
 
-The detailed method and identity reference is in the
-[UHP Terminal Profile](/docs/reference/terminal-backend/).
+`events.subscribe` supports replay with `after_sequence`. Replay and subscriber
+queues are bounded. A stale cursor or slow consumer requires a new snapshot.
 
-## Runtime agent authority
+Prefer `events.wait`, `agent.wait`, `terminal.backend.wait_change`, and
+`terminal.backend.wait_output` over polling. Waits are bounded and cancelled
+when their connection or target disappears.
 
-The Runtime profile lets an external integration provide agent state without
-waiting for a new hardcoded Luvus detector:
+## Security
 
-```json
-{"id":"report-1","method":"agent.report","params":{"pane":"7","source":"fx/plugin","agent":"fx","status":"working","sequence":12,"ttl_s":300}}
-```
+The local endpoint validates same-user ownership and is the default authority
+boundary. UHP never opens a TCP listener. Delegated tokens are memory-only,
+bounded, expiring, and scope restricted.
 
-Reports are renewable leases, not permanent labels. One source owns a pane at
-a time, sequence numbers must increase, and the lease expires automatically.
-The owner renews through a later report or releases authority with
-`agent.release`.
+Terminal and process responses avoid full argument vectors because they can
+contain prompts, credentials, or tokens. Capture, input, messages, and cwd are
+also bounded.
 
-If no live integration lease exists, Luvus falls back to its process, launch,
-title, screen, and prior-identity evidence. `agent.explain` exposes the winning
-source and confidence so a harness can distinguish precise integration state
-from a fallback inference.
-
-Full process arguments are never returned. They may contain prompts, tokens,
-or credentials. Process inspection returns bounded cached executable
-identities and reports uncertainty explicitly.
-
-## Input and mutation safety
-
-UHP separates input operations because their meanings differ:
-
-- `type_literal` sends exact UTF-8 and never adds Enter
-- `submit_text` queues one complete paste followed by exactly one Enter
-- `send_key` sends one supported logical key using the terminal's active mode
-
-A successful input response means the complete action reached the owned PTY
-writer queue. Immediate lifecycle and metadata mutations report `executed`.
-Rejected mutation errors include dispatch evidence.
-
-If a client writes a mutation and loses its correlated response, classify the
-outcome as **possibly executed**. Never retry automatically. Fetch a fresh
-inventory or snapshot and reconcile first. This prevents duplicate prompts,
-duplicate terminal creation, and closing the wrong target after a move.
-
-## Native transport and SSH proxy
-
-Native local IPC gives the lowest latency and supports event streams. A caller
-that cannot open Unix sockets or Windows named pipes can forward exactly one
-bounded request through standard IO:
-
-```sh
-printf '%s\n' '{"id":"1","method":"terminal.backend.inventory","params":{}}' \
-  | luvus socket proxy
-```
-
-The same one-frame bridge composes over SSH:
-
-```sh
-printf '%s\n' '{"id":"1","method":"terminal.backend.inventory","params":{}}' \
-  | ssh host luvus socket proxy
-```
-
-The proxy does not expose a network listener. It is suitable for bootstrap,
-remote one-shot reads, and bounded mutations. It is not a streaming replacement
-for either event subscription.
-
-## Security and privacy checklist
-
-Treat the endpoint as a capability that can type into terminals and terminate
-processes.
-
-- validate endpoint ownership and replacement before connecting
-- accept only local Windows named-pipe addresses
-- require the pipe server to run as the same Windows user
-- preserve the server-generation fence across reconnects
-- validate terminal and process lifetime before mutation
-- honor every advertised size, subscriber, and timeout limit
-- never log prompts, captures, submitted text, command arguments, cwd, agent
-  messages, or notification bodies by default
-- do not expose the local endpoint directly over TCP or a public socket
-- apply authentication and transport security in any separately designed
-  network gateway
-
-## Versioning rules
-
-UHP profile versions are independent of the Luvus application version.
-
-- consumers call only announced capabilities
-- additive optional capabilities may be introduced within v1
-- incompatible schema or semantic changes require a new profile major
-- wire names, identity meanings, framing, and lost-mutation behavior remain
-  stable for profile version 1.0
-- a consumer records compatibility for each profile independently
-
-## Conformance
-
-The normative contracts live in the repository:
-
-- [`protocol/README.md`](https://github.com/RizRiyz/luvus/blob/main/protocol/README.md)
-- [`protocol/runtime/v1`](https://github.com/RizRiyz/luvus/tree/main/protocol/runtime/v1)
-- [`protocol/terminal-backend/v1`](https://github.com/RizRiyz/luvus/tree/main/protocol/terminal-backend/v1)
-
-The repository includes dependency-free schema and fixture consumers, a mock
-server, isolated live lifecycle tests, failure injection, Windows ConPTY
-coverage, and an opt-in release benchmark.
-
-```sh
-python3 examples/runtime-api/consumer.py
-python3 examples/terminal-backend/consumer.py --fixtures
-python3 examples/terminal-backend/mock_conformance.py
-
-cargo build --locked
-python3 examples/terminal-backend/live_conformance.py
-python3 examples/terminal-backend/failure_conformance.py \
-  --luvus target/debug/luvus
-```
-
-For release performance evidence, run the isolated 1, 10, and 50-pane matrix:
-
-```sh
-cargo build --release --locked
-python3 examples/terminal-backend/benchmark.py \
-  --luvus target/release/luvus \
-  --panes 1,10,50 \
-  --samples 50 \
-  --idle-seconds 5
-```
-
-Generated measurements are host-specific evidence, not protocol guarantees.
-Compare only matching release builds, hosts, shells, pane workloads, sample
-counts, and idle windows.
-
-## Integration readiness checklist
-
-Before shipping a UHP adapter:
-
-- discover without starting or mutating a session
-- validate endpoints on every supported platform
-- inspect both profile versions and announced limits
-- subscribe before taking the initial snapshot
-- resnapshot after gaps, EOF, replacement, or overflow
-- keep opaque identities instead of parsing labels
-- distinguish literal text, submission, and logical keys
-- reconcile rather than replay a mutation with a lost response
-- apply bounded timeouts and cancel outstanding waits on disconnect
-- validate all relevant valid and invalid fixtures independently of Luvus
-- test server restart, terminal movement, process replacement, stale identity,
-  slow subscribers, and unavailable process evidence
-- publish which UHP profiles and profile versions the adapter supports
+See [Automating with UHP](/docs/guides/uhp/) for a walkthrough and the
+[UHP method reference](/docs/reference/api/) for the complete namespaces.

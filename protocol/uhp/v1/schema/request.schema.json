@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://luvus.dev/protocol/uhp/v1/request.schema.json",
+  "title": "Luvus Universal Harness Protocol request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "method", "params"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "auth": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "method": {
+      "type": "string",
+      "enum": [
+        "uhp.capabilities", "uhp.stats", "uhp.token.create", "uhp.token.list", "uhp.token.revoke",
+        "ping", "server.stop", "server.reload_config", "server.agent_manifests", "server.reload_agent_manifests", "config.get", "config.patch",
+        "session.snapshot", "events.subscribe", "events.wait", "wait.output",
+        "workspace.list", "workspace.get", "workspace.new", "workspace.open", "workspace.focus", "workspace.rename", "workspace.pin", "workspace.move", "workspace.move_block", "workspace.report_metadata", "workspace.close",
+        "node.list", "node.new", "node.open", "node.focus", "node.rename", "node.pin", "node.close",
+        "tab.list", "tab.get", "tab.new", "tab.focus", "tab.move", "tab.swap", "tab.rename", "tab.close",
+        "pane.list", "pane.get", "pane.current", "pane.layout", "pane.neighbor", "pane.edges", "pane.split", "pane.move", "pane.swap", "pane.focus", "pane.focus_direction", "pane.resize", "pane.zoom", "pane.rename", "pane.run", "pane.send_input", "pane.read", "pane.status", "pane.processes", "pane.report_session", "pane.report_event", "pane.close", "attach.pane",
+        "layout.export", "layout.apply", "layout.set_split_ratio",
+        "agent.list", "agent.get", "agent.explain", "agent.report", "agent.release", "agent.start", "agent.prompt", "agent.wait", "agent.name", "agent.fork", "agent.send", "agent.keys", "agent.read", "agent.sessions", "agent.resume",
+        "search", "search.capabilities", "search.query", "search.activate",
+        "files.tree", "files.open", "files.reveal", "files.refresh",
+        "git.status", "git.branches", "git.log", "git.open",
+        "diff.refresh", "diff.list", "diff.open", "diff.get", "diff.navigate", "diff.note.add", "diff.note.apply", "diff.note.list", "diff.note.edit", "diff.note.resolve", "diff.note.reopen", "diff.note.remove", "diff.note.send",
+        "worktree.list", "worktree.create", "worktree.open", "worktree.remove",
+        "task.add", "task.list", "task.get", "task.claim", "task.next", "task.start", "task.heartbeat", "task.update", "task.done", "task.merge", "task.release", "task.delete",
+        "lease.acquire", "lease.list", "lease.release",
+        "module.list", "module.info", "module.link", "module.unlink", "module.uninstall", "module.enable", "module.disable", "module.action.list", "module.action.invoke", "module.pane.open", "module.pane.focus", "module.pane.close", "module.config_dir", "module.settings.list", "module.settings.get", "module.settings.set", "module.log.list",
+        "theme.list", "theme.path", "theme.use", "theme.reload", "manifest.reload",
+        "ui.sidebar", "ui.dock.push", "ui.dock.list", "ui.dock.move", "ui.bar.push", "ui.bar.list", "ui.bar.move", "ui.bar.remove", "ui.notification.push", "ui.notification.clear", "ui.toast",
+        "terminal.backend.inventory", "terminal.backend.snapshot", "terminal.backend.validate", "terminal.backend.processes", "terminal.backend.capture", "terminal.backend.observe", "terminal.backend.control", "terminal.backend.type_literal", "terminal.backend.submit_text", "terminal.backend.send_key", "terminal.backend.set_title", "terminal.backend.notify", "terminal.backend.create", "terminal.backend.close", "terminal.backend.wait_change", "terminal.backend.wait_output", "terminal.backend.events.subscribe"
+      ]
+    },
+    "params": { "type": "object" }
+  },
+  "$defs": {
+    "emptyParams": { "type": "object", "additionalProperties": false, "maxProperties": 0 },
+    "tokenCreateParams": {
+      "type": "object", "additionalProperties": false, "required": ["scopes"],
+      "properties": {
+        "scopes": { "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true,
+          "items": { "enum": ["read", "workspace", "agent", "terminal", "orchestration", "extensions", "admin", "all"] } },
+        "ttl_s": { "type": "integer", "minimum": 1, "maximum": 86400 }
+      }
+    },
+    "tokenRevokeParams": {
+      "type": "object", "additionalProperties": false, "required": ["id"],
+      "properties": { "id": { "type": "string", "minLength": 1, "maxLength": 128 } }
+    },
+    "subscribeParams": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "after_sequence": { "type": "integer", "minimum": 0 } }
+    },
+    "eventWaitParams": {
+      "type": "object", "additionalProperties": false, "required": ["event"],
+      "properties": {
+        "event": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "where": { "type": "object", "maxProperties": 16 },
+        "timeout_s": { "type": "number", "minimum": 0, "maximum": 3600 },
+        "after_sequence": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "allOf": [
+    { "if": { "properties": { "method": { "enum": ["uhp.capabilities", "uhp.stats", "uhp.token.list"] } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
+    { "if": { "properties": { "method": { "const": "uhp.token.create" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/tokenCreateParams" } } } },
+    { "if": { "properties": { "method": { "const": "uhp.token.revoke" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/tokenRevokeParams" } } } },
+    { "if": { "properties": { "method": { "const": "events.subscribe" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/subscribeParams" } } } },
+    { "if": { "properties": { "method": { "const": "events.wait" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/eventWaitParams" } } } },
+    { "if": { "properties": { "method": { "const": "terminal.backend.inventory" } } },
+      "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/inventory.schema.json" } } } },
+    { "if": { "properties": { "method": { "const": "terminal.backend.snapshot" } } },
+      "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/snapshot.schema.json" } } } },
+    { "if": { "properties": { "method": { "const": "terminal.backend.validate" } } },
+      "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/validate.schema.json" } } } },
+    { "if": { "properties": { "method": { "const": "terminal.backend.processes" } } },
+      "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/processes.schema.json" } } } },
+    { "if": { "properties": { "method": { "const": "terminal.backend.capture" } } },
+      "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/capture.schema.json" } } } },
+    { "if": { "properties": { "method": { "const": "terminal.backend.observe" } } },
+      "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/observe.schema.json" } } } },
+    { "if": { "properties": { "method": { "const": "terminal.backend.control" } } },
+      "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/control.schema.json" } } } },
+    { "if": { "properties": { "method": { "const": "terminal.backend.type_literal" } } },
+      "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/type-literal.schema.json" } } } },
+    { "if": { "properties": { "method": { "const": "terminal.backend.submit_text" } } },
+      "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/submit-text.schema.json" } } } },
+    { "if": { "properties": { "method": { "const": "terminal.backend.send_key" } } },
+      "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/send-key.schema.json" } } } },
+    { "if": { "properties": { "method": { "const": "terminal.backend.set_title" } } },
+      "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/set-title.schema.json" } } } },
+    { "if": { "properties": { "method": { "const": "terminal.backend.notify" } } },
+      "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/notify.schema.json" } } } },
+    { "if": { "properties": { "method": { "const": "terminal.backend.create" } } },
+      "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/create.schema.json" } } } },
+    { "if": { "properties": { "method": { "const": "terminal.backend.close" } } },
+      "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/close.schema.json" } } } },
+    { "if": { "properties": { "method": { "const": "terminal.backend.wait_change" } } },
+      "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/wait-change.schema.json" } } } },
+    { "if": { "properties": { "method": { "const": "terminal.backend.wait_output" } } },
+      "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/wait-output.schema.json" } } } },
+    { "if": { "properties": { "method": { "const": "terminal.backend.events.subscribe" } } },
+      "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/events.schema.json" } } } }
+  ]
+}

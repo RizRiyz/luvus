@@ -340,7 +340,7 @@ impl TileLayout {
         }
     }
 
-    /// Validated ratio mutation for the Socket API. Returns false when `path`
+    /// Validated ratio mutation for UHP. Returns false when `path`
     /// does not identify a split; a failed request never mutates the tree.
     pub fn try_set_ratio(&mut self, area: Rect, path: &[bool], ratio: f32) -> bool {
         if !ratio.is_finite()

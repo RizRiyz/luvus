@@ -1,0 +1,8 @@
+{"method":"uhp.capabilities","params":{}}
+{"id":"","method":"uhp.capabilities","params":{}}
+{"id":"1","method":"not.a.method","params":{}}
+{"id":"1","method":"pane.neighbor","params":null}
+{"id":"1","method":"pane.neighbor","params":{},"extra":true}
+{"id":1,"method":"pane.current","params":{}}
+{"id":"1","method":"uhp.token.create","params":{"scopes":[],"ttl_s":0}}
+{"id":"1","method":"events.subscribe","params":{"after_sequence":-1}}

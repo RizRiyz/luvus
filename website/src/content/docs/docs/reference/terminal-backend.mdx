@@ -1,20 +1,20 @@
 ---
-title: UHP Terminal Profile
-description: Control every live Luvus PTY through the terminal profile of the Universal Harness Protocol.
+title: UHP terminal methods
+description: Control every live Luvus PTY through the terminal method namespace of UHP 1.0.
 ---
 
-This is the detailed Terminal profile reference for the
-[Universal Harness Protocol](/docs/reference/uhp/). Its compatibility wire name
-remains `luvus-terminal-backend` 1.0 and its methods remain
-`terminal.backend.*`.
+This is the detailed `terminal.backend.*` method reference for the
+[Universal Harness Protocol](/docs/reference/uhp/). These methods use the same
+`luvus-uhp` 1.0 identity, request envelope, capabilities, and event sequence as
+every other UHP method.
 
-The profile lets orchestrators discover every real PTY across all workspaces,
+The namespace lets orchestrators discover every real PTY across all workspaces,
 capture bounded output, send exact input, and manage terminal lifecycles
 without scraping the TUI or depending on Luvus agent manifests.
 
-Start with [Automating with the Socket API and UHP](/docs/guides/socket-and-uhp/)
+Start with [Automating with UHP](/docs/guides/uhp/)
 for a complete discovery-to-stream walkthrough, then use this page for the
-Terminal profile's exact contract.
+terminal namespace's exact contract.
 
 Protocol `1.0` is supported over Unix sockets on macOS and Linux and owner-only
 named pipes on Windows. The request, response, identity, limit, and event
@@ -30,15 +30,14 @@ luvus session list --json
 
 It reads existing session entries and probes reachability without migrating
 state, creating directories, selecting a session, or starting a server. Keep a
-running row, validate its `endpoint`, then connect directly and send:
+running row, validate its `endpoint`, then discover the global contract:
 
 ```json
-{"id":"cap-1","method":"terminal.backend.capabilities","params":{"protocol":{"name":"luvus-terminal-backend","major":1,"minor":0}}}
+{"id":"cap-1","method":"uhp.capabilities","params":{}}
 ```
 
-The response selects the protocol version, returns a random
-`server_generation`, and announces the exact capabilities and active limits.
-Never call an unannounced capability.
+The response returns the protocol version, a random `server_generation`, and
+the exact methods and active limits. Never call an unannounced method.
 
 ## Identity and lifecycle
 
@@ -103,7 +102,7 @@ action frames after its acknowledgment:
 {"id":"input-2","action":"send_key","params":{"key":"enter"}}
 ```
 
-Actions reuse the ordinary strict UHP Terminal validation and replies. Only one
+Actions reuse ordinary strict UHP validation and replies. Only one
 API control stream can lease a terminal at a time. Observe streams remain
 read-only, and local owner/TUI authority is unchanged.
 
@@ -121,11 +120,10 @@ The binary embeds the published schema, so packaged integrations do not need a
 source checkout:
 
 ```sh
-luvus uhp terminal schema
-luvus uhp runtime schema
-luvus uhp terminal capabilities
-luvus uhp terminal snapshot
-luvus uhp terminal events
+luvus uhp schema
+luvus uhp capabilities
+luvus uhp snapshot
+luvus uhp events
 ```
 
 Consumers that cannot open the native local transport can forward exactly one
@@ -133,14 +131,14 @@ bounded request and response through standard IO:
 
 ```sh
 printf '%s\n' '{"id":"1","method":"terminal.backend.inventory","params":{}}' \
-  | luvus socket proxy
+  | luvus uhp proxy
 ```
 
 The same command composes over SSH without exposing a network listener:
 
 ```sh
 printf '%s\n' '{"id":"1","method":"terminal.backend.inventory","params":{}}' \
-  | ssh host luvus socket proxy
+  | ssh host luvus uhp proxy
 ```
 
 Native socket or pipe access remains preferable for high-frequency local calls.
@@ -178,12 +176,12 @@ possibly executed. Do not retry it automatically. Refresh inventory instead.
 
 The normative schemas, limits, fixtures, endpoint rules, and conformance
 manifest live in
-[`protocol/terminal-backend/v1`](https://github.com/RizRiyz/luvus/tree/main/protocol/terminal-backend/v1).
+[`protocol/uhp/v1/terminal`](https://github.com/RizRiyz/luvus/tree/main/protocol/uhp/v1/terminal).
 The repository also includes a dependency-free Python consumer that validates
 all fixtures and demonstrates capability and inventory reads. Public UHP
 adapters should consume that package rather than copying types from Luvus
-source. The Runtime profile is independently versioned under
-[`protocol/runtime/v1`](https://github.com/RizRiyz/luvus/tree/main/protocol/runtime/v1).
+source. The global request, response, and event schemas live at
+[`protocol/uhp/v1`](https://github.com/RizRiyz/luvus/tree/main/protocol/uhp/v1).
 
 The endpoint is a privileged local-user capability. On Unix, validate
 ownership, modes, symlinks, socket replacement, and the documented owner-only
@@ -196,7 +194,7 @@ command arguments, cwd, or notification bodies by default.
 ## Conformance and performance
 
 The repository includes independent fixture, mock, live-lifecycle, and
-failure-injection consumers under `examples/terminal-backend/`. Live tools
+failure-injection consumers under `examples/uhp/terminal/`. Live tools
 always create a dedicated `LUVUS_HOME` below the checkout's `target/` directory
 and never target an installed server.
 
@@ -206,5 +204,5 @@ threads, and descriptors. macOS additionally reports physical footprint, peak,
 and live malloc bytes. Results are host-specific engineering evidence, not
 portable guarantees; compare only matched release binaries and workloads. See
 the versioned
-[conformance guide](https://github.com/RizRiyz/luvus/tree/main/protocol/terminal-backend/v1/conformance)
+[conformance guide](https://github.com/RizRiyz/luvus/tree/main/protocol/uhp/v1/terminal/conformance)
 for exact commands and caveats.

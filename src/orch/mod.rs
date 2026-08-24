@@ -88,7 +88,7 @@ pub struct Task {
 pub const COMPACTION_THRESHOLD: f64 = 0.85;
 
 /// Growth caps: the ledger lives in memory for the life of the server and in
-/// `orch.json` on disk, and the socket API can drive it programmatically — so
+/// `orch.json` on disk, and the UHP can drive it programmatically — so
 /// nothing may grow without bound. Limits far above real use, well below harm.
 pub const MAX_TASKS: usize = 1000;
 /// Per-task `outputs` / `notes` keep only the most recent entries…
