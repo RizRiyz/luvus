@@ -101,7 +101,7 @@ jobs:
         run: |
           cargo build --locked
           if ($LASTEXITCODE -ne 0) { throw "Windows debug build failed" }
-          .\examples\terminal-backend\live_conformance.ps1 `
+          .\examples\uhp\terminal\live_conformance.ps1 `
             -Luvus .\target\debug\luvus.exe
 
   # Known-vulnerability scan of the dependency tree (RustSec advisory DB).

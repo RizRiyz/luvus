@@ -1,9 +1,9 @@
 param(
-    [string]$Luvus = (Join-Path $PSScriptRoot "..\..\target\debug\luvus.exe")
+    [string]$Luvus = (Join-Path $PSScriptRoot "..\..\..\target\debug\luvus.exe")
 )
 
 $ErrorActionPreference = "Stop"
-$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 if (-not (Test-Path -LiteralPath $Luvus -PathType Leaf)) {
     throw "Luvus binary not found at '$Luvus'. Run 'cargo build' first or pass -Luvus <path>."
 }
