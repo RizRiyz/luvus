@@ -2574,11 +2574,16 @@ impl App {
         match self.mode {
             Mode::Prefix => {
                 self.mode = Mode::Normal;
-                // Pressing the prefix twice sends a literal prefix chord into the
-                // pane (Ctrl+Space → NUL; Ctrl+b → 0x02; etc).
+                // Pressing the prefix twice sends that exact key to the pane.
+                // Use the normal PTY encoder so F-keys and modifiers retain the
+                // same cross-platform escape sequence as ordinary input.
                 if self.prefix.matches(&key) {
-                    let bytes = self.prefix.literal_bytes();
-                    if let Some(p) = self.focused() {
+                    let prefix = self.prefix.key_event();
+                    let newline = self.config.shift_enter_bytes().to_vec();
+                    let app_cursor = self.focused().is_some_and(|p| p.application_cursor());
+                    if let (Some(p), Some(bytes)) =
+                        (self.focused(), encode_key(&prefix, &newline, app_cursor))
+                    {
                         p.send(&bytes);
                     }
                     return true; // left prefix mode → the status bar updates
@@ -2788,7 +2793,11 @@ fn encode_key(key: &KeyEvent, newline: &[u8], app_cursor: bool) -> Option<Vec<u8
                     '_' => 0x1f,
                     _ => return None,
                 };
-                vec![b]
+                if alt {
+                    vec![0x1b, b]
+                } else {
+                    vec![b]
+                }
             } else {
                 let mut s = c.to_string().into_bytes();
                 if alt {
@@ -3136,6 +3145,23 @@ mod tests {
         // Plain Enter ignores the newline sequence and always submits.
         let plain = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(encode_key(&plain, b"\n", false), Some(b"\r".to_vec()));
+    }
+
+    #[test]
+    fn character_keys_preserve_alt_with_control() {
+        let key = |modifiers| {
+            encode_key(
+                &KeyEvent::new(KeyCode::Char('a'), modifiers),
+                b"\x1b\r",
+                false,
+            )
+        };
+        assert_eq!(key(KeyModifiers::CONTROL), Some(vec![0x01]));
+        assert_eq!(key(KeyModifiers::ALT), Some(b"\x1ba".to_vec()));
+        assert_eq!(
+            key(KeyModifiers::CONTROL | KeyModifiers::ALT),
+            Some(vec![0x1b, 0x01])
+        );
     }
 
     #[test]

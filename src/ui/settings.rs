@@ -773,6 +773,12 @@ fn draw_content(
             // so pressing Down eventually reaches every block; notes and headings
             // scroll along but aren't landed on.
             let capturing = app.settings.as_ref().is_some_and(|u| u.capturing);
+            let prefix_candidate = app
+                .settings
+                .as_ref()
+                .and_then(|ui| ui.prefix_candidate.as_deref())
+                .and_then(crate::app::PrefixSpec::parse)
+                .map(|prefix| prefix.label());
             let all = crate::app::Cmd::ALL;
             let dim = |s: &'static str| Span::styled(s, Style::new().fg(t.overlay0));
             let acc = |s: &'static str| Span::styled(s, Style::new().fg(t.accent).bold());
@@ -812,13 +818,16 @@ fn draw_content(
                 KV::Note(vec![
                     dim("Press the prefix ("),
                     Span::styled(prefix_label.clone(), Style::new().fg(t.accent).bold()),
-                    dim("), then a key below. Hold or release Ctrl, both work."),
+                    dim("), then a key below. Command-key modifiers are optional."),
                 ]),
                 KV::Note(vec![
                     dim("Move with arrows or "),
                     acc("h j k l"),
                     dim(".  "),
-                    acc("Ctrl+Space ?"),
+                    Span::styled(
+                        format!("{prefix_label} ?"),
+                        Style::new().fg(t.accent).bold(),
+                    ),
                     dim(" shows the cheat-sheet."),
                 ]),
                 KV::Note(vec![
@@ -919,7 +928,10 @@ fn draw_content(
                         // The prefix row shows a capture prompt while capturing;
                         // the preset row shows `‹ value ›`.
                         let txt = if is_sel && capturing {
-                            "press a chord…".to_string()
+                            prefix_candidate
+                                .as_ref()
+                                .map(|candidate| format!("press {candidate} again…"))
+                                .unwrap_or_else(|| "press F1-F12 or a Ctrl/Alt chord…".to_string())
                         } else if *chooser {
                             format!("‹ {value} ›")
                         } else {

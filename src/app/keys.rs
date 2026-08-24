@@ -1,4 +1,4 @@
-//! Keybindings — the prefix-mode command registry. After `Ctrl+Space`, a key
+//! Keybindings — the prefix-mode command registry. After the configured prefix, a key
 //! triggers a [`Cmd`]. Defaults are listed here; users can rebind any command to
 //! a different key in Settings → Keys (persisted to `config.keybindings`). A few
 //! fixed aliases (vim `hjkl`, `Tab`/`⇧Tab`, `q`) are always available too.
@@ -279,7 +279,7 @@ pub const KEY_REFERENCE: &[(&str, &[(&str, &str)])] = &[
             ("X", "close pane"),
             ("-", "split down"),
             ("⇥ / ⇧⇥", "next / previous tab"),
-            ("⌃Space ⌃Space", "send a literal Ctrl+Space"),
+            ("prefix ×2", "send the literal configured prefix"),
         ],
     ),
     (
@@ -305,7 +305,7 @@ pub const KEY_REFERENCE: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
-        "Resize mode  (⌃Space r)",
+        "Resize mode  (after prefix + r)",
         &[
             ("arrows  hjkl", "resize the focused pane"),
             ("Shift+arrow", "bigger step"),
@@ -314,7 +314,7 @@ pub const KEY_REFERENCE: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
-        "Git tab  (⌃Space g)",
+        "Git tab  (after prefix + g)",
         &[
             ("1–6", "Commits Flow Branches PRs Issues Status"),
             ("⇥ / ⇧⇥", "next / previous view"),
@@ -327,7 +327,7 @@ pub const KEY_REFERENCE: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
-        "Task board  (⌃Space o)",
+        "Task board  (after prefix + o)",
         &[
             ("a", "new task"),
             ("s  d  m", "start / done / merge"),
@@ -338,7 +338,7 @@ pub const KEY_REFERENCE: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
-        "Folder picker  (⌃Space n)",
+        "Folder picker  (after prefix + N)",
         &[
             ("j / k", "move"),
             ("→ / ←", "enter folder / go up"),
@@ -380,8 +380,8 @@ pub fn key_reference_rows() -> usize {
     KEY_REFERENCE.iter().map(|(_, rows)| rows.len()).sum()
 }
 
-/// Canonical string for a key in prefix mode (the opening `Ctrl` is already
-/// consumed). Used both to match presses and to display/store bindings.
+/// Canonical string for a command key after the prefix has been consumed.
+/// Used both to match presses and to display/store bindings.
 pub fn key_string(key: &KeyEvent) -> Option<String> {
     Some(match key.code {
         KeyCode::Char(c) => c.to_string(),
@@ -395,110 +395,153 @@ pub fn key_string(key: &KeyEvent) -> Option<String> {
     })
 }
 
-/// The prefix chord that opens command mode (docs/64). Parsed from
-/// `config.prefix` (e.g. `"ctrl+space"`, `"ctrl+b"`). Always carries Ctrl so it
-/// can never be mistaken for a plain typed key; extra modifiers are optional.
+/// The prefix chord that opens command mode (docs/64). Safe single-key
+/// prefixes are F1-F12. Character/Space prefixes must carry Ctrl or Alt so a
+/// plain typed key can never disappear into command mode. Shift is supported
+/// on function keys, where terminals can preserve it reliably.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrefixSpec {
-    alt: bool,
-    shift: bool,
-    /// The base key. `KeyCode::Char(' ')` is `Ctrl+Space`.
+    modifiers: KeyModifiers,
     code: KeyCode,
 }
 
 impl Default for PrefixSpec {
     fn default() -> Self {
-        // The historical default: Ctrl+Space.
-        PrefixSpec {
-            alt: false,
-            shift: false,
+        Self {
+            modifiers: KeyModifiers::CONTROL,
             code: KeyCode::Char(' '),
         }
     }
 }
 
 impl PrefixSpec {
-    /// Parse a spec like `"ctrl+space"` / `"ctrl+b"` / `"ctrl+alt+a"`. Returns
-    /// `None` for anything that does not carry Ctrl or names an unknown key, so a
-    /// bad value is rejected and the caller keeps the previous prefix.
-    pub fn parse(s: &str) -> Option<PrefixSpec> {
-        let mut ctrl = false;
-        let mut alt = false;
-        let mut shift = false;
-        let mut code: Option<KeyCode> = None;
-        for part in s.split('+') {
-            match part.trim().to_ascii_lowercase().as_str() {
+    const RELEVANT_MODIFIERS: KeyModifiers = KeyModifiers::CONTROL
+        .union(KeyModifiers::ALT)
+        .union(KeyModifiers::SHIFT);
+
+    /// Parse canonical specs such as `ctrl+space`, `alt+\`, `shift+f12`, or
+    /// plain `f12`. Bare text remains invalid because it would swallow typing.
+    pub fn parse(s: &str) -> Option<Self> {
+        let mut modifiers = KeyModifiers::NONE;
+        let mut code = None;
+        for raw in s.split('+') {
+            let part = raw.trim().to_ascii_lowercase();
+            match part.as_str() {
                 "" => {}
-                "ctrl" | "control" => ctrl = true,
-                "alt" | "option" | "opt" | "meta" => alt = true,
-                "shift" => shift = true,
-                "space" | "spc" => code = Some(KeyCode::Char(' ')),
-                other if other.chars().count() == 1 => {
-                    code = Some(KeyCode::Char(other.chars().next().unwrap()))
+                "ctrl" | "control" => modifiers.insert(KeyModifiers::CONTROL),
+                // `meta` was historically treated as an Alt alias in config.
+                "alt" | "option" | "opt" | "meta" => modifiers.insert(KeyModifiers::ALT),
+                "shift" => modifiers.insert(KeyModifiers::SHIFT),
+                "space" | "spc" if code.is_none() => code = Some(KeyCode::Char(' ')),
+                "plus" if code.is_none() => code = Some(KeyCode::Char('+')),
+                other if code.is_none() => {
+                    if let Some(number) = other
+                        .strip_prefix('f')
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .filter(|number| (1..=12).contains(number))
+                    {
+                        code = Some(KeyCode::F(number));
+                    } else if other.chars().count() == 1 && other.is_ascii() {
+                        code = Some(KeyCode::Char(other.chars().next()?));
+                    } else {
+                        return None;
+                    }
                 }
                 _ => return None,
             }
         }
-        // Must carry Ctrl (so it can't swallow a plain key) and name a base key.
-        if !ctrl {
+        let code = code?;
+        let is_function = matches!(code, KeyCode::F(1..=12));
+        let carries_non_text_modifier =
+            modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        if !is_function && (!carries_non_text_modifier || modifiers.contains(KeyModifiers::SHIFT)) {
             return None;
         }
-        Some(PrefixSpec {
-            alt,
-            shift,
-            code: code?,
-        })
+        Some(Self { modifiers, code })
     }
 
-    /// Does this key event match the prefix chord? Handles the terminal quirks of
-    /// `Ctrl+Space`: many emulators send `Ctrl+@` or a raw `NUL` for it.
+    /// Canonical persisted representation.
+    pub fn spec(&self) -> String {
+        let mut parts = Vec::new();
+        if self.modifiers.contains(KeyModifiers::CONTROL) {
+            parts.push("ctrl".to_string());
+        }
+        if self.modifiers.contains(KeyModifiers::ALT) {
+            parts.push("alt".to_string());
+        }
+        if self.modifiers.contains(KeyModifiers::SHIFT) {
+            parts.push("shift".to_string());
+        }
+        parts.push(match self.code {
+            KeyCode::Char(' ') => "space".to_string(),
+            KeyCode::Char('+') => "plus".to_string(),
+            KeyCode::Char(character) => character.to_ascii_lowercase().to_string(),
+            KeyCode::F(number) => format!("f{number}"),
+            _ => unreachable!("PrefixSpec only stores supported keys"),
+        });
+        parts.join("+")
+    }
+
+    /// The normalized event used when a double prefix forwards the literal key
+    /// through the same PTY encoder as ordinary input.
+    pub fn key_event(&self) -> KeyEvent {
+        KeyEvent::new(self.code, self.modifiers)
+    }
+
+    /// Match the exact configured chord. Ctrl+Space keeps its NUL/Ctrl+@ legacy
+    /// compatibility because those encodings cannot carry complete modifiers.
     pub fn matches(&self, key: &KeyEvent) -> bool {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
-        if self.alt != alt {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META)
+        {
             return false;
         }
-        // Ctrl+Space: accept the three encodings terminals use for it.
-        if self.code == KeyCode::Char(' ') {
-            if matches!(key.code, KeyCode::Null) {
-                return true;
+        if self.code == KeyCode::Char(' ') && self.modifiers == KeyModifiers::CONTROL {
+            if key.code == KeyCode::Null {
+                return key.modifiers.is_empty() || key.modifiers == KeyModifiers::CONTROL;
             }
-            return ctrl && matches!(key.code, KeyCode::Char(' ') | KeyCode::Char('@'));
+            let modifiers = key.modifiers & Self::RELEVANT_MODIFIERS;
+            if matches!(key.code, KeyCode::Char(' ')) {
+                return modifiers == KeyModifiers::CONTROL;
+            }
+            // Some terminals spell Ctrl+Space as Ctrl+@ and may retain the
+            // physical Shift needed to type `@`; both encodings are NUL.
+            if matches!(key.code, KeyCode::Char('@')) {
+                return modifiers == KeyModifiers::CONTROL
+                    || modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+            }
         }
-        ctrl && key.code == self.code
+        if key.modifiers & Self::RELEVANT_MODIFIERS != self.modifiers {
+            return false;
+        }
+        match (self.code, key.code) {
+            (KeyCode::Char(expected), KeyCode::Char(actual)) => {
+                expected.eq_ignore_ascii_case(&actual)
+            }
+            (expected, actual) => expected == actual,
+        }
     }
 
-    /// The raw byte(s) a terminal sends for this chord, so pressing the prefix
-    /// twice can forward a literal prefix into the focused pane. `Ctrl+<letter>`
-    /// is `letter & 0x1f` (Space/`@` → `0x00`).
-    pub fn literal_bytes(&self) -> Vec<u8> {
-        match self.code {
-            KeyCode::Char(c) if c.is_ascii() => {
-                let upper = c.to_ascii_uppercase() as u8;
-                vec![upper & 0x1f]
-            }
-            _ => vec![0x00],
-        }
-    }
-
-    /// A human label for Settings (e.g. `"Ctrl+Space"`, `"Ctrl+B"`).
+    /// Human label used by Settings and the status line.
     pub fn label(&self) -> String {
-        let mut s = String::from("Ctrl");
-        if self.alt {
-            s.push_str("+Alt");
+        let mut parts = Vec::new();
+        if self.modifiers.contains(KeyModifiers::CONTROL) {
+            parts.push("Ctrl".to_string());
         }
-        if self.shift {
-            s.push_str("+Shift");
+        if self.modifiers.contains(KeyModifiers::ALT) {
+            parts.push("Alt".to_string());
         }
-        match self.code {
-            KeyCode::Char(' ') => s.push_str("+Space"),
-            KeyCode::Char(c) => {
-                s.push('+');
-                s.push(c.to_ascii_uppercase());
-            }
-            _ => {}
+        if self.modifiers.contains(KeyModifiers::SHIFT) {
+            parts.push("Shift".to_string());
         }
-        s
+        parts.push(match self.code {
+            KeyCode::Char(' ') => "Space".to_string(),
+            KeyCode::Char(character) => character.to_ascii_uppercase().to_string(),
+            KeyCode::F(number) => format!("F{number}"),
+            _ => unreachable!("PrefixSpec only stores supported keys"),
+        });
+        parts.join("+")
     }
 }
 
@@ -556,6 +599,12 @@ pub fn presets() -> &'static [Preset] {
             id: "default",
             label: "luvus (default)",
             prefix: "ctrl+space",
+            binds: &[],
+        },
+        Preset {
+            id: "function",
+            label: "no-Ctrl (F12)",
+            prefix: "f12",
             binds: &[],
         },
         Preset {
@@ -617,15 +666,14 @@ impl App {
         crate::config::save(&self.config);
     }
 
-    /// Set the command-mode prefix chord from a spec like `"ctrl+b"` (docs/64).
-    /// Rejects anything that does not carry Ctrl (so a plain key can never become
-    /// the prefix and swallow typing), keeping the current prefix and returning
-    /// `false`. On success it applies live, persists, and returns `true`.
+    /// Set the command-mode prefix from a safe spec such as `ctrl+b`, `alt+\`,
+    /// or `f12` (docs/64). Plain text keys are rejected so normal typing cannot
+    /// disappear into command mode. On success it applies live and persists.
     pub fn set_prefix(&mut self, spec: &str) -> bool {
         match PrefixSpec::parse(spec) {
             Some(p) => {
+                self.config.prefix = p.spec();
                 self.prefix = p;
-                self.config.prefix = spec.trim().to_ascii_lowercase();
                 crate::config::save(&self.config);
                 true
             }
@@ -811,39 +859,53 @@ mod tests {
     }
 
     #[test]
-    fn prefix_parse_requires_ctrl_and_accepts_letters() {
+    fn prefix_parse_accepts_safe_function_keys_and_modified_characters() {
         assert_eq!(PrefixSpec::parse("ctrl+space"), Some(PrefixSpec::default()));
-        assert_eq!(
-            PrefixSpec::parse("ctrl+b"),
-            Some(PrefixSpec {
-                alt: false,
-                shift: false,
-                code: KeyCode::Char('b'),
-            })
-        );
-        // A bare key (no Ctrl) is rejected so it can't swallow typing.
+        assert_eq!(PrefixSpec::parse("control+b").unwrap().spec(), "ctrl+b");
+        assert_eq!(PrefixSpec::parse("f12").unwrap().label(), "F12");
+        assert_eq!(PrefixSpec::parse("shift+f12").unwrap().label(), "Shift+F12");
+        assert_eq!(PrefixSpec::parse("option+\\").unwrap().spec(), "alt+\\");
+        assert_eq!(PrefixSpec::parse("ctrl+plus").unwrap().label(), "Ctrl++");
+        // Bare text and Shift-only text are rejected so they cannot swallow typing.
         assert_eq!(PrefixSpec::parse("b"), None);
         assert_eq!(PrefixSpec::parse("space"), None);
+        assert_eq!(PrefixSpec::parse("shift+b"), None);
+        assert_eq!(PrefixSpec::parse("f13"), None);
         assert_eq!(PrefixSpec::parse("nonsense"), None);
     }
 
     #[test]
-    fn prefix_matches_the_configured_chord() {
+    fn prefix_matches_the_exact_configured_chord() {
         let ctrl = KeyModifiers::CONTROL;
         // Ctrl+Space accepts all three terminal encodings.
         let sp = PrefixSpec::default();
         assert!(sp.matches(&KeyEvent::new(KeyCode::Char(' '), ctrl)));
         assert!(sp.matches(&KeyEvent::new(KeyCode::Char('@'), ctrl)));
         assert!(sp.matches(&KeyEvent::new(KeyCode::Null, KeyModifiers::NONE)));
+        assert!(!sp.matches(&KeyEvent::new(KeyCode::Char(' '), ctrl | KeyModifiers::ALT)));
         assert!(!sp.matches(&KeyEvent::new(KeyCode::Char('b'), ctrl)));
-        // Ctrl+b matches only Ctrl+b.
+
         let cb = PrefixSpec::parse("ctrl+b").unwrap();
         assert!(cb.matches(&KeyEvent::new(KeyCode::Char('b'), ctrl)));
         assert!(!cb.matches(&KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)));
-        assert!(!cb.matches(&KeyEvent::new(KeyCode::Char(' '), ctrl)));
-        // The literal byte a double-press forwards: Ctrl+b → 0x02, Space → NUL.
-        assert_eq!(cb.literal_bytes(), vec![0x02]);
-        assert_eq!(sp.literal_bytes(), vec![0x00]);
+        assert!(!cb.matches(&KeyEvent::new(
+            KeyCode::Char('b'),
+            ctrl | KeyModifiers::SHIFT
+        )));
+
+        assert_eq!(PrefixSpec::parse("ctrl+shift+b"), None);
+
+        let shifted = PrefixSpec::parse("shift+f12").unwrap();
+        assert!(shifted.matches(&KeyEvent::new(KeyCode::F(12), KeyModifiers::SHIFT)));
+        assert!(!shifted.matches(&KeyEvent::new(KeyCode::F(12), KeyModifiers::NONE)));
+
+        let f12 = PrefixSpec::parse("f12").unwrap();
+        assert!(f12.matches(&KeyEvent::new(KeyCode::F(12), KeyModifiers::NONE)));
+        assert!(!f12.matches(&KeyEvent::new(KeyCode::F(12), KeyModifiers::SHIFT)));
+        assert_eq!(
+            f12.key_event(),
+            KeyEvent::new(KeyCode::F(12), KeyModifiers::NONE)
+        );
     }
 
     #[test]
@@ -851,6 +913,10 @@ mod tests {
         let _env = crate::persist::test_env("tmux-preset");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
+        assert!(app.apply_preset("function"));
+        assert_eq!(app.prefix, PrefixSpec::parse("f12").unwrap());
+        assert_eq!(app.current_preset(), Some(1));
+
         assert!(app.apply_preset("tmux"));
         assert_eq!(app.prefix, PrefixSpec::parse("ctrl+b").unwrap());
         assert_eq!(app.keymap.get("%"), Some(&Cmd::SplitRight));
@@ -870,15 +936,16 @@ mod tests {
     }
 
     #[test]
-    fn set_prefix_rejects_a_modifierless_chord() {
+    fn set_prefix_accepts_function_keys_but_rejects_plain_text() {
         let _env = crate::persist::test_env("set-prefix");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
-        assert!(app.set_prefix("ctrl+a"));
-        assert_eq!(app.prefix, PrefixSpec::parse("ctrl+a").unwrap());
-        // A bad spec is refused and the previous prefix is kept.
+        assert!(app.set_prefix("f12"));
+        assert_eq!(app.prefix, PrefixSpec::parse("f12").unwrap());
+        assert_eq!(app.config.prefix, "f12");
+        // A plain text spec is refused and the previous prefix is kept.
         assert!(!app.set_prefix("x"));
-        assert_eq!(app.prefix, PrefixSpec::parse("ctrl+a").unwrap());
+        assert_eq!(app.prefix, PrefixSpec::parse("f12").unwrap());
     }
 
     #[test]
@@ -1006,6 +1073,26 @@ mod tests {
             tabs + 1,
             "Ctrl+Space no longer opens command mode"
         );
+    }
+
+    #[test]
+    fn function_key_prefix_drives_command_mode() {
+        let _env = crate::persist::test_env("function-prefix");
+        use crate::event::AppEvent;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        assert!(app.set_prefix("f12"));
+        let tabs = app.ws().tabs.len();
+
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::F(12),
+            KeyModifiers::NONE,
+        )));
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.ws().tabs.len(), tabs + 1, "F12 prefix opens a tab");
     }
 
     #[test]

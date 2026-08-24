@@ -72,6 +72,9 @@ impl SettingsTab {
 pub struct SettingsUi {
     pub tab: SettingsTab,
     pub cursor: usize,
+    /// Candidate prefix captured once and waiting for the same chord again.
+    /// Nothing is persisted until confirmation succeeds.
+    pub prefix_candidate: Option<String>,
     /// First visual row shown in the Layout tab. Persisting this while the modal
     /// is open prevents a visible dock/bar button click from re-anchoring the
     /// list around its newly selected row.
@@ -232,6 +235,7 @@ impl App {
         self.settings = Some(SettingsUi {
             tab: SettingsTab::General,
             cursor: 0,
+            prefix_candidate: None,
             layout_scroll: 0,
             capturing: false,
         });
@@ -274,12 +278,10 @@ impl App {
     }
 
     pub fn handle_settings_key(&mut self, key: KeyEvent) {
-        let Some(&SettingsUi {
-            tab,
-            cursor,
-            capturing,
-            ..
-        }) = self.settings.as_ref()
+        let Some((tab, cursor, capturing, prefix_candidate)) = self
+            .settings
+            .as_ref()
+            .map(|ui| (ui.tab, ui.cursor, ui.capturing, ui.prefix_candidate.clone()))
         else {
             return;
         };
@@ -287,22 +289,43 @@ impl App {
         // (Esc cancels). This must intercept before the normal handling so keys
         // like Tab / digits can themselves be bound.
         if capturing {
-            if key.code != KeyCode::Esc {
-                if cursor == KEYS_PREFIX_ROW {
-                    // Capturing the prefix chord needs the modifiers, not just the
-                    // key. Refuse anything without Ctrl and keep the old prefix.
-                    match Self::prefix_spec_from_key(&key) {
-                        Some(spec) if self.set_prefix(&spec) => {}
-                        _ => self.show_toast("Prefix must include Ctrl"),
+            if cursor == KEYS_PREFIX_ROW {
+                if key.code == KeyCode::Esc {
+                    if let Some(ui) = self.settings.as_mut() {
+                        ui.capturing = false;
+                        ui.prefix_candidate = None;
                     }
-                } else if let (Some(cmd), Some(s)) =
-                    (Self::keys_cmd_at(cursor), keys::key_string(&key))
-                {
+                    return;
+                }
+                let Some(spec) = Self::prefix_spec_from_key(&key) else {
+                    self.show_toast("Use F1-F12 or a Ctrl/Alt chord");
+                    return;
+                };
+                if prefix_candidate.as_deref() == Some(spec.as_str()) {
+                    self.set_prefix(&spec);
+                    if let Some(ui) = self.settings.as_mut() {
+                        ui.capturing = false;
+                        ui.prefix_candidate = None;
+                    }
+                } else {
+                    let label = keys::PrefixSpec::parse(&spec)
+                        .map(|prefix| prefix.label())
+                        .unwrap_or(spec.clone());
+                    if let Some(ui) = self.settings.as_mut() {
+                        ui.prefix_candidate = Some(spec);
+                    }
+                    self.show_toast(format!("Press {label} again to confirm"));
+                }
+                return;
+            }
+            if key.code != KeyCode::Esc {
+                if let (Some(cmd), Some(s)) = (Self::keys_cmd_at(cursor), keys::key_string(&key)) {
                     self.rebind(cmd, s);
                 }
             }
             if let Some(ui) = self.settings.as_mut() {
                 ui.capturing = false;
+                ui.prefix_candidate = None;
             }
             return;
         }
@@ -436,7 +459,9 @@ impl App {
         if let Some(ui) = self.settings.as_mut() {
             ui.tab = tab;
             ui.cursor = cursor;
+            ui.prefix_candidate = None;
             ui.layout_scroll = 0;
+            ui.capturing = false;
         }
     }
 
@@ -496,6 +521,10 @@ impl App {
         let Some(tab) = self.settings.as_ref().map(|u| u.tab) else {
             return;
         };
+        if let Some(ui) = self.settings.as_mut() {
+            ui.capturing = false;
+            ui.prefix_candidate = None;
+        }
         match tab {
             SettingsTab::Theme => {
                 let index = cursor.min(self.theme_registry.entries().len().saturating_sub(1));
@@ -526,12 +555,14 @@ impl App {
                 KEYS_PREFIX_ROW => {
                     if let Some(ui) = self.settings.as_mut() {
                         ui.capturing = true;
+                        ui.prefix_candidate = None;
                     }
                 }
                 _ => {
                     if Self::keys_cmd_at(cursor).is_some() {
                         if let Some(ui) = self.settings.as_mut() {
                             ui.capturing = true;
+                            ui.prefix_candidate = None;
                         }
                     }
                 }
@@ -549,28 +580,52 @@ impl App {
             .and_then(|i| crate::app::Cmd::ALL.get(i).copied())
     }
 
-    /// Build a prefix spec string (e.g. `"ctrl+b"`) from a captured key event, or
-    /// `None` if it doesn't carry Ctrl. `Ctrl+Space` arrives as `Char(' ')`/`'@'`
-    /// with Ctrl or a bare `Null`; both normalize to `"ctrl+space"`.
+    /// Convert a captured event to one canonical safe prefix. Function keys can
+    /// stand alone; character and Space prefixes require Ctrl or Alt. Super,
+    /// Hyper, and Meta are rejected because desktop environments commonly keep
+    /// them before the terminal can report them consistently.
     fn prefix_spec_from_key(key: &KeyEvent) -> Option<String> {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
-        let base = match key.code {
-            KeyCode::Null | KeyCode::Char(' ') | KeyCode::Char('@') => "space".to_string(),
-            KeyCode::Char(c) if c.is_ascii() => c.to_ascii_lowercase().to_string(),
-            _ => return None,
-        };
-        // Ctrl is required. A bare `Null` already implies Ctrl+Space.
-        if !ctrl && !matches!(key.code, KeyCode::Null) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META)
+        {
             return None;
         }
-        let mut s = String::from("ctrl");
-        if alt {
-            s.push_str("+alt");
+        if key.code == KeyCode::Null {
+            return Some("ctrl+space".to_string());
         }
-        s.push('+');
-        s.push_str(&base);
-        Some(s)
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let mut shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let base = match key.code {
+            KeyCode::Char('@') if ctrl => {
+                // Ctrl+Space may arrive as the physical Ctrl+Shift+2 (`@`). The
+                // resulting terminal key is still NUL, so persist Ctrl+Space.
+                shift = false;
+                "space".to_string()
+            }
+            KeyCode::Char(' ') if ctrl => "space".to_string(),
+            KeyCode::Char(' ') => "space".to_string(),
+            KeyCode::Char('+') => "plus".to_string(),
+            KeyCode::Char(character) if character.is_ascii() => {
+                character.to_ascii_lowercase().to_string()
+            }
+            KeyCode::F(number @ 1..=12) => format!("f{number}"),
+            _ => return None,
+        };
+        let mut parts = Vec::new();
+        if ctrl {
+            parts.push("ctrl");
+        }
+        if alt {
+            parts.push("alt");
+        }
+        if shift {
+            parts.push("shift");
+        }
+        parts.push(&base);
+        let candidate = parts.join("+");
+        keys::PrefixSpec::parse(&candidate).map(|prefix| prefix.spec())
     }
 
     /// The index of the preset that exactly matches the current config, or `None`
@@ -1210,6 +1265,62 @@ fn lang_cursor(code: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefix_capture_accepts_safe_non_ctrl_keys_and_exact_modifiers() {
+        assert_eq!(
+            App::prefix_spec_from_key(&KeyEvent::new(KeyCode::F(12), KeyModifiers::NONE)),
+            Some("f12".to_string())
+        );
+        assert_eq!(
+            App::prefix_spec_from_key(&KeyEvent::new(
+                KeyCode::Char('\\'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            )),
+            Some("ctrl+alt+\\".to_string())
+        );
+        assert_eq!(
+            App::prefix_spec_from_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE,)),
+            None
+        );
+        assert_eq!(
+            App::prefix_spec_from_key(&KeyEvent::new(
+                KeyCode::Char('@'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )),
+            Some("ctrl+space".to_string())
+        );
+        assert_eq!(
+            App::prefix_spec_from_key(&KeyEvent::new(KeyCode::F(12), KeyModifiers::SUPER,)),
+            None
+        );
+    }
+
+    #[test]
+    fn prefix_capture_requires_the_same_chord_twice_before_persisting() {
+        let _env = crate::persist::test_env("prefix-capture-confirm");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        app.open_settings();
+        app.settings_set_tab(SettingsTab::Keys);
+        app.settings_activate(KEYS_PREFIX_ROW);
+
+        let f12 = KeyEvent::new(KeyCode::F(12), KeyModifiers::NONE);
+        app.handle_settings_key(f12);
+        assert_eq!(app.config.prefix, "ctrl+space");
+        assert!(app.settings.as_ref().is_some_and(|ui| ui.capturing));
+        assert_eq!(
+            app.settings
+                .as_ref()
+                .and_then(|ui| ui.prefix_candidate.as_deref()),
+            Some("f12")
+        );
+
+        app.handle_settings_key(f12);
+        assert_eq!(app.config.prefix, "f12");
+        assert_eq!(app.prefix, keys::PrefixSpec::parse("f12").unwrap());
+        assert!(app.settings.as_ref().is_some_and(|ui| !ui.capturing));
+    }
 
     #[test]
     fn sidebar_widths_are_grouped_in_the_docks_section() {

@@ -26,12 +26,21 @@ the live cheat-sheet. Remap anything, change the prefix, or apply a preset in
 ## The prefix and presets
 
 The prefix is **configurable**. From the **Prefix** row at the top of
-Settings → Keys, press a new chord to set it (it must include `Ctrl`, so it can
-never swallow a typed key). Pressing the prefix twice sends the literal chord to
-the focused pane.
+Settings → Keys, press a safe key, then press it again to confirm. You can use a
+single function key (`F1`–`F12`) or a character/Space chord containing `Ctrl` or
+`Alt`, such as `Ctrl+b`, `Alt+\`, or `Ctrl+Alt+Space`. Bare text keys are
+rejected so Luvus can never swallow normal typing. Super/Cmd, Hyper, and Meta
+are rejected because desktop environments do not report them consistently.
+Pressing the configured prefix twice sends that literal key to the focused pane.
 
-The **Preset** row below it applies a whole bundle at once. The **tmux** preset
-switches the prefix to `Ctrl+b` and maps the tmux keys onto luvus:
+The **no-Ctrl (F12)** preset is the most portable single-key option. On a Mac
+keyboard configured to use media controls, press `Fn+F12`; Luvus still receives
+it as `F12`. Luvus asks you to confirm any captured prefix before saving it, so
+an operating-system or terminal shortcut cannot silently lock you out.
+
+The **Preset** row below it applies a whole bundle at once. Available presets
+are **luvus (default)** (`Ctrl+Space`), **no-Ctrl (F12)**, and **tmux**. The tmux
+preset switches the prefix to `Ctrl+b` and maps the tmux keys onto luvus:
 
 | tmux | luvus command |
 |------|---------------|
@@ -85,6 +94,6 @@ read-only or in an editor (plus new / rename / delete). See
 
 Custom bindings persist in `config.json`: `prefix` holds the prefix chord, and
 `keybindings` maps each command id to a key (an empty value unbinds it).
-`Ctrl+Space ?` shows the current map, and every command is editable in
+Pressing the configured prefix and then `?` shows the current map, and every command is editable in
 **Settings → Keys** (the vim `hjkl` and `Tab` aliases included, since nothing is
 bound behind your back).

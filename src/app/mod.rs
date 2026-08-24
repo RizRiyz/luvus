@@ -40,7 +40,7 @@ mod switcher;
 
 pub use search::{GlobalSearch, SearchFlash};
 
-pub use keys::{key_reference_rows, presets, Cmd, KEY_REFERENCE};
+pub use keys::{key_reference_rows, presets, Cmd, PrefixSpec, KEY_REFERENCE};
 pub use modules::ModuleMenuAction;
 pub use picker::{FolderPicker, PickerHit, Row};
 pub use settings::{
@@ -5268,6 +5268,7 @@ mod tests {
 
     #[test]
     fn prefix_chord_variants() {
+        let _env = crate::persist::test_env("prefix-chord-variants");
         // Ctrl+Space arrives in different forms across terminals/OSes; each must
         // enter prefix mode and the next key (here `v`) must then split.
         let chords = [
@@ -9486,6 +9487,7 @@ mod tests {
         app.settings = Some(SettingsUi {
             tab: SettingsTab::Layout,
             cursor: idx,
+            prefix_candidate: None,
             layout_scroll: 0,
             capturing: false,
         });

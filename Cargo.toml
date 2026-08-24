@@ -24,6 +24,7 @@ exclude = [
     "/.github",
     "/assets",
     "/community",
+    "/plugins",
     "/preview.html",
     "/preview.ans",
     "/MODULE-GUIDE.md",

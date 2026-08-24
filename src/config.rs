@@ -62,9 +62,9 @@ pub struct Config {
     /// An empty value means the command is explicitly unbound.
     #[serde(default)]
     pub keybindings: std::collections::HashMap<String, String>,
-    /// The `Ctrl+Space`-style prefix chord that opens command mode (docs/64).
-    /// A string like `"ctrl+space"` / `"ctrl+b"`; parsed by `keys::PrefixSpec`.
-    /// Must carry Ctrl so it can never swallow a plain typed key.
+    /// The safe prefix that opens command mode (docs/64): an F1-F12 key or a
+    /// Ctrl/Alt character chord such as `ctrl+space`, `ctrl+b`, or `alt+\\`.
+    /// Plain text keys are rejected so normal terminal typing is never swallowed.
     #[serde(default = "default_prefix")]
     pub prefix: String,
     /// Mission Control cost overrides (docs/54, MC-5): model-id substring →
