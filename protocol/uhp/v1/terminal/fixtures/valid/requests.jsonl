@@ -1,4 +1,4 @@
-{"id":"cap-1","method":"uhp.capabilities","params":{}}
+{"id":"cap-1","auth":"luv_tok_example","method":"uhp.capabilities","params":{}}
 {"id":"inv-1","method":"terminal.backend.inventory","params":{}}
 {"id":"val-1","method":"terminal.backend.validate","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","expected_root":{"pid":1234,"start_marker":null}}}
 {"id":"proc-1","method":"terminal.backend.processes","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7"}}

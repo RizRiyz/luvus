@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""One-frame fixture-driven Unix mock for terminal-backend adapter tests."""
+"""One-frame fixture-driven Unix mock for UHP terminal adapter tests."""
 
 import argparse
 import json
 import os
 import pathlib
+import re
 import socket
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 RESPONSES = ROOT / "protocol" / "uhp" / "v1" / "terminal" / "fixtures" / "valid" / "responses.jsonl"
 MAX_FRAME = 1024 * 1024
+REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 def load_results():
@@ -39,6 +41,20 @@ def response_for(request, results):
     return {"id": request_id, "error": {"code": "unsupported_capability", "message": "mock method is not configured"}}
 
 
+def valid_request(request):
+    if not isinstance(request, dict):
+        return False
+    if not {"id", "method", "params"} <= set(request) or not set(request) <= {"id", "method", "params", "auth"}:
+        return False
+    if not isinstance(request["id"], str) or REQUEST_ID.fullmatch(request["id"]) is None:
+        return False
+    if not isinstance(request["method"], str) or not request["method"] or not isinstance(request["params"], dict):
+        return False
+    return "auth" not in request or (
+        isinstance(request["auth"], str) and 1 <= len(request["auth"].encode()) <= 256
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--socket", required=True)
@@ -48,7 +64,6 @@ def main():
     if not path.is_absolute() or path.exists():
         parser.error("--socket must be an unused absolute path")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.parent.chmod(0o700)
     results = load_results()
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
@@ -71,7 +86,7 @@ def main():
                     except (UnicodeDecodeError, json.JSONDecodeError):
                         response = {"id":"0","error":{"code":"invalid_request","message":"bad json"}}
                     else:
-                        response = response_for(request, results)
+                        response = response_for(request, results) if valid_request(request) else {"id":"0","error":{"code":"invalid_request","message":"invalid request"}}
                     connection.sendall(json.dumps(response, separators=(",", ":")).encode() + b"\n")
     finally:
         try:

@@ -15,6 +15,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 PACKAGE = ROOT / "protocol" / "uhp" / "v1" / "terminal"
 OPAQUE = re.compile(r"^[0-9a-f]{32}$")
+REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 KEYS = {"enter", "escape", "tab", "backtab", "up", "down", "left", "right", "home", "end", "backspace", "delete", "pageup", "pagedown", "ctrl-c", "ctrl-d", "ctrl-u", "ctrl-w", "space", *(f"digit-{n}" for n in range(10))}
 METHOD_FIELDS = {
     "uhp.capabilities": set(),
@@ -66,9 +67,11 @@ def locator_ok(params):
 
 
 def valid_request(value):
-    if not isinstance(value, dict) or set(value) != {"id", "method", "params"}:
+    if not isinstance(value, dict) or not {"id", "method", "params"} <= set(value) or not set(value) <= {"id", "method", "params", "auth"}:
         return False
-    if not isinstance(value["id"], str) or not 1 <= len(value["id"].encode()) <= 128:
+    if not isinstance(value["id"], str) or REQUEST_ID.fullmatch(value["id"]) is None:
+        return False
+    if "auth" in value and (not isinstance(value["auth"], str) or not 1 <= len(value["auth"].encode()) <= 256):
         return False
     method, params = value["method"], value["params"]
     if method not in METHOD_FIELDS or not isinstance(params, dict) or not set(params) <= METHOD_FIELDS[method]:
@@ -108,13 +111,13 @@ def valid_request(value):
 
 
 def valid_response(value):
-    return isinstance(value, dict) and isinstance(value.get("id"), str) and ((isinstance(value.get("result"), dict) and "error" not in value) or (isinstance(value.get("error"), dict) and "result" not in value))
+    return isinstance(value, dict) and isinstance(value.get("id"), str) and REQUEST_ID.fullmatch(value["id"]) is not None and ((isinstance(value.get("result"), dict) and "error" not in value) or (isinstance(value.get("error"), dict) and "result" not in value))
 
 
 def valid_control_frame(value):
     if not isinstance(value, dict) or set(value) != {"id", "action", "params"}:
         return False
-    if not isinstance(value["id"], str) or not 1 <= len(value["id"].encode()) <= 128:
+    if not isinstance(value["id"], str) or REQUEST_ID.fullmatch(value["id"]) is None:
         return False
     action, params = value["action"], value["params"]
     if not isinstance(params, dict):

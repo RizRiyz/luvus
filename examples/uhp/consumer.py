@@ -11,6 +11,7 @@ PACKAGE = ROOT / "protocol" / "uhp" / "v1"
 PANE = re.compile(r"^[1-9][0-9]{0,9}$")
 SOURCE = re.compile(r"^[A-Za-z][A-Za-z0-9._:/-]{0,63}$")
 AGENT = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 STATES = {"idle", "working", "blocked", "done"}
 RESULT_TYPES = {
     "uhp_capabilities",
@@ -91,7 +92,7 @@ def bounded_string(value, maximum, allow_empty=True):
 def valid_request(value):
     if not isinstance(value, dict) or set(value) != {"id", "method", "params"}:
         return False
-    if not bounded_string(value["id"], 128, allow_empty=False):
+    if not isinstance(value["id"], str) or REQUEST_ID.fullmatch(value["id"]) is None:
         return False
     method = value["method"]
     params = value["params"]
@@ -185,7 +186,7 @@ def valid_request(value):
 
 
 def valid_response(value):
-    if not isinstance(value, dict) or not bounded_string(value.get("id"), 128, allow_empty=False):
+    if not isinstance(value, dict) or not isinstance(value.get("id"), str) or REQUEST_ID.fullmatch(value["id"]) is None:
         return False
     if set(value) == {"id", "result"}:
         result = value["result"]
@@ -312,7 +313,7 @@ def valid_global_request(value, methods):
         return False
     if not {"id", "method", "params"} <= set(value):
         return False
-    if not bounded_string(value["id"], 128, allow_empty=False):
+    if not isinstance(value["id"], str) or REQUEST_ID.fullmatch(value["id"]) is None:
         return False
     if value["method"] not in methods or not isinstance(value["params"], dict):
         return False
@@ -331,7 +332,8 @@ def valid_global_request(value, methods):
 def valid_global_response(value):
     return (
         isinstance(value, dict)
-        and bounded_string(value.get("id"), 128, allow_empty=False)
+        and isinstance(value.get("id"), str)
+        and REQUEST_ID.fullmatch(value["id"]) is not None
         and ((set(value) == {"id", "result"}) != (set(value) == {"id", "error"}))
     )
 

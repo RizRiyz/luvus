@@ -62,7 +62,7 @@ On Windows, build the debug binary and run the independent PowerShell consumer:
 
 ```powershell
 cargo build --locked
-.\examples\terminal-backend\live_conformance.ps1 `
+.\examples\uhp\terminal\live_conformance.ps1 `
   -Luvus .\target\debug\luvus.exe
 ```
 

@@ -3,7 +3,8 @@
   "$id":"https://luvus.dev/protocol/uhp/v1/schema/terminal/request.schema.json",
   "type":"object",
   "properties":{
-    "id":{"type":"string","minLength":1,"maxLength":128},
+    "id":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9._:-]+$"},
+    "auth":{"type":"string","minLength":1,"maxLength":256},
     "method":{"type":"string"},
     "params":{"type":"object"}
   },

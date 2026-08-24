@@ -162,9 +162,11 @@ the selected Luvus session.
 
 An ordinary connection carries one UTF-8 JSON object request and one response,
 each terminated by LF. Negotiated event and terminal observe/control methods
-switch their connections to streams after one acknowledgment. Every complete frame is capped at 1 MiB. Request IDs are
-strings of 1 to 128 UTF-8 bytes. Unknown fields, duplicate keys, invalid enums,
-and oversized frames are rejected before dispatch.
+switch their connections to streams after one acknowledgment. Every complete
+frame is capped at 1 MiB. Requests require `id`, `method`, and `params`; `auth`
+is optional. Request IDs contain 1 to 128 ASCII letters, digits, `.`, `_`, `:`,
+or `-`. Unknown fields, duplicate keys, invalid enums, and oversized frames are
+rejected before dispatch.
 
 Input success means the complete action was queued to the owned PTY writer.
 Immediate metadata and lifecycle mutations report `executed`. Mutation errors

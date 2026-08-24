@@ -1,3 +1,4 @@
 {"id":"bad-1","action":"type_literal","params":{"text":"","extra":true}}
 {"id":"bad-2","action":"send_key","params":{"key":"ctrl-z"}}
 {"id":"bad-3","action":"run","params":{"command":"rm"}}
+{"id":"unicode-é","action":"send_key","params":{"key":"enter"}}

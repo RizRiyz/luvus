@@ -74,6 +74,7 @@ const API_WORKER_STACK_BYTES: usize = 256 * 1024;
 const EVENT_FORWARDER_STACK_BYTES: usize = 128 * 1024;
 const INITIAL_FRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const INITIAL_FRAME_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+const MAX_REQUEST_ID_BYTES: usize = 128;
 
 static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 static REJECTED_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
@@ -99,6 +100,14 @@ const AUTH_SCOPES: &[&str] = &[
     "admin",
     "all",
 ];
+
+fn valid_request_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_REQUEST_ID_BYTES
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
 
 struct AuthToken {
     id: String,
@@ -957,16 +966,13 @@ fn control_action_response(
                 .to_string()
         }
     };
-    let id = value
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty() && id.chars().count() <= 128)
-        .unwrap_or("0");
+    let raw_id = value.get("id").and_then(Value::as_str);
+    let id = raw_id.filter(|id| valid_request_id(id)).unwrap_or("0");
     let valid_envelope = value.as_object().is_some_and(|object| {
         object
             .keys()
             .all(|key| matches!(key.as_str(), "id" | "action" | "params"))
-            && value.get("id").is_some_and(Value::is_string)
+            && raw_id.is_some_and(valid_request_id)
             && value.get("action").is_some_and(Value::is_string)
             && value.get("params").is_some_and(Value::is_object)
     });
@@ -1365,12 +1371,23 @@ fn handle_conn(
         }
     };
     let raw_id = val.get("id");
-    let id = raw_id.and_then(|v| v.as_str()).unwrap_or("0").to_string();
+    let id = raw_id
+        .and_then(Value::as_str)
+        .filter(|id| valid_request_id(id))
+        .unwrap_or("0")
+        .to_string();
     let method = val
         .get("method")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    if !raw_id.and_then(Value::as_str).is_some_and(valid_request_id) {
+        let response = json!({"id":id,"error":{"code":"invalid_request",
+            "message":"id must contain 1 to 128 ASCII letters, digits, '.', '_', ':', or '-'"}})
+        .to_string();
+        let _ = write_response(&mut writer, &id, &response);
+        return;
+    }
     let auth = match val.get("auth") {
         None => None,
         Some(Value::String(auth)) if !auth.is_empty() && auth.len() <= 256 => Some(auth.as_str()),
@@ -1438,9 +1455,6 @@ fn handle_conn(
             object
                 .keys()
                 .all(|key| matches!(key.as_str(), "id" | "method" | "params" | "auth"))
-                && raw_id.is_some_and(Value::is_string)
-                && !id.is_empty()
-                && id.chars().count() <= 128
                 && params.is_object()
         });
         if !valid_envelope {
@@ -2591,7 +2605,7 @@ mod tests {
     }
 
     #[test]
-    fn versioned_envelopes_reject_non_string_ids_and_normalize_null_params() {
+    fn versioned_envelopes_reject_invalid_ids_and_normalize_null_params() {
         let _env = crate::persist::test_env("versioned-env");
         let root = crate::persist::ensure_config_dir();
         let path = root.join("v.sock");
@@ -2616,6 +2630,23 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "invalid request reached the app loop"
+        );
+
+        let mut invalid = transport::connect(&path).unwrap();
+        writeln!(
+            invalid,
+            "{}",
+            json!({"id":"unicode-é","method":"workspace.list","params":{}})
+        )
+        .unwrap();
+        let mut response = String::new();
+        BufReader::new(invalid).read_line(&mut response).unwrap();
+        let response: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["id"], "0");
+        assert_eq!(response["error"]["code"], "invalid_request");
+        assert!(
+            rx.try_recv().is_err(),
+            "unsafe request ID reached the app loop"
         );
 
         let client_path = path.clone();

@@ -17,9 +17,10 @@ use the returned `endpoint` descriptor. macOS and Linux announce
 hint until the endpoint passes the platform checks in `endpoint-validation.md`
 and returns a compatible `uhp.capabilities` response.
 
-Every request has exactly `id`, `method`, and `params`. Request IDs contain 1 to
-128 UTF-8 bytes. Unknown or duplicate fields are rejected. Every successful
-response has `id` and `result`; every failure has `id` and `error`.
+Every request requires `id`, `method`, and `params`; `auth` is optional. Request
+IDs contain 1 to 128 ASCII letters, digits, `.`, `_`, `:`, or `-`. Unknown or
+duplicate fields are rejected. Every successful response has `id` and `result`;
+every failure has `id` and `error`.
 
 The authoritative limits and method shapes are in `schema/`. Examples in
 `fixtures/` are indexed by `fixtures/manifest.json`. The standard-library
