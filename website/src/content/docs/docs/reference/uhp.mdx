@@ -12,6 +12,10 @@ types.
 UHP v1 is local, bounded, versioned, harness-neutral, and available on macOS,
 Linux, and Windows.
 
+For a step-by-step integration using discovery, capability negotiation,
+snapshots, input, streams, delegated tokens, and reconnect handling, start with
+[Automating with the Socket API and UHP](/docs/guides/socket-and-uhp/).
+
 ## UHP is a protocol family
 
 UHP v1 contains two profiles that share the same local endpoint:
@@ -66,6 +70,8 @@ renders the Luvus interface and is not a harness automation API.
 | Wait for an agent to become blocked or done | Runtime `agent.wait` |
 | List every live PTY, including plain shells | Terminal `terminal.backend.inventory` |
 | Read bounded terminal output | Terminal `terminal.backend.capture` |
+| Render live safe ANSI without polling | Terminal `terminal.backend.observe` |
+| Render and send correlated input on one stream | Terminal `terminal.backend.control` |
 | Type text without Enter | Terminal `terminal.backend.type_literal` |
 | Submit one prompt atomically | Terminal `terminal.backend.submit_text` |
 | Send Ctrl+C or a navigation key | Terminal `terminal.backend.send_key` |
@@ -142,9 +148,9 @@ A success has `id` and `result`. A failure has `id` and `error`. Request IDs
 contain 1 to 128 UTF-8 bytes. Unknown fields, duplicate keys, invalid enums,
 and oversized frames are rejected before dispatch.
 
-An event subscription begins as one request and acknowledgment, then turns
-only that connection into a bounded stream. Ordinary connections remain
-one-request, one-response connections.
+An event subscription or Terminal observe/control request begins as one request
+and acknowledgment, then turns only that connection into a bounded stream.
+Ordinary connections remain one-request, one-response connections.
 
 ## Negotiate both profiles
 

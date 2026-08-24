@@ -14,8 +14,13 @@ Windows discovery exposes the actual `\\.\pipe\...` address instead of asking
 clients to reproduce Luvus's internal mapping.
 
 The resolved logical path is injected into every pane as `$LUVUS_SOCKET_PATH`.
-The selected local endpoint is the authority boundary, so methods do not need a
-session parameter.
+The selected local endpoint is protected by current-user ownership and is the
+default full-authority boundary, so methods do not need a session parameter.
+Harnesses can be given an optional short-lived scoped token instead of ambient
+owner authority.
+
+Start with [Automating with the Socket API and UHP](/docs/guides/socket-and-uhp/)
+for a practical connection, discovery, authentication, and streaming guide.
 Use `luvus --session <name> <command>` from outside a pane. Inside a pane, keep
 the inherited socket so commands cannot drift to another server. Server-facing
 CLI commands map to these methods. Session lifecycle and theme acquisition are
@@ -31,6 +36,13 @@ One request per connection, newline-terminated, and one JSON reply:
 ← {"id":"1","result":{"type":"ok","pane":"7"}}
 ```
 
+`auth` is optional. It carries a delegated token when a harness should have
+less authority than the local account:
+
+```json
+→ {"id":"2","method":"workspace.get","auth":"luv_tok_…","params":{"workspace_id":"workspace_…"}}
+```
+
 Errors come back structured:
 
 ```json
@@ -44,23 +56,32 @@ printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.luvus/luvus.so
 
 ## Method families
 
+`luvus api socket-schema` prints the complete installed Socket API 1.0
+contract without starting or connecting to a server. `luvus api
+socket-capabilities` queries the selected running server and returns its exact
+method registry, event sequence fence, limits, supported UHP profiles, and
+graphics support. Discover capabilities instead of inferring support from the
+Luvus release number.
+
 | Family | Methods |
 |---|---|
-| workspaces | `workspace.list` · `workspace.open` · `workspace.focus` · `workspace.rename` · `workspace.pin` · `workspace.close` |
-| tabs | `tab.list` · `tab.new` · `tab.focus` · `tab.move` · `tab.swap` · `tab.rename` · `tab.close` |
+| discovery / config | `socket.capabilities` · `socket.stats` · `socket.token.create` · `socket.token.list` · `socket.token.revoke` · `config.get` · `config.patch` · `server.reload_config` · `server.agent_manifests` · `server.reload_agent_manifests` |
+| workspaces | `workspace.list` · `workspace.get` · `workspace.open` · `workspace.focus` · `workspace.rename` · `workspace.pin` · `workspace.move` · `workspace.move_block` · `workspace.report_metadata` · `workspace.close` |
+| tabs | `tab.list` · `tab.get` · `tab.new` · `tab.focus` · `tab.move` · `tab.swap` · `tab.rename` · `tab.close` |
 | UHP Runtime profile | `runtime.capabilities` · `session.snapshot` · `agent.start` · `agent.prompt` · `agent.wait` · `events.subscribe` |
-| panes | `pane.list` · `pane.split` · `pane.move` · `pane.focus` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.processes` · `pane.close` · `attach.pane` |
+| panes | `pane.list` · `pane.get` · `pane.current` · `pane.layout` · `pane.neighbor` · `pane.edges` · `pane.split` · `pane.move` · `pane.swap` · `pane.focus` · `pane.focus_direction` · `pane.resize` · `pane.zoom` · `pane.rename` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.processes` · `pane.close` · `attach.pane` |
+| layouts | `layout.export` · `layout.apply` · `layout.set_split_ratio` |
 | agents | `agent.list` · `agent.get` · `agent.explain` · `agent.report` · `agent.release` · `agent.start` · `agent.prompt` · `agent.wait` · `agent.name` · `agent.fork` · `agent.send` · `agent.keys` · `agent.read` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.report_event` |
 | search | `search` · `search.capabilities` · `search.query` · `search.activate` |
 | files | `files.tree` · `files.open` · `files.reveal` · `files.refresh` |
 | git | `git.status` · `git.branches` · `git.log` · `git.open` |
 | diff | `diff.refresh` · `diff.list` · `diff.open` · `diff.get` · `diff.navigate` · `diff.note.add` · `diff.note.apply` · `diff.note.list` · `diff.note.edit` · `diff.note.resolve` · `diff.note.reopen` · `diff.note.remove` · `diff.note.send` |
-| UHP Terminal profile | `terminal.backend.capabilities` · `terminal.backend.inventory` · `terminal.backend.snapshot` · `terminal.backend.validate` · `terminal.backend.processes` · `terminal.backend.capture` · `terminal.backend.type_literal` · `terminal.backend.submit_text` · `terminal.backend.send_key` · `terminal.backend.set_title` · `terminal.backend.notify` · `terminal.backend.create` · `terminal.backend.close` · `terminal.backend.wait_change` · `terminal.backend.wait_output` · `terminal.backend.events.subscribe` |
+| UHP Terminal profile | `terminal.backend.capabilities` · `terminal.backend.inventory` · `terminal.backend.snapshot` · `terminal.backend.validate` · `terminal.backend.processes` · `terminal.backend.capture` · `terminal.backend.observe` · `terminal.backend.control` · `terminal.backend.type_literal` · `terminal.backend.submit_text` · `terminal.backend.send_key` · `terminal.backend.set_title` · `terminal.backend.notify` · `terminal.backend.create` · `terminal.backend.close` · `terminal.backend.wait_change` · `terminal.backend.wait_output` · `terminal.backend.events.subscribe` |
 | worktrees | `worktree.list` · `worktree.create` · `worktree.open` · `worktree.remove` |
 | orchestration | `task.add` · `task.list` · `task.get` · `task.claim` · `task.next` · `task.start` · `task.heartbeat` · `task.update` · `task.done` · `task.merge` · `task.release` · `lease.acquire` · `lease.list` · `lease.release` |
 | modules | `module.list` · `module.info` · `module.link` · `module.unlink` · `module.enable` · `module.disable` · `module.action.list` · `module.action.invoke` · `module.pane.open` · `module.pane.focus` · `module.pane.close` · `module.config_dir` · `module.settings.list` · `module.settings.get` · `module.settings.set` · `module.log.list` |
 | themes | `theme.list` · `theme.path` · `theme.use` · `theme.reload` |
-| ui / server | `ui.sidebar` · `ui.dock.push` · `ui.dock.list` · `ui.dock.move` · `ui.bar.push` · `ui.bar.list` · `ui.bar.move` · `ui.bar.remove` · `ui.notification.push` · `ui.notification.clear` · `ui.toast` · `ping` · `server.stop` · `events.subscribe` |
+| ui / server | `ui.sidebar` · `ui.dock.push` · `ui.dock.list` · `ui.dock.move` · `ui.bar.push` · `ui.bar.list` · `ui.bar.move` · `ui.bar.remove` · `ui.notification.push` · `ui.notification.clear` · `ui.toast` · `ping` · `server.stop` · `events.subscribe` · `events.wait` |
 
 Parameter shapes mirror the CLI flags (`luvus task add --paths x` →
 `{"paths": ["x"]}`). For CLI commands, an omitted pane uses
@@ -73,6 +94,118 @@ versioned automation contract and does not
 inherit the focused pane. It requires explicit runtime identity and stricter
 framing, limits, and failure evidence. See the detailed
 [UHP Terminal Profile](/docs/reference/terminal-backend/) reference.
+
+## Topology and layout control
+
+Workspace indices are 0-based and tab positions are 1-based for backward
+compatibility. Every workspace and tab also has an opaque `workspace_id` or
+`tab_id` that survives reorder and restart. Requests may use the explicit ID
+field instead of a position. Terminal panes expose `terminal_id`, which remains
+stable for that exact PTY lifetime across pane and tab moves. Read methods do
+not change focus:
+
+```json
+→ {"id":"p1","method":"pane.neighbor","params":{"pane":"7","direction":"right"}}
+← {"id":"p1","result":{"type":"pane_neighbor","pane":"7","neighbor":"9"}}
+```
+
+`pane.layout` returns the pane rectangle in a normalized 10,000 by 10,000
+logical area. Headless clients therefore receive deterministic geometry that
+does not depend on the latest attached terminal size. `pane.edges` reports
+which outer edges the pane touches. Directional queries use the same geometric
+selection as the TUI.
+
+`layout.export` returns the complete binary split tree and focused pane.
+`layout.apply` accepts that tree plus an optional focus. It succeeds only when
+the tree contains every current pane in the target tab exactly once. It never
+spawns, closes, or recreates a pane, so PTYs, scrollback, process identity, and
+agent sessions survive. Duplicate, missing, foreign, invalid-axis,
+invalid-ratio, and over-deep trees are rejected before mutation. Dashboard tabs
+do not have mutable pane layouts.
+
+`layout.set_split_ratio` takes a root-relative `path` of `"a"` and `"b"`
+steps and a ratio from 0 to 1. The live layout clamps the result to preserve the
+minimum pane size. `pane.resize` takes `direction` and `cells`; `pane.swap`
+requires both panes to be in the same tab. `pane.focus_direction` changes focus,
+while `pane.neighbor` only inspects it.
+
+`workspace.move_block` takes a unique, bounded `workspaces` array and a final
+zero-based `to` position. All indices are validated before anything changes,
+the block keeps its supplied order, and the active workspace remains active.
+`workspace.move` is the single-workspace form.
+
+## Configuration and manifests
+
+`config.get` returns the normalized live config. `config.patch` takes
+`{"patch":{...}}`, recursively merges only known fields, validates the result,
+applies theme, language, keymap, prefix, sidebars, layout gaps, file visibility,
+and pane history budgets live, then persists atomically. Unknown or invalid
+fields leave the current config unchanged. `server.reload_config` reloads the
+on-disk config through the same apply path.
+
+`server.agent_manifests` returns the active recognized agent names and rule
+count. `server.reload_agent_manifests` reloads built-in, managed, and user
+manifests and forces a fresh detection pass. `manifest.reload` remains a
+compatibility alias.
+
+## One-shot event waits
+
+`events.wait` is the bounded, event-driven alternative to client polling. It
+takes an exact event name, an optional flat `where` object matched against event
+data, and `timeout_s` up to 3600 seconds. The default timeout is 30 seconds.
+
+```json
+→ {"id":"w1","method":"events.wait","params":{"event":"pane.agent_status_changed","where":{"pane":"7"},"timeout_s":30}}
+← {"id":"w1","result":{"type":"event_wait","matched":true,"sequence":41,"event":{"event":"pane.agent_status_changed","sequence":42,"data":{"pane":"7","status":"done"}}}}
+```
+
+Registration happens before the returned sequence fence. Pass
+`after_sequence` to consume a matching event already retained before the new
+connection. The waiter consumes the existing bounded event bus, is reclaimed
+when the client disconnects, and adds no app-loop polling or background
+process.
+
+## Reconnect, concurrency, and delegated authority
+
+`events.subscribe` accepts `after_sequence` and replays retained events before
+live delivery. The replay window holds at most 256 shared frames and 1 MiB in
+total. A sequence older than that fixed window returns `resync_required`; take
+a fresh snapshot and subscribe again. Subscriber queues stay bounded and a
+slow consumer receives `events.resync_required` before disconnect.
+
+Application-state results include the current `revision`, which is the same
+monotonic fence used by the event stream. A mutation may
+pass `if_revision`; if another successful mutation already changed state,
+Luvus returns `revision_conflict` without executing the request. Existing
+compound methods such as `agent.start`, `agent.prompt`, `workspace.move_block`,
+`layout.apply`, and `diff.note.apply` validate and commit as one operation.
+
+Create a delegated credential with:
+
+```json
+→ {"id":"token-1","method":"socket.token.create","params":{"scopes":["read","workspace"],"ttl_s":3600}}
+```
+
+The secret is returned once. Supported scopes are `read`, `workspace`,
+`agent`, `terminal`, `orchestration`, `extensions`, `admin`, and `all`. Tokens
+are memory-only, expire after at most 24 hours, are capped at 64 per server, and
+can be listed by public ID or revoked. They are a least-authority delegation
+tool; Unix socket ownership or the Windows named-pipe DACL remains the security
+boundary.
+
+`socket.stats` exposes bounded operational counters: active/capacity/accepted/
+rejected connections, initial-frame timeouts, completed requests, byte totals,
+mean request latency, uptime, replay limits, and active terminal streams. Luvus permits at most 80 active
+API connections, waits at most five seconds for the initial frame, and applies
+owner checks before dispatch. These limits prevent silent clients from growing
+threads or memory without bound.
+
+The installed Socket schema embeds the strict UHP Runtime and Terminal profile
+bundles under `profiles`. Live terminal observe/control streams are capped at
+eight connections, use a two-frame queue, and are driven by existing coalesced
+output events rather than an idle timer. See the
+[UHP Terminal Profile](/docs/reference/terminal-backend/) for framing and
+resynchronization rules.
 
 ## Runtime snapshots and agent authority
 
@@ -196,7 +329,8 @@ Luvus during named-session handoff. Invalid or stale targets return a structured
 
 ## Organizing workspaces
 
-Workspace indices are 0-based and remain stable when sidebar ordering changes.
+Workspace indices are 0-based positions. Use `workspace_id` when identity must
+remain stable across API reordering and server restart.
 
 | Method | Params | Result |
 |---|---|---|
@@ -211,10 +345,11 @@ sidebar display order without changing the API index or stealing focus. A pin
 on a parent or linked worktree floats that complete worktree group while
 preserving its internal order.
 
-`workspace.list` remains in stable API-index order. Each row includes
+`workspace.list` remains in API-index order. Each row includes `workspace_id`,
 `workspace`, `name`, `cwd`, `pinned`, `display_position`, `active`, and `tabs`.
 Both `workspace` and `display_position` are 0-based; callers can therefore
-target a stable index and separately verify where it appears in the sidebar.
+target a current position or use the stable ID and separately verify where it
+appears in the sidebar.
 Missing or malformed parameters return `invalid_request`, while an out-of-range
 workspace returns `not_found` without changing state.
 

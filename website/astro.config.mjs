@@ -88,6 +88,7 @@ export default defineConfig({
             { label: 'Settings & Theming', slug: 'docs/guides/settings' },
             { label: 'Community Themes', slug: 'docs/guides/themes' },
             { label: 'Scripting luvus', slug: 'docs/guides/scripting' },
+            { label: 'Socket API & UHP', slug: 'docs/guides/socket-and-uhp' },
           ],
         },
         {

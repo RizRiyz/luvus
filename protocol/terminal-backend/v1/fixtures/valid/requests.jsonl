@@ -15,3 +15,5 @@
 {"id":"events-1","method":"terminal.backend.events.subscribe","params":{}}
 {"id":"wait-1","method":"terminal.backend.wait_change","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","after_revision":4,"timeout_ms":30000}}
 {"id":"wait-output-1","method":"terminal.backend.wait_output","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","after_revision":4,"match":"ready","timeout_ms":30000}}
+{"id":"observe-1","method":"terminal.backend.observe","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","mode":"visible","lines":80,"ansi":true}}
+{"id":"control-1","method":"terminal.backend.control","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","mode":"visible","lines":80,"ansi":true}}

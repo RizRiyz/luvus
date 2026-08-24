@@ -9,7 +9,8 @@ namespace.
 The profile controls live Luvus terminals over the existing local control
 endpoint. Protocol 1.0 uses one
 UTF-8 JSON request and one JSON response per ordinary connection. The event
-method switches its connection into a bounded stream after one acknowledgment.
+and terminal observe/control methods switch their connections into bounded
+streams after one acknowledgment.
 Each frame is terminated by LF and is at most 1 MiB including that LF.
 
 Start by running `luvus session list --json`, keep only running sessions, and
@@ -35,7 +36,7 @@ reconcile through a fresh inventory.
 
 Protocol v1 capabilities are:
 
-- `inventory`, `validate`, and `capture`
+- `inventory`, `validate`, `capture`, `observe`, and `control_stream`
 - `type_literal`, `submit_text`, and `send_key`
 - `set_title` and `notify_terminal`
 - `create_workspace`, `create_sibling`, and `close`
@@ -59,6 +60,16 @@ control frame from reaching the client. `output_ready`, `metadata_changed`, and
 `exited` intentionally stay lightweight and require a fresh snapshot when they
 arrive after its fence. The dependency-free reference consumer implements and
 tests this reconciliation policy.
+
+`terminal.backend.observe` sends one safe normalized ANSI `terminal.frame`
+immediately, then only after that terminal's existing coalesced
+`terminal.output_ready` event advances its content revision. A stream has a
+two-frame queue, captures at most 200 rows and 64 KiB, and never polls a PTY.
+`terminal.backend.control` adds newline-delimited `type_literal`, `submit_text`,
+and `send_key` action frames on that same connection. Only one API control
+stream may lease a terminal at a time. There are at most eight combined
+observe/control streams per server. Overflow requires a fresh capture and
+reconnect.
 
 An installed binary exposes the same contract with `luvus api schema`, live
 negotiation with `luvus api capabilities`, the fenced inventory with

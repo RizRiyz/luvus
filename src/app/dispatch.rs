@@ -24,6 +24,186 @@ pub struct OutputWait {
     pub cancelled: Arc<AtomicBool>,
 }
 
+#[cfg(test)]
+mod socket_api_tests {
+    use super::*;
+
+    fn app(name: &str) -> (crate::persist::TestEnv, App) {
+        let env = crate::persist::test_env(name);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let app = App::new(100, 40, tx).unwrap();
+        (env, app)
+    }
+
+    #[test]
+    fn topology_queries_and_mutations_share_the_live_layout() {
+        let (_env, mut app) = app("socket-topology");
+        let first = app.layout().focus;
+        let split = app.dispatch("pane.split", &json!({})).unwrap();
+        let second = PaneId(split["pane"].as_str().unwrap().parse().unwrap());
+
+        let current = app.dispatch("pane.current", &json!({})).unwrap();
+        assert_eq!(current["pane"], second.0.to_string());
+        let neighbor = app
+            .dispatch(
+                "pane.neighbor",
+                &json!({
+                    "pane":second.0.to_string(), "direction":"left"
+                }),
+            )
+            .unwrap();
+        assert_eq!(neighbor["neighbor"], first.0.to_string());
+
+        app.dispatch(
+            "pane.swap",
+            &json!({
+                "pane":first.0.to_string(), "with":second.0.to_string()
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            app.layout().focus,
+            second,
+            "swap preserves focused PTY identity"
+        );
+
+        let exported = app.dispatch("layout.export", &json!({})).unwrap();
+        app.dispatch(
+            "layout.apply",
+            &json!({
+                "tree":exported["tree"].clone(), "focus":first.0.to_string()
+            }),
+        )
+        .unwrap();
+        assert_eq!(app.layout().focus, first);
+        assert_eq!(app.layout().leaves().len(), 2);
+        assert!(app.panes.contains_key(&first) && app.panes.contains_key(&second));
+    }
+
+    #[test]
+    fn workspace_block_move_is_atomic_and_keeps_active_workspace() {
+        let (_env, mut app) = app("socket-workspace-move");
+        app.dispatch("workspace.new", &json!({})).unwrap();
+        app.dispatch("workspace.new", &json!({})).unwrap();
+        assert_eq!(app.workspaces.len(), 3);
+        let active_name = app.workspaces[app.active_ws].name.clone();
+
+        let before: Vec<_> = app
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.cwd.clone())
+            .collect();
+        assert!(app
+            .dispatch(
+                "workspace.move_block",
+                &json!({
+                    "workspaces":[0,0], "to":1
+                })
+            )
+            .is_err());
+        assert_eq!(
+            app.workspaces
+                .iter()
+                .map(|workspace| workspace.cwd.clone())
+                .collect::<Vec<_>>(),
+            before
+        );
+
+        assert!(app
+            .dispatch(
+                "workspace.move_block",
+                &json!({
+                    "workspaces":[0,1], "to":2
+                })
+            )
+            .is_err());
+        assert_eq!(
+            app.workspaces
+                .iter()
+                .map(|workspace| workspace.cwd.clone())
+                .collect::<Vec<_>>(),
+            before,
+            "an impossible final block position is rejected atomically"
+        );
+
+        app.dispatch(
+            "workspace.move_block",
+            &json!({
+                "workspaces":[0,1], "to":1
+            }),
+        )
+        .unwrap();
+        assert_eq!(app.workspaces[app.active_ws].name, active_name);
+    }
+
+    #[test]
+    fn config_patch_rejects_unknown_fields_without_mutation() {
+        let (_env, mut app) = app("socket-config");
+        let before = serde_json::to_value(&app.config).unwrap();
+        let error = app.dispatch(
+            "config.patch",
+            &json!({"patch":{"layout":{"unknown":true}}}),
+        );
+        assert!(error.is_err());
+        assert_eq!(serde_json::to_value(&app.config).unwrap(), before);
+
+        let result = app
+            .dispatch("config.patch", &json!({"patch":{"check_updates":false}}))
+            .unwrap();
+        assert_eq!(result["config"]["check_updates"], false);
+        assert!(!app.config.check_updates);
+    }
+
+    #[test]
+    fn stable_topology_ids_survive_reordering_and_address_mutations() {
+        let (_env, mut app) = app("socket-stable-ids");
+        let workspace_id = app.workspaces[0].id.clone();
+        let first_tab_id = app.workspaces[0].tabs[0].id.clone();
+        app.dispatch("tab.new", &json!({})).unwrap();
+        let second_tab_id = app.workspaces[0].tabs[1].id.clone();
+
+        app.dispatch(
+            "tab.swap",
+            &json!({"tab_id":first_tab_id,"with_id":second_tab_id}),
+        )
+        .unwrap();
+        assert_eq!(app.workspaces[0].tabs[1].id, first_tab_id);
+        let selected = app
+            .dispatch(
+                "tab.get",
+                &json!({"workspace_id":workspace_id,"tab_id":first_tab_id}),
+            )
+            .unwrap();
+        assert_eq!(selected["tab"], "2");
+        assert_eq!(selected["workspace_id"], workspace_id);
+        assert_eq!(selected["tab_id"], first_tab_id);
+    }
+
+    #[test]
+    fn socket_mutations_support_optimistic_revision_guards() {
+        let (_env, mut app) = app("socket-revision-guard");
+        let (reply, _) = std::sync::mpsc::channel();
+        let first: Value = serde_json::from_str(&app.handle_api(&ApiRequest {
+            id: "first".into(),
+            method: "tab.new".into(),
+            params: json!({"if_revision":0}),
+            reply: reply.clone(),
+        }))
+        .unwrap();
+        assert!(first["result"]["revision"].as_u64().unwrap() > 0);
+
+        let conflict: Value = serde_json::from_str(&app.handle_api(&ApiRequest {
+            id: "stale".into(),
+            method: "tab.new".into(),
+            params: json!({"if_revision":0}),
+            reply,
+        }))
+        .unwrap();
+        assert_eq!(conflict["error"]["code"], "revision_conflict");
+        assert_eq!(app.workspaces[0].tabs.len(), 2);
+    }
+}
+
 /// A parked `agent.wait` request. State transitions resolve these directly on
 /// the app loop; no client polling and no subscribe-then-snapshot race.
 pub struct AgentWait {
@@ -610,10 +790,16 @@ impl App {
         // *server's* cwd — the very thing §3.3 removed.
         const WITHOUT_NODE: &[&str] = &[
             "ping",
+            "socket.capabilities",
             "runtime.capabilities",
             "session.snapshot",
             "search.capabilities",
             "server.stop",
+            "server.reload_config",
+            "server.agent_manifests",
+            "server.reload_agent_manifests",
+            "config.get",
+            "config.patch",
             "workspace.open",
             "node.open",
             "workspace.list",
@@ -632,8 +818,45 @@ impl App {
         if self.workspaces.is_empty() && !WITHOUT_NODE.contains(&req.method.as_str()) {
             return json!({ "id": req.id, "error": { "code": "no_session", "message": "no active session" } }).to_string();
         }
-        match self.dispatch(&req.method, &req.params) {
-            Ok(result) => json!({ "id": req.id, "result": result }).to_string(),
+        let read_only = crate::api::capabilities::is_read_only(&req.method);
+        let revisioned = !matches!(
+            req.method.as_str(),
+            "runtime.capabilities" | "session.snapshot"
+        );
+        let mut params = req.params.clone();
+        let expected_revision = revisioned
+            .then(|| {
+                params
+                    .as_object_mut()
+                    .and_then(|object| object.remove("if_revision"))
+            })
+            .flatten();
+        if read_only && expected_revision.is_some() {
+            return json!({ "id": req.id, "error": { "code": "invalid_request",
+                "message": "if_revision is only valid for mutations" } })
+            .to_string();
+        }
+        if let Some(expected) = expected_revision {
+            let actual = crate::ipc::api::current_sequence(&self.events);
+            if expected.as_u64() != Some(actual) {
+                return json!({ "id": req.id, "error": { "code": "revision_conflict",
+                    "message": "socket state changed before this mutation",
+                    "expected": expected, "actual": actual } })
+                .to_string();
+            }
+        }
+        match self.dispatch(&req.method, &params) {
+            Ok(mut result) => {
+                if revisioned {
+                    if let Some(object) = result.as_object_mut() {
+                        object.insert(
+                            "revision".to_string(),
+                            json!(crate::ipc::api::current_sequence(&self.events)),
+                        );
+                    }
+                }
+                json!({ "id": req.id, "result": result }).to_string()
+            }
             Err((code, message)) => {
                 json!({ "id": req.id, "error": { "code": code, "message": message } }).to_string()
             }
@@ -648,6 +871,50 @@ impl App {
                 "protocol":1,
                 "session": crate::session::display_name()
             })),
+            "socket.capabilities" => {
+                reject_api_fields(p, &[])?;
+                Ok(crate::api::capabilities(crate::ipc::api::current_sequence(
+                    &self.events,
+                )))
+            }
+            "config.get" => {
+                reject_api_fields(p, &[])?;
+                Ok(json!({"type":"config", "config":self.config}))
+            }
+            "config.patch" => {
+                reject_api_fields(p, &["patch"])?;
+                let patch = p.get("patch").ok_or_else(|| {
+                    (
+                        "invalid_request".to_string(),
+                        "config.patch needs a patch object".to_string(),
+                    )
+                })?;
+                let next = patched_config(&self.config, patch)?;
+                self.apply_socket_config(next)?;
+                Ok(json!({"type":"config", "config":self.config}))
+            }
+            "server.reload_config" => {
+                reject_api_fields(p, &[])?;
+                let next = crate::config::load();
+                self.apply_socket_config(next)?;
+                Ok(json!({"type":"config_reloaded", "config":self.config}))
+            }
+            "server.agent_manifests" => {
+                reject_api_fields(p, &[])?;
+                Ok(json!({
+                    "type":"agent_manifests",
+                    "rules":self.manifests.rule_count(),
+                    "agents":self.manifests.agent_names(),
+                }))
+            }
+            "server.reload_agent_manifests" | "manifest.reload" => {
+                reject_api_fields(p, &[])?;
+                let manifests =
+                    crate::detect::Manifests::load(&crate::persist::ensure_manifests_dir());
+                self.apply_socket_manifests(manifests);
+                let rules = self.manifests.rule_count();
+                Ok(json!({"type":"agent_manifests_reloaded","rules":rules}))
+            }
             "runtime.capabilities" => {
                 reject_api_fields(p, &[])?;
                 Ok(json!({
@@ -707,20 +974,50 @@ impl App {
                 self.apply_theme(id);
                 Ok(json!({"type": "theme_selected", "id": self.config.theme}))
             }
-            // Re-read `~/.luvus/manifests/` (built-in + managed OTA + user) into
-            // the live engine, so `server update-manifest` applies without a
-            // restart. Detection uses the new rules on the next tick.
-            "manifest.reload" => {
-                self.manifests =
-                    crate::detect::Manifests::load(&crate::persist::ensure_manifests_dir());
-                for status in self.status.values_mut() {
-                    status.force_detect = true;
-                }
-                Ok(json!({"type":"ok","rules": self.manifests.rule_count()}))
-            }
             "server.stop" => {
                 self.should_quit = true;
                 Ok(json!({"type":"ok"}))
+            }
+            "pane.get" => {
+                reject_api_fields(p, &["pane"])?;
+                let pane = self.resolve_pane(p).ok_or_else(not_found)?;
+                self.socket_pane(pane)
+            }
+            "pane.current" => {
+                reject_api_fields(p, &[])?;
+                self.socket_pane(self.layout().focus)
+            }
+            "pane.layout" => {
+                reject_api_fields(p, &["pane"])?;
+                let pane = self.resolve_pane(p).unwrap_or_else(|| self.layout().focus);
+                self.socket_pane_layout(pane)
+            }
+            "pane.neighbor" => {
+                reject_api_fields(p, &["pane", "direction"])?;
+                let pane = self.resolve_pane(p).unwrap_or_else(|| self.layout().focus);
+                let direction = crate::api::topology::direction(p)?;
+                let (workspace, tab) = self.pane_location(pane).ok_or_else(not_found)?;
+                let layout = &self.workspaces[workspace].tabs[tab].layout;
+                let neighbor =
+                    layout.neighbor(crate::api::topology::logical_area(), pane, direction);
+                Ok(json!({"type":"pane_neighbor","pane":pane.0.to_string(),
+                    "neighbor":neighbor.map(|id| id.0.to_string())}))
+            }
+            "pane.edges" => {
+                reject_api_fields(p, &["pane"])?;
+                let pane = self.resolve_pane(p).unwrap_or_else(|| self.layout().focus);
+                let (workspace, tab) = self.pane_location(pane).ok_or_else(not_found)?;
+                let area = crate::api::topology::logical_area();
+                let rect = self.workspaces[workspace].tabs[tab]
+                    .layout
+                    .pane_rect(area, pane)
+                    .ok_or_else(not_found)?;
+                Ok(
+                    json!({"type":"pane_edges","pane":pane.0.to_string(),"edges":{
+                        "left":rect.x == area.x, "right":rect.right() == area.right(),
+                        "top":rect.y == area.y, "bottom":rect.bottom() == area.bottom(),
+                    }}),
+                )
             }
             "pane.list" => {
                 let focus = self.layout().focus;
@@ -974,6 +1271,7 @@ impl App {
                     .map(|(i, w)| {
                         json!({
                             "workspace": i.to_string(),
+                            "workspace_id": w.id,
                             "name": w.name,
                             "cwd": w.cwd.display().to_string(),
                             "pinned": w.pinned,
@@ -985,9 +1283,122 @@ impl App {
                     .collect();
                 Ok(json!({"type":"workspace_list","workspaces":arr}))
             }
+            "workspace.get" => {
+                reject_api_fields(p, &["workspace", "workspace_id"])?;
+                let index = self.optional_socket_workspace(p)?.unwrap_or(self.active_ws);
+                self.socket_workspace(index)
+            }
+            "workspace.move" => {
+                reject_api_fields(p, &["workspace", "workspace_id", "to"])?;
+                let workspace = self.required_socket_workspace(p)?;
+                let to = required_index_param(p, "to")?;
+                let positions = self.reorder_workspace_block(&[workspace], to)?;
+                self.emit_event(
+                    "workspace.moved",
+                    json!({"workspace":workspace.to_string(),"to":positions[0].to_string()}),
+                );
+                Ok(json!({
+                    "type":"workspace_move",
+                    "workspace":workspace.to_string(),
+                    "to":positions[0].to_string()
+                }))
+            }
+            "workspace.move_block" => {
+                reject_api_fields(p, &["workspaces", "workspace_ids", "to"])?;
+                if p.get("workspaces").is_some() && p.get("workspace_ids").is_some() {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "workspaces and workspace_ids cannot be used together".to_string(),
+                    ));
+                }
+                let values = p
+                    .get("workspaces")
+                    .or_else(|| p.get("workspace_ids"))
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| {
+                        (
+                            "invalid_request".to_string(),
+                            "workspaces or workspace_ids must be an array".to_string(),
+                        )
+                    })?;
+                if values.is_empty()
+                    || values.len() > crate::api::topology::MAX_WORKSPACE_MOVE_BLOCK
+                {
+                    return Err((
+                        "limit_exceeded".to_string(),
+                        "workspace block size is invalid".to_string(),
+                    ));
+                }
+                let workspaces: Vec<usize> = if p.get("workspace_ids").is_some() {
+                    values
+                        .iter()
+                        .map(|value| {
+                            let id = value.as_str().ok_or_else(|| {
+                                (
+                                    "invalid_request".to_string(),
+                                    "workspace_ids must contain strings".to_string(),
+                                )
+                            })?;
+                            self.workspaces
+                                .iter()
+                                .position(|workspace| workspace.id == id)
+                                .ok_or_else(|| {
+                                    (
+                                        "not_found".to_string(),
+                                        format!("workspace id {id} not found"),
+                                    )
+                                })
+                        })
+                        .collect::<Result<_, _>>()?
+                } else {
+                    values
+                        .iter()
+                        .map(parse_index_value)
+                        .collect::<Result<_, _>>()?
+                };
+                let to = required_index_param(p, "to")?;
+                let positions = self.reorder_workspace_block(&workspaces, to)?;
+                self.emit_event(
+                    "workspace.block_moved",
+                    json!({"workspaces":workspaces,"positions":positions}),
+                );
+                Ok(json!({
+                    "type":"workspace_move_block",
+                    "workspaces":workspaces,
+                    "positions":positions
+                }))
+            }
+            "workspace.report_metadata" => {
+                reject_api_fields(
+                    p,
+                    &["workspace", "workspace_id", "branch", "ahead", "behind"],
+                )?;
+                let index = self.required_socket_workspace(p)?;
+                let branch = optional_nullable_string(p, "branch", 512)?;
+                let ahead = optional_u32(p, "ahead")?;
+                let behind = optional_u32(p, "behind")?;
+                let workspace = self
+                    .workspaces
+                    .get_mut(index)
+                    .ok_or_else(|| workspace_update_error(index, WorkspaceUpdateError::NotFound))?;
+                if p.get("branch").is_some() {
+                    workspace.branch = branch;
+                }
+                if ahead.is_some() || behind.is_some() {
+                    workspace.git_ahead_behind = Some((ahead.unwrap_or(0), behind.unwrap_or(0)));
+                }
+                self.emit_event(
+                    "workspace.metadata_reported",
+                    json!({"workspace":index.to_string()}),
+                );
+                self.socket_workspace(index)
+            }
             "workspace.new" | "node.new" => {
                 self.new_workspace();
-                Ok(json!({"type":"workspace","workspace": self.active_ws.to_string()}))
+                Ok(json!({
+                    "type":"workspace",
+                    "workspace": self.active_ws.to_string()
+                }))
             }
             "workspace.open" | "node.open" => {
                 // Open `path` as a workspace, or focus it if it's already one. Used
@@ -1027,10 +1438,13 @@ impl App {
                     }
                     None => {}
                 }
-                Ok(json!({"type":"workspace","workspace": self.active_ws.to_string()}))
+                Ok(json!({
+                    "type":"workspace",
+                    "workspace": self.active_ws.to_string()
+                }))
             }
             "workspace.focus" | "node.focus" => {
-                if let Some(i) = param_usize(p, "workspace").or_else(|| param_usize(p, "node")) {
+                if let Some(i) = self.optional_socket_workspace(p)? {
                     if i < self.workspaces.len() {
                         self.active_ws = i;
                     }
@@ -1038,7 +1452,7 @@ impl App {
                 Ok(json!({"type":"ok"}))
             }
             "workspace.rename" | "node.rename" => {
-                let i = required_workspace_param(p)?;
+                let i = self.required_socket_workspace(p)?;
                 let name = p.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
                     (
                         "invalid_request".to_string(),
@@ -1058,7 +1472,7 @@ impl App {
                 }))
             }
             "workspace.pin" | "node.pin" => {
-                let i = required_workspace_param(p)?;
+                let i = self.required_socket_workspace(p)?;
                 let pinned = p.get("pinned").and_then(|v| v.as_bool()).ok_or_else(|| {
                     (
                         "invalid_request".to_string(),
@@ -1078,9 +1492,7 @@ impl App {
                 }))
             }
             "workspace.close" | "node.close" => {
-                let i = param_usize(p, "workspace")
-                    .or_else(|| param_usize(p, "node"))
-                    .unwrap_or(self.active_ws);
+                let i = self.optional_socket_workspace(p)?.unwrap_or(self.active_ws);
                 self.close_workspace(i);
                 Ok(json!({"type":"ok"}))
             }
@@ -1103,6 +1515,7 @@ impl App {
                         };
                         json!({
                             "tab": (i + 1).to_string(),
+                            "tab_id": t.id,
                             "active": i == ws.active_tab,
                             "name": t.name.clone(),
                             "kind": kind,
@@ -1111,12 +1524,28 @@ impl App {
                     .collect();
                 Ok(json!({"type":"tab_list","tabs":arr}))
             }
+            "tab.get" => {
+                reject_api_fields(p, &["workspace", "workspace_id", "tab", "tab_id"])?;
+                let workspace = self.optional_socket_workspace(p)?.unwrap_or(self.active_ws);
+                let tab = self
+                    .optional_socket_tab(workspace, p, "tab", "tab_id")?
+                    .unwrap_or_else(|| {
+                        self.workspaces
+                            .get(workspace)
+                            .map(|ws| ws.active_tab)
+                            .unwrap_or(usize::MAX)
+                    });
+                self.socket_tab(workspace, tab)
+            }
             "tab.new" => {
                 self.new_tab();
-                Ok(json!({"type":"tab","tab": (self.ws().active_tab + 1).to_string()}))
+                Ok(json!({
+                    "type":"tab",
+                    "tab": (self.ws().active_tab + 1).to_string()
+                }))
             }
             "tab.focus" => {
-                let index = required_one_based_param(p, "tab")?;
+                let index = self.required_socket_tab(self.active_ws, p, "tab", "tab_id")?;
                 self.focus_tab(index).map_err(tab_focus_error)?;
                 Ok(json!({"type":"ok"}))
             }
@@ -1140,14 +1569,11 @@ impl App {
                             ))
                         }
                     };
-                    let from = p
-                        .get("tab")
-                        .map(|_| required_one_based_param(p, "tab"))
-                        .transpose()?;
+                    let from = self.optional_socket_tab(self.active_ws, p, "tab", "tab_id")?;
                     self.move_tab_direction(from, direction)
                         .map_err(tab_move_error)?
                 } else {
-                    let from = required_one_based_param(p, "tab")?;
+                    let from = self.required_socket_tab(self.active_ws, p, "tab", "tab_id")?;
                     let to = required_one_based_param(p, "to")?;
                     let active = self.move_tab(from, to).map_err(tab_move_error)?;
                     (from, to, active)
@@ -1160,8 +1586,8 @@ impl App {
                 }))
             }
             "tab.swap" => {
-                let first = required_one_based_param(p, "tab")?;
-                let second = required_one_based_param(p, "with")?;
+                let first = self.required_socket_tab(self.active_ws, p, "tab", "tab_id")?;
+                let second = self.required_socket_tab(self.active_ws, p, "with", "with_id")?;
                 let active = self.swap_tabs(first, second).map_err(tab_move_error)?;
                 Ok(json!({
                     "type": "tab_swap",
@@ -1173,10 +1599,8 @@ impl App {
             // Name a tab from a module (docs/13 §3.9) — the same label the
             // tab-rename modal writes. An empty name clears it back to a number.
             "tab.rename" => {
-                let index = p
-                    .get("tab")
-                    .map(|_| required_one_based_param(p, "tab"))
-                    .transpose()?
+                let index = self
+                    .optional_socket_tab(self.active_ws, p, "tab", "tab_id")?
                     .unwrap_or(self.ws().active_tab);
                 let name = p.get("name").and_then(Value::as_str).ok_or_else(|| {
                     (
@@ -1188,17 +1612,293 @@ impl App {
                 Ok(json!({"type":"ok"}))
             }
             "tab.close" => {
-                let i = param_usize(p, "tab")
-                    .map(|i| i.saturating_sub(1))
+                let i = self
+                    .optional_socket_tab(self.active_ws, p, "tab", "tab_id")?
                     .unwrap_or(self.ws().active_tab);
                 self.close_tab(i);
                 Ok(json!({"type":"ok"}))
+            }
+            "layout.export" => {
+                reject_api_fields(p, &["workspace", "workspace_id", "tab", "tab_id"])?;
+                let workspace = self.optional_socket_workspace(p)?.unwrap_or(self.active_ws);
+                let tab = self
+                    .optional_socket_tab(workspace, p, "tab", "tab_id")?
+                    .unwrap_or_else(|| {
+                        self.workspaces
+                            .get(workspace)
+                            .map(|ws| ws.active_tab)
+                            .unwrap_or(usize::MAX)
+                    });
+                let tab_ref = self
+                    .workspaces
+                    .get(workspace)
+                    .and_then(|ws| ws.tabs.get(tab))
+                    .ok_or_else(not_found)?;
+                if !tab_ref.is_renameable() {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "dashboard tabs do not have a mutable pane layout".to_string(),
+                    ));
+                }
+                Ok(
+                    json!({"type":"layout","workspace":workspace.to_string(),"tab":(tab+1).to_string(),
+                    "focus":tab_ref.layout.focus.0.to_string(),"tree":tab_ref.layout.to_tree()}),
+                )
+            }
+            "layout.apply" => {
+                reject_api_fields(
+                    p,
+                    &[
+                        "workspace",
+                        "workspace_id",
+                        "tab",
+                        "tab_id",
+                        "focus",
+                        "tree",
+                    ],
+                )?;
+                let workspace = self.optional_socket_workspace(p)?.unwrap_or(self.active_ws);
+                let tab = self
+                    .optional_socket_tab(workspace, p, "tab", "tab_id")?
+                    .unwrap_or_else(|| {
+                        self.workspaces
+                            .get(workspace)
+                            .map(|ws| ws.active_tab)
+                            .unwrap_or(usize::MAX)
+                    });
+                let tree = crate::api::topology::parse_tree(p.get("tree").ok_or_else(|| {
+                    (
+                        "invalid_request".to_string(),
+                        "layout.apply needs a tree".to_string(),
+                    )
+                })?)?;
+                let tab_ref = self
+                    .workspaces
+                    .get_mut(workspace)
+                    .and_then(|ws| ws.tabs.get_mut(tab))
+                    .ok_or_else(not_found)?;
+                if !tab_ref.is_renameable() {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "dashboard tabs do not have a mutable pane layout".to_string(),
+                    ));
+                }
+                let focus = match p.get("focus") {
+                    None => tab_ref.layout.focus,
+                    Some(value) => PaneId(parse_u32_value(value, "focus")?),
+                };
+                tab_ref
+                    .layout
+                    .apply_tree(&tree, focus)
+                    .map_err(|message| ("invalid_request".to_string(), message.to_string()))?;
+                self.session_dirty = true;
+                self.emit_event(
+                    "layout.applied",
+                    json!({"workspace":workspace.to_string(),"tab":(tab+1).to_string()}),
+                );
+                Ok(
+                    json!({"type":"layout_applied","workspace":workspace.to_string(),"tab":(tab+1).to_string()}),
+                )
+            }
+            "layout.set_split_ratio" => {
+                reject_api_fields(
+                    p,
+                    &[
+                        "workspace",
+                        "workspace_id",
+                        "tab",
+                        "tab_id",
+                        "path",
+                        "ratio",
+                    ],
+                )?;
+                let workspace = self.optional_socket_workspace(p)?.unwrap_or(self.active_ws);
+                let tab = self
+                    .optional_socket_tab(workspace, p, "tab", "tab_id")?
+                    .unwrap_or_else(|| {
+                        self.workspaces
+                            .get(workspace)
+                            .map(|ws| ws.active_tab)
+                            .unwrap_or(usize::MAX)
+                    });
+                let path = crate::api::topology::split_path(p)?;
+                let ratio = p.get("ratio").and_then(Value::as_f64).ok_or_else(|| {
+                    (
+                        "invalid_request".to_string(),
+                        "ratio must be a finite number".to_string(),
+                    )
+                })?;
+                if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "ratio must be between 0 and 1".to_string(),
+                    ));
+                }
+                let tab_ref = self
+                    .workspaces
+                    .get_mut(workspace)
+                    .and_then(|ws| ws.tabs.get_mut(tab))
+                    .ok_or_else(not_found)?;
+                if !tab_ref.layout.try_set_ratio(
+                    crate::api::topology::logical_area(),
+                    &path,
+                    ratio as f32,
+                ) {
+                    return Err((
+                        "not_found".to_string(),
+                        "path does not identify a split".to_string(),
+                    ));
+                }
+                self.session_dirty = true;
+                self.emit_event("layout.ratio_changed", json!({"workspace":workspace.to_string(),"tab":(tab+1).to_string(),"path":p["path"],"ratio":ratio}));
+                Ok(
+                    json!({"type":"layout_split_ratio","workspace":workspace.to_string(),"tab":(tab+1).to_string(),"ratio":ratio}),
+                )
             }
             // ── panes / agents ──
             "pane.focus" => {
                 let id = self.resolve_pane(p).ok_or_else(not_found)?;
                 self.focus_pane_global(id);
                 Ok(json!({"type":"ok"}))
+            }
+            "pane.focus_direction" => {
+                reject_api_fields(p, &["pane", "direction"])?;
+                let pane = self.resolve_pane(p).unwrap_or_else(|| self.layout().focus);
+                let direction = crate::api::topology::direction(p)?;
+                let (workspace, tab) = self.pane_location(pane).ok_or_else(not_found)?;
+                let next = self.workspaces[workspace].tabs[tab]
+                    .layout
+                    .neighbor(crate::api::topology::logical_area(), pane, direction)
+                    .ok_or_else(|| {
+                        (
+                            "not_found".to_string(),
+                            "no pane exists in that direction".to_string(),
+                        )
+                    })?;
+                self.focus_pane_global(next);
+                self.emit_event("pane.focused", json!({"pane":next.0.to_string()}));
+                Ok(json!({"type":"pane_focus","pane":next.0.to_string()}))
+            }
+            "pane.resize" => {
+                reject_api_fields(p, &["pane", "direction", "cells"])?;
+                let pane = self.resolve_pane(p).unwrap_or_else(|| self.layout().focus);
+                let direction = crate::api::topology::direction(p)?;
+                let cells = p.get("cells").and_then(Value::as_i64).unwrap_or(1);
+                if !(1..=1000).contains(&cells) {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "cells must be between 1 and 1000".to_string(),
+                    ));
+                }
+                let (workspace, tab) = self.pane_location(pane).ok_or_else(not_found)?;
+                let layout = &mut self.workspaces[workspace].tabs[tab].layout;
+                let previous = layout.focus;
+                layout.focus = pane;
+                let area = if self.last_pane_area.width > 1 && self.last_pane_area.height > 1 {
+                    self.last_pane_area
+                } else {
+                    crate::api::topology::logical_area()
+                };
+                let changed = layout.resize_focused(area, direction, cells as i16);
+                layout.focus = previous;
+                if !changed {
+                    return Err((
+                        "not_found".to_string(),
+                        "no matching divider can resize this pane".to_string(),
+                    ));
+                }
+                self.session_dirty = true;
+                self.emit_event(
+                    "pane.resized",
+                    json!({"pane":pane.0.to_string(),"cells":cells}),
+                );
+                Ok(json!({"type":"pane_resize","pane":pane.0.to_string()}))
+            }
+            "pane.zoom" => {
+                reject_api_fields(p, &["pane", "enabled"])?;
+                if let Some(pane) = self.resolve_pane(p) {
+                    self.focus_pane_global(pane);
+                }
+                let enabled = match p.get("enabled") {
+                    None => !self.zoomed,
+                    Some(Value::Bool(enabled)) => *enabled,
+                    Some(_) => {
+                        return Err((
+                            "invalid_request".to_string(),
+                            "enabled must be a boolean".to_string(),
+                        ))
+                    }
+                };
+                self.zoomed = enabled;
+                let pane = self.layout().focus;
+                self.emit_event(
+                    "pane.zoomed",
+                    json!({"pane":pane.0.to_string(),"enabled":enabled}),
+                );
+                Ok(json!({"type":"pane_zoom","pane":pane.0.to_string(),"enabled":enabled}))
+            }
+            "pane.rename" => {
+                reject_api_fields(p, &["pane", "name"])?;
+                let pane = self.resolve_pane(p).ok_or_else(not_found)?;
+                let name = p
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        (
+                            "invalid_request".to_string(),
+                            "name must be a string".to_string(),
+                        )
+                    })?
+                    .trim();
+                if !name.is_empty() && !valid_agent_name(name) {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "name must match [a-z][a-z0-9_-]{0,31}".to_string(),
+                    ));
+                }
+                self.set_agent_name(pane, (!name.is_empty()).then_some(name));
+                self.emit_event("pane.renamed", json!({"pane":pane.0.to_string(),"name":if name.is_empty(){Value::Null}else{json!(name)}}));
+                Ok(
+                    json!({"type":"pane_rename","pane":pane.0.to_string(),"name":if name.is_empty(){Value::Null}else{json!(name)}}),
+                )
+            }
+            "pane.swap" => {
+                reject_api_fields(p, &["pane", "with"])?;
+                let first = self.resolve_pane(p).ok_or_else(not_found)?;
+                let second = p
+                    .get("with")
+                    .and_then(Value::as_str)
+                    .and_then(|raw| raw.parse::<u32>().ok())
+                    .map(PaneId)
+                    .ok_or_else(|| {
+                        (
+                            "invalid_request".to_string(),
+                            "with must be a pane id".to_string(),
+                        )
+                    })?;
+                let first_location = self.pane_location(first).ok_or_else(not_found)?;
+                let second_location = self.pane_location(second).ok_or_else(not_found)?;
+                if first_location != second_location {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "panes must belong to the same tab".to_string(),
+                    ));
+                }
+                let layout = &mut self.workspaces[first_location.0].tabs[first_location.1].layout;
+                if !layout.swap_panes(first, second) {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "panes could not be swapped".to_string(),
+                    ));
+                }
+                self.session_dirty = true;
+                self.emit_event(
+                    "pane.swapped",
+                    json!({"pane":first.0.to_string(),"with":second.0.to_string()}),
+                );
+                Ok(
+                    json!({"type":"pane_swap","pane":first.0.to_string(),"with":second.0.to_string()}),
+                )
             }
             // `attach.pane` (docs/18 WA-2): focus a pane and zoom it, so a client
             // attaching next opens straight into that fullscreen terminal.
@@ -3879,6 +4579,284 @@ impl App {
         }
     }
 
+    fn optional_socket_workspace(&self, p: &Value) -> Result<Option<usize>, (String, String)> {
+        let indexed = optional_workspace_param(p)?;
+        let by_id = match p.get("workspace_id") {
+            None => None,
+            Some(Value::String(id)) if !id.is_empty() => Some(
+                self.workspaces
+                    .iter()
+                    .position(|workspace| workspace.id == *id)
+                    .ok_or_else(|| {
+                        (
+                            "not_found".to_string(),
+                            format!("workspace id {id} not found"),
+                        )
+                    })?,
+            ),
+            Some(_) => {
+                return Err((
+                    "invalid_request".to_string(),
+                    "workspace_id must be a non-empty string".to_string(),
+                ))
+            }
+        };
+        if indexed.is_some() && by_id.is_some() {
+            return Err((
+                "invalid_request".to_string(),
+                "workspace and workspace_id cannot be used together".to_string(),
+            ));
+        }
+        Ok(indexed.or(by_id))
+    }
+
+    fn required_socket_workspace(&self, p: &Value) -> Result<usize, (String, String)> {
+        self.optional_socket_workspace(p)?.ok_or_else(|| {
+            (
+                "invalid_request".to_string(),
+                "workspace or workspace_id is required".to_string(),
+            )
+        })
+    }
+
+    fn optional_socket_tab(
+        &self,
+        workspace: usize,
+        p: &Value,
+        position_key: &str,
+        id_key: &str,
+    ) -> Result<Option<usize>, (String, String)> {
+        let positioned = p
+            .get(position_key)
+            .map(|_| required_one_based_param(p, position_key))
+            .transpose()?;
+        let by_id = match p.get(id_key) {
+            None => None,
+            Some(Value::String(id)) if !id.is_empty() => Some(
+                self.workspaces
+                    .get(workspace)
+                    .and_then(|workspace| workspace.tabs.iter().position(|tab| tab.id == *id))
+                    .ok_or_else(|| ("not_found".to_string(), format!("tab id {id} not found")))?,
+            ),
+            Some(_) => {
+                return Err((
+                    "invalid_request".to_string(),
+                    format!("{id_key} must be a non-empty string"),
+                ))
+            }
+        };
+        if positioned.is_some() && by_id.is_some() {
+            return Err((
+                "invalid_request".to_string(),
+                format!("{position_key} and {id_key} cannot be used together"),
+            ));
+        }
+        Ok(positioned.or(by_id))
+    }
+
+    fn required_socket_tab(
+        &self,
+        workspace: usize,
+        p: &Value,
+        position_key: &str,
+        id_key: &str,
+    ) -> Result<usize, (String, String)> {
+        self.optional_socket_tab(workspace, p, position_key, id_key)?
+            .ok_or_else(|| {
+                (
+                    "invalid_request".to_string(),
+                    format!("{position_key} or {id_key} is required"),
+                )
+            })
+    }
+
+    fn socket_workspace(&self, index: usize) -> Result<Value, (String, String)> {
+        let workspace = self
+            .workspaces
+            .get(index)
+            .ok_or_else(|| workspace_update_error(index, WorkspaceUpdateError::NotFound))?;
+        Ok(json!({
+            "type":"workspace", "workspace":index.to_string(), "workspace_id":workspace.id,
+            "name":workspace.name,
+            "cwd":workspace.cwd.display().to_string(), "branch":workspace.branch,
+            "ahead":workspace.git_ahead_behind.map(|value| value.0),
+            "behind":workspace.git_ahead_behind.map(|value| value.1),
+            "pinned":workspace.pinned, "active":index == self.active_ws,
+            "display_position":self.workspace_display_position(index).unwrap_or(index).to_string(),
+            "active_tab":(workspace.active_tab + 1).to_string(), "tabs":workspace.tabs.len(),
+        }))
+    }
+
+    fn socket_tab(&self, workspace: usize, tab: usize) -> Result<Value, (String, String)> {
+        let ws = self
+            .workspaces
+            .get(workspace)
+            .ok_or_else(|| workspace_update_error(workspace, WorkspaceUpdateError::NotFound))?;
+        let value = ws.tabs.get(tab).ok_or_else(|| {
+            (
+                "not_found".to_string(),
+                format!("tab {} not found", tab + 1),
+            )
+        })?;
+        let kind = if value.is_git() {
+            "git"
+        } else if value.is_orch() {
+            "orch"
+        } else if value.is_mission() {
+            "mission"
+        } else {
+            "panes"
+        };
+        Ok(json!({
+            "type":"tab", "workspace":workspace.to_string(), "workspace_id":ws.id,
+            "tab":(tab+1).to_string(), "tab_id":value.id,
+            "active":workspace == self.active_ws && tab == ws.active_tab,
+            "name":value.name, "kind":kind, "focus":value.layout.focus.0.to_string(),
+            "panes":value.layout.leaves().into_iter().map(|id| id.0.to_string()).collect::<Vec<_>>(),
+        }))
+    }
+
+    fn socket_pane(&self, pane: PaneId) -> Result<Value, (String, String)> {
+        let (workspace, tab) = self.pane_location(pane).ok_or_else(not_found)?;
+        let terminal = self.panes.get(&pane);
+        let status = self.status.get(&pane);
+        let history = terminal.map(|pane| pane.history_metrics());
+        Ok(json!({
+            "type":"pane", "pane":pane.0.to_string(), "workspace":workspace.to_string(),
+            "workspace_id":self.workspaces[workspace].id,
+            "tab":(tab+1).to_string(), "tab_id":self.workspaces[workspace].tabs[tab].id,
+            "terminal_id":terminal.and_then(|pane| pane.terminal_runtime()).map(|runtime| runtime.terminal_id),
+            "focused":workspace == self.active_ws
+                && tab == self.workspaces[workspace].active_tab
+                && self.workspaces[workspace].tabs[tab].layout.focus == pane,
+            "name":self.agent_name_for(pane),
+            "cwd":terminal.map(|pane| pane.cwd.display().to_string()),
+            "command":terminal.map(|pane| pane.command.as_str()),
+            "agent":status.map(|status| status.agent.as_str()),
+            "status":status.map(|status| state_str(status.state)).unwrap_or("unknown"),
+            "history_budget_bytes":history.map(|metrics| metrics.budget_bytes),
+            "history_bytes":history.map(|metrics| metrics.retained_bytes),
+            "module":self.module_panes.get(&pane).map(|module| json!({"id":module.module_id,"entrypoint":module.entrypoint})),
+        }))
+    }
+
+    fn socket_pane_layout(&self, pane: PaneId) -> Result<Value, (String, String)> {
+        let (workspace, tab) = self.pane_location(pane).ok_or_else(not_found)?;
+        let area = crate::api::topology::logical_area();
+        let layout = &self.workspaces[workspace].tabs[tab].layout;
+        let rect = layout.pane_rect(area, pane).ok_or_else(not_found)?;
+        Ok(json!({
+            "type":"pane_layout", "pane":pane.0.to_string(), "workspace":workspace.to_string(),
+            "tab":(tab+1).to_string(), "logical_size":{"width":area.width,"height":area.height},
+            "rect":{"x":rect.x,"y":rect.y,"width":rect.width,"height":rect.height},
+            "tree":layout.to_tree(),
+        }))
+    }
+
+    fn reorder_workspace_block(
+        &mut self,
+        block: &[usize],
+        to: usize,
+    ) -> Result<Vec<usize>, (String, String)> {
+        let len = self.workspaces.len();
+        if block.is_empty() || to > len.saturating_sub(block.len()) {
+            return Err((
+                "invalid_request".to_string(),
+                "destination workspace position is out of range".to_string(),
+            ));
+        }
+        let selected: std::collections::HashSet<_> = block.iter().copied().collect();
+        if selected.len() != block.len() || block.iter().any(|index| *index >= len) {
+            return Err((
+                "invalid_request".to_string(),
+                "workspace block contains an invalid or duplicate index".to_string(),
+            ));
+        }
+        let mut order: Vec<usize> = (0..len).filter(|index| !selected.contains(index)).collect();
+        let insertion = to;
+        for (offset, index) in block.iter().copied().enumerate() {
+            order.insert(insertion + offset, index);
+        }
+        if !order.iter().copied().eq(0..len) {
+            let old_active = self.active_ws;
+            let mut old: Vec<Option<Workspace>> = std::mem::take(&mut self.workspaces)
+                .into_iter()
+                .map(Some)
+                .collect();
+            self.workspaces = order
+                .iter()
+                .map(|index| old[*index].take().unwrap())
+                .collect();
+            self.active_ws = order
+                .iter()
+                .position(|index| *index == old_active)
+                .unwrap_or(0);
+            self.session_dirty = true;
+        }
+        Ok(block
+            .iter()
+            .map(|index| {
+                order
+                    .iter()
+                    .position(|candidate| candidate == index)
+                    .unwrap()
+            })
+            .collect())
+    }
+
+    pub(super) fn apply_socket_config(
+        &mut self,
+        next: crate::config::Config,
+    ) -> Result<(), (String, String)> {
+        let prefix = keys::PrefixSpec::parse(&next.prefix).ok_or_else(|| {
+            (
+                "invalid_request".to_string(),
+                "config prefix must be a valid Ctrl chord".to_string(),
+            )
+        })?;
+        if self.theme_registry.get(&next.theme).is_none() && next.theme != "terminal" {
+            return Err((
+                "invalid_request".to_string(),
+                format!("theme `{}` is not installed", next.theme),
+            ));
+        }
+        let mut theme = self.theme_registry.theme_or_default(&next.theme);
+        if self.downsample {
+            theme = theme.to_256();
+        }
+        let sidebars = Sidebars::from_config(&next.sidebars());
+        let keymap = keys::build_keymap(&next.keybindings);
+        let history_budget = next.scrollback_bytes();
+        self.theme = theme;
+        self.catalog = crate::i18n::by_code(&next.language);
+        self.prefix = prefix;
+        self.keymap = keymap;
+        self.sidebars = sidebars;
+        self.file_tree.show_hidden = next.layout.files_show_hidden;
+        self.file_tree.scroll = 0;
+        crate::layout::set_gaps(next.layout.col_gap, next.layout.row_gap);
+        for pane in self.panes.values() {
+            pane.set_history_budget(history_budget);
+        }
+        self.config = next;
+        self.changelog_rows = None;
+        let persisted = self.config.clone();
+        std::thread::spawn(move || crate::config::save(&persisted));
+        self.emit_event("config.changed", json!({}));
+        Ok(())
+    }
+
+    pub(super) fn apply_socket_manifests(&mut self, manifests: crate::detect::Manifests) {
+        self.manifests = manifests;
+        for status in self.status.values_mut() {
+            status.force_detect = true;
+        }
+        self.emit_event(
+            "server.agent_manifests_reloaded",
+            json!({"rules":self.manifests.rule_count()}),
+        );
+    }
+
     /// The cwd of the `workspace` param (else the active workspace) for git.* methods.
     fn git_workspace_cwd(&self, p: &Value) -> PathBuf {
         let i = param_usize(p, "workspace")
@@ -4248,17 +5226,132 @@ fn param_usize(p: &Value, key: &str) -> Option<usize> {
         .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
 }
 
-/// Required public workspace index. Workspace indices are deliberately
-/// 0-based and stay in storage/API order even when pins change sidebar order.
-fn required_workspace_param(p: &Value) -> Result<usize, (String, String)> {
-    param_usize(p, "workspace")
-        .or_else(|| param_usize(p, "node"))
+fn parse_index_value(value: &Value) -> Result<usize, (String, String)> {
+    value
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
         .ok_or_else(|| {
             (
                 "invalid_request".to_string(),
-                "workspace must be a 0-based number".to_string(),
+                "workspace indices must be non-negative integers".to_string(),
             )
         })
+}
+
+fn required_index_param(p: &Value, key: &str) -> Result<usize, (String, String)> {
+    p.get(key)
+        .map(parse_index_value)
+        .transpose()?
+        .ok_or_else(|| ("invalid_request".to_string(), format!("{key} is required")))
+}
+
+fn parse_u32_value(value: &Value, key: &str) -> Result<u32, (String, String)> {
+    value
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+        .ok_or_else(|| {
+            (
+                "invalid_request".to_string(),
+                format!("{key} must be a pane id"),
+            )
+        })
+}
+
+fn optional_workspace_param(p: &Value) -> Result<Option<usize>, (String, String)> {
+    if p.get("workspace").is_some() && p.get("node").is_some() {
+        return Err((
+            "invalid_request".to_string(),
+            "workspace and node cannot be used together".to_string(),
+        ));
+    }
+    match p.get("workspace").or_else(|| p.get("node")) {
+        None => Ok(None),
+        Some(value) => parse_index_value(value).map(Some),
+    }
+}
+
+fn optional_nullable_string(
+    p: &Value,
+    key: &str,
+    max_chars: usize,
+) -> Result<Option<String>, (String, String)> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if value.chars().count() <= max_chars => Ok(Some(value.clone())),
+        Some(_) => Err((
+            "invalid_request".to_string(),
+            format!("{key} must be null or a string of at most {max_chars} characters"),
+        )),
+    }
+}
+
+fn optional_u32(p: &Value, key: &str) -> Result<Option<u32>, (String, String)> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => parse_u32_value(value, key).map(Some),
+    }
+}
+
+fn patched_config(
+    current: &crate::config::Config,
+    patch: &Value,
+) -> Result<crate::config::Config, (String, String)> {
+    if !patch.is_object() {
+        return Err((
+            "invalid_request".to_string(),
+            "patch must be an object".to_string(),
+        ));
+    }
+    let mut merged = serde_json::to_value(current).map_err(|error| {
+        (
+            "internal".to_string(),
+            format!("could not serialize config: {error}"),
+        )
+    })?;
+    merge_known_fields(&mut merged, patch, "config")?;
+    serde_json::from_value(merged)
+        .map(crate::config::normalize_config)
+        .map_err(|error| {
+            (
+                "invalid_request".to_string(),
+                format!("invalid config patch: {error}"),
+            )
+        })
+}
+
+fn merge_known_fields(
+    target: &mut Value,
+    patch: &Value,
+    path: &str,
+) -> Result<(), (String, String)> {
+    let patch = patch.as_object().ok_or_else(|| {
+        (
+            "invalid_request".to_string(),
+            format!("{path} patch must be an object"),
+        )
+    })?;
+    let target = target.as_object_mut().ok_or_else(|| {
+        (
+            "invalid_request".to_string(),
+            format!("{path} cannot be patched as an object"),
+        )
+    })?;
+    for (key, value) in patch {
+        let existing = target.get_mut(key).ok_or_else(|| {
+            (
+                "invalid_request".to_string(),
+                format!("unknown config field {path}.{key}"),
+            )
+        })?;
+        if existing.is_object() && value.is_object() {
+            merge_known_fields(existing, value, &format!("{path}.{key}"))?;
+        } else {
+            *existing = value.clone();
+        }
+    }
+    Ok(())
 }
 
 /// Required public tab position: accepts a JSON integer or numeric string and

@@ -26,6 +26,8 @@ pub struct SessionSnapshot {
 
 #[derive(Serialize, Deserialize)]
 pub struct WsSnap {
+    #[serde(default = "new_workspace_id")]
+    pub id: String,
     pub name: String,
     pub cwd: PathBuf,
     pub active_tab: usize,
@@ -37,6 +39,8 @@ pub struct WsSnap {
 
 #[derive(Serialize, Deserialize)]
 pub struct TabSnap {
+    #[serde(default = "new_tab_id")]
+    pub id: String,
     pub tree: LayoutTree,
     pub focus: u32,
     /// (raw pane id at save time → its cwd/command).
@@ -55,6 +59,14 @@ pub struct TabSnap {
     /// User-chosen tab name (docs/28); `None` → the tab shows its number.
     #[serde(default)]
     pub name: Option<String>,
+}
+
+fn new_workspace_id() -> String {
+    crate::ids::public_id("workspace")
+}
+
+fn new_tab_id() -> String {
+    crate::ids::public_id("tab")
 }
 
 #[derive(Serialize, Deserialize)]
@@ -431,6 +443,55 @@ pub fn ensure_session_dir() -> PathBuf {
     dir
 }
 
+/// Create and validate the selected server runtime directory. Unlike the
+/// best-effort helpers used by ordinary config reads, server startup fails
+/// closed because its sockets grant command execution as the current user.
+pub fn ensure_server_session_dir() -> std::io::Result<PathBuf> {
+    let dir = session_dir();
+    ensure_private_server_dir(&dir)?;
+    #[cfg(unix)]
+    for socket in [socket_path(), client_socket_path()] {
+        if let Some(parent) = socket.parent().filter(|parent| *parent != dir) {
+            ensure_private_server_dir(parent)?;
+        }
+    }
+    Ok(dir)
+}
+
+fn ensure_private_server_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if Some(dir) == crate::platform::home_dir().as_deref() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Luvus server state directory cannot be the home directory",
+            ));
+        }
+        let metadata = fs::symlink_metadata(dir)?;
+        // SAFETY: `geteuid` has no preconditions.
+        let current_uid = unsafe { libc::geteuid() };
+        if !metadata.file_type().is_dir() || metadata.uid() != current_uid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "Luvus server state must be a real directory owned by the current user: {}",
+                    dir.display()
+                ),
+            ));
+        }
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        if fs::symlink_metadata(dir)?.mode() & 0o777 != 0o700 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("could not protect Luvus server state: {}", dir.display()),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn ensure_private_dir(dir: &std::path::Path) {
     let _ = fs::create_dir_all(dir);
     #[cfg(unix)]
@@ -662,6 +723,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
             // re-created as the dashboard (and re-fetched) on restore.
             if tab.is_git() {
                 tabs.push(TabSnap {
+                    id: tab.id.clone(),
                     tree: tab.layout.to_tree(),
                     focus: tab.layout.focus.0,
                     panes: Vec::new(),
@@ -675,6 +737,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
             // An orchestration board (docs/22) has no real panes either.
             if tab.is_orch() {
                 tabs.push(TabSnap {
+                    id: tab.id.clone(),
                     tree: tab.layout.to_tree(),
                     focus: tab.layout.focus.0,
                     panes: Vec::new(),
@@ -688,6 +751,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
             // A Mission Control dashboard (docs/54) — placeholder, re-derived.
             if tab.is_mission() {
                 tabs.push(TabSnap {
+                    id: tab.id.clone(),
                     tree: tab.layout.to_tree(),
                     focus: tab.layout.focus.0,
                     panes: Vec::new(),
@@ -807,6 +871,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                 })
                 .collect();
             tabs.push(TabSnap {
+                id: tab.id.clone(),
                 tree: tab.layout.to_tree(),
                 focus: tab.layout.focus.0,
                 panes,
@@ -817,6 +882,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
             });
         }
         workspaces.push(WsSnap {
+            id: ws.id.clone(),
             name: ws.name.clone(),
             cwd: ws.cwd.clone(),
             active_tab: ws.active_tab,

@@ -5,6 +5,7 @@ use crate::terminal::backend::{
     self, BackendError, CaptureMode, DispatchEvidence, TerminalRuntime,
 };
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 type BackendResult = Result<Value, BackendError>;
@@ -839,6 +840,7 @@ impl App {
                     .position(|workspace| crate::platform::same_path(&workspace.cwd, &cwd))
                     .unwrap_or_else(|| {
                         self.workspaces.push(Workspace {
+                            id: crate::ids::public_id("workspace"),
                             name: ws_name(&cwd),
                             cwd: cwd.clone(),
                             branch,
@@ -944,7 +946,7 @@ impl App {
         let _ = reply.send(response);
     }
 
-    fn pane_location(&self, pane_id: PaneId) -> Option<(usize, usize)> {
+    pub(super) fn pane_location(&self, pane_id: PaneId) -> Option<(usize, usize)> {
         self.workspaces
             .iter()
             .enumerate()
@@ -1039,6 +1041,78 @@ impl App {
             };
             let _ = req.reply.send(response);
         });
+    }
+
+    /// Validate a live ANSI stream once on the app loop, then return only the
+    /// terminal's cloneable engine/revision handles. No observer registry or
+    /// per-frame work lives in `App`; an absent stream is literally free.
+    pub(super) fn prepare_backend_observe(
+        &self,
+        params: &Value,
+    ) -> Result<backend::ObserveTarget, BackendError> {
+        backend::reject_unknown_fields(
+            params,
+            &[
+                "server_generation",
+                "terminal_id",
+                "pane_id",
+                "expected_root",
+                "mode",
+                "lines",
+                "ansi",
+            ],
+        )?;
+        let pane_id = self.resolve_backend_runtime(params, false)?;
+        let mode = params
+            .get("mode")
+            .and_then(Value::as_str)
+            .and_then(CaptureMode::parse)
+            .unwrap_or(CaptureMode::Visible);
+        if mode == CaptureMode::Detection {
+            return Err(BackendError::read(
+                "invalid_params",
+                "live streams support visible or recent_unwrapped capture",
+            ));
+        }
+        let lines = match params.get("lines") {
+            None => 80,
+            Some(value) => value
+                .as_u64()
+                .ok_or_else(|| BackendError::read("invalid_params", "lines must be an integer"))?,
+        };
+        if lines == 0 || lines > backend::MAX_OBSERVE_LINES as u64 {
+            return Err(BackendError::read(
+                "invalid_params",
+                format!("lines must be between 1 and {}", backend::MAX_OBSERVE_LINES),
+            ));
+        }
+        let ansi = match params.get("ansi") {
+            None => true,
+            Some(Value::Bool(value)) => *value,
+            Some(_) => {
+                return Err(BackendError::read(
+                    "invalid_params",
+                    "ansi must be a boolean",
+                ))
+            }
+        };
+        let pane = self
+            .panes
+            .get(&pane_id)
+            .ok_or_else(|| BackendError::read("terminal_gone", "terminal no longer has a pane"))?;
+        let runtime = pane.terminal_runtime().ok_or_else(|| {
+            BackendError::read("terminal_not_ready", "terminal is still starting")
+        })?;
+        Ok(backend::ObserveTarget {
+            server_generation: self.backend_server_generation.clone(),
+            terminal_id: runtime.terminal_id,
+            pane_id: pane_id.0.to_string(),
+            engine: Arc::clone(&pane.engine),
+            content_revision: pane.content_revision_handle(),
+            mode,
+            lines: lines as usize,
+            ansi,
+        })
     }
 
     pub(super) fn start_backend_wait(&mut self, req: ApiRequest) {
@@ -1534,6 +1608,39 @@ mod tests {
         assert_eq!(result["executables"], json!(["zsh", "codex"]));
         assert_eq!(result["arguments_exposed"], false);
         assert!(!result.to_string().contains("hidden"));
+    }
+
+    #[test]
+    fn observe_target_is_identity_safe_bounded_and_focus_preserving() {
+        let _env = crate::persist::test_env("backend-observe-target");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let runtime = app.panes[&pane].terminal_runtime().unwrap();
+        let locator = json!({
+            "server_generation":app.backend_server_generation,
+            "terminal_id":runtime.terminal_id,
+            "pane_id":pane.0.to_string(),
+        });
+        let target = app.prepare_backend_observe(&locator).unwrap();
+        assert_eq!(target.pane_id, pane.0.to_string());
+        assert_eq!(target.lines, 80);
+        assert!(target.ansi);
+        assert_eq!(app.layout().focus, pane);
+
+        let mut oversized = locator.clone();
+        oversized["lines"] = json!(backend::MAX_OBSERVE_LINES + 1);
+        assert_eq!(
+            app.prepare_backend_observe(&oversized).err().unwrap().code,
+            "invalid_params"
+        );
+        let mut stale = locator;
+        stale["terminal_id"] = json!(backend::random_id().unwrap());
+        assert_eq!(
+            app.prepare_backend_observe(&stale).err().unwrap().code,
+            "stale_terminal"
+        );
+        assert_eq!(app.layout().focus, pane);
     }
 
     #[test]

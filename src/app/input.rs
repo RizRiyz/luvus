@@ -241,8 +241,38 @@ impl App {
                 self.register_backend_terminal(id);
                 return true;
             }
+            AppEvent::BackendObserve { params, reply } => {
+                let _ = reply.send(self.prepare_backend_observe(&params));
+                return false;
+            }
             AppEvent::ThemeUninstalled { id, result } => {
                 self.finish_theme_uninstall(id, result);
+                return true;
+            }
+            AppEvent::ConfigReloaded { id, config, reply } => {
+                let response = match self.apply_socket_config(config) {
+                    Ok(()) => {
+                        json!({"id":id,"result":{"type":"config_reloaded","config":self.config}})
+                    }
+                    Err((code, message)) => {
+                        json!({"id":id,"error":{"code":code,"message":message}})
+                    }
+                };
+                let _ = reply.send(response.to_string());
+                return true;
+            }
+            AppEvent::ManifestsReloaded {
+                id,
+                manifests,
+                reply,
+            } => {
+                self.apply_socket_manifests(manifests);
+                let _ = reply.send(
+                    json!({"id":id,"result":{
+                        "type":"agent_manifests_reloaded","rules":self.manifests.rule_count()
+                    }})
+                    .to_string(),
+                );
                 return true;
             }
             AppEvent::SearchFilesIndexed { instance, catalogs } => {
@@ -602,7 +632,10 @@ impl App {
             | AppEvent::ClientInput { .. } => false,
             // Consumed by the pre-dispatch worker-result branch above.
             AppEvent::ThemeUninstalled { .. }
+            | AppEvent::ConfigReloaded { .. }
+            | AppEvent::ManifestsReloaded { .. }
             | AppEvent::BackendCreateReady { .. }
+            | AppEvent::BackendObserve { .. }
             | AppEvent::PtyReady(_)
             | AppEvent::SearchFilesIndexed { .. }
             | AppEvent::SearchResults { .. }
@@ -3017,6 +3050,7 @@ mod tests {
         let closed_root = app.ws().cwd.clone();
         let open_root = closed_root.join("still-open");
         app.workspaces.push(crate::app::Workspace {
+            id: crate::ids::public_id("workspace"),
             name: "still-open".into(),
             cwd: open_root.clone(),
             branch: None,

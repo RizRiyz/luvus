@@ -4,7 +4,12 @@
 //! versioned limits, opaque terminal identity, capture contract, and errors so
 //! the wire protocol does not leak `App`'s UI model.
 
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
+
 use serde_json::{json, Value};
+
+use crate::terminal::vt::VtEngine;
 
 pub const PROTOCOL_NAME: &str = "luvus-terminal-backend";
 pub const PROTOCOL_MAJOR: u64 = 1;
@@ -14,6 +19,14 @@ pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_INVENTORY_TERMINALS: usize = 1024;
 pub const MAX_CAPTURE_LINES: usize = 300;
 pub const MAX_CAPTURE_BYTES: usize = 512 * 1024;
+/// Live streams deliberately use a smaller frame than one-shot capture. JSON
+/// escaping can expand SGR control bytes, and every observer owns one in-flight
+/// serialization, so this cap keeps both the wire frame and resident working
+/// set bounded.
+pub const MAX_OBSERVE_BYTES: usize = 64 * 1024;
+pub const MAX_OBSERVE_LINES: usize = 200;
+pub const MAX_OBSERVERS: usize = 8;
+pub const OBSERVER_QUEUE_CAPACITY: usize = 2;
 pub const MAX_INPUT_BYTES: usize = 256 * 1024;
 pub const MAX_TITLE_BYTES: usize = 256;
 pub const MAX_NOTIFICATION_TITLE_BYTES: usize = 256;
@@ -27,6 +40,8 @@ pub const CAPABILITIES: &[&str] = &[
     "inventory",
     "validate",
     "capture",
+    "observe",
+    "control_stream",
     "type_literal",
     "submit_text",
     "send_key",
@@ -80,6 +95,20 @@ pub struct RuntimeLocator {
     pub server_generation: String,
     pub terminal_id: String,
     pub pane_id: String,
+}
+
+/// App-validated, read-only handles handed to an opt-in terminal stream. The
+/// stream worker captures off the app loop and the handles add no work or
+/// allocation until a client explicitly opens an observer.
+pub struct ObserveTarget {
+    pub server_generation: String,
+    pub terminal_id: String,
+    pub pane_id: String,
+    pub engine: Arc<Mutex<dyn VtEngine>>,
+    pub content_revision: Arc<AtomicU64>,
+    pub mode: CaptureMode,
+    pub lines: usize,
+    pub ansi: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -215,6 +244,10 @@ pub fn limits_json() -> Value {
         "inventory_terminals": MAX_INVENTORY_TERMINALS,
         "capture_lines": MAX_CAPTURE_LINES,
         "capture_bytes": MAX_CAPTURE_BYTES,
+        "observe_bytes": MAX_OBSERVE_BYTES,
+        "observe_lines": MAX_OBSERVE_LINES,
+        "observers": MAX_OBSERVERS,
+        "observer_queue": OBSERVER_QUEUE_CAPACITY,
         "input_bytes": MAX_INPUT_BYTES,
         "logical_keys_per_request": 1,
         "title_bytes": MAX_TITLE_BYTES,
@@ -250,6 +283,9 @@ pub fn schema_bundle() -> Value {
     let common = schema(include_str!(
         "../../../protocol/terminal-backend/v1/schema/common.schema.json"
     ));
+    let control_frame = schema(include_str!(
+        "../../../protocol/terminal-backend/v1/schema/control-frame.schema.json"
+    ));
     let methods = json!({
         "capabilities":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/capabilities.schema.json")),
         "inventory":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/inventory.schema.json")),
@@ -257,6 +293,8 @@ pub fn schema_bundle() -> Value {
         "validate":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/validate.schema.json")),
         "processes":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/processes.schema.json")),
         "capture":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/capture.schema.json")),
+        "observe":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/observe.schema.json")),
+        "control":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/control.schema.json")),
         "type_literal":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/type-literal.schema.json")),
         "submit_text":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/submit-text.schema.json")),
         "send_key":schema(include_str!("../../../protocol/terminal-backend/v1/schema/methods/send-key.schema.json")),
@@ -273,6 +311,10 @@ pub fn schema_bundle() -> Value {
     documents.insert(format!("{BASE}/response.schema.json"), response.clone());
     documents.insert(format!("{BASE}/event.schema.json"), event.clone());
     documents.insert(format!("{BASE}/common.schema.json"), common);
+    documents.insert(
+        format!("{BASE}/control-frame.schema.json"),
+        control_frame.clone(),
+    );
     let method_files = [
         ("capabilities", "capabilities"),
         ("inventory", "inventory"),
@@ -280,6 +322,8 @@ pub fn schema_bundle() -> Value {
         ("validate", "validate"),
         ("processes", "processes"),
         ("capture", "capture"),
+        ("observe", "observe"),
+        ("control", "control"),
         ("type_literal", "type-literal"),
         ("submit_text", "submit-text"),
         ("send_key", "send-key"),
@@ -302,6 +346,7 @@ pub fn schema_bundle() -> Value {
         "request":request,
         "response":response,
         "event":event,
+        "control_frame":control_frame,
         "methods":methods,
         "documents":documents,
     })
@@ -428,6 +473,10 @@ mod tests {
         assert_eq!(fixture["result"]["protocol"]["minor"], PROTOCOL_MINOR);
         assert_eq!(MAX_FRAME_BYTES, 1_048_576);
         assert_eq!(MAX_CAPTURE_BYTES, 524_288);
+        assert_eq!(MAX_OBSERVE_BYTES, 65_536);
+        assert_eq!(MAX_OBSERVE_LINES, 200);
+        assert_eq!(MAX_OBSERVERS, 8);
+        assert_eq!(OBSERVER_QUEUE_CAPACITY, 2);
         assert_eq!(MAX_INPUT_BYTES, 262_144);
     }
 }

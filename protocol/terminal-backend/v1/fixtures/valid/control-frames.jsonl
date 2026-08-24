@@ -1,0 +1,3 @@
+{"id":"input-1","action":"type_literal","params":{"text":"cargo test"}}
+{"id":"input-2","action":"submit_text","params":{"text":"summarize this change"}}
+{"id":"input-3","action":"send_key","params":{"key":"escape"}}

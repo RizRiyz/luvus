@@ -1,0 +1,379 @@
+use serde_json::{json, Value};
+
+/// Canonical methods and compatibility aliases accepted by the live server.
+/// Keep this registry in lockstep with dispatch and the installed schema.
+pub const METHODS: &[&str] = &[
+    "socket.capabilities",
+    "socket.stats",
+    "socket.token.create",
+    "socket.token.list",
+    "socket.token.revoke",
+    "ping",
+    "server.stop",
+    "server.reload_config",
+    "server.agent_manifests",
+    "server.reload_agent_manifests",
+    "config.get",
+    "config.patch",
+    "runtime.capabilities",
+    "session.snapshot",
+    "events.subscribe",
+    "events.wait",
+    "wait.output",
+    "workspace.list",
+    "workspace.get",
+    "workspace.new",
+    "workspace.open",
+    "workspace.focus",
+    "workspace.rename",
+    "workspace.pin",
+    "workspace.move",
+    "workspace.move_block",
+    "workspace.report_metadata",
+    "workspace.close",
+    "node.list",
+    "node.new",
+    "node.open",
+    "node.focus",
+    "node.rename",
+    "node.pin",
+    "node.close",
+    "tab.list",
+    "tab.get",
+    "tab.new",
+    "tab.focus",
+    "tab.move",
+    "tab.swap",
+    "tab.rename",
+    "tab.close",
+    "pane.list",
+    "pane.get",
+    "pane.current",
+    "pane.layout",
+    "pane.neighbor",
+    "pane.edges",
+    "pane.split",
+    "pane.move",
+    "pane.swap",
+    "pane.focus",
+    "pane.focus_direction",
+    "pane.resize",
+    "pane.zoom",
+    "pane.rename",
+    "pane.run",
+    "pane.send_input",
+    "pane.read",
+    "pane.status",
+    "pane.processes",
+    "pane.report_session",
+    "pane.report_event",
+    "pane.close",
+    "attach.pane",
+    "layout.export",
+    "layout.apply",
+    "layout.set_split_ratio",
+    "agent.list",
+    "agent.get",
+    "agent.explain",
+    "agent.report",
+    "agent.release",
+    "agent.start",
+    "agent.prompt",
+    "agent.wait",
+    "agent.name",
+    "agent.fork",
+    "agent.send",
+    "agent.keys",
+    "agent.read",
+    "agent.sessions",
+    "agent.resume",
+    "search",
+    "search.capabilities",
+    "search.query",
+    "search.activate",
+    "files.tree",
+    "files.open",
+    "files.reveal",
+    "files.refresh",
+    "git.status",
+    "git.branches",
+    "git.log",
+    "git.open",
+    "diff.refresh",
+    "diff.list",
+    "diff.open",
+    "diff.get",
+    "diff.navigate",
+    "diff.note.add",
+    "diff.note.apply",
+    "diff.note.list",
+    "diff.note.edit",
+    "diff.note.resolve",
+    "diff.note.reopen",
+    "diff.note.remove",
+    "diff.note.send",
+    "worktree.list",
+    "worktree.create",
+    "worktree.open",
+    "worktree.remove",
+    "task.add",
+    "task.list",
+    "task.get",
+    "task.claim",
+    "task.next",
+    "task.start",
+    "task.heartbeat",
+    "task.update",
+    "task.done",
+    "task.merge",
+    "task.release",
+    "task.delete",
+    "lease.acquire",
+    "lease.list",
+    "lease.release",
+    "module.list",
+    "module.info",
+    "module.link",
+    "module.unlink",
+    "module.uninstall",
+    "module.enable",
+    "module.disable",
+    "module.action.list",
+    "module.action.invoke",
+    "module.pane.open",
+    "module.pane.focus",
+    "module.pane.close",
+    "module.config_dir",
+    "module.settings.list",
+    "module.settings.get",
+    "module.settings.set",
+    "module.log.list",
+    "theme.list",
+    "theme.path",
+    "theme.use",
+    "theme.reload",
+    "manifest.reload",
+    "ui.sidebar",
+    "ui.dock.push",
+    "ui.dock.list",
+    "ui.dock.move",
+    "ui.bar.push",
+    "ui.bar.list",
+    "ui.bar.move",
+    "ui.bar.remove",
+    "ui.notification.push",
+    "ui.notification.clear",
+    "ui.toast",
+    "terminal.backend.capabilities",
+    "terminal.backend.inventory",
+    "terminal.backend.snapshot",
+    "terminal.backend.validate",
+    "terminal.backend.processes",
+    "terminal.backend.capture",
+    "terminal.backend.observe",
+    "terminal.backend.control",
+    "terminal.backend.type_literal",
+    "terminal.backend.submit_text",
+    "terminal.backend.send_key",
+    "terminal.backend.set_title",
+    "terminal.backend.notify",
+    "terminal.backend.create",
+    "terminal.backend.close",
+    "terminal.backend.wait_change",
+    "terminal.backend.wait_output",
+    "terminal.backend.events.subscribe",
+];
+
+const READ_ONLY_METHODS: &[&str] = &[
+    "socket.capabilities",
+    "socket.stats",
+    "socket.token.list",
+    "ping",
+    "server.agent_manifests",
+    "config.get",
+    "runtime.capabilities",
+    "session.snapshot",
+    "events.subscribe",
+    "events.wait",
+    "wait.output",
+    "workspace.list",
+    "workspace.get",
+    "node.list",
+    "tab.list",
+    "tab.get",
+    "pane.list",
+    "pane.get",
+    "pane.current",
+    "pane.layout",
+    "pane.neighbor",
+    "pane.edges",
+    "pane.read",
+    "pane.status",
+    "pane.processes",
+    "layout.export",
+    "agent.list",
+    "agent.get",
+    "agent.explain",
+    "agent.wait",
+    "agent.read",
+    "agent.sessions",
+    "search",
+    "search.capabilities",
+    "search.query",
+    "files.tree",
+    "git.status",
+    "git.branches",
+    "git.log",
+    "diff.list",
+    "diff.get",
+    "diff.note.list",
+    "worktree.list",
+    "task.list",
+    "task.get",
+    "task.next",
+    "lease.list",
+    "module.list",
+    "module.info",
+    "module.action.list",
+    "module.config_dir",
+    "module.settings.list",
+    "module.settings.get",
+    "module.log.list",
+    "theme.list",
+    "theme.path",
+    "ui.dock.list",
+    "ui.bar.list",
+    "terminal.backend.capabilities",
+    "terminal.backend.inventory",
+    "terminal.backend.snapshot",
+    "terminal.backend.validate",
+    "terminal.backend.processes",
+    "terminal.backend.capture",
+    "terminal.backend.observe",
+    "terminal.backend.wait_change",
+    "terminal.backend.wait_output",
+    "terminal.backend.events.subscribe",
+];
+
+pub fn is_read_only(method: &str) -> bool {
+    READ_ONLY_METHODS.contains(&method)
+}
+
+pub fn required_scope(method: &str) -> &'static str {
+    if matches!(method, "socket.capabilities" | "socket.stats" | "ping") {
+        "read"
+    } else if method.starts_with("terminal.backend.") {
+        "terminal"
+    } else if method.starts_with("agent.") || method.starts_with("pane.report_") {
+        "agent"
+    } else if method.starts_with("task.") || method.starts_with("lease.") {
+        "orchestration"
+    } else if method.starts_with("module.") {
+        "extensions"
+    } else if method.starts_with("workspace.")
+        || method.starts_with("node.")
+        || method.starts_with("tab.")
+        || method.starts_with("pane.")
+        || method.starts_with("layout.")
+        || method.starts_with("search")
+        || method.starts_with("files.")
+        || method.starts_with("git.")
+        || method.starts_with("diff.")
+        || method.starts_with("worktree.")
+    {
+        "workspace"
+    } else {
+        "admin"
+    }
+}
+
+fn method_contracts() -> Vec<Value> {
+    METHODS
+        .iter()
+        .map(|method| {
+            let read_only = is_read_only(method);
+            json!({
+                "method":method,
+                "access":if read_only { "read" } else { "write" },
+                "scope":required_scope(method),
+                "idempotent":read_only,
+            })
+        })
+        .collect()
+}
+
+pub fn capabilities(event_sequence: u64) -> Value {
+    json!({
+        "type":"socket_capabilities",
+        "protocol":{
+            "name":super::PROTOCOL_NAME,
+            "major":super::PROTOCOL_MAJOR,
+            "minor":super::PROTOCOL_MINOR,
+        },
+        "event_sequence":event_sequence,
+        "methods":METHODS,
+        "method_contracts":method_contracts(),
+        "limits":{
+            "frame_bytes":crate::terminal::backend::MAX_FRAME_BYTES,
+            "event_queue":crate::ipc::api::event_queue_capacity(),
+            "event_subscribers":crate::ipc::api::max_event_subscribers(),
+            "event_replay":crate::ipc::api::event_replay_capacity(),
+            "event_replay_bytes":crate::ipc::api::event_replay_bytes(),
+            "active_connections":crate::ipc::api::active_connections(),
+            "connection_capacity":crate::ipc::api::max_active_connections(),
+            "rejected_connections":crate::ipc::api::rejected_connections(),
+            "terminal_streams":crate::ipc::api::active_terminal_streams(),
+            "terminal_stream_capacity":crate::terminal::backend::MAX_OBSERVERS,
+            "terminal_stream_queue":crate::terminal::backend::OBSERVER_QUEUE_CAPACITY,
+            "terminal_stream_frame_bytes":crate::terminal::backend::MAX_OBSERVE_BYTES,
+            "event_wait_timeout_s":super::topology::MAX_EVENT_WAIT_S,
+            "layout_depth":super::topology::MAX_LAYOUT_DEPTH,
+            "workspace_move_block":super::topology::MAX_WORKSPACE_MOVE_BLOCK,
+        },
+        "profiles":["luvus-socket", "luvus-runtime", "luvus-terminal-backend"],
+        "identity":{"workspace":"stable","tab":"stable","terminal":"pty_lifetime"},
+        "events":{"resume":"after_sequence","loss":"resync_required"},
+        "authorization":{"default":"local_owner","delegation":"scoped_ephemeral_token",
+            "scopes":["read","workspace","agent","terminal","orchestration","extensions","admin","all"]},
+        "concurrency":{"mutation_guard":"if_revision"},
+        "atomic_methods":["agent.start","agent.prompt","workspace.move_block","layout.apply","diff.note.apply"],
+        "graphics":false,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_has_no_duplicates_and_contains_required_surface() {
+        let unique: std::collections::BTreeSet<_> = METHODS.iter().copied().collect();
+        assert_eq!(unique.len(), METHODS.len());
+        for required in [
+            "socket.capabilities",
+            "workspace.get",
+            "pane.current",
+            "layout.apply",
+            "config.patch",
+            "events.wait",
+            "terminal.backend.capabilities",
+            "terminal.backend.observe",
+            "terminal.backend.control",
+        ] {
+            assert!(unique.contains(required), "missing {required}");
+        }
+        assert!(READ_ONLY_METHODS
+            .iter()
+            .all(|method| unique.contains(method)));
+        let contracts = method_contracts();
+        assert_eq!(contracts.len(), METHODS.len());
+        assert!(contracts.iter().all(|contract| {
+            contract["access"].is_string()
+                && contract["scope"].is_string()
+                && contract["idempotent"].is_boolean()
+        }));
+        let capabilities = capabilities(0);
+        assert_eq!(capabilities["limits"]["terminal_stream_capacity"], 8);
+        assert_eq!(capabilities["limits"]["terminal_stream_queue"], 2);
+    }
+}

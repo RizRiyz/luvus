@@ -19,6 +19,7 @@ impl App {
         let placeholder = PaneId::alloc(); // never inserted into `panes`
         let ws = &mut self.workspaces[self.active_ws];
         ws.tabs.push(Tab {
+            id: crate::ids::public_id("tab"),
             layout: TileLayout::new(placeholder),
             git: None,
             orch: true,

@@ -4,7 +4,7 @@
   "type":"object",
   "properties":{
     "event":{"type":"string"},
-    "sequence":{"type":"integer","minimum":1},
+    "sequence":{"type":"integer","minimum":0},
     "data":{"type":"object"}
   },
   "required":["event","sequence","data"],
@@ -12,7 +12,29 @@
   "oneOf":[
     {
       "properties":{
+        "event":{"const":"terminal.frame"},
+        "data":{
+          "properties":{
+            "server_generation":{"type":"string","pattern":"^[0-9a-f]{32}$"},
+            "terminal_id":{"type":"string","pattern":"^[0-9a-f]{32}$"},
+            "pane_id":{"type":"string","pattern":"^[1-9][0-9]{0,9}$"},
+            "content_revision":{"type":"integer","minimum":0},
+            "mode":{"enum":["visible","recent_unwrapped"]},
+            "ansi":{"type":"boolean"},
+            "text":{"type":"string"},
+            "lines":{"type":"integer","minimum":0,"maximum":200},
+            "bytes":{"type":"integer","minimum":0,"maximum":65536},
+            "truncated":{"type":"boolean"}
+          },
+          "required":["server_generation","terminal_id","pane_id","content_revision","mode","ansi","text","lines","bytes","truncated"],
+          "additionalProperties":false
+        }
+      }
+    },
+    {
+      "properties":{
         "event":{"enum":["terminal.created","terminal.moved","terminal.metadata_changed","terminal.output_ready","terminal.exited","terminal.closed"]},
+        "sequence":{"type":"integer","minimum":1},
         "data":{
           "properties":{
             "server_generation":{"type":"string","pattern":"^[0-9a-f]{32}$"},
@@ -31,6 +53,7 @@
     {
       "properties":{
         "event":{"const":"terminal.resync_required"},
+        "sequence":{"type":"integer","minimum":1},
         "data":{
           "properties":{"reason":{"const":"subscriber_overflow"}},
           "required":["reason"],

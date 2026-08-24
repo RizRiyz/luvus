@@ -72,6 +72,7 @@ impl App {
         let placeholder = PaneId::alloc(); // never inserted into `panes`
         let ws = &mut self.workspaces[wsi];
         ws.tabs.push(Tab {
+            id: crate::ids::public_id("tab"),
             layout: TileLayout::new(placeholder),
             git: Some(Box::new(view)),
             orch: false,
@@ -1164,6 +1165,7 @@ mod tests {
         ]);
         let placeholder = PaneId::alloc();
         app.workspaces[0].tabs.push(Tab {
+            id: crate::ids::public_id("tab"),
             layout: TileLayout::new(placeholder),
             git: Some(Box::new(view)),
             orch: false,
@@ -1251,6 +1253,7 @@ mod tests {
         });
         let placeholder = PaneId::alloc();
         app.workspaces[0].tabs.push(Tab {
+            id: crate::ids::public_id("tab"),
             layout: TileLayout::new(placeholder),
             git: Some(Box::new(view)),
             orch: false,
@@ -1320,6 +1323,7 @@ mod tests {
         }]);
         let placeholder = PaneId::alloc();
         app.workspaces[0].tabs.push(Tab {
+            id: crate::ids::public_id("tab"),
             layout: TileLayout::new(placeholder),
             git: Some(Box::new(view)),
             orch: false,
@@ -1373,6 +1377,7 @@ mod tests {
         // right before the git tab, so the old code would have jumped to it.
         let real_pane_tab = 0usize;
         app.workspaces[0].tabs.push(Tab {
+            id: crate::ids::public_id("tab"),
             layout: TileLayout::new(PaneId::alloc()),
             git: None,
             orch: true,
@@ -1381,6 +1386,7 @@ mod tests {
         });
         let orch_tab = 1usize;
         app.workspaces[0].tabs.push(Tab {
+            id: crate::ids::public_id("tab"),
             layout: TileLayout::new(PaneId::alloc()),
             git: Some(Box::new(GitView::new(std::path::PathBuf::from("/tmp")))),
             orch: false,
@@ -1412,6 +1418,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         app.workspaces[0].tabs.push(Tab {
+            id: crate::ids::public_id("tab"),
             layout: TileLayout::new(PaneId::alloc()),
             git: Some(Box::new(GitView::new(std::path::PathBuf::from("/tmp")))),
             orch: false,
@@ -1462,6 +1469,7 @@ mod tests {
         }]);
         let placeholder = PaneId::alloc();
         app.workspaces[0].tabs.push(Tab {
+            id: crate::ids::public_id("tab"),
             layout: TileLayout::new(placeholder),
             git: Some(Box::new(view)),
             orch: false,
@@ -1519,6 +1527,7 @@ mod tests {
         view.section = Section::Prs;
         let placeholder = PaneId::alloc();
         app.workspaces[0].tabs.push(Tab {
+            id: crate::ids::public_id("tab"),
             layout: TileLayout::new(placeholder),
             git: Some(Box::new(view)),
             orch: false,
@@ -1560,6 +1569,7 @@ mod tests {
         view.commits = Load::Loaded(vec![mk("aaa111"), mk("bbb222"), mk("ccc333")]);
         let placeholder = PaneId::alloc();
         app.workspaces[0].tabs.push(Tab {
+            id: crate::ids::public_id("tab"),
             layout: TileLayout::new(placeholder),
             git: Some(Box::new(view)),
             orch: false,
@@ -1599,6 +1609,7 @@ mod tests {
         let mut app = App::new(80, 24, tx).unwrap();
         let placeholder = PaneId::alloc();
         app.workspaces[0].tabs.push(Tab {
+            id: crate::ids::public_id("tab"),
             layout: TileLayout::new(placeholder),
             git: Some(Box::new(view)),
             orch: false,
@@ -1651,6 +1662,7 @@ mod tests {
         let mut app = App::new(170, 24, tx).unwrap();
         let placeholder = PaneId::alloc();
         app.workspaces[0].tabs.push(Tab {
+            id: crate::ids::public_id("tab"),
             layout: TileLayout::new(placeholder),
             git: Some(Box::new(view)),
             orch: false,
@@ -1764,6 +1776,7 @@ mod tests {
         let mut app = App::new(40, 12, tx).unwrap();
         let placeholder = PaneId::alloc();
         app.workspaces[0].tabs.push(Tab {
+            id: crate::ids::public_id("tab"),
             layout: TileLayout::new(placeholder),
             git: Some(Box::new(view)),
             orch: false,
@@ -1962,6 +1975,7 @@ mod tests {
         view.prs = Load::Loaded(vec![pr]);
         let placeholder = PaneId::alloc();
         app.workspaces[0].tabs.push(Tab {
+            id: crate::ids::public_id("tab"),
             layout: TileLayout::new(placeholder),
             git: Some(Box::new(view)),
             orch: false,
@@ -2009,6 +2023,7 @@ mod tests {
         let vid = view.id;
         let placeholder = PaneId::alloc();
         app.workspaces[0].tabs.push(Tab {
+            id: crate::ids::public_id("tab"),
             layout: TileLayout::new(placeholder),
             git: Some(Box::new(view)),
             orch: false,

@@ -3,6 +3,7 @@
 //! See docs/12-execution-plan.md.
 
 mod agent;
+mod api;
 mod app;
 mod bar;
 mod changelog;
@@ -118,7 +119,7 @@ fn is_backend_discovery_request(args: &[String]) -> bool {
         args,
         [_, session, list, json]
             if session == "session" && list == "list" && json == "--json"
-    ) || matches!(args, [_, api, schema] if api == "api" && matches!(schema.as_str(), "schema" | "runtime-schema"))
+    ) || matches!(args, [_, api, schema] if api == "api" && matches!(schema.as_str(), "schema" | "runtime-schema" | "socket-schema"))
 }
 
 /// After `ratatui::init()` (which restores raw mode + alt-screen on panic), also
@@ -781,7 +782,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
 
     // `--local` still exposes the control API, so it must obey the same
     // single-server ownership rules as the headless server.
-    let state_dir = persist::ensure_session_dir();
+    let state_dir = persist::ensure_server_session_dir()?;
     let startup_lock = ipc::transport::acquire_server_startup_lock(&state_dir)?;
     let sock = persist::socket_path();
     let client_sock = persist::client_socket_path();
@@ -995,6 +996,16 @@ mod tests {
         ])));
         assert!(is_backend_discovery_request(&strings(&[
             "luvus", "api", "schema"
+        ])));
+        assert!(is_backend_discovery_request(&strings(&[
+            "luvus",
+            "api",
+            "runtime-schema"
+        ])));
+        assert!(is_backend_discovery_request(&strings(&[
+            "luvus",
+            "api",
+            "socket-schema"
         ])));
     }
 

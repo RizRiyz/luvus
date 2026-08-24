@@ -1,0 +1,32 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://luvus.dev/protocol/terminal-backend/v1/schema/control-frame.schema.json",
+  "type":"object",
+  "properties":{
+    "id":{"type":"string","minLength":1,"maxLength":128},
+    "action":{"enum":["type_literal","submit_text","send_key"]},
+    "params":{"type":"object"}
+  },
+  "required":["id","action","params"],
+  "additionalProperties":false,
+  "oneOf":[
+    {
+      "properties":{
+        "action":{"const":"type_literal"},
+        "params":{"type":"object","properties":{"text":{"type":"string","minLength":1,"maxLength":262144}},"required":["text"],"additionalProperties":false}
+      }
+    },
+    {
+      "properties":{
+        "action":{"const":"submit_text"},
+        "params":{"type":"object","properties":{"text":{"type":"string","minLength":1,"maxLength":262144}},"required":["text"],"additionalProperties":false}
+      }
+    },
+    {
+      "properties":{
+        "action":{"const":"send_key"},
+        "params":{"type":"object","properties":{"key":{"enum":["enter","escape","tab","backtab","up","down","left","right","home","end","backspace","delete","pageup","pagedown","ctrl-c","ctrl-d","ctrl-u","ctrl-w","space","digit-0","digit-1","digit-2","digit-3","digit-4","digit-5","digit-6","digit-7","digit-8","digit-9"]}},"required":["key"],"additionalProperties":false}
+      }
+    }
+  ]
+}

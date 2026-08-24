@@ -503,7 +503,7 @@ pub fn load() -> Config {
 /// old default becomes today's 10 MiB default; custom values retain their rough
 /// relative size using the previous measured 5,000 lines at 120 columns ≈ 10
 /// MiB relationship.
-fn normalize_config(mut cfg: Config) -> Config {
+pub(crate) fn normalize_config(mut cfg: Config) -> Config {
     if cfg.layout.scrollback_bytes.is_none() {
         cfg.layout.scrollback_bytes = Some(legacy_scrollback_bytes(cfg.layout.scrollback));
     }

@@ -286,11 +286,13 @@ events:
 api:
   api schema                 print the installed UHP Terminal JSON Schema bundle
   api runtime-schema         print the installed UHP Runtime JSON Schema bundle
+  api socket-schema          print the complete installed Socket API schema bundle
   api capabilities           negotiate and print UHP Terminal capabilities
   api snapshot               print a fenced UHP Terminal inventory
   api events                 stream sequenced UHP Terminal events
   api runtime                print UHP Runtime capabilities and limits
   api session                print a fenced UHP Runtime session snapshot
+  api socket-capabilities    print live Socket API methods and limits
   api proxy                  forward one JSON request from stdin to the local server
 
 sessions:
@@ -374,6 +376,18 @@ pub fn run(args: &[String]) -> Result<i32> {
         println!(
             "{}",
             serde_json::to_string_pretty(&crate::runtime_api::schema_bundle())?
+        );
+        return Ok(0);
+    }
+    if args.get(1).map(String::as_str) == Some("api")
+        && args.get(2).map(String::as_str) == Some("socket-schema")
+    {
+        if args.len() != 3 {
+            return Err(anyhow!("usage: luvus api socket-schema"));
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&crate::api::schema_bundle())?
         );
         return Ok(0);
     }
@@ -646,7 +660,7 @@ fn write_topic_help(
             detailed_section("events:\n", "\napi:\n"),
         ),
         "api" => (
-            "luvus api <schema|runtime-schema|capabilities|snapshot|events|runtime|session|proxy>",
+            "luvus api <schema|runtime-schema|socket-schema|capabilities|snapshot|events|runtime|session|socket-capabilities|proxy>",
             detailed_section("api:\n", "\nsessions:\n"),
         ),
         "remote" => (
@@ -2106,7 +2120,7 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
     if noun == "api"
         && matches!(
             verb,
-            "capabilities" | "snapshot" | "events" | "runtime" | "session"
+            "capabilities" | "snapshot" | "events" | "runtime" | "session" | "socket-capabilities"
         )
         && !rest.is_empty()
     {
@@ -2186,9 +2200,10 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         ("api", "events") => ("terminal.backend.events.subscribe".into(), json!({})),
         ("api", "runtime") => ("runtime.capabilities".into(), json!({})),
         ("api", "session") => ("session.snapshot".into(), json!({})),
+        ("api", "socket-capabilities") => ("socket.capabilities".into(), json!({})),
         ("api", _) => {
             return Err(anyhow!(
-                "usage: luvus api schema|runtime-schema|capabilities|snapshot|events|runtime|session|proxy"
+                "usage: luvus api schema|runtime-schema|socket-schema|capabilities|snapshot|events|runtime|session|socket-capabilities|proxy"
             ));
         }
         // Exact scrollback search remains the default for script compatibility.
@@ -3473,7 +3488,18 @@ mod tests {
             parse(&argv("luvus api session")).unwrap().0,
             "session.snapshot"
         );
-        for command in ["capabilities", "snapshot", "events", "runtime", "session"] {
+        assert_eq!(
+            parse(&argv("luvus api socket-capabilities")).unwrap().0,
+            "socket.capabilities"
+        );
+        for command in [
+            "capabilities",
+            "snapshot",
+            "events",
+            "runtime",
+            "session",
+            "socket-capabilities",
+        ] {
             assert!(
                 parse(&argv(&format!("luvus api {command} unexpected"))).is_err(),
                 "api {command} must reject trailing arguments"

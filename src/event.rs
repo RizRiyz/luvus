@@ -46,6 +46,15 @@ pub enum AppEvent {
         commit: crate::terminal::backend::CreateCommit,
         result: Result<crate::terminal::pty::Pane, String>,
     },
+    /// Resolve and validate an opt-in ANSI stream target on the single-writer
+    /// app loop. Only cloneable read handles leave the loop; capture and socket
+    /// writes happen on the requesting API worker.
+    BackendObserve {
+        params: serde_json::Value,
+        reply: Sender<
+            Result<crate::terminal::backend::ObserveTarget, crate::terminal::backend::BackendError>,
+        >,
+    },
     /// A binary client attached (server mode); `messages` feeds its socket writer.
     ClientConnected {
         id: u64,
@@ -200,6 +209,19 @@ pub enum AppEvent {
     ThemeReloaded {
         id: String,
         registry: crate::theme::ThemeRegistry,
+        reply: Sender<String>,
+    },
+    /// Config file IO and parsing completed on the socket worker. The app loop
+    /// only validates and swaps the resulting live configuration.
+    ConfigReloaded {
+        id: String,
+        config: crate::config::Config,
+        reply: Sender<String>,
+    },
+    /// Agent manifest IO and parsing completed on the socket worker.
+    ManifestsReloaded {
+        id: String,
+        manifests: crate::detect::Manifests,
         reply: Sender<String>,
     },
     /// Settings requested removal of an installed theme. Filesystem validation,

@@ -1,7 +1,7 @@
 //! Binary space-partition tiling tree. Panes are leaves; splits are internal
 //! nodes with a ratio. See docs/04-data-model.md §4.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
@@ -148,9 +148,52 @@ impl TileLayout {
 
     /// Move focus to the nearest pane in `dir` (geometric).
     pub fn focus_dir(&mut self, area: Rect, dir: Dir) {
-        if let Some(id) = self.find_in_direction(area, dir) {
+        if let Some(id) = self.find_in_direction_from(area, self.focus, dir) {
             self.focus = id;
         }
+    }
+
+    /// Query directional navigation without changing focus. Socket inspection
+    /// uses exactly the same geometric rule as the TUI.
+    pub fn neighbor(&self, area: Rect, pane: PaneId, dir: Dir) -> Option<PaneId> {
+        self.find_in_direction_from(area, pane, dir)
+    }
+
+    pub fn pane_rect(&self, area: Rect, pane: PaneId) -> Option<Rect> {
+        self.panes(area)
+            .into_iter()
+            .find(|candidate| candidate.id == pane)
+            .map(|candidate| candidate.rect)
+    }
+
+    /// Swap two leaf identities without moving or recreating either PTY.
+    pub fn swap_panes(&mut self, first: PaneId, second: PaneId) -> bool {
+        if first == second || !self.contains(first) || !self.contains(second) {
+            return false;
+        }
+        swap_leaf_ids(&mut self.root, first, second);
+        true
+    }
+
+    /// Replace the tree only when it contains every current pane exactly once.
+    /// This makes `layout.apply` atomic and preserves all pane-owned state.
+    pub fn apply_tree(&mut self, tree: &LayoutTree, focus: PaneId) -> Result<(), &'static str> {
+        let current: HashSet<u32> = self.leaves().into_iter().map(|id| id.0).collect();
+        let mut requested = Vec::new();
+        collect_raw_leaves(tree, &mut requested);
+        let requested_set: HashSet<u32> = requested.iter().copied().collect();
+        if requested_set.len() != requested.len() {
+            return Err("layout contains a duplicate pane");
+        }
+        if requested_set != current {
+            return Err("layout must contain every pane in the tab exactly once");
+        }
+        if !requested_set.contains(&focus.0) {
+            return Err("layout focus is not part of the tree");
+        }
+        self.root = build_live_node(tree, Rect::new(0, 0, 10_000, 10_000));
+        self.focus = focus;
+        Ok(())
     }
 
     /// The pane to move focus to, or `None` when there is nothing that way.
@@ -166,9 +209,9 @@ impl TileLayout {
     /// pane jumped back to the **left** pane: its centre was lower, and the cost
     /// function weighted along-axis distance 1000x against sideways offset, so
     /// being in a completely different column cost almost nothing.
-    fn find_in_direction(&self, area: Rect, dir: Dir) -> Option<PaneId> {
+    fn find_in_direction_from(&self, area: Rect, from: PaneId, dir: Dir) -> Option<PaneId> {
         let panes = self.panes(area);
-        let cur = panes.iter().find(|p| p.id == self.focus)?;
+        let cur = panes.iter().find(|p| p.id == from)?;
         let (c_lo, c_hi) = perp_span(cur.rect, dir);
 
         // Ordered by (gap along the axis, widest overlap, then topmost/leftmost)
@@ -181,7 +224,7 @@ impl TileLayout {
         let mut fallback: Option<((i64, i64), PaneId)> = None;
 
         for p in &panes {
-            if p.id == self.focus {
+            if p.id == from {
                 continue;
             }
             let gap = gap_towards(cur.rect, p.rect, dir);
@@ -297,6 +340,19 @@ impl TileLayout {
         }
     }
 
+    /// Validated ratio mutation for the Socket API. Returns false when `path`
+    /// does not identify a split; a failed request never mutates the tree.
+    pub fn try_set_ratio(&mut self, area: Rect, path: &[bool], ratio: f32) -> bool {
+        if !ratio.is_finite()
+            || !matches!(self.node_at(path), Some(Node::Split { .. }))
+            || self.node_rect(area, path).is_none()
+        {
+            return false;
+        }
+        self.set_ratio(area, path, ratio);
+        true
+    }
+
     /// Keyboard resize: grow the focused pane toward `dir` by `delta` cells, by
     /// nudging the nearest ancestor split whose divider is on that side. Returns
     /// whether a split moved.
@@ -371,6 +427,59 @@ fn collect_leaves(node: &Node, out: &mut Vec<PaneId>) {
         Node::Split { a, b, .. } => {
             collect_leaves(a, out);
             collect_leaves(b, out);
+        }
+    }
+}
+
+fn swap_leaf_ids(node: &mut Node, first: PaneId, second: PaneId) {
+    match node {
+        Node::Leaf(id) if *id == first => *id = second,
+        Node::Leaf(id) if *id == second => *id = first,
+        Node::Leaf(_) => {}
+        Node::Split { a, b, .. } => {
+            swap_leaf_ids(a, first, second);
+            swap_leaf_ids(b, first, second);
+        }
+    }
+}
+
+fn collect_raw_leaves(tree: &LayoutTree, out: &mut Vec<u32>) {
+    match tree {
+        LayoutTree::Leaf(raw) => out.push(*raw),
+        LayoutTree::Split { a, b, .. } => {
+            collect_raw_leaves(a, out);
+            collect_raw_leaves(b, out);
+        }
+    }
+}
+
+fn build_live_node(tree: &LayoutTree, area: Rect) -> Node {
+    match tree {
+        LayoutTree::Leaf(raw) => Node::Leaf(PaneId(*raw)),
+        LayoutTree::Split { axis, ratio, a, b } => {
+            let axis = if *axis == 0 { Axis::Col } else { Axis::Row };
+            let extent = match axis {
+                Axis::Col => area.width,
+                Axis::Row => area.height,
+            };
+            let gap = match axis {
+                Axis::Col => GAP_COL.load(Ordering::Relaxed),
+                Axis::Row => GAP_ROW.load(Ordering::Relaxed),
+            };
+            let available = extent.saturating_sub(gap);
+            let min_ratio = if available >= MIN_PANE.saturating_mul(2) {
+                MIN_PANE as f32 / available as f32
+            } else {
+                0.5
+            };
+            let ratio = ratio.clamp(min_ratio, 1.0 - min_ratio);
+            let (a_area, b_area) = split_rect(area, axis, ratio);
+            Node::Split {
+                axis,
+                ratio,
+                a: Box::new(build_live_node(a, a_area)),
+                b: Box::new(build_live_node(b, b_area)),
+            }
         }
     }
 }
@@ -631,6 +740,55 @@ mod tests {
         assert_eq!(l.focus, a);
         assert!(!l.contains(b));
         assert!(l.remove(a)); // empty
+    }
+
+    #[test]
+    fn socket_queries_and_tree_apply_preserve_live_leaf_identity() {
+        let first = PaneId::alloc();
+        let second = PaneId::alloc();
+        let mut layout = TileLayout::new(first);
+        layout.split_focused(Axis::Col, second);
+        let area = Rect::new(0, 0, 100, 40);
+
+        let focus = layout.focus;
+        assert_eq!(layout.neighbor(area, second, Dir::Left), Some(first));
+        assert_eq!(layout.focus, focus, "inspection never changes focus");
+
+        assert!(layout.swap_panes(first, second));
+        assert_eq!(
+            layout.focus, focus,
+            "swapping positions preserves focus identity"
+        );
+
+        let before = serde_json::to_value(layout.to_tree()).unwrap();
+        let duplicate = LayoutTree::Split {
+            axis: 0,
+            ratio: 0.5,
+            a: Box::new(LayoutTree::Leaf(first.0)),
+            b: Box::new(LayoutTree::Leaf(first.0)),
+        };
+        assert!(layout.apply_tree(&duplicate, first).is_err());
+        assert_eq!(
+            serde_json::to_value(layout.to_tree()).unwrap(),
+            before,
+            "invalid replacement is atomic"
+        );
+
+        let extreme = LayoutTree::Split {
+            axis: 0,
+            ratio: 0.0,
+            a: Box::new(LayoutTree::Leaf(first.0)),
+            b: Box::new(LayoutTree::Leaf(second.0)),
+        };
+        layout.apply_tree(&extreme, first).unwrap();
+        let LayoutTree::Split { ratio, .. } = layout.to_tree() else {
+            panic!("applied split must remain a split");
+        };
+        assert!(ratio > 0.0 && ratio < 1.0);
+        assert!(layout
+            .panes(Rect::new(0, 0, 10_000, 10_000))
+            .iter()
+            .all(|pane| pane.rect.width >= MIN_PANE));
     }
 
     /// The reported bug: one pane on the left, two stacked on the right. From

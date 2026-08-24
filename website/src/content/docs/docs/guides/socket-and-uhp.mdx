@@ -1,0 +1,295 @@
+---
+title: Automating with the Socket API and UHP
+description: Connect a script, tool, or coding harness to Luvus through its local Socket API and versioned Universal Harness Protocol.
+---
+
+Each Luvus server exposes one owner-only local JSON endpoint for automation.
+Use the broad **Socket API** to control Luvus features, or use the versioned
+**Universal Harness Protocol (UHP)** when you are building a reusable coding
+harness or terminal driver.
+
+This guide gets a client connected and shows the safe request, discovery,
+streaming, authentication, and reconnect patterns. Use the
+[Socket API reference](/docs/reference/api/) and
+[UHP reference](/docs/reference/uhp/) for the complete contracts.
+
+## Choose the right surface
+
+| You want to | Use |
+| --- | --- |
+| Control workspaces, tabs, panes, layouts, files, Git, DIFF, modules, bars, docks, themes, or configuration | Luvus Socket API |
+| Inspect the whole session, understand or publish agent state, start an agent, submit a prompt, or wait for an agent | UHP Runtime profile |
+| Discover PTYs, capture output, send exact input, create or close terminals, or render a live ANSI stream | UHP Terminal profile |
+
+Most Luvus-specific tools use the Socket API. A complete external coding
+harness normally negotiates both UHP profiles. All three surfaces share the
+same endpoint and newline-delimited JSON framing.
+
+## Discover the endpoint
+
+Do not guess which session is running. Discover it without starting or changing
+anything:
+
+```sh
+luvus session list --json
+```
+
+Each running session reports an endpoint descriptor. macOS and Linux return an
+owner-only Unix socket. Windows returns a local named-pipe address.
+
+Inside a Luvus pane or module, use the injected endpoint directly:
+
+```sh
+printf '%s\n' "$LUVUS_SOCKET_PATH"
+```
+
+Outside a pane, select the session explicitly when using the CLI:
+
+```sh
+luvus --session review pane list --json
+luvus --session review api socket-capabilities
+```
+
+A production integration must validate that the discovered endpoint belongs to
+the current user. UHP Terminal consumers should follow the complete
+[endpoint validation contract](https://github.com/RizRiyz/luvus/blob/main/protocol/terminal-backend/v1/endpoint-validation.md).
+
+## Inspect support before calling it
+
+Print the exact schemas embedded in the installed binary:
+
+```sh
+luvus api socket-schema   # complete Socket API bundle and UHP profiles
+luvus api runtime-schema  # UHP Runtime 1.0
+luvus api schema          # UHP Terminal 1.0
+```
+
+Schema printing is local and does not require a running server. Query live
+capabilities for the selected session:
+
+```sh
+luvus api socket-capabilities
+luvus api runtime
+luvus api capabilities
+```
+
+Call only methods and capabilities announced by that server. Do not infer
+support from the Luvus application version.
+
+## Send a Socket API request
+
+Every ordinary connection carries one UTF-8 JSON request and one JSON response,
+both terminated by a newline:
+
+```json
+{"id":"pane-1","method":"pane.list","params":{}}
+```
+
+On macOS or Linux, send it directly to the selected Unix socket:
+
+```sh
+printf '%s\n' '{"id":"pane-1","method":"pane.list","params":{}}' \
+  | nc -U "$LUVUS_SOCKET_PATH"
+```
+
+If you are outside a pane, take the socket address from `luvus session list
+--json` instead of hardcoding `~/.luvus/luvus.sock`. Named sessions and long
+Unix paths may use another address.
+
+For one portable request, including over SSH, use the standard-IO bridge:
+
+```sh
+printf '%s\n' '{"id":"pane-1","method":"pane.list","params":{}}' \
+  | luvus api proxy
+
+printf '%s\n' '{"id":"remote-1","method":"session.snapshot","params":{}}' \
+  | ssh host luvus api proxy
+```
+
+`api proxy` forwards exactly one bounded request and response. It does not
+support event, observe, or control streams.
+
+## Read responses correctly
+
+A success has the same request ID and a `result`:
+
+```json
+{"id":"pane-1","result":{"type":"pane_list","panes":[]}}
+```
+
+A failure has the same ID and a structured `error`:
+
+```json
+{"id":"pane-1","error":{"code":"not_found","message":"pane not found"}}
+```
+
+Treat error codes as machine-readable and messages as bounded diagnostics. Do
+not parse human-facing CLI output when a JSON method exists.
+
+For mutations, losing the response does not prove the operation failed. Do not
+automatically repeat prompts, agent launches, terminal input, or other
+non-idempotent actions. Reconcile with a fresh query or snapshot first.
+
+## Start with UHP Runtime
+
+Negotiate Runtime and fetch a sequence-fenced view of the complete session:
+
+```json
+{"id":"runtime-1","method":"runtime.capabilities","params":{}}
+{"id":"snapshot-1","method":"session.snapshot","params":{}}
+```
+
+Runtime is the semantic agent layer. Common methods include:
+
+```json
+{"id":"explain-1","method":"agent.explain","params":{"pane":"7"}}
+{"id":"wait-1","method":"agent.wait","params":{"pane":"7","status":"done","timeout_s":600}}
+{"id":"prompt-1","method":"agent.prompt","params":{"target":"reviewer","text":"Review the current diff","wait":true,"until":["idle","done","blocked"],"timeout_s":600}}
+```
+
+`agent.prompt` submits the prompt atomically. If it returns
+`submitted:true, matched:false`, the prompt was still submitted and must not be
+sent again automatically.
+
+An agent integration can publish precise state without waiting for Luvus to add
+hardcoded detection:
+
+```json
+{"id":"report-1","method":"agent.report","params":{"pane":"7","source":"my-harness","agent":"my-agent","status":"working","sequence":1,"ttl_s":300}}
+```
+
+The source renews the lease with increasing sequence numbers or releases it
+when its agent exits.
+
+## Use UHP Terminal for PTYs
+
+Negotiate the exact Terminal profile before trusting terminal identity:
+
+```json
+{"id":"terminal-1","method":"terminal.backend.capabilities","params":{"protocol":{"name":"luvus-terminal-backend","major":1,"minor":0}}}
+```
+
+Then request inventory:
+
+```json
+{"id":"inventory-1","method":"terminal.backend.inventory","params":{}}
+```
+
+Every mutation uses the returned `server_generation`, `terminal_id`, and current
+`pane_id`. This prevents a stale harness from typing into a replacement PTY or
+a pane route that now belongs to another terminal.
+
+Capture bounded normalized output:
+
+```json
+{"id":"capture-1","method":"terminal.backend.capture","params":{"server_generation":"...","terminal_id":"...","pane_id":"7","mode":"recent_unwrapped","lines":100,"ansi":false}}
+```
+
+Send exact input through the existing PTY queue:
+
+```json
+{"id":"type-1","method":"terminal.backend.type_literal","params":{"server_generation":"...","terminal_id":"...","pane_id":"7","text":"cargo test"}}
+{"id":"key-1","method":"terminal.backend.send_key","params":{"server_generation":"...","terminal_id":"...","pane_id":"7","key":"enter"}}
+```
+
+Use `submit_text` when text plus one Enter must be queued atomically.
+
+## Observe a live terminal
+
+`terminal.backend.observe` returns one safe ANSI frame immediately, then emits
+a new frame only when that terminal's content revision changes. It does not
+poll the PTY.
+
+```json
+{"id":"watch-1","method":"terminal.backend.observe","params":{"server_generation":"...","terminal_id":"...","pane_id":"7","mode":"visible","lines":80,"ansi":true}}
+```
+
+After the acknowledgment, read newline-delimited `terminal.frame` events until
+EOF. Each stream is bounded to the limits announced by capability discovery.
+A slow client may receive `terminal.resync_required` and disconnect. Treat EOF
+the same way: reconnect and accept the new initial frame.
+
+`terminal.backend.control` provides the same output stream and accepts
+correlated input frames on that connection:
+
+```json
+{"id":"input-1","action":"type_literal","params":{"text":"cargo test"}}
+{"id":"input-2","action":"send_key","params":{"key":"enter"}}
+```
+
+Only one API control stream can lease a terminal at a time. Read-only observers
+can still connect independently.
+
+## Subscribe without races
+
+When maintaining a complete session model:
+
+1. Open the relevant event subscription.
+2. Fetch `session.snapshot` or `terminal.backend.snapshot` on a second
+   connection.
+3. Read the snapshot's sequence fence.
+4. Discard buffered events at or below that fence.
+5. Apply later events in sequence order.
+6. Take a new snapshot after a sequence gap, overflow, EOF, reconnect, or server
+   generation change.
+
+Never replace this with a rapid polling loop. Luvus provides events and bounded
+wait methods so integrations remain fast while idle.
+
+## Delegate restricted access
+
+The local user who owns the socket has full authority. A harness can instead be
+given an in-memory, expiring token with narrow scopes:
+
+```json
+{"id":"token-1","method":"socket.token.create","params":{"scopes":["read","terminal"],"ttl_s":3600}}
+```
+
+The response returns the token secret once. Supply it as `auth`:
+
+```json
+{"id":"capture-2","method":"terminal.backend.capture","auth":"luv_tok_...","params":{"server_generation":"...","terminal_id":"...","pane_id":"7","mode":"visible","lines":40,"ansi":false}}
+```
+
+Use `socket.token.list` to inspect public token IDs and
+`socket.token.revoke` to revoke one. Never log the secret or place it in command
+arguments, project files, or shell history.
+
+## Minimal Unix client
+
+This dependency-free Python example performs one request. Use the exact endpoint
+returned by session discovery:
+
+```python
+import json
+import socket
+
+endpoint = "/path/from/luvus-session-list"
+request = {"id": "1", "method": "session.snapshot", "params": {}}
+
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+    client.connect(endpoint)
+    client.sendall((json.dumps(request) + "\n").encode())
+    response = client.makefile("r", encoding="utf-8").readline()
+    print(json.loads(response))
+```
+
+On Windows, connect to the discovery-supplied local named pipe with a client
+library that preserves newline framing and validates the pipe owner. Do not
+convert the endpoint into a TCP listener.
+
+## Production checklist
+
+- Discover and validate the endpoint instead of assuming a path.
+- Print schemas during development and negotiate capabilities at runtime.
+- Use opaque stable identities rather than visible positions where available.
+- Respect every announced size, queue, connection, and timeout limit.
+- Keep prompts, captures, command arguments, cwd, tokens, and agent messages out
+  of logs by default.
+- Treat lost mutation responses as possibly executed.
+- Reconcile subscriptions after overflow, EOF, or server replacement.
+- Test macOS, Linux, and Windows transports you claim to support.
+
+Continue with the [Socket API reference](/docs/reference/api/),
+[UHP reference](/docs/reference/uhp/), and
+[UHP Terminal Profile](/docs/reference/terminal-backend/).

@@ -1,0 +1,9 @@
+{
+  "protocol": { "name": "luvus-socket", "major": 1, "minor": 0 },
+  "files": [
+    { "path": "valid/requests.jsonl", "count": 16 },
+    { "path": "valid/responses.jsonl", "count": 4 },
+    { "path": "valid/events.jsonl", "count": 2 },
+    { "path": "invalid/requests.jsonl", "count": 8 }
+  ]
+}

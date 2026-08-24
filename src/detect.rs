@@ -327,6 +327,11 @@ impl Manifests {
         self.rules.len()
     }
 
+    /// Stable, bounded discovery data for Socket API administration.
+    pub fn agent_names(&self) -> Vec<String> {
+        self.agents.iter().map(|agent| agent.name.clone()).collect()
+    }
+
     /// True if `name` is a recognised agent (not a plain shell). Drives whether
     /// a pane appears in the AGENTS list.
     pub fn is_agent(&self, name: &str) -> bool {

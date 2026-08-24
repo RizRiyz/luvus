@@ -33,6 +33,7 @@ Use the Terminal profile when a harness needs to control a PTY:
 - inventory every live terminal across all workspaces
 - validate a terminal and its root process lifetime before mutation
 - capture bounded visible or recent text
+- observe safe ANSI frames and optionally control input on one live connection
 - type literal text, submit text with Enter, or send one logical key
 - create, label, notify, wait on, or close a terminal
 - subscribe to bounded terminal lifecycle and output events
@@ -65,12 +66,13 @@ before trusting endpoint metadata.
 
 Ordinary requests use one UTF-8 JSON object and one JSON response per
 connection, each terminated by LF and bounded to 1 MiB. A successfully
-negotiated subscription changes only that connection into a bounded event
-stream. It does not turn the endpoint into a general multi-request session.
+negotiated event subscription or Terminal observe/control request changes only
+that connection into a bounded stream. It does not turn the endpoint into a
+general multi-request session.
 
 Consumers that cannot open the native transport can forward one bounded frame
 through `luvus api proxy`, including over SSH. Native sockets or named pipes are
-required for event streams and are preferred for high-frequency local calls.
+required for all streams and are preferred for high-frequency local calls.
 
 ## Safe startup sequence
 

@@ -12,6 +12,10 @@ The profile lets orchestrators discover every real PTY across all workspaces,
 capture bounded output, send exact input, and manage terminal lifecycles
 without scraping the TUI or depending on Luvus agent manifests.
 
+Start with [Automating with the Socket API and UHP](/docs/guides/socket-and-uhp/)
+for a complete discovery-to-stream walkthrough, then use this page for the
+Terminal profile's exact contract.
+
 Protocol `1.0` is supported over Unix sockets on macOS and Linux and owner-only
 named pipes on Windows. The request, response, identity, limit, and event
 contracts are identical on every platform.
@@ -55,6 +59,8 @@ never follows a moved terminal implicitly for a write.
 | `validate` | `terminal.backend.validate` | Returns `alive`, `gone`, or `unknown` without mutating state |
 | `process_inspection` | `terminal.backend.processes` | Cached executable identities under a validated root; never full argv |
 | `capture` | `terminal.backend.capture` | Bounded `visible`, `recent_unwrapped`, or detection text; optional safe SGR for the first two; recent capture includes passively retained alternate-screen rows |
+| `observe` | `terminal.backend.observe` | Initial safe ANSI frame followed by revision-deduplicated frames when this terminal emits output |
+| `control_stream` | `terminal.backend.control` | The observe stream plus correlated `type_literal`, `submit_text`, and `send_key` action frames |
 | `type_literal` | `terminal.backend.type_literal` | Literal UTF-8 with no implicit Enter |
 | `submit_text` | `terminal.backend.submit_text` | One atomic paste-and-Enter queue action |
 | `send_key` | `terminal.backend.send_key` | One documented logical key with terminal-mode-aware navigation |
@@ -79,6 +85,27 @@ The reference consumer replays output, metadata, and close events against the
 snapshot. It requests a new snapshot for created, moved, or exited terminals
 because those deliberately compact events do not repeat the full inventory
 record.
+
+For a rendered live view, use `terminal.backend.observe` instead of repeatedly
+calling capture. It sends one `terminal.frame` immediately and then captures
+only when the selected terminal's existing coalesced `terminal.output_ready`
+event advances `content_revision`. It never polls. Each stream has a two-frame
+queue, a 64 KiB capture cap, a 200-row cap, and the server permits eight
+combined observe/control streams. Slow clients receive best-effort
+`terminal.resync_required` and disconnect. Treat EOF the same way and reconnect
+for a fresh initial frame.
+
+`terminal.backend.control` has the same output stream and accepts correlated
+action frames after its acknowledgment:
+
+```json
+{"id":"input-1","action":"type_literal","params":{"text":"cargo test"}}
+{"id":"input-2","action":"send_key","params":{"key":"enter"}}
+```
+
+Actions reuse the ordinary strict UHP Terminal validation and replies. Only one
+API control stream can lease a terminal at a time. Observe streams remain
+read-only, and local owner/TUI authority is unchanged.
 
 While a full-screen agent owns the alternate screen, Luvus passively retains
 rows that scroll above that screen and includes them in `recent_unwrapped`.
@@ -118,7 +145,16 @@ printf '%s\n' '{"id":"1","method":"terminal.backend.inventory","params":{}}' \
 
 Native socket or pipe access remains preferable for high-frequency local calls.
 The proxy is a portable bootstrap and remote-control path, not a streaming
-replacement for `terminal.backend.events.subscribe`.
+replacement for `terminal.backend.events.subscribe`,
+`terminal.backend.observe`, or `terminal.backend.control`. A native client sends
+the stream request directly to the discovered endpoint. On Unix, this can also
+be inspected manually with `nc -U` after replacing the identity fields with an
+inventory result:
+
+```sh
+printf '%s\n' '{"id":"watch-1","method":"terminal.backend.observe","params":{"server_generation":"...","terminal_id":"...","pane_id":"7","mode":"visible","lines":80,"ansi":true}}' \
+  | nc -U ~/.luvus/luvus.sock
+```
 
 `schema` is local and works without a running server. The other commands target
 the selected Luvus session.
@@ -126,8 +162,8 @@ the selected Luvus session.
 ## Framing and failure safety
 
 An ordinary connection carries one UTF-8 JSON object request and one response,
-each terminated by LF. The negotiated event method switches its connection to
-a stream after one acknowledgment. Every complete frame is capped at 1 MiB. Request IDs are
+each terminated by LF. Negotiated event and terminal observe/control methods
+switch their connections to streams after one acknowledgment. Every complete frame is capped at 1 MiB. Request IDs are
 strings of 1 to 128 UTF-8 bytes. Unknown fields, duplicate keys, invalid enums,
 and oversized frames are rejected before dispatch.
 

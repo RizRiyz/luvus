@@ -304,6 +304,9 @@ pub enum Mode {
 }
 
 pub struct Tab {
+    /// Stable public identity. Positions remain the human-facing CLI locator;
+    /// API integrations use this value across moves, swaps, and restarts.
+    pub id: String,
     pub layout: TileLayout,
     /// When `Some`, this is a **git tab** (docs/17): render the git dashboard
     /// instead of panes. The `layout` holds a placeholder leaf (no real pane is
@@ -326,6 +329,7 @@ impl Tab {
     /// A normal pane tab.
     fn panes(layout: TileLayout) -> Tab {
         Tab {
+            id: crate::ids::public_id("tab"),
             layout,
             git: None,
             orch: false,
@@ -905,6 +909,8 @@ pub struct OrchStart {
 }
 
 pub struct Workspace {
+    /// Stable public identity across display reordering and restarts.
+    pub id: String,
     pub name: String,
     pub cwd: PathBuf,
     /// Current git branch of `cwd`, if it's inside a repo (for the WORKSPACES list).
@@ -1711,6 +1717,7 @@ impl App {
             manifests: crate::detect::Manifests::load(&crate::persist::ensure_manifests_dir()),
             editors: crate::platform::editor_choices(),
             workspaces: vec![Workspace {
+                id: crate::ids::public_id("workspace"),
                 name,
                 worktree: worktree_membership(&cwd),
                 cwd,
@@ -1968,6 +1975,7 @@ impl App {
                         let view = crate::git::GitView::new(ws.cwd.clone());
                         let placeholder = PaneId::alloc();
                         tabs.push(Tab {
+                            id: tab.id.clone(),
                             layout: TileLayout::new(placeholder),
                             git: Some(Box::new(view)),
                             orch: false,
@@ -1982,6 +1990,7 @@ impl App {
                 if tab.orch {
                     let placeholder = PaneId::alloc();
                     tabs.push(Tab {
+                        id: tab.id.clone(),
                         layout: TileLayout::new(placeholder),
                         git: None,
                         orch: true,
@@ -1995,6 +2004,7 @@ impl App {
                 if tab.mission {
                     let placeholder = PaneId::alloc();
                     tabs.push(Tab {
+                        id: tab.id.clone(),
                         layout: TileLayout::new(placeholder),
                         git: None,
                         orch: false,
@@ -2172,6 +2182,7 @@ impl App {
                 match TileLayout::from_tree(&tab.tree, &remap, tab.focus) {
                     Some(layout) => {
                         let mut t = Tab::panes(layout);
+                        t.id = tab.id.clone();
                         t.name = tab.name.clone();
                         tabs.push(t);
                     }
@@ -2189,6 +2200,7 @@ impl App {
             }
             let active_tab = ws.active_tab.min(tabs.len() - 1);
             workspaces.push(Workspace {
+                id: ws.id,
                 name: ws.name,
                 worktree: worktree_membership(&ws.cwd),
                 cwd: ws.cwd,
@@ -3062,6 +3074,7 @@ impl App {
             return false;
         };
         self.workspaces.push(Workspace {
+            id: crate::ids::public_id("workspace"),
             name,
             worktree: worktree_membership(&cwd),
             cwd,
@@ -4520,6 +4533,7 @@ impl App {
         } else {
             let branch = git_branch(&s.cwd);
             self.workspaces.push(Workspace {
+                id: crate::ids::public_id("workspace"),
                 name: ws_name(&s.cwd),
                 cwd: s.cwd.clone(),
                 branch,
@@ -6023,6 +6037,7 @@ mod tests {
         let pane = app.layout().focus;
         let common_dir = PathBuf::from("/tmp/luvus-group/.git");
         app.workspaces.push(Workspace {
+            id: crate::ids::public_id("workspace"),
             name: "parent".into(),
             cwd: PathBuf::from("/tmp/luvus-group"),
             branch: None,
@@ -6036,6 +6051,7 @@ mod tests {
             pinned: false,
         });
         app.workspaces.push(Workspace {
+            id: crate::ids::public_id("workspace"),
             name: "child".into(),
             cwd: PathBuf::from("/tmp/luvus-group-child"),
             branch: None,

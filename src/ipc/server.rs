@@ -132,7 +132,7 @@ pub fn run() -> Result<()> {
     // Every process targeting one selected session serializes startup here. This is
     // deliberately before restoring panes: a losing server must exit without
     // spawning duplicate PTYs or retaining a second terminal grid.
-    let state_dir = persist::ensure_session_dir();
+    let state_dir = persist::ensure_server_session_dir()?;
     let startup_lock = transport::acquire_server_startup_lock(&state_dir)?;
     let sock = persist::socket_path();
     let client_sock = persist::client_socket_path();
