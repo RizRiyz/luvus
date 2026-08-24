@@ -4316,9 +4316,9 @@ mod tests {
         // DETAILED_USAGE ends with a newline the split consumes; compare trimmed.
         assert_eq!(
             block.trim_end(),
-            DETAILED_USAGE.trim_end(),
+            format!("{DETAILED_USAGE}{HELP_BUG}").trim_end(),
             "website/…/reference/cli.mdx has drifted from `luvus help all` — \
-             regenerate the page's txt block from the DETAILED_USAGE text"
+             regenerate the page's txt block from DETAILED_USAGE plus HELP_BUG"
         );
     }
 
