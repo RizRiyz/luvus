@@ -1,0 +1,64 @@
+---
+import { getCollection } from 'astro:content';
+import BlogLayout from '../../layouts/BlogLayout.astro';
+
+const posts = (await getCollection('blog', ({ data }) => !data.draft)).sort(
+  (a, b) => b.data.date.valueOf() - a.data.date.valueOf(),
+);
+const formatDate = (date: Date) => date.toLocaleDateString('en-US', {
+  year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC',
+});
+---
+
+<BlogLayout title="Blog — luvus" description="Notes on Luvus, AI coding agents, terminals, and building an extensible workspace." path="/blog/">
+  <header class="page-hero">
+    <div class="glow" aria-hidden="true"></div>
+    <span class="eyebrow">Blog</span>
+    <h1>Notes from luvus</h1>
+    <p>
+      Ideas, design decisions, and lessons from building mission control for coding agents.
+    </p>
+    <div class="hero-cta">
+      <a class="btn" href="/docs/">Explore the docs →</a>
+    </div>
+  </header>
+
+  <section class="post-list" aria-label="Blog posts">
+    {posts.map((post) => (
+      <article class="post-row">
+        <div class="post-copy">
+          <p class="meta"><time datetime={post.data.date.toISOString()}>{formatDate(post.data.date)}</time><span>by {post.data.author}</span></p>
+          <h2><a href={`/blog/${post.id}/`}>{post.data.title}</a></h2>
+          <p class="excerpt">{post.data.description}</p>
+          <a class="read" href={`/blog/${post.id}/`}>Read blog <span aria-hidden="true">→</span></a>
+        </div>
+        {post.data.hero && (
+          <a class="thumbnail" href={`/blog/${post.id}/`} aria-label={`Read ${post.data.title}`}>
+            <img src={post.data.hero} alt={post.data.heroAlt ?? ''} width="1672" height="941" />
+          </a>
+        )}
+      </article>
+    ))}
+  </section>
+</BlogLayout>
+
+<style is:global>
+  .meta, .read { color: var(--accent); font: .75rem/1.4 'IBM Plex Mono', ui-monospace, monospace; letter-spacing: .1em; text-transform: uppercase; }
+  .post-row h2 { font-family: 'IBM Plex Mono', ui-monospace, monospace; letter-spacing: -.045em; line-height: 1.14; }
+  .post-list { padding: 1rem var(--gut); }
+  .post-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(24rem, .62fr); gap: 3.2rem; align-items: center; padding: 2.6rem 0; border-bottom: 1px solid var(--line); }
+  .post-row:last-child { border-bottom: 0; }
+  .post-copy { max-width: 48rem; }
+  .meta { display: flex; gap: .8rem; color: var(--sub); letter-spacing: .05em; }
+  .meta span::before { content: '·'; margin-right: .8rem; color: var(--accent); }
+  .post-row h2 { margin: .6rem 0 .7rem; font-size: clamp(1.25rem, 2vw, 1.55rem); }
+  .post-row h2 a:hover { color: var(--accent); }
+  .excerpt { margin: 0; color: var(--sub); font-size: .92rem; line-height: 1.85; }
+  .read { display: inline-block; margin-top: 1rem; transition: color .15s; }
+  .read:hover { color: var(--text); }
+  .thumbnail { display: block; aspect-ratio: 16 / 9; overflow: hidden; border: 1px solid var(--line); background: var(--bg2); }
+  .thumbnail:hover { border-color: var(--accent); }
+  .thumbnail img { display: block; width: 100%; height: 100%; object-fit: cover; }
+  @media (max-width: 760px) { header.page-hero { padding: 3rem 1.25rem; } }
+  @media (max-width: 700px) { .post-row { grid-template-columns: 1fr; gap: 1.4rem; padding: 2rem 0; } .thumbnail { width: min(100%, 28rem); } }
+</style>

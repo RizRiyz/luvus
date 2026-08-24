@@ -1,0 +1,99 @@
+---
+import { getCollection, render } from 'astro:content';
+import BlogLayout from '../../layouts/BlogLayout.astro';
+
+export async function getStaticPaths() {
+  const posts = await getCollection('blog', ({ data }) => !data.draft);
+  return posts.map((post) => ({ params: { slug: post.id }, props: { post } }));
+}
+
+const { post } = Astro.props;
+const { Content } = await render(post);
+const formatDate = (date: Date) => date.toLocaleDateString('en-US', {
+  year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC',
+});
+---
+
+<BlogLayout
+  title={`${post.data.title} — luvus`}
+  description={post.data.description}
+  path={`/blog/${post.id}/`}
+  article
+  image={post.data.hero}
+  imageAlt={post.data.heroAlt}
+  imageWidth={post.data.heroWidth}
+  imageHeight={post.data.heroHeight}
+  publishedTime={post.data.date.toISOString()}
+  author={post.data.author}
+>
+  <article class="post">
+    <header class="post-header">
+      <a class="back" href="/blog/">← All posts</a>
+      <h1>{post.data.title}</h1>
+      <p class="meta"><time datetime={post.data.date.toISOString()}>{formatDate(post.data.date)}</time><span>by {post.data.author}</span></p>
+    </header>
+    {post.data.hero && (
+      <figure class="post-image">
+        <img
+          src={post.data.hero}
+          alt={post.data.heroAlt ?? ''}
+          width={post.data.heroWidth ?? 1672}
+          height={post.data.heroHeight ?? 941}
+        />
+      </figure>
+    )}
+    <div class="prose"><Content /></div>
+  </article>
+</BlogLayout>
+
+<style is:global>
+  /* A restrained long-form measure keeps the post comfortable to scan. The
+     header, image, and article copy share one centered 42rem column. */
+  .post { padding: 4rem var(--gut, 2.6rem) 5.5rem; }
+  .post-header, .post-image, .prose { width: min(100%, 42rem); margin-inline: auto; }
+  .post-header { padding-bottom: 1rem; }
+  .back, .meta { font: .72rem/1.4 'IBM Plex Mono', ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+  .back { display: inline-flex; align-items: center; color: var(--accent); }
+  .back:hover { color: var(--text); }
+  .post h1 { max-width: 42rem; margin: 1.5rem 0 0; font: 600 clamp(1.25rem, 1.55vw, 1.45rem)/1.25 'IBM Plex Mono', ui-monospace, monospace; letter-spacing: -.03em; text-wrap: balance; }
+  .meta { display: flex; flex-wrap: wrap; gap: .7rem; margin: 1rem 0 0; color: var(--sub); }
+  .meta span::before { content: '·'; margin-right: .7rem; color: var(--accent); }
+  .post-image { margin-top: 2.5rem; }
+  .post-image img { display: block; width: 100%; height: auto; }
+
+  /* Long-form copy stays deliberately plain: readable type, familiar heading
+     hierarchy, and whitespace instead of decorative bars or section rules. */
+  .prose { margin-top: 3rem; color: var(--sub2); font-size: .98rem; line-height: 1.78; }
+  /* This style block is already global. Keep these as ordinary descendants;
+     wrapping them in Astro's :global() pseudo-class would emit that pseudo-class
+     literally and the browser would discard every rendered-Markdown rule. */
+  .prose > :first-child { margin-top: 0; }
+  .prose > :last-child { margin-bottom: 0; }
+  .prose p { margin: 1rem 0; text-wrap: pretty; }
+  .prose h2, .prose h3 { color: var(--text); font-family: 'IBM Plex Mono', ui-monospace, monospace; font-weight: 600; line-height: 1.25; }
+  .prose h2 { margin: 3.4rem 0 1rem; font-size: clamp(1.2rem, 1.8vw, 1.5rem); letter-spacing: -.03em; text-wrap: balance; }
+  .prose h2 + p { margin-top: 0; }
+  .prose h3 { margin: 2.4rem 0 .75rem; font-size: 1.02rem; letter-spacing: -.02em; }
+  .prose ul, .prose ol { margin: 1.15rem 0; padding-left: 1.35rem; }
+  .prose li { padding-left: .2rem; }
+  .prose li + li { margin-top: .5rem; }
+  .prose li::marker { color: var(--accent); }
+  .prose a { color: var(--accent); border-bottom: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); overflow-wrap: anywhere; }
+  .prose a:hover { border-bottom-color: var(--accent); }
+  .prose strong { color: var(--text); font-weight: 600; }
+  .prose blockquote { margin: 1.5rem 0; padding: .35rem 0 .35rem 1.15rem; border-left: 2px solid var(--accent); color: var(--sub2); }
+  .prose code { padding: .1rem .32rem; color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--bg)); border: 1px solid color-mix(in srgb, var(--accent) 16%, var(--bg)); font: .88em 'JetBrains Mono Variable', ui-monospace, monospace; overflow-wrap: anywhere; }
+  .prose pre { max-width: 100%; margin: 1.25rem 0; overflow-x: auto; padding: 1rem; border: 1px solid var(--line); background: var(--bg2); }
+  .prose pre code { padding: 0; border: 0; color: var(--text); background: transparent; overflow-wrap: normal; }
+  .prose hr { margin: 2rem 0; border: 0; border-top: 1px solid var(--line); }
+  .prose img { display: block; max-width: 100%; height: auto; }
+
+  @media (max-width: 640px) {
+    .post { padding: 3rem 1.25rem 4rem; }
+    .post-header { padding-bottom: .5rem; }
+    .post h1 { margin-top: 1.25rem; font-size: clamp(1.2rem, 5.5vw, 1.4rem); }
+    .post-image { margin-top: 1.5rem; }
+    .prose { margin-top: 2.4rem; font-size: .96rem; line-height: 1.74; }
+    .prose h2 { margin-top: 3rem; }
+  }
+</style>

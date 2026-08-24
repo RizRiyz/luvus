@@ -1,0 +1,214 @@
+---
+import interLatin from '@fontsource-variable/inter/files/inter-latin-wght-normal.woff2?url';
+import jetbrainsLatin from '@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2?url';
+import plexLatin600 from '@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-600-normal.woff2?url';
+import '@fontsource-variable/inter';
+import '@fontsource-variable/jetbrains-mono';
+import '@fontsource/ibm-plex-mono/500.css';
+import '@fontsource/ibm-plex-mono/600.css';
+import '@fontsource/ibm-plex-mono/700.css';
+import '@fontsource/orbit/400.css';
+import '../styles/themes.css';
+import Logo from '../components/Logo.astro';
+import XLogo from '../components/XLogo.astro';
+import { NAV_MARK } from '../lib/mark';
+import { DEFAULT_THEME, THEMES } from '../lib/themes';
+
+interface Props {
+  title: string;
+  description: string;
+  path: string;
+  article?: boolean;
+  image?: string;
+  imageAlt?: string;
+  imageWidth?: number;
+  imageHeight?: number;
+  publishedTime?: string;
+  author?: string;
+}
+
+const {
+  title,
+  description,
+  path,
+  article = false,
+  image = '/og.png',
+  imageAlt = 'Luvus mission control for coding agents',
+  imageWidth,
+  imageHeight,
+  publishedTime,
+  author,
+} = Astro.props;
+const canonical = `https://luvus.dev${path}`;
+const socialImage = new URL(image, 'https://luvus.dev').href;
+const socialImageWidth = imageWidth ?? (image === '/og.png' ? 1200 : undefined);
+const socialImageHeight = imageHeight ?? (image === '/og.png' ? 630 : undefined);
+const GITHUB = 'https://github.com/RizRiyz/luvus';
+const X = 'https://x.com/luvusdev';
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="preload" href={interLatin} as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href={jetbrainsLatin} as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href={plexLatin600} as="font" type="font/woff2" crossorigin />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="canonical" href={canonical} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content={article ? 'article' : 'website'} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:site_name" content="luvus" />
+    <meta property="og:image" content={socialImage} />
+    <meta property="og:image:secure_url" content={socialImage} />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:alt" content={imageAlt} />
+    {socialImageWidth && <meta property="og:image:width" content={String(socialImageWidth)} />}
+    {socialImageHeight && <meta property="og:image:height" content={String(socialImageHeight)} />}
+    {article && publishedTime && <meta property="article:published_time" content={publishedTime} />}
+    {article && author && <meta property="article:author" content={author} />}
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={socialImage} />
+    <meta name="twitter:image:alt" content={imageAlt} />
+    <script is:inline>
+      try {
+        var theme = localStorage.getItem('luvus-theme');
+        if (theme) document.documentElement.setAttribute('data-bh-theme', theme);
+      } catch {}
+    </script>
+  </head>
+  <body>
+    <nav>
+      <div class="nav-inner">
+        <a class="brand" href="/">
+          <span class="mark mark-luvus" aria-hidden="true" set:html={NAV_MARK}></span>
+          <span>Luvus</span>
+        </a>
+        <div class="nav-links">
+          <a href="/docs/">Docs</a>
+          <a href="/modules/">Modules</a>
+          <a href="/themes/">Themes</a>
+          <a href="/blog/" aria-current="page">Blog</a>
+          <a href="/changelog/">Changelog</a>
+          <a href={GITHUB} class="gh" aria-label="Luvus on GitHub" title="GitHub">
+            <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path></svg>
+          </a>
+          <a href={X} class="gh" aria-label="Luvus on X" title="X"><XLogo /></a>
+        </div>
+      </div>
+    </nav>
+    <div class="page-frame"><slot /></div>
+    <footer>
+      <div class="foot-inner">
+        <div class="foot-brand"><Logo width={22} height={22} class="mark" aria-hidden="true" /><span>Luvus</span><span class="dim">by Riz</span></div>
+        <div class="foot-links"><a href={GITHUB}>GitHub</a><a href="https://crates.io/crates/luvus">crates.io</a></div>
+      </div>
+    </footer>
+    <div class="theme-dock" id="theme-dock">
+      <ul class="td-list" id="td-list" role="listbox" aria-label="Color theme" hidden>
+        {THEMES.map((theme) => <li><button type="button" class="td-opt" role="option" data-theme={theme.id}><i class="td-sw" data-theme={theme.id} aria-hidden="true"></i><span>{theme.label}</span></button></li>)}
+      </ul>
+      <button type="button" class="td-btn" id="td-btn" aria-expanded="false" aria-haspopup="listbox"><i class="td-sw td-sw-cur" aria-hidden="true"></i><span id="td-cur">{THEMES.find((theme) => theme.id === DEFAULT_THEME)?.label ?? DEFAULT_THEME}</span><span aria-hidden="true">▴</span></button>
+    </div>
+    <script>
+      import { DEFAULT_THEME, THEMES } from '../lib/themes';
+      const key = 'luvus-theme';
+      const dock = document.querySelector('#theme-dock');
+      const list = document.querySelector('#td-list');
+      const button = document.querySelector('#td-btn');
+      const current = document.querySelector('#td-cur');
+      const swatch = document.querySelector('.td-sw-cur');
+      const setTheme = (id) => {
+        document.documentElement.setAttribute('data-bh-theme', id);
+        try { localStorage.setItem(key, id); } catch {}
+        const theme = THEMES.find((item) => item.id === id) ?? THEMES.find((item) => item.id === DEFAULT_THEME);
+        if (current && theme) current.textContent = theme.label;
+        if (swatch) swatch.setAttribute('data-theme', id);
+      };
+      const selected = (() => { try { return localStorage.getItem(key) || DEFAULT_THEME; } catch { return DEFAULT_THEME; } })();
+      setTheme(selected);
+      button?.addEventListener('click', () => {
+        const open = list?.hasAttribute('hidden') ?? true;
+        list?.toggleAttribute('hidden', !open);
+        button.setAttribute('aria-expanded', String(open));
+      });
+      list?.addEventListener('click', (event) => {
+        const target = event.target instanceof Element ? event.target.closest('[data-theme]') : null;
+        const id = target?.getAttribute('data-theme');
+        if (!id) return;
+        setTheme(id);
+        list.setAttribute('hidden', '');
+        button?.setAttribute('aria-expanded', 'false');
+      });
+      document.addEventListener('click', (event) => {
+        if (dock instanceof Element && !dock.contains(event.target instanceof Node ? event.target : null)) {
+          list?.setAttribute('hidden', '');
+          button?.setAttribute('aria-expanded', 'false');
+        }
+      });
+    </script>
+  </body>
+</html>
+
+<style is:global>
+  :root { --gut: 2.6rem; }
+  @media (max-width: 900px) { :root { --gut: 1.6rem; } }
+  @media (max-width: 560px) { :root { --gut: 1.15rem; } }
+  * { box-sizing: border-box; margin: 0; }
+  html { scroll-behavior: smooth; }
+  body { background: var(--bg); color: var(--text); font: 15px/1.75 'Inter Variable', ui-sans-serif, system-ui, sans-serif; }
+  a { color: inherit; text-decoration: none; }
+  ::selection { background: var(--sel); color: var(--text); }
+  h2 { font-size: 1.45rem; letter-spacing: -.035em; }
+  h1, h2, h3, .brand, .foot-brand { font-family: 'IBM Plex Mono', ui-monospace, 'JetBrains Mono Variable', monospace; font-weight: 600; line-height: 1.14; letter-spacing: -.045em; }
+  .dim { color: var(--sub); }
+  nav { background: var(--bg); border-bottom: 1px solid var(--line); }
+  footer { border-top: 1px solid var(--line); }
+  section, header.page-hero { max-width: none; margin: 0; padding: 4rem var(--gut); border-bottom: 1px solid var(--line); }
+  .nav-inner { max-width: 1440px; min-height: 3.8rem; margin: 0 auto; padding: .3rem var(--gut); display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+  .brand { display: flex; align-items: center; gap: .35rem; color: var(--text); font-family: 'Orbit', var(--bh-display, ui-monospace), monospace; font-weight: 400; font-size: 1.7rem; line-height: normal; letter-spacing: -.05em; }
+  .brand > span:last-child { transform: translateY(var(--brand-nudge, -.06em)); }
+  .mark { display: block; flex: 0 0 auto; }
+  .mark-luvus { width: 42px; height: 42px; }
+  .mark-luvus svg { width: 100%; height: 100%; display: block; }
+  .nav-links { display: flex; align-items: center; gap: 1.4rem; color: var(--sub); font: .88rem/1.3 'IBM Plex Mono', ui-monospace, monospace; letter-spacing: -.01em; }
+  .nav-links a:hover { color: var(--text); }
+  .nav-links a[aria-current='page'] { color: var(--accent); }
+  .gh { width: 33px; height: 33px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line); transition: border-color .15s, color .15s; }
+  .gh:hover { border-color: var(--accent); color: var(--accent); }
+  .page-frame { max-width: 1440px; margin: 0 auto; background: var(--bg); position: relative; border-inline: 1px solid var(--line); }
+  .page-frame > section:last-child { border-bottom: 0; }
+  .foot-inner { max-width: 1440px; margin: 0 auto; padding: 2rem var(--gut); display: flex; justify-content: center; align-items: center; gap: 2.2rem; flex-wrap: wrap; }
+  .foot-brand { display: flex; align-items: center; gap: .5rem; font-weight: 700; }
+  .foot-brand .dim { font-weight: 400; font-size: .85rem; }
+  .foot-links { display: flex; gap: 1.3rem; color: var(--sub); font-size: .92rem; }
+  .foot-links a:hover { color: var(--accent); }
+  .page-hero { text-align: center; position: relative; padding-top: 4.5rem; padding-bottom: 1.5rem; }
+  .page-hero .glow { display: none; }
+  .eyebrow { font-family: 'IBM Plex Mono', monospace; color: var(--accent); font-size: .78rem; letter-spacing: .14em; text-transform: uppercase; position: relative; }
+  .page-hero h1 { font-size: clamp(1.9rem, 4.6vw, 2.8rem); font-weight: 600; letter-spacing: -.045em; margin-top: .6rem; position: relative; }
+  .page-hero p { color: var(--sub); max-width: 46rem; margin: 1.1rem auto 0; font-size: .9rem; line-height: 1.8; position: relative; }
+  .hero-cta { margin-top: 1.6rem; position: relative; }
+  .btn { display: inline-flex; align-items: center; gap: .5rem; padding: .65rem 1.35rem; border: 1px solid var(--line); font-weight: 600; font-size: .92rem; font-family: 'IBM Plex Mono', monospace; transition: border-color .15s, transform .15s, filter .15s; }
+  .btn:hover { transform: translateY(-2px); border-color: var(--accent); color: var(--accent); }
+  .btn.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  .btn.primary:hover { filter: brightness(1.08); color: var(--bg); }
+  .theme-dock { position: fixed; right: 1rem; bottom: 1rem; z-index: 10; font: .75rem/1.2 'IBM Plex Mono', ui-monospace, monospace; }
+  .td-btn, .td-opt { appearance: none; color: var(--text); background: var(--bg2); border: 1px solid var(--line); font: inherit; cursor: pointer; }
+  .td-btn { display: flex; gap: .55rem; align-items: center; padding: .56rem .72rem; }
+  .td-btn:hover, .td-opt:hover { border-color: var(--accent); }
+  .td-list { position: absolute; right: 0; bottom: calc(100% + .45rem); width: 11.8rem; margin: 0; padding: .3rem; list-style: none; border: 1px solid var(--line); background: var(--bg2); }
+  .td-opt { width: 100%; display: flex; gap: .55rem; align-items: center; padding: .5rem; border-color: transparent; text-align: left; }
+  .td-sw { width: .7rem; height: .7rem; flex: 0 0 auto; border-radius: 50%; display: inline-block; }
+  @media (max-width: 760px) { section, header.page-hero { padding: 3rem 1.25rem; } }
+  @media (max-width: 560px) { .nav-inner { flex-wrap: wrap; row-gap: .45rem; padding-top: .7rem; padding-bottom: .7rem; } .nav-links { gap: .9rem; font-size: .78rem; flex-wrap: wrap; justify-content: flex-end; } }
+</style>
