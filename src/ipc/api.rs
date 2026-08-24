@@ -177,6 +177,11 @@ fn write_response(writer: &mut impl Write, id: &str, response: &str) -> io::Resu
     writer.flush()
 }
 
+fn write_event_frame(writer: &mut impl Write, event: &str) -> io::Result<()> {
+    writeln!(writer, "{event}")?;
+    writer.flush()
+}
+
 /// Reject duplicate JSON object keys before deserializing into `Value`, which
 /// would otherwise silently keep the last value and make validation ambiguous.
 fn reject_duplicate_keys(bytes: &[u8]) -> Result<(), serde_json::Error> {
@@ -525,12 +530,13 @@ fn handle_conn(stream: Conn, event_tx: Sender<AppEvent>, bus: EventBus) {
                 if !fwd_active.load(Ordering::Acquire) {
                     let dropped_at = overflow_sequence.load(Ordering::Acquire);
                     if dropped_at > 0 {
-                        let _ = writeln!(fwd_writer, "{}", resync_event(filter, dropped_at));
+                        let _ =
+                            write_event_frame(&mut fwd_writer, &resync_event(filter, dropped_at));
                     }
                     break;
                 }
                 if evt.len().saturating_add(1) > crate::terminal::backend::MAX_FRAME_BYTES
-                    || writeln!(fwd_writer, "{evt}").is_err()
+                    || write_event_frame(&mut fwd_writer, &evt).is_err()
                 {
                     fwd_active.store(false, Ordering::Release);
                     break;
@@ -841,6 +847,15 @@ mod tests {
         write_response(&mut writer, "test", r#"{"id":"test","result":{}}"#).unwrap();
 
         assert_eq!(writer.bytes, b"{\"id\":\"test\",\"result\":{}}\n");
+        assert_eq!(writer.flushes, 1);
+    }
+
+    #[test]
+    fn subscription_events_are_lf_framed_and_flushed_immediately() {
+        let mut writer = FlushProbe::default();
+        write_event_frame(&mut writer, r#"{"event":"terminal.closed"}"#).unwrap();
+
+        assert_eq!(writer.bytes, b"{\"event\":\"terminal.closed\"}\n");
         assert_eq!(writer.flushes, 1);
     }
 
