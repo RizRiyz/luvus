@@ -71,8 +71,12 @@ def valid_request(value):
         return False
     if not isinstance(value["id"], str) or REQUEST_ID.fullmatch(value["id"]) is None:
         return False
-    if "auth" in value and (not isinstance(value["auth"], str) or not 1 <= len(value["auth"].encode()) <= 256):
-        return False
+    if "auth" in value:
+        auth = value["auth"]
+        if not isinstance(auth, str) or not 1 <= len(auth) <= 256 or not all(
+            "!" <= char <= "~" for char in auth
+        ):
+            return False
     method, params = value["method"], value["params"]
     if method not in METHOD_FIELDS or not isinstance(params, dict) or not set(params) <= METHOD_FIELDS[method]:
         return False

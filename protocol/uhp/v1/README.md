@@ -14,3 +14,4 @@ query live methods and limits with `luvus uhp capabilities`.
 
 All requests use the `luvus-uhp` `1.0` identity. Method namespaces organize the
 surface but do not define separate protocols or capability handshakes.
+Optional delegated `auth` tokens contain 1 to 256 printable ASCII bytes.

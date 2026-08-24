@@ -5,13 +5,13 @@ import argparse
 import json
 import os
 import pathlib
-import re
 import socket
+
+from consumer import REQUEST_ID, valid_request
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 RESPONSES = ROOT / "protocol" / "uhp" / "v1" / "terminal" / "fixtures" / "valid" / "responses.jsonl"
 MAX_FRAME = 1024 * 1024
-REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 def load_results():
@@ -41,18 +41,11 @@ def response_for(request, results):
     return {"id": request_id, "error": {"code": "unsupported_capability", "message": "mock method is not configured"}}
 
 
-def valid_request(request):
-    if not isinstance(request, dict):
-        return False
-    if not {"id", "method", "params"} <= set(request) or not set(request) <= {"id", "method", "params", "auth"}:
-        return False
-    if not isinstance(request["id"], str) or REQUEST_ID.fullmatch(request["id"]) is None:
-        return False
-    if not isinstance(request["method"], str) or not request["method"] or not isinstance(request["params"], dict):
-        return False
-    return "auth" not in request or (
-        isinstance(request["auth"], str) and 1 <= len(request["auth"].encode()) <= 256
-    )
+def invalid_request(request, message):
+    request_id = request.get("id") if isinstance(request, dict) else None
+    if not isinstance(request_id, str) or REQUEST_ID.fullmatch(request_id) is None:
+        request_id = "0"
+    return {"id": request_id, "error": {"code": "invalid_request", "message": message}}
 
 
 def main():
@@ -84,9 +77,13 @@ def main():
                     try:
                         request = json.loads(frame[:-1])
                     except (UnicodeDecodeError, json.JSONDecodeError):
-                        response = {"id":"0","error":{"code":"invalid_request","message":"bad json"}}
+                        response = invalid_request(None, "bad json")
                     else:
-                        response = response_for(request, results) if valid_request(request) else {"id":"0","error":{"code":"invalid_request","message":"invalid request"}}
+                        response = (
+                            response_for(request, results)
+                            if valid_request(request)
+                            else invalid_request(request, "invalid request")
+                        )
                     connection.sendall(json.dumps(response, separators=(",", ":")).encode() + b"\n")
     finally:
         try:

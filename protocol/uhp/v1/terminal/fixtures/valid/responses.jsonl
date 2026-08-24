@@ -9,3 +9,4 @@
 {"id":"wait-output-1","result":{"type":"terminal_backend_output","content_revision":5}}
 {"id":"events-1","result":{"type":"subscription_started","sequence":12,"queue_capacity":256,"loss_behavior":"resync_required_then_close"}}
 {"id":"observe-1","result":{"type":"terminal_backend_stream","mode":"observe","server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","sequence":12,"content_revision":5,"ansi":true,"capture_mode":"visible","lines":80,"frame_bytes":65536,"queue_capacity":2,"loss_behavior":"resync_required_then_close"}}
+{"id":"auth-1","error":{"code":"forbidden","message":"invalid or expired auth token"}}

@@ -317,8 +317,12 @@ def valid_global_request(value, methods):
         return False
     if value["method"] not in methods or not isinstance(value["params"], dict):
         return False
-    if "auth" in value and not bounded_string(value["auth"], 256, allow_empty=False):
-        return False
+    if "auth" in value:
+        auth = value["auth"]
+        if not bounded_string(auth, 256, allow_empty=False) or not all(
+            "!" <= char <= "~" for char in auth
+        ):
+            return False
     if value["method"] == "uhp.token.create":
         scopes = value["params"].get("scopes")
         ttl = value["params"].get("ttl_s", 3600)

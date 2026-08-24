@@ -19,8 +19,9 @@ and returns a compatible `uhp.capabilities` response.
 
 Every request requires `id`, `method`, and `params`; `auth` is optional. Request
 IDs contain 1 to 128 ASCII letters, digits, `.`, `_`, `:`, or `-`. Unknown or
-duplicate fields are rejected. Every successful response has `id` and `result`;
-every failure has `id` and `error`.
+duplicate fields are rejected. An `auth` token contains 1 to 256 printable
+ASCII bytes. Every successful response has `id` and `result`; every failure has
+`id` and `error`.
 
 The authoritative limits and method shapes are in `schema/`. Examples in
 `fixtures/` are indexed by `fixtures/manifest.json`. The standard-library

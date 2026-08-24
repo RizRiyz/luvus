@@ -23,7 +23,7 @@
     "error":{
       "type":"object",
       "properties":{
-        "code":{"enum":["invalid_request","invalid_params","frame_too_large","incompatible_protocol","unsupported_capability","stale_server","stale_terminal","stale_route","terminal_not_ready","process_mismatch","terminal_gone","capture_too_large","input_too_large","send_failed","create_failed","close_failed","unavailable","limit_exceeded","control_conflict","timeout","internal"]},
+        "code":{"enum":["invalid_request","invalid_params","forbidden","frame_too_large","incompatible_protocol","unsupported_capability","stale_server","stale_terminal","stale_route","terminal_not_ready","process_mismatch","terminal_gone","capture_too_large","input_too_large","send_failed","create_failed","close_failed","unavailable","limit_exceeded","control_conflict","timeout","internal"]},
         "message":{"type":"string","maxLength":512},
         "dispatch":{"enum":["not_started","rejected"]},
         "metadata":{"type":"object"}

@@ -89,6 +89,7 @@ static ACTIVE_TERMINAL_STREAMS: AtomicUsize = AtomicUsize::new(0);
 static CONTROL_TERMINALS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 const MAX_AUTH_TOKENS: usize = 64;
+const MAX_AUTH_TOKEN_BYTES: usize = 256;
 const MAX_AUTH_TTL: std::time::Duration = std::time::Duration::from_secs(86_400);
 const AUTH_SCOPES: &[&str] = &[
     "read",
@@ -107,6 +108,12 @@ fn valid_request_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+fn valid_auth_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= MAX_AUTH_TOKEN_BYTES
+        && token.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
 struct AuthToken {
@@ -1390,10 +1397,10 @@ fn handle_conn(
     }
     let auth = match val.get("auth") {
         None => None,
-        Some(Value::String(auth)) if !auth.is_empty() && auth.len() <= 256 => Some(auth.as_str()),
+        Some(Value::String(auth)) if valid_auth_token(auth) => Some(auth.as_str()),
         Some(_) => {
             let response = json!({"id":id,"error":{"code":"invalid_request",
-                "message":"auth must be a non-empty string of at most 256 bytes"}})
+                "message":"auth must be a non-empty printable ASCII string of at most 256 bytes"}})
             .to_string();
             let _ = write_response(&mut writer, &id, &response);
             return;
@@ -2124,6 +2131,16 @@ mod tests {
             self.flushes += 1;
             Ok(())
         }
+    }
+
+    #[test]
+    fn delegated_auth_tokens_are_bounded_printable_ascii() {
+        assert!(valid_auth_token("luv_tok_example"));
+        assert!(valid_auth_token(&"a".repeat(MAX_AUTH_TOKEN_BYTES)));
+        assert!(!valid_auth_token(""));
+        assert!(!valid_auth_token("luv_tok_é"));
+        assert!(!valid_auth_token("luv_tok_\n"));
+        assert!(!valid_auth_token(&"a".repeat(MAX_AUTH_TOKEN_BYTES + 1)));
     }
 
     #[test]

@@ -1933,7 +1933,14 @@ mod tests {
 
         assert_eq!(app.config.theme, theme::THEMES[0]);
         assert!(app.theme_uninstall_pending("custom-enter"));
-        let event = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        let event = loop {
+            match rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap() {
+                event @ crate::event::AppEvent::ThemeUninstalled { .. } => break event,
+                other => {
+                    app.handle_event(other);
+                }
+            }
+        };
         app.handle_event(event);
         assert!(app.theme_registry.get("custom-enter").is_none());
     }

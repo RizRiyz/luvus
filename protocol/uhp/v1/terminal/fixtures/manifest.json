@@ -2,10 +2,10 @@
   "protocol":{"name":"luvus-uhp","major":1,"minor":0},
   "files":[
     {"path":"valid/requests.jsonl","kind":"request","expect":"valid","count":19},
-    {"path":"valid/responses.jsonl","kind":"response","expect":"valid","count":11},
+    {"path":"valid/responses.jsonl","kind":"response","expect":"valid","count":12},
     {"path":"valid/events.jsonl","kind":"event","expect":"valid","count":4},
     {"path":"valid/control-frames.jsonl","kind":"control","expect":"valid","count":3},
-    {"path":"invalid/requests.jsonl","kind":"request","expect":"invalid","count":9},
+    {"path":"invalid/requests.jsonl","kind":"request","expect":"invalid","count":10},
     {"path":"invalid/responses.jsonl","kind":"response","expect":"invalid","count":1},
     {"path":"invalid/events.jsonl","kind":"event","expect":"invalid","count":2},
     {"path":"invalid/control-frames.jsonl","kind":"control","expect":"invalid","count":4}
