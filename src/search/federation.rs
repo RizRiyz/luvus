@@ -255,10 +255,10 @@ fn request_nonblocking(
     let mut chunk = [0u8; 16 * 1024];
     loop {
         match stream.read(&mut chunk) {
-            Ok(0) if response.is_empty() => {
-                return Err("session returned an empty response".to_string())
-            }
-            Ok(0) => break,
+            // Windows PIPE_NOWAIT can return a successful zero-byte read when
+            // no response data is ready yet. This helper is only used for the
+            // nonblocking timeout fallback, so keep waiting for LF or deadline.
+            Ok(0) => wait_for_io(deadline)?,
             Ok(bytes) => {
                 let room = (MAX_SESSION_RESPONSE_BYTES as usize + 1).saturating_sub(response.len());
                 response.extend_from_slice(&chunk[..bytes.min(room)]);
@@ -311,6 +311,10 @@ mod tests {
 
     struct NeverReady;
 
+    struct ZeroThenResponse {
+        reads: usize,
+    }
+
     impl Read for NeverReady {
         fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
             Err(std::io::ErrorKind::WouldBlock.into())
@@ -320,6 +324,28 @@ mod tests {
     impl Write for NeverReady {
         fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
             Err(std::io::ErrorKind::WouldBlock.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Read for ZeroThenResponse {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            if self.reads == 1 {
+                return Ok(0);
+            }
+            let response = b"{\"id\":\"federated-search\",\"result\":{}}\n";
+            buf[..response.len()].copy_from_slice(response);
+            Ok(response.len())
+        }
+    }
+
+    impl Write for ZeroThenResponse {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
         }
 
         fn flush(&mut self) -> std::io::Result<()> {
@@ -340,6 +366,16 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn nonblocking_fallback_retries_zero_byte_reads() {
+        let mut stream = ZeroThenResponse { reads: 0 };
+        let response =
+            request_nonblocking(&mut stream, b"request\n", Duration::from_millis(100)).unwrap();
+
+        assert!(response.ends_with('\n'));
+        assert_eq!(stream.reads, 2);
     }
 
     #[test]

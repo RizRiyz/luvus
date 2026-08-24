@@ -540,12 +540,19 @@ fn handle_conn(stream: Conn, event_tx: Sender<AppEvent>, bus: EventBus) {
         // …while this thread watches the read side: EOF/error = the client is
         // gone, so unsubscribe NOW instead of lingering in the bus until the
         // next publish happens to notice the dead channel.
-        let _ = reader
+        let timeout_mode = reader
             .get_ref()
-            .set_timeouts(std::time::Duration::from_millis(250));
+            .set_timeouts(std::time::Duration::from_millis(250))
+            .ok();
         let mut probe = [0_u8; 1024];
         while active.load(Ordering::Acquire) {
             match reader.read(&mut probe) {
+                Ok(0) if timeout_mode == Some(transport::TimeoutMode::Nonblocking) => {
+                    // Windows byte-mode named pipes can report a zero-byte
+                    // successful read for PIPE_NOWAIT when no data is ready.
+                    // A later write still detects a disconnected subscriber.
+                    thread::sleep(std::time::Duration::from_millis(25));
+                }
                 Ok(0) => break,
                 Ok(_) => {}
                 Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
@@ -746,6 +753,12 @@ fn wait_for_parked_reply(
             Err(TryRecvError::Empty) => {}
         }
         match reader.read(&mut probe) {
+            Ok(0) if timeout_mode == Some(transport::TimeoutMode::Nonblocking) => {
+                // On Windows PIPE_NOWAIT, zero bytes can mean that no input is
+                // ready rather than EOF. The app-owned timeout still bounds
+                // this wait and the response write detects a disconnected peer.
+                thread::sleep(std::time::Duration::from_millis(25));
+            }
             Ok(0) => break,
             Ok(_) => {}
             Err(error)

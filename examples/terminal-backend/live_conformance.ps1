@@ -70,19 +70,20 @@ function Close-PipeConnection {
 function Read-BoundedLine {
     param(
         [Parameter(Mandatory)]$Reader,
-        [int]$TimeoutMs = 5000
+        [int]$TimeoutMs = 5000,
+        [string]$Context = "named-pipe response"
     )
 
     $Task = $Reader.ReadLineAsync()
     if (-not $Task.Wait($TimeoutMs)) {
-        throw "named-pipe response timed out"
+        throw "$Context timed out"
     }
     $Line = $Task.Result
     if ($null -eq $Line) {
-        throw "named-pipe response ended before LF"
+        throw "$Context ended before LF"
     }
     if ([System.Text.Encoding]::UTF8.GetByteCount($Line) + 1 -gt 1MB) {
-        throw "named-pipe response exceeded the protocol frame limit"
+        throw "$Context exceeded the protocol frame limit"
     }
     $Line
 }
@@ -102,7 +103,8 @@ function Send-Request {
         $Connection.Writer.Write($Json + "`n")
         $Connection.Writer.Flush()
         try {
-            $Response = (Read-BoundedLine $Connection.Reader) | ConvertFrom-Json
+            $Response = (Read-BoundedLine -Reader $Connection.Reader `
+                -Context "request '$($Request.id)' response") | ConvertFrom-Json
         } catch {
             throw "named-pipe request '$($Request.id)' failed: $($_.Exception.Message)"
         }
@@ -126,7 +128,8 @@ function Wait-TerminalEvent {
     $Deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
     while ([DateTime]::UtcNow -lt $Deadline) {
         $RemainingMs = [Math]::Max(1, [int]($Deadline - [DateTime]::UtcNow).TotalMilliseconds)
-        $Received = (Read-BoundedLine -Reader $Connection.Reader -TimeoutMs $RemainingMs) | ConvertFrom-Json
+        $Received = (Read-BoundedLine -Reader $Connection.Reader -TimeoutMs $RemainingMs `
+            -Context "event '$Name'") | ConvertFrom-Json
         if ($Received.event -eq "terminal.resync_required") {
             throw "terminal event stream overflowed during conformance"
         }
@@ -222,7 +225,8 @@ try {
         params = @{}
     } | ConvertTo-Json -Compress) + "`n")
     $EventConnection.Writer.Flush()
-    $Subscribed = (Read-BoundedLine $EventConnection.Reader) | ConvertFrom-Json
+    $Subscribed = (Read-BoundedLine -Reader $EventConnection.Reader `
+        -Context "event subscription response") | ConvertFrom-Json
     if ($Subscribed.result.type -ne "subscription_started") {
         throw "terminal event subscription did not start"
     }
