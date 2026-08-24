@@ -526,10 +526,7 @@ mod tests {
         // dotfiles sort before "readme.txt", so toggling shifts indices — the
         // highlight must stay on the same entry.
         let leading = app.picker.as_ref().unwrap().leading();
-        let readme_idx = entries
-            .iter()
-            .position(|e| e.name == "readme.txt")
-            .unwrap();
+        let readme_idx = entries.iter().position(|e| e.name == "readme.txt").unwrap();
         app.picker.as_mut().unwrap().cursor = leading + readme_idx;
         app.handle_picker_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE));
         {

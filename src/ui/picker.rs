@@ -129,10 +129,7 @@ pub(super) fn draw_picker(
             let x = inner.x.saturating_add(hint_x[i]);
             let w = (display_width(key) + 1 + display_width(label))
                 .min(inner.width.saturating_sub(x - inner.x).max(1) as usize);
-            footer_hints.push((
-                PickerHit::Hint(*code),
-                Rect::new(x, footer_y, w as u16, 1),
-            ));
+            footer_hints.push((PickerHit::Hint(*code), Rect::new(x, footer_y, w as u16, 1)));
         }
     }
 
