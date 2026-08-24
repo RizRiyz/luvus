@@ -685,7 +685,11 @@ accent = "#123456"
             .iter()
             .filter(|entry| matches!(entry.source, ThemeSource::Local { .. }))
             .collect();
-        assert_eq!(local.len(), 8, "all reviewed starter themes are registered");
+        assert_eq!(
+            local.len(),
+            12,
+            "all reviewed starter themes are registered"
+        );
         let website = fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("website/src/lib/theme-schema.ts"),
         )

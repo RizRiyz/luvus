@@ -165,4 +165,48 @@ export const MAKER_THEMES: MakerTheme[] = [
       amber: '#a96e17', coral: '#a73535',
     },
   },
+  {
+    id: 'edge-dark', name: 'Edge Dark', appearance: 'dark',
+    description: 'Cool slate dark, orchid accent.',
+    colors: {
+      crust: '#1b1e28', mantle: '#1e222c', base: '#212530', surface0: '#262b36',
+      surface1: '#2f3542', overlay0: '#3a4152', overlay1: '#565d72', subtext0: '#9aa1b4',
+      subtext1: '#c8cddb', text: '#e2e6f0', accent: '#dd7fd3', sel_bg: '#2b2039',
+      border: '#2a2f3b', border_focus: '#dd7fd3', green: '#78b096', mint: '#6fc2b8',
+      amber: '#c9a869', coral: '#dd8272',
+    },
+  },
+  {
+    id: 'read-roomy', name: 'Read Roomy', appearance: 'dark',
+    description: 'Warm paper dark, soft blue accent.',
+    colors: {
+      crust: '#141311', mantle: '#1a1816', base: '#1f1d1a', surface0: '#252220',
+      surface1: '#302c27', overlay0: '#46403a', overlay1: '#6f6a61', subtext0: '#a49d92',
+      subtext1: '#d3ccc1', text: '#ece7df', accent: '#7aa9dd', sel_bg: '#1e2a38',
+      border: '#383029', border_focus: '#7aa9dd', green: '#7fa98a', mint: '#6fa79c',
+      amber: '#c2a15e', coral: '#d08272',
+    },
+  },
+  {
+    id: 'anakmagang-dark', name: 'Anakmagang Dark', appearance: 'dark',
+    description: 'Near-black neutrals, cyan accent.',
+    colors: {
+      crust: '#0a0a0a', mantle: '#0e0e0e', base: '#121212', surface0: '#171717',
+      surface1: '#1f1f1f', overlay0: '#2e2e2e', overlay1: '#4d4d4d', subtext0: '#a3a3a3',
+      subtext1: '#d4d4d4', text: '#ededed', accent: '#06b6d5', sel_bg: '#0b2d38',
+      border: '#262626', border_focus: '#06b6d5', green: '#22c55f', mint: '#2dd4bf',
+      amber: '#eab308', coral: '#ef4444',
+    },
+  },
+  {
+    id: 'reedge-dark', name: 'Reedge Dark', appearance: 'dark',
+    description: 'Cool dark slate, sky-blue accent.',
+    colors: {
+      crust: '#242631', mantle: '#272935', base: '#2b2d3a', surface0: '#31323c',
+      surface1: '#37383e', overlay0: '#5d606c', overlay1: '#737681', subtext0: '#9b9fa8',
+      subtext1: '#b8bcc5', text: '#e1e5ed', accent: '#6cb6eb', sel_bg: '#364559',
+      border: '#3b3b3f', border_focus: '#70727e', green: '#a0c980', mint: '#5dbbc1',
+      amber: '#ef9f76', coral: '#ec7279',
+    },
+  },
 ];
