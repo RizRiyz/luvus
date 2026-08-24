@@ -4,19 +4,47 @@ pub fn schema_bundle() -> Value {
     fn schema(source: &str) -> Value {
         serde_json::from_str(source).expect("embedded Socket API schema is valid JSON")
     }
+    let request = schema(include_str!(
+        "../../protocol/socket/v1/schema/request.schema.json"
+    ));
+    let response = schema(include_str!(
+        "../../protocol/socket/v1/schema/response.schema.json"
+    ));
+    let event = schema(include_str!(
+        "../../protocol/socket/v1/schema/event.schema.json"
+    ));
+    let runtime = crate::runtime_api::schema_bundle();
+    let terminal = crate::terminal::backend::schema_bundle();
+    let mut documents = terminal["documents"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    documents.insert(
+        "https://luvus.dev/protocol/socket/v1/request.schema.json".into(),
+        request.clone(),
+    );
+    documents.insert(
+        "https://luvus.dev/protocol/socket/v1/response.schema.json".into(),
+        response.clone(),
+    );
+    documents.insert(
+        "https://luvus.dev/protocol/socket/v1/event.schema.json".into(),
+        event.clone(),
+    );
     json!({
         "protocol":{
             "name":super::PROTOCOL_NAME,
             "major":super::PROTOCOL_MAJOR,
             "minor":super::PROTOCOL_MINOR,
         },
-        "request":schema(include_str!("../../protocol/socket/v1/schema/request.schema.json")),
-        "response":schema(include_str!("../../protocol/socket/v1/schema/response.schema.json")),
-        "event":schema(include_str!("../../protocol/socket/v1/schema/event.schema.json")),
+        "request":request,
+        "response":response,
+        "event":event,
         "profiles":{
-            "runtime":crate::runtime_api::schema_bundle(),
-            "terminal":crate::terminal::backend::schema_bundle(),
+            "runtime":runtime,
+            "terminal":terminal,
         },
+        "documents":documents,
     })
 }
 
@@ -54,6 +82,18 @@ mod tests {
         assert_eq!(bundle["profiles"]["terminal"]["protocol"]["major"], 1);
         assert!(bundle["profiles"]["terminal"]["methods"]["observe"].is_object());
         assert!(bundle["profiles"]["terminal"]["methods"]["control"].is_object());
+        let documents = bundle["documents"].as_object().unwrap();
+        for branch in bundle["request"]["allOf"].as_array().unwrap() {
+            let Some(reference) = branch["then"]["properties"]["params"]["$ref"].as_str() else {
+                continue;
+            };
+            if reference.starts_with("https://") {
+                assert!(
+                    documents.contains_key(reference),
+                    "missing schema {reference}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -1063,11 +1063,18 @@ impl App {
             ],
         )?;
         let pane_id = self.resolve_backend_runtime(params, false)?;
-        let mode = params
-            .get("mode")
-            .and_then(Value::as_str)
-            .and_then(CaptureMode::parse)
-            .unwrap_or(CaptureMode::Visible);
+        let mode = match params.get("mode") {
+            None => CaptureMode::Visible,
+            Some(Value::String(mode)) => CaptureMode::parse(mode).ok_or_else(|| {
+                BackendError::read("invalid_params", "mode must be visible or recent_unwrapped")
+            })?,
+            Some(_) => {
+                return Err(BackendError::read(
+                    "invalid_params",
+                    "mode must be a string",
+                ))
+            }
+        };
         if mode == CaptureMode::Detection {
             return Err(BackendError::read(
                 "invalid_params",
@@ -1634,6 +1641,14 @@ mod tests {
             app.prepare_backend_observe(&oversized).err().unwrap().code,
             "invalid_params"
         );
+        for invalid in [json!("detection"), json!("unknown"), json!(false)] {
+            let mut params = locator.clone();
+            params["mode"] = invalid;
+            assert_eq!(
+                app.prepare_backend_observe(&params).err().unwrap().code,
+                "invalid_params"
+            );
+        }
         let mut stale = locator;
         stale["terminal_id"] = json!(backend::random_id().unwrap());
         assert_eq!(

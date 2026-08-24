@@ -287,6 +287,14 @@ pub fn required_scope(method: &str) -> &'static str {
     }
 }
 
+fn is_idempotent(method: &str) -> bool {
+    is_read_only(method)
+        && !matches!(
+            method,
+            "events.subscribe" | "terminal.backend.events.subscribe" | "terminal.backend.observe"
+        )
+}
+
 fn method_contracts() -> Vec<Value> {
     METHODS
         .iter()
@@ -296,7 +304,7 @@ fn method_contracts() -> Vec<Value> {
                 "method":method,
                 "access":if read_only { "read" } else { "write" },
                 "scope":required_scope(method),
-                "idempotent":read_only,
+                "idempotent":is_idempotent(method),
             })
         })
         .collect()
@@ -375,5 +383,14 @@ mod tests {
         let capabilities = capabilities(0);
         assert_eq!(capabilities["limits"]["terminal_stream_capacity"], 8);
         assert_eq!(capabilities["limits"]["terminal_stream_queue"], 2);
+        assert!(is_idempotent("pane.list"));
+        for stream in [
+            "events.subscribe",
+            "terminal.backend.events.subscribe",
+            "terminal.backend.observe",
+        ] {
+            assert!(is_read_only(stream));
+            assert!(!is_idempotent(stream));
+        }
     }
 }

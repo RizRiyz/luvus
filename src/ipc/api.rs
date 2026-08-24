@@ -262,12 +262,15 @@ pub fn socket_stats() -> Value {
     })
 }
 
-fn authorize_request(method: &str, auth: Option<&str>) -> Result<(), &'static str> {
+fn authorize_request(
+    method: &str,
+    auth: Option<&str>,
+) -> Result<Option<Vec<String>>, &'static str> {
     let Some(secret) = auth else {
         // The owner-only local transport remains the full-authority boundary.
         // Tokens are for deliberately delegated harnesses, not a replacement
         // for the operating-system account boundary.
-        return Ok(());
+        return Ok(None);
     };
     let mut store = auth_store()
         .lock()
@@ -286,10 +289,17 @@ fn authorize_request(method: &str, auth: Option<&str>) -> Result<(), &'static st
                 && required != "admin"
                 && crate::api::capabilities::is_read_only(method))
     });
-    allowed.then_some(()).ok_or("auth token scope denied")
+    allowed
+        .then(|| (method == "socket.token.create").then(|| token.scopes.clone()))
+        .ok_or("auth token scope denied")
 }
 
-fn handle_auth_method(id: &str, method: &str, params: &Value) -> Option<String> {
+fn handle_auth_method(
+    id: &str,
+    method: &str,
+    params: &Value,
+    caller_scopes: Option<&[String]>,
+) -> Option<String> {
     match method {
         "socket.stats" => Some(json!({"id":id,"result":socket_stats()}).to_string()),
         "socket.token.create" => {
@@ -320,6 +330,16 @@ fn handle_auth_method(id: &str, method: &str, params: &Value) -> Option<String> 
                 return Some(json!({"id":id,"error":{"code":"invalid_request",
                     "message":"scopes must be a non-empty known scope array and ttl_s must be 1..86400"}}).to_string());
             };
+            if caller_scopes.is_some_and(|caller| {
+                !caller.iter().any(|scope| scope == "all")
+                    && scopes.iter().any(|scope| !caller.contains(scope))
+            }) {
+                return Some(
+                    json!({"id":id,"error":{"code":"forbidden",
+                    "message":"delegated tokens cannot grant scopes the caller does not have"}})
+                    .to_string(),
+                );
+            }
             let mut store = match auth_store().lock() {
                 Ok(store) => store,
                 Err(_) => return Some(json!({"id":id,"error":{"code":"unavailable","message":"authorization unavailable"}}).to_string()),
@@ -1267,6 +1287,7 @@ pub fn start_server(listener: transport::Listener, event_tx: Sender<AppEvent>, b
                 }
                 let Some(permit) = ConnectionPermit::acquire() else {
                     REJECTED_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
+                    #[cfg(not(windows))]
                     let _ = stream.set_timeouts(INITIAL_FRAME_POLL);
                     let response = json!({"id":"0","error":{
                         "code":"server_busy",
@@ -1295,7 +1316,16 @@ fn handle_conn(
     _permit: ConnectionPermit,
 ) {
     let mut writer = stream.clone();
-    let frame = match read_initial_frame(&mut stream, INITIAL_FRAME_TIMEOUT) {
+    let initial_frame = read_initial_frame(&mut stream, INITIAL_FRAME_TIMEOUT);
+    // Windows implements the initial-frame deadline with PIPE_NOWAIT because
+    // named pipes have no kernel read timeout. Restore blocking mode before
+    // writing a one-shot response; a nonblocking pipe can close before even a
+    // ready reader receives the first byte.
+    #[cfg(windows)]
+    if stream.set_blocking().is_err() {
+        return;
+    }
+    let frame = match initial_frame {
         Ok(frame) => frame,
         Err(FrameError::TooLarge) => {
             let _ = write_response(
@@ -1312,6 +1342,7 @@ fn handle_conn(
         Err(_) => return,
     };
     let _request_metrics = RequestMetrics::start(frame.len());
+    #[cfg(not(windows))]
     let _ = writer.set_send_timeout(INITIAL_FRAME_TIMEOUT);
     let mut reader = BufReader::new(stream);
     let payload = &frame[..frame.len().saturating_sub(1)];
@@ -1420,12 +1451,16 @@ fn handle_conn(
         }
     }
 
-    if let Err(message) = authorize_request(&method, auth) {
-        let response = json!({"id":id,"error":{"code":"forbidden","message":message}}).to_string();
-        let _ = write_response(&mut writer, &id, &response);
-        return;
-    }
-    if let Some(response) = handle_auth_method(&id, &method, &params) {
+    let delegated_scopes = match authorize_request(&method, auth) {
+        Ok(scopes) => scopes,
+        Err(message) => {
+            let response =
+                json!({"id":id,"error":{"code":"forbidden","message":message}}).to_string();
+            let _ = write_response(&mut writer, &id, &response);
+            return;
+        }
+    };
+    if let Some(response) = handle_auth_method(&id, &method, &params, delegated_scopes.as_deref()) {
         let _ = write_response(&mut writer, &id, &response);
         return;
     }
@@ -1563,6 +1598,16 @@ fn handle_conn(
                     matched = Some(value);
                     break 'wait;
                 }
+            }
+            if !subscription.active.load(Ordering::Acquire) {
+                let dropped_at = subscription.overflow_sequence.load(Ordering::Acquire);
+                unsubscribe(&bus, sub_id);
+                let response = json!({"id":id,"error":{"code":"resync_required",
+                    "message":"event history was dropped before the wait completed",
+                    "sequence":dropped_at.max(fence)}})
+                .to_string();
+                let _ = write_response(&mut writer, &id, &response);
+                return;
             }
             if std::time::Instant::now() >= deadline {
                 break;
@@ -2428,6 +2473,47 @@ mod tests {
     }
 
     #[test]
+    fn event_wait_requires_resync_when_its_bounded_queue_overflows() {
+        let _env = crate::persist::test_env("ew-of");
+        let root = crate::persist::ensure_config_dir();
+        let path = root.join("w.sock");
+        let lock = transport::acquire_server_startup_lock(&root).unwrap();
+        let listener = bind_server(&path, &lock).unwrap();
+        let (events, _rx) = mpsc::channel();
+        let bus = new_bus();
+        start_server(listener, events, bus.clone());
+        drop(lock);
+
+        let client_path = path.clone();
+        let client = thread::spawn(move || {
+            let mut stream = transport::connect(&client_path).unwrap();
+            writeln!(
+                stream,
+                "{}",
+                json!({"id":"wait-overflow","method":"events.wait",
+                "params":{"event":"never.matches","timeout_s":2}})
+            )
+            .unwrap();
+            let mut response = String::new();
+            BufReader::new(stream).read_line(&mut response).unwrap();
+            serde_json::from_str::<Value>(&response).unwrap()
+        });
+        for _ in 0..100 {
+            if bus.0.lock().unwrap().subscribers.len() == 1 {
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(2));
+        }
+        for index in 0..=EVENT_QUEUE_CAPACITY {
+            publish_event(&bus, "pane.test", json!({"index":index}));
+        }
+        let response = client.join().unwrap();
+        assert_eq!(response["error"]["code"], "resync_required");
+        assert!(response["error"]["sequence"].as_u64().unwrap() > 0);
+        assert!(bus.0.lock().unwrap().subscribers.is_empty());
+    }
+
+    #[test]
     fn agent_wait_parks_on_the_app_loop_with_validated_state_and_timeout() {
         let _env = crate::persist::test_env("agent-wait-api");
         let root = crate::persist::ensure_config_dir();
@@ -2634,6 +2720,7 @@ mod tests {
                 "create",
                 "socket.token.create",
                 &json!({"scopes":["read"],"ttl_s":60}),
+                None,
             )
             .unwrap(),
         )
@@ -2645,10 +2732,53 @@ mod tests {
             authorize_request("workspace.close", Some(secret)),
             Err("auth token scope denied")
         );
-        handle_auth_method("revoke", "socket.token.revoke", &json!({"id":token_id})).unwrap();
+        handle_auth_method(
+            "revoke",
+            "socket.token.revoke",
+            &json!({"id":token_id}),
+            None,
+        )
+        .unwrap();
         assert_eq!(
             authorize_request("workspace.get", Some(secret)),
             Err("invalid or expired auth token")
         );
+
+        let admin: Value = serde_json::from_str(
+            &handle_auth_method(
+                "admin",
+                "socket.token.create",
+                &json!({"scopes":["admin"],"ttl_s":60}),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let admin_secret = admin["result"]["token"].as_str().unwrap();
+        let caller = authorize_request("socket.token.create", Some(admin_secret))
+            .unwrap()
+            .unwrap();
+        let escalated: Value = serde_json::from_str(
+            &handle_auth_method(
+                "escalate",
+                "socket.token.create",
+                &json!({"scopes":["all"],"ttl_s":60}),
+                Some(&caller),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(escalated["error"]["code"], "forbidden");
+        let delegated: Value = serde_json::from_str(
+            &handle_auth_method(
+                "delegate",
+                "socket.token.create",
+                &json!({"scopes":["admin"],"ttl_s":60}),
+                Some(&caller),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(delegated["result"]["scopes"], json!(["admin"]));
     }
 }

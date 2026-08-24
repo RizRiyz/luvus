@@ -1,8 +1,9 @@
 # Luvus Socket API 1.0
 
 The Socket API is the complete server-owned Luvus control surface. It uses one
-newline-delimited JSON request and response per connection. Streaming event
-subscriptions are the documented exception.
+newline-delimited JSON request and response per connection. Event subscriptions
+and Terminal observe/control requests are the documented exceptions: those
+connections become bounded streams after their initial response.
 
 UHP Runtime and Terminal remain independently versioned profiles on the same
 endpoint. Their 1.0 contracts are not changed by this schema.

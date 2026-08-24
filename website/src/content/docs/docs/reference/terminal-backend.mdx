@@ -152,8 +152,9 @@ be inspected manually with `nc -U` after replacing the identity fields with an
 inventory result:
 
 ```sh
+socket=$(luvus session list --json | jq -r '.sessions[] | select(.default and .running) | .endpoint.address' | head -n 1)
 printf '%s\n' '{"id":"watch-1","method":"terminal.backend.observe","params":{"server_generation":"...","terminal_id":"...","pane_id":"7","mode":"visible","lines":80,"ansi":true}}' \
-  | nc -U ~/.luvus/luvus.sock
+  | nc -U "$socket"
 ```
 
 `schema` is local and works without a running server. The other commands target

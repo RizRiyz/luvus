@@ -57,7 +57,7 @@ mod socket_api_tests {
         app.dispatch(
             "pane.swap",
             &json!({
-                "pane":first.0.to_string(), "with":second.0.to_string()
+                "pane":first.0, "with":second.0
             }),
         )
         .unwrap();
@@ -152,6 +152,50 @@ mod socket_api_tests {
             .unwrap();
         assert_eq!(result["config"]["check_updates"], false);
         assert!(!app.config.check_updates);
+
+        app.dispatch(
+            "config.patch",
+            &json!({"patch":{"keybindings":{"new-command":"ctrl+n"}}}),
+        )
+        .unwrap();
+        assert_eq!(
+            app.config
+                .keybindings
+                .get("new-command")
+                .map(String::as_str),
+            Some("ctrl+n")
+        );
+        app.dispatch(
+            "config.patch",
+            &json!({"patch":{"mission_pricing":{"new-model":[1.0,2.0,0.5]}}}),
+        )
+        .unwrap();
+        assert_eq!(
+            app.config.mission_pricing.get("new-model"),
+            Some(&[1.0, 2.0, 0.5])
+        );
+    }
+
+    #[test]
+    fn workspace_metadata_partial_updates_preserve_the_other_counter() {
+        let (_env, mut app) = app("socket-workspace-metadata");
+        app.dispatch(
+            "workspace.report_metadata",
+            &json!({"workspace":0,"ahead":4,"behind":7}),
+        )
+        .unwrap();
+        app.dispatch(
+            "workspace.report_metadata",
+            &json!({"workspace":0,"ahead":9}),
+        )
+        .unwrap();
+        assert_eq!(app.workspaces[0].git_ahead_behind, Some((9, 7)));
+        app.dispatch(
+            "workspace.report_metadata",
+            &json!({"workspace":0,"behind":2}),
+        )
+        .unwrap();
+        assert_eq!(app.workspaces[0].git_ahead_behind, Some((9, 2)));
     }
 
     #[test]
@@ -1385,7 +1429,9 @@ impl App {
                     workspace.branch = branch;
                 }
                 if ahead.is_some() || behind.is_some() {
-                    workspace.git_ahead_behind = Some((ahead.unwrap_or(0), behind.unwrap_or(0)));
+                    let current = workspace.git_ahead_behind.unwrap_or_default();
+                    workspace.git_ahead_behind =
+                        Some((ahead.unwrap_or(current.0), behind.unwrap_or(current.1)));
                 }
                 self.emit_event(
                     "workspace.metadata_reported",
@@ -1865,17 +1911,15 @@ impl App {
             "pane.swap" => {
                 reject_api_fields(p, &["pane", "with"])?;
                 let first = self.resolve_pane(p).ok_or_else(not_found)?;
-                let second = p
-                    .get("with")
-                    .and_then(Value::as_str)
-                    .and_then(|raw| raw.parse::<u32>().ok())
-                    .map(PaneId)
-                    .ok_or_else(|| {
+                let second = PaneId(parse_u32_value(
+                    p.get("with").ok_or_else(|| {
                         (
                             "invalid_request".to_string(),
                             "with must be a pane id".to_string(),
                         )
-                    })?;
+                    })?,
+                    "with",
+                )?);
                 let first_location = self.pane_location(first).ok_or_else(not_found)?;
                 let second_location = self.pane_location(second).ok_or_else(not_found)?;
                 if first_location != second_location {
@@ -5338,13 +5382,18 @@ fn merge_known_fields(
             format!("{path} cannot be patched as an object"),
         )
     })?;
+    let dynamic_map = matches!(path, "config.keybindings" | "config.mission_pricing");
     for (key, value) in patch {
-        let existing = target.get_mut(key).ok_or_else(|| {
-            (
+        let Some(existing) = target.get_mut(key) else {
+            if dynamic_map {
+                target.insert(key.clone(), value.clone());
+                continue;
+            }
+            return Err((
                 "invalid_request".to_string(),
                 format!("unknown config field {path}.{key}"),
-            )
-        })?;
+            ));
+        };
         if existing.is_object() && value.is_object() {
             merge_known_fields(existing, value, &format!("{path}.{key}"))?;
         } else {

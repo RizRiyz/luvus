@@ -1,0 +1,2 @@
+{"event":"terminal.frame","sequence":15,"data":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","content_revision":5,"mode":"visible","ansi":true,"text":"ready","lines":1,"bytes":4,"truncated":false}}
+{"event":"terminal.frame","sequence":15,"data":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","content_revision":5,"mode":"visible","ansi":true,"text":"first\nsecond","lines":1,"bytes":12,"truncated":false}}
