@@ -2112,45 +2112,47 @@ impl App {
                     let (pane, module_rec) = match restored {
                         Some((p, rec)) => (p, Some(rec)),
                         None => {
-                            // A pane whose saved cwd vanished (deleted project
-                            // dir, unmounted volume) must not cost the whole
-                            // session: fall back to the workspace dir, then
-                            // home, before giving up on just this one pane.
+                            // Resolve a usable cwd before handing the shell to
+                            // the deferred worker. Session loading must not wait
+                            // for macOS/Linux/Windows PTY allocation, which can
+                            // occasionally stall inside the OS. The saved screen
+                            // is still replayed synchronously for the first frame.
                             let home = crate::platform::home_dir().unwrap_or_default();
-                            let mut spawned = None;
-                            for cwd in [&ps.cwd, &ws.cwd, &home] {
-                                let attempt = match &resume_argv {
-                                    Some(argv) => Pane::spawn_shell_with(
-                                        id,
-                                        80,
-                                        24,
-                                        cwd.clone(),
-                                        app_tx.clone(),
-                                        ps.screen.as_deref(),
-                                        &shell,
-                                        argv,
-                                        history_budget_bytes,
-                                    ),
-                                    None => Pane::spawn(
-                                        id,
-                                        80,
-                                        24,
-                                        cwd.clone(),
-                                        app_tx.clone(),
-                                        ps.screen.as_deref(),
-                                        &shell,
-                                        history_budget_bytes,
-                                    ),
-                                };
-                                if let Ok(p) = attempt {
-                                    spawned = Some(p);
-                                    break;
-                                }
-                            }
-                            match spawned {
-                                Some(p) => (p, None),
-                                None => continue, // skip this pane, keep the rest
-                            }
+                            let Some(cwd) = [&ps.cwd, &ws.cwd, &home]
+                                .into_iter()
+                                .find(|cwd| cwd.is_dir())
+                                .cloned()
+                            else {
+                                continue;
+                            };
+                            let pane = match &resume_argv {
+                                Some(argv) => Pane::spawn_shell_with_deferred(
+                                    id,
+                                    80,
+                                    24,
+                                    cwd,
+                                    app_tx.clone(),
+                                    ps.screen.as_deref(),
+                                    &shell,
+                                    argv,
+                                    history_budget_bytes,
+                                )
+                                .ok(),
+                                None => Some(Pane::spawn_restored(
+                                    id,
+                                    80,
+                                    24,
+                                    cwd,
+                                    app_tx.clone(),
+                                    ps.screen.as_deref(),
+                                    &shell,
+                                    history_budget_bytes,
+                                )),
+                            };
+                            let Some(pane) = pane else {
+                                continue;
+                            };
+                            (pane, None)
                         }
                     };
                     let direct_resume = resume_argv.is_some() && module_rec.is_none();

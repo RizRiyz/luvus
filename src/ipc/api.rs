@@ -556,25 +556,36 @@ fn read_frame(reader: &mut impl BufRead) -> Result<Vec<u8>, FrameError> {
     }
 }
 
-fn read_text_frame(reader: &mut impl BufRead, kind: &str) -> io::Result<String> {
-    let frame = read_frame(reader).map_err(|error| {
-        let (kind, message) = match error {
-            FrameError::TooLarge => (
-                io::ErrorKind::InvalidData,
-                format!("{kind} frame is too large"),
-            ),
-            FrameError::MissingLf => (
-                io::ErrorKind::UnexpectedEof,
-                format!("{kind} is missing LF"),
-            ),
-            FrameError::Eof => (io::ErrorKind::UnexpectedEof, format!("{kind} is empty")),
-            FrameError::Timeout => (io::ErrorKind::TimedOut, format!("{kind} timed out")),
-            FrameError::Io => (io::ErrorKind::Other, format!("{kind} read failed")),
-        };
-        io::Error::new(kind, message)
-    })?;
+fn frame_error(error: FrameError, frame_kind: &str) -> io::Error {
+    let (kind, message) = match error {
+        FrameError::TooLarge => (
+            io::ErrorKind::InvalidData,
+            format!("{frame_kind} frame is too large"),
+        ),
+        FrameError::MissingLf => (
+            io::ErrorKind::UnexpectedEof,
+            format!("{frame_kind} is missing LF"),
+        ),
+        FrameError::Eof => (
+            io::ErrorKind::UnexpectedEof,
+            format!("{frame_kind} is empty"),
+        ),
+        FrameError::Timeout => (io::ErrorKind::TimedOut, format!("{frame_kind} timed out")),
+        FrameError::Io => (io::ErrorKind::Other, format!("{frame_kind} read failed")),
+    };
+    io::Error::new(kind, message)
+}
+
+fn frame_text(frame: Vec<u8>, kind: &str) -> io::Result<String> {
     String::from_utf8(frame[..frame.len() - 1].to_vec())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("{kind} is not UTF-8")))
+}
+
+fn read_text_frame(reader: &mut impl BufRead, kind: &str) -> io::Result<String> {
+    frame_text(
+        read_frame(reader).map_err(|error| frame_error(error, kind))?,
+        kind,
+    )
 }
 
 /// Read one bounded frame from a long-lived event stream. A clean EOF ends the
@@ -614,6 +625,17 @@ pub(crate) fn read_request_frame(reader: &mut impl BufRead) -> io::Result<String
 /// Read one bounded ordinary API response for CLI and adapter callers.
 pub(crate) fn read_response_frame(reader: &mut impl BufRead) -> io::Result<String> {
     read_text_frame(reader, "response")
+}
+
+/// Read one ordinary API response with an application deadline. Lifecycle
+/// commands use this so an unresponsive app loop cannot block a terminal.
+pub(crate) fn read_response_frame_with_deadline(
+    stream: &mut Conn,
+    timeout: std::time::Duration,
+) -> io::Result<String> {
+    let frame =
+        read_initial_frame(stream, timeout).map_err(|error| frame_error(error, "response"))?;
+    frame_text(frame, "response")
 }
 
 fn write_response(writer: &mut impl Write, id: &str, response: &str) -> io::Result<()> {
@@ -2173,6 +2195,37 @@ mod tests {
         let mut oversized =
             std::io::Cursor::new(vec![b'x'; crate::terminal::backend::MAX_FRAME_BYTES + 1]);
         assert_eq!(read_frame(&mut oversized), Err(FrameError::TooLarge));
+    }
+
+    #[test]
+    fn deadline_response_reader_does_not_wait_for_a_silent_peer() {
+        let path = std::env::temp_dir().join(format!(
+            "luvus-response-deadline-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = transport::bind(&path).expect("bind test control socket");
+        let worker = std::thread::spawn(move || {
+            let _connection = transport::incoming(&listener)
+                .next()
+                .expect("accept test connection");
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        });
+
+        let mut client = transport::connect(&path).expect("connect test control socket");
+        writeln!(client, "request").unwrap();
+        let started = std::time::Instant::now();
+        let error =
+            read_response_frame_with_deadline(&mut client, std::time::Duration::from_millis(100))
+                .expect_err("silent peer must time out");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "deadline reader blocked too long"
+        );
+        worker.join().unwrap();
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

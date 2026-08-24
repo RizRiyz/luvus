@@ -53,6 +53,8 @@ use ratatui::DefaultTerminal;
 use crate::app::App;
 use crate::event::AppEvent;
 
+const SERVER_CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
+
 fn main() -> Result<()> {
     // Run the whole process at 1ms timer resolution so the event loop's timed
     // waits aren't quantized to Windows' ~15.6ms default (the cause of laggy
@@ -402,12 +404,14 @@ fn autodetect_and_attach() -> Result<()> {
         // none of the new version shows up — tell the user how to load it (the
         // brief pause keeps the note readable before the UI takes the screen).
         let binary = env!("CARGO_PKG_VERSION");
-        if let Some(running) = server_version().filter(|running| running != binary) {
-            eprintln!(
-                "luvus v{binary} installed, but the running server is v{running} — \
-                 run `luvus server restart` to load it (your session is saved and restored)."
-            );
-            thread::sleep(Duration::from_millis(2000));
+        if let Ok(running) = server_version() {
+            if running != binary {
+                eprintln!(
+                    "luvus v{binary} installed, but the running server is v{running} — \
+                     run `luvus server restart` to load it (your session is saved and restored)."
+                );
+                thread::sleep(Duration::from_millis(2000));
+            }
         }
     }
     // Always ask the server to open the launch folder. A *fresh* server may have
@@ -676,11 +680,11 @@ fn server_start() -> Result<()> {
 
 fn server_stop() -> Result<()> {
     let sock = persist::client_socket_path();
-    if send_server_stop() {
+    if send_server_stop()? {
         // The server acks before it actually exits, so wait for it to release the
         // socket — then `stop` returning means it's really down (and a following
         // `status` reports "not running", not a half-shutdown "running").
-        wait_for_shutdown(&sock);
+        wait_for_shutdown(&sock)?;
         println!("luvus server stopped (session {})", session::display_name());
     } else {
         println!("no luvus server running");
@@ -692,8 +696,8 @@ fn server_stop() -> Result<()> {
 /// the way to load a newly-installed binary without rebooting a live session.
 fn server_restart() -> Result<()> {
     let sock = persist::client_socket_path();
-    if send_server_stop() {
-        wait_for_shutdown(&sock);
+    if send_server_stop()? {
+        wait_for_shutdown(&sock)?;
     }
     spawn_server()?;
     wait_for_socket(&sock)?;
@@ -706,13 +710,16 @@ fn server_restart() -> Result<()> {
 
 /// Poll (bounded) until the server releases its socket, so `stop`/`restart`
 /// return only once the old server is truly gone.
-fn wait_for_shutdown(sock: &Path) {
+fn wait_for_shutdown(sock: &Path) -> Result<()> {
     for _ in 0..100 {
         if !server_running(sock) {
-            return;
+            return Ok(());
         }
         thread::sleep(Duration::from_millis(50));
     }
+    Err(anyhow!(
+        "luvus server did not stop in time; refusing to start a second server"
+    ))
 }
 
 /// Report whether a server is up and, if so, the version it's *running* — which
@@ -727,7 +734,7 @@ fn server_status() -> Result<()> {
         return Ok(());
     }
     match server_version() {
-        Some(running) => {
+        Ok(running) => {
             println!(
                 "luvus server: running (v{running}, session {})",
                 session::display_name()
@@ -739,36 +746,60 @@ fn server_status() -> Result<()> {
                 );
             }
         }
-        None => println!(
-            "luvus server: running (session {})",
-            session::display_name()
-        ),
+        Err(error) => {
+            return Err(anyhow!(
+                "luvus server is running but did not answer: {error}"
+            ));
+        }
     }
     Ok(())
 }
 
-/// Send `server.stop` to a running server; returns whether one answered.
-fn send_server_stop() -> bool {
-    match ipc::transport::connect(&persist::socket_path()) {
-        Ok(mut s) => {
-            let _ = writeln!(s, r#"{{"id":"1","method":"server.stop","params":{{}}}}"#);
-            // Read the ack so the server has processed the request before we return.
-            let mut line = String::new();
-            let _ = BufReader::new(s).read_line(&mut line);
-            true
-        }
-        Err(_) => false,
+/// Send `server.stop` to a running server; returns whether one was present.
+fn send_server_stop() -> Result<bool> {
+    if !server_running(&persist::client_socket_path()) {
+        return Ok(false);
     }
+    let response = server_control_request("server.stop")?;
+    let acknowledged = response
+        .get("result")
+        .and_then(|result| result.get("type"))
+        .and_then(serde_json::Value::as_str)
+        == Some("ok");
+    if !acknowledged {
+        return Err(anyhow!("luvus server returned an invalid stop response"));
+    }
+    Ok(true)
 }
 
-/// Ask the running server its version via `ping`. `None` if unreachable/unparsable.
-fn server_version() -> Option<String> {
-    let mut s = ipc::transport::connect(&persist::socket_path()).ok()?;
-    writeln!(s, r#"{{"id":"1","method":"ping","params":{{}}}}"#).ok()?;
-    let mut line = String::new();
-    BufReader::new(s).read_line(&mut line).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&line).ok()?;
-    v.get("result")?.get("version")?.as_str().map(String::from)
+/// Ask the running server its version via `ping`.
+fn server_version() -> Result<String> {
+    let response = server_control_request("ping")?;
+    response
+        .get("result")
+        .and_then(|result| result.get("version"))
+        .and_then(serde_json::Value::as_str)
+        .map(String::from)
+        .ok_or_else(|| anyhow!("luvus server returned an invalid ping response"))
+}
+
+/// Perform one lifecycle request with a bounded response wait. This keeps
+/// `status`, `stop`, and `restart` responsive when a socket exists but the app
+/// loop cannot answer, including through Windows named pipes.
+fn server_control_request(method: &str) -> Result<serde_json::Value> {
+    let mut stream = ipc::transport::connect(&persist::socket_path())
+        .map_err(|error| anyhow!("cannot connect to luvus server: {error}"))?;
+    writeln!(stream, r#"{{"id":"1","method":"{method}","params":{{}}}}"#)?;
+    let frame = ipc::api::read_response_frame_with_deadline(&mut stream, SERVER_CONTROL_TIMEOUT)?;
+    let response: serde_json::Value = serde_json::from_str(&frame)
+        .map_err(|error| anyhow!("invalid server control response: {error}"))?;
+    if response.get("id").and_then(serde_json::Value::as_str) != Some("1") {
+        return Err(anyhow!("server control response id does not match request"));
+    }
+    if let Some(error) = response.get("error") {
+        return Err(anyhow!("server rejected control request: {error}"));
+    }
+    Ok(response)
 }
 
 fn run(terminal: &mut DefaultTerminal) -> Result<()> {

@@ -359,11 +359,77 @@ impl Pane {
             rows,
             cwd,
             app_tx,
+            None,
             cmd,
             basename(shell),
             &[],
             history_budget_bytes,
         )
+    }
+
+    /// Restore an interactive shell pane without making session loading wait
+    /// for the operating system to allocate its PTY. The saved screen is
+    /// replayed before this returns, so clients can render useful content while
+    /// the shell starts in the background.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_restored(
+        id: PaneId,
+        cols: u16,
+        rows: u16,
+        cwd: PathBuf,
+        app_tx: Sender<AppEvent>,
+        initial: Option<&str>,
+        shell: &str,
+        history_budget_bytes: usize,
+    ) -> Pane {
+        let cmd = CommandBuilder::new(shell);
+        Self::build_deferred(
+            id,
+            cols,
+            rows,
+            cwd,
+            app_tx,
+            initial,
+            cmd,
+            basename(shell),
+            &[],
+            history_budget_bytes,
+        )
+    }
+
+    /// Deferred counterpart to [`Pane::spawn_shell_with`] for restoring a
+    /// PowerShell agent session without blocking server startup.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_shell_with_deferred(
+        id: PaneId,
+        cols: u16,
+        rows: u16,
+        cwd: PathBuf,
+        app_tx: Sender<AppEvent>,
+        initial: Option<&str>,
+        shell: &str,
+        argv: &[String],
+        history_budget_bytes: usize,
+    ) -> Result<Pane> {
+        let Some((program, args)) = argv.split_first() else {
+            return Err(anyhow::anyhow!("empty shell command"));
+        };
+        let mut cmd = CommandBuilder::new(program);
+        for arg in args {
+            cmd.arg(arg);
+        }
+        Ok(Self::build_deferred(
+            id,
+            cols,
+            rows,
+            cwd,
+            app_tx,
+            initial,
+            cmd,
+            basename(shell),
+            &[],
+            history_budget_bytes,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -469,6 +535,7 @@ impl Pane {
         rows: u16,
         cwd: PathBuf,
         app_tx: Sender<AppEvent>,
+        initial: Option<&str>,
         mut cmd: CommandBuilder,
         command: String,
         extra_env: &[(String, String)],
@@ -483,6 +550,11 @@ impl Pane {
             input_tx.clone(),
             history_budget_bytes,
         )));
+        if let Some(screen) = initial {
+            if let Ok(mut engine) = engine.lock() {
+                engine.advance(screen.as_bytes());
+            }
+        }
 
         // The writer thread starts with the pane and blocks until the spawn
         // worker hands over the PTY writer; bytes sent meanwhile queue in
@@ -1125,6 +1197,29 @@ mod reap_tests {
             pane.child_pid.load(Ordering::SeqCst),
             0,
             "the worker forked the child"
+        );
+    }
+
+    #[test]
+    fn restored_deferred_pane_replays_saved_screen_immediately() {
+        let (tx, _rx) = mpsc::channel();
+        let pane = Pane::spawn_restored(
+            PaneId::alloc(),
+            80,
+            24,
+            std::env::temp_dir(),
+            tx,
+            Some("RESTORED-SCREEN\r\n"),
+            "/bin/sh",
+            500,
+        );
+        assert!(
+            pane.engine
+                .lock()
+                .unwrap()
+                .detection_text(24)
+                .contains("RESTORED-SCREEN"),
+            "saved content is visible without waiting for the PTY worker"
         );
     }
 
