@@ -40,6 +40,7 @@ pub struct FolderPicker {
 
 /// A selectable row in the picker. The action rows lead; the directory entries
 /// follow. The "open with worktree" row only exists when the folder is a repo.
+#[derive(Debug)]
 pub enum Row {
     /// Open the browsed folder as a workspace.
     OpenFolder,
@@ -54,13 +55,13 @@ pub enum Row {
 }
 
 /// Mouse targets rendered by the picker. Modal is last in hit-test order so
-/// rows and the Go-to footer remain interactive while inert modal space simply
+/// rows and the footer hints remain interactive while inert modal space simply
 /// keeps the picker open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PickerHit {
     Row(usize),
-    GoTo,
-    ToggleHidden,
+    /// A footer key hint; a click behaves exactly like pressing that key.
+    Hint(KeyCode),
     Modal,
 }
 
@@ -132,6 +133,13 @@ impl App {
 
     /// Re-read the browsed path's entries (folders + files), dirs first.
     fn picker_refresh(&mut self) {
+        // Remember which entry the cursor highlights so filter changes (e.g.
+        // `.` hiding dotfiles) re-anchor the selection by identity instead of
+        // leaving it at a numeric index that may now point elsewhere.
+        let selected = self.picker.as_ref().and_then(|p| match p.row(p.cursor) {
+            Row::Entry(idx) => p.entries.get(idx).map(|e| e.name.clone()),
+            _ => None,
+        });
         if let Some(p) = self.picker.as_mut() {
             let mut entries: Vec<Entry> = std::fs::read_dir(&p.path)
                 .map(|rd| {
@@ -154,6 +162,15 @@ impl App {
                     .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
             });
             p.entries = entries;
+            if let Some(name) = selected {
+                match p.entries.iter().position(|e| e.name == name) {
+                    Some(pos) => p.cursor = p.leading() + pos,
+                    // Highlighted entry was filtered out: fall back to the
+                    // last fixed action row instead of letting the stale
+                    // index land on some other directory.
+                    None => p.cursor = p.leading() - 1,
+                }
+            }
             p.is_repo = crate::git::local::is_repo(&p.path);
             p.cursor = p.cursor.min(p.row_count().saturating_sub(1));
         }
@@ -505,6 +522,38 @@ mod tests {
         assert!(!app.picker.as_ref().unwrap().show_hidden);
         assert!(!entries.iter().any(|e| e.name == ".secret"));
 
+        // Selection survives `.` filter changes by identity, not index:
+        // dotfiles sort before "readme.txt", so toggling shifts indices — the
+        // highlight must stay on the same entry.
+        let leading = app.picker.as_ref().unwrap().leading();
+        let readme_idx = entries
+            .iter()
+            .position(|e| e.name == "readme.txt")
+            .unwrap();
+        app.picker.as_mut().unwrap().cursor = leading + readme_idx;
+        app.handle_picker_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE));
+        {
+            let p = app.picker.as_ref().unwrap();
+            match p.row(p.cursor) {
+                Row::Entry(i) => assert_eq!(p.entries[i].name, "readme.txt"),
+                other => panic!("expected readme.txt selected, got {:?}", other),
+            }
+        }
+        // Cursor on a dotfile that gets filtered out → falls back to an
+        // action row instead of silently landing on an unrelated directory.
+        let secret_idx = app
+            .picker
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .position(|e| e.name == ".secret")
+            .unwrap();
+        app.picker.as_mut().unwrap().cursor = leading + secret_idx;
+        app.handle_picker_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE));
+        let p = app.picker.as_ref().unwrap();
+        assert!(!matches!(p.row(p.cursor), Row::Entry(_)));
+
         // Cursor 0 = "use this folder" → opens the browsed folder as a workspace.
         app.picker.as_mut().unwrap().cursor = 0;
         app.handle_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -663,7 +712,7 @@ mod tests {
         let go_to = app
             .picker_rects
             .iter()
-            .find_map(|(hit, rect)| (*hit == PickerHit::GoTo).then_some(*rect))
+            .find_map(|(hit, rect)| (*hit == PickerHit::Hint(KeyCode::Char('g'))).then_some(*rect))
             .expect("Go to footer hit target");
         app.handle_event(AppEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
