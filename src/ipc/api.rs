@@ -555,8 +555,20 @@ fn handle_conn(stream: Conn, event_tx: Sender<AppEvent>, bus: EventBus) {
                 }
                 Ok(0) => break,
                 Ok(_) => {}
-                Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    if timeout_mode == Some(transport::TimeoutMode::Nonblocking) {
+                        thread::sleep(std::time::Duration::from_millis(25));
+                    }
+                }
+                Err(error)
+                    if timeout_mode == Some(transport::TimeoutMode::Nonblocking)
+                        && transport::nonblocking_read_pending(&error) =>
+                {
                     thread::sleep(std::time::Duration::from_millis(25));
                 }
                 Err(_) => break,
@@ -770,6 +782,12 @@ fn wait_for_parked_reply(
                 if timeout_mode == Some(transport::TimeoutMode::Nonblocking) {
                     thread::sleep(std::time::Duration::from_millis(25));
                 }
+            }
+            Err(error)
+                if timeout_mode == Some(transport::TimeoutMode::Nonblocking)
+                    && transport::nonblocking_read_pending(&error) =>
+            {
+                thread::sleep(std::time::Duration::from_millis(25));
             }
             Err(_) => break,
         }

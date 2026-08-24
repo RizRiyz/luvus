@@ -127,6 +127,23 @@ impl Conn {
     }
 }
 
+/// Whether a nonblocking local-socket read should be retried. Windows reports
+/// `ERROR_NO_DATA` for a connected PIPE_NOWAIT stream with no input available,
+/// and Rust maps that code to `BrokenPipe` rather than `WouldBlock`.
+pub fn nonblocking_read_pending(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        error.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_NO_DATA as i32)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 impl Read for Conn {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         (&*self.0).read(buf)
@@ -379,7 +396,8 @@ mod tests {
 
 #[cfg(all(test, windows))]
 mod windows_tests {
-    use super::{legacy_pipe_id, pipe_id};
+    use super::{legacy_pipe_id, nonblocking_read_pending, pipe_id};
+    use std::io;
     use std::path::Path;
 
     #[test]
@@ -404,5 +422,13 @@ mod windows_tests {
             current.strip_prefix("luvus-"),
             legacy.strip_prefix("bohay-")
         );
+    }
+
+    #[test]
+    fn pipe_nowait_no_data_is_retryable_despite_broken_pipe_kind() {
+        let error =
+            io::Error::from_raw_os_error(windows_sys::Win32::Foundation::ERROR_NO_DATA as i32);
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert!(nonblocking_read_pending(&error));
     }
 }

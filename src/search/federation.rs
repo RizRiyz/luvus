@@ -270,7 +270,7 @@ fn request_nonblocking(
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(error) if crate::ipc::transport::nonblocking_read_pending(&error) => {
                 wait_for_io(deadline)?;
             }
             Err(error) => return Err(format!("session search timed out or failed: {error}")),
