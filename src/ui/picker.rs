@@ -127,8 +127,11 @@ pub(super) fn draw_picker(
         );
         for (i, (key, label, code)) in hints.iter().enumerate() {
             let x = inner.x.saturating_add(hint_x[i]);
-            let w = (display_width(key) + 1 + display_width(label))
-                .min(inner.width.saturating_sub(x - inner.x).max(1) as usize);
+            let available = inner.right().saturating_sub(x);
+            if available == 0 {
+                continue;
+            }
+            let w = (display_width(key) + 1 + display_width(label)).min(available as usize);
             footer_hints.push((PickerHit::Hint(*code), Rect::new(x, footer_y, w as u16, 1)));
         }
     }
