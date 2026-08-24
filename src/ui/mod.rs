@@ -880,11 +880,25 @@ pub(super) const LONE_PANE_HPAD: u16 = 1;
 /// by the modals (Settings / picker) and the git-tab footer. A pair with an
 /// empty label is a bare key (e.g. `j/k`).
 pub(super) fn hint_line(pairs: &[(&str, &str)], t: &Theme) -> Line<'static> {
+    hint_line_with_offsets(pairs, t).0
+}
+
+/// Same rendering as [`hint_line`], plus each pair's start column within the
+/// rendered line (so hitboxes can be aligned to the visible hints without
+/// re-deriving the layout).
+pub(super) fn hint_line_with_offsets(
+    pairs: &[(&str, &str)],
+    t: &Theme,
+) -> (Line<'static>, Vec<u16>) {
     let mut spans = vec![Span::raw(" ")];
+    let mut offsets = Vec::with_capacity(pairs.len());
     for (i, (key, label)) in pairs.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(" · ", Style::new().fg(t.overlay0)));
         }
+        // Column where this pair's key begins: width of everything before it
+        // (leading pad + separators + earlier pairs).
+        offsets.push(spans.iter().map(|span| span.width() as u16).sum());
         spans.push(Span::styled(
             key.to_string(),
             Style::new().fg(t.accent).bold(),
@@ -896,7 +910,7 @@ pub(super) fn hint_line(pairs: &[(&str, &str)], t: &Theme) -> Line<'static> {
             ));
         }
     }
-    Line::from(spans)
+    (Line::from(spans), offsets)
 }
 
 /// Display width of `s` in terminal columns (CJK = 2 cells, etc.). Fixed-width

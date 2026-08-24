@@ -4,6 +4,7 @@
 use super::*;
 use crate::app::{FolderPicker, PickerHit, Row};
 use crate::i18n::Catalog;
+use ratatui::crossterm::event::KeyCode;
 use ratatui::widgets::{Borders, Clear};
 
 /// Draw the picker over a dimmed backdrop; returns the clickable row rects
@@ -52,8 +53,7 @@ pub(super) fn draw_picker(
         footer_y.saturating_sub(1)
     };
     hline(f, inner.x, divider_y, inner.width, t);
-    let mut go_to_rect = None;
-    let mut hidden_rect = None;
+    let mut footer_hints: Vec<(PickerHit, Rect)> = Vec::new();
     if let Some(buf) = &p.going_to {
         let input_y = footer_y.saturating_sub(1);
         let label = format!(" {}: ", cat.act_go_to);
@@ -110,42 +110,30 @@ pub(super) fn draw_picker(
         // Key hints: the shortcut in the theme accent, the label in light text —
         // over the modal's own background (no black bar). `⏎` acts on the
         // highlighted row (open folder / open with worktree / `..` / descend).
+        // Every hint is clickable; a click replays its key.
+        let hints = [
+            ("g", cat.act_go_to, KeyCode::Char('g')),
+            ("↑↓", cat.act_move, KeyCode::Down),
+            ("⏎", cat.act_select, KeyCode::Enter),
+            ("←", cat.act_up, KeyCode::Left),
+            ("n", cat.act_new_folder, KeyCode::Char('n')),
+            (".", cat.act_show_hidden, KeyCode::Char('.')),
+            ("esc", cat.act_cancel, KeyCode::Esc),
+        ];
+        let (hints_line, hint_x) = hint_line_with_offsets(&hints.map(|(k, l, _)| (k, l)), t);
         f.render_widget(
-            Paragraph::new(hint_line(
-                &[
-                    ("g", cat.act_go_to),
-                    ("↑↓", cat.act_move),
-                    ("⏎", cat.act_select),
-                    ("←", cat.act_up),
-                    ("n", cat.act_new_folder),
-                    (".", cat.act_show_hidden),
-                    ("esc", cat.act_cancel),
-                ],
-                t,
-            )),
+            Paragraph::new(hints_line),
             Rect::new(inner.x, footer_y, inner.width, 1),
         );
-        // `g go to` is first, after hint_line's one-column leading pad; the
-        // `.` hidden toggle follows after its separator.
-        go_to_rect = Some(Rect::new(
-            inner.x.saturating_add(1),
-            footer_y,
-            (2 + display_width(cat.act_go_to)).min(inner.width.saturating_sub(1) as usize) as u16,
-            1,
-        ));
-        let hidden_x = inner
-            .x
-            .saturating_add(1)
-            .saturating_add(2 + display_width(cat.act_go_to) as u16)
-            .saturating_add(3); // " · " separator
-        hidden_rect = Some(Rect::new(
-            hidden_x,
-            footer_y,
-            (2 + display_width(cat.act_show_hidden))
-                .min(inner.width.saturating_sub(hidden_x - inner.x).max(1) as usize)
-                as u16,
-            1,
-        ));
+        for (i, (key, label, code)) in hints.iter().enumerate() {
+            let x = inner.x.saturating_add(hint_x[i]);
+            let w = (display_width(key) + 1 + display_width(label))
+                .min(inner.width.saturating_sub(x - inner.x).max(1) as usize);
+            footer_hints.push((
+                PickerHit::Hint(*code),
+                Rect::new(x, footer_y, w as u16, 1),
+            ));
+        }
     }
 
     // The scrolling list: [Open this folder] · [Home] · [..] · folders · files.
@@ -193,11 +181,8 @@ pub(super) fn draw_picker(
         );
         rects.push((PickerHit::Row(i), row_rect));
     }
-    if let Some(rect) = go_to_rect {
-        rects.push((PickerHit::GoTo, rect));
-    }
-    if let Some(rect) = hidden_rect {
-        rects.push((PickerHit::ToggleHidden, rect));
+    if !footer_hints.is_empty() {
+        rects.extend(footer_hints);
     }
     rects.push((PickerHit::Modal, modal));
     rects
