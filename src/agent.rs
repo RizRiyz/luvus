@@ -115,7 +115,8 @@ static SOURCES: &[SessionSource] = &[
             list: None,
         }),
         resume: |q| format!("grok --resume {q}\r"),
-        fork: None,
+        // Same flag pair as Claude: resume the source transcript into a new id.
+        fork: Some(|q| format!("grok --resume {q} --fork-session\r")),
     },
     SessionSource {
         name: "pi",
@@ -1505,6 +1506,11 @@ mod tests {
             ),
             vec!["--verbose"]
         );
+        // Grok uses the same `--fork-session` resume pair; restore must not re-fork.
+        assert_eq!(
+            f("grok", &["--resume", "old-id", "--fork-session", "--yolo"]),
+            vec!["--yolo"]
+        );
         // Codex selects a session with positional resume/fork subcommands.
         assert_eq!(
             f("codex", &["resume", "sess_9", "--model", "o3"]),
@@ -1610,10 +1616,11 @@ mod tests {
         assert!(fork_command("pi", "0198abcd-uuid")
             .unwrap()
             .contains("pi --fork"));
-        assert!(can_fork("claude") && can_fork("codex") && can_fork("pi"));
+        let grok = fork_command("grok", "g1").unwrap();
+        assert!(grok.contains("grok --resume") && grok.contains("--fork-session"));
+        assert!(can_fork("claude") && can_fork("codex") && can_fork("pi") && can_fork("grok"));
         // Resume-capable, but no native fork (the copy-then-resume tier is future).
-        assert!(fork_command("grok", "g1").is_none());
-        assert!(!can_fork("copilot") && !can_fork("grok"));
+        assert!(!can_fork("copilot"));
         assert!(!can_fork("cursor"));
         // Unknown agent / unsafe / empty id all refuse.
         assert!(fork_command("unknown", "x").is_none());

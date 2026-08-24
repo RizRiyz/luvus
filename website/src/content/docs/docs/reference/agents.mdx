@@ -10,7 +10,7 @@ description: What luvus supports per agent, covering live status, session resume
 | Codex | ✓ | ✓ | ✓ | ✓ |
 | opencode | ✓ | ✓ | no | ✓ |
 | Kimi Code CLI | ✓ | ✓ | no | ✓ |
-| Grok Build | ✓ | ✓ | no | ✓ |
+| Grok Build | ✓ | ✓ | ✓ | ✓ |
 | Pi | ✓ | ✓ | ✓ | no |
 | Cursor | ✓ | resume command | no | no |
 | Gemini | ✓ | no | no | no |
@@ -29,8 +29,9 @@ description: What luvus supports per agent, covering live status, session resume
 - **Fork to New Pane** branches the running session into a new pane beside it,
   preserving the original's full context under a new session id while the
   original keeps running. It needs an agent with a native fork command, so today
-  that is **Claude** (`claude --resume <id> --fork-session`), **Codex**
-  (`codex fork <id>`), and **Pi** (`pi --fork <id>`). Right-click the pane and
+  that is **Claude** (`claude --resume <id> --fork-session`), **Grok**
+  (`grok --resume <id> --fork-session`), **Codex** (`codex fork <id>`), and
+  **Pi** (`pi --fork <id>`). Right-click the pane and
   choose **Fork to New Pane**, or press `Ctrl+Space f`. The action only appears
   for agents that can fork.
 - **Hook**, via `luvus integration install <agent>`, makes the agent report its

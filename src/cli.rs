@@ -320,11 +320,11 @@ pub fn run(args: &[String]) -> Result<i32> {
     if args.get(1).map(String::as_str) == Some("help") {
         return match args.get(2).map(String::as_str) {
             None => {
-                print!("{USAGE}");
+                print!("{USAGE}{HELP_BUG}");
                 Ok(0)
             }
             Some("all") if args.len() == 3 => {
-                print!("{DETAILED_USAGE}");
+                print!("{DETAILED_USAGE}{HELP_BUG}");
                 Ok(0)
             }
             Some(topic) if matches!(args.len(), 3 | 4) => {
@@ -553,6 +553,13 @@ fn normalize_help_topic(topic: &str) -> Option<&str> {
     }
 }
 
+const HELP_BUG: &str = r#"
+\   /
+ \_/
+(o_o)
+/|_|\
+"#;
+
 fn write_topic_help(
     mut output: impl Write,
     requested: &str,
@@ -564,12 +571,13 @@ fn write_topic_help(
     if topic == "session" {
         if let Some(command) = command {
             writeln!(output, "Usage: luvus session <command>\n")?;
-            if !write_command_rows(&mut output, SESSION_USAGE, topic, command)? {
+            if !write_topic_rows(&mut output, SESSION_USAGE, topic, Some(command))? {
                 output.write_all(SESSION_USAGE.as_bytes())?;
             }
         } else {
             output.write_all(SESSION_USAGE.as_bytes())?;
         }
+        output.write_all(HELP_BUG.as_bytes())?;
         return Ok(true);
     }
 
@@ -691,23 +699,24 @@ fn write_topic_help(
     };
 
     writeln!(output, "Usage: {usage}\n")?;
-    if let Some(command) = command {
-        if !write_command_rows(&mut output, section, topic, command)? {
-            output.write_all(section.as_bytes())?;
-        }
-    } else {
+    if !write_topic_rows(&mut output, section, topic, command)? {
         output.write_all(section.as_bytes())?;
     }
+    output.write_all(HELP_BUG.as_bytes())?;
     Ok(true)
 }
 
-fn write_command_rows(
+fn write_topic_rows(
     output: &mut impl Write,
     section: &str,
     topic: &str,
-    command: &str,
+    command: Option<&str>,
 ) -> std::io::Result<bool> {
-    let noun = if topic == "session" { "" } else { topic };
+    let noun = match topic {
+        "session" => "",
+        "remote" | "--remote" => "--remote",
+        _ => topic,
+    };
     let mut matched = false;
     let mut include_continuation = false;
 
@@ -731,9 +740,11 @@ fn write_command_rows(
                 continue;
             };
             let syntax = rest.split("  ").next().unwrap_or(rest);
-            include_continuation = syntax
-                .split(|character: char| character.is_whitespace() || character == '|')
-                .any(|token| token == command);
+            include_continuation = command.is_none_or(|command| {
+                syntax
+                    .split(|character: char| character.is_whitespace() || character == '|')
+                    .any(|token| token == command)
+            });
             if include_continuation {
                 matched = true;
                 writeln!(output, "{line}")?;
@@ -801,7 +812,8 @@ Commands:
 ";
 
 fn write_session_help(mut output: impl Write) -> std::io::Result<()> {
-    output.write_all(SESSION_USAGE.as_bytes())
+    output.write_all(SESSION_USAGE.as_bytes())?;
+    output.write_all(HELP_BUG.as_bytes())
 }
 
 fn session_list(args: &[String]) -> Result<i32> {
@@ -3445,6 +3457,71 @@ mod tests {
 
     fn argv(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
+    }
+
+    fn rendered_topic_help(topic: &str, command: Option<&str>) -> String {
+        let mut output = Vec::new();
+        assert!(write_topic_help(&mut output, topic, command).unwrap());
+        String::from_utf8(output).unwrap()
+    }
+
+    #[test]
+    fn family_help_lists_only_commands_owned_by_that_family() {
+        for (topic, noun) in [
+            ("workspace", "workspace"),
+            ("tab", "tab"),
+            ("pane", "pane"),
+            ("agent", "agent"),
+            ("skill", "skill"),
+            ("wait", "wait"),
+            ("attach", "attach"),
+            ("search", "search"),
+            ("theme", "theme"),
+            ("bar", "bar"),
+            ("ui", "ui"),
+            ("module", "module"),
+            ("git", "git"),
+            ("files", "files"),
+            ("diff", "diff"),
+            ("worktree", "worktree"),
+            ("task", "task"),
+            ("lease", "lease"),
+            ("events", "events"),
+            ("api", "api"),
+            ("remote", "--remote"),
+            ("server", "server"),
+            ("integration", "integration"),
+        ] {
+            let output = rendered_topic_help(topic, None);
+            assert!(output.ends_with(HELP_BUG), "{topic} help lost the bug");
+            let rows: Vec<_> = output
+                .lines()
+                .filter(|line| {
+                    line.starts_with("  ")
+                        && line
+                            .as_bytes()
+                            .get(2)
+                            .is_some_and(|character| *character != b' ')
+                })
+                .collect();
+            assert!(!rows.is_empty(), "{topic} help has no command rows");
+            assert!(
+                rows.iter().all(|line| {
+                    line.trim_start()
+                        .strip_prefix(noun)
+                        .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
+                }),
+                "{topic} help contains another family: {rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn leaf_help_still_selects_only_the_requested_command() {
+        let output = rendered_topic_help("pane", Some("split"));
+        assert!(output.contains("pane split [<id>]"));
+        assert!(!output.contains("pane list"));
+        assert!(!output.contains("agent start"));
     }
 
     #[test]

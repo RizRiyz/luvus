@@ -8471,6 +8471,36 @@ mod tests {
     }
 
     #[test]
+    fn fork_pane_splits_a_grok_session() {
+        let _env = crate::persist::test_env("fork-pane-grok");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let src = app.layout().focus;
+        {
+            let st = app.status.get_mut(&src).unwrap();
+            st.agent = "grok".into();
+            st.agent_session = Some(AgentSession {
+                agent: "grok".into(),
+                session_id: "sess-grok".into(),
+            });
+        }
+        assert!(app.fork_pane(src), "grok sessions fork natively");
+        let new = app.layout().focus;
+        assert_ne!(new, src);
+        assert_eq!(app.status.get(&new).unwrap().agent, "grok");
+        assert_eq!(
+            app.status
+                .get(&src)
+                .unwrap()
+                .agent_session
+                .as_ref()
+                .unwrap()
+                .session_id,
+            "sess-grok"
+        );
+    }
+
+    #[test]
     fn fork_from_mission_control_uses_the_agents_real_tab() {
         let _env = crate::persist::test_env("fork-pane-mission");
         let (tx, _rx) = std::sync::mpsc::channel();
