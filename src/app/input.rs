@@ -1044,6 +1044,7 @@ impl App {
                     match hit {
                         Some(PickerHit::Row(i)) => self.picker_click(i),
                         Some(PickerHit::GoTo) => self.picker_start_go_to(),
+                        Some(PickerHit::ToggleHidden) => self.picker_toggle_hidden(),
                         Some(PickerHit::Modal) => {}
                         None => self.close_folder_picker(), // click outside cancels
                     }

@@ -19,7 +19,8 @@ pub struct Entry {
 pub struct FolderPicker {
     /// The directory currently being browsed.
     pub path: PathBuf,
-    /// Folders + files in `path`, dirs first then files (dotfiles excluded).
+    /// Folders + files in `path`, dirs first then files (dotfiles unless
+    /// [`FolderPicker::show_hidden`]).
     pub entries: Vec<Entry>,
     /// Cursor into the row list (see [`Row`] / [`FolderPicker::row`]).
     pub cursor: usize,
@@ -33,6 +34,8 @@ pub struct FolderPicker {
     /// Whether the browsed folder is a git repo — adds the "Open with new
     /// worktree" row (and the `w` accelerator). Recomputed when the path changes.
     pub is_repo: bool,
+    /// Whether dotfile entries are listed (`.` toggles).
+    pub show_hidden: bool,
 }
 
 /// A selectable row in the picker. The action rows lead; the directory entries
@@ -57,6 +60,7 @@ pub enum Row {
 pub enum PickerHit {
     Row(usize),
     GoTo,
+    ToggleHidden,
     Modal,
 }
 
@@ -117,6 +121,7 @@ impl App {
             going_to: None,
             error: None,
             is_repo: false,
+            show_hidden: false,
         });
         self.picker_refresh();
     }
@@ -133,7 +138,7 @@ impl App {
                     rd.filter_map(Result::ok)
                         .filter_map(|e| {
                             let name = e.file_name().into_string().ok()?;
-                            if name.starts_with('.') {
+                            if !p.show_hidden && name.starts_with('.') {
                                 return None;
                             }
                             let is_dir = e.file_type().map(|ty| ty.is_dir()).unwrap_or(false);
@@ -152,6 +157,14 @@ impl App {
             p.is_repo = crate::git::local::is_repo(&p.path);
             p.cursor = p.cursor.min(p.row_count().saturating_sub(1));
         }
+    }
+
+    /// Show/hide dotfile entries (`.` or the footer hint).
+    pub fn picker_toggle_hidden(&mut self) {
+        if let Some(p) = self.picker.as_mut() {
+            p.show_hidden = !p.show_hidden;
+        }
+        self.picker_refresh();
     }
 
     /// The "Open with new worktree" row (or `w`): create a git worktree of the
@@ -229,6 +242,7 @@ impl App {
                 }
             }
             KeyCode::Char('g') => self.picker_start_go_to(),
+            KeyCode::Char('.') => self.picker_toggle_hidden(),
             KeyCode::Home | KeyCode::Char('~') => self.picker_home(),
             KeyCode::Char('w') => self.picker_make_worktree(),
             KeyCode::Esc | KeyCode::Char('q') => self.close_folder_picker(),
@@ -418,6 +432,7 @@ mod tests {
             going_to: None,
             error: None,
             is_repo: false,
+            show_hidden: false,
         };
         // Plain folder: [Open] [Home] [..] [a]
         assert_eq!(p.row_count(), 4);
@@ -448,6 +463,7 @@ mod tests {
             going_to: None,
             error: None,
             is_repo: true,
+            show_hidden: false,
         });
         app.picker_activate(); // ⏎ / click on that row
         assert!(app.picker.is_none(), "picker closes");
@@ -475,6 +491,19 @@ mod tests {
         assert!(entries.iter().any(|e| e.name == "sub" && e.is_dir));
         assert!(entries.iter().any(|e| e.name == "readme.txt" && !e.is_dir));
         assert!(entries[0].is_dir, "directories are listed before files");
+
+        // Dotfiles are hidden by default; `.` toggles them on and back off.
+        std::fs::write(tmp.join(".secret"), "x").unwrap();
+        app.picker_refresh();
+        assert!(!app.picker.as_ref().unwrap().show_hidden);
+        app.handle_picker_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE));
+        let entries = &app.picker.as_ref().unwrap().entries;
+        assert!(app.picker.as_ref().unwrap().show_hidden);
+        assert!(entries.iter().any(|e| e.name == ".secret"));
+        app.handle_picker_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE));
+        let entries = &app.picker.as_ref().unwrap().entries;
+        assert!(!app.picker.as_ref().unwrap().show_hidden);
+        assert!(!entries.iter().any(|e| e.name == ".secret"));
 
         // Cursor 0 = "use this folder" → opens the browsed folder as a workspace.
         app.picker.as_mut().unwrap().cursor = 0;

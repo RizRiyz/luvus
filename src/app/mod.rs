@@ -5551,6 +5551,7 @@ mod tests {
             going_to: None,
             error: None,
             is_repo,
+            show_hidden: false,
         };
 
         // On a git repo: `w` closes the picker and opens the branch prompt,

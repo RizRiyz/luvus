@@ -53,6 +53,7 @@ pub(super) fn draw_picker(
     };
     hline(f, inner.x, divider_y, inner.width, t);
     let mut go_to_rect = None;
+    let mut hidden_rect = None;
     if let Some(buf) = &p.going_to {
         let input_y = footer_y.saturating_sub(1);
         let label = format!(" {}: ", cat.act_go_to);
@@ -117,17 +118,32 @@ pub(super) fn draw_picker(
                     ("⏎", cat.act_select),
                     ("←", cat.act_up),
                     ("n", cat.act_new_folder),
+                    (".", cat.act_show_hidden),
                     ("esc", cat.act_cancel),
                 ],
                 t,
             )),
             Rect::new(inner.x, footer_y, inner.width, 1),
         );
-        // `g go to` is first, after hint_line's one-column leading pad.
+        // `g go to` is first, after hint_line's one-column leading pad; the
+        // `.` hidden toggle follows after its separator.
         go_to_rect = Some(Rect::new(
             inner.x.saturating_add(1),
             footer_y,
             (2 + display_width(cat.act_go_to)).min(inner.width.saturating_sub(1) as usize) as u16,
+            1,
+        ));
+        let hidden_x = inner
+            .x
+            .saturating_add(1)
+            .saturating_add(2 + display_width(cat.act_go_to) as u16)
+            .saturating_add(3); // " · " separator
+        hidden_rect = Some(Rect::new(
+            hidden_x,
+            footer_y,
+            (2 + display_width(cat.act_show_hidden)).min(
+                inner.width.saturating_sub(hidden_x - inner.x).max(1) as usize,
+            ) as u16,
             1,
         ));
     }
@@ -179,6 +195,9 @@ pub(super) fn draw_picker(
     }
     if let Some(rect) = go_to_rect {
         rects.push((PickerHit::GoTo, rect));
+    }
+    if let Some(rect) = hidden_rect {
+        rects.push((PickerHit::ToggleHidden, rect));
     }
     rects.push((PickerHit::Modal, modal));
     rects
