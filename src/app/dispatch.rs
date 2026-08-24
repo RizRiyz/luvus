@@ -4855,7 +4855,7 @@ impl App {
         let prefix = keys::PrefixSpec::parse(&next.prefix).ok_or_else(|| {
             (
                 "invalid_request".to_string(),
-                "config prefix must be a valid Ctrl chord".to_string(),
+                "config prefix must be F1-F12 or a valid Ctrl/Alt chord".to_string(),
             )
         })?;
         if self.theme_registry.get(&next.theme).is_none() && next.theme != "terminal" {
