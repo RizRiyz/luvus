@@ -123,6 +123,14 @@ impl<T> Storage<T> {
         self.trim_cache();
     }
 
+    /// Shrink the logical buffer without compacting its row cache immediately.
+    /// The terminal uses this while parsing alternate-screen output and trims
+    /// once when the completed frame is consumed.
+    #[inline]
+    pub fn shrink_lines_deferred(&mut self, shrinkage: usize) {
+        self.len -= shrinkage;
+    }
+
     /// Truncate the invisible elements from the raw buffer.
     #[inline]
     pub fn truncate(&mut self) {
@@ -275,7 +283,7 @@ impl<T> Storage<T> {
     /// target. Width reflow can replace storage with a short vector that still
     /// owns capacity for tens of thousands of row descriptors, so limiting
     /// only initialized rows is insufficient.
-    fn trim_cache(&mut self) {
+    pub(super) fn trim_cache(&mut self) {
         let columns = self.columns();
         let cache_rows = cache_row_limit::<T>(columns);
         if self.inner.len() > self.len.saturating_add(cache_rows) {

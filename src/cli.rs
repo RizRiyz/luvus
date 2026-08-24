@@ -436,12 +436,9 @@ pub fn run(args: &[String]) -> Result<i32> {
         method.as_str(),
         "events.subscribe" | "terminal.backend.events.subscribe"
     ) {
-        // Stream events until the connection closes.
-        for line in reader.lines() {
-            match line {
-                Ok(l) => println!("{l}"),
-                Err(_) => break,
-            }
+        // Stream bounded events until the connection closes cleanly.
+        while let Some(line) = crate::ipc::api::read_stream_frame(&mut reader)? {
+            println!("{line}");
         }
         return Ok(0);
     }
@@ -1972,13 +1969,12 @@ fn wait_status_stream(pane: &str, target: &str, deadline: Option<Instant>) -> Re
         "{}",
         json!({"id":"1","method":"events.subscribe","params":{}})
     )?;
-    let reader = BufReader::new(stream);
+    let mut reader = BufReader::new(stream);
 
     let (tx, rx) = std::sync::mpsc::channel();
     let (pane_s, target_s) = (pane.to_string(), target.to_string());
     std::thread::spawn(move || {
-        for line in reader.lines() {
-            let Ok(l) = line else { break };
+        while let Ok(Some(l)) = crate::ipc::api::read_stream_frame(&mut reader) {
             if let Ok(v) = serde_json::from_str::<Value>(&l) {
                 let is_status =
                     v.get("event").and_then(|e| e.as_str()) == Some("pane.agent_status_changed");
@@ -2029,9 +2025,8 @@ pub(crate) fn send_request(method: &str, params: Value) -> Result<Value> {
     let req = json!({ "id": "1", "method": method, "params": params });
     writeln!(stream, "{req}")?;
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    serde_json::from_str(line.trim()).map_err(|e| anyhow!("bad reply: {e}"))
+    let line = crate::ipc::api::read_response_frame(&mut reader)?;
+    serde_json::from_str(&line).map_err(|e| anyhow!("bad reply: {e}"))
 }
 
 /// Transport-neutral one-frame bridge for harnesses that cannot use Unix
@@ -2049,8 +2044,28 @@ fn api_proxy() -> Result<i32> {
     writeln!(stream, "{request}")?;
     let mut reader = BufReader::new(stream);
     let response = crate::ipc::api::read_response_frame(&mut reader)?;
+    validate_response_id(&request, &response)?;
     println!("{response}");
     Ok(api_response_exit_code(&response))
+}
+
+fn validate_response_id(request: &str, response: &str) -> Result<()> {
+    let request: Value = serde_json::from_str(request)
+        .map_err(|error| anyhow!("invalid request envelope: {error}"))?;
+    let response: Value = serde_json::from_str(response)
+        .map_err(|error| anyhow!("invalid response envelope: {error}"))?;
+    let request_id = request
+        .get("id")
+        .ok_or_else(|| anyhow!("request envelope is missing id"))?;
+    let response_id = response
+        .get("id")
+        .ok_or_else(|| anyhow!("response envelope is missing id"))?;
+    if response_id != request_id {
+        return Err(anyhow!(
+            "response id does not match request id: expected {request_id}, received {response_id}"
+        ));
+    }
+    Ok(())
 }
 
 fn api_response_exit_code(response: &str) -> i32 {
@@ -2088,6 +2103,15 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
     let noun = args.get(1).map(String::as_str).unwrap_or("");
     let verb = args.get(2).map(String::as_str).unwrap_or("");
     let rest = &args[3.min(args.len())..];
+    if noun == "api"
+        && matches!(
+            verb,
+            "capabilities" | "snapshot" | "events" | "runtime" | "session"
+        )
+        && !rest.is_empty()
+    {
+        return Err(anyhow!("luvus api {verb} does not accept arguments"));
+    }
 
     // The pane id is the first numeric positional, else $LUVUS_PANE_ID.
     let pane = || -> Value {
@@ -3449,6 +3473,12 @@ mod tests {
             parse(&argv("luvus api session")).unwrap().0,
             "session.snapshot"
         );
+        for command in ["capabilities", "snapshot", "events", "runtime", "session"] {
+            assert!(
+                parse(&argv(&format!("luvus api {command} unexpected"))).is_err(),
+                "api {command} must reject trailing arguments"
+            );
+        }
     }
 
     #[test]
@@ -4152,6 +4182,20 @@ mod tests {
             1
         );
         assert_eq!(api_response_exit_code("not json"), 0);
+    }
+
+    #[test]
+    fn api_proxy_rejects_mismatched_response_ids() {
+        assert!(validate_response_id(
+            r#"{"id":"request-1","method":"ping","params":{}}"#,
+            r#"{"id":"request-1","result":{}}"#,
+        )
+        .is_ok());
+        assert!(validate_response_id(
+            r#"{"id":"request-1","method":"ping","params":{}}"#,
+            r#"{"id":"request-2","result":{}}"#,
+        )
+        .is_err());
     }
 
     #[test]

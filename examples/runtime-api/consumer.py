@@ -24,6 +24,28 @@ RESULT_TYPES = {
     "agent_wait",
     "subscription_started",
 }
+RESULT_FIELDS = {
+    "runtime_capabilities": {
+        "protocol", "session", "event_sequence", "methods", "agent_authorities",
+        "agent_states", "limits",
+    },
+    "session_snapshot": {
+        "protocol", "session", "server_generation", "event_sequence", "workspaces",
+    },
+    "pane_processes": {
+        "pane", "terminal_id", "root_process", "scan", "executables", "arguments_exposed",
+    },
+    "agent_explanation": {"pane", "available"},
+    "agent_report": {"pane", "agent", "status", "source", "sequence", "ttl_s"},
+    "agent_release": {"pane"},
+    "agent_start": {"name", "kind", "pane", "ready", "status"},
+    "agent_prompt": {
+        "pane", "submitted", "matched", "status", "baseline_revision",
+        "content_revision", "evidence",
+    },
+    "agent_wait": {"matched", "pane", "status"},
+    "subscription_started": {"sequence", "queue_capacity", "loss_behavior"},
+}
 FIELDS = {
     "runtime.capabilities": set(),
     "session.snapshot": set(),
@@ -136,15 +158,16 @@ def valid_request(value):
         timeout = params.get("timeout_s", 30)
         return type(timeout) in {int, float} and 0 <= timeout <= 3600
     if method == "agent.prompt":
-        if not {"target", "text", "wait"} <= set(params):
+        if not {"target", "text"} <= set(params):
             return False
         if not bounded_string(params["target"], 128, allow_empty=False):
             return False
         if not bounded_string(params["text"], 262144, allow_empty=False):
             return False
-        if type(params["wait"]) is not bool:
+        if "wait" in params and type(params["wait"]) is not bool:
             return False
-        if not params["wait"] and ({"until", "timeout_s"} & set(params)):
+        wait = params.get("wait", False)
+        if not wait and ({"until", "timeout_s"} & set(params)):
             return False
         until = params.get("until", ["idle", "done", "blocked"])
         if not isinstance(until, list) or not 1 <= len(until) <= 4:
@@ -166,7 +189,103 @@ def valid_response(value):
         return False
     if set(value) == {"id", "result"}:
         result = value["result"]
-        return isinstance(result, dict) and result.get("type") in RESULT_TYPES
+        if not isinstance(result, dict) or result.get("type") not in RESULT_TYPES:
+            return False
+        required = RESULT_FIELDS[result["type"]]
+        if not required <= set(result):
+            return False
+        kind = result["type"]
+        if kind in {"runtime_capabilities", "session_snapshot"}:
+            protocol = result["protocol"]
+            if protocol != {"name": "luvus-runtime", "major": 1, "minor": 0}:
+                return False
+            if not isinstance(result["session"], str) or not integer(result["event_sequence"]):
+                return False
+            if kind == "runtime_capabilities":
+                return (
+                    isinstance(result["methods"], list)
+                    and isinstance(result["agent_authorities"], list)
+                    and isinstance(result["agent_states"], list)
+                    and set(result["agent_states"]) <= STATES
+                    and isinstance(result["limits"], dict)
+                )
+            return (
+                bounded_string(result["server_generation"], 512, allow_empty=False)
+                and isinstance(result["workspaces"], list)
+            )
+        if kind == "pane_processes":
+            return (
+                pane(result["pane"])
+                and (result["terminal_id"] is None or isinstance(result["terminal_id"], str))
+                and (result["root_process"] is None or isinstance(result["root_process"], dict))
+                and result["scan"] in {"observed", "unavailable"}
+                and isinstance(result["executables"], list)
+                and all(isinstance(item, str) for item in result["executables"])
+                and result["arguments_exposed"] is False
+            )
+        if kind == "agent_explanation":
+            if not pane(result["pane"]) or type(result["available"]) is not bool:
+                return False
+            if not result["available"]:
+                return True
+            return (
+                {"agent", "status", "identity", "state_evidence", "authority", "session"}
+                <= set(result)
+                and isinstance(result["agent"], str)
+                and result["status"] in STATES
+                and isinstance(result["identity"], dict)
+                and isinstance(result["state_evidence"], dict)
+                and (result["authority"] is None or isinstance(result["authority"], dict))
+                and (result["session"] is None or isinstance(result["session"], dict))
+            )
+        if kind == "agent_report":
+            return (
+                pane(result["pane"])
+                and isinstance(result["agent"], str)
+                and result["status"] in STATES
+                and isinstance(result["source"], str)
+                and integer(result["sequence"])
+                and result["sequence"] >= 0
+                and integer(result["ttl_s"])
+                and 1 <= result["ttl_s"] <= 86400
+            )
+        if kind == "agent_release":
+            return pane(result["pane"])
+        if kind == "agent_start":
+            return (
+                isinstance(result["name"], str)
+                and isinstance(result["kind"], str)
+                and pane(result["pane"])
+                and type(result["ready"]) is bool
+                and (result["status"] is None or result["status"] in STATES)
+            )
+        if kind == "agent_prompt":
+            return (
+                pane(result["pane"])
+                and type(result["submitted"]) is bool
+                and type(result["matched"]) is bool
+                and (result["status"] is None or result["status"] in STATES)
+                and integer(result["baseline_revision"])
+                and result["baseline_revision"] >= 0
+                and integer(result["content_revision"])
+                and result["content_revision"] >= 0
+                and result["evidence"] in {
+                    "queued", "state_transition", "output_settled", "timeout", "pane_closed",
+                }
+            )
+        if kind == "agent_wait":
+            return (
+                type(result["matched"]) is bool
+                and (result["pane"] is None or pane(result["pane"]))
+                and (result["status"] is None or result["status"] in STATES)
+            )
+        return (
+            integer(result["sequence"])
+            and result["sequence"] >= 0
+            and integer(result["queue_capacity"])
+            and result["queue_capacity"] >= 1
+            and result["loss_behavior"] == "resync_required_then_close"
+        )
     if set(value) == {"id", "error"}:
         error = value["error"]
         return (

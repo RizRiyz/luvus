@@ -1,0 +1,10 @@
+{"id":"cap","result":{"type":"runtime_capabilities"}}
+{"id":"snapshot","result":{"type":"session_snapshot"}}
+{"id":"process","result":{"type":"pane_processes"}}
+{"id":"explain","result":{"type":"agent_explanation"}}
+{"id":"report","result":{"type":"agent_report"}}
+{"id":"release","result":{"type":"agent_release"}}
+{"id":"start","result":{"type":"agent_start"}}
+{"id":"prompt","result":{"type":"agent_prompt"}}
+{"id":"wait","result":{"type":"agent_wait"}}
+{"id":"events","result":{"type":"subscription_started"}}

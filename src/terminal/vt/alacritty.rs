@@ -292,6 +292,10 @@ impl VtEngine for AlacrittyEngine {
         self.output_generation = self.output_generation.wrapping_add(1);
     }
 
+    fn finish_output_batch(&mut self) {
+        self.term.finish_output_batch();
+    }
+
     fn output_generation(&self) -> u64 {
         self.output_generation
     }

@@ -4,10 +4,37 @@
   "type":"object",
   "properties":{
     "id":{"type":"string","minLength":1,"maxLength":128},
-    "result":{"type":"object","properties":{"type":{"enum":["runtime_capabilities","session_snapshot","pane_processes","agent_explanation","agent_report","agent_release","agent_start","agent_prompt","agent_wait","subscription_started"]}},"required":["type"]},
-    "error":{"type":"object","properties":{"code":{"type":"string"},"message":{"type":"string","maxLength":512}},"required":["code","message"]}
+    "result":{"oneOf":[
+      {"$ref":"#/$defs/runtimeCapabilities"},
+      {"$ref":"#/$defs/sessionSnapshot"},
+      {"$ref":"#/$defs/paneProcesses"},
+      {"$ref":"#/$defs/agentExplanation"},
+      {"$ref":"#/$defs/agentReport"},
+      {"$ref":"#/$defs/agentRelease"},
+      {"$ref":"#/$defs/agentStart"},
+      {"$ref":"#/$defs/agentPrompt"},
+      {"$ref":"#/$defs/agentWait"},
+      {"$ref":"#/$defs/subscriptionStarted"}
+    ]},
+    "error":{"type":"object","properties":{"code":{"type":"string","minLength":1,"maxLength":128},"message":{"type":"string","maxLength":512}},"required":["code","message"],"additionalProperties":false}
   },
   "required":["id"],
   "oneOf":[{"required":["result"]},{"required":["error"]}],
-  "additionalProperties":false
+  "additionalProperties":false,
+  "$defs":{
+    "paneId":{"type":"string","pattern":"^[1-9][0-9]{0,9}$"},
+    "state":{"enum":["idle","working","blocked","done"]},
+    "nullableState":{"oneOf":[{"$ref":"#/$defs/state"},{"type":"null"}]},
+    "protocol":{"type":"object","properties":{"name":{"const":"luvus-runtime"},"major":{"const":1},"minor":{"const":0}},"required":["name","major","minor"]},
+    "runtimeCapabilities":{"type":"object","properties":{"type":{"const":"runtime_capabilities"},"protocol":{"$ref":"#/$defs/protocol"},"session":{"type":"string"},"event_sequence":{"type":"integer","minimum":0},"methods":{"type":"array","items":{"type":"string"}},"agent_authorities":{"type":"array","items":{"type":"string"}},"agent_states":{"type":"array","items":{"$ref":"#/$defs/state"}},"limits":{"type":"object"}},"required":["type","protocol","session","event_sequence","methods","agent_authorities","agent_states","limits"]},
+    "sessionSnapshot":{"type":"object","properties":{"type":{"const":"session_snapshot"},"protocol":{"$ref":"#/$defs/protocol"},"session":{"type":"string"},"server_generation":{"type":"string","minLength":1},"event_sequence":{"type":"integer","minimum":0},"workspaces":{"type":"array"}},"required":["type","protocol","session","server_generation","event_sequence","workspaces"]},
+    "paneProcesses":{"type":"object","properties":{"type":{"const":"pane_processes"},"pane":{"$ref":"#/$defs/paneId"},"terminal_id":{"type":["string","null"]},"root_process":{"type":["object","null"]},"scan":{"enum":["observed","unavailable"]},"executables":{"type":"array","items":{"type":"string"}},"arguments_exposed":{"const":false}},"required":["type","pane","terminal_id","root_process","scan","executables","arguments_exposed"]},
+    "agentExplanation":{"type":"object","properties":{"type":{"const":"agent_explanation"},"pane":{"$ref":"#/$defs/paneId"},"available":{"type":"boolean"},"agent":{"type":"string"},"status":{"$ref":"#/$defs/state"},"identity":{"type":"object"},"state_evidence":{"type":"object"},"authority":{"type":["object","null"]},"session":{"type":["object","null"]}},"required":["type","pane","available"],"allOf":[{"if":{"properties":{"available":{"const":true}},"required":["available"]},"then":{"required":["agent","status","identity","state_evidence","authority","session"]}}]},
+    "agentReport":{"type":"object","properties":{"type":{"const":"agent_report"},"pane":{"$ref":"#/$defs/paneId"},"agent":{"type":"string"},"status":{"$ref":"#/$defs/state"},"source":{"type":"string"},"sequence":{"type":"integer","minimum":0},"ttl_s":{"type":"integer","minimum":1,"maximum":86400}},"required":["type","pane","agent","status","source","sequence","ttl_s"]},
+    "agentRelease":{"type":"object","properties":{"type":{"const":"agent_release"},"pane":{"$ref":"#/$defs/paneId"}},"required":["type","pane"]},
+    "agentStart":{"type":"object","properties":{"type":{"const":"agent_start"},"name":{"type":"string"},"kind":{"type":"string"},"pane":{"$ref":"#/$defs/paneId"},"ready":{"type":"boolean"},"status":{"$ref":"#/$defs/nullableState"}},"required":["type","name","kind","pane","ready","status"]},
+    "agentPrompt":{"type":"object","properties":{"type":{"const":"agent_prompt"},"pane":{"$ref":"#/$defs/paneId"},"submitted":{"type":"boolean"},"matched":{"type":"boolean"},"status":{"$ref":"#/$defs/nullableState"},"baseline_revision":{"type":"integer","minimum":0},"content_revision":{"type":"integer","minimum":0},"evidence":{"enum":["queued","state_transition","output_settled","timeout","pane_closed"]}},"required":["type","pane","submitted","matched","status","baseline_revision","content_revision","evidence"]},
+    "agentWait":{"type":"object","properties":{"type":{"const":"agent_wait"},"matched":{"type":"boolean"},"pane":{"oneOf":[{"$ref":"#/$defs/paneId"},{"type":"null"}]},"status":{"$ref":"#/$defs/nullableState"}},"required":["type","matched","pane","status"]},
+    "subscriptionStarted":{"type":"object","properties":{"type":{"const":"subscription_started"},"sequence":{"type":"integer","minimum":0},"queue_capacity":{"type":"integer","minimum":1},"loss_behavior":{"const":"resync_required_then_close"}},"required":["type","sequence","queue_capacity","loss_behavior"]}
+  }
 }

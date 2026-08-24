@@ -127,6 +127,33 @@ fn read_text_frame(reader: &mut impl BufRead, kind: &str) -> io::Result<String> 
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("{kind} is not UTF-8")))
 }
 
+/// Read one bounded frame from a long-lived event stream. A clean EOF ends the
+/// stream; malformed, unterminated, or oversized frames remain hard errors.
+pub(crate) fn read_stream_frame(reader: &mut impl BufRead) -> io::Result<Option<String>> {
+    let frame = match read_frame(reader) {
+        Ok(frame) => frame,
+        Err(FrameError::Eof) => return Ok(None),
+        Err(error) => {
+            let message = match error {
+                FrameError::TooLarge => "event frame is too large",
+                FrameError::MissingLf => "event frame is missing LF",
+                FrameError::Io => "event frame read failed",
+                FrameError::Eof => unreachable!(),
+            };
+            let kind = match error {
+                FrameError::TooLarge => io::ErrorKind::InvalidData,
+                FrameError::MissingLf => io::ErrorKind::UnexpectedEof,
+                FrameError::Io => io::ErrorKind::Other,
+                FrameError::Eof => unreachable!(),
+            };
+            return Err(io::Error::new(kind, message));
+        }
+    };
+    String::from_utf8(frame[..frame.len() - 1].to_vec())
+        .map(Some)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "event frame is not UTF-8"))
+}
+
 /// Read one bounded ordinary API request for CLI bridge callers.
 pub(crate) fn read_request_frame(reader: &mut impl BufRead) -> io::Result<String> {
     read_text_frame(reader, "request")
@@ -770,6 +797,22 @@ mod tests {
         let mut oversized =
             std::io::Cursor::new(vec![b'x'; crate::terminal::backend::MAX_FRAME_BYTES + 1]);
         assert_eq!(read_frame(&mut oversized), Err(FrameError::TooLarge));
+    }
+
+    #[test]
+    fn bounded_stream_frame_distinguishes_clean_eof_from_invalid_frames() {
+        let mut stream = std::io::Cursor::new(b"event\n".to_vec());
+        assert_eq!(
+            read_stream_frame(&mut stream).unwrap(),
+            Some("event".into())
+        );
+        assert_eq!(read_stream_frame(&mut stream).unwrap(), None);
+
+        let mut missing = std::io::Cursor::new(b"event".to_vec());
+        assert_eq!(
+            read_stream_frame(&mut missing).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
     }
 
     #[test]

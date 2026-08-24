@@ -3559,9 +3559,7 @@ impl App {
                 }
                 let status = self.status.get(&pane);
                 if status.is_some_and(|status| {
-                    status.agent.eq_ignore_ascii_case(&start.kind)
-                        && matches!(status.state, State::Idle | State::Done)
-                        && self.is_agent_pane(pane)
+                    status.agent.eq_ignore_ascii_case(&start.kind) && self.is_agent_pane(pane)
                 }) {
                     return Some(Some((true, status.map(|status| status.state))));
                 }
@@ -5158,12 +5156,15 @@ command = ["true"]
         assert_eq!(app.agent_names.get("reviewer"), Some(&pane));
         assert!(response.try_recv().is_err());
 
-        app.status.get_mut(&pane).unwrap().agent = "codex".into();
+        let status = app.status.get_mut(&pane).unwrap();
+        status.agent = "codex".into();
+        status.state = State::Working;
         app.tick_agent_workflows(Instant::now());
         let value: Value = serde_json::from_str(&response.recv().unwrap()).unwrap();
         assert_eq!(value["result"]["type"], "agent_start");
         assert_eq!(value["result"]["ready"], true);
         assert_eq!(value["result"]["name"], "reviewer");
+        assert_eq!(value["result"]["status"], "working");
     }
 
     #[test]

@@ -59,6 +59,11 @@ pub trait VtEngine: Send {
     /// Feed child output. Must never panic on arbitrary bytes.
     fn advance(&mut self, bytes: &[u8]);
 
+    /// Finish allocation maintenance deferred while parsing the latest output
+    /// burst. Called at the app's coalesced frame boundary, outside the PTY
+    /// reader path.
+    fn finish_output_batch(&mut self);
+
     /// Monotonic generation of successfully parsed terminal output.
     fn output_generation(&self) -> u64;
 

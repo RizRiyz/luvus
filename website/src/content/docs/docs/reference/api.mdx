@@ -120,8 +120,9 @@ the pane, queues the launch as one submitted shell action, reserves the unique
 name, and waits for manifest-driven detection without composing separate socket
 requests.
 
-`agent.prompt` takes `target`, `text`, `wait`, optional `until`, and optional
-`timeout_s`. Paste and Enter are one PTY queue action. With `wait:true`, the
+`agent.prompt` takes `target`, `text`, optional `wait` (default `false`),
+optional `until`, and optional `timeout_s`. `until` and `timeout_s` require
+`wait:true`. Paste and Enter are one PTY queue action. With `wait:true`, the
 response is held until a requested state has post-submission evidence. Luvus
 accepts a detected Working transition or a newer output revision followed by a
 short quiet window, so a fast turn cannot disappear between detector ticks. A

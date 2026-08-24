@@ -325,6 +325,10 @@ pub struct Term<T> {
     /// Information about damaged cells.
     damage: TermDamageState,
 
+    /// Alternate-screen rebalancing updates logical history for every row but
+    /// defers physical cache trimming until the frame leaves the parser path.
+    history_cache_dirty: bool,
+
     /// Config directly for the terminal.
     config: Config,
 }
@@ -427,6 +431,7 @@ impl<T> Term<T> {
             scroll_region,
             event_proxy,
             damage,
+            history_cache_dirty: false,
             config,
             grid,
             tabs,
@@ -487,7 +492,18 @@ impl<T> Term<T> {
 
     /// Resets the terminal damage information.
     pub fn reset_damage(&mut self) {
+        self.finish_output_batch();
         self.damage.reset(self.columns());
+    }
+
+    /// Complete deferred allocation maintenance after a parsed output batch.
+    /// Consumers which do not use damage tracking can call this at their own
+    /// frame boundary.
+    pub fn finish_output_batch(&mut self) {
+        if mem::take(&mut self.history_cache_dirty) {
+            self.grid.trim_history_cache();
+            self.inactive_grid.trim_history_cache();
+        }
     }
 
     #[inline]
@@ -852,10 +868,11 @@ impl<T> Term<T> {
     /// grows. Both visible screens remain outside this history allowance.
     fn rebalance_alt_history(&mut self) {
         let limit = self.config.scrolling_history;
-        self.grid.update_history(limit);
+        self.grid.update_history_deferred(limit);
         let alternate_rows = self.grid.history_size().min(limit);
         self.inactive_grid
-            .update_history(limit.saturating_sub(alternate_rows));
+            .update_history_deferred(limit.saturating_sub(alternate_rows));
+        self.history_cache_dirty = true;
     }
 
     fn deccolm(&mut self)
@@ -3310,6 +3327,26 @@ mod tests {
         let size = TermSize::new(10, 10);
         term.resize(size);
         assert!(term.damage.full);
+    }
+
+    #[test]
+    fn alternate_history_trims_cache_once_at_frame_boundary() {
+        let size = TermSize::new(8, 4);
+        let config = Config { scrolling_history: 32, ..Config::default() };
+        let mut term = Term::new(config, &size, VoidListener);
+
+        for _ in 0..40 {
+            term.newline();
+        }
+        term.swap_alt();
+        for _ in 0..16 {
+            term.newline();
+        }
+
+        assert!(term.history_cache_dirty);
+        assert!(term.grid.history_size() + term.inactive_grid.history_size() <= 32);
+        term.reset_damage();
+        assert!(!term.history_cache_dirty);
     }
 
     #[test]

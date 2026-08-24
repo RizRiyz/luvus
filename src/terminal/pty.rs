@@ -90,8 +90,7 @@ fn child_reaper_loop(rx: Receiver<ReaperEntry>) {
 
         let mut index = 0;
         while index < children.len() {
-            let exited = !matches!(children[index].child.try_wait(), Ok(None));
-            if exited {
+            if child_poll_finished(children[index].child.try_wait()) {
                 let entry = children.swap_remove(index);
                 finish_child(entry);
             } else {
@@ -99,6 +98,16 @@ fn child_reaper_loop(rx: Receiver<ReaperEntry>) {
             }
         }
     }
+}
+
+#[inline]
+fn child_poll_finished(result: std::io::Result<Option<portable_pty::ExitStatus>>) -> bool {
+    matches!(result, Ok(Some(_)))
+}
+
+fn terminate_spawned_child(child: &mut (dyn portable_pty::Child + Send + Sync)) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn finish_child(entry: ReaperEntry) {
@@ -379,11 +388,17 @@ impl Pane {
         })?;
 
         apply_pane_env(&mut cmd, id, &cwd, extra_env);
-        let child = pair.slave.spawn_command(cmd)?;
+        let mut child = pair.slave.spawn_command(cmd)?;
         let child_pid = child
             .process_id()
             .expect("a spawned child always has a pid");
-        let terminal_runtime = TerminalRuntime::new(child_pid).map_err(anyhow::Error::msg)?;
+        let terminal_runtime = match TerminalRuntime::new(child_pid) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                terminate_spawned_child(child.as_mut());
+                return Err(anyhow::Error::msg(error));
+            }
+        };
         drop(pair.slave);
 
         // All bytes (user input + terminal responses) funnel through one channel
@@ -541,16 +556,20 @@ impl Pane {
                 if cancelled.load(Ordering::SeqCst) {
                     return;
                 }
-                let child = match pair.slave.spawn_command(cmd) {
+                let mut child = match pair.slave.spawn_command(cmd) {
                     Ok(child) => child,
                     Err(_) => return fail(),
                 };
                 let Some(pid) = child.process_id() else {
+                    terminate_spawned_child(child.as_mut());
                     return fail();
                 };
                 let runtime = match TerminalRuntime::new(pid) {
                     Ok(runtime) => runtime,
-                    Err(_) => return fail(),
+                    Err(_) => {
+                        terminate_spawned_child(child.as_mut());
+                        return fail();
+                    }
                 };
                 drop(pair.slave);
                 // Publish the pid *before* the cancellation check: a concurrent
@@ -641,8 +660,15 @@ impl Pane {
     /// whether it was set — i.e. output arrived since the last re-arm, so the
     /// caller may owe one more render for the tail of a burst.
     pub fn take_data_pending(&self) -> bool {
-        self.data_pending
-            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        let pending = self
+            .data_pending
+            .swap(false, std::sync::atomic::Ordering::AcqRel);
+        if pending {
+            if let Ok(mut engine) = self.engine.lock() {
+                engine.finish_output_batch();
+            }
+        }
+        pending
     }
 
     /// Clear the pending-output coalescing flag so the reader's next
@@ -1176,7 +1202,7 @@ mod reap_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{wrap_paste, write_input_action, InputAction};
+    use super::{child_poll_finished, wrap_paste, write_input_action, InputAction};
     use std::time::Duration;
 
     #[test]
@@ -1210,5 +1236,16 @@ mod tests {
             path.as_bytes(),
             "sent bare when it did not, so a plain shell is unaffected"
         );
+    }
+
+    #[test]
+    fn reaper_retries_child_poll_errors() {
+        assert!(!child_poll_finished(Ok(None)));
+        assert!(!child_poll_finished(Err(std::io::Error::other(
+            "temporary poll failure"
+        ))));
+        assert!(child_poll_finished(Ok(Some(
+            portable_pty::ExitStatus::with_exit_code(0)
+        ))));
     }
 }

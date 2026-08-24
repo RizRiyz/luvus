@@ -65,8 +65,9 @@ The profile is bounded by the limits returned from `runtime.capabilities`.
 Callers must cancel outstanding waits on disconnect and must never interpret
 unavailable process evidence as proof that no child process exists.
 
-`agent.prompt` returns `submitted:true` once the one-piece input action is
-queued. A waiting call does not treat the target's pre-existing idle state as
+`agent.prompt` defaults `wait` to `false`; `until` and `timeout_s` are valid
+only with `wait:true`. It returns `submitted:true` once the one-piece input
+action is queued. A waiting call does not treat the target's pre-existing idle state as
 completion. It first requires post-submission evidence: an observed Working
 state, or a newer content revision that remains quiet for the bounded settle
 window. This also covers fast turns that begin and finish between detection

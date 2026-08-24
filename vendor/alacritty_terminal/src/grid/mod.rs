@@ -160,6 +160,24 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         self.max_scroll_limit = history_size;
     }
 
+    /// Update the logical history limit while deferring row-cache maintenance.
+    /// This keeps repeated alternate-screen scrolls from compacting once per
+    /// parsed row; [`Self::trim_history_cache`] completes the maintenance.
+    pub fn update_history_deferred(&mut self, history_size: usize) {
+        let current_history_size = self.history_size();
+        if current_history_size > history_size {
+            self.raw
+                .shrink_lines_deferred(current_history_size - history_size);
+        }
+        self.display_offset = min(self.display_offset, history_size);
+        self.max_scroll_limit = history_size;
+    }
+
+    #[inline]
+    pub fn trim_history_cache(&mut self) {
+        self.raw.trim_cache();
+    }
+
     pub fn scroll_display(&mut self, scroll: Scroll) {
         self.display_offset = match scroll {
             Scroll::Delta(count) => {
