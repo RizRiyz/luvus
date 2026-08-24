@@ -1,0 +1,26 @@
+<svg width="1000" height="1000" viewBox="0 0 1000 1000" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g clip-path="url(#clip0_1108_2)">
+<rect width="1531" height="1531" rx="10" fill="#272727"/>
+<rect x="200.203" y="87" width="673" height="100" rx="50" transform="rotate(20 200.203 87)" stroke="#DBC66F" stroke-width="30"/>
+<rect x="833.203" y="181.352" width="673" height="100" rx="50" transform="rotate(160 833.203 181.352)" fill="#272727" stroke="#DBC66F" stroke-width="30"/>
+<rect x="490.203" y="301" width="30" height="103" rx="7" fill="#DBC66F"/>
+<rect x="232.203" y="392" width="30" height="234" rx="7" fill="#DBC66F"/>
+<rect x="736.203" y="392" width="30" height="234" rx="7" fill="#DBC66F"/>
+<circle cx="500.203" cy="555.785" r="149" stroke="#DBC66F" stroke-width="30"/>
+<rect x="431.203" y="496.785" width="39" height="81" rx="19.5" stroke="#DBC66F" stroke-width="20"/>
+<rect x="536.203" y="496.785" width="39" height="81" rx="19.5" stroke="#DBC66F" stroke-width="20"/>
+<circle cx="330.203" cy="749" r="149" fill="#272727" stroke="#DBC66F" stroke-width="30"/>
+<rect x="342.703" y="755.5" width="86" height="19" rx="9.5" fill="#DBC66F" stroke="#DBC66F"/>
+<rect x="243.927" y="683.696" width="86" height="19" rx="9.5" transform="rotate(35 243.927 683.696)" fill="#DBC66F" stroke="#DBC66F"/>
+<rect x="232.899" y="772.162" width="86" height="19" rx="9.5" transform="rotate(-35 232.899 772.162)" fill="#DBC66F" stroke="#DBC66F"/>
+<circle cx="164" cy="164" r="149" transform="matrix(-1 0 0 1 832.203 585)" fill="#272727" stroke="#DBC66F" stroke-width="30"/>
+<rect x="-0.5" y="0.5" width="86" height="19" rx="9.5" transform="matrix(-1 0 0 1 655.203 755)" fill="#DBC66F" stroke="#DBC66F"/>
+<rect x="-0.122788" y="0.696364" width="86" height="19" rx="9.5" transform="matrix(-0.819152 0.573576 0.573576 0.819152 753.979 683.196)" fill="#DBC66F" stroke="#DBC66F"/>
+<rect x="-0.696364" y="0.122788" width="86" height="19" rx="9.5" transform="matrix(-0.819152 -0.573576 -0.573576 0.819152 765.007 771.662)" fill="#DBC66F" stroke="#DBC66F"/>
+</g>
+<defs>
+<clipPath id="clip0_1108_2">
+<rect width="1000" height="1000" fill="white"/>
+</clipPath>
+</defs>
+</svg>
