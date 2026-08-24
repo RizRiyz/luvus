@@ -16,8 +16,7 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use crate::event::AppEvent;
 use crate::ids::PaneId;
 use crate::terminal::backend::TerminalRuntime;
-use crate::terminal::vt::alacritty::AlacrittyEngine;
-use crate::terminal::vt::VtEngine;
+use crate::terminal::vt::{create_engine, VtEngine, VtEngineKind};
 
 const CHILD_REAPER_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -475,12 +474,13 @@ impl Pane {
         // All bytes (user input + terminal responses) funnel through one channel
         // to a single writer thread — keeps ordering correct, needs no mutex.
         let (input_tx, input_rx) = mpsc::channel::<InputAction>();
-        let engine: Arc<Mutex<dyn VtEngine>> = Arc::new(Mutex::new(AlacrittyEngine::new(
+        let engine = create_engine(
+            VtEngineKind::default(),
             cols,
             rows,
             input_tx.clone(),
             history_budget_bytes,
-        )));
+        );
         // Replay the saved screen so a restored pane shows its prior content.
         if let Some(screen) = initial {
             if let Ok(mut e) = engine.lock() {
@@ -550,12 +550,13 @@ impl Pane {
         // Everything a caller can observe before the child exists: the engine
         // (pane.read, detection, rendering) and the input queue.
         let (input_tx, input_rx) = mpsc::channel::<InputAction>();
-        let engine: Arc<Mutex<dyn VtEngine>> = Arc::new(Mutex::new(AlacrittyEngine::new(
+        let engine = create_engine(
+            VtEngineKind::default(),
             cols,
             rows,
             input_tx.clone(),
             history_budget_bytes,
-        )));
+        );
         if let Some(screen) = initial {
             if let Ok(mut engine) = engine.lock() {
                 engine.advance(screen.as_bytes());

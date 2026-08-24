@@ -5,7 +5,45 @@
 
 pub mod alacritty;
 
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
+
 use ratatui::style::{Color, Modifier};
+
+use crate::terminal::pty::InputAction;
+
+/// Which terminal engine backs a pane.
+///
+/// One variant today. It exists so that the choice of engine is a named
+/// decision with one home, rather than a concrete type spelled out at each
+/// construction site.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum VtEngineKind {
+    #[default]
+    Alacritty,
+}
+
+/// Build the engine backing one pane.
+///
+/// Every pane is constructed through here, so engine selection, and any
+/// validation it later needs, live in one place while the rest of the
+/// application keeps talking only to [`VtEngine`].
+pub(crate) fn create_engine(
+    kind: VtEngineKind,
+    cols: u16,
+    rows: u16,
+    resp_tx: Sender<InputAction>,
+    history_budget_bytes: usize,
+) -> Arc<Mutex<dyn VtEngine>> {
+    match kind {
+        VtEngineKind::Alacritty => Arc::new(Mutex::new(alacritty::AlacrittyEngine::new(
+            cols,
+            rows,
+            resp_tx,
+            history_budget_bytes,
+        ))),
+    }
+}
 
 /// A rendered cell's style, already mapped to ratatui colors/modifiers so the
 /// trait surface stays free of engine-specific types. The cell's *symbol* (its
@@ -191,4 +229,20 @@ pub trait VtEngine: Send {
     /// Dump the visible screen as ANSI so it can be replayed into a fresh
     /// engine on restore (session persistence). Trailing blanks are trimmed.
     fn snapshot_ansi(&self) -> String;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn factory_builds_a_working_default_engine() {
+        let (tx, _rx) = mpsc::channel();
+        let engine = create_engine(VtEngineKind::default(), 20, 3, tx, 64 * 1024);
+        let mut engine = engine.lock().expect("engine lock");
+        engine.advance(b"hi");
+        assert_eq!(engine.visible_rows()[0].trim_end(), "hi");
+        assert_eq!(engine.cursor().x, 2);
+    }
 }
