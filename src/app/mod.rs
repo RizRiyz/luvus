@@ -2792,6 +2792,21 @@ impl App {
             .unwrap_or_else(|| self.ws().cwd.clone())
     }
 
+    /// Where a newly opened tab or split should start: the focused pane's live
+    /// working directory, falling back to the workspace root and then `$HOME`
+    /// if that directory no longer exists. Keeps new panes where the user is
+    /// working, anchored back inside the workspace rather than resetting to
+    /// root or (for a deleted cwd) landing in `$HOME` or spawning a dead pane.
+    /// Shared by `new_tab` and `split` so the two stay aligned.
+    fn spawn_cwd(&self) -> PathBuf {
+        let focused = self.focused_cwd();
+        let home = crate::platform::home_dir().unwrap_or_default();
+        [focused.clone(), self.ws().cwd.clone(), home]
+            .into_iter()
+            .find(|candidate| candidate.is_dir())
+            .unwrap_or(focused)
+    }
+
     // ── mutations ─────────────────────────────────────────────────────────────
 
     fn spawn_into(&mut self, cwd: PathBuf) -> Option<PaneId> {
@@ -2906,7 +2921,11 @@ impl App {
     }
 
     fn split(&mut self, axis: Axis) {
-        let cwd = self.focused_cwd();
+        // Resolve the cwd up front (focused pane → workspace root → $HOME) so a
+        // split whose focused pane has `cd`'d into a since-deleted directory
+        // lands in the workspace instead of spawning a dead pane. The deferred
+        // worker takes an empty fallback list, so this resolution is the guard.
+        let cwd = self.spawn_cwd();
         if let Some(id) = self.spawn_into_deferred(cwd) {
             self.layout_mut().split_focused(axis, id);
         }
@@ -3031,9 +3050,12 @@ impl App {
     }
 
     fn new_tab(&mut self) {
-        // A new tab opens at the workspace's **static** folder (not wherever the
-        // current pane has `cd`'d), matching the static-workspace model.
-        let cwd = self.ws().cwd.clone();
+        // A new tab starts where the user is: it inherits the focused pane's live
+        // working directory, the same way `split` and `new_workspace` do, and
+        // anchors back to the workspace root if that directory no longer exists.
+        // The workspace root itself stays fixed, so the static-workspace model
+        // still holds elsewhere.
+        let cwd = self.spawn_cwd();
         if let Some(id) = self.spawn_into(cwd) {
             let ws = &mut self.workspaces[self.active_ws];
             ws.tabs.push(Tab::panes(TileLayout::new(id)));
