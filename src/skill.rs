@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 pub const BUNDLED_SKILL: &str = include_str!("../skills/luvus/SKILL.md");
 const BUNDLED_ADVANCED_CONTROL: &str =
     include_str!("../skills/luvus/references/advanced-control.md");
+const BUNDLED_UHP_CONTROL: &str = include_str!("../skills/luvus/references/uhp-control.md");
 const BUNDLED_OPENAI_METADATA: &str = include_str!("../skills/luvus/agents/openai.yaml");
 
 const STATE_SCHEMA: u32 = 1;
@@ -213,6 +214,10 @@ fn bundled_files(host: SkillHost) -> Vec<BundledFile> {
         BundledFile {
             path: "references/advanced-control.md",
             content: BUNDLED_ADVANCED_CONTROL,
+        },
+        BundledFile {
+            path: "references/uhp-control.md",
+            content: BUNDLED_UHP_CONTROL,
         },
     ];
     if host == SkillHost::Codex {
@@ -974,6 +979,10 @@ mod tests {
             BUNDLED_ADVANCED_CONTROL
         );
         assert_eq!(
+            fs::read_to_string(plugin.join("references/uhp-control.md")).unwrap(),
+            BUNDLED_UHP_CONTROL
+        );
+        assert_eq!(
             fs::read_to_string(plugin.join("agents/openai.yaml")).unwrap(),
             BUNDLED_OPENAI_METADATA
         );
@@ -1138,6 +1147,9 @@ mod tests {
         assert_eq!(show(), BUNDLED_SKILL);
         assert!(show().contains("name: luvus"));
         assert!(show().contains("agent send"));
+        assert!(show().contains("luvus uhp capabilities"));
+        assert!(show().contains("ui.bar.*"));
+        assert!(show().contains("Agent detection is built into Luvus"));
     }
 
     #[test]

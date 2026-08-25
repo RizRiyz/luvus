@@ -1,12 +1,13 @@
 ---
 name: luvus
-description: "Control Luvus through its local CLI. Use only for a line beginning with `=target message`, an explicit request naming Luvus, a request to delegate to a named live Luvus agent or pane, or an explicit Luvus session operation on a workspace, tab, pane, agent, worktree, task, lease, module, dock, or Luvus UI. Do not use for ordinary coding, file edits, Git operations, tests, task planning, generic agent work, or parallelization unless the user explicitly connects the request to Luvus. Being inside Luvus does not trigger this skill by itself. Inside Luvus use the inherited session; outside use the installed production Luvus command and configured session."
+description: "Control Luvus through its local CLI and UHP. Use only for a line beginning with `=target message`, an explicit request naming Luvus, a request to delegate to a named live Luvus agent or pane, or an explicit Luvus operation involving sessions, workspaces, tabs, panes, agents, files, Git, DIFF, worktrees, tasks, leases, modules, themes, Luvus Bar, UI, integrations, or Luvus UHP. Do not use for ordinary coding, file edits, Git operations, tests, task planning, generic agent work, or parallelization unless the user explicitly connects the request to Luvus. Being inside Luvus does not trigger this skill by itself. Inside Luvus use the inherited session; outside use the installed production Luvus command and configured session."
 ---
 
 # Luvus
 
-Use Luvus's JSON CLI to delegate work and control its workspaces, tabs, panes,
-and coding agents. The skill adds no service, event loop, or polling process.
+Use Luvus's semantic CLI and UHP to delegate work, control the live workspace,
+and build explicit harness integrations. The skill adds no service, event loop,
+or polling process.
 
 ## Route `=target` delegation first
 
@@ -126,6 +127,55 @@ commands for server-session commands.
 Most commands return JSON with `.result` or `.error`. Parse exact IDs, indices,
 paths, names, and statuses from those results. Never infer a target from sidebar
 position.
+
+## Choose the CLI or UHP deliberately
+
+Use the semantic CLI for ordinary Luvus control and delegation. It is the
+shortest path for one action and should not be replaced with raw protocol or
+terminal input.
+
+Use Universal Harness Protocol 1.0 only when the user explicitly asks for a
+Luvus API, harness integration, capability or schema discovery, sequenced
+events, fenced snapshots, revision-safe automation, delegated access, or
+terminal-backend streaming. For that work, discover the installed server
+instead of assuming support from documentation or a release number:
+
+```sh
+luvus uhp capabilities
+luvus uhp schema
+luvus uhp snapshot
+```
+
+These discovery calls are an exception to the no-preflight rule because they
+define the live protocol contract. Do not run them before routine CLI actions.
+`luvus uhp proxy` forwards one newline-delimited JSON request from stdin to the
+selected local server. Validate the method and parameters against the installed
+schema before sending it.
+
+For stateful UHP automation:
+
+1. Read capabilities and limits.
+2. Subscribe from a known event sequence and obtain a fenced snapshot.
+3. Apply only later events in order.
+4. Resnapshot after a sequence gap, overflow, reconnect, server-generation
+   change, or `resync_required` event.
+5. Use advertised revisions or `if_revision` for conflicting mutations.
+6. Prefer atomic methods such as `agent.start`, `agent.prompt`, `layout.apply`,
+   `workspace.move_block`, and `diff.note.apply` when the live capabilities
+   advertise them.
+
+The default endpoint trusts the local owner and is not a public TCP service.
+Create scoped, expiring UHP tokens only for an explicitly delegated harness.
+Never print, persist, or log token secrets, and never grant broader scopes than
+the requested integration requires. Terminal observe and control streams are
+for explicit harness or remote-client work. Control is exclusive, bounded, and
+must be released when the task ends. Prefer `agent prompt`, `pane read`, and
+other semantic routes for ordinary automation.
+
+For method families, event recovery, tokens, revisions, layout operations, and
+terminal streams, read
+[uhp-control.md](references/uhp-control.md) when it is installed. The rules
+above remain sufficient when `luvus skill show` is the only available file.
 
 ## Delegate and manage agents
 
@@ -276,13 +326,16 @@ Use these read routes to resolve state and exact targets:
 
 - Files and Git: `luvus files tree`, `luvus git status`,
   `luvus git branches`, `luvus git log`
+- DIFF: `luvus diff list`, `luvus diff get <path>`,
+  `luvus diff note list`
 - Worktrees: `luvus worktree list`
 - Orchestration: `luvus task list`, `luvus task get <id>`,
   `luvus lease list`
 - Modules: `luvus module list`, `luvus module info <id>`,
   `luvus module actions`, `luvus module settings <id>`,
   `luvus module log <id>`
-- UI: `luvus ui dock list`
+- Themes and UI: `luvus theme list`, `luvus bar list`,
+  `luvus ui dock list`
 
 Run `luvus help all` only when the requested mutation grammar is uncertain.
 This remains compatible with older Luvus releases. Before changing an advanced
@@ -290,6 +343,9 @@ surface:
 
 - Inspect files and Git before opening a file, revealing a path, refreshing
   the tree, or opening a Git view.
+- Inspect the exact DIFF layer and file before opening it or adding, editing,
+  resolving, removing, applying, or sending a review note. Removing a note and
+  sending feedback to an agent require explicit authorization.
 - List worktrees before creating, opening, or removing one. Removal requires
   explicit authorization and an exact path.
 - Inspect task and lease ownership, dependencies, gates, assignees, and path
@@ -298,8 +354,16 @@ surface:
 - Inspect module metadata, actions, settings, and logs before changing module
   state. Installation, uninstallation, and consequential setting changes need
   clear authorization.
-- Inspect docks before moving them. Avoid sidebar, dock, toast, or focus
-  changes unless they serve the user's request.
+- Validate theme sources before installing them. Do not uninstall the active
+  theme or fetch a remote theme without explicit authorization.
+- CLI widget commands use `luvus bar ...`; the UHP method family is
+  `ui.bar.*`. Inspect widgets and docks before changing placement or content.
+  Avoid sidebar, dock, notification, toast, bar, or focus changes unless they
+  serve the user's request.
+- Agent detection is built into Luvus. `luvus integration install` manages
+  optional native session-resume hooks and must not be used merely to make an
+  agent appear in the sidebar. Install or remove an integration only when the
+  user explicitly requests that lifecycle integration.
 - Subscribe to events only for a live monitoring request. Stop when its
   condition is satisfied and never retain an unbounded stream.
 

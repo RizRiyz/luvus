@@ -145,8 +145,10 @@ discover the skill from their native directory and load its instructions only
 when relevant or explicitly invoked.
 
 `luvus skill enable` installs prompt guidance. It is independent from
-`luvus integration install`, which adds only the session/status hook needed for
-precise detection and resume. Enabling either one never enables the other.
+`luvus integration install`, which adds optional exact session identity and
+lifecycle events for resume, alerts, and automation. Core process and screen
+detection, sidebar visibility, and ordinary resume need no hook. Enabling either
+one never enables the other.
 
 The messaging **commands themselves work with every agent luvus detects**
 (claude, codex, gemini, opencode, kimi, grok, aider, and more), whether or not

@@ -9,14 +9,19 @@ it conflicts with `SKILL.md`, follow `SKILL.md`.
 
 - Files and Git: `luvus files tree`, `luvus git status`,
   `luvus git branches`, `luvus git log`
+- DIFF: `luvus diff list`, `luvus diff get <path>`,
+  `luvus diff note list`
 - Worktrees: `luvus worktree list`
 - Orchestration: `luvus task list`, `luvus task get <id>`,
   `luvus lease list`
 - Modules: `luvus module list`, `luvus module info <id>`,
   `luvus module actions`, `luvus module settings <id>`,
   `luvus module log <id>`
-- UI: `luvus ui dock list`
+- Themes and UI: `luvus theme list`, `luvus bar list`,
+  `luvus ui dock list`
 - Layout: `luvus workspace list`, `luvus tab list`, `luvus pane list`
+- UHP: `luvus uhp capabilities`, `luvus uhp schema`,
+  `luvus uhp snapshot`
 
 Run `luvus help all` only when the requested command grammar is uncertain. This
 remains compatible with older Luvus releases.
@@ -25,6 +30,8 @@ remains compatible with older Luvus releases.
 
 - Inspect files and Git before opening a file, revealing a path, refreshing the
   tree, or opening a Git view.
+- Inspect the exact DIFF layer and file before changing or sending review notes.
+  Removing notes and messaging an agent require explicit authorization.
 - List worktrees before creating, opening, or removing one. Removal requires
   explicit authorization and an exact path.
 - Inspect task and lease ownership, dependencies, gates, assignees, and path
@@ -33,6 +40,9 @@ remains compatible with older Luvus releases.
 - Inspect module metadata, actions, settings, and logs before changing module
   state. Installation, uninstallation, and consequential setting changes need
   clear authorization.
+- Validate theme sources before installation. CLI widgets use `luvus bar`; UHP
+  widgets use `ui.bar.*`. Inspect current placement before moving or removing a
+  widget or dock.
 - Inspect docks before moving them. Avoid sidebar, dock, toast, or focus changes
   unless they serve the user's request.
 - With an explicit stable index, run `luvus workspace rename <i> <name>`, `pin
@@ -52,6 +62,11 @@ remains compatible with older Luvus releases.
   allowed only after an exact stopped target and explicit authorization.
 - Subscribe to events only for a live monitoring request. Stop when its
   condition is satisfied and never retain an unbounded stream.
+- For explicit harness or protocol work, read
+  [uhp-control.md](uhp-control.md), discover the live capabilities and schema,
+  and resnapshot after event loss or a server-generation change.
+- Agent detection is independent of optional resume integrations. Never install
+  an integration merely to make an agent visible.
 - Do not remove worktrees, delete or merge tasks, uninstall modules, or
   overwrite consequential settings without clear authorization and a read-only
   target check.

@@ -1,11 +1,12 @@
 ---
 title: Control Luvus from Codex
-description: Opt in to Luvus's Codex skill to delegate work and control agents, panes, tabs, and workspaces from a managed pane or local terminal.
+description: Opt in to Luvus's Codex skill to delegate work, control the full Luvus workspace, and build capability-driven UHP automation.
 ---
 
 The optional Luvus Codex skill provides agent delegation and full session
-control. It covers workspaces, tabs, panes, agents, files, Git, worktrees,
-tasks, leases, modules, and UI state.
+control. It covers workspaces, tabs, panes, agents, files, Git, DIFF notes,
+worktrees, tasks, leases, modules, themes, Luvus Bar, UI state, optional resume
+integrations, and Universal Harness Protocol 1.0.
 
 Inside a Luvus pane, the skill uses that pane's inherited binary, socket, and
 pane identity. This lets the same skill delegate and control the current Luvus
@@ -128,6 +129,34 @@ Try requests such as:
 
 > Read the visible screen of the blocked Codex agent before answering it.
 
+### Use UHP for harness automation
+
+The skill keeps ordinary control on the faster semantic CLI path. It uses UHP
+only when you explicitly ask for a Luvus API, harness integration, live schema,
+sequenced events, revision-safe automation, delegated access, or terminal
+streaming.
+
+For UHP work it begins with the selected running server's contract:
+
+```sh
+luvus uhp capabilities
+luvus uhp schema
+luvus uhp snapshot
+```
+
+The skill follows the returned method contracts and limits instead of assuming
+that the website and installed release match. It handles fenced snapshots,
+event replay and resynchronization, mutation revisions, scoped expiring tokens,
+and exclusive terminal-control streams. Routine delegation still uses
+`agent prompt`, `agent read`, and other semantic commands rather than raw
+terminal control.
+
+CLI widget commands are named `luvus bar`; the corresponding UHP method family
+is `ui.bar.*`. Agent detection remains a core Luvus feature. Optional
+`integration install` hooks are used only when you explicitly request native
+session resume or lifecycle reporting, never as a prerequisite for sidebar
+detection.
+
 ### Fork an agent session
 
 The skill can fork a supported live agent into a sibling pane while the
@@ -229,9 +258,10 @@ does not follow it with another status or agent lookup. It waits only when the
 next requested action depends on a state transition or when you explicitly ask
 it to wait.
 
-Common pane and agent instructions stay in the small core skill. Guidance for
-worktrees, orchestration, modules, UI, and destructive operations loads only
-when a request needs it, which keeps normal startup and control prompts lighter.
+Common pane and agent instructions stay on the direct path. Detailed guidance
+for UHP, worktrees, orchestration, modules, DIFF, themes, UI, and destructive
+operations loads only when a request needs it, which keeps normal control
+prompts lighter.
 
 ## Refresh or remove
 

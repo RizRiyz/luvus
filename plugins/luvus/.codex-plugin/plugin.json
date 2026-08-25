@@ -1,7 +1,7 @@
 {
   "name": "luvus",
-  "version": "0.4.0",
-  "description": "Delegate, fork, arrange agents, and organize Luvus workspaces from Codex.",
+  "version": "0.4.1",
+  "description": "Control Luvus agents, workspaces, and UHP automation from Codex.",
   "author": {
     "name": "Riz",
     "url": "https://github.com/RizRiyz"
@@ -19,8 +19,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Luvus",
-    "shortDescription": "Delegate agents and organize Luvus workspaces.",
-    "longDescription": "Control a local Luvus session from Codex. Delegate work, fork supported agent sessions, arrange panes and tabs, and organize workspaces. Requires an installed Luvus client and a running Luvus session.",
+    "shortDescription": "Control Luvus agents, workspaces, and UHP.",
+    "longDescription": "Control a local Luvus session from Codex. Delegate work, fork agent sessions, arrange workspaces, review DIFF notes, coordinate tasks, and build capability-driven UHP automation. Requires an installed Luvus client and a running Luvus session.",
     "developerName": "Riz",
     "category": "Productivity",
     "capabilities": [
@@ -37,7 +37,7 @@
     "defaultPrompt": [
       "Delegate a review to the Luvus agent named reviewer.",
       "Fork a supported live Luvus agent into a named sibling pane.",
-      "Rename and pin a Luvus workspace without changing its folder."
+      "Inspect live Luvus UHP capabilities before planning a harness integration."
     ]
   }
 }
