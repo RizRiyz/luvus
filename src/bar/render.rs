@@ -109,6 +109,7 @@ fn draw_segment(
         BarSegmentKind::State { state, label } => {
             let state = parse_state(state);
             let glyph = if state == State::Working {
+                f.mark_working_animation();
                 spinner_frame(spinner)
             } else {
                 state.dot()

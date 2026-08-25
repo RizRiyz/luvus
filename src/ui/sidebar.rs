@@ -577,6 +577,7 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                 // A working agent gets a live rotating-circle spinner in the dot
                 // slot; every other state keeps its static dot.
                 let dot = if st == State::Working {
+                    f.mark_working_animation();
                     crate::ui::theme::spinner_frame(app.spinner)
                 } else {
                     st.dot()

@@ -671,6 +671,13 @@ impl Pane {
         pending
     }
 
+    /// Observe whether output is waiting for a coalescing boundary without
+    /// consuming it. The server uses this to arm the 100 ms fallback only while
+    /// a pane actually has pending bytes, instead of waking forever when idle.
+    pub fn has_data_pending(&self) -> bool {
+        self.data_pending.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Clear the pending-output coalescing flag so the reader's next
     /// announcement fires immediately. Input is interaction, not background
     /// output, and a parked `wait.output` must stay event-driven (docs/81).

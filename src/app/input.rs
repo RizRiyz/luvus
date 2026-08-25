@@ -422,6 +422,7 @@ impl App {
                 if let Some(s) = self.status.get_mut(&id) {
                     s.last_activity = Instant::now();
                 }
+                self.detection_dirty.insert(id);
                 // A parked `wait.output` for this pane just got new output to
                 // test against — resolve it on the same wake (docs/81).
                 self.check_output_waits(id);

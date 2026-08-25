@@ -1426,10 +1426,20 @@ pub struct App {
     /// Throttle for per-pane agent classification — it locks each pane's VT engine
     /// and scans its grid, so it runs at ~100ms, not at the render frame rate.
     last_detect_at: Instant,
+    /// Panes whose PTY generation or identity inputs changed since their last
+    /// classification pass. The detector consumes this bounded set instead of
+    /// walking every quiet pane on each 100 ms cadence.
+    detection_dirty: HashSet<PaneId>,
+    /// A bounded fleet audit repairs any missed invalidation without making the
+    /// audit the normal scheduling path.
+    last_detection_audit_at: Instant,
     /// Runtime evidence for the generation gate, exposed additively by
     /// `pane.list` for diagnostics and performance comparisons.
     detection_extractions: u64,
     detection_skips: u64,
+    detection_panes_considered: u64,
+    detection_full_fleet_audits: u64,
+    detection_audit_recoveries: u64,
     /// Pending server-side `wait.output` requests keyed by pane (docs/81).
     /// Satisfied by the pane's next output event, expired by the loop tick.
     output_waits: HashMap<PaneId, Vec<crate::app::dispatch::OutputWait>>,
@@ -1818,8 +1828,15 @@ impl App {
             last_detect_at: Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
+            detection_dirty: HashSet::new(),
+            last_detection_audit_at: Instant::now()
+                .checked_sub(Duration::from_secs(2))
+                .unwrap_or_else(Instant::now),
             detection_extractions: 0,
             detection_skips: 0,
+            detection_panes_considered: 0,
+            detection_full_fleet_audits: 0,
+            detection_audit_recoveries: 0,
             output_waits: HashMap::new(),
             agent_waits: HashMap::new(),
             agent_starts: HashMap::new(),
@@ -2339,8 +2356,15 @@ impl App {
             last_detect_at: Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
+            detection_dirty: HashSet::new(),
+            last_detection_audit_at: Instant::now()
+                .checked_sub(Duration::from_secs(2))
+                .unwrap_or_else(Instant::now),
             detection_extractions: 0,
             detection_skips: 0,
+            detection_panes_considered: 0,
+            detection_full_fleet_audits: 0,
+            detection_audit_recoveries: 0,
             output_waits: HashMap::new(),
             agent_waits: HashMap::new(),
             agent_starts: HashMap::new(),
@@ -2722,6 +2746,11 @@ impl App {
             }
         }
         (visible, background)
+    }
+
+    /// Whether any PTY reader is currently coalescing an output notification.
+    pub fn has_pending_pty_output(&self) -> bool {
+        self.panes.values().any(|pane| pane.has_data_pending())
     }
 
     /// Whether a pane is rendered in the active tab.

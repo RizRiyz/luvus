@@ -409,6 +409,17 @@ current Alacritty adapter it is a conservative estimate (`false`), because the
 underlying terminal engine limits rows rather than allocation bytes. These
 fields observe state only; they do not grant remote control of a pane viewport.
 
+### Runtime performance counters
+
+The top-level `pane.list` result also includes additive process-lifetime
+`render_performance` and `detection_performance` objects. They expose bounded
+counts for render causes, loop wake sources, client projections, changed and
+unchanged projections, frame backpressure, panes considered and extracted,
+full-fleet audits, and audit recoveries. The counters are intended for local
+performance comparisons and contain no pane text, commands, paths, prompts, or
+client identifiers. Existing `detection_extractions` and `detection_skips`
+remain available for compatibility.
+
 ## Forking an agent session
 
 | Method | Params | Result |

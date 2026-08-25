@@ -13,6 +13,8 @@ pub(crate) const MAX_AGENT_REPORT_MESSAGE_CHARS: usize = 4096;
 pub(crate) const MAX_AGENT_PROMPT_CHARS: usize = 262_144;
 pub(crate) const MAX_AGENT_START_ARGS: usize = 64;
 const AGENT_PROMPT_QUIET: Duration = Duration::from_millis(1200);
+const DETECTION_INTERVAL: Duration = Duration::from_millis(100);
+const DETECTION_AUDIT_INTERVAL: Duration = Duration::from_secs(2);
 
 /// A parked `wait.output` request (docs/81): reply when the pane's recent
 /// output contains `needle`, or the optional deadline passes.
@@ -33,6 +35,80 @@ mod socket_api_tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let app = App::new(100, 40, tx).unwrap();
         (env, app)
+    }
+
+    #[test]
+    fn quiet_runtime_can_leave_the_fast_detection_cadence() {
+        let (_env, mut app) = app("quiet-runtime-cadence");
+        let now = Instant::now();
+        assert!(app.needs_fast_runtime_tick(now));
+
+        for status in app.status.values_mut() {
+            status.force_detect = false;
+            status.candidate = status.state;
+            status.last_activity = now - ACTIVITY_WINDOW - QUIET_DWELL - Duration::from_secs(1);
+        }
+        assert!(
+            !app.needs_fast_runtime_tick(now),
+            "a quiet fleet without parked deadlines should use the coarse audit"
+        );
+
+        let status = app.status.values_mut().next().unwrap();
+        status.candidate = State::Working;
+        assert!(
+            app.needs_fast_runtime_tick(now),
+            "an in-flight state dwell retains the fast cadence"
+        );
+    }
+
+    #[test]
+    fn detection_considers_changed_panes_between_bounded_audits() {
+        let (_env, mut app) = app("dirty-pane-detection");
+        let pane = app.layout().focus;
+        let start = Instant::now();
+        app.last_detect_at = start - DETECTION_INTERVAL;
+        app.last_detection_audit_at = start;
+        for status in app.status.values_mut() {
+            status.force_detect = false;
+            status.state = State::Idle;
+            status.candidate = State::Idle;
+            status.last_activity = start - Duration::from_secs(60);
+        }
+
+        let considered = app.detection_panes_considered;
+        app.detect_tick(start + DETECTION_INTERVAL);
+        assert_eq!(
+            app.detection_panes_considered, considered,
+            "quiet panes are skipped between fleet audits"
+        );
+
+        assert!(app.handle_event(AppEvent::PtyData(pane)));
+        app.detect_tick(start + 2 * DETECTION_INTERVAL);
+        assert_eq!(
+            app.detection_panes_considered,
+            considered + 1,
+            "PTY invalidation schedules only its pane"
+        );
+    }
+
+    #[test]
+    fn hidden_pty_title_change_is_a_presentation_invalidation() {
+        let (_env, mut app) = app("hidden-title-invalidation");
+        let hidden = app.layout().focus;
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        assert!(!app.pane_is_visible(hidden));
+        {
+            let mut engine = app.panes[&hidden].engine.lock().unwrap();
+            engine.advance(b"\x1b]0;Background build\x07");
+        }
+        assert!(app.handle_event(AppEvent::PtyData(hidden)));
+        let now = Instant::now();
+        app.last_detect_at = now - DETECTION_INTERVAL;
+        app.last_detection_audit_at = now;
+        assert!(
+            app.detect_tick(now),
+            "an inactive pane title can change visible tab metadata"
+        );
     }
 
     #[test]
@@ -363,6 +439,30 @@ fn blocking_hint(bottom: &str) -> Option<String> {
 }
 
 impl App {
+    /// Whether the server loop must retain its 100 ms runtime cadence.
+    ///
+    /// Quiet panes do not need a 33 ms poll. Fresh output, an in-flight
+    /// classification dwell, an expiring integration lease, or a parked API
+    /// workflow does: these paths have user-visible deadlines and keep the
+    /// existing detection latency until the scheduler can sleep again.
+    pub(crate) fn needs_fast_runtime_tick(&self, now: Instant) -> bool {
+        let detection_active = self.status.values().any(|status| {
+            status.force_detect
+                || status.candidate != status.state
+                || status.agent_report.is_some()
+                || now.saturating_duration_since(status.last_activity)
+                    < ACTIVITY_WINDOW + QUIET_DWELL
+        });
+        detection_active
+            || !self.output_waits.is_empty()
+            || !self.agent_waits.is_empty()
+            || !self.agent_starts.is_empty()
+            || !self.agent_prompts.is_empty()
+            || !self.backend_revision_waits.is_empty()
+            || self.toast.is_some()
+            || self.search_flash.is_some()
+    }
+
     /// Recompute every pane's agent state. Cheap; called a few times a second.
     /// Returns whether anything the sidebar shows changed, so the loop repaints a
     /// silent agent's Working→Done transition even when no other event fires.
@@ -501,12 +601,34 @@ impl App {
         // The per-pane classification below locks each pane's VT engine + scans its
         // grid; agent state (blocked/working/done) is human-paced, so ~100ms is
         // plenty — running it at the render frame rate (up to 60fps) just burns CPU.
-        if now.duration_since(self.last_detect_at) < Duration::from_millis(100) {
+        if now.duration_since(self.last_detect_at) < DETECTION_INTERVAL {
             return false;
         }
         self.last_detect_at = now;
         let focus = self.layout().focus;
-        let ids: Vec<PaneId> = self.panes.keys().copied().collect();
+        self.detection_dirty
+            .retain(|id| self.panes.contains_key(id));
+        let full_audit =
+            now.duration_since(self.last_detection_audit_at) >= DETECTION_AUDIT_INTERVAL;
+        if full_audit {
+            self.last_detection_audit_at = now;
+            self.detection_full_fleet_audits = self.detection_full_fleet_audits.saturating_add(1);
+        }
+        let ids: Vec<PaneId> = self
+            .panes
+            .keys()
+            .copied()
+            .filter(|id| {
+                full_audit
+                    || self.detection_dirty.contains(id)
+                    || self.status.get(id).is_some_and(|status| {
+                        status.force_detect
+                            || status.candidate != status.state
+                            || status.state == State::Working
+                            || status.agent_report.is_some()
+                    })
+            })
+            .collect();
         let mut changes: Vec<(PaneId, State, String)> = Vec::new();
         // Panes that just finished a working stretch (Working → Idle/Done) — the
         // retro "done" chime fires on these, whether or not the pane is focused.
@@ -518,8 +640,22 @@ impl App {
         // the state remains Idle. Keep this separate from `agent_appeared`:
         // non-resumable agents still need a repaint, but not a persisted session.
         let mut visible_identity_changed = false;
+        // OSC title changes can alter tab labels even when their pane is not in
+        // the active tab. Hidden PTY bytes do not schedule presentation, so the
+        // detector must explicitly surface this metadata-only invalidation.
+        let mut presentation_metadata_changed = false;
         let mut expired_reports: Vec<(PaneId, String)> = Vec::new();
         for id in ids {
+            self.detection_panes_considered = self.detection_panes_considered.saturating_add(1);
+            let audit_only = full_audit
+                && !self.detection_dirty.contains(&id)
+                && self.status.get(&id).is_none_or(|status| {
+                    !status.force_detect
+                        && status.candidate == status.state
+                        && status.state != State::Working
+                        && status.agent_report.is_none()
+                });
+            self.detection_dirty.remove(&id);
             let Some(pane) = self.panes.get(&id) else {
                 continue;
             };
@@ -578,7 +714,12 @@ impl App {
             };
             if let Some(s) = self.status.get_mut(&id) {
                 if let Some((generation, title, bottom)) = inspected {
+                    if audit_only {
+                        self.detection_audit_recoveries =
+                            self.detection_audit_recoveries.saturating_add(1);
+                    }
                     s.last_detect_generation = Some(generation);
+                    presentation_metadata_changed |= s.detected_title != title;
                     s.detected_title = title;
                     s.detected_bottom = bottom;
                     s.force_detect = false;
@@ -749,9 +890,23 @@ impl App {
         if agent_appeared {
             self.session_dirty = true;
         }
+        // A state transition needs presentation only when that state has a
+        // rendered consumer: a visible pane, a live AGENTS/Mission row, or an
+        // orchestration board. Quiet shells in inactive tabs still publish API
+        // events below, but no longer force a known-no-change full projection.
+        let state_presentation_changed = changes.iter().any(|(id, _, agent)| {
+            self.pane_is_visible(*id)
+                || self.manifests.is_agent(agent)
+                || self.status.get(id).is_some_and(|status| {
+                    status.agent_session.is_some() || status.agent_report.is_some()
+                })
+                || self.active_is_orch()
+                || self.active_is_mission()
+        });
         // State and visible identity transitions both change the sidebar. Session
         // persistence remains limited to resumable agents via `agent_appeared`.
-        let changed = !changes.is_empty() || visible_identity_changed;
+        let changed =
+            state_presentation_changed || visible_identity_changed || presentation_metadata_changed;
         let (sound_done, sound_blocked) = {
             let n = &self.config.notifications;
             (n.sound_on_done, n.sound_on_blocked)
@@ -1083,6 +1238,13 @@ impl App {
                     "panes":panes,
                     "detection_extractions": self.detection_extractions,
                     "detection_skips": self.detection_skips,
+                    "detection_performance": {
+                        "panes_considered": self.detection_panes_considered,
+                        "panes_extracted": self.detection_extractions,
+                        "panes_generation_skipped": self.detection_skips,
+                        "full_fleet_audits": self.detection_full_fleet_audits,
+                        "audit_recoveries": self.detection_audit_recoveries,
+                    },
                     "render_performance": crate::ipc::server::performance_snapshot(),
                 }))
             }
@@ -6994,6 +7156,15 @@ command = ["true"]
         let listed = app.dispatch("pane.list", &json!({})).expect("pane list");
         assert!(listed["detection_extractions"].as_u64().is_some());
         assert!(listed["detection_skips"].as_u64().is_some());
+        assert!(listed["detection_performance"]["panes_considered"]
+            .as_u64()
+            .is_some());
+        assert!(listed["detection_performance"]["full_fleet_audits"]
+            .as_u64()
+            .is_some());
+        assert!(listed["detection_performance"]["audit_recoveries"]
+            .as_u64()
+            .is_some());
         assert!(listed["render_performance"]["frames_sent"]
             .as_u64()
             .is_some());
