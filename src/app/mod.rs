@@ -9272,6 +9272,7 @@ mod tests {
         if let Some(p) = app.panes.get(&id) {
             p.scroll(60);
         }
+        app.detection_dirty.insert(id);
         let visible = app
             .panes
             .get(&id)

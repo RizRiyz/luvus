@@ -34,6 +34,16 @@ const IDLE_INTERVAL: Duration = Duration::from_millis(250);
 /// 100 ms cadence while they have time-sensitive work.
 const FAST_IDLE_INTERVAL: Duration = Duration::from_millis(100);
 
+fn frame_wait(elapsed_since_attempt: Duration) -> Duration {
+    FRAME_INTERVAL
+        .saturating_sub(elapsed_since_attempt)
+        .max(Duration::from_millis(1))
+}
+
+fn frame_cadence_ready(elapsed_since_attempt: Duration) -> bool {
+    elapsed_since_attempt >= FRAME_INTERVAL
+}
+
 static FRAMES_SENT: AtomicU64 = AtomicU64::new(0);
 static FULL_FRAMES_SENT: AtomicU64 = AtomicU64::new(0);
 static DIFF_RUNS_SENT: AtomicU64 = AtomicU64::new(0);
@@ -152,10 +162,6 @@ impl RenderRequest {
 
     fn needs_render(self) -> bool {
         self.causes != 0
-    }
-
-    fn only_resync(self) -> bool {
-        self.causes == RenderCause::ClientResync.bit()
     }
 
     fn clear(&mut self) {
@@ -303,7 +309,6 @@ pub fn run() -> Result<()> {
     let mut interactive_size = DEFAULT_SIZE;
     let mut next_activity = 1u64;
     let mut last_render_attempt = Instant::now();
-    let mut last_presentation = Instant::now();
     let mut last_save = Instant::now();
     // Un-rendered activity waiting for the frame cap to expire — drives a trailing
     // render so a change that lands mid-interval isn't stuck until the next event.
@@ -322,14 +327,7 @@ pub fn run() -> Result<()> {
         // Pending + clients attached → wait only until the cap frees up (flush
         // promptly); otherwise tick at the coarser idle cadence.
         let wait = if render_request.needs_render() && !clients.is_empty() {
-            let cadence = if render_request.only_resync() {
-                last_render_attempt.elapsed()
-            } else {
-                last_presentation.elapsed()
-            };
-            FRAME_INTERVAL
-                .saturating_sub(cadence)
-                .max(Duration::from_millis(1))
+            frame_wait(last_render_attempt.elapsed())
         } else {
             let mut idle = if app.needs_fast_runtime_tick(Instant::now()) {
                 FAST_IDLE_INTERVAL
@@ -528,24 +526,19 @@ pub fn run() -> Result<()> {
             render_request.record(RenderCause::ClientResync);
         }
 
-        let render_cadence_ready = if render_request.only_resync() {
-            last_render_attempt.elapsed() >= FRAME_INTERVAL
-        } else {
-            last_presentation.elapsed() >= FRAME_INTERVAL
-        };
-        if render_request.needs_render() && !clients.is_empty() && render_cadence_ready {
+        if render_request.needs_render()
+            && !clients.is_empty()
+            && frame_cadence_ready(last_render_attempt.elapsed())
+        {
             let forced = std::mem::take(&mut app.force_redraw);
             last_render_attempt = Instant::now();
-            let presented = render_clients(
+            render_clients(
                 &mut app,
                 &mut clients,
                 &mut foreground,
                 &mut interactive_size,
                 forced,
             );
-            if presented {
-                last_presentation = last_render_attempt;
-            }
             render_request.clear();
             // Re-arm the PTY readers now that their output is on screen. A flag
             // set during this frame = more output already waiting → stay dirty
@@ -1105,8 +1098,9 @@ mod shutdown {
 mod tests {
     use super::ServerMessage;
     use super::{
-        apply, broadcast, record_event_render_request, render_clients, ClientSender, ClientState,
-        EventRenderSource, FrameSendError, RenderCause, RenderRequest,
+        apply, broadcast, frame_cadence_ready, frame_wait, record_event_render_request,
+        render_clients, ClientSender, ClientState, EventRenderSource, FrameSendError, RenderCause,
+        RenderRequest, FRAME_INTERVAL,
     };
     use crate::app::App;
     use crate::event::{AppEvent, ClientInput};
@@ -1167,6 +1161,27 @@ mod tests {
         assert!(request.needs_render());
         request.clear();
         assert!(!request.needs_render());
+    }
+
+    #[test]
+    fn unchanged_normal_render_attempts_remain_frame_capped() {
+        let mut request = RenderRequest::default();
+        request.record(RenderCause::VisiblePty);
+
+        // An unchanged projection clears the request but still resets the
+        // attempt clock. A new normal request must wait for the same frame cap.
+        for _ in 0..2 {
+            assert!(request.needs_render());
+            assert_eq!(frame_wait(Duration::ZERO), FRAME_INTERVAL);
+            assert!(!frame_cadence_ready(Duration::ZERO));
+            request.clear();
+            request.record(RenderCause::VisiblePty);
+        }
+
+        assert!(!frame_cadence_ready(
+            FRAME_INTERVAL - Duration::from_millis(1)
+        ));
+        assert!(frame_cadence_ready(FRAME_INTERVAL));
     }
 
     /// A tab switch requests a frame at the same time a finished selection sends
