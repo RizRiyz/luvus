@@ -94,26 +94,36 @@ fn fetch_outcome(url: &str) -> CheckOutcome {
 /// `luvus update`: check first, then use the installation's own safe update
 /// path. This is deliberately a single command rather than an update command
 /// tree; automatic update checks stay notification-only.
-pub fn run_cli(args: &[String]) -> Result<i32> {
+pub fn run_cli(args: &[String], context: crate::i18n::cli::Context) -> Result<i32> {
     if !args.is_empty() {
-        eprintln!("usage: luvus update");
+        eprintln!(
+            "{}",
+            crate::i18n::cli::help("usage: luvus update", context.language())
+        );
         return Ok(2);
     }
 
-    println!("Checking for Luvus updates...");
+    println!("{}", context.text("Checking for Luvus updates..."));
     let manifest = manifest_url();
     let latest = match fetch_outcome(&manifest) {
         CheckOutcome::Current => {
-            println!("Luvus {CURRENT} is already up to date.");
+            println!("Luvus {CURRENT} {}", context.text("is already up to date."));
             return Ok(0);
         }
         CheckOutcome::Newer(version) => validate_release_version(&version)?,
         CheckOutcome::Failed => {
-            bail!("could not check {manifest}; check your connection and try again")
+            bail!(
+                "{} {manifest}; {}",
+                context.text("could not check"),
+                context.text("check your connection and try again")
+            )
         }
     };
 
-    println!("Luvus {latest} is available (current: {CURRENT}).");
+    println!(
+        "Luvus {latest} {} {CURRENT}).",
+        context.text("is available (current:")
+    );
     let executable = std::env::current_exe().context("find the running Luvus binary")?;
     let executable = executable.canonicalize().unwrap_or(executable);
     let channel = classify_install(&executable, crate::platform::home_dir().as_deref());
@@ -163,8 +173,12 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
         ),
     }
 
-    println!("Updated Luvus {CURRENT} -> {latest}.");
-    println!("Run `luvus server restart` when you are ready to load the new server binary.");
+    println!("{} {CURRENT} -> {latest}.", context.text("Updated Luvus"));
+    println!(
+        "{}",
+        context
+            .text("Run `luvus server restart` when you are ready to load the new server binary.")
+    );
     Ok(0)
 }
 

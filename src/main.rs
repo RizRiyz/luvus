@@ -103,7 +103,9 @@ fn main() -> Result<()> {
         // `attach <id>` (docs/18 WA-2): focus + zoom the pane, then open the TUI
         // straight into that fullscreen terminal.
         Some("attach") => return attach_cmd(&args),
-        Some("integration") => std::process::exit(integration::run(&args)?),
+        Some("integration") => {
+            std::process::exit(integration::run(&args, i18n::cli::Context::configured())?)
+        }
         Some("--local") => return run_local(),
         Some(_) if cli::is_cli(&args) => {
             let code = cli::run(&args)?;
@@ -585,16 +587,25 @@ fn wait_for_socket(sock: &Path) -> Result<()> {
 /// Bare `luvus server` (no subcommand) is the internal headless role that
 /// `spawn_server` launches via setsid; users go through the subcommands.
 fn server_cmd(args: &[String]) -> Result<()> {
-    match args.get(2).map(String::as_str) {
-        None => ipc::server::run(), // internal role: run the server in the foreground
-        Some("start") => server_start(),
-        Some("stop") => server_stop(),
-        Some("restart") => server_restart(),
-        Some("status") => server_status(),
-        Some("update-manifest") => update_manifest(),
-        Some(other) => {
-            eprintln!("unknown server command: {other}");
-            eprintln!("usage: luvus server <start|stop|restart|status|update-manifest>");
+    let Some(command) = args.get(2).map(String::as_str) else {
+        return ipc::server::run(); // internal role: run the server in the foreground
+    };
+    let context = i18n::cli::Context::configured();
+    match command {
+        "start" => server_start(context),
+        "stop" => server_stop(context),
+        "restart" => server_restart(context),
+        "status" => server_status(context),
+        "update-manifest" => update_manifest(context),
+        other => {
+            eprintln!("{}: {other}", context.text("unknown server command"));
+            eprintln!(
+                "{}",
+                i18n::cli::help(
+                    "usage: luvus server <start|stop|restart|status|update-manifest>",
+                    context.language(),
+                )
+            );
             std::process::exit(2);
         }
     }
@@ -612,7 +623,7 @@ struct ManifestIndex {
 /// user's own manifests) and apply live if a server is running, else on next
 /// start. The source is `https://luvus.dev/manifests` (override with
 /// `$LUVUS_MANIFEST_URL`, e.g. a `file://` dir for testing).
-fn update_manifest() -> Result<()> {
+fn update_manifest(context: i18n::cli::Context) -> Result<()> {
     let base = std::env::var("LUVUS_MANIFEST_URL")
         .unwrap_or_else(|_| "https://luvus.dev/manifests".to_string());
     let index_url = format!("{base}/index.json");
@@ -633,21 +644,28 @@ fn update_manifest() -> Result<()> {
             || name.contains('\\')
             || name.contains("..");
         if bad {
-            eprintln!("skipping suspicious manifest name: {name}");
+            eprintln!(
+                "{}: {name}",
+                context.text("skipping suspicious manifest name")
+            );
             skipped += 1;
             continue;
         }
         let body = match crate::module::discovery::http_get(&format!("{base}/{name}")) {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("skipping {name}: {e}");
+                eprintln!("{} {name}: {e}", context.text("skipping"));
                 skipped += 1;
                 continue;
             }
         };
         // Reject a garbled download before it can land in the managed dir.
         if !crate::detect::manifest_parses(&body) {
-            eprintln!("skipping {name}: not a valid detection manifest");
+            eprintln!(
+                "{} {name}: {}",
+                context.text("skipping"),
+                context.text("not a valid detection manifest")
+            );
             skipped += 1;
             continue;
         }
@@ -656,9 +674,11 @@ fn update_manifest() -> Result<()> {
         written += 1;
     }
     println!(
-        "updated {written} detection manifest(s){} -> {}",
+        "{} {written} {}{} -> {}",
+        context.text("updated"),
+        context.text("detection manifest(s)"),
         if skipped > 0 {
-            format!(", {skipped} skipped")
+            format!(", {skipped} {}", context.text("skipped"))
         } else {
             String::new()
         },
@@ -673,46 +693,63 @@ fn update_manifest() -> Result<()> {
                 .and_then(|r| r.get("rules"))
                 .and_then(|x| x.as_u64())
                 .unwrap_or(0);
-            println!("reloaded into the running server ({n} rules active) - no restart needed");
+            println!(
+                "{} ({n} {}) - {}",
+                context.text("reloaded into the running server"),
+                context.text("rules active"),
+                context.text("no restart needed")
+            );
         }
-        Err(_) => println!("no server running - the update loads on next start"),
+        Err(_) => println!(
+            "{}",
+            context.text("no server running - the update loads on next start")
+        ),
     }
     Ok(())
 }
 
 /// Spawn the detached server if one isn't already up.
-fn server_start() -> Result<()> {
+fn server_start(context: i18n::cli::Context) -> Result<()> {
     let sock = persist::client_socket_path();
     if server_running(&sock) {
         println!(
-            "luvus server already running (session {})",
+            "luvus {} (session {})",
+            context.text("server already running"),
             session::display_name()
         );
         return Ok(());
     }
     spawn_server()?;
     wait_for_socket(&sock)?;
-    println!("luvus server started (session {})", session::display_name());
+    println!(
+        "luvus {} (session {})",
+        context.text("server started"),
+        session::display_name()
+    );
     Ok(())
 }
 
-fn server_stop() -> Result<()> {
+fn server_stop(context: i18n::cli::Context) -> Result<()> {
     let sock = persist::client_socket_path();
     if send_server_stop()? {
         // The server acks before it actually exits, so wait for it to release the
         // socket — then `stop` returning means it's really down (and a following
         // `status` reports "not running", not a half-shutdown "running").
         wait_for_shutdown(&sock)?;
-        println!("luvus server stopped (session {})", session::display_name());
+        println!(
+            "luvus {} (session {})",
+            context.text("server stopped"),
+            session::display_name()
+        );
     } else {
-        println!("no luvus server running");
+        println!("{}", context.text("no luvus server running"));
     }
     Ok(())
 }
 
 /// Stop (if running), wait for the socket to close, then start a fresh server —
 /// the way to load a newly-installed binary without rebooting a live session.
-fn server_restart() -> Result<()> {
+fn server_restart(context: i18n::cli::Context) -> Result<()> {
     let sock = persist::client_socket_path();
     if send_server_stop()? {
         wait_for_shutdown(&sock)?;
@@ -720,7 +757,8 @@ fn server_restart() -> Result<()> {
     spawn_server()?;
     wait_for_socket(&sock)?;
     println!(
-        "luvus server restarted (session {})",
+        "luvus {} (session {})",
+        context.text("server restarted"),
         session::display_name()
     );
     Ok(())
@@ -742,11 +780,12 @@ fn wait_for_shutdown(sock: &Path) -> Result<()> {
 
 /// Report whether a server is up and, if so, the version it's *running* — which
 /// can differ from this binary when a new install hasn't been restarted yet.
-fn server_status() -> Result<()> {
+fn server_status(context: i18n::cli::Context) -> Result<()> {
     let sock = persist::client_socket_path();
     if !server_running(&sock) {
         println!(
-            "luvus server: not running (session {})",
+            "luvus server: {} (session {})",
+            context.text("not running"),
             session::display_name()
         );
         return Ok(());
@@ -754,19 +793,23 @@ fn server_status() -> Result<()> {
     match server_version() {
         Ok(running) => {
             println!(
-                "luvus server: running (v{running}, session {})",
+                "luvus server: {} (v{running}, session {})",
+                context.text("running"),
                 session::display_name()
             );
             let binary = env!("CARGO_PKG_VERSION");
             if running != binary {
                 println!(
-                    "  note: this binary is v{binary} — run `luvus server restart` to load it"
+                    "  {} v{binary} — {}",
+                    context.text("note: this binary is"),
+                    context.text("run `luvus server restart` to load it")
                 );
             }
         }
         Err(error) => {
             return Err(anyhow!(
-                "luvus server is running but did not answer: {error}"
+                "luvus {}: {error}",
+                context.text("server is running but did not answer")
             ));
         }
     }

@@ -314,47 +314,87 @@ server:
 ";
 
 pub fn run(args: &[String]) -> Result<i32> {
+    run_inner(args).map_err(localize_usage_error)
+}
+
+fn localize_usage_error(error: anyhow::Error) -> anyhow::Error {
+    let message = error.to_string();
+    if !message.starts_with("usage:") && !message.starts_with("Usage:") {
+        return error;
+    }
+    let context = crate::i18n::cli::Context::configured();
+    anyhow!("{}", crate::i18n::cli::help(&message, context.language()))
+}
+
+fn run_inner(args: &[String]) -> Result<i32> {
     if args.get(1).map(String::as_str) == Some("help") {
+        let context = crate::i18n::cli::Context::configured();
+        let language = context.language();
         return match args.get(2).map(String::as_str) {
             None => {
-                print!("{USAGE}{HELP_BUG}");
+                print!("{}", crate::i18n::cli::help(USAGE, language));
+                print!("{}", crate::i18n::cli::help(HELP_BUG, language));
                 Ok(0)
             }
             Some("all") if args.len() == 3 => {
-                print!("{DETAILED_USAGE}{HELP_BUG}");
+                print!("{}", crate::i18n::cli::help(DETAILED_USAGE, language));
+                print!("{}", crate::i18n::cli::help(HELP_BUG, language));
                 Ok(0)
             }
             Some(topic) if matches!(args.len(), 3 | 4) => {
                 let command = args.get(3).map(String::as_str);
-                if write_topic_help(std::io::stdout().lock(), topic, command)? {
+                if write_topic_help(std::io::stdout().lock(), topic, command, language)? {
                     Ok(0)
                 } else {
-                    eprintln!("unknown help topic `{topic}`. Run `luvus --help` for the list.");
+                    eprintln!(
+                        "{} `{topic}`. {}",
+                        context.text("unknown help topic"),
+                        context.text("Run `luvus --help` for the list.")
+                    );
                     Ok(2)
                 }
             }
             _ => {
-                eprintln!("usage: luvus help [all|<topic> [command]]");
+                eprintln!(
+                    "{}",
+                    crate::i18n::cli::help("usage: luvus help [all|<topic> [command]]", language,)
+                );
                 Ok(2)
             }
         };
     }
     if let Some((topic, command)) = command_help_request(args) {
-        write_topic_help(std::io::stdout().lock(), topic, command)?;
+        let context = crate::i18n::cli::Context::configured();
+        write_topic_help(std::io::stdout().lock(), topic, command, context.language())?;
         return Ok(0);
     }
     if args.get(1).map(String::as_str) == Some("uhp") && args.len() == 2 {
-        write_topic_help(std::io::stdout().lock(), args[1].as_str(), None)?;
+        let context = crate::i18n::cli::Context::configured();
+        write_topic_help(
+            std::io::stdout().lock(),
+            args[1].as_str(),
+            None,
+            context.language(),
+        )?;
         return Ok(0);
     }
     if args.get(1).map(String::as_str) == Some("skill") {
-        return skill_cmd(&args[2.min(args.len())..]);
+        return skill_cmd(
+            &args[2.min(args.len())..],
+            crate::i18n::cli::Context::configured(),
+        );
     }
     if args.get(1).map(String::as_str) == Some("session") {
-        return session_cmd(&args[2.min(args.len())..]);
+        return session_cmd(
+            &args[2.min(args.len())..],
+            crate::i18n::cli::Context::configured(),
+        );
     }
     if args.get(1).map(String::as_str) == Some("theme") {
-        return theme_cmd(&args[2.min(args.len())..]);
+        return theme_cmd(
+            &args[2.min(args.len())..],
+            crate::i18n::cli::Context::configured(),
+        );
     }
     if args.get(1).map(String::as_str) == Some("uhp")
         && args.get(2).map(String::as_str) == Some("schema")
@@ -378,24 +418,27 @@ pub fn run(args: &[String]) -> Result<i32> {
     }
     // Explicit update requests are local and never require a running server.
     if args.get(1).map(String::as_str) == Some("update") {
-        return crate::update::run_cli(&args[2.min(args.len())..]);
+        return crate::update::run_cli(
+            &args[2.min(args.len())..],
+            crate::i18n::cli::Context::configured(),
+        );
     }
     // `doctor` is a local environment check — no server needed.
     if args.get(1).map(String::as_str) == Some("doctor") {
-        return Ok(doctor());
+        return Ok(doctor(crate::i18n::cli::Context::configured()));
     }
     // `module install` clones + builds locally (with a confirm prompt), then
     // registers over the socket — it isn't a plain request/response.
     if args.get(1).map(String::as_str) == Some("module")
         && args.get(2).map(String::as_str) == Some("install")
     {
-        return module_install(args);
+        return module_install(args, crate::i18n::cli::Context::configured());
     }
     // `module search` is a read-only GitHub lookup — no server involved.
     if args.get(1).map(String::as_str) == Some("module")
         && args.get(2).map(String::as_str) == Some("search")
     {
-        return module_search(args);
+        return module_search(args, crate::i18n::cli::Context::configured());
     }
     // `wait` (docs/18 WA-1) is a client-side poll/stream loop, not a one-shot
     // request — it exits 0 on the condition, 2 on timeout.
@@ -416,8 +459,14 @@ pub fn run(args: &[String]) -> Result<i32> {
     }
     let (method, params) = parse(args)?;
     let path = crate::persist::cli_socket_path();
-    let mut stream = crate::ipc::transport::connect(&path)
-        .map_err(|_| anyhow!("no luvus server running (socket: {})", path.display()))?;
+    let mut stream = crate::ipc::transport::connect(&path).map_err(|_| {
+        let context = crate::i18n::cli::Context::configured();
+        anyhow!(
+            "{} (socket: {})",
+            context.text("no luvus server running"),
+            path.display()
+        )
+    })?;
 
     let req = json!({ "id": "1", "method": method, "params": params });
     writeln!(stream, "{req}")?;
@@ -538,6 +587,21 @@ const HELP_BUG: &str = r#"
 "#;
 
 fn write_topic_help(
+    mut output: impl Write,
+    requested: &str,
+    command: Option<&str>,
+    language: crate::i18n::cli::Language,
+) -> std::io::Result<bool> {
+    let mut english = Vec::new();
+    let recognized = write_topic_help_english(&mut english, requested, command)?;
+    if recognized {
+        let english = String::from_utf8(english).expect("CLI help is UTF-8");
+        output.write_all(crate::i18n::cli::help(&english, language).as_bytes())?;
+    }
+    Ok(recognized)
+}
+
+fn write_topic_help_english(
     mut output: impl Write,
     requested: &str,
     command: Option<&str>,
@@ -749,30 +813,33 @@ fn detailed_section_to_end(start: &str) -> &'static str {
     &DETAILED_USAGE[start..]
 }
 
-fn session_cmd(args: &[String]) -> Result<i32> {
+fn session_cmd(args: &[String], context: crate::i18n::cli::Context) -> Result<i32> {
     match args.first().map(String::as_str) {
-        Some("list") => session_list(&args[1..]),
-        Some("stop") => session_stop(&args[1..]),
-        Some("delete") => session_delete(&args[1..]),
+        Some("list") => session_list(&args[1..], context),
+        Some("stop") => session_stop(&args[1..], context),
+        Some("delete") => session_delete(&args[1..], context),
         Some("attach")
             if matches!(
                 args.get(1).map(String::as_str),
                 Some("help" | "--help" | "-h")
             ) =>
         {
-            write_session_help(std::io::stdout().lock())?;
+            write_session_help(std::io::stdout().lock(), context)?;
             Ok(0)
         }
         Some("attach") => {
-            eprintln!("usage: luvus session attach <name>");
+            eprintln!(
+                "{}",
+                crate::i18n::cli::help("usage: luvus session attach <name>", context.language(),)
+            );
             Ok(2)
         }
         Some("help" | "--help" | "-h") => {
-            write_session_help(std::io::stdout().lock())?;
+            write_session_help(std::io::stdout().lock(), context)?;
             Ok(0)
         }
         _ => {
-            write_session_help(std::io::stderr().lock())?;
+            write_session_help(std::io::stderr().lock(), context)?;
             Ok(2)
         }
     }
@@ -782,22 +849,30 @@ const SESSION_USAGE: &str = "\
 Usage: luvus session <command>
 
 Commands:
-  list [--json]         List default and named sessions
-  attach <name>        Start or attach to a named session
-  stop <name> [--json] Stop a named session and its panes
-  delete <name> [--json] Delete a stopped named session
+  list [--json]           list default and named server sessions
+  attach <name>           start or attach to the named session
+  stop <name> [--json]    stop only the named session and its panes
+  delete <name> [--json]  delete a stopped named session
 ";
 
-fn write_session_help(mut output: impl Write) -> std::io::Result<()> {
-    output.write_all(SESSION_USAGE.as_bytes())?;
-    output.write_all(HELP_BUG.as_bytes())
+fn write_session_help(
+    mut output: impl Write,
+    context: crate::i18n::cli::Context,
+) -> std::io::Result<()> {
+    output.write_all(crate::i18n::cli::help(SESSION_USAGE, context.language()).as_bytes())?;
+    output.write_all(crate::i18n::cli::help(HELP_BUG, context.language()).as_bytes())
 }
 
-fn session_list(args: &[String]) -> Result<i32> {
+fn session_list(args: &[String], context: crate::i18n::cli::Context) -> Result<i32> {
     let json = match args {
         [] => false,
         [flag] if flag == "--json" => true,
-        _ => return Err(anyhow!("usage: luvus session list [--json]")),
+        _ => {
+            return Err(anyhow!(
+                "{}",
+                crate::i18n::cli::help("usage: luvus session list [--json]", context.language(),)
+            ))
+        }
     };
     let sessions = crate::session::list_sessions()?;
     if json {
@@ -807,33 +882,48 @@ fn session_list(args: &[String]) -> Result<i32> {
         );
         return Ok(0);
     }
-    println!("{:<24} {:<10} directory", "name", "status");
+    println!(
+        "{} {}{}",
+        crate::i18n::cli::pad(context.text("name"), 24),
+        crate::i18n::cli::pad(context.text("status"), 10),
+        context.text("directory")
+    );
     for session in sessions {
         println!(
-            "{:<24} {:<10} {}",
-            session.name,
-            if session.running {
-                "running"
-            } else {
-                "stopped"
-            },
+            "{} {}{}",
+            crate::i18n::cli::pad(&session.name, 24),
+            crate::i18n::cli::pad(
+                if session.running {
+                    context.text("running")
+                } else {
+                    context.text("stopped")
+                },
+                10
+            ),
             session.session_dir
         );
     }
     Ok(0)
 }
 
-fn parse_session_name_and_json<'a>(args: &'a [String], usage: &str) -> Result<(&'a str, bool)> {
+fn parse_session_name_and_json<'a>(
+    args: &'a [String],
+    usage: &str,
+    context: crate::i18n::cli::Context,
+) -> Result<(&'a str, bool)> {
     match args {
         [name] => Ok((name, false)),
         [name, flag] if flag == "--json" => Ok((name, true)),
-        _ => Err(anyhow!(usage.to_string())),
+        _ => Err(anyhow!(
+            "{}",
+            crate::i18n::cli::help(usage, context.language())
+        )),
     }
 }
 
-fn session_stop(args: &[String]) -> Result<i32> {
+fn session_stop(args: &[String], context: crate::i18n::cli::Context) -> Result<i32> {
     let (name, json_output) =
-        parse_session_name_and_json(args, "usage: luvus session stop <name> [--json]")?;
+        parse_session_name_and_json(args, "usage: luvus session stop <name> [--json]", context)?;
     let target = match crate::session::parse_target_name(name) {
         Ok(target) => target,
         Err(message) => return session_error("invalid_session_name", &message, json_output),
@@ -846,7 +936,7 @@ fn session_stop(args: &[String]) -> Result<i32> {
                     serde_json::to_string_pretty(&json!({"stopped": true, "session": session}))?
                 );
             } else {
-                println!("stopped session {}", session.name);
+                println!("{} {}", context.text("stopped session"), session.name);
             }
             Ok(0)
         }
@@ -854,9 +944,9 @@ fn session_stop(args: &[String]) -> Result<i32> {
     }
 }
 
-fn session_delete(args: &[String]) -> Result<i32> {
+fn session_delete(args: &[String], context: crate::i18n::cli::Context) -> Result<i32> {
     let (name, json_output) =
-        parse_session_name_and_json(args, "usage: luvus session delete <name> [--json]")?;
+        parse_session_name_and_json(args, "usage: luvus session delete <name> [--json]", context)?;
     match crate::session::delete_session(name) {
         Ok(session) => {
             if json_output {
@@ -865,7 +955,7 @@ fn session_delete(args: &[String]) -> Result<i32> {
                     serde_json::to_string_pretty(&json!({"deleted": true, "session": session}))?
                 );
             } else {
-                println!("deleted session {}", session.name);
+                println!("{} {}", context.text("deleted session"), session.name);
             }
             Ok(0)
         }
@@ -883,7 +973,7 @@ fn session_error(code: &str, message: &str, json_output: bool) -> Result<i32> {
     Ok(1)
 }
 
-fn theme_cmd(args: &[String]) -> Result<i32> {
+fn theme_cmd(args: &[String], context: crate::i18n::cli::Context) -> Result<i32> {
     let subcommand = args.first().map(String::as_str).unwrap_or("list");
     let json_output = args.iter().any(|arg| arg == "--json");
     match subcommand {
@@ -906,20 +996,27 @@ fn theme_cmd(args: &[String]) -> Result<i32> {
                         ' '
                     };
                     let source = match &entry.source {
-                        crate::theme::registry::ThemeSource::BuiltIn => "built-in",
-                        crate::theme::registry::ThemeSource::Local { .. } => "local",
-                        crate::theme::registry::ThemeSource::Virtual => "virtual",
+                        crate::theme::registry::ThemeSource::BuiltIn => context.text("built-in"),
+                        crate::theme::registry::ThemeSource::Local { .. } => context.text("local"),
+                        crate::theme::registry::ThemeSource::Virtual => context.text("virtual"),
                     };
                     println!(
-                        "{marker} {:<28} {:<9} {}",
-                        entry.id, source, entry.description
+                        "{marker} {:<28} {}{}",
+                        entry.id,
+                        crate::i18n::cli::pad(source, 9),
+                        entry.description
                     );
                     for warning in &entry.warnings {
-                        println!("    warning: {warning}");
+                        println!("    {}: {warning}", context.text("warning"));
                     }
                 }
                 for problem in registry.problems() {
-                    eprintln!("invalid {}: {}", problem.path, problem.message);
+                    eprintln!(
+                        "{} {}: {}",
+                        context.text("invalid"),
+                        problem.path,
+                        problem.message
+                    );
                 }
             }
             Ok(if registry.problems().is_empty() { 0 } else { 1 })
@@ -942,7 +1039,7 @@ fn theme_cmd(args: &[String]) -> Result<i32> {
             let parent = flag(args, "--extends");
             let path = std::path::PathBuf::from(format!("{id}.toml"));
             crate::theme::install::init(&path, id, parent.as_deref())?;
-            println!("created {}", path.display());
+            println!("{} {}", context.text("created"), path.display());
             Ok(0)
         }
         "validate" => {
@@ -986,9 +1083,14 @@ fn theme_cmd(args: &[String]) -> Result<i32> {
                     }))?
                 );
             } else {
-                println!("valid theme: {} ({})", file.display_name, file.id);
+                println!(
+                    "{}: {} ({})",
+                    context.text("valid theme"),
+                    file.display_name,
+                    file.id
+                );
                 for warning in warnings {
-                    println!("warning: {warning}");
+                    println!("{}: {warning}", context.text("warning"));
                 }
             }
             Ok(0)
@@ -1017,19 +1119,22 @@ fn theme_cmd(args: &[String]) -> Result<i32> {
             let installed = crate::theme::install::install(source, yes)?;
             let reloaded = reload_theme_server()?;
             println!(
-                "installed {} ({}) from {} to {}{}",
+                "{} {} ({}) {} {} {} {}{}",
+                context.text("installed"),
                 installed.display_name,
                 installed.id,
+                context.text("from"),
                 installed.source,
+                context.text("to"),
                 installed.path.display(),
                 if reloaded {
-                    " and reloaded the selected server"
+                    format!(" {}", context.text("and reloaded the selected server"))
                 } else {
-                    " — start or reload Luvus to use it"
+                    format!(" — {}", context.text("start or reload Luvus to use it"))
                 }
             );
             for warning in installed.warnings {
-                println!("warning: {warning}");
+                println!("{}: {warning}", context.text("warning"));
             }
             Ok(0)
         }
@@ -1040,20 +1145,25 @@ fn theme_cmd(args: &[String]) -> Result<i32> {
                 .ok_or_else(|| anyhow!("usage: luvus theme use <id>"))?;
             reject_theme_extras(args, 2, "usage: luvus theme use <id>")?;
             let registry = crate::theme::ThemeRegistry::load();
-            let entry = registry
-                .get(id)
-                .ok_or_else(|| anyhow!("theme `{id}` is not installed"))?;
+            let entry = registry.get(id).ok_or_else(|| {
+                anyhow!("theme `{id}` {}", context.text("theme is not installed"))
+            })?;
             let selected = entry.id.clone();
             match send_request("theme.use", json!({"id": selected})) {
                 Ok(response) if !is_unknown_method(&response, "theme.use") => {
                     ensure_api_success(&response)?;
-                    println!("using theme {}", entry.id);
+                    println!("{} {}", context.text("using theme"), entry.id);
                 }
                 Ok(_) | Err(_) => {
                     let mut config = crate::config::load();
                     config.theme = selected;
                     crate::config::save(&config);
-                    println!("using theme {} — applies when Luvus starts", entry.id);
+                    println!(
+                        "{} {} — {}",
+                        context.text("using theme"),
+                        entry.id,
+                        context.text("applies when Luvus starts")
+                    );
                 }
             }
             Ok(0)
@@ -1067,12 +1177,13 @@ fn theme_cmd(args: &[String]) -> Result<i32> {
             let path = crate::theme::install::uninstall(id)?;
             let reloaded = reload_theme_server()?;
             println!(
-                "uninstalled {id} ({}){}",
+                "{} {id} ({}){}",
+                context.text("uninstalled"),
                 path.display(),
                 if reloaded {
-                    " and reloaded the selected server"
+                    format!(" {}", context.text("and reloaded the selected server"))
                 } else {
-                    ""
+                    String::new()
                 }
             );
             Ok(0)
@@ -1082,21 +1193,34 @@ fn theme_cmd(args: &[String]) -> Result<i32> {
             let registry = crate::theme::ThemeRegistry::load();
             if !registry.problems().is_empty() {
                 for problem in registry.problems() {
-                    eprintln!("invalid {}: {}", problem.path, problem.message);
+                    eprintln!(
+                        "{} {}: {}",
+                        context.text("invalid"),
+                        problem.path,
+                        problem.message
+                    );
                 }
             }
             if reload_theme_server()? {
-                println!("reloaded {} themes", registry.entries().len());
+                println!(
+                    "{} {} {}",
+                    context.text("reloaded"),
+                    registry.entries().len(),
+                    context.text("themes")
+                );
             } else {
                 println!(
-                    "validated {} themes — start Luvus to load them",
-                    registry.entries().len()
+                    "{} {} {} — {}",
+                    context.text("validated"),
+                    registry.entries().len(),
+                    context.text("themes"),
+                    context.text("start Luvus to load them")
                 );
             }
             Ok(if registry.problems().is_empty() { 0 } else { 1 })
         }
         "help" | "--help" | "-h" => {
-            write_topic_help(std::io::stdout().lock(), "theme", None)?;
+            write_topic_help(std::io::stdout().lock(), "theme", None, context.language())?;
             Ok(0)
         }
         _ => Err(anyhow!(
@@ -1147,7 +1271,7 @@ fn reload_theme_server() -> Result<bool> {
 
 /// `luvus module install owner/repo[/sub] [--ref REF] [--yes]` — clone + build
 /// locally, then register over the socket (or directly if the server is down).
-fn module_install(args: &[String]) -> Result<i32> {
+fn module_install(args: &[String], context: crate::i18n::cli::Context) -> Result<i32> {
     let spec = args
         .get(3)
         .filter(|s| !s.starts_with("--"))
@@ -1169,15 +1293,23 @@ fn module_install(args: &[String]) -> Result<i32> {
             Ok(1)
         }
         Ok(_) => {
-            println!("installed {} ({})", installed.id, installed.source);
+            println!(
+                "{} {} ({})",
+                context.text("installed"),
+                installed.id,
+                installed.source
+            );
             Ok(0)
         }
         Err(_) => {
             // Server down: write the registry directly; it loads on next start.
             register_directly(&installed)?;
             println!(
-                "installed {} ({}) — start luvus to use it",
-                installed.id, installed.source
+                "{} {} ({}) — {}",
+                context.text("installed"),
+                installed.id,
+                installed.source,
+                context.text("start luvus to use it")
             );
             Ok(0)
         }
@@ -1188,7 +1320,7 @@ fn module_install(args: &[String]) -> Result<i32> {
 /// multiplexer needs none of them; this just tells a fresh install (esp. via
 /// `cargo install`, which can't pull in system tools) what each missing tool
 /// would unlock and how to get it. Always exits 0 — nothing here is fatal.
-fn doctor() -> i32 {
+fn doctor(context: crate::i18n::cli::Context) -> i32 {
     use std::process::Command;
     // Run `<cmd> <arg>` and return its first non-empty version line, if it runs.
     let probe = |cmd: &str, arg: &str| -> Option<String> {
@@ -1206,7 +1338,10 @@ fn doctor() -> i32 {
     };
 
     println!("luvus {}\n", env!("CARGO_PKG_VERSION"));
-    println!("  ✓ core    the multiplexer (panes · tabs · agents) needs no external tools\n");
+    println!(
+        "  ✓ core    {}\n",
+        context.text("the multiplexer (panes · tabs · agents) needs no external tools")
+    );
 
     // (name, cmd, version-arg, what it unlocks, required?, install hint)
     let tools = [
@@ -1222,7 +1357,7 @@ fn doctor() -> i32 {
             "gh",
             "gh",
             "--version",
-            "GitHub PRs & issues",
+            context.text("GitHub PRs & issues"),
             false,
             "https://cli.github.com  (brew install gh)",
         ),
@@ -1232,7 +1367,7 @@ fn doctor() -> i32 {
             "-V",
             "luvus --remote",
             false,
-            "preinstalled on macOS/Linux",
+            context.text("preinstalled on macOS/Linux"),
         ),
         (
             "curl",
@@ -1256,8 +1391,15 @@ fn doctor() -> i32 {
                 if required {
                     missing_git = true;
                 }
-                let kind = if required { "needed for" } else { "optional -" };
-                println!("  ✗ {name:<6}not found · {kind} {unlocks}");
+                let kind = if required {
+                    context.text("needed for")
+                } else {
+                    context.text("optional -")
+                };
+                println!(
+                    "  ✗ {name:<6}{} · {kind} {unlocks}",
+                    context.text("not found")
+                );
                 println!("           ↳ {hint}");
             }
         }
@@ -1269,27 +1411,41 @@ fn doctor() -> i32 {
     println!();
     match keyboard_protocol_status() {
         KeyProto::InsidePane => {
-            println!("  · keys    run `luvus doctor` outside a luvus pane to test your terminal");
+            println!(
+                "  · keys    {}",
+                context.text("run `luvus doctor` outside a luvus pane to test your terminal")
+            );
         }
         KeyProto::Supported => {
-            println!("  ✓ keys    Shift+Enter works (terminal reports modified keys)");
+            println!(
+                "  ✓ keys    {}",
+                context.text("Shift+Enter works (terminal reports modified keys)")
+            );
         }
         KeyProto::Unsupported => {
             let is_wsl = std::env::var_os("WSL_DISTRO_NAME").is_some()
                 || std::env::var_os("WSL_INTEROP").is_some();
             let in_windows_terminal = std::env::var_os("WT_SESSION").is_some();
             let (detail, action) = unsupported_key_guidance(is_wsl, in_windows_terminal);
-            println!("  ! keys    Shift+Enter isn't distinguishable here · optional");
-            println!("           ↳ {detail}");
-            println!("             {action}");
+            println!(
+                "  ! keys    {}",
+                context.text("Shift+Enter isn't distinguishable here · optional")
+            );
+            println!("           ↳ {}", context.text(detail));
+            println!("             {}", context.text(action));
         }
     }
 
     println!();
     if missing_git {
-        println!("Tip: install `git` to use the git tab & worktrees. Everything else works now.");
+        println!(
+            "{}",
+            context.text(
+                "Tip: install `git` to use the git tab & worktrees. Everything else works now."
+            )
+        );
     } else {
-        println!("All set — you're good to go. ✓");
+        println!("{}", context.text("All set — you're good to go. ✓"));
     }
     0
 }
@@ -1362,7 +1518,7 @@ fn keyboard_protocol_status() -> KeyProto {
 
 /// `luvus module search [<query>]` — list modules published to the
 /// `luvus-module` GitHub topic. Read-only; doesn't need a running server.
-fn module_search(args: &[String]) -> Result<i32> {
+fn module_search(args: &[String], context: crate::i18n::cli::Context) -> Result<i32> {
     let terms: Vec<&str> = args
         .get(3..)
         .unwrap_or(&[])
@@ -1374,8 +1530,14 @@ fn module_search(args: &[String]) -> Result<i32> {
 
     let hits = crate::module::discovery::search(query.as_deref())?;
     if hits.is_empty() {
-        println!("No modules found in the `luvus-module` topic yet.");
-        println!("Publish one by tagging a public repo with the `luvus-module` topic.");
+        println!(
+            "{}",
+            context.text("No modules found in the `luvus-module` topic yet.")
+        );
+        println!(
+            "{}",
+            context.text("Publish one by tagging a public repo with the `luvus-module` topic.")
+        );
         return Ok(0);
     }
     for h in &hits {
@@ -1388,8 +1550,9 @@ fn module_search(args: &[String]) -> Result<i32> {
         }
     }
     println!(
-        "\n{} result(s). Install with:  luvus module install <owner>/<repo>",
-        hits.len()
+        "\n{} {}  luvus module install <owner>/<repo>",
+        hits.len(),
+        context.text("results. Install with:")
     );
     Ok(0)
 }
@@ -1648,20 +1811,37 @@ fn validate_agent_start_options(args: &[String]) -> Result<()> {
 
 /// Manage the one bundled, version-matched Luvus skill. Host-specific paths are
 /// reported as installation details, never exposed as separate skills.
-fn skill_cmd(rest: &[String]) -> Result<i32> {
-    fn no_arguments(rest: &[String]) -> Result<()> {
+fn skill_cmd(rest: &[String], context: crate::i18n::cli::Context) -> Result<i32> {
+    fn no_arguments(rest: &[String], context: crate::i18n::cli::Context) -> Result<()> {
         if let Some(argument) = rest.get(1) {
             return Err(anyhow!(
-                "agent-specific skill management was removed; `luvus skill {}` accepts no arguments (unexpected `{argument}`)",
-                rest[0]
+                "{}; `luvus skill {}` {} ({} `{argument}`)",
+                context.text("agent-specific skill management was removed"),
+                rest[0],
+                context.text("accepts no arguments"),
+                context.text("unexpected")
             ));
         }
         Ok(())
     }
 
+    fn state_label(
+        state: crate::skill::DestinationState,
+        context: crate::i18n::cli::Context,
+    ) -> &'static str {
+        context.text(state.as_str())
+    }
+
+    fn action_label(
+        action: crate::skill::ChangeAction,
+        context: crate::i18n::cli::Context,
+    ) -> &'static str {
+        context.text(action.as_str())
+    }
+
     match rest.first().map(String::as_str) {
         None | Some("status") => {
-            no_arguments(rest)?;
+            no_arguments(rest, context)?;
             let statuses = crate::skill::status()?;
             let summary = if statuses.iter().any(|status| {
                 matches!(
@@ -1671,7 +1851,7 @@ fn skill_cmd(rest: &[String]) -> Result<i32> {
                         | crate::skill::DestinationState::Outdated
                 )
             }) {
-                "attention"
+                context.text("attention")
             } else if statuses.iter().any(|status| {
                 matches!(
                     status.state,
@@ -1680,17 +1860,22 @@ fn skill_cmd(rest: &[String]) -> Result<i32> {
                         | crate::skill::DestinationState::External
                 )
             }) {
-                "enabled"
+                context.text("enabled")
             } else {
-                "disabled"
+                context.text("disabled")
             };
-            println!("bundled\t{}\tavailable", crate::skill::bundled_release());
-            println!("installations\t{summary}");
+            println!(
+                "{}\t{}\t{}",
+                context.text("bundled"),
+                crate::skill::bundled_release(),
+                context.text("available")
+            );
+            println!("{}\t{summary}", context.text("installations"));
             for status in statuses {
                 println!(
                     "{}\t{}\t{}\t{}",
                     status.host,
-                    status.state.as_str(),
+                    state_label(status.state, context),
                     status.managed_release.as_deref().unwrap_or("-"),
                     status.target.display()
                 );
@@ -1698,35 +1883,35 @@ fn skill_cmd(rest: &[String]) -> Result<i32> {
             Ok(0)
         }
         Some("enable") => {
-            no_arguments(rest)?;
+            no_arguments(rest, context)?;
             let mut incomplete = false;
             for change in crate::skill::enable()? {
                 incomplete |= change.action == crate::skill::ChangeAction::PreservedModified;
                 println!(
                     "{}\t{}\t{}",
                     change.host,
-                    change.action.as_str(),
+                    action_label(change.action, context),
                     change.target.display()
                 );
             }
             Ok(if incomplete { 2 } else { 0 })
         }
         Some("disable") => {
-            no_arguments(rest)?;
+            no_arguments(rest, context)?;
             let mut incomplete = false;
             for change in crate::skill::disable()? {
                 incomplete |= change.action == crate::skill::ChangeAction::PreservedModified;
                 println!(
                     "{}\t{}\t{}",
                     change.host,
-                    change.action.as_str(),
+                    action_label(change.action, context),
                     change.target.display()
                 );
             }
             Ok(if incomplete { 2 } else { 0 })
         }
         Some("show") => {
-            no_arguments(rest)?;
+            no_arguments(rest, context)?;
             print!("{}", crate::skill::show());
             Ok(0)
         }
@@ -1848,8 +2033,12 @@ fn pane_status(pane: &str) -> Result<Option<String>> {
 /// never missed (it's already buffered on the stream).
 fn wait_status_stream(pane: &str, target: &str, deadline: Option<Instant>) -> Result<i32> {
     let path = crate::persist::cli_socket_path();
-    let stream =
-        crate::ipc::transport::connect(&path).map_err(|_| anyhow!("no luvus server running"))?;
+    let stream = crate::ipc::transport::connect(&path).map_err(|_| {
+        anyhow!(
+            "{}",
+            crate::i18n::cli::Context::configured().text("no luvus server running")
+        )
+    })?;
     let mut writer = stream.clone();
     writeln!(
         writer,
@@ -1907,8 +2096,12 @@ pub fn request_attach(pane: &str) -> Result<()> {
 /// One request/response over the control socket.
 pub(crate) fn send_request(method: &str, params: Value) -> Result<Value> {
     let path = crate::persist::cli_socket_path();
-    let mut stream =
-        crate::ipc::transport::connect(&path).map_err(|_| anyhow!("no luvus server running"))?;
+    let mut stream = crate::ipc::transport::connect(&path).map_err(|_| {
+        anyhow!(
+            "{}",
+            crate::i18n::cli::Context::configured().text("no luvus server running")
+        )
+    })?;
     let req = json!({ "id": "1", "method": method, "params": params });
     writeln!(stream, "{req}")?;
     let mut reader = BufReader::new(stream);
@@ -3310,8 +3503,51 @@ mod tests {
 
     fn rendered_topic_help(topic: &str, command: Option<&str>) -> String {
         let mut output = Vec::new();
-        assert!(write_topic_help(&mut output, topic, command).unwrap());
+        assert!(
+            write_topic_help(&mut output, topic, command, crate::i18n::cli::Language::En,).unwrap()
+        );
         String::from_utf8(output).unwrap()
+    }
+
+    #[test]
+    fn complete_help_translates_every_human_line() {
+        let untranslated = DETAILED_USAGE
+            .lines()
+            .filter(|english| {
+                let trimmed = english.trim();
+                let command_without_description = matches!(
+                    trimmed.split_whitespace().next(),
+                    Some(
+                        "agent"
+                            | "wait"
+                            | "search"
+                            | "bar"
+                            | "ui"
+                            | "module"
+                            | "diff"
+                            | "task"
+                            | "integration"
+                    )
+                ) && !trimmed.contains("  ");
+                if trimmed.is_empty()
+                    || trimmed.starts_with("[--limit ")
+                    || trimmed.starts_with("[--placement ")
+                    || trimmed.starts_with("[--end-line ")
+                    || command_without_description
+                    || trimmed.starts_with("session attach <name>")
+                    || trimmed == "(applies live if the server is up; else on next start)"
+                {
+                    false
+                } else {
+                    crate::i18n::cli::help(english, crate::i18n::cli::Language::Zh) == *english
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            untranslated.is_empty(),
+            "untranslated CLI help lines:\n{}",
+            untranslated.join("\n")
+        );
     }
 
     #[test]
@@ -3363,6 +3599,118 @@ mod tests {
                 "{topic} help contains another family: {rows:?}"
             );
         }
+    }
+
+    #[test]
+    fn every_command_family_localizes_in_every_supported_language() {
+        let command_section = USAGE
+            .split_once("Commands:\n")
+            .expect("compact help has a Commands section")
+            .1
+            .split_once("\nExamples:\n")
+            .expect("compact help has an Examples section")
+            .0;
+        let mut topics = command_section
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .collect::<Vec<_>>();
+        // `node` is the retained compatibility alias for `pane`, so it is not
+        // advertised as a separate family but must keep the same localized help.
+        topics.push("node");
+        let languages = [
+            crate::i18n::cli::Language::Es,
+            crate::i18n::cli::Language::Pt,
+            crate::i18n::cli::Language::Fr,
+            crate::i18n::cli::Language::De,
+            crate::i18n::cli::Language::Id,
+            crate::i18n::cli::Language::Zh,
+            crate::i18n::cli::Language::Ja,
+        ];
+
+        for topic in topics {
+            assert!(
+                normalize_help_topic(topic).is_some(),
+                "published command family `{topic}` has no help route"
+            );
+            let english = rendered_topic_help(topic, None);
+            for language in languages {
+                let mut output = Vec::new();
+                assert!(write_topic_help(&mut output, topic, None, language).unwrap());
+                let localized = String::from_utf8(output).unwrap();
+                assert_ne!(localized, english, "{topic} stayed English in {language:?}");
+                assert!(localized.contains("luvus"), "{topic} lost canonical syntax");
+                assert!(
+                    localized.contains("https://luvus.dev/agent-readme.md"),
+                    "{topic} changed the agent guide URL"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn session_help_and_skill_states_use_the_cli_catalog() {
+        for language in [
+            crate::i18n::cli::Language::Es,
+            crate::i18n::cli::Language::Pt,
+            crate::i18n::cli::Language::Fr,
+            crate::i18n::cli::Language::De,
+            crate::i18n::cli::Language::Id,
+            crate::i18n::cli::Language::Zh,
+            crate::i18n::cli::Language::Ja,
+        ] {
+            let mut session = Vec::new();
+            assert!(write_topic_help(&mut session, "session", None, language).unwrap());
+            let session = String::from_utf8(session).unwrap();
+            for english in [
+                "list default and named server sessions",
+                "start or attach to the named session",
+                "stop only the named session and its panes",
+                "delete a stopped named session",
+            ] {
+                assert!(
+                    !session.contains(english),
+                    "session help kept `{english}` in {language:?}"
+                );
+            }
+
+            let context = crate::i18n::cli::Context::for_language(language);
+            for state in [
+                crate::skill::DestinationState::Current,
+                crate::skill::DestinationState::Outdated,
+                crate::skill::DestinationState::Missing,
+                crate::skill::DestinationState::Modified,
+                crate::skill::DestinationState::ExternalCurrent,
+                crate::skill::DestinationState::External,
+                crate::skill::DestinationState::Available,
+                crate::skill::DestinationState::NotDetected,
+            ] {
+                assert_ne!(context.text(state.as_str()), state.as_str());
+            }
+            for action in [
+                crate::skill::ChangeAction::Installed,
+                crate::skill::ChangeAction::Refreshed,
+                crate::skill::ChangeAction::Repaired,
+                crate::skill::ChangeAction::Current,
+                crate::skill::ChangeAction::External,
+                crate::skill::ChangeAction::PreservedModified,
+                crate::skill::ChangeAction::Disabled,
+                crate::skill::ChangeAction::AlreadyDisabled,
+            ] {
+                assert_ne!(context.text(action.as_str()), action.as_str());
+            }
+        }
+
+        let mut chinese = Vec::new();
+        assert!(write_topic_help(
+            &mut chinese,
+            "session",
+            None,
+            crate::i18n::cli::Language::Zh
+        )
+        .unwrap());
+        let chinese = String::from_utf8(chinese).unwrap();
+        assert!(chinese.contains("列出默认和命名服务器会话"));
+        assert!(chinese.contains("启动或连接到命名会话"));
     }
 
     #[test]
@@ -3498,7 +3846,14 @@ mod tests {
             vec!["uninstall".into(), "x".into(), "extra".into()],
             vec!["reload".into(), "extra".into()],
         ] {
-            assert!(theme_cmd(&invalid).is_err(), "{invalid:?}");
+            assert!(
+                theme_cmd(
+                    &invalid,
+                    crate::i18n::cli::Context::for_language(crate::i18n::cli::Language::En,),
+                )
+                .is_err(),
+                "{invalid:?}"
+            );
         }
     }
 
@@ -4187,9 +4542,10 @@ mod tests {
     #[test]
     fn skill_management_exposes_one_bundled_skill() {
         let _env = crate::persist::test_env("cli-skill-opt-in");
-        assert_eq!(skill_cmd(&[]).unwrap(), 0);
-        assert_eq!(skill_cmd(&["status".into()]).unwrap(), 0);
-        assert_eq!(skill_cmd(&["show".into()]).unwrap(), 0);
+        let context = crate::i18n::cli::Context::for_language(crate::i18n::cli::Language::En);
+        assert_eq!(skill_cmd(&[], context).unwrap(), 0);
+        assert_eq!(skill_cmd(&["status".into()], context).unwrap(), 0);
+        assert_eq!(skill_cmd(&["show".into()], context).unwrap(), 0);
 
         for args in [
             vec!["enable".into(), "codex".into()],
@@ -4201,7 +4557,7 @@ mod tests {
             vec!["on".into()],
             vec!["install".into()],
         ] {
-            assert!(skill_cmd(&args).is_err(), "{args:?}");
+            assert!(skill_cmd(&args, context).is_err(), "{args:?}");
         }
     }
 }

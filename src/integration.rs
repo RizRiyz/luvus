@@ -82,23 +82,34 @@ export const luvus = async () => {
 }
 "#;
 
-pub fn run(args: &[String]) -> Result<i32> {
+pub fn run(args: &[String], context: crate::i18n::cli::Context) -> Result<i32> {
     match (
         args.get(2).map(String::as_str),
         args.get(3).map(String::as_str),
     ) {
         (Some("install"), Some(agent)) if AGENTS.contains(&agent) => {
             install(agent)?;
-            println!("installed luvus {agent} integration");
+            println!(
+                "{} {agent} {}",
+                context.text("installed luvus"),
+                context.text("integration")
+            );
             Ok(0)
         }
         (Some("uninstall"), Some(agent)) if AGENTS.contains(&agent) => {
             uninstall(agent)?;
-            println!("removed luvus {agent} integration (the {agent} agent itself is untouched)");
+            println!(
+                "{} {agent} {} ({agent}: {})",
+                context.text("removed luvus"),
+                context.text("integration"),
+                context.text("agent itself is untouched")
+            );
             Ok(0)
         }
         (Some("install" | "uninstall"), Some(other)) => Err(anyhow!(
-            "unsupported agent: {other} (supported: {})",
+            "{}: {other} ({}: {})",
+            context.text("unsupported agent"),
+            context.text("supported"),
             AGENTS.join(", ")
         )),
         _ => Err(anyhow!(

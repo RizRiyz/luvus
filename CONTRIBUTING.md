@@ -61,6 +61,11 @@ because the outer process handles the keys first.
   Keep operating-system code in `platform.rs` behind `cfg` gates when possible.
 - **Update related documentation.** CLI, API, configuration, or visible behavior
   changes should update the matching public documentation.
+- **Keep CLI translations complete.** Command names, flags, JSON, and UHP stay
+  canonical. Add human CLI text to `src/i18n/cli.rs` with all eight language
+  values, preserve placeholders and literal user data, and run the focused CLI
+  localization tests. Do not add a partial English fallback for a registered
+  language.
 
 ## Tests and checks
 

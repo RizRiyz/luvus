@@ -9,6 +9,8 @@
 //! partial translation can't compile, and an unknown `config.language` falls back
 //! to [`EN`] (worst case: shows English, never a crash or a blank label).
 
+pub mod cli;
+
 /// Every translatable UI label. One field per string; all required. Footer/hint
 /// "action words" are shared across surfaces (picker, git tab, help) for
 /// consistency and to keep the table small.

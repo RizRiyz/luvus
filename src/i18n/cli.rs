@@ -1,0 +1,2480 @@
+//! Human-facing CLI localization.
+//!
+//! Command names, flags, JSON, UHP, error codes, IDs, paths, and user data are
+//! canonical. Only prose from known Luvus-owned strings is translated. Catalogs
+//! are compiled into the binary and selected once per CLI invocation.
+
+use std::borrow::Cow;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Language {
+    En,
+    Es,
+    Pt,
+    Fr,
+    De,
+    Id,
+    Zh,
+    Ja,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Context {
+    language: Language,
+}
+
+impl Context {
+    pub const fn for_language(language: Language) -> Self {
+        Self { language }
+    }
+
+    /// Resolve the selected Luvus language with one read-only config load.
+    pub fn configured() -> Self {
+        Self::for_language(Language::from_code(&crate::config::load().language))
+    }
+
+    pub fn language(self) -> Language {
+        self.language
+    }
+
+    pub fn text(self, english: &'static str) -> &'static str {
+        text(english, self.language)
+    }
+}
+
+impl Language {
+    pub fn from_code(code: &str) -> Self {
+        match code {
+            "es" => Self::Es,
+            "pt" => Self::Pt,
+            "fr" => Self::Fr,
+            "de" => Self::De,
+            "id" => Self::Id,
+            "zh" => Self::Zh,
+            "ja" => Self::Ja,
+            _ => Self::En,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::En => "en",
+            Self::Es => "es",
+            Self::Pt => "pt",
+            Self::Fr => "fr",
+            Self::De => "de",
+            Self::Id => "id",
+            Self::Zh => "zh",
+            Self::Ja => "ja",
+        }
+    }
+}
+
+struct Translation {
+    en: &'static str,
+    es: &'static str,
+    pt: &'static str,
+    fr: &'static str,
+    de: &'static str,
+    id: &'static str,
+    zh: &'static str,
+    ja: &'static str,
+}
+
+impl Translation {
+    fn get(&self, language: Language) -> &'static str {
+        match language {
+            Language::En => self.en,
+            Language::Es => self.es,
+            Language::Pt => self.pt,
+            Language::Fr => self.fr,
+            Language::De => self.de,
+            Language::Id => self.id,
+            Language::Zh => self.zh,
+            Language::Ja => self.ja,
+        }
+    }
+}
+
+macro_rules! tr {
+    ($en:literal, $es:literal, $pt:literal, $fr:literal, $de:literal, $id:literal, $zh:literal, $ja:literal) => {
+        Translation {
+            en: $en,
+            es: $es,
+            pt: $pt,
+            fr: $fr,
+            de: $de,
+            id: $id,
+            zh: $zh,
+            ja: $ja,
+        }
+    };
+}
+
+/// Complete prose catalog used by compact, full, topic, and leaf help.
+/// Entries are matched only as a complete line or a whitespace-delimited line
+/// suffix, so canonical syntax at the start of a row is never rewritten.
+static HELP: &[Translation] = &[
+    tr!(
+        "luvus: Mission control for your AI coding agents",
+        "luvus: Centro de control para tus agentes de programación con IA",
+        "luvus: Central de controle para seus agentes de programação com IA",
+        "luvus : Centre de contrôle pour vos agents de programmation IA",
+        "luvus: Kontrollzentrum für deine KI-Programmieragenten",
+        "luvus: Pusat kendali untuk agen pemrograman AI Anda",
+        "luvus：AI 编程智能体的任务控制中心",
+        "luvus：AI コーディングエージェントのミッションコントロール"
+    ),
+    tr!(
+        "Usage:",
+        "Uso:",
+        "Uso:",
+        "Utilisation :",
+        "Verwendung:",
+        "Penggunaan:",
+        "用法：",
+        "使用法："
+    ),
+    tr!(
+        "usage:",
+        "uso:",
+        "uso:",
+        "utilisation :",
+        "verwendung:",
+        "penggunaan:",
+        "用法：",
+        "使用法："
+    ),
+    tr!(
+        "Commands:",
+        "Comandos:",
+        "Comandos:",
+        "Commandes :",
+        "Befehle:",
+        "Perintah:",
+        "命令：",
+        "コマンド："
+    ),
+    tr!(
+        "Examples:",
+        "Ejemplos:",
+        "Exemplos:",
+        "Exemples :",
+        "Beispiele:",
+        "Contoh:",
+        "示例：",
+        "例："
+    ),
+    tr!(
+        "Options:",
+        "Opciones:",
+        "Opções:",
+        "Options :",
+        "Optionen:",
+        "Opsi:",
+        "选项：",
+        "オプション："
+    ),
+    tr!(
+        "Help:",
+        "Ayuda:",
+        "Ajuda:",
+        "Aide :",
+        "Hilfe:",
+        "Bantuan:",
+        "帮助：",
+        "ヘルプ："
+    ),
+    tr!(
+        "workspaces:",
+        "espacios de trabajo:",
+        "espaços de trabalho:",
+        "espaces de travail :",
+        "Arbeitsbereiche:",
+        "ruang kerja:",
+        "工作区：",
+        "ワークスペース："
+    ),
+    tr!(
+        "tabs:",
+        "pestañas:",
+        "abas:",
+        "onglets :",
+        "Tabs:",
+        "tab:",
+        "标签页：",
+        "タブ："
+    ),
+    tr!(
+        "panes / agents:",
+        "paneles / agentes:",
+        "painéis / agentes:",
+        "volets / agents :",
+        "Bereiche / Agenten:",
+        "panel / agen:",
+        "窗格 / 智能体：",
+        "ペイン / エージェント："
+    ),
+    tr!(
+        "search:",
+        "búsqueda:",
+        "pesquisa:",
+        "recherche :",
+        "Suche:",
+        "pencarian:",
+        "搜索：",
+        "検索："
+    ),
+    tr!(
+        "themes:",
+        "temas:",
+        "temas:",
+        "thèmes :",
+        "Themes:",
+        "tema:",
+        "主题：",
+        "テーマ："
+    ),
+    tr!(
+        "bars:",
+        "barras:",
+        "barras:",
+        "barres :",
+        "Leisten:",
+        "bar:",
+        "状态栏：",
+        "バー："
+    ),
+    tr!(
+        "appearance:",
+        "apariencia:",
+        "aparência:",
+        "apparence :",
+        "Darstellung:",
+        "tampilan:",
+        "外观：",
+        "外観："
+    ),
+    tr!(
+        "modules (extensions):",
+        "módulos (extensiones):",
+        "módulos (extensões):",
+        "modules (extensions) :",
+        "Module (Erweiterungen):",
+        "modul (ekstensi):",
+        "模块（扩展）：",
+        "モジュール（拡張）："
+    ),
+    tr!("git:", "git:", "git:", "git :", "Git:", "git:", "Git：", "Git："),
+    tr!(
+        "diff review:",
+        "revisión de diff:",
+        "revisão de diff:",
+        "revue des différences :",
+        "Diff-Prüfung:",
+        "tinjauan diff:",
+        "差异审查：",
+        "差分レビュー："
+    ),
+    tr!(
+        "worktrees:",
+        "árboles de trabajo:",
+        "árvores de trabalho:",
+        "arbres de travail :",
+        "Worktrees:",
+        "worktree:",
+        "工作树：",
+        "ワークツリー："
+    ),
+    tr!(
+        "orchestration (multiple agents on one project, docs/22):",
+        "orquestación (varios agentes en un proyecto, docs/22):",
+        "orquestração (vários agentes em um projeto, docs/22):",
+        "orchestration (plusieurs agents sur un projet, docs/22) :",
+        "Orchestrierung (mehrere Agenten in einem Projekt, docs/22):",
+        "orkestrasi (beberapa agen dalam satu proyek, docs/22):",
+        "编排（一个项目中的多个智能体，docs/22）：",
+        "オーケストレーション（1つのプロジェクトの複数エージェント、docs/22）："
+    ),
+    tr!(
+        "events:",
+        "eventos:",
+        "eventos:",
+        "événements :",
+        "Ereignisse:",
+        "peristiwa:",
+        "事件：",
+        "イベント："
+    ),
+    tr!(
+        "universal harness protocol:",
+        "protocolo universal de arneses:",
+        "protocolo universal de harness:",
+        "protocole universel de harness :",
+        "Universal Harness Protocol:",
+        "protokol harness universal:",
+        "通用智能体框架协议：",
+        "Universal Harness Protocol："
+    ),
+    tr!(
+        "sessions:",
+        "sesiones:",
+        "sessões:",
+        "sessions :",
+        "Sitzungen:",
+        "sesi:",
+        "会话：",
+        "セッション："
+    ),
+    tr!(
+        "remote:",
+        "remoto:",
+        "remoto:",
+        "distant :",
+        "Remote:",
+        "jarak jauh:",
+        "远程：",
+        "リモート："
+    ),
+    tr!(
+        "server:",
+        "servidor:",
+        "servidor:",
+        "serveur :",
+        "Server:",
+        "server:",
+        "服务器：",
+        "サーバー："
+    ),
+    tr!(
+        "If you are an AI, read this:",
+        "Si eres una IA, lee esto:",
+        "Se você é uma IA, leia isto:",
+        "Si vous êtes une IA, lisez ceci :",
+        "Wenn du eine KI bist, lies dies:",
+        "Jika Anda adalah AI, baca ini:",
+        "如果你是 AI，请阅读：",
+        "AI の場合は、こちらをお読みください："
+    ),
+    tr!(
+        "Launch or attach to the TUI",
+        "Iniciar o conectar a la TUI",
+        "Iniciar ou anexar à TUI",
+        "Lancer ou rejoindre la TUI",
+        "TUI starten oder verbinden",
+        "Jalankan atau sambungkan ke TUI",
+        "启动或连接到 TUI",
+        "TUI を起動またはアタッチ"
+    ),
+    tr!(
+        "Control a local session",
+        "Controlar una sesión local",
+        "Controlar uma sessão local",
+        "Contrôler une session locale",
+        "Lokale Sitzung steuern",
+        "Kendalikan sesi lokal",
+        "控制本地会话",
+        "ローカルセッションを操作"
+    ),
+    tr!(
+        "Attach to a remote session",
+        "Conectar a una sesión remota",
+        "Conectar a uma sessão remota",
+        "Rejoindre une session distante",
+        "Mit einer Remote-Sitzung verbinden",
+        "Sambungkan ke sesi jarak jauh",
+        "连接到远程会话",
+        "リモートセッションにアタッチ"
+    ),
+    tr!(
+        "Show every command and option",
+        "Mostrar todos los comandos y opciones",
+        "Mostrar todos os comandos e opções",
+        "Afficher toutes les commandes et options",
+        "Alle Befehle und Optionen anzeigen",
+        "Tampilkan semua perintah dan opsi",
+        "显示所有命令和选项",
+        "すべてのコマンドとオプションを表示"
+    ),
+    tr!(
+        "Open, organize, and switch projects",
+        "Abrir, organizar y cambiar proyectos",
+        "Abrir, organizar e alternar projetos",
+        "Ouvrir, organiser et changer de projet",
+        "Projekte öffnen, organisieren und wechseln",
+        "Buka, atur, dan ganti proyek",
+        "打开、整理和切换项目",
+        "プロジェクトを開く、整理、切り替え"
+    ),
+    tr!(
+        "Create, reorder, rename, and close tabs",
+        "Crear, reordenar, renombrar y cerrar pestañas",
+        "Criar, reordenar, renomear e fechar abas",
+        "Créer, réordonner, renommer et fermer les onglets",
+        "Tabs erstellen, sortieren, umbenennen und schließen",
+        "Buat, urutkan, ubah nama, dan tutup tab",
+        "创建、重新排序、重命名和关闭标签页",
+        "タブの作成、並べ替え、名前変更、終了"
+    ),
+    tr!(
+        "Split, move, focus, run, inspect, and close panes",
+        "Dividir, mover, enfocar, ejecutar, inspeccionar y cerrar paneles",
+        "Dividir, mover, focar, executar, inspecionar e fechar painéis",
+        "Diviser, déplacer, cibler, exécuter, inspecter et fermer les volets",
+        "Bereiche teilen, verschieben, fokussieren, ausführen, prüfen und schließen",
+        "Bagi, pindah, fokus, jalankan, periksa, dan tutup panel",
+        "拆分、移动、聚焦、运行、检查和关闭窗格",
+        "ペインの分割、移動、フォーカス、実行、確認、終了"
+    ),
+    tr!(
+        "Start, fork, message, inspect, and resume coding agents",
+        "Iniciar, bifurcar, enviar mensajes, inspeccionar y reanudar agentes",
+        "Iniciar, bifurcar, enviar mensagens, inspecionar e retomar agentes",
+        "Démarrer, dupliquer, contacter, inspecter et reprendre les agents",
+        "Agenten starten, forken, kontaktieren, prüfen und fortsetzen",
+        "Mulai, fork, kirim pesan, periksa, dan lanjutkan agen",
+        "启动、派生、发送消息、检查和恢复编程智能体",
+        "エージェントの起動、フォーク、メッセージ、確認、再開"
+    ),
+    tr!(
+        "Browse and open workspace files",
+        "Explorar y abrir archivos del espacio de trabajo",
+        "Navegar e abrir arquivos do espaço de trabalho",
+        "Parcourir et ouvrir les fichiers de l'espace de travail",
+        "Arbeitsbereichsdateien durchsuchen und öffnen",
+        "Jelajahi dan buka berkas ruang kerja",
+        "浏览并打开工作区文件",
+        "ワークスペースのファイルを閲覧して開く"
+    ),
+    tr!(
+        "Inspect repository state and open the Git UI",
+        "Inspeccionar el repositorio y abrir la interfaz Git",
+        "Inspecionar o repositório e abrir a interface Git",
+        "Inspecter le dépôt et ouvrir l'interface Git",
+        "Repository-Status prüfen und Git-Oberfläche öffnen",
+        "Periksa repositori dan buka UI Git",
+        "检查仓库状态并打开 Git 界面",
+        "リポジトリ状態を確認して Git UI を開く"
+    ),
+    tr!(
+        "Review Git diffs, notes, and agent feedback",
+        "Revisar diferencias Git, notas y comentarios de agentes",
+        "Revisar diffs Git, notas e feedback de agentes",
+        "Examiner les différences Git, les notes et les retours d'agents",
+        "Git-Diffs, Notizen und Agentenfeedback prüfen",
+        "Tinjau diff Git, catatan, dan umpan balik agen",
+        "审查 Git 差异、笔记和智能体反馈",
+        "Git 差分、ノート、エージェントのフィードバックをレビュー"
+    ),
+    tr!(
+        "Create, open, list, and remove Git worktrees",
+        "Crear, abrir, listar y eliminar árboles de trabajo Git",
+        "Criar, abrir, listar e remover worktrees Git",
+        "Créer, ouvrir, lister et supprimer les worktrees Git",
+        "Git-Worktrees erstellen, öffnen, auflisten und entfernen",
+        "Buat, buka, daftar, dan hapus worktree Git",
+        "创建、打开、列出和删除 Git 工作树",
+        "Git ワークツリーの作成、表示、一覧、削除"
+    ),
+    tr!(
+        "Coordinate work across multiple coding agents",
+        "Coordinar trabajo entre varios agentes",
+        "Coordenar trabalho entre vários agentes",
+        "Coordonner le travail de plusieurs agents",
+        "Arbeit mehrerer Agenten koordinieren",
+        "Koordinasikan pekerjaan beberapa agen",
+        "协调多个编程智能体的工作",
+        "複数エージェントの作業を調整"
+    ),
+    tr!(
+        "Reserve file paths for active tasks",
+        "Reservar rutas de archivos para tareas activas",
+        "Reservar caminhos de arquivos para tarefas ativas",
+        "Réserver des chemins de fichiers pour les tâches actives",
+        "Dateipfade für aktive Aufgaben reservieren",
+        "Cadangkan path berkas untuk tugas aktif",
+        "为活动任务预留文件路径",
+        "実行中タスクのファイルパスを予約"
+    ),
+    tr!(
+        "Find, install, configure, and run extensions",
+        "Buscar, instalar, configurar y ejecutar extensiones",
+        "Encontrar, instalar, configurar e executar extensões",
+        "Trouver, installer, configurer et exécuter des extensions",
+        "Erweiterungen finden, installieren, konfigurieren und ausführen",
+        "Cari, pasang, konfigurasi, dan jalankan ekstensi",
+        "查找、安装、配置和运行扩展",
+        "拡張機能の検索、インストール、設定、実行"
+    ),
+    tr!(
+        "List, create, validate, install, and select themes",
+        "Listar, crear, validar, instalar y seleccionar temas",
+        "Listar, criar, validar, instalar e selecionar temas",
+        "Lister, créer, valider, installer et sélectionner des thèmes",
+        "Themes auflisten, erstellen, prüfen, installieren und auswählen",
+        "Daftar, buat, validasi, pasang, dan pilih tema",
+        "列出、创建、验证、安装和选择主题",
+        "テーマの一覧、作成、検証、インストール、選択"
+    ),
+    tr!(
+        "Publish and arrange top and bottom status widgets",
+        "Publicar y organizar widgets de estado superiores e inferiores",
+        "Publicar e organizar widgets de status superiores e inferiores",
+        "Publier et organiser les widgets d'état du haut et du bas",
+        "Status-Widgets oben und unten veröffentlichen und anordnen",
+        "Terbitkan dan atur widget status atas dan bawah",
+        "发布并排列顶部和底部状态组件",
+        "上下のステータスウィジェットを公開、配置"
+    ),
+    tr!(
+        "Configure sidebars, docks, and notifications",
+        "Configurar barras laterales, paneles y notificaciones",
+        "Configurar barras laterais, docks e notificações",
+        "Configurer les barres latérales, docks et notifications",
+        "Seitenleisten, Docks und Benachrichtigungen konfigurieren",
+        "Konfigurasi bilah sisi, dock, dan notifikasi",
+        "配置侧边栏、停靠栏和通知",
+        "サイドバー、ドック、通知を設定"
+    ),
+    tr!(
+        "List, attach, stop, and delete server sessions",
+        "Listar, conectar, detener y eliminar sesiones",
+        "Listar, anexar, parar e excluir sessões",
+        "Lister, rejoindre, arrêter et supprimer les sessions",
+        "Serversitzungen auflisten, verbinden, stoppen und löschen",
+        "Daftar, sambungkan, hentikan, dan hapus sesi server",
+        "列出、连接、停止和删除服务器会话",
+        "サーバーセッションの一覧、接続、停止、削除"
+    ),
+    tr!(
+        "Inspect and manage the selected background server",
+        "Inspeccionar y gestionar el servidor en segundo plano seleccionado",
+        "Inspecionar e gerenciar o servidor em segundo plano selecionado",
+        "Inspecter et gérer le serveur d'arrière-plan sélectionné",
+        "Ausgewählten Hintergrundserver prüfen und verwalten",
+        "Periksa dan kelola server latar yang dipilih",
+        "检查和管理所选后台服务器",
+        "選択したバックグラウンドサーバーを確認、管理"
+    ),
+    tr!(
+        "Manage agent session-resume integrations",
+        "Gestionar integraciones de reanudación de agentes",
+        "Gerenciar integrações de retomada de agentes",
+        "Gérer les intégrations de reprise des agents",
+        "Integrationen zur Agentenfortsetzung verwalten",
+        "Kelola integrasi pelanjutan sesi agen",
+        "管理智能体会话恢复集成",
+        "エージェントのセッション再開連携を管理"
+    ),
+    tr!(
+        "Manage the bundled agent skill",
+        "Gestionar la habilidad incluida para agentes",
+        "Gerenciar a skill incluída para agentes",
+        "Gérer la compétence d'agent intégrée",
+        "Gebündelten Agenten-Skill verwalten",
+        "Kelola skill agen bawaan",
+        "管理内置智能体技能",
+        "同梱エージェントスキルを管理"
+    ),
+    tr!(
+        "Wait for pane output or an agent state",
+        "Esperar la salida de un panel o el estado de un agente",
+        "Aguardar a saída de um painel ou o estado de um agente",
+        "Attendre la sortie d'un volet ou l'état d'un agent",
+        "Auf Bereichsausgabe oder Agentenstatus warten",
+        "Tunggu keluaran panel atau status agen",
+        "等待窗格输出或智能体状态",
+        "ペイン出力またはエージェント状態を待機"
+    ),
+    tr!(
+        "Search across pane scrollback",
+        "Buscar en el historial de los paneles",
+        "Pesquisar no histórico dos painéis",
+        "Rechercher dans l'historique des volets",
+        "Im Bereichsverlauf suchen",
+        "Cari di riwayat panel",
+        "搜索窗格回滚历史",
+        "ペインのスクロールバックを検索"
+    ),
+    tr!(
+        "Stream live status changes",
+        "Transmitir cambios de estado en vivo",
+        "Transmitir mudanças de status ao vivo",
+        "Diffuser les changements d'état en direct",
+        "Live-Statusänderungen streamen",
+        "Alirkan perubahan status langsung",
+        "流式输出实时状态变化",
+        "状態変更をリアルタイム配信"
+    ),
+    tr!(
+        "Discover and use Universal Harness Protocol 1.0",
+        "Descubrir y usar Universal Harness Protocol 1.0",
+        "Descobrir e usar o Universal Harness Protocol 1.0",
+        "Découvrir et utiliser Universal Harness Protocol 1.0",
+        "Universal Harness Protocol 1.0 erkennen und verwenden",
+        "Temukan dan gunakan Universal Harness Protocol 1.0",
+        "发现并使用通用智能体框架协议 1.0",
+        "Universal Harness Protocol 1.0 を検出して使用"
+    ),
+    tr!(
+        "Open the TUI focused on one pane",
+        "Abrir la TUI enfocada en un panel",
+        "Abrir a TUI focada em um painel",
+        "Ouvrir la TUI centrée sur un volet",
+        "TUI mit Fokus auf einen Bereich öffnen",
+        "Buka TUI dengan fokus pada satu panel",
+        "打开聚焦于单个窗格的 TUI",
+        "1つのペインにフォーカスして TUI を開く"
+    ),
+    tr!(
+        "Check optional external tools",
+        "Comprobar herramientas externas opcionales",
+        "Verificar ferramentas externas opcionais",
+        "Vérifier les outils externes facultatifs",
+        "Optionale externe Werkzeuge prüfen",
+        "Periksa alat eksternal opsional",
+        "检查可选外部工具",
+        "任意の外部ツールを確認"
+    ),
+    tr!(
+        "Check for and install a newer Luvus release",
+        "Buscar e instalar una versión más reciente de Luvus",
+        "Verificar e instalar uma versão mais recente do Luvus",
+        "Rechercher et installer une version plus récente de Luvus",
+        "Neuere Luvus-Version suchen und installieren",
+        "Periksa dan pasang rilis Luvus yang lebih baru",
+        "检查并安装较新的 Luvus 版本",
+        "新しい Luvus リリースを確認してインストール"
+    ),
+    tr!(
+        "Check whether the selected server responds",
+        "Comprobar si responde el servidor seleccionado",
+        "Verificar se o servidor selecionado responde",
+        "Vérifier si le serveur sélectionné répond",
+        "Prüfen, ob der ausgewählte Server antwortet",
+        "Periksa apakah server yang dipilih merespons",
+        "检查所选服务器是否响应",
+        "選択したサーバーが応答するか確認"
+    ),
+    tr!(
+        "See every active coding agent",
+        "Ver todos los agentes activos",
+        "Ver todos os agentes ativos",
+        "Voir tous les agents actifs",
+        "Alle aktiven Agenten anzeigen",
+        "Lihat semua agen aktif",
+        "查看所有活动的编程智能体",
+        "すべての稼働中エージェントを表示"
+    ),
+    tr!(
+        "Add a pane below the focused pane",
+        "Añadir un panel debajo del panel enfocado",
+        "Adicionar um painel abaixo do painel em foco",
+        "Ajouter un volet sous le volet actif",
+        "Bereich unter dem fokussierten Bereich hinzufügen",
+        "Tambahkan panel di bawah panel aktif",
+        "在聚焦窗格下方添加窗格",
+        "フォーカス中のペインの下にペインを追加"
+    ),
+    tr!(
+        "Open the current project",
+        "Abrir el proyecto actual",
+        "Abrir o projeto atual",
+        "Ouvrir le projet actuel",
+        "Aktuelles Projekt öffnen",
+        "Buka proyek saat ini",
+        "打开当前项目",
+        "現在のプロジェクトを開く"
+    ),
+    tr!(
+        "Start or open a named session",
+        "Iniciar o abrir una sesión con nombre",
+        "Iniciar ou abrir uma sessão nomeada",
+        "Démarrer ou ouvrir une session nommée",
+        "Benannte Sitzung starten oder öffnen",
+        "Mulai atau buka sesi bernama",
+        "启动或打开命名会话",
+        "名前付きセッションを開始または開く"
+    ),
+    tr!(
+        "Control a session from another terminal",
+        "Controlar una sesión desde otro terminal",
+        "Controlar uma sessão de outro terminal",
+        "Contrôler une session depuis un autre terminal",
+        "Sitzung von einem anderen Terminal steuern",
+        "Kendalikan sesi dari terminal lain",
+        "从另一个终端控制会话",
+        "別のターミナルからセッションを操作"
+    ),
+    tr!(
+        "Target a named server session",
+        "Seleccionar una sesión de servidor con nombre",
+        "Selecionar uma sessão de servidor nomeada",
+        "Cibler une session serveur nommée",
+        "Benannte Serversitzung auswählen",
+        "Targetkan sesi server bernama",
+        "指定命名服务器会话",
+        "名前付きサーバーセッションを対象にする"
+    ),
+    tr!(
+        "Attach through SSH",
+        "Conectar mediante SSH",
+        "Conectar por SSH",
+        "Se connecter par SSH",
+        "Über SSH verbinden",
+        "Sambungkan melalui SSH",
+        "通过 SSH 连接",
+        "SSH 経由でアタッチ"
+    ),
+    tr!(
+        "Print the version",
+        "Mostrar la versión",
+        "Exibir a versão",
+        "Afficher la version",
+        "Version ausgeben",
+        "Tampilkan versi",
+        "输出版本",
+        "バージョンを表示"
+    ),
+    tr!(
+        "Show this help",
+        "Mostrar esta ayuda",
+        "Mostrar esta ajuda",
+        "Afficher cette aide",
+        "Diese Hilfe anzeigen",
+        "Tampilkan bantuan ini",
+        "显示此帮助",
+        "このヘルプを表示"
+    ),
+    tr!(
+        "Complete CLI reference",
+        "Referencia completa de la CLI",
+        "Referência completa da CLI",
+        "Référence CLI complète",
+        "Vollständige CLI-Referenz",
+        "Referensi CLI lengkap",
+        "完整 CLI 参考",
+        "完全な CLI リファレンス"
+    ),
+    tr!(
+        "Focus on one area or command",
+        "Mostrar un área o comando",
+        "Mostrar uma área ou comando",
+        "Afficher une section ou commande",
+        "Einen Bereich oder Befehl anzeigen",
+        "Fokus pada satu area atau perintah",
+        "查看单个区域或命令",
+        "1つの領域またはコマンドに絞る"
+    ),
+    tr!(
+        "Online reference",
+        "Referencia en línea",
+        "Referência online",
+        "Référence en ligne",
+        "Online-Referenz",
+        "Referensi online",
+        "在线参考",
+        "オンラインリファレンス"
+    ),
+    tr!(
+        "launch / attach the TUI",
+        "iniciar / conectar a la TUI",
+        "iniciar / anexar à TUI",
+        "lancer / rejoindre la TUI",
+        "TUI starten / verbinden",
+        "jalankan / sambungkan ke TUI",
+        "启动 / 连接到 TUI",
+        "TUI を起動 / アタッチ"
+    ),
+    tr!(
+        "target one named server session",
+        "seleccionar una sesión de servidor con nombre",
+        "selecionar uma sessão de servidor nomeada",
+        "cibler une session serveur nommée",
+        "eine benannte Serversitzung auswählen",
+        "targetkan satu sesi server bernama",
+        "指定一个命名服务器会话",
+        "名前付きサーバーセッションを1つ選択"
+    ),
+    tr!(
+        "print the version",
+        "mostrar la versión",
+        "exibir a versão",
+        "afficher la version",
+        "Version ausgeben",
+        "tampilkan versi",
+        "输出版本",
+        "バージョンを表示"
+    ),
+    tr!(
+        "show compact help",
+        "mostrar ayuda compacta",
+        "mostrar ajuda compacta",
+        "afficher l'aide compacte",
+        "Kompakthilfe anzeigen",
+        "tampilkan bantuan ringkas",
+        "显示简要帮助",
+        "簡易ヘルプを表示"
+    ),
+    tr!(
+        "show compact, complete, or focused help",
+        "mostrar ayuda compacta, completa o específica",
+        "mostrar ajuda compacta, completa ou específica",
+        "afficher l'aide compacte, complète ou ciblée",
+        "kompakte, vollständige oder gezielte Hilfe anzeigen",
+        "tampilkan bantuan ringkas, lengkap, atau terfokus",
+        "显示简要、完整或专题帮助",
+        "簡易、完全、または対象別ヘルプを表示"
+    ),
+    tr!(
+        "check optional external tools (git, gh, …)",
+        "comprobar herramientas externas opcionales (git, gh, …)",
+        "verificar ferramentas externas opcionais (git, gh, …)",
+        "vérifier les outils externes facultatifs (git, gh, …)",
+        "optionale externe Werkzeuge prüfen (git, gh, …)",
+        "periksa alat eksternal opsional (git, gh, …)",
+        "检查可选外部工具（git、gh 等）",
+        "任意の外部ツールを確認（git、gh など）"
+    ),
+    tr!(
+        "check for and install a newer Luvus release",
+        "buscar e instalar una versión más reciente de Luvus",
+        "verificar e instalar uma versão mais recente do Luvus",
+        "rechercher et installer une version plus récente de Luvus",
+        "neuere Luvus-Version suchen und installieren",
+        "periksa dan pasang rilis Luvus yang lebih baru",
+        "检查并安装较新的 Luvus 版本",
+        "新しい Luvus リリースを確認してインストール"
+    ),
+    tr!(
+        "check the server",
+        "comprobar el servidor",
+        "verificar o servidor",
+        "vérifier le serveur",
+        "Server prüfen",
+        "periksa server",
+        "检查服务器",
+        "サーバーを確認"
+    ),
+    tr!(
+        "list workspaces",
+        "listar espacios de trabajo",
+        "listar espaços de trabalho",
+        "lister les espaces de travail",
+        "Arbeitsbereiche auflisten",
+        "daftar ruang kerja",
+        "列出工作区",
+        "ワークスペースを一覧表示"
+    ),
+    tr!(
+        "create a workspace in the current directory",
+        "crear un espacio de trabajo en el directorio actual",
+        "criar um espaço de trabalho no diretório atual",
+        "créer un espace de travail dans le dossier actuel",
+        "Arbeitsbereich im aktuellen Verzeichnis erstellen",
+        "buat ruang kerja di direktori saat ini",
+        "在当前目录中创建工作区",
+        "現在のディレクトリにワークスペースを作成"
+    ),
+    tr!(
+        "open <path> as a workspace (or focus it if already open)",
+        "abrir <path> como espacio de trabajo (o enfocarlo si ya está abierto)",
+        "abrir <path> como espaço de trabalho (ou focar se já estiver aberto)",
+        "ouvrir <path> comme espace de travail (ou l'activer s'il est déjà ouvert)",
+        "<path> als Arbeitsbereich öffnen (oder fokussieren, falls bereits offen)",
+        "buka <path> sebagai ruang kerja (atau fokuskan jika sudah terbuka)",
+        "将 <path> 作为工作区打开（已打开则聚焦）",
+        "<path> をワークスペースとして開く（既に開いていればフォーカス）"
+    ),
+    tr!(
+        "focus workspace i (0-based)",
+        "enfocar el espacio de trabajo i (base 0)",
+        "focar o espaço de trabalho i (base 0)",
+        "activer l'espace de travail i (indexé à partir de 0)",
+        "Arbeitsbereich i fokussieren (0-basiert)",
+        "fokuskan ruang kerja i (berbasis 0)",
+        "聚焦工作区 i（从 0 开始）",
+        "ワークスペース i にフォーカス（0 始まり）"
+    ),
+    tr!(
+        "rename workspace i without changing its folder",
+        "renombrar el espacio i sin cambiar su carpeta",
+        "renomear o espaço i sem alterar sua pasta",
+        "renommer l'espace i sans modifier son dossier",
+        "Arbeitsbereich i umbenennen, ohne den Ordner zu ändern",
+        "ubah nama ruang kerja i tanpa mengubah folder",
+        "重命名工作区 i，但不更改其文件夹",
+        "フォルダを変えずにワークスペース i の名前を変更"
+    ),
+    tr!(
+        "pin workspace i (0-based) in the sidebar",
+        "fijar el espacio i (base 0) en la barra lateral",
+        "fixar o espaço i (base 0) na barra lateral",
+        "épingler l'espace i (indexé à partir de 0) dans la barre latérale",
+        "Arbeitsbereich i (0-basiert) in der Seitenleiste anheften",
+        "sematkan ruang kerja i (berbasis 0) di bilah sisi",
+        "在侧边栏中固定工作区 i（从 0 开始）",
+        "ワークスペース i（0 始まり）をサイドバーに固定"
+    ),
+    tr!(
+        "unpin workspace i (0-based)",
+        "desfijar el espacio i (base 0)",
+        "desafixar o espaço i (base 0)",
+        "désépingler l'espace i (indexé à partir de 0)",
+        "Arbeitsbereich i (0-basiert) lösen",
+        "lepas sematan ruang kerja i (berbasis 0)",
+        "取消固定工作区 i（从 0 开始）",
+        "ワークスペース i（0 始まり）の固定を解除"
+    ),
+    tr!(
+        "close a workspace (default: active)",
+        "cerrar un espacio de trabajo (predeterminado: activo)",
+        "fechar um espaço de trabalho (padrão: ativo)",
+        "fermer un espace de travail (par défaut : actif)",
+        "Arbeitsbereich schließen (Standard: aktiv)",
+        "tutup ruang kerja (bawaan: aktif)",
+        "关闭工作区（默认：当前工作区）",
+        "ワークスペースを閉じる（既定：アクティブ）"
+    ),
+    tr!(
+        "list tabs in the current workspace",
+        "listar pestañas del espacio de trabajo actual",
+        "listar abas no espaço de trabalho atual",
+        "lister les onglets de l'espace de travail actuel",
+        "Tabs im aktuellen Arbeitsbereich auflisten",
+        "daftar tab di ruang kerja saat ini",
+        "列出当前工作区中的标签页",
+        "現在のワークスペースのタブを一覧表示"
+    ),
+    tr!(
+        "new tab",
+        "nueva pestaña",
+        "nova aba",
+        "nouvel onglet",
+        "neuer Tab",
+        "tab baru",
+        "新建标签页",
+        "新しいタブ"
+    ),
+    tr!(
+        "focus tab n (1-based)",
+        "enfocar la pestaña n (base 1)",
+        "focar a aba n (base 1)",
+        "activer l'onglet n (indexé à partir de 1)",
+        "Tab n fokussieren (1-basiert)",
+        "fokuskan tab n (berbasis 1)",
+        "聚焦标签页 n（从 1 开始）",
+        "タブ n にフォーカス（1 始まり）"
+    ),
+    tr!(
+        "move a tab to an exact position (1-based)",
+        "mover una pestaña a una posición exacta (base 1)",
+        "mover uma aba para uma posição exata (base 1)",
+        "déplacer un onglet à une position exacte (indexée à partir de 1)",
+        "Tab an eine genaue Position verschieben (1-basiert)",
+        "pindahkan tab ke posisi tepat (berbasis 1)",
+        "将标签页移动到精确位置（从 1 开始）",
+        "タブを正確な位置へ移動（1 始まり）"
+    ),
+    tr!(
+        "move the active tab one position (--tab N targets one)",
+        "mover la pestaña activa una posición (--tab N selecciona una)",
+        "mover a aba ativa uma posição (--tab N seleciona uma)",
+        "déplacer l'onglet actif d'une position (--tab N en cible un)",
+        "aktiven Tab um eine Position verschieben (--tab N wählt einen aus)",
+        "pindahkan tab aktif satu posisi (--tab N menargetkan satu)",
+        "将当前标签页移动一个位置（--tab N 指定目标）",
+        "アクティブタブを1つ移動（--tab N で対象指定）"
+    ),
+    tr!(
+        "exchange two tab positions (1-based)",
+        "intercambiar dos posiciones de pestañas (base 1)",
+        "trocar duas posições de abas (base 1)",
+        "échanger deux positions d'onglets (indexées à partir de 1)",
+        "zwei Tabpositionen tauschen (1-basiert)",
+        "tukar dua posisi tab (berbasis 1)",
+        "交换两个标签页的位置（从 1 开始）",
+        "2つのタブ位置を交換（1 始まり）"
+    ),
+    tr!(
+        "name a tab (--tab N to target one; empty clears it)",
+        "nombrar una pestaña (--tab N la selecciona; vacío borra el nombre)",
+        "nomear uma aba (--tab N seleciona uma; vazio limpa)",
+        "nommer un onglet (--tab N le cible ; vide efface le nom)",
+        "Tab benennen (--tab N wählt einen aus; leer löscht den Namen)",
+        "beri nama tab (--tab N menargetkan satu; kosong menghapusnya)",
+        "命名标签页（--tab N 指定目标；空值清除名称）",
+        "タブに名前を付ける（--tab N で対象指定、空で消去）"
+    ),
+    tr!(
+        "close a tab (default: active)",
+        "cerrar una pestaña (predeterminada: activa)",
+        "fechar uma aba (padrão: ativa)",
+        "fermer un onglet (par défaut : actif)",
+        "Tab schließen (Standard: aktiv)",
+        "tutup tab (bawaan: aktif)",
+        "关闭标签页（默认：当前标签页）",
+        "タブを閉じる（既定：アクティブ）"
+    ),
+    tr!(
+        "list panes and read-only history metrics in the current tab",
+        "listar paneles y métricas de historial de solo lectura en la pestaña actual",
+        "listar painéis e métricas de histórico somente leitura na aba atual",
+        "lister les volets et les métriques d'historique en lecture seule de l'onglet actuel",
+        "Bereiche und schreibgeschützte Verlaufsmetriken im aktuellen Tab auflisten",
+        "daftar panel dan metrik riwayat hanya-baca di tab saat ini",
+        "列出当前标签页中的窗格和只读历史指标",
+        "現在のタブのペインと読み取り専用履歴メトリクスを一覧表示"
+    ),
+    tr!(
+        "split a pane (default: side by side)",
+        "dividir un panel (predeterminado: lado a lado)",
+        "dividir um painel (padrão: lado a lado)",
+        "diviser un volet (par défaut : côte à côte)",
+        "Bereich teilen (Standard: nebeneinander)",
+        "bagi panel (bawaan: berdampingan)",
+        "拆分窗格（默认：左右并排）",
+        "ペインを分割（既定：横並び）"
+    ),
+    tr!(
+        "focus a pane (jumps to its workspace/tab)",
+        "enfocar un panel (salta a su espacio/pestaña)",
+        "focar um painel (vai para seu espaço/aba)",
+        "activer un volet (rejoint son espace/onglet)",
+        "Bereich fokussieren (wechselt zu Arbeitsbereich/Tab)",
+        "fokuskan panel (beralih ke ruang kerja/tab-nya)",
+        "聚焦窗格（跳转到其工作区/标签页）",
+        "ペインにフォーカス（所属ワークスペース/タブへ移動）"
+    ),
+    tr!(
+        "move a pane within its workspace",
+        "mover un panel dentro de su espacio de trabajo",
+        "mover um painel dentro do espaço de trabalho",
+        "déplacer un volet dans son espace de travail",
+        "Bereich innerhalb seines Arbeitsbereichs verschieben",
+        "pindahkan panel di dalam ruang kerjanya",
+        "在其工作区内移动窗格",
+        "ワークスペース内でペインを移動"
+    ),
+    tr!(
+        "run a command in a pane",
+        "ejecutar un comando en un panel",
+        "executar um comando em um painel",
+        "exécuter une commande dans un volet",
+        "Befehl in einem Bereich ausführen",
+        "jalankan perintah di panel",
+        "在窗格中运行命令",
+        "ペインでコマンドを実行"
+    ),
+    tr!(
+        "send raw text to a pane",
+        "enviar texto sin procesar a un panel",
+        "enviar texto bruto para um painel",
+        "envoyer du texte brut à un volet",
+        "Rohtext an einen Bereich senden",
+        "kirim teks mentah ke panel",
+        "向窗格发送原始文本",
+        "ペインへ生テキストを送信"
+    ),
+    tr!(
+        "print a pane's recent output",
+        "mostrar la salida reciente de un panel",
+        "exibir a saída recente de um painel",
+        "afficher la sortie récente d'un volet",
+        "letzte Ausgabe eines Bereichs ausgeben",
+        "tampilkan keluaran terbaru panel",
+        "输出窗格的最近内容",
+        "ペインの直近の出力を表示"
+    ),
+    tr!(
+        "print a pane's agent status and history metrics (any workspace)",
+        "mostrar el estado del agente y las métricas de historial de un panel (cualquier espacio)",
+        "exibir o status do agente e métricas de histórico de um painel (qualquer espaço)",
+        "afficher l'état de l'agent et les métriques d'historique d'un volet (tout espace)",
+        "Agentenstatus und Verlaufsmetriken eines Bereichs ausgeben (jeder Arbeitsbereich)",
+        "tampilkan status agen dan metrik riwayat panel (ruang kerja apa pun)",
+        "输出窗格的智能体状态和历史指标（任意工作区）",
+        "ペインのエージェント状態と履歴メトリクスを表示（全ワークスペース）"
+    ),
+    tr!(
+        "list cached executable identities without exposing arguments",
+        "listar identidades de ejecutables en caché sin mostrar argumentos",
+        "listar identidades de executáveis em cache sem expor argumentos",
+        "lister les identités d'exécutables en cache sans exposer les arguments",
+        "zwischengespeicherte Programmidentitäten ohne Argumente auflisten",
+        "daftar identitas executable tersimpan tanpa membuka argumen",
+        "列出缓存的可执行文件身份，不暴露参数",
+        "引数を公開せずキャッシュ済み実行ファイル識別子を一覧表示"
+    ),
+    tr!(
+        "name a pane so you can mention it (--pane <id>; --clear)",
+        "nombrar un panel para poder mencionarlo (--pane <id>; --clear)",
+        "nomear um painel para poder mencioná-lo (--pane <id>; --clear)",
+        "nommer un volet pour pouvoir le mentionner (--pane <id> ; --clear)",
+        "Bereich benennen, damit er erwähnt werden kann (--pane <id>; --clear)",
+        "beri nama panel agar dapat disebut (--pane <id>; --clear)",
+        "命名窗格以便引用（--pane <id>；--clear）",
+        "参照できるようペインに名前を付ける（--pane <id>; --clear）"
+    ),
+    tr!(
+        "close a pane",
+        "cerrar un panel",
+        "fechar um painel",
+        "fermer un volet",
+        "Bereich schließen",
+        "tutup panel",
+        "关闭窗格",
+        "ペインを閉じる"
+    ),
+    tr!(
+        "list every agent across all workspaces/tabs",
+        "listar todos los agentes de todos los espacios/pestañas",
+        "listar todos os agentes em todos os espaços/abas",
+        "lister tous les agents de tous les espaces/onglets",
+        "alle Agenten in allen Arbeitsbereichen/Tabs auflisten",
+        "daftar semua agen di seluruh ruang kerja/tab",
+        "列出所有工作区/标签页中的全部智能体",
+        "全ワークスペース/タブのエージェントを一覧表示"
+    ),
+    tr!(
+        "spawn beside an anchor or reuse a pane, wait until ready, name it",
+        "crear junto a un ancla o reutilizar un panel, esperar y nombrarlo",
+        "iniciar ao lado de uma âncora ou reutilizar um painel, aguardar e nomear",
+        "lancer près d'un point d'ancrage ou réutiliser un volet, attendre puis le nommer",
+        "neben einem Anker starten oder Bereich wiederverwenden, warten und benennen",
+        "jalankan di samping jangkar atau gunakan ulang panel, tunggu siap, lalu beri nama",
+        "在锚点旁启动或复用窗格，等待就绪并命名",
+        "アンカーの隣で起動またはペインを再利用し、準備完了を待って命名"
+    ),
+    tr!(
+        "fork a supported agent's session into a sibling pane",
+        "bifurcar la sesión de un agente compatible a un panel hermano",
+        "bifurcar a sessão de um agente compatível para um painel irmão",
+        "dupliquer la session d'un agent pris en charge dans un volet voisin",
+        "Sitzung eines unterstützten Agenten in einen Nachbarbereich forken",
+        "fork sesi agen yang didukung ke panel saudara",
+        "将受支持智能体的会话派生到相邻窗格",
+        "対応エージェントのセッションを隣接ペインへフォーク"
+    ),
+    tr!(
+        "alias the current agent, same as pane name (--clear to drop)",
+        "asignar un alias al agente actual, igual que el nombre del panel (--clear lo elimina)",
+        "atribuir alias ao agente atual, igual ao nome do painel (--clear remove)",
+        "donner un alias à l'agent actuel, comme le nom du volet (--clear le supprime)",
+        "aktuellen Agenten aliasieren, wie Bereichsname (--clear entfernt ihn)",
+        "beri alias agen saat ini, sama seperti nama panel (--clear menghapus)",
+        "为当前智能体设置别名，与窗格名称相同（--clear 删除）",
+        "現在のエージェントに別名を設定、ペイン名と同じ（--clear で削除）"
+    ),
+    tr!(
+        "atomically prompt and optionally wait (send is an alias)",
+        "enviar un prompt de forma atómica y esperar opcionalmente (send es un alias)",
+        "enviar prompt atomicamente e aguardar opcionalmente (send é um alias)",
+        "envoyer une invite atomiquement et attendre si demandé (send est un alias)",
+        "Prompt atomar senden und optional warten (send ist ein Alias)",
+        "kirim prompt secara atomik dan opsional tunggu (send adalah alias)",
+        "原子提交提示，并可选择等待（send 是别名）",
+        "プロンプトをアトミックに送信し任意で待機（send は別名）"
+    ),
+    tr!(
+        "compatibility alias for agent prompt",
+        "alias de compatibilidad para agent prompt",
+        "alias de compatibilidade para agent prompt",
+        "alias de compatibilité pour agent prompt",
+        "Kompatibilitätsalias für agent prompt",
+        "alias kompatibilitas untuk agent prompt",
+        "agent prompt 的兼容别名",
+        "agent prompt の互換エイリアス"
+    ),
+    tr!(
+        "send control keys (enter, esc, ctrl+c, up, …)",
+        "enviar teclas de control (enter, esc, ctrl+c, arriba, …)",
+        "enviar teclas de controle (enter, esc, ctrl+c, cima, …)",
+        "envoyer des touches de contrôle (entrée, échap, ctrl+c, haut, …)",
+        "Steuertasten senden (enter, esc, ctrl+c, hoch, …)",
+        "kirim tombol kontrol (enter, esc, ctrl+c, atas, …)",
+        "发送控制键（enter、esc、ctrl+c、up 等）",
+        "制御キーを送信（enter、esc、ctrl+c、up など）"
+    ),
+    tr!(
+        "print an agent's output",
+        "mostrar la salida de un agente",
+        "exibir a saída de um agente",
+        "afficher la sortie d'un agent",
+        "Ausgabe eines Agenten anzeigen",
+        "tampilkan keluaran agen",
+        "输出智能体内容",
+        "エージェントの出力を表示"
+    ),
+    tr!(
+        "one agent's live info (pane, name, kind, status, cwd)",
+        "información en vivo de un agente (panel, nombre, tipo, estado, cwd)",
+        "informações ao vivo de um agente (painel, nome, tipo, status, cwd)",
+        "informations en direct d'un agent (volet, nom, type, état, cwd)",
+        "Live-Informationen eines Agenten (Bereich, Name, Art, Status, cwd)",
+        "info langsung satu agen (panel, nama, jenis, status, cwd)",
+        "一个智能体的实时信息（窗格、名称、类型、状态、cwd）",
+        "1エージェントのライブ情報（ペイン、名前、種類、状態、cwd）"
+    ),
+    tr!(
+        "show identity/state evidence and active authority",
+        "mostrar pruebas de identidad/estado y autoridad activa",
+        "mostrar evidências de identidade/status e autoridade ativa",
+        "afficher les preuves d'identité/état et l'autorité active",
+        "Identitäts-/Statusnachweise und aktive Autorität anzeigen",
+        "tampilkan bukti identitas/status dan otoritas aktif",
+        "显示身份/状态证据和活动权限来源",
+        "識別/状態の根拠と有効な権限を表示"
+    ),
+    tr!(
+        "publish a leased authoritative state (integration API)",
+        "publicar un estado autoritativo con concesión (API de integración)",
+        "publicar um estado autoritativo com concessão (API de integração)",
+        "publier un état faisant autorité sous bail (API d'intégration)",
+        "geleasten autoritativen Status veröffentlichen (Integrations-API)",
+        "terbitkan status otoritatif bersewa (API integrasi)",
+        "发布带租约的权威状态（集成 API）",
+        "リース付きの権威ある状態を公開（連携 API）"
+    ),
+    tr!(
+        "release that integration authority",
+        "liberar esa autoridad de integración",
+        "liberar essa autoridade de integração",
+        "libérer cette autorité d'intégration",
+        "diese Integrationsautorität freigeben",
+        "lepaskan otoritas integrasi tersebut",
+        "释放该集成权限",
+        "その連携権限を解放"
+    ),
+    tr!(
+        "list resumable sessions found on disk",
+        "listar sesiones reanudables encontradas en disco",
+        "listar sessões retomáveis encontradas no disco",
+        "lister les sessions reprenables trouvées sur le disque",
+        "fortsetzbare Sitzungen auf dem Datenträger auflisten",
+        "daftar sesi yang dapat dilanjutkan dari disk",
+        "列出磁盘上可恢复的会话",
+        "ディスク上の再開可能なセッションを一覧表示"
+    ),
+    tr!(
+        "reopen a resumable session into a pane",
+        "reabrir una sesión reanudable en un panel",
+        "reabrir uma sessão retomável em um painel",
+        "rouvrir une session reprenable dans un volet",
+        "fortsetzbare Sitzung in einem Bereich öffnen",
+        "buka kembali sesi yang dapat dilanjutkan ke panel",
+        "在窗格中重新打开可恢复会话",
+        "再開可能なセッションをペインで開く"
+    ),
+    tr!(
+        "install the bundled skill in detected agent hosts",
+        "instalar la habilidad incluida en los agentes detectados",
+        "instalar a skill incluída nos agentes detectados",
+        "installer la compétence intégrée dans les hôtes d'agents détectés",
+        "gebündelten Skill in erkannten Agenten-Hosts installieren",
+        "pasang skill bawaan di host agen yang terdeteksi",
+        "在检测到的智能体宿主中安装内置技能",
+        "検出したエージェントホストへ同梱スキルをインストール"
+    ),
+    tr!(
+        "show the bundled release and installation details",
+        "mostrar la versión incluida y los detalles de instalación",
+        "mostrar a versão incluída e detalhes de instalação",
+        "afficher la version intégrée et les détails d'installation",
+        "gebündelte Version und Installationsdetails anzeigen",
+        "tampilkan rilis bawaan dan detail instalasi",
+        "显示内置版本和安装详情",
+        "同梱リリースとインストール詳細を表示"
+    ),
+    tr!(
+        "remove unchanged Luvus-managed installations",
+        "eliminar instalaciones sin cambios gestionadas por Luvus",
+        "remover instalações inalteradas gerenciadas pelo Luvus",
+        "supprimer les installations Luvus non modifiées",
+        "unveränderte Luvus-verwaltete Installationen entfernen",
+        "hapus instalasi kelolaan Luvus yang tidak berubah",
+        "删除未修改的 Luvus 管理安装",
+        "未変更の Luvus 管理インストールを削除"
+    ),
+    tr!(
+        "print the bundled, version-matched SKILL.md",
+        "mostrar el SKILL.md incluido y compatible con la versión",
+        "exibir o SKILL.md incluído e compatível com a versão",
+        "afficher le SKILL.md intégré correspondant à la version",
+        "gebündelte, versionspassende SKILL.md ausgeben",
+        "tampilkan SKILL.md bawaan yang cocok dengan versi",
+        "输出内置且版本匹配的 SKILL.md",
+        "同梱されたバージョン一致の SKILL.md を表示"
+    ),
+    tr!(
+        "block until output appears",
+        "bloquear hasta que aparezca la salida",
+        "bloquear até a saída aparecer",
+        "bloquer jusqu'à l'apparition de la sortie",
+        "blockieren, bis Ausgabe erscheint",
+        "blokir hingga keluaran muncul",
+        "阻塞直到出现输出",
+        "出力が現れるまで待機"
+    ),
+    tr!(
+        "open the TUI into a single fullscreen pane",
+        "abrir la TUI en un único panel a pantalla completa",
+        "abrir a TUI em um único painel em tela cheia",
+        "ouvrir la TUI dans un seul volet plein écran",
+        "TUI in einem einzelnen Vollbildbereich öffnen",
+        "buka TUI dalam satu panel layar penuh",
+        "在单个全屏窗格中打开 TUI",
+        "単一の全画面ペインで TUI を開く"
+    ),
+    tr!(
+        "find text across every pane's scrollback (docs/63);",
+        "buscar texto en el historial de todos los paneles (docs/63);",
+        "buscar texto no histórico de todos os painéis (docs/63);",
+        "rechercher du texte dans l'historique de tous les volets (docs/63) ;",
+        "Text im Verlauf aller Bereiche suchen (docs/63);",
+        "cari teks di riwayat semua panel (docs/63);",
+        "在所有窗格的回滚历史中查找文本（docs/63）；",
+        "すべてのペインのスクロールバックからテキストを検索（docs/63）；"
+    ),
+    tr!(
+        "--case is case-sensitive; returns matches as JSON",
+        "--case distingue mayúsculas; devuelve coincidencias como JSON",
+        "--case diferencia maiúsculas; retorna correspondências como JSON",
+        "--case respecte la casse ; renvoie les résultats en JSON",
+        "--case beachtet Groß-/Kleinschreibung; Treffer als JSON",
+        "--case peka huruf besar-kecil; hasil berupa JSON",
+        "--case 区分大小写；匹配结果以 JSON 返回",
+        "--case は大文字小文字を区別し、結果を JSON で返す"
+    ),
+    tr!(
+        "rank navigation, file paths, and retained output;",
+        "clasificar navegación, rutas de archivos y salida conservada;",
+        "classificar navegação, caminhos e saída retida;",
+        "classer la navigation, les chemins et la sortie conservée ;",
+        "Navigation, Dateipfade und gespeicherte Ausgabe bewerten;",
+        "urutkan navigasi, path berkas, dan keluaran tersimpan;",
+        "对导航、文件路径和保留输出进行排序；",
+        "ナビゲーション、ファイルパス、保持済み出力を順位付け；"
+    ),
+    tr!(
+        "legacy search stays exact unless --fuzzy is passed",
+        "la búsqueda anterior sigue siendo exacta salvo que se use --fuzzy",
+        "a busca anterior permanece exata salvo com --fuzzy",
+        "la recherche historique reste exacte sauf avec --fuzzy",
+        "die bisherige Suche bleibt exakt, außer mit --fuzzy",
+        "pencarian lama tetap persis kecuali memakai --fuzzy",
+        "除非传入 --fuzzy，旧搜索仍为精确匹配",
+        "--fuzzy を指定しない限り従来の検索は完全一致"
+    ),
+    tr!(
+        "list built-in, installed, and virtual themes",
+        "listar temas integrados, instalados y virtuales",
+        "listar temas integrados, instalados e virtuais",
+        "lister les thèmes intégrés, installés et virtuels",
+        "integrierte, installierte und virtuelle Themes auflisten",
+        "daftar tema bawaan, terpasang, dan virtual",
+        "列出内置、已安装和虚拟主题",
+        "組み込み、インストール済み、仮想テーマを一覧表示"
+    ),
+    tr!(
+        "print/create the shared themes directory",
+        "mostrar/crear el directorio compartido de temas",
+        "exibir/criar o diretório compartilhado de temas",
+        "afficher/créer le répertoire partagé des thèmes",
+        "gemeinsames Theme-Verzeichnis ausgeben/erstellen",
+        "tampilkan/buat direktori tema bersama",
+        "输出/创建共享主题目录",
+        "共有テーマディレクトリを表示/作成"
+    ),
+    tr!(
+        "write an editable TOML starter",
+        "crear una plantilla TOML editable",
+        "gravar um modelo TOML editável",
+        "écrire un modèle TOML modifiable",
+        "editierbare TOML-Vorlage schreiben",
+        "tulis template TOML yang dapat diedit",
+        "写入可编辑的 TOML 模板",
+        "編集可能な TOML 雛形を書き出す"
+    ),
+    tr!(
+        "validate without installing",
+        "validar sin instalar",
+        "validar sem instalar",
+        "valider sans installer",
+        "ohne Installation prüfen",
+        "validasi tanpa memasang",
+        "验证但不安装",
+        "インストールせず検証"
+    ),
+    tr!(
+        "install a local file, HTTPS URL, GitHub repo, or community/<id>",
+        "instalar un archivo local, URL HTTPS, repositorio GitHub o community/<id>",
+        "instalar arquivo local, URL HTTPS, repositório GitHub ou community/<id>",
+        "installer un fichier local, une URL HTTPS, un dépôt GitHub ou community/<id>",
+        "lokale Datei, HTTPS-URL, GitHub-Repository oder community/<id> installieren",
+        "pasang berkas lokal, URL HTTPS, repo GitHub, atau community/<id>",
+        "安装本地文件、HTTPS URL、GitHub 仓库或 community/<id>",
+        "ローカルファイル、HTTPS URL、GitHub リポジトリ、community/<id> をインストール"
+    ),
+    tr!(
+        "select and persist a registered theme",
+        "seleccionar y guardar un tema registrado",
+        "selecionar e salvar um tema registrado",
+        "sélectionner et conserver un thème enregistré",
+        "registriertes Theme auswählen und speichern",
+        "pilih dan simpan tema terdaftar",
+        "选择并保存已注册主题",
+        "登録済みテーマを選択して保存"
+    ),
+    tr!(
+        "remove an inactive local theme",
+        "eliminar un tema local inactivo",
+        "remover um tema local inativo",
+        "supprimer un thème local inactif",
+        "inaktives lokales Theme entfernen",
+        "hapus tema lokal yang tidak aktif",
+        "删除未启用的本地主题",
+        "未使用のローカルテーマを削除"
+    ),
+    tr!(
+        "rescan installed themes in the selected server",
+        "volver a analizar los temas instalados en el servidor seleccionado",
+        "reexaminar temas instalados no servidor selecionado",
+        "réanalyser les thèmes installés sur le serveur sélectionné",
+        "installierte Themes im ausgewählten Server neu einlesen",
+        "pindai ulang tema terpasang di server terpilih",
+        "在所选服务器中重新扫描已安装主题",
+        "選択したサーバーでインストール済みテーマを再スキャン"
+    ),
+    tr!(
+        "list declared Luvus Bar widgets and live content",
+        "listar widgets declarados de Luvus Bar y contenido activo",
+        "listar widgets declarados da Luvus Bar e conteúdo ativo",
+        "lister les widgets Luvus Bar déclarés et leur contenu actif",
+        "deklarierte Luvus-Bar-Widgets und Live-Inhalte auflisten",
+        "daftar widget Luvus Bar dan konten langsung",
+        "列出已声明的 Luvus Bar 组件和实时内容",
+        "宣言済み Luvus Bar ウィジェットとライブ内容を一覧表示"
+    ),
+    tr!(
+        "publish validated live widget segments;",
+        "publicar segmentos de widget activos y validados;",
+        "publicar segmentos validados de widget ao vivo;",
+        "publier des segments de widget actifs validés ;",
+        "geprüfte Live-Widget-Segmente veröffentlichen;",
+        "terbitkan segmen widget langsung yang tervalidasi;",
+        "发布已验证的实时组件片段；",
+        "検証済みライブウィジェットセグメントを公開；"
+    ),
+    tr!(
+        "--content-file, --compact-content, --text and --state supported",
+        "admite --content-file, --compact-content, --text y --state",
+        "suporta --content-file, --compact-content, --text e --state",
+        "prend en charge --content-file, --compact-content, --text et --state",
+        "--content-file, --compact-content, --text und --state werden unterstützt",
+        "mendukung --content-file, --compact-content, --text, dan --state",
+        "支持 --content-file、--compact-content、--text 和 --state",
+        "--content-file、--compact-content、--text、--state に対応"
+    ),
+    tr!(
+        "clear live widget content, preserving placement",
+        "borrar contenido activo conservando la posición",
+        "limpar conteúdo ativo preservando a posição",
+        "effacer le contenu actif en conservant l'emplacement",
+        "Live-Widget-Inhalt löschen, Platzierung beibehalten",
+        "hapus konten langsung, pertahankan penempatan",
+        "清除实时组件内容并保留位置",
+        "配置位置を保ったままライブ内容を消去"
+    ),
+    tr!(
+        "set a sidebar's width (columns)",
+        "definir el ancho de una barra lateral (columnas)",
+        "definir a largura de uma barra lateral (colunas)",
+        "définir la largeur d'une barre latérale (colonnes)",
+        "Breite einer Seitenleiste festlegen (Spalten)",
+        "atur lebar bilah sisi (kolom)",
+        "设置侧边栏宽度（列）",
+        "サイドバー幅を設定（列）"
+    ),
+    tr!(
+        "toggle a sidebar",
+        "mostrar u ocultar una barra lateral",
+        "alternar uma barra lateral",
+        "afficher ou masquer une barre latérale",
+        "Seitenleiste ein-/ausblenden",
+        "tampilkan/sembunyikan bilah sisi",
+        "显示或隐藏侧边栏",
+        "サイドバーを表示/非表示"
+    ),
+    tr!(
+        "list docks and which side each is on",
+        "listar docks y el lado de cada uno",
+        "listar docks e o lado de cada um",
+        "lister les docks et leur côté",
+        "Docks und ihre jeweilige Seite auflisten",
+        "daftar dock dan sisinya",
+        "列出停靠栏及其所在侧",
+        "ドックと配置側を一覧表示"
+    ),
+    tr!(
+        "place a dock on a side",
+        "colocar un dock en un lado",
+        "posicionar um dock em um lado",
+        "placer un dock sur un côté",
+        "Dock auf einer Seite platzieren",
+        "tempatkan dock di satu sisi",
+        "将停靠栏放置在一侧",
+        "ドックを左右どちらかに配置"
+    ),
+    tr!(
+        "feed a module's sidebar dock its rows (JSON array,",
+        "enviar filas al dock lateral de un módulo (matriz JSON,",
+        "enviar linhas ao dock lateral de um módulo (array JSON,",
+        "fournir les lignes au dock latéral d'un module (tableau JSON,",
+        "Zeilen an das Seitenleisten-Dock eines Moduls senden (JSON-Array,",
+        "kirim baris ke dock bilah sisi modul (array JSON,",
+        "向模块侧边停靠栏提供行数据（JSON 数组，",
+        "モジュールのサイドバードックへ行を送信（JSON 配列、"
+    ),
+    tr!(
+        "or piped on stdin). See docs/29 + the website",
+        "o por stdin). Consulta docs/29 y el sitio web",
+        "ou via stdin). Veja docs/29 e o site",
+        "ou via stdin). Voir docs/29 et le site",
+        "oder über stdin). Siehe docs/29 und Website",
+        "atau lewat stdin). Lihat docs/29 dan situs",
+        "或通过 stdin 管道传入）。参见 docs/29 和网站",
+        "または stdin）。docs/29 とウェブサイトを参照"
+    ),
+    tr!(
+        "flash a one-line message in the UI",
+        "mostrar brevemente un mensaje de una línea en la interfaz",
+        "exibir brevemente uma mensagem de uma linha na interface",
+        "afficher brièvement un message d'une ligne dans l'interface",
+        "einzeilige Meldung kurz in der UI anzeigen",
+        "tampilkan pesan satu baris sejenak di UI",
+        "在界面中短暂显示单行消息",
+        "UI に1行メッセージを一時表示"
+    ),
+    tr!(
+        "find modules published to the `luvus-module` GitHub topic",
+        "buscar módulos publicados en el tema `luvus-module` de GitHub",
+        "buscar módulos publicados no tópico `luvus-module` do GitHub",
+        "trouver les modules publiés sous le sujet GitHub `luvus-module`",
+        "unter dem GitHub-Topic `luvus-module` veröffentlichte Module finden",
+        "cari modul di topik GitHub `luvus-module`",
+        "查找发布到 GitHub `luvus-module` 主题的模块",
+        "GitHub の `luvus-module` トピックで公開されたモジュールを検索"
+    ),
+    tr!(
+        "list installed modules",
+        "listar módulos instalados",
+        "listar módulos instalados",
+        "lister les modules installés",
+        "installierte Module auflisten",
+        "daftar modul terpasang",
+        "列出已安装模块",
+        "インストール済みモジュールを一覧表示"
+    ),
+    tr!(
+        "show a module's actions / panes / events / source",
+        "mostrar acciones / paneles / eventos / origen de un módulo",
+        "mostrar ações / painéis / eventos / origem de um módulo",
+        "afficher les actions / volets / événements / source d'un module",
+        "Aktionen / Bereiche / Ereignisse / Quelle eines Moduls anzeigen",
+        "tampilkan aksi / panel / peristiwa / sumber modul",
+        "显示模块的操作 / 窗格 / 事件 / 来源",
+        "モジュールのアクション / ペイン / イベント / ソースを表示"
+    ),
+    tr!(
+        "register a local module dir (--disabled to skip enabling)",
+        "registrar un directorio de módulo local (--disabled evita activarlo)",
+        "registrar diretório de módulo local (--disabled não ativa)",
+        "enregistrer un répertoire de module local (--disabled évite l'activation)",
+        "lokales Modulverzeichnis registrieren (--disabled aktiviert es nicht)",
+        "daftarkan direktori modul lokal (--disabled agar tidak diaktifkan)",
+        "注册本地模块目录（--disabled 跳过启用）",
+        "ローカルモジュールディレクトリを登録（--disabled で無効のまま）"
+    ),
+    tr!(
+        "install from GitHub",
+        "instalar desde GitHub",
+        "instalar do GitHub",
+        "installer depuis GitHub",
+        "von GitHub installieren",
+        "pasang dari GitHub",
+        "从 GitHub 安装",
+        "GitHub からインストール"
+    ),
+    tr!(
+        "remove a module from the registry",
+        "eliminar un módulo del registro",
+        "remover um módulo do registro",
+        "retirer un module du registre",
+        "Modul aus der Registrierung entfernen",
+        "hapus modul dari registry",
+        "从注册表中移除模块",
+        "モジュールをレジストリから削除"
+    ),
+    tr!(
+        "unlink + delete a git-installed module's checkout",
+        "desvincular y borrar el checkout de un módulo instalado con git",
+        "desvincular e excluir o checkout de um módulo instalado via git",
+        "dissocier et supprimer le checkout d'un module installé par git",
+        "Verknüpfung und Checkout eines per Git installierten Moduls löschen",
+        "putuskan dan hapus checkout modul yang dipasang lewat git",
+        "取消链接并删除通过 git 安装的模块检出",
+        "リンク解除し Git インストール済みモジュールのチェックアウトを削除"
+    ),
+    tr!(
+        "<id> is a module id or the owner/repo it came from",
+        "<id> es un id de módulo o su owner/repo de origen",
+        "<id> é um id de módulo ou seu owner/repo de origem",
+        "<id> est un identifiant de module ou son owner/repo d'origine",
+        "<id> ist eine Modul-ID oder das ursprüngliche owner/repo",
+        "<id> adalah id modul atau owner/repo asalnya",
+        "<id> 是模块 ID 或其来源 owner/repo",
+        "<id> はモジュール ID または取得元 owner/repo"
+    ),
+    tr!(
+        "list every action across modules",
+        "listar todas las acciones de los módulos",
+        "listar todas as ações dos módulos",
+        "lister toutes les actions des modules",
+        "alle Aktionen aller Module auflisten",
+        "daftar semua aksi lintas modul",
+        "列出所有模块操作",
+        "全モジュールのアクションを一覧表示"
+    ),
+    tr!(
+        "invoke a module action (captures + logs output)",
+        "invocar una acción de módulo (captura y registra la salida)",
+        "invocar uma ação de módulo (captura e registra a saída)",
+        "exécuter une action de module (capture et journalise la sortie)",
+        "Modulaktion ausführen (Ausgabe erfassen und protokollieren)",
+        "jalankan aksi modul (tangkap dan catat keluaran)",
+        "调用模块操作（捕获并记录输出）",
+        "モジュールアクションを実行（出力を取得、記録）"
+    ),
+    tr!(
+        "tail module command logs (--limit N)",
+        "seguir registros de comandos del módulo (--limit N)",
+        "acompanhar logs de comandos do módulo (--limit N)",
+        "suivre les journaux de commandes du module (--limit N)",
+        "Modul-Befehlsprotokolle verfolgen (--limit N)",
+        "ikuti log perintah modul (--limit N)",
+        "查看模块命令日志末尾（--limit N）",
+        "モジュールコマンドログを追跡（--limit N）"
+    ),
+    tr!(
+        "print/create a module's config dir",
+        "mostrar/crear el directorio de configuración de un módulo",
+        "exibir/criar o diretório de configuração de um módulo",
+        "afficher/créer le répertoire de configuration d'un module",
+        "Konfigurationsverzeichnis eines Moduls ausgeben/erstellen",
+        "tampilkan/buat direktori konfigurasi modul",
+        "输出/创建模块配置目录",
+        "モジュール設定ディレクトリを表示/作成"
+    ),
+    tr!(
+        "list a module's declared settings and values",
+        "listar ajustes y valores declarados de un módulo",
+        "listar configurações e valores declarados de um módulo",
+        "lister les réglages déclarés et leurs valeurs",
+        "deklarierte Einstellungen und Werte eines Moduls auflisten",
+        "daftar pengaturan dan nilai modul",
+        "列出模块声明的设置和值",
+        "モジュールが宣言した設定と値を一覧表示"
+    ),
+    tr!(
+        "read / write one setting",
+        "leer / escribir un ajuste",
+        "ler / gravar uma configuração",
+        "lire / écrire un réglage",
+        "eine Einstellung lesen / schreiben",
+        "baca / tulis satu pengaturan",
+        "读取 / 写入一项设置",
+        "設定を1つ読み書き"
+    ),
+    tr!(
+        "branch, ahead/behind, working tree of the current workspace",
+        "rama, avance/retraso y árbol de trabajo del espacio actual",
+        "branch, avanço/atraso e árvore de trabalho do espaço atual",
+        "branche, avance/retard et arbre de travail de l'espace actuel",
+        "Branch, voraus/hinterher und Arbeitsbaum des aktuellen Arbeitsbereichs",
+        "branch, ahead/behind, dan working tree ruang kerja saat ini",
+        "当前工作区的分支、领先/落后和工作树",
+        "現在のワークスペースのブランチ、ahead/behind、作業ツリー"
+    ),
+    tr!(
+        "local branches with tracking",
+        "ramas locales con seguimiento",
+        "branches locais com rastreamento",
+        "branches locales avec suivi",
+        "lokale Branches mit Tracking",
+        "branch lokal dengan tracking",
+        "带跟踪信息的本地分支",
+        "追跡情報付きローカルブランチ"
+    ),
+    tr!(
+        "recent commits",
+        "commits recientes",
+        "commits recentes",
+        "commits récents",
+        "letzte Commits",
+        "commit terbaru",
+        "最近提交",
+        "最近のコミット"
+    ),
+    tr!(
+        "open the git tab for a workspace",
+        "abrir la pestaña Git de un espacio de trabajo",
+        "abrir a aba Git de um espaço de trabalho",
+        "ouvrir l'onglet Git d'un espace de travail",
+        "Git-Tab für einen Arbeitsbereich öffnen",
+        "buka tab Git untuk ruang kerja",
+        "打开工作区的 Git 标签页",
+        "ワークスペースの Git タブを開く"
+    ),
+    tr!(
+        "print the FILES tree of the active node",
+        "mostrar el árbol FILES del nodo activo",
+        "exibir a árvore FILES do nó ativo",
+        "afficher l'arborescence FILES du nœud actif",
+        "FILES-Baum des aktiven Knotens ausgeben",
+        "tampilkan pohon FILES node aktif",
+        "输出活动节点的 FILES 树",
+        "アクティブノードの FILES ツリーを表示"
+    ),
+    tr!(
+        "open a file in a view",
+        "abrir un archivo en una vista",
+        "abrir um arquivo em uma visualização",
+        "ouvrir un fichier dans une vue",
+        "Datei in einer Ansicht öffnen",
+        "buka berkas dalam tampilan",
+        "在视图中打开文件",
+        "ファイルをビューで開く"
+    ),
+    tr!(
+        "expand the tree to a path",
+        "expandir el árbol hasta una ruta",
+        "expandir a árvore até um caminho",
+        "développer l'arborescence jusqu'à un chemin",
+        "Baum bis zu einem Pfad aufklappen",
+        "bentangkan pohon hingga suatu path",
+        "将树展开到指定路径",
+        "指定パスまでツリーを展開"
+    ),
+    tr!(
+        "re-read the tree from disk",
+        "volver a leer el árbol desde el disco",
+        "reler a árvore do disco",
+        "relire l'arborescence depuis le disque",
+        "Baum erneut vom Datenträger lesen",
+        "baca ulang pohon dari disk",
+        "从磁盘重新读取树",
+        "ディスクからツリーを再読み込み"
+    ),
+    tr!(
+        "list exact diff layers",
+        "listar capas exactas del diff",
+        "listar camadas exatas do diff",
+        "lister les couches exactes du diff",
+        "exakte Diff-Ebenen auflisten",
+        "daftar lapisan diff yang tepat",
+        "列出精确差异层",
+        "正確な差分レイヤーを一覧表示"
+    ),
+    tr!(
+        "inspect a bounded semantic diff",
+        "inspeccionar un diff semántico limitado",
+        "inspecionar um diff semântico limitado",
+        "inspecter un diff sémantique borné",
+        "begrenzten semantischen Diff prüfen",
+        "periksa diff semantik terbatas",
+        "检查有界语义差异",
+        "範囲制限されたセマンティック差分を確認"
+    ),
+    tr!(
+        "refresh the shared FILES and DIFF index",
+        "actualizar el índice compartido FILES y DIFF",
+        "atualizar o índice compartilhado FILES e DIFF",
+        "actualiser l'index partagé FILES et DIFF",
+        "gemeinsamen FILES- und DIFF-Index aktualisieren",
+        "perbarui indeks FILES dan DIFF bersama",
+        "刷新共享 FILES 和 DIFF 索引",
+        "共有 FILES / DIFF インデックスを更新"
+    ),
+    tr!(
+        "list the current repo's worktrees",
+        "listar los worktrees del repositorio actual",
+        "listar os worktrees do repositório atual",
+        "lister les worktrees du dépôt actuel",
+        "Worktrees des aktuellen Repositorys auflisten",
+        "daftar worktree repo saat ini",
+        "列出当前仓库的工作树",
+        "現在のリポジトリのワークツリーを一覧表示"
+    ),
+    tr!(
+        "create a worktree + workspace for <branch>",
+        "crear un worktree y espacio de trabajo para <branch>",
+        "criar worktree e espaço de trabalho para <branch>",
+        "créer un worktree et un espace de travail pour <branch>",
+        "Worktree und Arbeitsbereich für <branch> erstellen",
+        "buat worktree dan ruang kerja untuk <branch>",
+        "为 <branch> 创建工作树和工作区",
+        "<branch> 用のワークツリーとワークスペースを作成"
+    ),
+    tr!(
+        "open an existing worktree as a workspace",
+        "abrir un worktree existente como espacio de trabajo",
+        "abrir um worktree existente como espaço de trabalho",
+        "ouvrir un worktree existant comme espace de travail",
+        "vorhandenen Worktree als Arbeitsbereich öffnen",
+        "buka worktree yang ada sebagai ruang kerja",
+        "将现有工作树作为工作区打开",
+        "既存ワークツリーをワークスペースとして開く"
+    ),
+    tr!(
+        "remove a worktree (its branch is kept)",
+        "eliminar un worktree (se conserva su rama)",
+        "remover um worktree (a branch é mantida)",
+        "supprimer un worktree (sa branche est conservée)",
+        "Worktree entfernen (Branch bleibt erhalten)",
+        "hapus worktree (branch tetap disimpan)",
+        "删除工作树（保留其分支）",
+        "ワークツリーを削除（ブランチは保持）"
+    ),
+    tr!(
+        "list all tasks + their status/assignee",
+        "listar todas las tareas, estado y responsable",
+        "listar todas as tarefas, status e responsável",
+        "lister toutes les tâches, leur état et responsable",
+        "alle Aufgaben mit Status und Zuständigem auflisten",
+        "daftar semua tugas, status, dan penanggung jawab",
+        "列出所有任务及其状态/负责人",
+        "全タスクと状態/担当者を一覧表示"
+    ),
+    tr!(
+        "show one task",
+        "mostrar una tarea",
+        "mostrar uma tarefa",
+        "afficher une tâche",
+        "eine Aufgabe anzeigen",
+        "tampilkan satu tugas",
+        "显示一个任务",
+        "タスクを1つ表示"
+    ),
+    tr!(
+        "claim a task for this pane (deps must be done)",
+        "asignar una tarea a este panel (dependencias terminadas)",
+        "assumir uma tarefa neste painel (dependências concluídas)",
+        "réserver une tâche pour ce volet (dépendances terminées)",
+        "Aufgabe für diesen Bereich übernehmen (Abhängigkeiten müssen erledigt sein)",
+        "ambil tugas untuk panel ini (dependensi harus selesai)",
+        "为此窗格领取任务（依赖必须完成）",
+        "このペインでタスクを担当（依存タスクは完了必須）"
+    ),
+    tr!(
+        "claim the next ready task (--start spawns",
+        "asignar la siguiente tarea lista (--start crea",
+        "assumir a próxima tarefa pronta (--start inicia",
+        "réserver la prochaine tâche prête (--start lance",
+        "nächste bereite Aufgabe übernehmen (--start startet",
+        "ambil tugas siap berikutnya (--start menjalankan",
+        "领取下一个就绪任务（--start 启动",
+        "次の実行可能タスクを担当（--start で起動"
+    ),
+    tr!(
+        "an isolated worker), for an agent loop draining the queue",
+        "un trabajador aislado), para que un agente vacíe la cola",
+        "um worker isolado), para um agente processar a fila",
+        "un worker isolé), pour qu'un agent vide la file",
+        "einen isolierten Worker), damit ein Agent die Warteschlange abarbeitet",
+        "worker terisolasi), untuk loop agen mengosongkan antrean",
+        "隔离工作进程），供智能体循环清空队列",
+        "分離ワーカー）、エージェントループでキューを処理"
+    ),
+    tr!(
+        "spawn an isolated worker:",
+        "crear un trabajador aislado:",
+        "iniciar um worker isolado:",
+        "lancer un worker isolé :",
+        "isolierten Worker starten:",
+        "jalankan worker terisolasi:",
+        "启动隔离工作进程：",
+        "分離ワーカーを起動："
+    ),
+    tr!(
+        "a git worktree + pane, auto-claimed and path-leased",
+        "un worktree Git y panel, asignado y con rutas reservadas",
+        "um worktree Git e painel, assumido e com caminhos reservados",
+        "un worktree Git et un volet, réservés automatiquement avec les chemins",
+        "Git-Worktree und Bereich, automatisch übernommen und Pfade reserviert",
+        "worktree Git dan panel, otomatis diambil dan path disewa",
+        "Git 工作树和窗格，自动领取并租用路径",
+        "Git ワークツリーとペイン、自動担当およびパス予約"
+    ),
+    tr!(
+        "report context usage (blocks done at >85%)",
+        "informar uso de contexto (bloquea finalizar por encima del 85%)",
+        "informar uso de contexto (bloqueia conclusão acima de 85%)",
+        "signaler l'usage du contexte (bloque la fin au-delà de 85 %)",
+        "Kontextnutzung melden (blockiert Abschluss über 85 %)",
+        "laporkan penggunaan konteks (blokir selesai di atas 85%)",
+        "报告上下文使用率（超过 85% 时阻止完成）",
+        "コンテキスト使用率を報告（85%超で完了を拒否）"
+    ),
+    tr!(
+        "mark done + release its leases",
+        "marcar como terminada y liberar sus reservas",
+        "marcar como concluída e liberar reservas",
+        "marquer terminée et libérer ses réservations",
+        "als erledigt markieren und Reservierungen freigeben",
+        "tandai selesai dan lepaskan sewanya",
+        "标记完成并释放租约",
+        "完了にして予約を解放"
+    ),
+    tr!(
+        "integrate the task's branch into luvus/integration",
+        "integrar la rama de la tarea en luvus/integration",
+        "integrar a branch da tarefa em luvus/integration",
+        "intégrer la branche de la tâche dans luvus/integration",
+        "Aufgaben-Branch in luvus/integration integrieren",
+        "integrasikan branch tugas ke luvus/integration",
+        "将任务分支集成到 luvus/integration",
+        "タスクのブランチを luvus/integration へ統合"
+    ),
+    tr!(
+        "(isolated worktree, conflicts block the task)",
+        "(worktree aislado, los conflictos bloquean la tarea)",
+        "(worktree isolado, conflitos bloqueiam a tarefa)",
+        "(worktree isolé, les conflits bloquent la tâche)",
+        "(isolierter Worktree, Konflikte blockieren die Aufgabe)",
+        "(worktree terisolasi, konflik memblokir tugas)",
+        "（隔离工作树，冲突会阻塞任务）",
+        "（分離ワークツリー、競合時はタスクをブロック）"
+    ),
+    tr!(
+        "return a claimed task to the queue",
+        "devolver una tarea asignada a la cola",
+        "devolver uma tarefa assumida à fila",
+        "remettre une tâche réservée dans la file",
+        "übernommene Aufgabe in die Warteschlange zurückgeben",
+        "kembalikan tugas yang diambil ke antrean",
+        "将已领取任务退回队列",
+        "担当中タスクをキューへ戻す"
+    ),
+    tr!(
+        "remove a task (release/finish an active one first)",
+        "eliminar una tarea (liberar/finalizar antes si está activa)",
+        "remover uma tarefa (libere/conclua antes se estiver ativa)",
+        "supprimer une tâche (libérer/terminer d'abord si active)",
+        "Aufgabe entfernen (aktive zuerst freigeben/abschließen)",
+        "hapus tugas (lepaskan/selesaikan yang aktif dulu)",
+        "删除任务（活动任务须先释放/完成）",
+        "タスクを削除（実行中なら先に解放/完了）"
+    ),
+    tr!(
+        "reserve file paths (denied if they overlap)",
+        "reservar rutas de archivos (se rechaza si se solapan)",
+        "reservar caminhos de arquivos (negado se houver sobreposição)",
+        "réserver des chemins (refus en cas de chevauchement)",
+        "Dateipfade reservieren (bei Überschneidung abgelehnt)",
+        "sewa path berkas (ditolak jika tumpang tindih)",
+        "预留文件路径（重叠时拒绝）",
+        "ファイルパスを予約（重複時は拒否）"
+    ),
+    tr!(
+        "release a lease",
+        "liberar una reserva",
+        "liberar uma reserva",
+        "libérer une réservation",
+        "Reservierung freigeben",
+        "lepaskan sewa",
+        "释放租约",
+        "予約を解放"
+    ),
+    tr!(
+        "list active path leases",
+        "listar reservas de rutas activas",
+        "listar reservas de caminhos ativas",
+        "lister les réservations de chemins actives",
+        "aktive Pfadreservierungen auflisten",
+        "daftar sewa path aktif",
+        "列出活动路径租约",
+        "有効なパス予約を一覧表示"
+    ),
+    tr!(
+        "stream live status changes",
+        "transmitir cambios de estado en vivo",
+        "transmitir mudanças de status ao vivo",
+        "diffuser les changements d'état en direct",
+        "Live-Statusänderungen streamen",
+        "alirkan perubahan status langsung",
+        "流式输出实时状态变化",
+        "状態変更をリアルタイム配信"
+    ),
+    tr!(
+        "print live methods, contracts, limits, and protocol identity",
+        "mostrar métodos, contratos, límites e identidad del protocolo",
+        "exibir métodos, contratos, limites e identidade do protocolo",
+        "afficher les méthodes, contrats, limites et l'identité du protocole",
+        "Live-Methoden, Verträge, Grenzen und Protokollidentität ausgeben",
+        "tampilkan metode, kontrak, batas, dan identitas protokol",
+        "输出实时方法、契约、限制和协议身份",
+        "ライブメソッド、契約、制限、プロトコル識別を表示"
+    ),
+    tr!(
+        "print the complete installed UHP JSON Schema bundle",
+        "mostrar el paquete completo de esquemas JSON UHP instalado",
+        "exibir o pacote completo de JSON Schema UHP instalado",
+        "afficher le paquet JSON Schema UHP installé complet",
+        "vollständiges installiertes UHP-JSON-Schema-Bundle ausgeben",
+        "tampilkan bundel JSON Schema UHP terpasang lengkap",
+        "输出完整的已安装 UHP JSON Schema 包",
+        "インストール済み UHP JSON Schema 一式を表示"
+    ),
+    tr!(
+        "print a fenced session snapshot for harness bootstrap",
+        "mostrar una instantánea delimitada para iniciar el harness",
+        "exibir snapshot delimitado para iniciar o harness",
+        "afficher un instantané délimité pour amorcer le harness",
+        "abgegrenzten Sitzungssnapshot für Harness-Bootstrap ausgeben",
+        "tampilkan snapshot sesi berpagar untuk bootstrap harness",
+        "输出用于框架引导的有界会话快照",
+        "ハーネス起動用の区切られたセッションスナップショットを表示"
+    ),
+    tr!(
+        "stream sequenced UHP events",
+        "transmitir eventos UHP secuenciados",
+        "transmitir eventos UHP sequenciados",
+        "diffuser les événements UHP séquencés",
+        "sequenzierte UHP-Ereignisse streamen",
+        "alirkan peristiwa UHP berurutan",
+        "流式输出带序号的 UHP 事件",
+        "連番付き UHP イベントを配信"
+    ),
+    tr!(
+        "forward one JSON request from stdin to the selected server",
+        "reenviar una solicitud JSON de stdin al servidor seleccionado",
+        "encaminhar uma solicitação JSON de stdin ao servidor selecionado",
+        "transmettre une requête JSON de stdin au serveur sélectionné",
+        "eine JSON-Anfrage von stdin an den ausgewählten Server weiterleiten",
+        "teruskan satu permintaan JSON dari stdin ke server terpilih",
+        "将 stdin 中的一条 JSON 请求转发到所选服务器",
+        "stdin の JSON リクエスト1件を選択したサーバーへ転送"
+    ),
+    tr!(
+        "list default and named server sessions",
+        "listar sesiones predeterminadas y con nombre",
+        "listar sessões padrão e nomeadas",
+        "lister les sessions serveur par défaut et nommées",
+        "Standard- und benannte Serversitzungen auflisten",
+        "daftar sesi server bawaan dan bernama",
+        "列出默认和命名服务器会话",
+        "既定および名前付きサーバーセッションを一覧表示"
+    ),
+    tr!(
+        "start or attach to the named session",
+        "iniciar o conectar a la sesión con nombre",
+        "iniciar ou anexar à sessão nomeada",
+        "démarrer ou rejoindre la session nommée",
+        "benannte Sitzung starten oder verbinden",
+        "mulai atau sambungkan ke sesi bernama",
+        "启动或连接到命名会话",
+        "名前付きセッションを起動または接続"
+    ),
+    tr!(
+        "stop only the named session and its panes",
+        "detener solo la sesión con nombre y sus paneles",
+        "parar apenas a sessão nomeada e seus painéis",
+        "arrêter uniquement la session nommée et ses volets",
+        "nur die benannte Sitzung und ihre Bereiche stoppen",
+        "hentikan hanya sesi bernama dan panelnya",
+        "仅停止命名会话及其窗格",
+        "名前付きセッションとそのペインのみ停止"
+    ),
+    tr!(
+        "delete a stopped named session",
+        "eliminar una sesión con nombre detenida",
+        "excluir uma sessão nomeada parada",
+        "supprimer une session nommée arrêtée",
+        "gestoppte benannte Sitzung löschen",
+        "hapus sesi bernama yang berhenti",
+        "删除已停止的命名会话",
+        "停止済みの名前付きセッションを削除"
+    ),
+    tr!(
+        "attach to a luvus session on <host> over plain ssh",
+        "conectar a una sesión de luvus en <host> mediante ssh",
+        "anexar a uma sessão luvus em <host> via ssh",
+        "rejoindre une session luvus sur <host> via ssh",
+        "über ssh mit einer luvus-Sitzung auf <host> verbinden",
+        "sambungkan ke sesi luvus di <host> melalui ssh",
+        "通过 ssh 连接到 <host> 上的 luvus 会话",
+        "ssh で <host> の luvus セッションに接続"
+    ),
+    tr!(
+        "is the server running, and what version",
+        "comprobar si el servidor funciona y su versión",
+        "verificar se o servidor está ativo e sua versão",
+        "indiquer si le serveur fonctionne et sa version",
+        "prüfen, ob der Server läuft und welche Version",
+        "periksa apakah server berjalan dan versinya",
+        "检查服务器是否运行及其版本",
+        "サーバーの稼働状態とバージョンを確認"
+    ),
+    tr!(
+        "start the background server if it isn't up",
+        "iniciar el servidor en segundo plano si no está activo",
+        "iniciar o servidor em segundo plano se não estiver ativo",
+        "démarrer le serveur d'arrière-plan s'il est arrêté",
+        "Hintergrundserver starten, falls er nicht läuft",
+        "jalankan server latar jika belum aktif",
+        "若后台服务器未运行则启动",
+        "バックグラウンドサーバーが未起動なら開始"
+    ),
+    tr!(
+        "stop the server (and all panes)",
+        "detener el servidor (y todos los paneles)",
+        "parar o servidor (e todos os painéis)",
+        "arrêter le serveur (et tous les volets)",
+        "Server stoppen (und alle Bereiche)",
+        "hentikan server (dan semua panel)",
+        "停止服务器（及所有窗格）",
+        "サーバーを停止（全ペインを含む）"
+    ),
+    tr!(
+        "stop + start (load a newly-installed binary)",
+        "detener e iniciar (cargar un binario recién instalado)",
+        "parar e iniciar (carregar um binário recém-instalado)",
+        "arrêter puis démarrer (charger un binaire nouvellement installé)",
+        "stoppen und starten (neu installiertes Binary laden)",
+        "hentikan lalu mulai (muat binary baru)",
+        "停止并启动（加载新安装的二进制文件）",
+        "停止して再開（新しくインストールしたバイナリを読み込む）"
+    ),
+    tr!(
+        "fetch the latest agent-detection rules from luvus.dev",
+        "obtener las reglas más recientes de detección desde luvus.dev",
+        "buscar as regras mais recentes de detecção em luvus.dev",
+        "récupérer les dernières règles de détection depuis luvus.dev",
+        "neueste Agentenerkennungsregeln von luvus.dev abrufen",
+        "ambil aturan deteksi agen terbaru dari luvus.dev",
+        "从 luvus.dev 获取最新智能体检测规则",
+        "luvus.dev から最新のエージェント検出ルールを取得"
+    ),
+    tr!(
+        "(applies live if the server is up; else on next start)",
+        "(se aplica en vivo si el servidor está activo; si no, al iniciar)",
+        "(aplica ao vivo se o servidor estiver ativo; senão, na próxima inicialização)",
+        "(appliqué en direct si le serveur tourne, sinon au prochain démarrage)",
+        "(bei laufendem Server sofort, sonst beim nächsten Start)",
+        "(langsung berlaku jika server aktif; jika tidak, saat mulai berikutnya)",
+        "（服务器运行时实时应用，否则下次启动时应用）",
+        "（サーバー稼働中は即時、停止中は次回起動時に適用）"
+    ),
+    tr!(
+        "add/remove luvus's session-resume hook (uninstall",
+        "añadir/eliminar el hook de reanudación de luvus (uninstall",
+        "adicionar/remover o hook de retomada do luvus (uninstall",
+        "ajouter/supprimer le hook de reprise de luvus (uninstall",
+        "Luvus-Hook zur Sitzungsfortsetzung hinzufügen/entfernen (uninstall",
+        "tambah/hapus hook pelanjutan sesi luvus (uninstall",
+        "添加/移除 luvus 会话恢复钩子（uninstall",
+        "luvus のセッション再開フックを追加/削除（uninstall"
+    ),
+    tr!(
+        "removes only luvus's hook, never the agent)",
+        "solo elimina el hook de luvus, nunca el agente)",
+        "remove apenas o hook do luvus, nunca o agente)",
+        "ne supprime que le hook de luvus, jamais l'agent)",
+        "entfernt nur den Luvus-Hook, niemals den Agenten)",
+        "hanya menghapus hook luvus, bukan agennya)",
+        "仅移除 luvus 钩子，不会移除智能体）",
+        "luvus のフックのみ削除し、エージェントは削除しない）"
+    ),
+];
+
+/// Local CLI labels and diagnostics. These are kept out of `HELP` so short
+/// labels such as `name` can never be mistaken for a help-row description.
+static TEXT: &[Translation] = &[
+    tr!("name", "nombre", "nome", "nom", "Name", "nama", "名称", "名前"),
+    tr!("status", "estado", "status", "état", "Status", "status", "状态", "状態"),
+    tr!("directory", "directorio", "diretório", "répertoire", "Verzeichnis", "direktori", "目录", "ディレクトリ"),
+    tr!("running", "en ejecución", "em execução", "en cours", "läuft", "berjalan", "运行中", "実行中"),
+    tr!("stopped", "detenida", "parada", "arrêtée", "gestoppt", "berhenti", "已停止", "停止済み"),
+    tr!("stopped session", "sesión detenida", "sessão parada", "session arrêtée", "Sitzung gestoppt", "sesi dihentikan", "已停止会话", "セッションを停止しました"),
+    tr!("deleted session", "sesión eliminada", "sessão excluída", "session supprimée", "Sitzung gelöscht", "sesi dihapus", "已删除会话", "セッションを削除しました"),
+    tr!("unknown help topic", "tema de ayuda desconocido", "tópico de ajuda desconhecido", "sujet d'aide inconnu", "unbekanntes Hilfethema", "topik bantuan tidak dikenal", "未知帮助主题", "不明なヘルプトピック"),
+    tr!("Run `luvus --help` for the list.", "Ejecuta `luvus --help` para ver la lista.", "Execute `luvus --help` para ver a lista.", "Exécutez `luvus --help` pour voir la liste.", "Mit `luvus --help` wird die Liste angezeigt.", "Jalankan `luvus --help` untuk melihat daftar.", "运行 `luvus --help` 查看列表。", "一覧は `luvus --help` で確認できます。"),
+    tr!("Check whether the selected server responds.", "Comprobar si responde el servidor seleccionado.", "Verificar se o servidor selecionado responde.", "Vérifier si le serveur sélectionné répond.", "Prüfen, ob der ausgewählte Server antwortet.", "Periksa apakah server terpilih merespons.", "检查所选服务器是否响应。", "選択したサーバーが応答するか確認します。"),
+    tr!("Check optional external tools used by Luvus.", "Comprobar herramientas externas opcionales usadas por Luvus.", "Verificar ferramentas externas opcionais usadas pelo Luvus.", "Vérifier les outils externes facultatifs utilisés par Luvus.", "Von Luvus verwendete optionale externe Werkzeuge prüfen.", "Periksa alat eksternal opsional yang digunakan Luvus.", "检查 Luvus 使用的可选外部工具。", "Luvus が使用する任意の外部ツールを確認します。"),
+    tr!("Check for a newer release and install it through the detected safe update channel.", "Buscar una versión nueva e instalarla mediante el canal seguro detectado.", "Verificar uma nova versão e instalá-la pelo canal seguro detectado.", "Rechercher une nouvelle version et l'installer via le canal sûr détecté.", "Nach neuer Version suchen und über den erkannten sicheren Kanal installieren.", "Periksa rilis baru dan pasang lewat kanal aman yang terdeteksi.", "检查新版本并通过检测到的安全更新渠道安装。", "新しいリリースを確認し、検出した安全な更新経路でインストールします。"),
+    tr!("Checking for Luvus updates...", "Buscando actualizaciones de Luvus...", "Verificando atualizações do Luvus...", "Recherche des mises à jour de Luvus...", "Luvus-Aktualisierungen werden gesucht...", "Memeriksa pembaruan Luvus...", "正在检查 Luvus 更新...", "Luvus の更新を確認しています..."),
+    tr!("is already up to date.", "ya está actualizado.", "já está atualizado.", "est déjà à jour.", "ist bereits aktuell.", "sudah terbaru.", "已是最新版本。", "はすでに最新です。"),
+    tr!("is available (current:", "está disponible (actual:", "está disponível (atual:", "est disponible (actuelle :", "ist verfügbar (aktuell:", "tersedia (saat ini:", "可用（当前：", "が利用できます（現在："),
+    tr!("Updated Luvus", "Luvus actualizado", "Luvus atualizado", "Luvus mis à jour", "Luvus aktualisiert", "Luvus diperbarui", "Luvus 已更新", "Luvus を更新しました"),
+    tr!("Run `luvus server restart` when you are ready to load the new server binary.", "Ejecuta `luvus server restart` cuando quieras cargar el nuevo binario del servidor.", "Execute `luvus server restart` quando quiser carregar o novo binário do servidor.", "Exécutez `luvus server restart` lorsque vous souhaitez charger le nouveau binaire serveur.", "Führe `luvus server restart` aus, wenn das neue Server-Binary geladen werden soll.", "Jalankan `luvus server restart` saat siap memuat binary server baru.", "准备加载新的服务器二进制文件时，请运行 `luvus server restart`。", "新しいサーバーバイナリを読み込む準備ができたら `luvus server restart` を実行してください。"),
+    tr!("could not check", "no se pudo comprobar", "não foi possível verificar", "impossible de vérifier", "konnte nicht prüfen", "tidak dapat memeriksa", "无法检查", "確認できませんでした"),
+    tr!("check your connection and try again", "comprueba tu conexión e inténtalo de nuevo", "verifique sua conexão e tente novamente", "vérifiez votre connexion et réessayez", "Verbindung prüfen und erneut versuchen", "periksa koneksi dan coba lagi", "请检查网络连接后重试", "接続を確認して再試行してください"),
+    tr!("the multiplexer (panes · tabs · agents) needs no external tools", "el multiplexor (paneles · pestañas · agentes) no necesita herramientas externas", "o multiplexador (painéis · abas · agentes) não precisa de ferramentas externas", "le multiplexeur (volets · onglets · agents) ne nécessite aucun outil externe", "der Multiplexer (Bereiche · Tabs · Agenten) benötigt keine externen Werkzeuge", "multiplexer (panel · tab · agen) tidak memerlukan alat eksternal", "多路复用器（窗格 · 标签页 · 智能体）无需外部工具", "マルチプレクサー（ペイン · タブ · エージェント）に外部ツールは不要です"),
+    tr!("GitHub PRs & issues", "PR e incidencias de GitHub", "PRs e issues do GitHub", "PR et issues GitHub", "GitHub-PRs und Issues", "PR dan issue GitHub", "GitHub PR 和议题", "GitHub PR と Issue"),
+    tr!("preinstalled on macOS/Linux", "preinstalado en macOS/Linux", "pré-instalado no macOS/Linux", "préinstallé sur macOS/Linux", "auf macOS/Linux vorinstalliert", "sudah terpasang di macOS/Linux", "macOS/Linux 已预装", "macOS/Linux にプリインストール済み"),
+    tr!("needed for", "necesario para", "necessário para", "requis pour", "benötigt für", "diperlukan untuk", "需要用于", "必要："),
+    tr!("optional -", "opcional -", "opcional -", "facultatif -", "optional -", "opsional -", "可选 -", "任意 -"),
+    tr!("not found", "no encontrado", "não encontrado", "introuvable", "nicht gefunden", "tidak ditemukan", "未找到", "見つかりません"),
+    tr!("run `luvus doctor` outside a luvus pane to test your terminal", "ejecuta `luvus doctor` fuera de un panel de luvus para probar tu terminal", "execute `luvus doctor` fora de um painel luvus para testar seu terminal", "exécutez `luvus doctor` hors d'un volet luvus pour tester votre terminal", "`luvus doctor` außerhalb eines Luvus-Bereichs ausführen, um das Terminal zu testen", "jalankan `luvus doctor` di luar panel luvus untuk menguji terminal", "请在 luvus 窗格外运行 `luvus doctor` 以测试终端", "端末を確認するには luvus ペイン外で `luvus doctor` を実行してください"),
+    tr!("Shift+Enter works (terminal reports modified keys)", "Shift+Enter funciona (el terminal informa teclas modificadas)", "Shift+Enter funciona (o terminal informa teclas modificadas)", "Shift+Entrée fonctionne (le terminal signale les touches modifiées)", "Shift+Enter funktioniert (Terminal meldet modifizierte Tasten)", "Shift+Enter berfungsi (terminal melaporkan tombol bermodifier)", "Shift+Enter 可用（终端报告修饰键）", "Shift+Enter は利用できます（端末が修飾キーを通知）"),
+    tr!("Shift+Enter isn't distinguishable here · optional", "Shift+Enter no se distingue aquí · opcional", "Shift+Enter não é distinguível aqui · opcional", "Shift+Entrée n'est pas distinguable ici · facultatif", "Shift+Enter ist hier nicht unterscheidbar · optional", "Shift+Enter tidak dapat dibedakan di sini · opsional", "此处无法区分 Shift+Enter · 可选", "ここでは Shift+Enter を区別できません · 任意"),
+    tr!("WSL in Windows Terminal detected; all other features still work", "se detectó WSL en Windows Terminal; las demás funciones siguen disponibles", "WSL no Windows Terminal detectado; os demais recursos continuam funcionando", "WSL dans Windows Terminal détecté ; les autres fonctions restent disponibles", "WSL in Windows Terminal erkannt; alle anderen Funktionen arbeiten weiter", "WSL di Windows Terminal terdeteksi; fitur lain tetap berfungsi", "检测到 Windows Terminal 中的 WSL；其他功能仍可用", "Windows Terminal 上の WSL を検出。他の機能は引き続き利用できます"),
+    tr!("update Windows Terminal to 1.25+, or bind Shift+Enter to ESC CR", "actualiza Windows Terminal a 1.25+ o vincula Shift+Enter a ESC CR", "atualize o Windows Terminal para 1.25+ ou vincule Shift+Enter a ESC CR", "mettez Windows Terminal à jour vers 1.25+ ou liez Shift+Entrée à ESC CR", "Windows Terminal auf 1.25+ aktualisieren oder Shift+Enter an ESC CR binden", "perbarui Windows Terminal ke 1.25+ atau ikat Shift+Enter ke ESC CR", "将 Windows Terminal 更新到 1.25+，或将 Shift+Enter 绑定为 ESC CR", "Windows Terminal を 1.25+ に更新するか Shift+Enter を ESC CR に割り当ててください"),
+    tr!("WSL detected; all other features still work", "se detectó WSL; las demás funciones siguen disponibles", "WSL detectado; os demais recursos continuam funcionando", "WSL détecté ; les autres fonctions restent disponibles", "WSL erkannt; alle anderen Funktionen arbeiten weiter", "WSL terdeteksi; fitur lain tetap berfungsi", "检测到 WSL；其他功能仍可用", "WSL を検出。他の機能は引き続き利用できます"),
+    tr!("use Windows Terminal 1.25+ or bind Shift+Enter to ESC CR", "usa Windows Terminal 1.25+ o vincula Shift+Enter a ESC CR", "use Windows Terminal 1.25+ ou vincule Shift+Enter a ESC CR", "utilisez Windows Terminal 1.25+ ou liez Shift+Entrée à ESC CR", "Windows Terminal 1.25+ verwenden oder Shift+Enter an ESC CR binden", "gunakan Windows Terminal 1.25+ atau ikat Shift+Enter ke ESC CR", "使用 Windows Terminal 1.25+，或将 Shift+Enter 绑定为 ESC CR", "Windows Terminal 1.25+ を使うか Shift+Enter を ESC CR に割り当ててください"),
+    tr!("Luvus still works; only the modified-Enter shortcut is affected", "Luvus sigue funcionando; solo afecta al atajo Enter modificado", "Luvus continua funcionando; apenas o atalho Enter modificado é afetado", "Luvus fonctionne toujours ; seul le raccourci Entrée modifiée est affecté", "Luvus funktioniert weiter; nur der modifizierte Enter-Kurzbefehl ist betroffen", "Luvus tetap berfungsi; hanya pintasan Enter bermodifier yang terpengaruh", "Luvus 仍可正常工作；仅修饰 Enter 快捷键受影响", "Luvus は動作します。修飾 Enter のショートカットだけが影響を受けます"),
+    tr!("use Alt/Option+Enter or a terminal with the keyboard protocol", "usa Alt/Option+Enter o un terminal con el protocolo de teclado", "use Alt/Option+Enter ou um terminal com o protocolo de teclado", "utilisez Alt/Option+Entrée ou un terminal avec le protocole clavier", "Alt/Option+Enter oder ein Terminal mit Tastaturprotokoll verwenden", "gunakan Alt/Option+Enter atau terminal dengan protokol keyboard", "请使用 Alt/Option+Enter 或支持键盘协议的终端", "Alt/Option+Enter またはキーボードプロトコル対応端末を使用してください"),
+    tr!("Tip: install `git` to use the git tab & worktrees. Everything else works now.", "Consejo: instala `git` para usar la pestaña Git y los worktrees. Todo lo demás ya funciona.", "Dica: instale `git` para usar a aba Git e worktrees. Todo o restante já funciona.", "Conseil : installez `git` pour utiliser l'onglet Git et les worktrees. Tout le reste fonctionne.", "Tipp: `git` für Git-Tab und Worktrees installieren. Alles andere funktioniert bereits.", "Tip: pasang `git` untuk memakai tab Git dan worktree. Fitur lain sudah berfungsi.", "提示：安装 `git` 以使用 Git 标签页和工作树。其他功能均可正常使用。", "ヒント：Git タブとワークツリーには `git` をインストールしてください。他はすべて利用できます。"),
+    tr!("All set — you're good to go. ✓", "Todo listo. ✓", "Tudo pronto. ✓", "Tout est prêt. ✓", "Alles bereit. ✓", "Semua siap. ✓", "一切就绪。✓", "準備完了です。✓"),
+    tr!("installed luvus", "integración de luvus instalada para", "integração luvus instalada para", "intégration luvus installée pour", "Luvus-Integration installiert für", "integrasi luvus terpasang untuk", "已安装 luvus 集成：", "luvus 連携をインストール："),
+    tr!("integration", "integración", "integração", "intégration", "Integration", "integrasi", "集成", "連携"),
+    tr!("removed luvus", "integración de luvus eliminada para", "integração luvus removida para", "intégration luvus supprimée pour", "Luvus-Integration entfernt für", "integrasi luvus dihapus untuk", "已移除 luvus 集成：", "luvus 連携を削除："),
+    tr!("agent itself is untouched", "el agente no se modifica", "o agente não é alterado", "l'agent lui-même n'est pas modifié", "der Agent selbst bleibt unverändert", "agen tidak diubah", "智能体本身未被修改", "エージェント自体は変更されません"),
+    tr!("unsupported agent", "agente no compatible", "agente não suportado", "agent non pris en charge", "nicht unterstützter Agent", "agen tidak didukung", "不支持的智能体", "未対応のエージェント"),
+    tr!("supported", "compatibles", "suportados", "pris en charge", "unterstützt", "didukung", "支持", "対応"),
+    tr!("unknown server command", "comando de servidor desconocido", "comando de servidor desconhecido", "commande serveur inconnue", "unbekannter Serverbefehl", "perintah server tidak dikenal", "未知服务器命令", "不明なサーバーコマンド"),
+    tr!("server already running", "el servidor ya está en ejecución", "o servidor já está em execução", "le serveur est déjà en cours", "Server läuft bereits", "server sudah berjalan", "服务器已在运行", "サーバーはすでに実行中です"),
+    tr!("server started", "servidor iniciado", "servidor iniciado", "serveur démarré", "Server gestartet", "server dimulai", "服务器已启动", "サーバーを起動しました"),
+    tr!("server stopped", "servidor detenido", "servidor parado", "serveur arrêté", "Server gestoppt", "server dihentikan", "服务器已停止", "サーバーを停止しました"),
+    tr!("no luvus server running", "no hay ningún servidor luvus en ejecución", "nenhum servidor luvus em execução", "aucun serveur luvus en cours", "kein Luvus-Server läuft", "tidak ada server luvus berjalan", "没有正在运行的 luvus 服务器", "実行中の luvus サーバーはありません"),
+    tr!("server restarted", "servidor reiniciado", "servidor reiniciado", "serveur redémarré", "Server neu gestartet", "server dimulai ulang", "服务器已重启", "サーバーを再起動しました"),
+    tr!("not running", "no está en ejecución", "não está em execução", "arrêté", "läuft nicht", "tidak berjalan", "未运行", "停止中"),
+    tr!("note: this binary is", "nota: este binario es", "nota: este binário é", "note : ce binaire est", "Hinweis: Dieses Binary ist", "catatan: binary ini", "注意：当前二进制版本为", "注：このバイナリは"),
+    tr!("run `luvus server restart` to load it", "ejecuta `luvus server restart` para cargarlo", "execute `luvus server restart` para carregá-lo", "exécutez `luvus server restart` pour le charger", "mit `luvus server restart` laden", "jalankan `luvus server restart` untuk memuatnya", "运行 `luvus server restart` 以加载它", "読み込むには `luvus server restart` を実行してください"),
+    tr!("server is running but did not answer", "el servidor está en ejecución pero no respondió", "o servidor está em execução mas não respondeu", "le serveur fonctionne mais n'a pas répondu", "Server läuft, hat aber nicht geantwortet", "server berjalan tetapi tidak merespons", "服务器正在运行但未响应", "サーバーは実行中ですが応答しませんでした"),
+    tr!("built-in", "integrado", "integrado", "intégré", "integriert", "bawaan", "内置", "組み込み"),
+    tr!("local", "local", "local", "local", "lokal", "lokal", "本地", "ローカル"),
+    tr!("virtual", "virtual", "virtual", "virtuel", "virtuell", "virtual", "虚拟", "仮想"),
+    tr!("warning", "advertencia", "aviso", "avertissement", "Warnung", "peringatan", "警告", "警告"),
+    tr!("invalid", "no válido", "inválido", "invalide", "ungültig", "tidak valid", "无效", "無効"),
+    tr!("created", "creado", "criado", "créé", "erstellt", "dibuat", "已创建", "作成しました"),
+    tr!("valid theme", "tema válido", "tema válido", "thème valide", "gültiges Theme", "tema valid", "有效主题", "有効なテーマ"),
+    tr!("installed", "instalado", "instalado", "installé", "installiert", "terpasang", "已安装", "インストール済み"),
+    tr!("from", "desde", "de", "depuis", "von", "dari", "来源", "取得元"),
+    tr!("to", "en", "em", "vers", "nach", "ke", "到", "保存先"),
+    tr!("and reloaded the selected server", "y se recargó el servidor seleccionado", "e o servidor selecionado foi recarregado", "et le serveur sélectionné a été rechargé", "und ausgewählten Server neu geladen", "dan server terpilih dimuat ulang", "并已重新加载所选服务器", "選択したサーバーを再読み込みしました"),
+    tr!("start or reload Luvus to use it", "inicia o recarga Luvus para usarlo", "inicie ou recarregue o Luvus para usá-lo", "démarrez ou rechargez Luvus pour l'utiliser", "Luvus starten oder neu laden, um es zu verwenden", "mulai atau muat ulang Luvus untuk memakainya", "启动或重新加载 Luvus 以使用它", "使用するには Luvus を起動または再読み込みしてください"),
+    tr!("using theme", "usando el tema", "usando o tema", "thème utilisé", "Theme wird verwendet", "menggunakan tema", "正在使用主题", "使用中のテーマ"),
+    tr!("applies when Luvus starts", "se aplica cuando Luvus se inicia", "aplica quando o Luvus iniciar", "s'applique au démarrage de Luvus", "wird beim Start von Luvus angewendet", "berlaku saat Luvus dimulai", "将在 Luvus 启动时应用", "Luvus 起動時に適用されます"),
+    tr!("uninstalled", "desinstalado", "desinstalado", "désinstallé", "deinstalliert", "dihapus", "已卸载", "アンインストール済み"),
+    tr!("reloaded", "recargados", "recarregados", "rechargés", "neu geladen", "dimuat ulang", "已重新加载", "再読み込みしました"),
+    tr!("themes", "temas", "temas", "thèmes", "Themes", "tema", "个主题", "テーマ"),
+    tr!("validated", "validados", "validados", "validés", "geprüft", "tervalidasi", "已验证", "検証済み"),
+    tr!("start Luvus to load them", "inicia Luvus para cargarlos", "inicie o Luvus para carregá-los", "démarrez Luvus pour les charger", "Luvus starten, um sie zu laden", "mulai Luvus untuk memuatnya", "启动 Luvus 以加载它们", "読み込むには Luvus を起動してください"),
+    tr!("theme is not installed", "el tema no está instalado", "o tema não está instalado", "le thème n'est pas installé", "Theme ist nicht installiert", "tema belum terpasang", "主题未安装", "テーマがインストールされていません"),
+    tr!("start luvus to use it", "inicia luvus para usarlo", "inicie o luvus para usá-lo", "démarrez luvus pour l'utiliser", "luvus starten, um es zu verwenden", "mulai luvus untuk memakainya", "启动 luvus 以使用它", "使用するには luvus を起動してください"),
+    tr!("No modules found in the `luvus-module` topic yet.", "Aún no hay módulos en el tema `luvus-module`.", "Ainda não há módulos no tópico `luvus-module`.", "Aucun module trouvé dans le sujet `luvus-module` pour le moment.", "Noch keine Module im Topic `luvus-module` gefunden.", "Belum ada modul di topik `luvus-module`.", "`luvus-module` 主题中尚未找到模块。", "`luvus-module` トピックにはまだモジュールがありません。"),
+    tr!("Publish one by tagging a public repo with the `luvus-module` topic.", "Publica uno etiquetando un repositorio público con el tema `luvus-module`.", "Publique um marcando um repositório público com o tópico `luvus-module`.", "Publiez-en un en ajoutant le sujet `luvus-module` à un dépôt public.", "Ein öffentliches Repository mit dem Topic `luvus-module` veröffentlichen.", "Terbitkan dengan memberi topik `luvus-module` pada repo publik.", "为公共仓库添加 `luvus-module` 主题即可发布模块。", "公開リポジトリに `luvus-module` トピックを付けて公開できます。"),
+    tr!("results. Install with:", "resultados. Instala con:", "resultados. Instale com:", "résultats. Installez avec :", "Ergebnisse. Installieren mit:", "hasil. Pasang dengan:", "个结果。安装命令：", "件。インストール："),
+    tr!("skipping suspicious manifest name", "se omite un nombre de manifiesto sospechoso", "ignorando nome de manifesto suspeito", "nom de manifeste suspect ignoré", "verdächtiger Manifestname wird übersprungen", "melewati nama manifest mencurigakan", "跳过可疑清单名称", "不審なマニフェスト名をスキップ"),
+    tr!("skipping", "se omite", "ignorando", "ignoré", "übersprungen", "melewati", "跳过", "スキップ"),
+    tr!("not a valid detection manifest", "no es un manifiesto de detección válido", "não é um manifesto de detecção válido", "n'est pas un manifeste de détection valide", "kein gültiges Erkennungsmanifest", "bukan manifest deteksi yang valid", "不是有效的检测清单", "有効な検出マニフェストではありません"),
+    tr!("updated", "actualizados", "atualizados", "mis à jour", "aktualisiert", "diperbarui", "已更新", "更新しました"),
+    tr!("detection manifest(s)", "manifiestos de detección", "manifestos de detecção", "manifestes de détection", "Erkennungsmanifeste", "manifest deteksi", "个检测清单", "件の検出マニフェスト"),
+    tr!("skipped", "omitidos", "ignorados", "ignorés", "übersprungen", "dilewati", "已跳过", "スキップ"),
+    tr!("reloaded into the running server", "recargado en el servidor en ejecución", "recarregado no servidor em execução", "rechargé dans le serveur en cours", "in den laufenden Server neu geladen", "dimuat ulang ke server berjalan", "已重新加载到运行中的服务器", "実行中のサーバーへ再読み込み"),
+    tr!("rules active", "reglas activas", "regras ativas", "règles actives", "aktive Regeln", "aturan aktif", "条规则生效", "件のルールが有効"),
+    tr!("no restart needed", "no se necesita reiniciar", "não é necessário reiniciar", "aucun redémarrage requis", "kein Neustart erforderlich", "tidak perlu mulai ulang", "无需重启", "再起動は不要"),
+    tr!("no server running - the update loads on next start", "no hay servidor en ejecución; la actualización se carga al iniciar", "nenhum servidor em execução; a atualização carrega na próxima inicialização", "aucun serveur en cours ; la mise à jour sera chargée au prochain démarrage", "kein Server läuft; Aktualisierung wird beim nächsten Start geladen", "tidak ada server berjalan; pembaruan dimuat saat mulai berikutnya", "没有服务器运行；更新将在下次启动时加载", "サーバーは停止中です。更新は次回起動時に読み込まれます"),
+    tr!("bundled", "incluido", "incluído", "intégré", "gebündelt", "bawaan", "内置", "同梱"),
+    tr!("available", "disponible", "disponível", "disponible", "verfügbar", "tersedia", "可用", "利用可能"),
+    tr!("installations", "instalaciones", "instalações", "installations", "Installationen", "instalasi", "安装", "インストール"),
+    tr!("attention", "requiere atención", "requer atenção", "attention requise", "Aufmerksamkeit nötig", "perlu perhatian", "需要处理", "要確認"),
+    tr!("enabled", "activado", "ativado", "activé", "aktiviert", "diaktifkan", "已启用", "有効"),
+    tr!("disabled", "desactivado", "desativado", "désactivé", "deaktiviert", "dinonaktifkan", "已禁用", "無効"),
+    tr!("current", "actual", "atual", "à jour", "aktuell", "terkini", "最新", "最新"),
+    tr!("outdated", "desactualizado", "desatualizado", "obsolète", "veraltet", "kedaluwarsa", "已过期", "古い"),
+    tr!("missing", "ausente", "ausente", "manquant", "fehlt", "hilang", "缺失", "不足"),
+    tr!("modified", "modificado", "modificado", "modifié", "geändert", "diubah", "已修改", "変更済み"),
+    tr!("external-current", "externo y actual", "externo e atual", "externe et à jour", "extern und aktuell", "eksternal dan terkini", "外部且最新", "外部・最新"),
+    tr!("external", "externo", "externo", "externe", "extern", "eksternal", "外部", "外部"),
+    tr!("not-installed", "no instalado", "não instalado", "non installé", "nicht installiert", "belum terpasang", "未安装", "未インストール"),
+    tr!("not-detected", "no detectado", "não detectado", "non détecté", "nicht erkannt", "tidak terdeteksi", "未检测到", "未検出"),
+    tr!("refreshed", "actualizado", "atualizado", "actualisé", "aktualisiert", "disegarkan", "已刷新", "更新済み"),
+    tr!("repaired", "reparado", "reparado", "réparé", "repariert", "diperbaiki", "已修复", "修復済み"),
+    tr!("external-preserved", "externo conservado", "externo preservado", "externe conservée", "extern beibehalten", "eksternal dipertahankan", "已保留外部副本", "外部コピーを保持"),
+    tr!("modified-preserved", "modificado y conservado", "modificado e preservado", "modifié et conservé", "geändert und beibehalten", "perubahan dipertahankan", "已保留修改", "変更を保持"),
+    tr!("already-disabled", "ya desactivado", "já desativado", "déjà désactivé", "bereits deaktiviert", "sudah dinonaktifkan", "已禁用", "無効化済み"),
+    tr!("agent-specific skill management was removed", "se eliminó la gestión de skills por agente", "o gerenciamento de skills por agente foi removido", "la gestion des skills par agent a été supprimée", "die agentenspezifische Skill-Verwaltung wurde entfernt", "pengelolaan skill per agen telah dihapus", "已移除按智能体管理技能的功能", "エージェント別のスキル管理は削除されました"),
+    tr!("accepts no arguments", "no acepta argumentos", "não aceita argumentos", "n'accepte aucun argument", "akzeptiert keine Argumente", "tidak menerima argumen", "不接受参数", "引数は指定できません"),
+    tr!("unexpected", "inesperado", "inesperado", "inattendu", "unerwartet", "tidak diharapkan", "意外参数", "想定外"),
+];
+
+/// Translate a canonical help block without ever touching command syntax.
+pub fn help<'a>(source: &'a str, language: Language) -> Cow<'a, str> {
+    if language == Language::En {
+        return Cow::Borrowed(source);
+    }
+
+    let mut output = String::with_capacity(source.len().saturating_add(source.len() / 4));
+    for segment in source.split_inclusive('\n') {
+        let (line, newline) = segment
+            .strip_suffix('\n')
+            .map_or((segment, ""), |line| (line, "\n"));
+        if let Some(rest) = line.strip_prefix("Usage:") {
+            output.push_str(label_usage(language));
+            output.push_str(usage_rest(rest, language));
+        } else if let Some(rest) = line.strip_prefix("usage:") {
+            output.push_str(&label_usage(language).to_lowercase());
+            output.push_str(usage_rest(rest, language));
+        } else if line == "  session attach <name>      start or attach to the named session" {
+            output.push_str("  session attach <name>      ");
+            output.push_str(text("start or attach to the named session", language));
+        } else if let Some(entry) = best_suffix(line) {
+            let prefix_len = line.len() - entry.en.len();
+            output.push_str(&line[..prefix_len]);
+            output.push_str(entry.get(language));
+        } else {
+            output.push_str(line);
+        }
+        output.push_str(newline);
+    }
+    Cow::Owned(output)
+}
+
+fn usage_rest(rest: &str, language: Language) -> &str {
+    if matches!(language, Language::Zh | Language::Ja) {
+        rest.trim_start_matches(' ')
+    } else {
+        rest
+    }
+}
+
+pub fn text(english: &'static str, language: Language) -> &'static str {
+    if language == Language::En {
+        return english;
+    }
+    HELP.iter()
+        .chain(TEXT)
+        .find(|entry| entry.en == english)
+        .unwrap_or_else(|| panic!("missing CLI translation key: {english}"))
+        .get(language)
+}
+
+/// Pad using terminal cell width, not UTF-8 bytes or Unicode scalar count.
+pub fn pad(value: &str, columns: usize) -> String {
+    let width = unicode_width::UnicodeWidthStr::width(value);
+    let mut output = String::with_capacity(value.len() + columns.saturating_sub(width));
+    output.push_str(value);
+    output.extend(std::iter::repeat_n(' ', columns.saturating_sub(width)));
+    output
+}
+
+fn best_suffix(line: &str) -> Option<&'static Translation> {
+    HELP.iter()
+        .filter(|entry| {
+            if !line.as_bytes().ends_with(entry.en.as_bytes()) {
+                return false;
+            }
+            let prefix = &line[..line.len() - entry.en.len()];
+            prefix.is_empty() || prefix.chars().next_back().is_some_and(char::is_whitespace)
+        })
+        .max_by_key(|entry| entry.en.len())
+}
+
+fn label_usage(language: Language) -> &'static str {
+    HELP.iter()
+        .find(|entry| entry.en == "Usage:")
+        .expect("Usage label is required")
+        .get(language)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codes_match_the_ui_registry() {
+        for code in crate::i18n::LANGS {
+            assert_eq!(Language::from_code(code).code(), *code);
+        }
+        assert_eq!(Language::from_code("unknown"), Language::En);
+    }
+
+    #[test]
+    fn canonical_syntax_is_never_rewritten() {
+        let source = "Usage: luvus pane list\n  pane list    list panes\n";
+        let translated = help(source, Language::Zh);
+        assert!(translated.contains("luvus pane list"));
+        assert!(translated.contains("pane list"));
+        assert_ne!(
+            help(
+                "  session attach <name>      start or attach to the named session\n",
+                Language::Zh,
+            ),
+            "  session attach <name>      start or attach to the named session\n"
+        );
+        assert_ne!(
+            help(
+                "  session attach <name>      start or attach to the named session",
+                Language::Zh,
+            ),
+            "  session attach <name>      start or attach to the named session"
+        );
+        assert!(help(
+            "  session attach <name>      start or attach to the named session",
+            Language::Zh,
+        )
+        .contains("启动或连接"));
+    }
+
+    #[test]
+    fn english_catalog_keys_are_unique() {
+        let mut keys = HELP
+            .iter()
+            .chain(TEXT)
+            .map(|entry| entry.en)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        let duplicate = keys.windows(2).find(|pair| pair[0] == pair[1]);
+        assert!(
+            duplicate.is_none(),
+            "duplicate CLI translation: {duplicate:?}"
+        );
+    }
+
+    #[test]
+    fn padding_uses_terminal_cell_width_for_cjk() {
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(pad("状态", 10).as_str()),
+            10
+        );
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(pad("status", 10).as_str()),
+            10
+        );
+    }
+
+    #[test]
+    fn configured_context_is_read_only_and_falls_back_safely() {
+        let _env = crate::persist::test_env("cli-i18n-context");
+        let home = crate::persist::config_dir();
+        assert!(!home.exists());
+        assert_eq!(Context::configured().language(), Language::En);
+        assert!(
+            !home.exists(),
+            "language lookup must not create Luvus state"
+        );
+
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("config.json"), r#"{"language":"zh"}"#).unwrap();
+        assert_eq!(Context::configured().language(), Language::Zh);
+
+        std::fs::write(home.join("config.json"), "not json").unwrap();
+        assert_eq!(Context::configured().language(), Language::En);
+        std::fs::write(home.join("config.json"), r#"{"language":"unknown"}"#).unwrap();
+        assert_eq!(Context::configured().language(), Language::En);
+    }
+}
