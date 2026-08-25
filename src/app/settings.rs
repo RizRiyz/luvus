@@ -123,6 +123,9 @@ pub enum GeneralRow {
     CheckUpdates,
     /// Replay each agent's own CLI options on resume (docs/62).
     ResumeFlags,
+    /// Open a new tab/split at the workspace root instead of inheriting the
+    /// focused pane's cwd.
+    NewPaneToWorkspaceRoot,
     /// Show each agent's live session title in the AGENTS sidebar.
     AgentTitle,
     SoundDone,
@@ -151,6 +154,7 @@ impl App {
             GeneralRow::ShiftEnter,
             GeneralRow::CheckUpdates,
             GeneralRow::ResumeFlags,
+            GeneralRow::NewPaneToWorkspaceRoot,
             GeneralRow::AgentTitle,
             GeneralRow::SoundDone,
             GeneralRow::SoundBlocked,
@@ -159,10 +163,10 @@ impl App {
     }
 
     /// Index of the first notification row (where the `── Notify ──` divider
-    /// goes), mirroring `dock_section_start` in the Layout tab. The five general
+    /// goes), mirroring `dock_section_start` in the Layout tab. The six general
     /// settings sit above it.
     pub fn general_section_start(&self) -> usize {
-        5
+        6
     }
 
     /// The Layout tab's ordered selectable rows (docs/29). The first index of the
@@ -1216,6 +1220,11 @@ impl App {
                 self.config.resume_launch_flags = !self.config.resume_launch_flags;
                 config::save(&self.config);
             }
+            Some(GeneralRow::NewPaneToWorkspaceRoot) => {
+                self.config.layout.new_pane_to_workspace_root =
+                    !self.config.layout.new_pane_to_workspace_root;
+                config::save(&self.config);
+            }
             Some(GeneralRow::AgentTitle) => {
                 self.config.layout.agent_title = !self.config.layout.agent_title;
                 config::save(&self.config);
@@ -1572,6 +1581,53 @@ mod tests {
         assert!(!old.resume_launch_flags);
     }
 
+    /// The "Open new pane/tab at workspace root" toggle is opt-in: off by
+    /// default (a new tab/split inherits the focused pane's cwd), and flipping
+    /// it in Settings → General persists.
+    #[test]
+    fn new_pane_to_workspace_root_toggle_persists() {
+        let _env = crate::persist::test_env("new-pane-workspace-root");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        assert!(
+            !app.config.layout.new_pane_to_workspace_root,
+            "off by default: a new tab/split inherits the focused pane's cwd"
+        );
+
+        app.open_settings();
+        if let Some(ui) = app.settings.as_mut() {
+            ui.tab = SettingsTab::General;
+        }
+        let row = app
+            .general_rows()
+            .iter()
+            .position(|r| *r == GeneralRow::NewPaneToWorkspaceRoot)
+            .expect("the row is on the General tab");
+        // It sits with the general options, above the Notify divider.
+        assert!(row < app.general_section_start());
+
+        app.adjust_general(row, 1);
+        assert!(
+            app.config.layout.new_pane_to_workspace_root,
+            "the toggle flipped"
+        );
+        assert!(
+            crate::config::load().layout.new_pane_to_workspace_root,
+            "and it was saved"
+        );
+
+        app.adjust_general(row, 1);
+        assert!(
+            !app.config.layout.new_pane_to_workspace_root,
+            "toggles back"
+        );
+
+        // A config written before this field existed loads as off: the inherit
+        // behavior stays the default for an existing user.
+        let old: crate::config::Config = serde_json::from_str("{}").unwrap();
+        assert!(!old.layout.new_pane_to_workspace_root);
+    }
+
     // The General tab is the file-open chooser plus the Notifications section:
     // the two sound toggles (persisted) and a Test row that rings the chime
     // immediately, regardless of the toggles.
@@ -1584,7 +1640,7 @@ mod tests {
         if let Some(ui) = app.settings.as_mut() {
             ui.tab = SettingsTab::General;
         }
-        assert_eq!(app.settings_rows(SettingsTab::General), 9);
+        assert_eq!(app.settings_rows(SettingsTab::General), 10);
         let rows = app.general_rows();
         assert_eq!(rows[0], GeneralRow::FileOpen, "file-open leads the tab");
 

@@ -201,6 +201,11 @@ pub struct LayoutConfig {
     /// Resume a session into its own workspace (else a new tab in the current one).
     #[serde(default = "yes", alias = "resume_in_new_node")]
     pub resume_in_new_workspace: bool,
+    /// Open a new tab/split at the workspace root instead of inheriting the
+    /// focused pane's live cwd. Off by default: a new tab/split starts where the
+    /// user is working; turn this on to always reset to the workspace root.
+    #[serde(default)]
+    pub new_pane_to_workspace_root: bool,
     /// Default action when a file is opened from the FILES tree (docs/38):
     /// `"readonly"` (the native viewer) or an editor run-command such as `"vim"`
     /// / `"emacs -nw"`. A plain click uses this; Shift+click always reads it
@@ -410,6 +415,7 @@ impl Default for LayoutConfig {
             pane_title_path: false,
             agent_title: false,
             resume_in_new_workspace: true,
+            new_pane_to_workspace_root: false,
             file_open: default_file_open(),
             scrollback_bytes: Some(SCROLLBACK_BYTES_DEFAULT),
             scrollback: default_scrollback(),

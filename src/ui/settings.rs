@@ -692,6 +692,16 @@ fn draw_content(
                         toggle(app.config.resume_launch_flags, t),
                         t,
                     )),
+                    GeneralRow::NewPaneToWorkspaceRoot => ctls.push(ctl_row(
+                        f,
+                        area,
+                        y,
+                        i,
+                        cursor,
+                        cat.set_new_pane_to_workspace_root,
+                        toggle(app.config.layout.new_pane_to_workspace_root, t),
+                        t,
+                    )),
                     GeneralRow::AgentTitle => ctls.push(ctl_row(
                         f,
                         area,

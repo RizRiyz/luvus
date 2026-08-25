@@ -2792,19 +2792,25 @@ impl App {
             .unwrap_or_else(|| self.ws().cwd.clone())
     }
 
-    /// Where a newly opened tab or split should start: the focused pane's live
-    /// working directory, falling back to the workspace root and then `$HOME`
-    /// if that directory no longer exists. Keeps new panes where the user is
-    /// working, anchored back inside the workspace rather than resetting to
-    /// root or (for a deleted cwd) landing in `$HOME` or spawning a dead pane.
-    /// Shared by `new_tab` and `split` so the two stay aligned.
+    /// Where a newly opened tab or split should start. By default it inherits the
+    /// focused pane's live working directory so a new pane starts where the user
+    /// is working; with `layout.new_pane_to_workspace_root` set it resets to the
+    /// workspace root instead. Either way it walks a fallback chain and returns the
+    /// first directory that still exists, so `split`'s deferred worker never gets a
+    /// deleted cwd (which would spawn a dead pane). Shared by `new_tab` and `split`
+    /// so the two stay aligned.
     fn spawn_cwd(&self) -> PathBuf {
-        let focused = self.focused_cwd();
         let home = crate::platform::home_dir().unwrap_or_default();
-        [focused.clone(), self.ws().cwd.clone(), home]
+        let root = self.ws().cwd.clone();
+        let candidates = if self.config.layout.new_pane_to_workspace_root {
+            vec![root.clone(), home]
+        } else {
+            vec![self.focused_cwd(), root.clone(), home]
+        };
+        candidates
             .into_iter()
             .find(|candidate| candidate.is_dir())
-            .unwrap_or(focused)
+            .unwrap_or(root)
     }
 
     // ── mutations ─────────────────────────────────────────────────────────────
