@@ -9351,6 +9351,7 @@ mod tests {
 
         // The user just typed: the recent output is keystroke echo → stays Idle.
         app.status.get_mut(&id).unwrap().last_input = now;
+        app.detection_dirty.insert(id);
         app.detect_tick(now);
         assert_eq!(
             app.status.get(&id).unwrap().state,
@@ -9362,6 +9363,7 @@ mod tests {
         let later = now + std::time::Duration::from_millis(150);
         app.status.get_mut(&id).unwrap().last_activity = later;
         app.status.get_mut(&id).unwrap().last_input = now - std::time::Duration::from_secs(5);
+        app.detection_dirty.insert(id);
         app.detect_tick(later);
         assert_eq!(
             app.status.get(&id).unwrap().state,
@@ -9391,6 +9393,7 @@ mod tests {
             s.last_input = t0 - std::time::Duration::from_secs(5);
             s.last_resize = Some(t0);
         }
+        app.detection_dirty.insert(id);
         app.detect_tick(t0);
         assert_eq!(
             app.status.get(&id).unwrap().state,
@@ -9405,6 +9408,7 @@ mod tests {
             s.last_activity = t1;
             s.last_input = t1 - std::time::Duration::from_secs(5);
         }
+        app.detection_dirty.insert(id);
         app.detect_tick(t1);
         assert_eq!(
             app.status.get(&id).unwrap().state,
@@ -9975,14 +9979,19 @@ mod tests {
         // spinner rather than just poking `last_activity`.
         // Newlines scroll the previous marker away and land the new text in the
         // bottom rows, which is the region detection actually scans.
-        let paint = |app: &App, text: &str| {
-            if let Some(p) = app.panes.get(&id) {
-                if let Ok(mut e) = p.engine.lock() {
-                    let mut buf = vec![b'\n'; 30];
-                    buf.extend_from_slice(text.as_bytes());
-                    e.advance(&buf);
+        let paint = |app: &mut App, text: &str| {
+            {
+                if let Some(p) = app.panes.get(&id) {
+                    if let Ok(mut e) = p.engine.lock() {
+                        let mut buf = vec![b'\n'; 30];
+                        buf.extend_from_slice(text.as_bytes());
+                        e.advance(&buf);
+                    }
                 }
             }
+            // Production output reaches detection through `PtyData`, which marks
+            // the pane dirty. This direct VT mutation must model the same event.
+            app.detection_dirty.insert(id);
         };
         let go_working = |app: &mut App, base: std::time::Instant| {
             paint(app, "⠋ Thinking… (esc to interrupt)\r\n");
