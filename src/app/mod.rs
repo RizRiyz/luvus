@@ -2859,6 +2859,7 @@ impl App {
             80,
             24,
             cwd,
+            &[],
             self.app_tx.clone(),
             &shell,
             history_budget_bytes,

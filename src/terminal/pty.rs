@@ -348,6 +348,7 @@ impl Pane {
         cols: u16,
         rows: u16,
         cwd: PathBuf,
+        fallback_cwds: &[PathBuf],
         app_tx: Sender<AppEvent>,
         shell: &str,
         history_budget_bytes: usize,
@@ -358,7 +359,7 @@ impl Pane {
             cols,
             rows,
             cwd,
-            &[],
+            fallback_cwds,
             app_tx,
             None,
             cmd,
@@ -1192,6 +1193,7 @@ mod reap_tests {
             80,
             24,
             std::env::temp_dir(),
+            &[],
             tx,
             "/bin/sh",
             500,
@@ -1288,6 +1290,47 @@ mod reap_tests {
         assert_ne!(pane.child_pid.load(Ordering::SeqCst), 0);
     }
 
+    /// A deferred pane (the split path) whose primary cwd was deleted after it
+    /// was resolved must retry its fallback chain rather than dying. Regression
+    /// for the split that silently disappeared when its cwd vanished in the race
+    /// window before the fork: same shape as the restore-path test above, but
+    /// driven through `spawn_deferred`.
+    #[test]
+    fn deferred_pane_retries_a_fallback_cwd() {
+        let (tx, rx) = mpsc::channel();
+        let id = PaneId::alloc();
+        let fallback = std::env::temp_dir();
+        let missing = fallback.join(format!("luvus-missing-cwd-{}", std::process::id()));
+        let pane = Pane::spawn_deferred(
+            id,
+            80,
+            24,
+            missing,
+            std::slice::from_ref(&fallback),
+            tx,
+            "/bin/sh",
+            500,
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(!remaining.is_zero(), "the fallback PTY never became ready");
+            match rx.recv_timeout(remaining) {
+                Ok(AppEvent::PtyReady { id: ready, cwd }) if ready == id => {
+                    assert_eq!(cwd, fallback);
+                    break;
+                }
+                Ok(AppEvent::PtyExit(exited)) if exited == id => {
+                    panic!("the deferred pane closed instead of using its fallback cwd")
+                }
+                Ok(_) => {}
+                Err(error) => panic!("the fallback PTY never became ready: {error}"),
+            }
+        }
+        assert_ne!(pane.child_pid.load(Ordering::SeqCst), 0);
+    }
+
     /// A resize issued before the deferred fork must still reach the child:
     /// the worker opens the PTY at the latest recorded size (docs/82).
     #[test]
@@ -1298,6 +1341,7 @@ mod reap_tests {
             80,
             24,
             std::env::temp_dir(),
+            &[],
             tx,
             "/bin/sh",
             500,
