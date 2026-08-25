@@ -1,4 +1,5 @@
-//! Mission Control (docs/54): the per-workspace agent dashboard. This is the
+//! Mission Control (docs/54): the workspace and all-workspaces agent dashboard.
+//! This is the
 //! **pure model** — the row/usage types here, and the cost estimates in
 //! [`pricing`]. A `Tab.mission` flag makes a tab render this dashboard instead of
 //! panes, exactly like the git tab (docs/17) and the orch board (docs/22): the tab
@@ -13,10 +14,36 @@ pub use pricing::*;
 use crate::ids::PaneId;
 use crate::ui::theme::State;
 
+/// Which workspaces contribute agents to Mission Control. This is ephemeral UI
+/// state: it changes only what the dashboard shows, never pane ownership.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MissionScope {
+    #[default]
+    Workspace,
+    All,
+}
+
+/// Stable cache identity for a native usage ledger. Session identifiers are
+/// agent-local, so the agent name must be part of the key.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct UsageKey {
+    pub agent: String,
+    pub session_id: String,
+}
+
+impl UsageKey {
+    pub fn new(agent: impl Into<String>, session_id: impl Into<String>) -> Self {
+        Self {
+            agent: agent.into(),
+            session_id: session_id.into(),
+        }
+    }
+}
+
 /// Token / context / cost usage for one agent session (docs/54 §5). Every figure
-/// is best-effort from the agent's own on-disk store; **cost is an estimate**
-/// (tokens × a model price table, see [`pricing`]), never a bill. `None` fields
-/// mean "unknown".
+/// is best-effort from the agent's own on-disk store. Cost uses an agent's exact
+/// persisted amount where available, otherwise the model price table in
+/// [`pricing`]; it is still informational, never a bill. `None` means unknown.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AgentUsage {
     pub model: String,
@@ -36,7 +63,7 @@ impl AgentUsage {
     }
 }
 
-/// What a Mission Control row points at, for its click / `⏎` action.
+/// What a Mission Control row points at for keyboard activation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MissionRow {
     /// A live agent pane — jump to it.

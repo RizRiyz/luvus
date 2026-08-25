@@ -527,61 +527,39 @@ impl App {
                 let _ = tx.send(AppEvent::ProcScanned(found));
             });
         }
-        // Mission Control usage (docs/54, MC-2): read tokens/context/cost from the
-        // agents' on-disk stores on a worker thread, and only while a mission tab is
-        // open — the default session pays nothing. Targets are gathered here (cheap);
-        // the worker does the file IO and posts the fresh cache back.
-        let mission_open = self
-            .workspaces
-            .iter()
-            .any(|w| w.tabs.iter().any(Tab::is_mission));
-        if mission_open
-            && now.duration_since(self.last_usage_at) >= Duration::from_secs(5)
-            && !self.usage_scan_inflight
-        {
-            self.last_usage_at = now;
+        // Mission Control usage is demand-driven. Opening/focusing the dashboard,
+        // changing scope, or pressing/clicking refresh queues one worker scan;
+        // merely retaining a hidden mission tab performs no usage IO.
+        self.sync_mission_usage_visibility();
+        if self.mission_usage_requested && !self.usage_scan_inflight {
+            self.mission_usage_requested = false;
             self.usage_scan_inflight = true;
-            // Targets: every live pane with a session, plus every resumable session
-            // on disk. Keyed by session id (dedup), so a live pane and its resumable
-            // twin share one read (`(agent, cwd, session_id)`).
-            let mut targets: std::collections::HashMap<String, (String, std::path::PathBuf)> =
-                std::collections::HashMap::new();
-            for (id, p) in self.panes.iter() {
-                if let Some(sess) = self.status.get(id).and_then(|s| s.agent_session.as_ref()) {
-                    targets
-                        .entry(sess.session_id.clone())
-                        .or_insert((sess.agent.clone(), p.cwd.clone()));
-                }
-            }
-            for s in self.resumable.iter() {
-                targets
-                    .entry(s.session_id.clone())
-                    .or_insert((s.agent.clone(), s.cwd.clone()));
-            }
+            let targets = self.mission_usage_targets();
             let overrides = self.config.mission_pricing.clone();
-            // Previous scan's results, so an unchanged transcript is reused instead
-            // of re-read+parsed (the heavy part). Cloned once per scan (every 5s,
-            // only while a mission tab is open) — a handful of small entries.
+            // Previous results let an explicit refresh reuse unchanged transcripts:
+            // one stat per idle session, with no read or parse.
             let prev_usage = self.agent_usage.clone();
             let prev_mtimes = self.usage_mtimes.clone();
             let tx = self.app_tx.clone();
             std::thread::spawn(move || {
                 let mut usage = std::collections::HashMap::new();
                 let mut mtimes = std::collections::HashMap::new();
-                for (sid, (agent, cwd)) in targets {
-                    let mtime = crate::agent::session_mtime(&agent, &cwd, &sid);
+                for (key, cwd) in targets {
+                    let mtime = crate::agent::session_mtime(&key.agent, &cwd, &key.session_id);
                     if let Some(mt) = mtime {
-                        mtimes.insert(sid.clone(), mt);
+                        mtimes.insert(key.clone(), mt);
                     }
                     // Unchanged since last scan → reuse the cached figures (one
                     // `stat`, no read/parse).
-                    if mtime.is_some() && prev_mtimes.get(&sid) == mtime.as_ref() {
-                        if let Some(u) = prev_usage.get(&sid) {
-                            usage.insert(sid, u.clone());
+                    if mtime.is_some() && prev_mtimes.get(&key) == mtime.as_ref() {
+                        if let Some(u) = prev_usage.get(&key) {
+                            usage.insert(key, u.clone());
                             continue;
                         }
                     }
-                    if let Some(mut u) = crate::agent::session_usage(&agent, &cwd, &sid) {
+                    if let Some(mut u) =
+                        crate::agent::session_usage(&key.agent, &cwd, &key.session_id)
+                    {
                         // Re-price with any user overrides (MC-5); empty ⇒ unchanged.
                         if !overrides.is_empty() {
                             u.cost = crate::mission::estimate_cost_with(
@@ -592,7 +570,7 @@ impl App {
                                 &overrides,
                             );
                         }
-                        usage.insert(sid, u);
+                        usage.insert(key, u);
                     }
                 }
                 let _ = tx.send(AppEvent::UsageScanned { usage, mtimes });

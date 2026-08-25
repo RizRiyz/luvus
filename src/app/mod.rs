@@ -317,8 +317,8 @@ pub struct Tab {
     /// -leaf trick as a git tab; mutually exclusive with `git`.
     pub orch: bool,
     /// When `true`, this is the **Mission Control** dashboard (docs/54): the
-    /// per-workspace agent overview. Same placeholder-leaf trick as git/orch;
-    /// mutually exclusive with both.
+    /// workspace or all-workspaces agent overview. Same placeholder-leaf trick
+    /// as git/orch; mutually exclusive with both.
     pub mission: bool,
     /// User-chosen tab name (docs/28). `None` → the tab bar shows its number.
     /// Git/orch/mission tabs keep their fixed label and are never named.
@@ -1319,10 +1319,17 @@ pub struct App {
     /// The board's content rect, for mouse-wheel hit-testing.
     pub orch_area: Rect,
     /// Mission Control (docs/54): scroll + selected row of the active mission tab,
-    /// its content rect (mouse hit-testing), the rows currently displayed (so a
-    /// click/⏎ maps back to a pane or session), and the async token/cost cache.
+    /// its content rect (mouse-wheel hit-testing), the rows currently displayed
+    /// (so keyboard activation maps back to a pane or session), and the async
+    /// token/cost cache.
     pub mission_scroll: usize,
     pub mission_cursor: usize,
+    /// Current workspace only, or every open workspace.
+    pub mission_scope: crate::mission::MissionScope,
+    /// Click targets for the two scope tabs. Agent rows remain keyboard-only.
+    pub mission_scope_rects: Vec<(crate::mission::MissionScope, Rect)>,
+    /// Click target for the explicit Mission Control usage refresh action.
+    pub mission_refresh_rect: Option<Rect>,
     pub mission_area: Rect,
     pub mission_rows: Vec<crate::mission::MissionRowView>,
     /// Row index whose Mission Control detail overlay is open (`o`), if any (MC-5).
@@ -1335,15 +1342,17 @@ pub struct App {
     pub mission_burn: Option<f64>,
     /// Previous (total cost, time) sample, for the burn-rate delta.
     pub mission_last_cost: Option<(f64, std::time::Instant)>,
-    /// Best-effort usage (tokens/context/cost) keyed by **session id**, so both a
-    /// live pane and a resumable on-disk session share one entry. Refreshed
+    /// Best-effort usage (tokens/context/cost) keyed by **agent + session id**, so
+    /// a live pane and its resumable on-disk session share one entry without
+    /// colliding with another agent's local session namespace. Refreshed
     /// off-loop and blitted by the mission render — never computed on the render
     /// path (docs/54 MC-2/MC-4).
-    pub agent_usage: std::collections::HashMap<String, crate::mission::AgentUsage>,
+    pub agent_usage:
+        std::collections::HashMap<crate::mission::UsageKey, crate::mission::AgentUsage>,
     /// Each scanned transcript's mtime, so the next usage scan re-reads a session
     /// only when its file actually changed (docs/54) — an idle session costs one
     /// `stat`, not a full read+parse.
-    pub usage_mtimes: std::collections::HashMap<String, std::time::SystemTime>,
+    pub usage_mtimes: std::collections::HashMap<crate::mission::UsageKey, std::time::SystemTime>,
     /// Cursor position from the last render (for headless frame streaming).
     pub last_cursor: Option<(u16, u16)>,
     /// Foreground client asked to detach (prefix+q). Distinct from quit.
@@ -1419,9 +1428,11 @@ pub struct App {
     /// Throttle for rescanning the agents' on-disk session stores.
     last_sessions_at: Instant,
     last_proc_at: Instant,
-    /// Mission Control usage scan (docs/54, MC-2): throttle + in-flight guard, so
-    /// the token/cost read runs off-loop and only while a mission tab is open.
-    last_usage_at: Instant,
+    /// Mission Control usage is demand-driven: opening/focusing the dashboard,
+    /// changing its scope, or choosing refresh queues one off-loop scan. No
+    /// usage reader runs merely because a hidden Mission Control tab exists.
+    mission_usage_requested: bool,
+    mission_was_active: bool,
     usage_scan_inflight: bool,
     /// Throttle for per-pane agent classification — it locks each pane's VT engine
     /// and scans its grid, so it runs at ~100ms, not at the render frame rate.
@@ -1790,6 +1801,9 @@ impl App {
             orch_area: Rect::ZERO,
             mission_scroll: 0,
             mission_cursor: 0,
+            mission_scope: crate::mission::MissionScope::Workspace,
+            mission_scope_rects: Vec::new(),
+            mission_refresh_rect: None,
             mission_area: Rect::ZERO,
             mission_rows: Vec::new(),
             mission_detail: None,
@@ -1822,7 +1836,8 @@ impl App {
             proc_scan_inflight: false,
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
-            last_usage_at: Instant::now(),
+            mission_usage_requested: false,
+            mission_was_active: false,
             usage_scan_inflight: false,
             last_proc_at: Instant::now(),
             last_detect_at: Instant::now()
@@ -2324,6 +2339,9 @@ impl App {
             orch_area: Rect::ZERO,
             mission_scroll: 0,
             mission_cursor: 0,
+            mission_scope: crate::mission::MissionScope::Workspace,
+            mission_scope_rects: Vec::new(),
+            mission_refresh_rect: None,
             mission_area: Rect::ZERO,
             mission_rows: Vec::new(),
             mission_detail: None,
@@ -2356,7 +2374,8 @@ impl App {
             proc_scan_inflight: false,
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
-            last_usage_at: Instant::now(),
+            mission_usage_requested: false,
+            mission_was_active: false,
             usage_scan_inflight: false,
             last_proc_at: Instant::now(),
             last_detect_at: Instant::now()
@@ -6743,11 +6762,11 @@ mod tests {
         let mut app = App::new(80, 24, tx).unwrap();
         let focus = app.layout().focus;
         assert!(
-            !crate::agent::is_resumable("gemini"),
+            !crate::agent::is_resumable("aider"),
             "the regression needs an agent whose identity is visible but not persisted"
         );
 
-        app.proc_commands.insert(focus, vec!["gemini".into()]);
+        app.proc_commands.insert(focus, vec!["aider".into()]);
         let now = Instant::now();
         app.last_detect_at = now - Duration::from_secs(1);
         app.last_proc_at = now;
@@ -6758,7 +6777,7 @@ mod tests {
             app.detect_tick(now),
             "an idle identity change adds a sidebar row and must request a frame"
         );
-        assert_eq!(app.status.get(&focus).unwrap().agent, "gemini");
+        assert_eq!(app.status.get(&focus).unwrap().agent, "aider");
         assert!(
             !app.session_dirty,
             "a non-resumable identity repaint does not create persistence work"
@@ -9614,7 +9633,7 @@ mod tests {
     }
 
     // docs/54 MC-1: Mission Control opens as a dashboard tab, lists the node's
-    // live agents, renders them, and ⏎/click jumps back to the agent's pane.
+    // live agents, renders them, and Enter jumps back to the agent's pane.
     #[test]
     /// Every dashboard must survive a hostile terminal. Mission Control lays its
     /// rows out in fixed-width columns, which is exactly the shape that panics on
@@ -9694,6 +9713,7 @@ mod tests {
             text.contains("Mission Control"),
             "the dashboard title shows"
         );
+        assert!(text.contains("BETA"), "the dashboard beta badge shows");
         assert!(text.contains("claude"), "the agent row shows");
 
         // ⏎ jumps back to the agent's pane (leaving the dashboard).
@@ -9701,6 +9721,124 @@ mod tests {
         assert!(!app.active_is_mission(), "jumped off the dashboard");
         assert_eq!(app.ws().active_tab, agent_tab, "landed on the agent's tab");
         assert_eq!(app.layout().focus, agent_pane, "focused the agent's pane");
+    }
+
+    #[test]
+    fn mission_usage_refresh_is_demand_driven() {
+        use ratatui::crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("mission-demand-refresh");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let normal_tab = app.ws().active_tab;
+        app.open_mission_control(0);
+        let mission_tab = app.ws().active_tab;
+        assert!(app.mission_usage_requested, "opening requests one refresh");
+
+        app.sync_mission_usage_visibility();
+        app.mission_usage_requested = false; // simulate the worker consuming it
+        app.sync_mission_usage_visibility();
+        assert!(
+            !app.mission_usage_requested,
+            "remaining on Mission Control does not poll"
+        );
+
+        app.handle_mission_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(app.mission_usage_requested, "r requests a refresh");
+
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let refresh = app
+            .mission_refresh_rect
+            .expect("wide dashboard exposes refresh button");
+        app.mission_usage_requested = false;
+        app.handle_event(crate::event::AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: refresh.x,
+            row: refresh.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.mission_usage_requested, "click requests a refresh");
+
+        app.mission_usage_requested = false;
+        app.focus_tab(normal_tab).unwrap();
+        app.sync_mission_usage_visibility();
+        app.focus_tab(mission_tab).unwrap();
+        app.sync_mission_usage_visibility();
+        assert!(
+            app.mission_usage_requested,
+            "returning to Mission Control requests one fresh snapshot"
+        );
+    }
+
+    #[test]
+    fn mission_control_scope_tabs_include_every_workspace_without_row_clicks() {
+        use crate::mission::{MissionRow, MissionScope};
+        use ratatui::crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("mission-scope");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let first = app.layout().focus;
+        app.workspaces[0].name = "alpha".into();
+        app.status.get_mut(&first).unwrap().agent = "claude".into();
+
+        let second = PaneId::alloc();
+        let mut second_status = PaneStatus::new("codex".into());
+        second_status.agent_session = Some(AgentSession {
+            agent: "codex".into(),
+            session_id: "beta-session".into(),
+        });
+        app.status.insert(second, second_status);
+        app.workspaces.push(Workspace {
+            id: crate::ids::public_id("workspace"),
+            name: "beta".into(),
+            cwd: PathBuf::from("/tmp/luvus-mission-beta"),
+            branch: None,
+            git_ahead_behind: None,
+            worktree: None,
+            tabs: vec![Tab::panes(TileLayout::new(second))],
+            active_tab: 0,
+            pinned: false,
+        });
+
+        app.open_mission_control(0);
+        assert_eq!(app.mission_scope, MissionScope::Workspace);
+        assert_eq!(app.build_mission_rows().len(), 1, "current workspace only");
+
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let all = app
+            .mission_scope_rects
+            .iter()
+            .find(|(scope, _)| *scope == MissionScope::All)
+            .expect("all-workspaces scope tab is rendered")
+            .1;
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: all.x + 1,
+            row: all.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(app.mission_scope, MissionScope::All);
+        let rows = app.build_mission_rows();
+        assert_eq!(rows.len(), 2, "both workspaces contribute agents");
+        assert!(rows.iter().any(|row| {
+            row.row == MissionRow::Live(second) && row.location.starts_with("beta · t1")
+        }));
+
+        app.handle_mission_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.mission_scope,
+            MissionScope::Workspace,
+            "Tab provides a keyboard equivalent"
+        );
     }
 
     // docs/54 MC-2/MC-4: live rows carry cached usage (tokens/cost/context), and
@@ -9721,9 +9859,10 @@ mod tests {
                 session_id: "live-1".into(),
             });
         }
-        // Seed the usage cache (what the async scan produces), keyed by session id.
+        // Seed the usage cache (what the async scan produces), keyed by agent and
+        // session id.
         app.agent_usage.insert(
-            "live-1".into(),
+            crate::mission::UsageKey::new("claude", "live-1"),
             AgentUsage {
                 model: "claude-opus-4-8".into(),
                 tokens_in: 4000,
@@ -9741,7 +9880,7 @@ mod tests {
             updated: std::time::SystemTime::now(),
         }];
         app.agent_usage.insert(
-            "resume-1".into(),
+            crate::mission::UsageKey::new("claude", "resume-1"),
             AgentUsage {
                 model: "claude-sonnet-4".into(),
                 tokens_in: 1000,
@@ -9751,7 +9890,6 @@ mod tests {
                 cost: Some(0.02),
             },
         );
-
         app.open_mission_control(0);
         let rows = app.build_mission_rows();
 
@@ -9776,8 +9914,8 @@ mod tests {
             "the resumable row carries its historical cost"
         );
 
-        // Render the dashboard and confirm the new layout draws: the column
-        // header, the per-row context gauge, and the bottom cost-by-model chart.
+        // Render the dashboard and confirm the full command deck draws: agent
+        // sessions, selected agent, status summary, and model-spend telemetry.
         {
             use ratatui::{backend::TestBackend, Terminal};
             let mut term = Terminal::new(TestBackend::new(140, 30)).unwrap();
@@ -9789,14 +9927,60 @@ mod tests {
                         .map(move |c| buf.cell((c, r)).map(|x| x.symbol()).unwrap_or(" "))
                 })
                 .collect();
-            assert!(text.contains("status"), "column header row draws");
-            assert!(text.contains("context"), "the context column header draws");
+            assert!(text.contains("AGENT SESSIONS"), "the agent panel draws");
+            assert!(text.contains("LOCATION"), "the table location header draws");
+            assert!(text.contains("TOKENS"), "the table usage header draws");
             assert!(
-                text.contains("cost by model"),
-                "the bottom cost chart draws"
+                text.contains("SELECTED AGENT"),
+                "the selected-agent panel draws"
             );
-            assert!(text.contains('█'), "a bar (context gauge / chart) draws");
+            assert!(
+                text.contains("COST BY MODEL"),
+                "the model-spend panel draws"
+            );
+            assert!(text.contains("AGENT STATUS"), "the state panel draws");
+            assert!(text.contains('█'), "a telemetry bar draws");
         }
+
+        // A narrow terminal falls back to a full-width, single-column agent list.
+        {
+            use ratatui::{backend::TestBackend, Terminal};
+            let mut term = Terminal::new(TestBackend::new(60, 18)).unwrap();
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            let buf = term.backend().buffer();
+            let text: String = (0..buf.area.height)
+                .flat_map(|r| {
+                    (0..buf.area.width)
+                        .map(move |c| buf.cell((c, r)).map(|x| x.symbol()).unwrap_or(" "))
+                })
+                .collect();
+            assert!(text.contains("AGENT SESSIONS"), "compact agent panel draws");
+        }
+
+        // Plain clicks are intentionally inert: opening a pane is an explicit
+        // keyboard action through Enter, not an accidental dashboard click.
+        let active_tab = app.ws().active_tab;
+        let cursor = app.mission_cursor;
+        app.handle_event(crate::event::AppEvent::Mouse(
+            ratatui::crossterm::event::MouseEvent {
+                kind: ratatui::crossterm::event::MouseEventKind::Down(
+                    ratatui::crossterm::event::MouseButton::Left,
+                ),
+                column: app.mission_area.x.saturating_add(2),
+                row: app.mission_area.y.saturating_add(7),
+                modifiers: KeyModifiers::NONE,
+            },
+        ));
+        assert!(app.active_is_mission(), "click stays in Mission Control");
+        assert_eq!(
+            app.ws().active_tab,
+            active_tab,
+            "click does not open a pane"
+        );
+        assert_eq!(
+            app.mission_cursor, cursor,
+            "click does not change selection"
+        );
 
         // The detail overlay opens on `o` and closes on esc. (`render` publishes
         // `mission_rows`, so it's set now.)

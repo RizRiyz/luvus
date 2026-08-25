@@ -9,6 +9,9 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+mod usage;
+pub use usage::{session_mtime, session_usage};
+
 /// A resumable agent session discovered on disk.
 #[derive(Clone)]
 pub struct SessionInfo {
@@ -130,6 +133,39 @@ static SOURCES: &[SessionSource] = &[
         // Pi's session model is a branching tree; `--fork` forks by id (docs/23).
         fork: Some(|q| format!("pi --fork {q}\r")),
     },
+    SessionSource {
+        name: "gemini",
+        discover: Some(Discovery {
+            base: gemini_base,
+            recent: gemini_recent,
+            latest: gemini_latest,
+            list: Some(gemini_list),
+        }),
+        resume: |q| format!("gemini --resume {q}\r"),
+        fork: None,
+    },
+    SessionSource {
+        name: "qwen",
+        discover: Some(Discovery {
+            base: qwen_base,
+            recent: qwen_recent,
+            latest: qwen_latest,
+            list: Some(qwen_list),
+        }),
+        resume: |q| format!("qwen --resume {q}\r"),
+        fork: None,
+    },
+    SessionSource {
+        name: "fx",
+        discover: Some(Discovery {
+            base: fx_base,
+            recent: fx_recent,
+            latest: fx_latest,
+            list: Some(fx_list),
+        }),
+        resume: |q| format!("fx session resume {q}\r"),
+        fork: None,
+    },
     // Resume-only (no readable session store): usable when a hook reports the id.
     SessionSource {
         name: "cursor",
@@ -177,82 +213,6 @@ pub fn recent_sessions(limit: usize) -> Vec<SessionInfo> {
 pub fn latest_session(agent: &str, cwd: &Path) -> Option<String> {
     let d = source(agent)?.discover.as_ref()?;
     (d.latest)(&(d.base)(), cwd)
-}
-
-/// Best-effort token/context/cost usage for an agent's session, read from its own
-/// on-disk transcript (docs/54 §5, MC-2). Only agents whose store records usage
-/// are supported (Claude today); others return `None`, and the dashboard shows
-/// "—". Bounded IO — a single file read — so callers run it off the render loop.
-pub fn session_usage(
-    agent: &str,
-    cwd: &Path,
-    session_id: &str,
-) -> Option<crate::mission::AgentUsage> {
-    match agent {
-        "claude" => claude_session_usage(&claude_base(), cwd, session_id),
-        _ => None,
-    }
-}
-
-/// The last-modified time of a session's transcript, for the usage-scan cache
-/// (docs/54): a cheap `stat` so an unchanged (idle) transcript is skipped instead
-/// of being re-read and re-parsed each scan. `None` if there's no such file.
-pub fn session_mtime(agent: &str, cwd: &Path, session_id: &str) -> Option<SystemTime> {
-    let path = match agent {
-        "claude" => claude_project_dir(&claude_base(), cwd).join(format!("{session_id}.jsonl")),
-        _ => return None,
-    };
-    std::fs::metadata(&path).and_then(|m| m.modified()).ok()
-}
-
-/// Sum a Claude session's `.jsonl` transcript into an [`AgentUsage`]: cumulative
-/// input/output/cache tokens (for cost) and the *latest* turn's input-side total
-/// (for the live context %). Model comes from the newest assistant line. Tolerant
-/// of shape drift — missing fields count as zero and a bad line is skipped.
-fn claude_session_usage(
-    base: &Path,
-    cwd: &Path,
-    session_id: &str,
-) -> Option<crate::mission::AgentUsage> {
-    use crate::mission::{context_frac, estimate_cost, AgentUsage};
-    let path = claude_project_dir(base, cwd).join(format!("{session_id}.jsonl"));
-    let text = std::fs::read_to_string(&path).ok()?;
-    let field = |u: &serde_json::Value, k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-    let mut u = AgentUsage::default();
-    let mut context_tokens = 0u64;
-    for line in text.lines() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let msg = v.get("message");
-        // `usage` lives under `message.usage` (assistant turns) or top-level.
-        if let Some(us) = msg.and_then(|m| m.get("usage")).or_else(|| v.get("usage")) {
-            let cin =
-                field(us, "cache_read_input_tokens") + field(us, "cache_creation_input_tokens");
-            u.tokens_in += field(us, "input_tokens");
-            u.tokens_out += field(us, "output_tokens");
-            u.cache += cin;
-            // The current context ≈ this (latest) turn's whole input side.
-            context_tokens = field(us, "input_tokens") + cin;
-        }
-        if let Some(model) = msg
-            .and_then(|m| m.get("model"))
-            .or_else(|| v.get("model"))
-            .and_then(|x| x.as_str())
-        {
-            if !model.is_empty() {
-                u.model = model.to_string();
-            }
-        }
-    }
-    if u.model.is_empty() && u.total_tokens() == 0 {
-        return None; // nothing usable in this transcript
-    }
-    u.cost = estimate_cost(&u.model, u.tokens_in, u.tokens_out, u.cache);
-    if context_tokens > 0 {
-        u.context = Some(context_frac(&u.model, context_tokens));
-    }
-    Some(u)
 }
 
 /// Every session for `agent` in `cwd`, **newest first**.
@@ -453,6 +413,24 @@ fn opencode_base() -> PathBuf {
         .join("share")
         .join("opencode")
         .join("storage")
+}
+
+fn gemini_base() -> PathBuf {
+    std::env::var_os("GEMINI_CLI_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".gemini"))
+}
+
+fn qwen_base() -> PathBuf {
+    std::env::var_os("QWEN_CODE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".qwen"))
+}
+
+fn fx_base() -> PathBuf {
+    std::env::var_os("FX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".fx"))
 }
 
 // ── Claude Code ─────────────────────────────────────────────────────────────
@@ -1205,6 +1183,208 @@ fn pi_recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
     out
 }
 
+// ── Gemini CLI and Qwen Code ────────────────────────────────────────────────
+// Both keep project-scoped JSONL chats under `<base>/tmp/<project>/chats/` and
+// write the original project path to the sibling `.project_root` file. The
+// full session id lives in the JSONL header, so filenames remain an optimization
+// rather than an identity guess.
+
+fn chat_project_dirs(base: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let Ok(projects) = std::fs::read_dir(base.join("tmp")) else {
+        return Vec::new();
+    };
+    projects
+        .flatten()
+        .filter_map(|entry| {
+            let dir = entry.path();
+            let cwd = std::fs::read_to_string(dir.join(".project_root")).ok()?;
+            Some((PathBuf::from(cwd.trim()), dir.join("chats")))
+        })
+        .collect()
+}
+
+fn chat_files_in_dir(chats: &Path) -> Vec<(SystemTime, PathBuf)> {
+    let mut out = Vec::new();
+    let Ok(files) = std::fs::read_dir(chats) else {
+        return out;
+    };
+    for entry in files.flatten() {
+        let path = entry.path();
+        let supported = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("json" | "jsonl")
+        ) && path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("session-"));
+        if !supported {
+            continue;
+        }
+        if let Ok(updated) = entry.metadata().and_then(|m| m.modified()) {
+            out.push((updated, path));
+        }
+    }
+    out.sort_by_key(|(updated, _)| std::cmp::Reverse(*updated));
+    out
+}
+
+fn chat_session_files(base: &Path, cwd: &Path) -> Vec<(SystemTime, PathBuf)> {
+    chat_project_dirs(base)
+        .into_iter()
+        .find(|(project, _)| crate::platform::same_path(project, cwd))
+        .map(|(_, chats)| chat_files_in_dir(&chats))
+        .unwrap_or_default()
+}
+
+fn read_chat_session_id(path: &Path) -> Option<String> {
+    use std::io::{BufRead, Read};
+    let file = std::fs::File::open(path).ok()?;
+    for line in std::io::BufReader::new(file)
+        .take(256 * 1024)
+        .lines()
+        .take(40)
+        .map_while(Result::ok)
+    {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if let Some(id) = value.get("sessionId").and_then(|v| v.as_str()) {
+            return Some(id.to_string());
+        }
+    }
+    None
+}
+
+fn chat_list(base: &Path, cwd: &Path) -> Vec<String> {
+    chat_session_files(base, cwd)
+        .into_iter()
+        .filter_map(|(_, path)| read_chat_session_id(&path))
+        .collect()
+}
+
+fn chat_latest(base: &Path, cwd: &Path) -> Option<String> {
+    chat_session_files(base, cwd)
+        .into_iter()
+        .find_map(|(_, path)| read_chat_session_id(&path))
+}
+
+fn chat_recent(base: &Path, limit: usize, agent: &str) -> Vec<SessionInfo> {
+    let mut out = Vec::new();
+    for (cwd, chats) in chat_project_dirs(base) {
+        let Some((updated, path)) = chat_files_in_dir(&chats).into_iter().next() else {
+            continue;
+        };
+        let Some(session_id) = read_chat_session_id(&path) else {
+            continue;
+        };
+        out.push(SessionInfo {
+            agent: agent.to_string(),
+            session_id,
+            cwd,
+            updated,
+        });
+    }
+    out.sort_by_key(|s| std::cmp::Reverse(s.updated));
+    out.truncate(limit);
+    out
+}
+
+fn gemini_list(base: &Path, cwd: &Path) -> Vec<String> {
+    chat_list(base, cwd)
+}
+
+fn gemini_latest(base: &Path, cwd: &Path) -> Option<String> {
+    chat_latest(base, cwd)
+}
+
+fn gemini_recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
+    chat_recent(base, limit, "gemini")
+}
+
+fn qwen_list(base: &Path, cwd: &Path) -> Vec<String> {
+    chat_list(base, cwd)
+}
+
+fn qwen_latest(base: &Path, cwd: &Path) -> Option<String> {
+    chat_latest(base, cwd)
+}
+
+fn qwen_recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
+    chat_recent(base, limit, "qwen")
+}
+
+// ── fx ──────────────────────────────────────────────────────────────────────
+// fx stores one small metadata document and one aggregate usage snapshot per
+// session. Reading `session.json` avoids spawning the CLI during Luvus's regular
+// background session scan.
+
+fn read_fx_session(path: &Path) -> Option<(String, PathBuf, SystemTime)> {
+    let raw: serde_json::Value = serde_json::from_reader(std::fs::File::open(path).ok()?).ok()?;
+    let id = raw.get("id").and_then(|v| v.as_str())?.to_string();
+    let cwd = raw
+        .get("workspace_root")
+        .or_else(|| raw.get("origin_workspace_root"))
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)?;
+    let updated = raw
+        .get("updated_at_ms")
+        .and_then(|v| v.as_u64())
+        .map(|ms| SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(ms))
+        .or_else(|| std::fs::metadata(path).and_then(|m| m.modified()).ok())?;
+    Some((id, cwd, updated))
+}
+
+fn fx_session_files(base: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(base.join("sessions")) else {
+        return Vec::new();
+    };
+    let mut out: Vec<_> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path().join("session.json");
+            Some((std::fs::metadata(&path).ok()?.modified().ok()?, path))
+        })
+        .collect();
+    out.sort_by_key(|(updated, _)| std::cmp::Reverse(*updated));
+    out.into_iter().map(|(_, path)| path).collect()
+}
+
+fn fx_session(path: &Path) -> Option<SessionInfo> {
+    let (session_id, cwd, updated) = read_fx_session(path)?;
+    Some(SessionInfo {
+        agent: "fx".to_string(),
+        session_id,
+        cwd,
+        updated,
+    })
+}
+
+fn fx_list(base: &Path, cwd: &Path) -> Vec<String> {
+    fx_session_files(base)
+        .into_iter()
+        .filter_map(|path| fx_session(&path))
+        .filter(|s| crate::platform::same_path(&s.cwd, cwd))
+        .map(|s| s.session_id)
+        .collect()
+}
+
+fn fx_latest(base: &Path, cwd: &Path) -> Option<String> {
+    fx_session_files(base).into_iter().find_map(|path| {
+        let session = fx_session(&path)?;
+        crate::platform::same_path(&session.cwd, cwd).then_some(session.session_id)
+    })
+}
+
+fn fx_recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
+    let mut seen = std::collections::HashSet::new();
+    fx_session_files(base)
+        .into_iter()
+        .filter_map(|path| fx_session(&path))
+        .filter(|s| seen.insert(s.cwd.clone()))
+        .take(limit)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1216,36 +1396,6 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
-    }
-
-    // docs/54 MC-2: sum a Claude transcript's usage into tokens/context/cost.
-    #[test]
-    fn claude_usage_sums_tokens_context_and_cost() {
-        let base = tmp("claude-usage");
-        let cwd = PathBuf::from("/tmp/some/proj");
-        let dir = claude_project_dir(&base, &cwd);
-        fs::create_dir_all(&dir).unwrap();
-        let jsonl = concat!(
-            r#"{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":500,"cache_read_input_tokens":200}}}"#,
-            "\n",
-            r#"{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":3000,"output_tokens":700,"cache_creation_input_tokens":100}}}"#,
-            "\n",
-            "definitely not json — must be skipped\n",
-        );
-        fs::write(dir.join("sess-1.jsonl"), jsonl).unwrap();
-
-        let u = claude_session_usage(&base, &cwd, "sess-1").expect("usage read");
-        assert_eq!(u.model, "claude-opus-4-8");
-        assert_eq!(u.tokens_in, 4000, "cumulative input");
-        assert_eq!(u.tokens_out, 1200, "cumulative output");
-        assert_eq!(u.cache, 300, "cache read + creation");
-        // Context ≈ the last turn's input side (3000 + 100) / 200k window.
-        let c = u.context.expect("context");
-        assert!((c - (3100.0 / 200_000.0)).abs() < 1e-4, "context {c}");
-        // Cost estimate (opus): in*15 + out*75 + cache*1.5 per million.
-        let want = (4000.0 * 15.0 + 1200.0 * 75.0 + 300.0 * 1.5) / 1_000_000.0;
-        assert!((u.cost.expect("cost") - want).abs() < 1e-9);
-        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1279,10 +1429,65 @@ mod tests {
             .unwrap()
             .contains("cursor-agent --resume"));
         assert!(is_resumable("opencode") && is_resumable("cursor-agent"));
-        assert!(!is_resumable("gemini")); // detectable, but no resume path
+        assert_eq!(
+            resume_command("gemini", "g1").as_deref(),
+            Some("gemini --resume 'g1'\r")
+        );
+        assert_eq!(
+            resume_command("qwen", "q1").as_deref(),
+            Some("qwen --resume 'q1'\r")
+        );
+        assert_eq!(
+            resume_command("fx", "f1").as_deref(),
+            Some("fx session resume 'f1'\r")
+        );
         assert!(resume_command("unknown", "x").is_none());
         assert!(resume_command("claude", "").is_none()); // empty id
         assert!(resume_command("claude", "a b").is_none()); // unsafe char
+    }
+
+    #[test]
+    fn gemini_style_sessions_are_scoped_by_project_root() {
+        let base = tmp("gemini-session");
+        let project = base.join("tmp/hash-one");
+        fs::create_dir_all(project.join("chats")).unwrap();
+        fs::write(project.join(".project_root"), "/work/app\n").unwrap();
+        fs::write(
+            project.join("chats/session-2026-08-25-gem12345.jsonl"),
+            "{\"sessionId\":\"gem12345-full\"}\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            gemini_latest(&base, Path::new("/work/app")).as_deref(),
+            Some("gem12345-full")
+        );
+        assert!(gemini_latest(&base, Path::new("/work/other")).is_none());
+        let recent = qwen_recent(&base, 5);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].agent, "qwen");
+        assert_eq!(recent[0].cwd, Path::new("/work/app"));
+    }
+
+    #[test]
+    fn fx_sessions_use_native_workspace_metadata() {
+        let base = tmp("fx-session");
+        let session = base.join("sessions/fx-1");
+        fs::create_dir_all(&session).unwrap();
+        fs::write(
+            session.join("session.json"),
+            r#"{"id":"fx-1","workspace_root":"/work/app","created_at_ms":1000,"updated_at_ms":2000}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fx_latest(&base, Path::new("/work/app")).as_deref(),
+            Some("fx-1")
+        );
+        let recent = fx_recent(&base, 5);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].session_id, "fx-1");
+        assert_eq!(recent[0].cwd, Path::new("/work/app"));
     }
 
     #[test]

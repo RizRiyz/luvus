@@ -1787,14 +1787,16 @@ impl App {
             if self.mission_detail.take().is_some() || self.mission_answer.take().is_some() {
                 return;
             }
-            let body_top = self.mission_area.y + 2; // header + separator
-            if hit(self.mission_area) && m.row >= body_top {
-                let idx = self.mission_scroll + (m.row - body_top) as usize;
-                if idx < self.mission_rows.len() {
-                    self.mission_cursor = idx;
-                    self.mission_activate(idx);
-                }
+            if self.mission_refresh_rect.is_some_and(hit) {
+                self.request_mission_usage_refresh();
+                return;
             }
+            if let Some((scope, _)) = self.mission_scope_rects.iter().find(|(_, rect)| hit(*rect)) {
+                self.set_mission_scope(*scope);
+                return;
+            }
+            // Agent rows are intentionally keyboard-only for now. A plain click
+            // must never jump away from Mission Control unexpectedly.
             return;
         }
         if let Some((id, _)) = self.pane_rects.iter().find(|(_, rect)| hit(*rect)) {

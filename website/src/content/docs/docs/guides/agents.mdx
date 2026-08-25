@@ -10,8 +10,8 @@ back after a restart, all without wrapping or modifying the agents themselves.
 ## The AGENTS sidebar
 
 Every pane running a recognized agent (Claude Code, Copilot, Codex, opencode,
-Kimi, Grok, Pi, Cursor, Gemini, Aider, Amp, Droid) appears in the sidebar with a
-live state:
+Kimi, Grok, Pi, Cursor, Gemini, Qwen, Kiro, Aider, Amp, Droid, or fx) appears in
+the sidebar with a live state:
 
 | State | Meaning | How it's detected |
 |---|---|---|
@@ -39,6 +39,36 @@ idle. That way you never get a false state or a false completion chime.
 
 The **All / Active** toggle in the header switches between live agents only
 (default) and the full resumable history.
+
+## Usage in Mission Control
+
+Mission Control reads the structured usage counters that each agent already
+stores for its own session. It shows input, output, and cache tokens, context
+usage when the agent records its context limit, and cost when the agent records
+one or Luvus has pricing for the model.
+
+| Native usage reader | Data source |
+|---|---|
+| Claude Code | project transcript |
+| Codex | rollout token counters |
+| GitHub Copilot CLI | session shutdown metrics |
+| opencode | read-only session database |
+| Kimi | session status records |
+| Grok | completed-turn usage records |
+| Pi | assistant message usage |
+| Gemini and Qwen | project chat records |
+| fx | session usage snapshot |
+
+Aider, Kiro, Cursor, Amp, Droid, and manifest-defined agents still receive live
+identity and state detection, but show `—` for usage until they expose a stable
+per-session counter or report one through an integration. Luvus never estimates
+tokens from transcript text.
+
+Usage parsing runs off the render path only when Mission Control becomes active,
+its scope changes, or you choose **Refresh**. A hidden dashboard schedules no
+usage work. Unchanged sessions are cached by agent, session ID, and source
+modification time. JSONL readers cap individual records, so an unusually large
+tool result cannot cause an equally large temporary allocation.
 
 ## How luvus knows which agent a pane is running
 
@@ -87,6 +117,9 @@ command for you:
 | Kimi | its session index (`~/.kimi-code/session_index.jsonl`) |
 | Grok | its session directory (`~/.grok/sessions`) |
 | Pi | its session store (`~/.pi/agent/sessions`) |
+| Gemini | its project chat store (`~/.gemini/tmp`) |
+| Qwen | its project chat store (`~/.qwen/tmp`) |
+| fx | its session store (`~/.fx/sessions`) |
 | Cursor | resume command (when the session id is known) |
 
 You'll also see **recent sessions** listed at the bottom of the AGENTS sidebar

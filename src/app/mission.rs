@@ -1,10 +1,10 @@
-//! Mission Control (docs/54): open/close the per-workspace agent dashboard tab,
+//! Mission Control (docs/54): open/close the agent dashboard tab,
 //! build its rows, and its key/mouse handlers. A mission tab carries a
 //! placeholder `TileLayout` leaf (no pane spawned), so every `layout()` path is
 //! untouched; render/input branch on `Tab::is_mission()`, mirroring the git tab.
 
 use super::*;
-use crate::mission::{MissionRow, MissionRowView};
+use crate::mission::{MissionRow, MissionRowView, MissionScope};
 
 impl App {
     /// Open (or focus) the Mission Control tab for `workspace`. Idempotent — one
@@ -16,6 +16,7 @@ impl App {
         self.active_ws = wsi;
         if let Some(i) = self.workspaces[wsi].tabs.iter().position(Tab::is_mission) {
             self.workspaces[wsi].active_tab = i;
+            self.request_mission_usage_refresh();
             return;
         }
         let placeholder = PaneId::alloc(); // never inserted into `panes`
@@ -33,6 +34,7 @@ impl App {
         self.mission_scroll = 0;
         self.mission_cursor = 0;
         self.session_dirty = true;
+        self.request_mission_usage_refresh();
     }
 
     /// True when the focused tab is a Mission Control dashboard.
@@ -59,56 +61,153 @@ impl App {
         }
     }
 
-    /// Build the rows for the active node's Mission Control: every live agent in
-    /// its pane tabs (a recognised agent, or a pane with a resolved session).
-    /// Dashboard tabs (git/orch/mission) hold only a placeholder, which has no
-    /// `status` entry, so they contribute nothing. MC-4 appends resumable sessions.
-    pub fn build_mission_rows(&self) -> Vec<MissionRowView> {
-        let mut rows = Vec::new();
-        let Some(node) = self.workspaces.get(self.active_ws) else {
-            return rows;
-        };
-        // Live agents first.
-        let mut live_sessions = std::collections::HashSet::new();
-        for (ti, tab) in node.tabs.iter().enumerate() {
-            let leaves = tab.layout.leaves();
-            for (pi, id) in leaves.iter().copied().enumerate() {
-                let Some(s) = self.status.get(&id) else {
+    /// Change the dashboard scope without changing the active workspace or any
+    /// pane ownership. Selection-dependent overlays are reset because the row
+    /// identities may change when the scope changes.
+    pub fn set_mission_scope(&mut self, scope: MissionScope) {
+        if self.mission_scope != scope {
+            self.mission_scope = scope;
+            self.mission_scroll = 0;
+            self.mission_cursor = 0;
+            self.mission_detail = None;
+            self.mission_answer = None;
+            self.request_mission_usage_refresh();
+        }
+    }
+
+    /// Queue one asynchronous usage refresh. Repeated requests coalesce while a
+    /// scan is running; after it lands, Mission Control stays idle until another
+    /// explicit request or a later transition into the dashboard.
+    pub fn request_mission_usage_refresh(&mut self) {
+        self.mission_usage_requested = true;
+    }
+
+    pub fn mission_usage_refreshing(&self) -> bool {
+        self.mission_usage_requested || self.usage_scan_inflight
+    }
+
+    /// Detect focus transitions in one central place so mouse, keyboard, API,
+    /// switcher, and restored-session tab activation all share the same policy.
+    pub(crate) fn sync_mission_usage_visibility(&mut self) {
+        let active = self.active_is_mission();
+        if active && !self.mission_was_active {
+            self.request_mission_usage_refresh();
+        }
+        self.mission_was_active = active;
+    }
+
+    /// Usage targets visible in the selected Mission Control scope. Avoid
+    /// opening one workspace's dashboard and scanning every resumable session
+    /// Luvus has ever discovered in unrelated workspaces.
+    pub(crate) fn mission_usage_targets(
+        &self,
+    ) -> std::collections::HashMap<crate::mission::UsageKey, std::path::PathBuf> {
+        let mut targets = std::collections::HashMap::new();
+        if self.workspaces.get(self.active_ws).is_none() {
+            return targets;
+        }
+        let all = self.mission_scope == MissionScope::All;
+        for (wi, workspace) in self.workspaces.iter().enumerate() {
+            if !all && wi != self.active_ws {
+                continue;
+            }
+            for id in workspace.tabs.iter().flat_map(|tab| tab.layout.leaves()) {
+                let Some(session) = self
+                    .status
+                    .get(&id)
+                    .and_then(|status| status.agent_session.as_ref())
+                else {
                     continue;
                 };
-                if self.manifests.is_agent(&s.agent) || s.agent_session.is_some() {
-                    let usage = s
-                        .agent_session
-                        .as_ref()
-                        .and_then(|sess| {
-                            live_sessions.insert(sess.session_id.clone());
-                            self.agent_usage.get(&sess.session_id)
-                        })
-                        .cloned();
-                    // Where the agent lives: the tab (its own name if set, else its
-                    // number) and — when that tab is split — which pane holds it, so
-                    // you can tell two agents in one tab apart. Click still jumps.
-                    let mut location = match &tab.name {
-                        Some(n) => n.clone(),
-                        None => format!("tab {}", ti + 1),
+                if let Some(pane) = self.panes.get(&id) {
+                    targets
+                        .entry(crate::mission::UsageKey::new(
+                            &session.agent,
+                            &session.session_id,
+                        ))
+                        .or_insert_with(|| pane.cwd.clone());
+                }
+            }
+        }
+        for session in &self.resumable {
+            let included = self.workspaces.iter().enumerate().any(|(wi, workspace)| {
+                (all || wi == self.active_ws)
+                    && crate::platform::same_path(&session.cwd, &workspace.cwd)
+            });
+            if included {
+                targets
+                    .entry(crate::mission::UsageKey::new(
+                        &session.agent,
+                        &session.session_id,
+                    ))
+                    .or_insert_with(|| session.cwd.clone());
+            }
+        }
+        targets
+    }
+
+    /// Build Mission Control rows from either the active workspace or every open
+    /// workspace. Dashboard tabs hold placeholder leaves without status entries,
+    /// so they contribute nothing. Resumable sessions are appended once and keep
+    /// their global index, making activation equally safe in both scopes.
+    pub fn build_mission_rows(&self) -> Vec<MissionRowView> {
+        let mut rows = Vec::new();
+        if self.workspaces.get(self.active_ws).is_none() {
+            return rows;
+        }
+        let all = self.mission_scope == MissionScope::All;
+        // Live agents first.
+        let mut live_sessions = std::collections::HashSet::new();
+        for (wi, workspace) in self.workspaces.iter().enumerate() {
+            if !all && wi != self.active_ws {
+                continue;
+            }
+            for (ti, tab) in workspace.tabs.iter().enumerate() {
+                let leaves = tab.layout.leaves();
+                for (pi, id) in leaves.iter().copied().enumerate() {
+                    let Some(s) = self.status.get(&id) else {
+                        continue;
                     };
-                    if leaves.len() > 1 {
-                        location.push_str(&format!(" · p{}/{}", pi + 1, leaves.len()));
+                    if self.manifests.is_agent(&s.agent) || s.agent_session.is_some() {
+                        let usage = s
+                            .agent_session
+                            .as_ref()
+                            .and_then(|sess| {
+                                let key =
+                                    crate::mission::UsageKey::new(&sess.agent, &sess.session_id);
+                                live_sessions.insert(key.clone());
+                                self.agent_usage.get(&key)
+                            })
+                            .cloned();
+                        // In the global scope, the workspace label leads the normal
+                        // tab/pane location so identical tab numbers stay distinct.
+                        let tab_name = match &tab.name {
+                            Some(n) => n.clone(),
+                            None => format!("t{}", ti + 1),
+                        };
+                        let mut location = if all {
+                            format!("{} · {tab_name}", workspace.name)
+                        } else {
+                            tab_name
+                        };
+                        if leaves.len() > 1 {
+                            location.push_str(&format!(" p{}/{}", pi + 1, leaves.len()));
+                        }
+                        if let Some(task) =
+                            self.orch.tasks.iter().find(|t| t.assignee == Some(id.0))
+                        {
+                            location.push_str(&format!(" · {}", task.id));
+                        }
+                        rows.push(MissionRowView {
+                            row: MissionRow::Live(id),
+                            agent: s.agent.clone(),
+                            state: s.state,
+                            resumable: false,
+                            location,
+                            usage,
+                            blocked_hint: s.blocked_hint.clone(),
+                        });
                     }
-                    // If this pane is an orch worker (docs/22), tag its task id, so
-                    // Mission Control links to the board (docs/54 MC-5).
-                    if let Some(task) = self.orch.tasks.iter().find(|t| t.assignee == Some(id.0)) {
-                        location.push_str(&format!(" · {}", task.id));
-                    }
-                    rows.push(MissionRowView {
-                        row: MissionRow::Live(id),
-                        agent: s.agent.clone(),
-                        state: s.state,
-                        resumable: false,
-                        location,
-                        usage,
-                        blocked_hint: s.blocked_hint.clone(),
-                    });
                 }
             }
         }
@@ -123,12 +222,16 @@ impl App {
             _ => 3,
         };
         rows.sort_by_key(|r| rank(r.state));
-        // Then the node's resumable on-disk sessions (docs/54 MC-4) — those whose
-        // cwd is this node's folder and that aren't already live above.
+        // Then resumable sessions belonging to an included workspace and not
+        // already represented by a live pane.
         for (idx, s) in self.resumable.iter().enumerate() {
-            if !crate::platform::same_path(&s.cwd, &node.cwd)
-                || live_sessions.contains(&s.session_id)
-            {
+            let workspace = self.workspaces.iter().enumerate().find(|(wi, workspace)| {
+                (all || *wi == self.active_ws) && crate::platform::same_path(&s.cwd, &workspace.cwd)
+            });
+            let Some((_, workspace)) = workspace else {
+                continue;
+            };
+            if live_sessions.contains(&crate::mission::UsageKey::new(&s.agent, &s.session_id)) {
                 continue;
             }
             rows.push(MissionRowView {
@@ -136,16 +239,25 @@ impl App {
                 agent: s.agent.clone(),
                 state: crate::ui::theme::State::Idle,
                 resumable: true,
-                location: "resumable".into(),
-                usage: self.agent_usage.get(&s.session_id).cloned(),
+                // STATE already says RESUME, so repeating "resumable" in the
+                // location wastes the most valuable horizontal table space.
+                location: if all {
+                    workspace.name.clone()
+                } else {
+                    "—".into()
+                },
+                usage: self
+                    .agent_usage
+                    .get(&crate::mission::UsageKey::new(&s.agent, &s.session_id))
+                    .cloned(),
                 blocked_hint: None,
             });
         }
         rows
     }
 
-    /// The click/`⏎` action for the row at `idx`: jump to a live agent's pane, or
-    /// resume a dead session (MC-4).
+    /// Keyboard activation for the row at `idx`: jump to a live agent's pane, or
+    /// resume a dead session (MC-4). Plain row clicks are intentionally inert.
     pub fn mission_activate(&mut self, idx: usize) {
         let Some(row) = self.mission_rows.get(idx).map(|r| r.row) else {
             return;
@@ -220,6 +332,13 @@ impl App {
         }
         let n = self.mission_rows.len();
         match key.code {
+            KeyCode::Tab | KeyCode::BackTab => {
+                let scope = match self.mission_scope {
+                    MissionScope::Workspace => MissionScope::All,
+                    MissionScope::All => MissionScope::Workspace,
+                };
+                self.set_mission_scope(scope);
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 if n > 0 {
                     self.mission_cursor = (self.mission_cursor + 1).min(n - 1);
@@ -248,6 +367,7 @@ impl App {
             KeyCode::Char('a') if self.mission_selected_pane().is_some() => {
                 self.mission_answer = Some(String::new());
             }
+            KeyCode::Char('r') => self.request_mission_usage_refresh(),
             KeyCode::Char('q') => self.close_mission_tab(),
             _ => {}
         }

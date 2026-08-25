@@ -149,6 +149,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     let orch_area = app.orch_area;
     let mission_scroll = app.mission_scroll;
     let mission_area = app.mission_area;
+    let mission_refresh_rect = app.mission_refresh_rect;
     let changelog_scroll = app.changelog_scroll;
     let file_tree_scroll = app.file_tree.scroll;
 
@@ -181,6 +182,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     let switcher_rects = std::mem::take(&mut app.switcher_rects);
     let switcher_scope_rects = std::mem::take(&mut app.switcher_scope_rects);
     let mission_rows = std::mem::take(&mut app.mission_rows);
+    let mission_scope_rects = std::mem::take(&mut app.mission_scope_rects);
     let bar_hits = std::mem::take(&mut app.bar.hits);
     let bar_overflow_hits = std::mem::take(&mut app.bar.overflow_hits);
     let bar_overflow = app.bar.overflow.clone();
@@ -271,6 +273,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     app.orch_area = orch_area;
     app.mission_scroll = mission_scroll;
     app.mission_area = mission_area;
+    app.mission_refresh_rect = mission_refresh_rect;
     app.changelog_scroll = changelog_scroll;
     app.file_tree.scroll = file_tree_scroll;
     app.pane_rects = pane_rects;
@@ -300,6 +303,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     app.switcher_rects = switcher_rects;
     app.switcher_scope_rects = switcher_scope_rects;
     app.mission_rows = mission_rows;
+    app.mission_scope_rects = mission_scope_rects;
     app.bar.hits = bar_hits;
     app.bar.overflow_hits = bar_overflow_hits;
     app.bar.overflow = bar_overflow;
@@ -594,22 +598,27 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         None
     } else if app.active_is_mission() {
         // Mission Control (docs/54): rows are precomputed from `App` first (so the
-        // render borrows nothing mutable), stashed for click/⏎ hit-testing, then
+        // render borrows nothing mutable), stashed for keyboard activation, then
         // drawn; the scroll offset is written back.
         app.mission_area = pane_area;
         let rows = app.build_mission_rows();
-        app.mission_scroll = mission::render(
+        let rendered = mission::render(
             f,
             pane_area,
             &rows,
             app.mission_scroll,
             app.mission_cursor,
+            app.mission_scope,
+            app.mission_usage_refreshing(),
             app.mission_burn,
             app.config.mission_budget,
             compact,
             cat,
             &t,
         );
+        app.mission_scroll = rendered.scroll;
+        app.mission_scope_rects = rendered.scope_rects;
+        app.mission_refresh_rect = rendered.refresh_rect;
         app.mission_rows = rows;
         None
     } else if let Some(g) = app.active_git_mut() {
