@@ -1684,10 +1684,8 @@ fn skill_cmd(rest: &[String]) -> Result<i32> {
             } else {
                 "disabled"
             };
-            println!(
-                "luvus\t{}\t{summary}",
-                crate::skill::bundled_release()
-            );
+            println!("bundled\t{}\tavailable", crate::skill::bundled_release());
+            println!("installations\t{summary}");
             for status in statuses {
                 println!(
                     "{}\t{}\t{}\t{}",
@@ -4179,6 +4177,9 @@ mod tests {
         assert!(!HELP_BUG.contains("https://luvus.dev/llms.txt"));
         assert!(readme.starts_with("# Luvus README for AI agents\n"));
         assert!(readme.contains("luvus uhp capabilities"));
+        assert!(readme.contains("luvus skill enable"));
+        assert!(readme.contains("User preferences live in `config.json`, not TOML"));
+        assert!(readme.contains("https://luvus.dev/llms.txt as the task router"));
         assert!(llms.starts_with("# Luvus knowledge map for language models\n"));
         assert!(llms.contains("https://luvus.dev/docs/reference/api/"));
     }

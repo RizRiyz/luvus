@@ -53,18 +53,47 @@ static INSTALL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 #[serde(rename_all = "lowercase")]
 pub enum SkillHost {
     Claude,
-    Codex,
+    /// The open `~/.agents/skills` location shared by Codex, Copilot, Gemini,
+    /// Pi, Cursor, Amp, Droid, and fx.
+    Shared,
     Opencode,
+    Kimi,
+    Grok,
+    Qwen,
+    Kiro,
 }
 
 impl SkillHost {
-    const ALL: [Self; 3] = [Self::Claude, Self::Codex, Self::Opencode];
+    const ALL: [Self; 7] = [
+        Self::Shared,
+        Self::Claude,
+        Self::Opencode,
+        Self::Kimi,
+        Self::Grok,
+        Self::Qwen,
+        Self::Kiro,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
-            Self::Codex => "codex",
+            Self::Shared => "shared",
             Self::Opencode => "opencode",
+            Self::Kimi => "kimi",
+            Self::Grok => "grok",
+            Self::Qwen => "qwen",
+            Self::Kiro => "kiro",
+        }
+    }
+
+    /// Preserve the schema-1 `codex` ownership key for the shared destination.
+    /// Older Luvus releases already managed the same `~/.agents/skills` path,
+    /// so changing the key would orphan their ownership record.
+    fn state_key(self) -> &'static str {
+        if self == Self::Shared {
+            "codex"
+        } else {
+            self.as_str()
         }
     }
 }
@@ -151,7 +180,7 @@ impl DestinationState {
             Self::Modified => "modified",
             Self::ExternalCurrent => "external-current",
             Self::External => "external",
-            Self::Available => "available",
+            Self::Available => "not-installed",
             Self::NotDetected => "not-detected",
         }
     }
@@ -220,7 +249,7 @@ fn bundled_files(host: SkillHost) -> Vec<BundledFile> {
             content: BUNDLED_UHP_CONTROL,
         },
     ];
-    if host == SkillHost::Codex {
+    if host == SkillHost::Shared {
         files.push(BundledFile {
             path: "agents/openai.yaml",
             content: BUNDLED_OPENAI_METADATA,
@@ -340,13 +369,17 @@ fn atomic_replace_file(tmp: &Path, path: &Path) -> Result<()> {
 fn target_dir_at(host: SkillHost, home: &Path, xdg_config: Option<&Path>) -> PathBuf {
     match host {
         SkillHost::Claude => home.join(".claude").join("skills").join("luvus"),
-        SkillHost::Codex => home.join(".agents").join("skills").join("luvus"),
+        SkillHost::Shared => home.join(".agents").join("skills").join("luvus"),
         SkillHost::Opencode => xdg_config
             .map(Path::to_path_buf)
             .unwrap_or_else(|| home.join(".config"))
             .join("opencode")
             .join("skills")
             .join("luvus"),
+        SkillHost::Kimi => home.join(".kimi-code").join("skills").join("luvus"),
+        SkillHost::Grok => home.join(".grok").join("skills").join("luvus"),
+        SkillHost::Qwen => home.join(".qwen").join("skills").join("luvus"),
+        SkillHost::Kiro => home.join(".kiro").join("skills").join("luvus"),
     }
 }
 
@@ -354,6 +387,11 @@ fn target_dir(host: SkillHost) -> Result<PathBuf> {
     let home = crate::platform::home_dir().ok_or_else(|| anyhow!("home directory not found"))?;
     if host == SkillHost::Claude {
         if let Some(config) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+            return Ok(PathBuf::from(config).join("skills").join("luvus"));
+        }
+    }
+    if host == SkillHost::Kimi {
+        if let Some(config) = std::env::var_os("KIMI_CODE_HOME") {
             return Ok(PathBuf::from(config).join("skills").join("luvus"));
         }
     }
@@ -467,36 +505,90 @@ fn command_on_path(name: &str) -> bool {
     })
 }
 
+fn any_command_on_path(names: &[&str]) -> bool {
+    names.iter().any(|name| command_on_path(name))
+}
+
+fn any_dir(paths: &[PathBuf]) -> bool {
+    paths.iter().any(|path| path.is_dir())
+}
+
+fn host_commands(host: SkillHost) -> &'static [&'static str] {
+    match host {
+        SkillHost::Claude => &["claude"],
+        SkillHost::Shared => &[
+            "codex",
+            "copilot",
+            "gemini",
+            "pi-coding-agent",
+            "cursor-agent",
+            "amp",
+            "droid",
+            "fx",
+        ],
+        SkillHost::Opencode => &["opencode"],
+        SkillHost::Kimi => &["kimi"],
+        SkillHost::Grok => &["grok"],
+        SkillHost::Qwen => &["qwen"],
+        SkillHost::Kiro => &["kiro", "kiro-cli"],
+    }
+}
+
+fn host_config_dirs(
+    host: SkillHost,
+    home: &Path,
+    xdg_config: Option<&Path>,
+    claude_config: Option<&Path>,
+    codex_home: Option<&Path>,
+    kimi_home: Option<&Path>,
+) -> Vec<PathBuf> {
+    let xdg = xdg_config
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| home.join(".config"));
+    match host {
+        SkillHost::Claude => vec![claude_config
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| home.join(".claude"))],
+        SkillHost::Shared => vec![
+            codex_home
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| home.join(".codex")),
+            home.join(".agents"),
+            home.join(".copilot"),
+            home.join(".gemini"),
+            home.join(".pi").join("agent"),
+            home.join(".cursor"),
+            xdg.join("amp"),
+            home.join(".factory"),
+            home.join(".fx"),
+        ],
+        SkillHost::Opencode => vec![xdg.join("opencode")],
+        SkillHost::Kimi => vec![kimi_home
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| home.join(".kimi-code"))],
+        SkillHost::Grok => vec![home.join(".grok")],
+        SkillHost::Qwen => vec![home.join(".qwen")],
+        SkillHost::Kiro => vec![home.join(".kiro")],
+    }
+}
+
 fn host_detected(host: SkillHost, state: &SkillState, target: &Path) -> Result<bool> {
-    if state.agents.contains_key(host.as_str()) || target.exists() {
+    if state.agents.contains_key(host.state_key()) || target.exists() {
         return Ok(true);
     }
     let home = crate::platform::home_dir().ok_or_else(|| anyhow!("home directory not found"))?;
-    Ok(match host {
-        SkillHost::Claude => {
-            std::env::var_os("CLAUDE_CONFIG_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".claude"))
-                .is_dir()
-                || command_on_path("claude")
-        }
-        SkillHost::Codex => {
-            std::env::var_os("CODEX_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".codex"))
-                .is_dir()
-                || home.join(".agents").is_dir()
-                || command_on_path("codex")
-        }
-        SkillHost::Opencode => {
-            std::env::var_os("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".config"))
-                .join("opencode")
-                .is_dir()
-                || command_on_path("opencode")
-        }
-    })
+    let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+    let claude = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
+    let codex = std::env::var_os("CODEX_HOME").map(PathBuf::from);
+    let kimi = std::env::var_os("KIMI_CODE_HOME").map(PathBuf::from);
+    Ok(any_dir(&host_config_dirs(
+        host,
+        &home,
+        xdg.as_deref(),
+        claude.as_deref(),
+        codex.as_deref(),
+        kimi.as_deref(),
+    )) || any_command_on_path(host_commands(host)))
 }
 
 fn stage_bundle(target: &Path, host: SkillHost) -> Result<(PathBuf, Vec<ManagedFile>)> {
@@ -553,7 +645,7 @@ fn stage_bundle(target: &Path, host: SkillHost) -> Result<(PathBuf, Vec<ManagedF
 }
 
 fn install_one_at(state: &mut SkillState, host: SkillHost, target: PathBuf) -> Result<SkillChange> {
-    let key = host.as_str();
+    let key = host.state_key();
     let previous = state.agents.get(key).cloned();
     let previous_integrity = previous.as_ref().map(integrity).transpose()?;
 
@@ -720,7 +812,7 @@ pub fn enable() -> Result<Vec<SkillChange>> {
     }
     if selected.is_empty() {
         bail!(
-            "no supported skill host detected; install Claude Code, Codex, or OpenCode, then run `luvus skill enable`"
+            "no native Agent Skills host detected; use `luvus skill show` for this session or install a supported skill-capable agent, then run `luvus skill enable`"
         );
     }
 
@@ -737,7 +829,7 @@ fn disable_one_at(
     host: SkillHost,
     external_target: PathBuf,
 ) -> Result<SkillChange> {
-    let Some(record) = state.agents.get(host.as_str()).cloned() else {
+    let Some(record) = state.agents.get(host.state_key()).cloned() else {
         return Ok(SkillChange {
             host,
             action: if external_target.exists() {
@@ -769,12 +861,12 @@ fn disable_one_at(
         fs::rename(&record.target, &backup)
             .with_context(|| format!("staging removal of {}", record.target.display()))?;
     }
-    state.agents.remove(host.as_str());
+    state.agents.remove(host.state_key());
     if let Err(err) = save_state(state) {
         if backup.exists() {
             let _ = fs::rename(&backup, &record.target);
         }
-        state.agents.insert(host.as_str().to_string(), record);
+        state.agents.insert(host.state_key().to_string(), record);
         return Err(err).context("saving disabled skill state; removal rolled back");
     }
     if backup.exists() {
@@ -807,7 +899,7 @@ pub fn status() -> Result<Vec<DestinationStatus>> {
         .map(|host| {
             let target = target_dir(host)?;
             let detected = host_detected(host, &state, &target)?;
-            let record = state.agents.get(host.as_str());
+            let record = state.agents.get(host.state_key());
             let (state_value, managed_release) = match record {
                 Some(record) => {
                     let integrity = integrity(record)?;
@@ -992,15 +1084,59 @@ mod tests {
     fn native_targets_are_internal_adapters_not_agents_md() {
         let home = Path::new("/home/tester");
         assert_eq!(
-            target_dir_at(SkillHost::Codex, home, None),
+            target_dir_at(SkillHost::Shared, home, None),
             PathBuf::from("/home/tester/.agents/skills/luvus")
         );
-        assert!(!target_dir_at(SkillHost::Codex, home, None).ends_with("AGENTS.md"));
+        assert!(!target_dir_at(SkillHost::Shared, home, None).ends_with("AGENTS.md"));
         assert!(!target_dir_at(SkillHost::Opencode, home, None).ends_with("AGENTS.md"));
         assert_eq!(
             target_dir_at(SkillHost::Opencode, home, Some(Path::new("/xdg/config"))),
             PathBuf::from("/xdg/config/opencode/skills/luvus")
         );
+        assert_eq!(
+            target_dir_at(SkillHost::Kimi, home, None),
+            PathBuf::from("/home/tester/.kimi-code/skills/luvus")
+        );
+        assert_eq!(
+            target_dir_at(SkillHost::Grok, home, None),
+            PathBuf::from("/home/tester/.grok/skills/luvus")
+        );
+        assert_eq!(
+            target_dir_at(SkillHost::Qwen, home, None),
+            PathBuf::from("/home/tester/.qwen/skills/luvus")
+        );
+        assert_eq!(
+            target_dir_at(SkillHost::Kiro, home, None),
+            PathBuf::from("/home/tester/.kiro/skills/luvus")
+        );
+        assert_eq!(SkillHost::Shared.state_key(), "codex");
+    }
+
+    #[test]
+    fn every_native_skill_host_has_detection_markers() {
+        for host in SkillHost::ALL {
+            assert!(!host_commands(host).is_empty());
+            assert!(
+                !host_config_dirs(host, Path::new("/home/tester"), None, None, None, None)
+                    .is_empty()
+            );
+        }
+        let shared = host_commands(SkillHost::Shared);
+        for agent in [
+            "codex",
+            "copilot",
+            "gemini",
+            "pi-coding-agent",
+            "cursor-agent",
+            "amp",
+            "droid",
+            "fx",
+        ] {
+            assert!(
+                shared.contains(&agent),
+                "missing shared host detection for {agent}"
+            );
+        }
     }
 
     #[test]
@@ -1009,10 +1145,10 @@ mod tests {
         let target = crate::persist::skills_dir().join("agent-home/skills/luvus");
         let mut state = SkillState::default();
 
-        let installed = install_one_at(&mut state, SkillHost::Codex, target.clone()).unwrap();
+        let installed = install_one_at(&mut state, SkillHost::Shared, target.clone()).unwrap();
         assert_eq!(installed.action, ChangeAction::Installed);
         assert_eq!(
-            install_one_at(&mut state, SkillHost::Codex, target.clone())
+            install_one_at(&mut state, SkillHost::Shared, target.clone())
                 .unwrap()
                 .action,
             ChangeAction::Current
@@ -1020,7 +1156,7 @@ mod tests {
 
         state.agents.get_mut("codex").unwrap().release = "0.1.0".into();
         assert_eq!(
-            install_one_at(&mut state, SkillHost::Codex, target.clone())
+            install_one_at(&mut state, SkillHost::Shared, target.clone())
                 .unwrap()
                 .action,
             ChangeAction::Refreshed
@@ -1028,13 +1164,13 @@ mod tests {
 
         fs::write(target.join("SKILL.md"), "user changed this skill").unwrap();
         assert_eq!(
-            install_one_at(&mut state, SkillHost::Codex, target.clone())
+            install_one_at(&mut state, SkillHost::Shared, target.clone())
                 .unwrap()
                 .action,
             ChangeAction::PreservedModified
         );
         assert_eq!(
-            disable_one_at(&mut state, SkillHost::Codex, target.clone())
+            disable_one_at(&mut state, SkillHost::Shared, target.clone())
                 .unwrap()
                 .action,
             ChangeAction::PreservedModified
@@ -1054,9 +1190,9 @@ mod tests {
         let blocked_target = root.join("blocked/luvus");
         let mut state = SkillState::default();
 
-        install_one_at(&mut state, SkillHost::Codex, old_target.clone()).unwrap();
+        install_one_at(&mut state, SkillHost::Shared, old_target.clone()).unwrap();
         assert_eq!(
-            install_one_at(&mut state, SkillHost::Codex, new_target.clone())
+            install_one_at(&mut state, SkillHost::Shared, new_target.clone())
                 .unwrap()
                 .action,
             ChangeAction::Refreshed
@@ -1067,7 +1203,7 @@ mod tests {
         fs::create_dir_all(&blocked_target).unwrap();
         fs::write(blocked_target.join("SKILL.md"), "external replacement").unwrap();
         assert_eq!(
-            install_one_at(&mut state, SkillHost::Codex, blocked_target.clone())
+            install_one_at(&mut state, SkillHost::Shared, blocked_target.clone())
                 .unwrap()
                 .action,
             ChangeAction::External
@@ -1081,7 +1217,7 @@ mod tests {
         let later_target = root.join("later/luvus");
         fs::write(new_target.join("SKILL.md"), "managed copy was edited").unwrap();
         assert_eq!(
-            install_one_at(&mut state, SkillHost::Codex, later_target.clone())
+            install_one_at(&mut state, SkillHost::Shared, later_target.clone())
                 .unwrap()
                 .action,
             ChangeAction::PreservedModified

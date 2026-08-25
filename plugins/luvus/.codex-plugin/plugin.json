@@ -1,6 +1,6 @@
 {
   "name": "luvus",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Control Luvus agents, workspaces, and UHP automation from Codex.",
   "author": {
     "name": "Riz",

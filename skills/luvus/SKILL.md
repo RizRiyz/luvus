@@ -1,6 +1,6 @@
 ---
 name: luvus
-description: "Control Luvus through its local CLI and UHP. Use only for a line beginning with `=target message`, an explicit request naming Luvus, a request to delegate to a named live Luvus agent or pane, or an explicit Luvus operation involving sessions, workspaces, tabs, panes, agents, files, Git, DIFF, worktrees, tasks, leases, modules, themes, Luvus Bar, UI, integrations, or Luvus UHP. Do not use for ordinary coding, file edits, Git operations, tests, task planning, generic agent work, or parallelization unless the user explicitly connects the request to Luvus. Being inside Luvus does not trigger this skill by itself. Inside Luvus use the inherited session; outside use the installed production Luvus command and configured session."
+description: "Control Luvus through its local CLI and UHP. Use only for a line beginning with `=target message`, an explicit request naming Luvus, a request to delegate to a named live Luvus agent or pane, or an explicit Luvus operation involving sessions, workspaces, tabs, panes, agents, files, Git, DIFF, worktrees, tasks, leases, modules, themes, Luvus Bar, configuration, UI, integrations, or Luvus UHP. Do not use for ordinary coding, file edits, Git operations, tests, task planning, generic agent work, or parallelization unless the user explicitly connects the request to Luvus. Being inside Luvus does not trigger this skill by itself. Inside Luvus use the inherited session; outside use the installed production Luvus command and configured session."
 ---
 
 # Luvus
@@ -366,6 +366,21 @@ surface:
   user explicitly requests that lifecycle integration.
 - Subscribe to events only for a live monitoring request. Stop when its
   condition is satisfied and never retain an unbounded stream.
+
+## Learn configuration and unfamiliar surfaces
+
+Use `luvus help <topic>` for the installed command grammar and
+`luvus uhp capabilities` plus `luvus uhp schema` for a selected server's live
+automation contract. For configuration, installation, concepts, or a surface
+not covered here, read https://luvus.dev/agent-readme.md first and use
+https://luvus.dev/llms.txt to open only the relevant documentation page.
+
+Luvus preferences live in `config.json` under `~/.luvus/`, or under the
+explicit `LUVUS_HOME`. Debug builds use `~/.luvus-dev/`. Prefer the Settings
+screen for validated live changes, preserve unknown fields during a manual
+edit, and never substitute production, development, or named-session paths.
+The installed binary and selected running server remain authoritative when the
+website describes a newer release.
 
 ## Safety
 

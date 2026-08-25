@@ -32,6 +32,70 @@ luvus uhp snapshot
 The website documents the current release. A development build or older server
 can differ. Report the version and follow its live help for exact behavior.
 
+If the `luvus` command is unavailable, do not imply that Luvus or its skill is
+installed. Tell the human that the client is required and point them to the
+supported installation page at https://luvus.dev/docs/getting-started/installation/.
+Offer a platform command only after this specific missing-client failure:
+
+```sh
+# macOS or Linux
+curl -fsSL https://luvus.dev/install.sh | sh
+
+# Homebrew
+brew install RizRiyz/luvus/luvus
+```
+
+On Windows, the supported PowerShell installer is:
+
+```powershell
+irm https://luvus.dev/install.ps1 | iex
+```
+
+Do not show installation guidance preemptively or for an unrelated command,
+server, session, authentication, or permission failure.
+
+## Load or install the Luvus skill
+
+The Luvus binary contains a release-matched Agent Skill. There are three ways
+for an agent to receive it:
+
+1. For one conversation, read the canonical skill directly from the installed
+   binary:
+
+   ```sh
+   luvus skill show
+   ```
+
+2. For persistent discovery in installed coding agents, ask the human before
+   writing to agent configuration, then run:
+
+   ```sh
+   luvus skill enable
+   luvus skill status
+   ```
+
+3. In Codex, the official Luvus marketplace plugin already includes the skill.
+   Do not install a second copy merely because `luvus skill status` cannot see
+   Codex's private plugin cache.
+
+`luvus skill enable` makes no network request. It installs the same bundled
+skill into detected native skill locations without overwriting external or
+modified content. The shared `~/.agents/skills/luvus/` copy serves Codex,
+GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, and fx. Dedicated
+adapters serve Claude Code, OpenCode, Kimi Code CLI, Grok Build, Qwen Code,
+and Kiro. Aider has no native Agent Skills installation surface, so use
+`luvus skill show` when an Aider conversation needs the instructions.
+
+Start a new agent conversation after installation, or use that agent's skill
+reload command when it provides one. To remove unchanged Luvus-managed copies:
+
+```sh
+luvus skill disable
+```
+
+Disabling the skill does not stop Luvus, change a session, or remove a plugin
+or externally managed copy.
+
 ## What Luvus is
 
 Luvus is mission control for AI coding agents. It combines persistent terminal
@@ -75,6 +139,32 @@ remote, and default sessions isolated. Do not replace the endpoint with a
 hardcoded path. Do not launch another interactive Luvus client inside a pane
 unless the human explicitly requests it. Use CLI commands to control the
 inherited session.
+
+## How Luvus configuration works
+
+The default state root is `~/.luvus/`. Debug builds use `~/.luvus-dev/`, and
+`LUVUS_HOME` selects an explicit isolated root. Never substitute one root for
+another or copy state between them unless the human requests a migration.
+
+User preferences live in `config.json`, not TOML. It contains the theme,
+language, shell, layout, notifications, keybindings, sidebars, and Luvus Bar
+placement. Prefer the in-app Settings screen because it validates changes,
+applies supported settings live, and writes the file. Hand edits are loaded on
+restart. Preserve unknown keys and do not rewrite the file just to change one
+setting.
+
+The default session stores runtime files directly under the state root. Named
+sessions keep their server-specific runtime files under
+`~/.luvus/sessions/<name>/`, while preferences, skill ownership, manifests,
+themes, modules, worktrees, and reviews remain shared. `session.json` is a
+saved restoration snapshot, not proof that its processes are currently alive.
+Do not edit sockets, locks, or a live session snapshot by hand.
+
+Every managed pane receives `LUVUS_ENV`, `LUVUS_PANE_ID`, and
+`LUVUS_SOCKET_PATH`. `LUVUS_SHELL` overrides the configured shell for new
+panes. Consult https://luvus.dev/docs/reference/configuration/ before changing
+paths, environment variables, scrollback limits, keybindings, DIFF behavior,
+or bar placement.
 
 ## Choose the right interface
 
@@ -234,6 +324,20 @@ have consumed it; use `luvus doctor` and the keybinding reference.
 - Give commands appropriate to the user's OS and installation.
 - Prefer one safe path over speculative alternatives.
 - Say when facts were not verified against the running server.
+
+## Learn the rest of Luvus
+
+Do not expand this guide into a guessed product manual. Use
+https://luvus.dev/llms.txt as the task router, then read only the relevant
+documentation page. It maps installation, concepts, layout, files, scrollback,
+agents, Git, DIFF, worktrees, orchestration, modules, themes, Luvus Bar,
+remote sessions, security, CLI, UHP, and terminal backend behavior.
+
+For an exact command, start with `luvus help <topic>`. For automation, start
+with `luvus uhp capabilities` and `luvus uhp schema`. For product concepts or a
+human workflow, use https://luvus.dev/docs/. The installed binary and selected
+running server remain authoritative when published documentation describes a
+newer release.
 
 ## Canonical resources
 
