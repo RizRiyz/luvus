@@ -553,18 +553,25 @@ fn install_one_at(state: &mut SkillState, host: SkillHost, target: PathBuf) -> R
     let previous_integrity = previous.as_ref().map(integrity).transpose()?;
 
     if let Some(record) = previous.as_ref() {
-        if record.target != target || previous_integrity == Some(Integrity::Modified) {
+        if previous_integrity == Some(Integrity::Modified) {
             return Ok(SkillChange {
                 host,
                 target: record.target.clone(),
                 action: ChangeAction::PreservedModified,
             });
         }
-        if record_matches_bundle(record, host)? {
+        if record.target == target && record_matches_bundle(record, host)? {
             return Ok(SkillChange {
                 host,
                 target,
                 action: ChangeAction::Current,
+            });
+        }
+        if record.target != target && target.exists() {
+            return Ok(SkillChange {
+                host,
+                target,
+                action: ChangeAction::External,
             });
         }
     } else if target.exists() {
@@ -576,17 +583,66 @@ fn install_one_at(state: &mut SkillState, host: SkillHost, target: PathBuf) -> R
     }
 
     let (stage, files) = stage_bundle(&target, host)?;
-    let parent = target.parent().expect("target parent checked");
-    let sequence = INSTALL_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let backup = parent.join(format!(
-        ".luvus-skill-backup-{host}-{}-{sequence}",
-        std::process::id()
-    ));
+    // Staging can take long enough for another process to replace a missing
+    // destination. Recheck ownership before moving or deleting anything.
+    let managed_source = match previous.as_ref() {
+        Some(record) => match integrity(record)? {
+            Integrity::Modified => {
+                let _ = fs::remove_dir_all(&stage);
+                return Ok(SkillChange {
+                    host,
+                    target: record.target.clone(),
+                    action: ChangeAction::PreservedModified,
+                });
+            }
+            Integrity::Current => Some(record.target.clone()),
+            Integrity::Missing => None,
+        },
+        None => None,
+    };
+    if managed_source.as_ref() != Some(&target) && target.exists() {
+        let _ = fs::remove_dir_all(&stage);
+        return Ok(SkillChange {
+            host,
+            target,
+            action: ChangeAction::External,
+        });
+    }
+
+    let backup = managed_source.as_ref().map(|source| {
+        let sequence = INSTALL_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        source
+            .parent()
+            .expect("managed target parent checked")
+            .join(format!(
+                ".luvus-skill-backup-{host}-{}-{sequence}",
+                std::process::id()
+            ))
+    });
+    if let (Some(source), Some(backup)) = (managed_source.as_ref(), backup.as_ref()) {
+        if let Err(err) = fs::rename(source, backup) {
+            let _ = fs::remove_dir_all(&stage);
+            return Err(err).with_context(|| format!("backing up {}", source.display()));
+        }
+    }
     if target.exists() {
-        fs::rename(&target, &backup).with_context(|| format!("backing up {}", target.display()))?;
+        let _ = fs::remove_dir_all(&stage);
+        if let (Some(source), Some(backup)) = (managed_source.as_ref(), backup.as_ref()) {
+            if !source.exists() {
+                let _ = fs::rename(backup, source);
+            }
+        }
+        bail!(
+            "{} appeared while installing the {host} skill; existing content was preserved",
+            target.display()
+        );
     }
     if let Err(err) = fs::rename(&stage, &target) {
-        let _ = fs::rename(&backup, &target);
+        if let (Some(source), Some(backup)) = (managed_source.as_ref(), backup.as_ref()) {
+            if !source.exists() {
+                let _ = fs::rename(backup, source);
+            }
+        }
         let _ = fs::remove_dir_all(&stage);
         return Err(err).with_context(|| format!("installing {host} skill adapter"));
     }
@@ -597,11 +653,15 @@ fn install_one_at(state: &mut SkillState, host: SkillHost, target: PathBuf) -> R
         target: target.clone(),
         files,
     };
-    state.agents.insert(key.to_string(), installed);
+    state.agents.insert(key.to_string(), installed.clone());
     if let Err(err) = save_state(state) {
-        let _ = fs::remove_dir_all(&target);
-        if backup.exists() {
-            let _ = fs::rename(&backup, &target);
+        if matches!(integrity(&installed), Ok(Integrity::Current)) {
+            let _ = fs::remove_dir_all(&target);
+        }
+        if let (Some(source), Some(backup)) = (managed_source.as_ref(), backup.as_ref()) {
+            if !source.exists() {
+                let _ = fs::rename(backup, source);
+            }
         }
         match previous {
             Some(record) => {
@@ -613,8 +673,20 @@ fn install_one_at(state: &mut SkillState, host: SkillHost, target: PathBuf) -> R
         }
         return Err(err).context("saving skill ownership; installation rolled back");
     }
-    if backup.exists() {
-        let _ = fs::remove_dir_all(&backup);
+    if let (Some(record), Some(backup)) = (previous.as_ref(), backup.as_ref()) {
+        if backup.exists() {
+            let mut backed_up_record = record.clone();
+            backed_up_record.target = backup.clone();
+            if integrity(&backed_up_record)? == Integrity::Current {
+                fs::remove_dir_all(backup)
+                    .with_context(|| format!("removing managed backup {}", backup.display()))?;
+            } else {
+                bail!(
+                    "managed backup changed during installation and was preserved at {}",
+                    backup.display()
+                );
+            }
+        }
     }
 
     let action = match previous_integrity {
@@ -961,6 +1033,77 @@ mod tests {
         assert_eq!(
             fs::read_to_string(target.join("SKILL.md")).unwrap(),
             "user changed this skill"
+        );
+    }
+
+    #[test]
+    fn changed_host_path_moves_only_an_unmodified_managed_skill() {
+        let _env = crate::persist::test_env("skill-host-path-change");
+        let root = crate::persist::skills_dir().join("host-path-change");
+        let old_target = root.join("old/luvus");
+        let new_target = root.join("new/luvus");
+        let blocked_target = root.join("blocked/luvus");
+        let mut state = SkillState::default();
+
+        install_one_at(&mut state, SkillHost::Codex, old_target.clone()).unwrap();
+        assert_eq!(
+            install_one_at(&mut state, SkillHost::Codex, new_target.clone())
+                .unwrap()
+                .action,
+            ChangeAction::Refreshed
+        );
+        assert!(!old_target.exists());
+        assert_eq!(state.agents["codex"].target, new_target);
+
+        fs::create_dir_all(&blocked_target).unwrap();
+        fs::write(blocked_target.join("SKILL.md"), "external replacement").unwrap();
+        assert_eq!(
+            install_one_at(&mut state, SkillHost::Codex, blocked_target.clone())
+                .unwrap()
+                .action,
+            ChangeAction::External
+        );
+        assert!(new_target.exists());
+        assert_eq!(
+            fs::read_to_string(blocked_target.join("SKILL.md")).unwrap(),
+            "external replacement"
+        );
+
+        let later_target = root.join("later/luvus");
+        fs::write(new_target.join("SKILL.md"), "managed copy was edited").unwrap();
+        assert_eq!(
+            install_one_at(&mut state, SkillHost::Codex, later_target.clone())
+                .unwrap()
+                .action,
+            ChangeAction::PreservedModified
+        );
+        assert!(!later_target.exists());
+        assert_eq!(
+            fs::read_to_string(new_target.join("SKILL.md")).unwrap(),
+            "managed copy was edited"
+        );
+    }
+
+    #[test]
+    fn missing_managed_target_never_overwrites_replacement_content() {
+        let _env = crate::persist::test_env("skill-missing-replacement");
+        let target = crate::persist::skills_dir().join("missing-replacement/luvus");
+        let mut state = SkillState::default();
+
+        install_one_at(&mut state, SkillHost::Claude, target.clone()).unwrap();
+        fs::remove_dir_all(&target).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("SKILL.md"), "replacement content").unwrap();
+
+        assert_eq!(
+            install_one_at(&mut state, SkillHost::Claude, target.clone())
+                .unwrap()
+                .action,
+            ChangeAction::PreservedModified
+        );
+        assert_eq!(
+            fs::read_to_string(target.join("SKILL.md")).unwrap(),
+            "replacement content"
         );
     }
 

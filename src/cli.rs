@@ -73,7 +73,7 @@ Commands:
   session      List, attach, stop, and delete server sessions
   server       Inspect and manage the selected background server
   integration  Manage agent session-resume integrations
-  skill        Explicitly enable, inspect, update, or remove agent skills
+  skill        Enable, inspect, show, or remove the bundled agent skill
   wait         Wait for pane output or an agent state
   search       Search across pane scrollback
   events       Stream live status changes
