@@ -1849,6 +1849,7 @@ mod tests {
 
     #[test]
     fn git_tab_opens_fetches_and_persists_safely() {
+        let _env = crate::persist::test_env("git-tab-opens-fetches-and-persists");
         // A temp git repo with two branches + one commit.
         let repo = std::env::temp_dir().join(format!("luvus-gittab-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&repo);
