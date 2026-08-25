@@ -532,8 +532,8 @@ fn normalize_help_topic(topic: &str) -> Option<&str> {
 
 const HELP_BUG: &str = r#"
 \   /
- \_/
-(o_o)
+ \_/    If you are an AI, read this:
+(o_o)   https://luvus.dev/agent-readme.md
 /|_|\
 "#;
 
@@ -4165,6 +4165,22 @@ mod tests {
             "website/…/reference/cli.mdx has drifted from `luvus help all` — \
              regenerate the page's txt block from DETAILED_USAGE plus HELP_BUG"
         );
+    }
+
+    #[test]
+    fn agent_docs_are_published_and_linked_from_help() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let readme = std::fs::read_to_string(root.join("website/public/agent-readme.md"));
+        let llms = std::fs::read_to_string(root.join("website/public/llms.txt"));
+        let (Ok(readme), Ok(llms)) = (readme, llms) else {
+            return; // published crate / partial checkout
+        };
+        assert!(HELP_BUG.contains("https://luvus.dev/agent-readme.md"));
+        assert!(!HELP_BUG.contains("https://luvus.dev/llms.txt"));
+        assert!(readme.starts_with("# Luvus README for AI agents\n"));
+        assert!(readme.contains("luvus uhp capabilities"));
+        assert!(llms.starts_with("# Luvus knowledge map for language models\n"));
+        assert!(llms.contains("https://luvus.dev/docs/reference/api/"));
     }
 
     #[test]

@@ -1,0 +1,118 @@
+# Luvus knowledge map for language models
+
+Luvus is mission control for AI coding agents. This index routes an AI to the
+smallest authoritative source for a task. It is not a substitute for the linked
+documentation and not permission to control a running session.
+
+Canonical index: https://luvus.dev/llms.txt
+Agent operating guide: https://luvus.dev/agent-readme.md
+Documentation: https://luvus.dev/docs/
+Source: https://github.com/RizRiyz/luvus
+
+## Reading contract
+
+1. Read https://luvus.dev/agent-readme.md before operating Luvus for a human.
+2. Open only the pages needed for the current task.
+3. Use `luvus help all` as the command authority for the installed binary.
+4. Use `luvus uhp capabilities` and `luvus uhp schema` as the automation
+   authority for the selected running server.
+5. If website and binary differ, report the versions and follow the binary for
+   that installation.
+
+## Start and understand
+
+- Quickstart: https://luvus.dev/docs/
+- Installation and updates: https://luvus.dev/docs/getting-started/installation/
+- First session: https://luvus.dev/docs/getting-started/first-session/
+- Core concepts: https://luvus.dev/docs/getting-started/concepts/
+- Architecture: https://luvus.dev/docs/explanation/architecture/
+
+Use these for product identity, server/client ownership, persistence, sessions,
+workspaces, tabs, panes, installation, migration, and first-run behavior.
+
+## Operate the terminal workspace
+
+- Layout: https://luvus.dev/docs/guides/layout/
+- Files: https://luvus.dev/docs/guides/files/
+- Fuzzy finder: https://luvus.dev/docs/guides/search/
+- Scrollback and copy: https://luvus.dev/docs/guides/scrollback/
+- Keybindings: https://luvus.dev/docs/reference/keybindings/
+- Configuration: https://luvus.dev/docs/reference/configuration/
+
+Use these for pane and tab operations, file targets, retained output, mouse and
+keyboard behavior, state paths, environment variables, and settings.
+
+## Work with agents
+
+- Agent behavior: https://luvus.dev/docs/guides/agents/
+- Supported agents: https://luvus.dev/docs/reference/agents/
+- Agent messaging: https://luvus.dev/docs/guides/agent-messaging/
+- Codex plugin: https://luvus.dev/docs/guides/codex-plugin/
+- Orchestration: https://luvus.dev/docs/guides/orchestration/
+- Worktrees: https://luvus.dev/docs/guides/worktrees/
+
+Use these for detection, state, usage, hooks, resume, fork, custom manifests,
+atomic prompts, waits, tasks, dependencies, leases, workers, gates, and merges.
+
+## Review projects
+
+- Git dashboard: https://luvus.dev/docs/guides/git/
+- DIFF review: https://luvus.dev/docs/guides/diff/
+
+Use these for repository status, branches, commits, pull requests, issues,
+semantic diff layers, local notes, agent handoff, and review settings.
+
+## Automate and build harnesses
+
+- Scripting: https://luvus.dev/docs/guides/scripting/
+- CLI reference: https://luvus.dev/docs/reference/cli/
+- UHP guide: https://luvus.dev/docs/guides/uhp/
+- UHP contract: https://luvus.dev/docs/reference/uhp/
+- UHP methods: https://luvus.dev/docs/reference/api/
+- Terminal backend: https://luvus.dev/docs/reference/terminal-backend/
+
+The running server is the machine-contract source of truth:
+
+```sh
+luvus uhp capabilities
+luvus uhp schema
+luvus uhp snapshot
+```
+
+Discover before calling. Validate requests and responses. Reconcile state before
+retrying uncertain mutations. Use the terminal backend reference for stable PTY
+identity, snapshots, ANSI observation, and control leases.
+
+## Extend Luvus
+
+- Install and use modules: https://luvus.dev/docs/extend/using-modules/
+- Write modules: https://luvus.dev/docs/extend/writing-modules/
+- Luvus Bar: https://luvus.dev/docs/guides/bar/
+- Settings and theming: https://luvus.dev/docs/guides/settings/
+- Community themes: https://luvus.dev/docs/guides/themes/
+
+Use these for the module trust model, manifests, actions, panes, docks, events,
+settings, logs, bar widgets, theme validation, and community packages.
+
+## Connect, secure, and diagnose
+
+- Remote sessions: https://luvus.dev/docs/guides/remote/
+- Security model: https://luvus.dev/docs/explanation/security/
+- Troubleshooting: https://luvus.dev/docs/faq/
+- Vulnerability reports: https://github.com/RizRiyz/luvus/security/advisories/new
+
+Use these for SSH attachment, transport location, owner-only IPC, local trust,
+network boundaries, missing agents, stale servers, input problems, and reset
+behavior.
+
+## Route by intent
+
+- Human setup: quickstart, installation, then first session.
+- Wrong agent state: agent behavior, then `luvus agent explain <target>`.
+- Exact command: installed help, then CLI reference.
+- Harness integration: agent README, UHP guide, UHP contract, and only the
+  required method entries.
+- Terminal capture or control: add the terminal backend reference.
+- Extension work: both module pages plus the target surface guide.
+- Unexpected behavior: establish version, session, executable, endpoint, and
+  server status before proposing a mutation.
