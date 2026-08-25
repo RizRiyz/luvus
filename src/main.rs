@@ -757,10 +757,23 @@ fn server_status() -> Result<()> {
 
 /// Send `server.stop` to a running server; returns whether one was present.
 fn send_server_stop() -> Result<bool> {
-    if !server_running(&persist::client_socket_path()) {
+    let client_socket = persist::client_socket_path();
+    if !server_running(&client_socket) {
         return Ok(false);
     }
-    let response = server_control_request("server.stop")?;
+    let response = match server_control_request("server.stop") {
+        Ok(response) => response,
+        Err(error) => {
+            // The old server may exit between the liveness probe and connect,
+            // or Windows may observe the named pipe closing before the final
+            // stop acknowledgement is readable. A completed shutdown is still
+            // success; a live, unresponsive server keeps the original error.
+            if wait_for_shutdown(&client_socket).is_ok() {
+                return Ok(true);
+            }
+            return Err(error);
+        }
+    };
     let acknowledged = response
         .get("result")
         .and_then(|result| result.get("type"))
