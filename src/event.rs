@@ -33,7 +33,10 @@ pub enum AppEvent {
     /// A deferred pane finished opening its PTY and now owns a root process and
     /// stable terminal-backend identity. Pending panes are deliberately absent
     /// from public inventory until this event is applied by the app loop.
-    PtyReady(PaneId),
+    PtyReady {
+        id: PaneId,
+        cwd: std::path::PathBuf,
+    },
     /// A terminal-backend create finished its filesystem and PTY work off-loop.
     /// The app loop performs only the bounded layout/index commit and response.
     BackendCreateReady {

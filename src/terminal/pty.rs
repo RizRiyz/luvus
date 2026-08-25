@@ -358,6 +358,7 @@ impl Pane {
             cols,
             rows,
             cwd,
+            &[],
             app_tx,
             None,
             cmd,
@@ -377,6 +378,7 @@ impl Pane {
         cols: u16,
         rows: u16,
         cwd: PathBuf,
+        fallback_cwds: &[PathBuf],
         app_tx: Sender<AppEvent>,
         initial: Option<&str>,
         shell: &str,
@@ -388,6 +390,7 @@ impl Pane {
             cols,
             rows,
             cwd,
+            fallback_cwds,
             app_tx,
             initial,
             cmd,
@@ -405,6 +408,7 @@ impl Pane {
         cols: u16,
         rows: u16,
         cwd: PathBuf,
+        fallback_cwds: &[PathBuf],
         app_tx: Sender<AppEvent>,
         initial: Option<&str>,
         shell: &str,
@@ -423,6 +427,7 @@ impl Pane {
             cols,
             rows,
             cwd,
+            fallback_cwds,
             app_tx,
             initial,
             cmd,
@@ -534,9 +539,10 @@ impl Pane {
         cols: u16,
         rows: u16,
         cwd: PathBuf,
+        fallback_cwds: &[PathBuf],
         app_tx: Sender<AppEvent>,
         initial: Option<&str>,
-        mut cmd: CommandBuilder,
+        cmd: CommandBuilder,
         command: String,
         extra_env: &[(String, String)],
         history_budget_bytes: usize,
@@ -606,6 +612,7 @@ impl Pane {
             let tx = app_tx.clone();
             // Owned copies for the 'static worker thread.
             let worker_cwd = cwd.clone();
+            let worker_fallback_cwds = fallback_cwds.to_vec();
             let worker_env = extra_env.to_vec();
             thread::spawn(move || {
                 let fail = || {
@@ -623,14 +630,24 @@ impl Pane {
                     Ok(pair) => pair,
                     Err(_) => return fail(),
                 };
-                apply_pane_env(&mut cmd, id, &worker_cwd, &worker_env);
                 // Closed before the fork: abort without creating the child.
                 if cancelled.load(Ordering::SeqCst) {
                     return;
                 }
-                let mut child = match pair.slave.spawn_command(cmd) {
-                    Ok(child) => child,
-                    Err(_) => return fail(),
+                let mut spawned = None;
+                for candidate in std::iter::once(worker_cwd)
+                    .chain(worker_fallback_cwds)
+                    .filter(|candidate| candidate.is_dir())
+                {
+                    let mut candidate_cmd = cmd.clone();
+                    apply_pane_env(&mut candidate_cmd, id, &candidate, &worker_env);
+                    if let Ok(child) = pair.slave.spawn_command(candidate_cmd) {
+                        spawned = Some((child, candidate));
+                        break;
+                    }
+                }
+                let Some((mut child, spawned_cwd)) = spawned else {
+                    return fail();
                 };
                 let Some(pid) = child.process_id() else {
                     terminate_spawned_child(child.as_mut());
@@ -707,7 +724,10 @@ impl Pane {
                 *terminal_runtime
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(runtime);
-                let _ = ready_tx.send(AppEvent::PtyReady(id));
+                let _ = ready_tx.send(AppEvent::PtyReady {
+                    id,
+                    cwd: spawned_cwd,
+                });
             })
         };
         drop(worker);
@@ -1208,6 +1228,7 @@ mod reap_tests {
             80,
             24,
             std::env::temp_dir(),
+            &[],
             tx,
             Some("RESTORED-SCREEN\r\n"),
             "/bin/sh",
@@ -1221,6 +1242,43 @@ mod reap_tests {
                 .contains("RESTORED-SCREEN"),
             "saved content is visible without waiting for the PTY worker"
         );
+    }
+
+    #[test]
+    fn restored_deferred_pane_retries_a_fallback_cwd() {
+        let (tx, rx) = mpsc::channel();
+        let id = PaneId::alloc();
+        let fallback = std::env::temp_dir();
+        let missing = fallback.join(format!("luvus-missing-cwd-{}", std::process::id()));
+        let pane = Pane::spawn_restored(
+            id,
+            80,
+            24,
+            missing,
+            std::slice::from_ref(&fallback),
+            tx,
+            None,
+            "/bin/sh",
+            500,
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(!remaining.is_zero(), "the fallback PTY never became ready");
+            match rx.recv_timeout(remaining) {
+                Ok(AppEvent::PtyReady { id: ready, cwd }) if ready == id => {
+                    assert_eq!(cwd, fallback);
+                    break;
+                }
+                Ok(AppEvent::PtyExit(exited)) if exited == id => {
+                    panic!("the restored pane closed instead of using its fallback cwd")
+                }
+                Ok(_) => {}
+                Err(error) => panic!("the fallback PTY never became ready: {error}"),
+            }
+        }
+        assert_ne!(pane.child_pid.load(Ordering::SeqCst), 0);
     }
 
     /// A resize issued before the deferred fork must still reach the child:

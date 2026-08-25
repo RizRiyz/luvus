@@ -2118,11 +2118,13 @@ impl App {
                             // occasionally stall inside the OS. The saved screen
                             // is still replayed synchronously for the first frame.
                             let home = crate::platform::home_dir().unwrap_or_default();
-                            let Some(cwd) = [&ps.cwd, &ws.cwd, &home]
-                                .into_iter()
-                                .find(|cwd| cwd.is_dir())
-                                .cloned()
-                            else {
+                            let mut cwd_candidates = Vec::new();
+                            for candidate in [&ps.cwd, &ws.cwd, &home] {
+                                if candidate.is_dir() && !cwd_candidates.contains(candidate) {
+                                    cwd_candidates.push(candidate.clone());
+                                }
+                            }
+                            let Some((cwd, fallback_cwds)) = cwd_candidates.split_first() else {
                                 continue;
                             };
                             let pane = match &resume_argv {
@@ -2130,7 +2132,8 @@ impl App {
                                     id,
                                     80,
                                     24,
-                                    cwd,
+                                    cwd.clone(),
+                                    fallback_cwds,
                                     app_tx.clone(),
                                     ps.screen.as_deref(),
                                     &shell,
@@ -2142,7 +2145,8 @@ impl App {
                                     id,
                                     80,
                                     24,
-                                    cwd,
+                                    cwd.clone(),
+                                    fallback_cwds,
                                     app_tx.clone(),
                                     ps.screen.as_deref(),
                                     &shell,

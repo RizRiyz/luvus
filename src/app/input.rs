@@ -237,7 +237,10 @@ impl App {
                 );
                 return true;
             }
-            AppEvent::PtyReady(id) => {
+            AppEvent::PtyReady { id, cwd } => {
+                if let Some(pane) = self.panes.get_mut(&id) {
+                    pane.cwd = cwd;
+                }
                 self.register_backend_terminal(id);
                 return true;
             }
@@ -636,7 +639,7 @@ impl App {
             | AppEvent::ManifestsReloaded { .. }
             | AppEvent::BackendCreateReady { .. }
             | AppEvent::BackendObserve { .. }
-            | AppEvent::PtyReady(_)
+            | AppEvent::PtyReady { .. }
             | AppEvent::SearchFilesIndexed { .. }
             | AppEvent::SearchResults { .. }
             | AppEvent::SearchFederatedResults { .. }
