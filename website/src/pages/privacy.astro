@@ -6,7 +6,7 @@ import LegalPage from '../components/LegalPage.astro';
   title="Privacy Policy"
   description="How Luvus handles data in the local app, optional agent skills, and the Luvus website."
   path="/privacy/"
-  updated="August 19, 2026"
+  updated="August 25, 2026"
 >
   <h2>Overview</h2>
   <p>
@@ -23,11 +23,11 @@ import LegalPage from '../components/LegalPage.astro';
     Luvus's supported environment variables.
   </p>
   <p>
-    Agent skills are disabled by default. When you explicitly enable one, Luvus downloads it from
-    the configured HTTPS endpoint after verifying a signed manifest and file hashes, then stores it
-    in that agent's native local skill directory. The skill starts no separate network service and
-    stores no separate account data. It calls the installed <code>luvus</code> command and
-    communicates with your configured local Luvus server through its Unix socket.
+    The Luvus skill is disabled by default. When you explicitly enable it, Luvus copies the
+    version-matched instructions bundled with the installed binary into detected native local
+    skill directories. Enabling the skill makes no network request. The skill starts no separate
+    network service and stores no separate account data. It calls the installed
+    <code>luvus</code> command and communicates with your configured local Luvus server.
   </p>
   <p>
     Commands you ask Luvus or a coding agent to run can read or change files and can contact

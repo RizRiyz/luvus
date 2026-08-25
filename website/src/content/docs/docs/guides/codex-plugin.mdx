@@ -27,24 +27,27 @@ pane, an explicit `--session` wins over any inherited socket. It does not run
 `session list`, `help`, or `ping` before an ordinary operation, so named-session
 routing adds no discovery round trip to the fast command path.
 
-## Enable the Codex skill
+## Enable the Luvus skill
 
-Luvus starts without installing skills or editing Codex configuration. Opt in
-when you want Codex to control Luvus:
+The Codex marketplace plugin already includes the Luvus skill. When using Luvus
+without that plugin, opt in to the version-matched skill bundled with the Luvus
+binary:
 
 ```sh
-luvus skill enable codex
+luvus skill enable
 ```
 
-The command downloads a signed release, verifies its package and file hashes,
-and installs it at `~/.agents/skills/luvus/`, Codex's native user-skill path.
-It does not add an always-on pointer to `~/.codex/AGENTS.md`.
+The command makes no network request. It detects supported coding-agent
+environments and installs the one bundled Luvus skill through their native
+skill directories. For Codex that directory is `~/.agents/skills/luvus/`. It
+does not add an always-on pointer to `~/.codex/AGENTS.md`, and it never
+overwrites an installation it does not own.
 
 Start a new Codex thread after enabling the skill. Confirm its release, path,
 and integrity at any time with:
 
 ```sh
-luvus skill status codex
+luvus skill status
 ```
 
 ## Connect to Luvus
@@ -230,23 +233,21 @@ Common pane and agent instructions stay in the small core skill. Guidance for
 worktrees, orchestration, modules, UI, and destructive operations loads only
 when a request needs it, which keeps normal startup and control prompts lighter.
 
-## Update or remove
+## Refresh or remove
 
-Update the enabled Codex skill, then start a new Codex thread:
-
-```sh
-luvus skill update codex
-```
-
-Without an agent argument, `luvus skill update` refreshes every enabled agent.
-It does nothing—and makes no network request—when no skills are enabled.
-
-Remove only the managed Codex skill with:
+After updating Luvus, synchronize its version-matched skill and then start a
+new Codex thread:
 
 ```sh
-luvus skill disable codex
+luvus skill enable
 ```
 
-Disabling the skill does not stop Luvus or change any Luvus session. If the
-managed files were modified, Luvus preserves them rather than deleting user
-changes.
+Remove every unchanged Luvus-managed copy with:
+
+```sh
+luvus skill disable
+```
+
+Disabling the skill does not stop Luvus or change any session. Luvus preserves
+modified files and externally managed installations, including marketplace
+plugins.

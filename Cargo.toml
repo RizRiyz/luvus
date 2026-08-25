@@ -65,11 +65,8 @@ serde_json = "1"
 # it in-process and read-only: spawning the OpenCode/Bun runtime every Mission
 # Control refresh is both slower and substantially heavier.
 rusqlite = { version = "0.40", features = ["bundled"] }
-# Agent skills are distributed separately from the runtime. Manifests are
-# authenticated with Ed25519, artifact/package hashes use SHA-256, and semver
-# keeps independently released skills inside their declared Luvus range.
-base64 = "0.22"
-ed25519-dalek = "2"
+# SHA-256 tracks managed skill files and verifies release, theme, and diff
+# artifacts. The canonical Luvus skill itself is bundled with this release.
 semver = "1"
 sha2 = "0.10"
 # Module manifests (`luvus-module.toml`).

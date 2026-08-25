@@ -1,0 +1,4 @@
+interface:
+  display_name: "Luvus"
+  short_description: "Delegate agents and organize Luvus workspaces"
+  default_prompt: "Use $luvus to rename and pin a workspace without changing its folder."

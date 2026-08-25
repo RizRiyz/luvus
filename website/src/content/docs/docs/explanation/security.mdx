@@ -27,6 +27,9 @@ verifies that a connected server process belongs to the current Windows user.
   and ask for confirmation unless `--yes` is explicit.
 - **Integration hooks** write a single small script and one settings entry in
   the agent's config, and uninstall removes exactly those and nothing else.
+- **The Luvus skill** is version-matched content bundled with the binary. It is
+  copied only after `luvus skill enable`, never downloaded, and disable removes
+  only unchanged installations owned by Luvus.
 - **Git-tab actions** validate refs before anything reaches your shell, so a
   hostile branch name from a cloned repo can't smuggle shell metacharacters.
 - **DIFF review** invokes Git with explicit arguments, disables pagers, external
@@ -57,8 +60,8 @@ and opening the finder never starts a stopped session.
 
 `--remote` rides plain `ssh`: your keys, your config, no luvus network
 listener of any kind. Luvus has no telemetry. Network access is limited to
-explicit features such as update checks, module/skill discovery, and a requested
-HTTPS, public GitHub repository, or `community/<id>` theme installation.
+explicit features such as update checks and a requested HTTPS, public GitHub
+repository, or `community/<id>` theme installation.
 
 Found something? Please use
 [private reporting](https://github.com/RizRiyz/luvus/security/advisories/new).

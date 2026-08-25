@@ -124,27 +124,25 @@ asks you which pane you meant.
 ## Opt in to the skill
 
 The commands above work without an agent skill. The optional skill teaches a
-coding agent when and how to use them. Luvus does not install skills, edit agent
-configuration, or make a skill-network request during startup. Enable only the
-agents you want:
+coding agent when and how to use them. Luvus does not install skills or edit
+agent configuration during startup. Enable the one version-matched Luvus skill
+explicitly:
 
 ```sh
-luvus skill enable claude
-luvus skill enable codex
-luvus skill enable opencode
-# or make the same explicit choice for all three
-luvus skill enable --all
+luvus skill enable
 ```
 
-Each agent receives its native skill directory:
+Luvus detects supported coding-agent environments and installs the same bundled
+skill through their native adapters:
 
 - **Claude Code:** `~/.claude/skills/luvus/`
 - **Codex:** `~/.agents/skills/luvus/`
 - **opencode:** `${XDG_CONFIG_HOME:-~/.config}/opencode/skills/luvus/`
 
-Luvus does not add a global `AGENTS.md` pointer. Supported agents discover the
-skill from their native directory and load its full instructions only when the
-skill is relevant or explicitly invoked.
+The command makes no network request and never replaces a skill directory it
+does not own. Luvus does not add a global `AGENTS.md` pointer. Supported agents
+discover the skill from their native directory and load its instructions only
+when relevant or explicitly invoked.
 
 `luvus skill enable` installs prompt guidance. It is independent from
 `luvus integration install`, which adds only the session/status hook needed for
@@ -155,35 +153,31 @@ The messaging **commands themselves work with every agent luvus detects**
 that agent has the skill installed. The skill just teaches an agent to reach for
 them on its own.
 
-Inspect the local state or the installed instructions:
+Inspect the logical skill state or print the canonical instructions bundled
+with the running Luvus binary:
 
 ```sh
-luvus skill status                   # all supported agents
-luvus skill status codex             # one agent
-luvus skill show codex               # installed SKILL.md
+luvus skill status
+luvus skill show
 ```
 
-Refresh one enabled agent, or every enabled agent, between application releases:
+After updating Luvus, run enable again to refresh every Luvus-managed native
+copy from the new binary:
 
 ```sh
-luvus skill update codex
-luvus skill update
+luvus skill enable
 ```
 
-Updates use a signed manifest, verify the package hash and every file hash, and
-replace only installations that Luvus already manages. If no agents are
-enabled, `luvus skill update` is a local no-op with no network request.
-
-Disable an agent explicitly with `luvus skill disable codex`, or use `--all`.
-Luvus removes only an unchanged managed installation. If its files were edited,
-the command preserves them and reports the conflict.
+Disable the skill with `luvus skill disable`. Luvus removes only unchanged
+installations it manages. Modified files and externally managed skills are
+preserved and reported.
 
 When upgrading from Bohay or an earlier Luvus build, version 0.11 performs one
 local, idempotent cleanup: it removes only the old delimited Codex/opencode
 `AGENTS.md` pointer and exact known auto-installed Claude files. Surrounding
 user instructions, modified files, and independently installed plugins are
-preserved. The migration leaves every new skill disabled; opt back in with the
-commands above.
+preserved. Existing per-agent managed state remains readable and is refreshed
+into the bundled model the next time `luvus skill enable` runs.
 
 Restart your coding agent so it loads the skill, open it in a luvus pane, and
 ask in plain language:

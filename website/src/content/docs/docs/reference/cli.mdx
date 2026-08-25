@@ -79,12 +79,10 @@ panes / agents:
   agent release [<pane>] --source <id>   release that integration authority
   agent sessions             list resumable sessions found on disk
   agent resume <id>          reopen a resumable session into a pane
-  skill status [<agent>]      show enabled state, release, path, and integrity
-  skill enable <agent>|--all  opt an agent into the remotely distributed skill
-  skill disable <agent>|--all remove an unmodified managed skill
-  skill update [<agent>]      update enabled agents only (all enabled by default)
-  skill show <agent>          print an installed agent's SKILL.md
-                             <agent> is claude, codex, or opencode
+  skill enable               install the bundled skill in detected agent hosts
+  skill status               show the bundled release and installation details
+  skill disable              remove unchanged Luvus-managed installations
+  skill show                 print the bundled, version-matched SKILL.md
   wait output <id> --match <text> [--timeout <s>]    block until output appears
   wait agent-status <id> --status done|blocked|working|idle [--timeout <s>]
   attach <id>                open the TUI into a single fullscreen pane

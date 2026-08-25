@@ -15,10 +15,7 @@ const KEEP: usize = 6;
 
 fn main() {
     println!("cargo:rerun-if-changed=changelog");
-    // Public only: release builds inject the key that authenticates the
-    // separately published skill manifest. The signing key never enters this
-    // repository or the build environment.
-    println!("cargo:rerun-if-env-changed=LUVUS_SKILL_PUBLIC_KEY_B64");
+    println!("cargo:rerun-if-changed=skills/luvus");
 
     let dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("changelog");
     let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join("changelog_gen.rs");

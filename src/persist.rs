@@ -512,8 +512,8 @@ pub fn manifests_dir() -> PathBuf {
     config_dir().join("manifests")
 }
 
-/// Opt-in skill state, verified package cache, and migration marker. Skill
-/// bodies live in their agent-native locations, never in the Luvus binary.
+/// Opt-in skill ownership state and migration marker. The canonical skill is
+/// bundled in the binary; enabled copies live in agent-native locations.
 pub fn skills_dir() -> PathBuf {
     config_dir().join("skills")
 }
