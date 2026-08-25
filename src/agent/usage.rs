@@ -40,13 +40,22 @@ fn for_each_json_line(path: &Path, mut visit: impl FnMut(&Value)) -> Option<()> 
     loop {
         let (take, ended, eof) = {
             let available = reader.fill_buf().ok()?;
-            if available.is_empty() {
+            let next = if available.is_empty() {
                 (0, false, true)
             } else if let Some(at) = available.iter().position(|b| *b == b'\n') {
                 (at + 1, true, false)
             } else {
                 (available.len(), false, false)
+            };
+            if !oversized && !next.2 {
+                if line.len().saturating_add(next.0) <= MAX_USAGE_LINE {
+                    line.extend_from_slice(&available[..next.0]);
+                } else {
+                    line.clear();
+                    oversized = true;
+                }
             }
+            next
         };
 
         if eof {
@@ -58,15 +67,6 @@ fn for_each_json_line(path: &Path, mut visit: impl FnMut(&Value)) -> Option<()> 
             return Some(());
         }
 
-        if !oversized {
-            let available = reader.fill_buf().ok()?;
-            if line.len().saturating_add(take) <= MAX_USAGE_LINE {
-                line.extend_from_slice(&available[..take]);
-            } else {
-                line.clear();
-                oversized = true;
-            }
-        }
         reader.consume(take);
 
         if ended {

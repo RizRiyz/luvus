@@ -89,11 +89,11 @@ impl App {
     /// Detect focus transitions in one central place so mouse, keyboard, API,
     /// switcher, and restored-session tab activation all share the same policy.
     pub(crate) fn sync_mission_usage_visibility(&mut self) {
-        let active = self.active_is_mission();
-        if active && !self.mission_was_active {
+        let active_workspace = self.active_is_mission().then_some(self.active_ws);
+        if active_workspace.is_some() && active_workspace != self.mission_active_workspace {
             self.request_mission_usage_refresh();
         }
-        self.mission_was_active = active;
+        self.mission_active_workspace = active_workspace;
     }
 
     /// Usage targets visible in the selected Mission Control scope. Avoid

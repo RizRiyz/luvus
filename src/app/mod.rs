@@ -1432,7 +1432,9 @@ pub struct App {
     /// changing its scope, or choosing refresh queues one off-loop scan. No
     /// usage reader runs merely because a hidden Mission Control tab exists.
     mission_usage_requested: bool,
-    mission_was_active: bool,
+    /// Workspace whose Mission Control tab was visible on the previous sync.
+    /// `None` also records transitions away from Mission Control.
+    mission_active_workspace: Option<usize>,
     usage_scan_inflight: bool,
     /// Throttle for per-pane agent classification — it locks each pane's VT engine
     /// and scans its grid, so it runs at ~100ms, not at the render frame rate.
@@ -1837,7 +1839,7 @@ impl App {
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
             mission_usage_requested: false,
-            mission_was_active: false,
+            mission_active_workspace: None,
             usage_scan_inflight: false,
             last_proc_at: Instant::now(),
             last_detect_at: Instant::now()
@@ -2375,7 +2377,7 @@ impl App {
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
             mission_usage_requested: false,
-            mission_was_active: false,
+            mission_active_workspace: None,
             usage_scan_inflight: false,
             last_proc_at: Instant::now(),
             last_detect_at: Instant::now()
@@ -9771,6 +9773,38 @@ mod tests {
         assert!(
             app.mission_usage_requested,
             "returning to Mission Control requests one fresh snapshot"
+        );
+    }
+
+    #[test]
+    fn mission_usage_refreshes_when_switching_between_workspace_dashboards() {
+        let _env = crate::persist::test_env("mission-workspace-refresh");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let second = PaneId::alloc();
+        app.workspaces.push(Workspace {
+            id: crate::ids::public_id("workspace"),
+            name: "beta".into(),
+            cwd: PathBuf::from("/tmp/luvus-mission-beta"),
+            branch: None,
+            git_ahead_behind: None,
+            worktree: None,
+            tabs: vec![Tab::panes(TileLayout::new(second))],
+            active_tab: 0,
+            pinned: false,
+        });
+
+        app.open_mission_control(0);
+        app.open_mission_control(1);
+        app.sync_mission_usage_visibility();
+        app.mission_usage_requested = false;
+
+        app.active_ws = 0;
+        app.sync_mission_usage_visibility();
+
+        assert!(
+            app.mission_usage_requested,
+            "switching directly to another workspace dashboard requests fresh usage"
         );
     }
 
