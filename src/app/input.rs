@@ -389,10 +389,6 @@ impl App {
                 );
                 self.emit_backend_terminal_event(id, "terminal.exited", json!({}));
                 self.close_pane(id);
-                crate::logging::event(
-                    crate::logging::EventKind::PaneClose,
-                    &[crate::logging::Field::PaneId(u64::from(id.0))],
-                );
                 true
             }
             // Control-API requests arrive on the event channel so the loop wakes

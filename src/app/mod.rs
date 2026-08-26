@@ -5154,6 +5154,10 @@ impl App {
         if self.copy_mode.is_some_and(|copy| copy.pane == id) {
             self.copy_mode = None; // the pane is gone; there is no viewport to restore
         }
+        crate::logging::event(
+            crate::logging::EventKind::PaneClose,
+            &[crate::logging::Field::PaneId(u64::from(id.0))],
+        );
     }
 
     fn close_pane(&mut self, id: PaneId) {
@@ -5185,9 +5189,22 @@ impl App {
     }
 
     fn close_active_tab(&mut self) {
+        let workspace_index = self.active_ws;
         let ws = &mut self.workspaces[self.active_ws];
+        let tab_index = ws.active_tab;
+        let mut removed = false;
         if ws.active_tab < ws.tabs.len() {
             ws.tabs.remove(ws.active_tab);
+            removed = true;
+        }
+        if removed {
+            crate::logging::event(
+                crate::logging::EventKind::TabClose,
+                &[
+                    crate::logging::Field::WorkspaceIndex(workspace_index as u64),
+                    crate::logging::Field::TabIndex(tab_index as u64),
+                ],
+            );
         }
         if ws.tabs.is_empty() {
             self.close_active_ws();
@@ -5197,6 +5214,8 @@ impl App {
     }
 
     fn close_active_ws(&mut self) {
+        let workspace_index = self.active_ws;
+        let mut removed = false;
         if self.active_ws < self.workspaces.len() {
             let closed_workspace_id = self.workspaces[self.active_ws].id.clone();
             if self.workspaces.len() > 1 {
@@ -5212,6 +5231,15 @@ impl App {
             }
             self.clear_workspace_transients(&closed_workspace_id);
             self.workspaces.remove(self.active_ws);
+            removed = true;
+        }
+        if removed {
+            crate::logging::event(
+                crate::logging::EventKind::WorkspaceClose,
+                &[crate::logging::Field::WorkspaceIndex(
+                    workspace_index as u64,
+                )],
+            );
         }
         if self.workspaces.is_empty() {
             self.all_workspaces_closed();

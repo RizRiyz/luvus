@@ -118,6 +118,19 @@ pub(crate) fn directory_writable_without_creating(path: &Path) -> bool {
     let Some(parent) = nearest_existing_parent(path) else {
         return false;
     };
+    // If the requested log directory already exists, mirror
+    // `prepare_log_dir`: files, symlinks, and Windows reparse points are not
+    // usable log directories even when the object itself is writable.
+    if parent == path {
+        let Ok(metadata) = fs::symlink_metadata(parent) else {
+            return false;
+        };
+        if ensure_real_dir(&metadata).is_err() {
+            return false;
+        }
+    } else if !parent.is_dir() {
+        return false;
+    }
     #[cfg(unix)]
     {
         use std::ffi::CString;
@@ -177,6 +190,16 @@ mod tests {
         assert!(!log_dir().exists());
     }
 
+    #[test]
+    fn existing_non_directory_is_not_reported_writable() {
+        let _env = crate::persist::test_env("logging-health-file");
+        let dir = log_dir();
+        fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        fs::write(&dir, b"not a directory").unwrap();
+
+        assert!(!directory_writable_without_creating(&dir));
+    }
+
     #[cfg(unix)]
     #[test]
     fn rejects_symlink_log_files() {
@@ -188,6 +211,20 @@ mod tests {
         let path = log_path(LoggerKind::Server);
         symlink(&target, &path).unwrap();
         assert!(open_private_append(&path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_symlink_log_directory_is_not_reported_writable() {
+        use std::os::unix::fs::symlink;
+        let _env = crate::persist::test_env("logging-health-symlink");
+        let dir = log_dir();
+        fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        let target = dir.with_file_name("actual-logs");
+        fs::create_dir(&target).unwrap();
+        symlink(&target, &dir).unwrap();
+
+        assert!(!directory_writable_without_creating(&dir));
     }
 
     #[cfg(unix)]

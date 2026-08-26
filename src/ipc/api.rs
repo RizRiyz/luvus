@@ -667,9 +667,9 @@ thread_local! {
     static REQUEST_LOG: RefCell<Option<RequestLog>> = const { RefCell::new(None) };
 }
 
-fn begin_request_log(id: &str, method: &str) {
+fn begin_request_log(id: Option<&str>, method: &str) {
     let request = RequestLog {
-        id: crate::logging::SafeId::new(id),
+        id: id.and_then(crate::logging::SafeId::new),
         method: crate::logging::SafeId::new(method),
         started: std::time::Instant::now(),
         subscription: false,
@@ -844,18 +844,17 @@ fn finish_abandoned_request_log() {
 }
 
 fn write_response(writer: &mut impl Write, id: &str, response: &str) -> io::Result<()> {
-    RESPONSE_BYTES_OUT.fetch_add(response.len().saturating_add(1) as u64, Ordering::Relaxed);
-    if response.len().saturating_add(1) <= crate::terminal::backend::MAX_FRAME_BYTES {
-        writeln!(writer, "{response}")?;
+    let fallback;
+    let emitted = if response.len().saturating_add(1) <= crate::terminal::backend::MAX_FRAME_BYTES {
+        response
     } else {
-        writeln!(
-            writer,
-            "{}",
-            json!({"id":id,"error":{"code":"internal","message":"response exceeded protocol frame limit"}})
-        )?;
-    }
+        fallback = json!({"id":id,"error":{"code":"internal","message":"response exceeded protocol frame limit"}}).to_string();
+        &fallback
+    };
+    RESPONSE_BYTES_OUT.fetch_add(emitted.len().saturating_add(1) as u64, Ordering::Relaxed);
+    writeln!(writer, "{emitted}")?;
     writer.flush()?;
-    finish_request_log(response);
+    finish_request_log(emitted);
     Ok(())
 }
 
@@ -1618,7 +1617,12 @@ fn handle_conn(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    begin_request_log(&id, &method);
+    begin_request_log(
+        raw_id
+            .and_then(Value::as_str)
+            .filter(|raw_id| valid_request_id(raw_id)),
+        &method,
+    );
     if !raw_id.and_then(Value::as_str).is_some_and(valid_request_id) {
         let response = json!({"id":id,"error":{"code":"invalid_request",
             "message":"id must contain 1 to 128 ASCII letters, digits, '.', '_', ':', or '-'"}})
@@ -2382,6 +2386,37 @@ mod tests {
 
         assert_eq!(writer.bytes, b"{\"id\":\"test\",\"result\":{}}\n");
         assert_eq!(writer.flushes, 1);
+    }
+
+    #[test]
+    fn oversized_response_emits_the_bounded_fallback() {
+        let mut writer = FlushProbe::default();
+        let oversized = "x".repeat(crate::terminal::backend::MAX_FRAME_BYTES);
+        write_response(&mut writer, "request-1", &oversized).unwrap();
+
+        let emitted: Value = serde_json::from_slice(&writer.bytes).unwrap();
+        assert_eq!(emitted["id"], "request-1");
+        assert_eq!(emitted["error"]["code"], "internal");
+        assert_eq!(writer.flushes, 1);
+        assert!(writer.bytes.len() < crate::terminal::backend::MAX_FRAME_BYTES);
+    }
+
+    #[test]
+    fn request_log_preserves_missing_and_valid_id_state() {
+        begin_request_log(None, "pane.list");
+        let missing = REQUEST_LOG.with(|slot| slot.borrow_mut().take()).unwrap();
+        assert!(missing.id.is_none());
+        assert_eq!(
+            missing.method.as_ref().map(crate::logging::SafeId::as_str),
+            Some("pane.list")
+        );
+
+        begin_request_log(Some("request-1"), "pane.list");
+        let valid = REQUEST_LOG.with(|slot| slot.borrow_mut().take()).unwrap();
+        assert_eq!(
+            valid.id.as_ref().map(crate::logging::SafeId::as_str),
+            Some("request-1")
+        );
     }
 
     #[test]
