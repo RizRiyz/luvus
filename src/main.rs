@@ -21,6 +21,7 @@ mod integration;
 mod ipc;
 mod layout;
 mod links;
+mod logging;
 mod mission;
 mod module;
 mod orch;
@@ -398,6 +399,11 @@ pub(crate) fn window_title() -> String {
 
 /// Run the app monolithically against the real terminal (dev/escape hatch).
 fn run_local() -> Result<()> {
+    let _logging = logging::init(logging::Role::Local);
+    logging::event(
+        logging::EventKind::ServerStart,
+        &[logging::Field::Role(logging::Role::Local)],
+    );
     let mut terminal = ratatui::init();
     install_tui_panic_hook();
     let result = run(&mut terminal);

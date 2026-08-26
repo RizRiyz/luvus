@@ -260,13 +260,57 @@ pub fn run() -> Result<()> {
     if transport::connect(&sock).is_ok() || transport::connect(&client_sock).is_ok() {
         return Ok(());
     }
+    let _logging = crate::logging::init(crate::logging::Role::Server);
+    crate::logging::event(
+        crate::logging::EventKind::ServerStart,
+        &[crate::logging::Field::Role(crate::logging::Role::Server)],
+    );
     api::set_socket_path(sock.clone());
 
     let events = api::new_bus();
-    let api_listener = api::bind_server(&sock, &startup_lock)?;
+    let api_listener = match api::bind_server(&sock, &startup_lock) {
+        Ok(listener) => {
+            crate::logging::event(
+                crate::logging::EventKind::ListenerBind,
+                &[crate::logging::Field::Listener(
+                    crate::logging::Listener::Uhp,
+                )],
+            );
+            listener
+        }
+        Err(error) => {
+            crate::logging::event(
+                crate::logging::EventKind::ListenerBindFailed,
+                &[
+                    crate::logging::Field::Listener(crate::logging::Listener::Uhp),
+                    crate::logging::Field::ErrorCode(
+                        crate::logging::SafeId::new("io").expect("static id is valid"),
+                    ),
+                ],
+            );
+            return Err(error.into());
+        }
+    };
     let client_listener = match bind_client_listener(&client_sock, &startup_lock) {
-        Ok(listener) => listener,
+        Ok(listener) => {
+            crate::logging::event(
+                crate::logging::EventKind::ListenerBind,
+                &[crate::logging::Field::Listener(
+                    crate::logging::Listener::Client,
+                )],
+            );
+            listener
+        }
         Err(err) => {
+            crate::logging::event(
+                crate::logging::EventKind::ListenerBindFailed,
+                &[
+                    crate::logging::Field::Listener(crate::logging::Listener::Client),
+                    crate::logging::Field::ErrorCode(
+                        crate::logging::SafeId::new("io").expect("static id is valid"),
+                    ),
+                ],
+            );
             drop(api_listener);
             let _ = remove_unbound_socket(&sock);
             return Err(err.into());
@@ -276,6 +320,12 @@ pub fn run() -> Result<()> {
     let mut app = match App::restore_or_new(DEFAULT_SIZE.0, DEFAULT_SIZE.1, tx.clone()) {
         Ok(app) => app,
         Err(err) => {
+            crate::logging::event(
+                crate::logging::EventKind::PersistRestore,
+                &[crate::logging::Field::Outcome(
+                    crate::logging::Outcome::Error,
+                )],
+            );
             drop(client_listener);
             drop(api_listener);
             let _ = remove_unbound_socket(&client_sock);
@@ -292,6 +342,32 @@ pub fn run() -> Result<()> {
     api::start_server(api_listener, tx.clone(), events);
     start_client_listener(client_listener, tx.clone(), terminal_theme.clone());
     drop(startup_lock);
+    let restored_workspaces = app.workspaces.len() as u64;
+    let restored_tabs = app
+        .workspaces
+        .iter()
+        .map(|workspace| workspace.tabs.len() as u64)
+        .sum();
+    let restored_panes = app.panes.len() as u64;
+    crate::logging::event(
+        crate::logging::EventKind::PersistRestore,
+        &[
+            crate::logging::Field::Outcome(crate::logging::Outcome::Ok),
+            crate::logging::Field::RestoreWorkspaces(restored_workspaces),
+            crate::logging::Field::RestoreTabs(restored_tabs),
+            crate::logging::Field::RestorePanes(restored_panes),
+            crate::logging::Field::RestoreSkipped(0),
+        ],
+    );
+    crate::logging::event(
+        crate::logging::EventKind::ServerReady,
+        &[
+            crate::logging::Field::RestoreWorkspaces(restored_workspaces),
+            crate::logging::Field::RestoreTabs(restored_tabs),
+            crate::logging::Field::RestorePanes(restored_panes),
+            crate::logging::Field::RestoreSkipped(0),
+        ],
+    );
     // The session is restored and the API socket is listening, so a module's
     // `[[startup]]` hooks can now call back in — this is where a module
     // repaints the docks it owns (docs/13 §3.7).
@@ -575,6 +651,15 @@ fn apply(
             rows,
             terminal_colors,
         } => {
+            crate::logging::event(
+                crate::logging::EventKind::ServerClientAttach,
+                &[
+                    crate::logging::Field::ClientId(id),
+                    crate::logging::Field::Cols(u64::from(cols)),
+                    crate::logging::Field::Rows(u64::from(rows)),
+                    crate::logging::Field::ProtocolVersion(u64::from(protocol::PROTOCOL_VERSION)),
+                ],
+            );
             let activity = *next_activity;
             *next_activity = next_activity.saturating_add(1);
             clients.insert(
@@ -595,6 +680,13 @@ fn apply(
             true
         }
         AppEvent::ClientDetach { id } => {
+            crate::logging::event(
+                crate::logging::EventKind::ServerClientDetach,
+                &[
+                    crate::logging::Field::ClientId(id),
+                    crate::logging::Field::Reason(crate::logging::Reason::Eof),
+                ],
+            );
             let was_foreground = *foreground == Some(id);
             clients.remove(&id);
             if was_foreground {
@@ -611,6 +703,14 @@ fn apply(
             *next_activity = next_activity.saturating_add(1);
 
             if let ClientInput::Resize(cols, rows) = input {
+                crate::logging::event(
+                    crate::logging::EventKind::ServerClientResize,
+                    &[
+                        crate::logging::Field::ClientId(id),
+                        crate::logging::Field::Cols(u64::from(cols)),
+                        crate::logging::Field::Rows(u64::from(rows)),
+                    ],
+                );
                 client.size = (cols.max(1), rows.max(1));
                 // Resize/focus repair is local to this terminal. Its next frame
                 // must be complete, but other clients keep their diff baselines.
@@ -910,6 +1010,13 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
             rows,
         }) => {
             if version != protocol::PROTOCOL_VERSION {
+                crate::logging::event(
+                    crate::logging::EventKind::ServerClientHandshakeRejected,
+                    &[
+                        crate::logging::Field::Reason(crate::logging::Reason::VersionMismatch),
+                        crate::logging::Field::ProtocolVersion(u64::from(version)),
+                    ],
+                );
                 let _ = protocol::write_message(
                     &mut writer,
                     &ServerMessage::Welcome {

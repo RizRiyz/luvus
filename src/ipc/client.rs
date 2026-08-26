@@ -21,15 +21,46 @@ use crate::ipc::transport;
 
 /// Attach to the local server over its Unix socket.
 pub fn run(sock: &Path) -> Result<()> {
-    let stream = transport::connect(sock).map_err(|_| anyhow!("cannot connect to luvus server"))?;
+    let _logging = crate::logging::init(crate::logging::Role::Client);
+    crate::logging::event(
+        crate::logging::EventKind::ClientStart,
+        &[crate::logging::Field::Role(crate::logging::Role::Client)],
+    );
+    let stream = match transport::connect(sock) {
+        Ok(stream) => stream,
+        Err(_) => {
+            crate::logging::event(
+                crate::logging::EventKind::ClientConnectFailed,
+                &[crate::logging::Field::ErrorCode(
+                    crate::logging::SafeId::new("io").expect("static id is valid"),
+                )],
+            );
+            return Err(anyhow!("cannot connect to luvus server"));
+        }
+    };
+    crate::logging::event(crate::logging::EventKind::ClientConnect, &[]);
     // `Conn` is a cloneable duplex handle: one clone reads, the other writes.
-    attach(stream.clone(), stream)
+    attach_inner(stream.clone(), stream)
 }
 
 /// Attach a thin client over **any** reader/writer carrying the binary frame
 /// protocol. The local path passes the two halves of a `Conn`; remote attach
 /// (docs/18 RA) passes an `ssh` child's stdout/stdin — the protocol is the same.
 pub fn attach<R, W>(reader: R, writer: W) -> Result<()>
+where
+    R: Read,
+    W: Write + Send + 'static,
+{
+    let _logging = crate::logging::init(crate::logging::Role::Client);
+    crate::logging::event(
+        crate::logging::EventKind::ClientStart,
+        &[crate::logging::Field::Role(crate::logging::Role::Client)],
+    );
+    crate::logging::event(crate::logging::EventKind::ClientConnect, &[]);
+    attach_inner(reader, writer)
+}
+
+fn attach_inner<R, W>(reader: R, writer: W) -> Result<()>
 where
     R: Read,
     W: Write + Send + 'static,
@@ -93,13 +124,28 @@ where
         // The one user-facing handshake failure is an old server after an
         // upgrade — tell them the fix, not just the symptom.
         ServerMessage::Welcome { error: Some(e), .. } => {
+            crate::logging::event(
+                crate::logging::EventKind::ClientHandshakeRejected,
+                &[
+                    crate::logging::Field::Reason(crate::logging::Reason::VersionMismatch),
+                    crate::logging::Field::ProtocolVersion(u64::from(protocol::PROTOCOL_VERSION)),
+                ],
+            );
             return Err(anyhow!(
                 "server: {e}\nAn older luvus server is likely still running — \
                  run `luvus server restart` to load this version (your session is saved)."
-            ))
+            ));
         }
         ServerMessage::Welcome { .. } => {}
-        _ => return Err(anyhow!("unexpected handshake")),
+        _ => {
+            crate::logging::event(
+                crate::logging::EventKind::ClientHandshakeRejected,
+                &[crate::logging::Field::Reason(
+                    crate::logging::Reason::Handshake,
+                )],
+            );
+            return Err(anyhow!("unexpected handshake"));
+        }
     }
 
     let probe_terminal = match protocol::read_message::<_, ServerMessage>(&mut reader)? {
@@ -113,6 +159,14 @@ where
     } else {
         Vec::new()
     };
+    crate::logging::event(
+        crate::logging::EventKind::ClientHandshake,
+        &[
+            crate::logging::Field::ProtocolVersion(u64::from(protocol::PROTOCOL_VERSION)),
+            crate::logging::Field::Cols(u64::from(size.width)),
+            crate::logging::Field::Rows(u64::from(size.height)),
+        ],
+    );
 
     // Enable input protocols only after probing. That bounds the pending-input
     // decoder to ordinary terminal key sequences and avoids mouse/paste replies
@@ -151,12 +205,28 @@ where
                     true,
                 );
                 sync_end();
+                if r.is_err() {
+                    crate::logging::event(
+                        crate::logging::EventKind::ClientRenderFailed,
+                        &[crate::logging::Field::ErrorCode(
+                            crate::logging::SafeId::new("io").expect("static id is valid"),
+                        )],
+                    );
+                }
                 r?;
             }
             Ok(ServerMessage::FrameDiff(diff)) => {
                 sync_begin();
                 let r = paint(terminal, &diff_cells(&diff, truecolor), diff.cursor, false);
                 sync_end();
+                if r.is_err() {
+                    crate::logging::event(
+                        crate::logging::EventKind::ClientRenderFailed,
+                        &[crate::logging::Field::ErrorCode(
+                            crate::logging::SafeId::new("io").expect("static id is valid"),
+                        )],
+                    );
+                }
                 r?;
             }
             Ok(ServerMessage::Notify(msg)) => crate::emit_notification(&msg),
@@ -167,7 +237,21 @@ where
             Ok(ServerMessage::Detach) => break ClientExit::Detached,
             Ok(ServerMessage::ServerShutdown { .. }) => break ClientExit::ServerStopped,
             Ok(_) => {}
-            Err(_) => break ClientExit::Done, // server gone
+            Err(_) => {
+                crate::logging::event(
+                    crate::logging::EventKind::ClientFrameError,
+                    &[crate::logging::Field::ErrorCode(
+                        crate::logging::SafeId::new("protocol").expect("static id is valid"),
+                    )],
+                );
+                crate::logging::event(
+                    crate::logging::EventKind::ClientDisconnect,
+                    &[crate::logging::Field::Reason(
+                        crate::logging::Reason::Protocol,
+                    )],
+                );
+                break ClientExit::Done;
+            }
         }
     };
     Ok(exit)
@@ -244,7 +328,16 @@ fn event_message(event: Event) -> Option<ClientMessage> {
     match event {
         Event::Key(k) => Some(ClientMessage::Key(k)),
         Event::Mouse(m) => Some(ClientMessage::Mouse(m)),
-        Event::Resize(cols, rows) => Some(ClientMessage::Resize { cols, rows }),
+        Event::Resize(cols, rows) => {
+            crate::logging::event(
+                crate::logging::EventKind::ClientResize,
+                &[
+                    crate::logging::Field::Cols(u64::from(cols)),
+                    crate::logging::Field::Rows(u64::from(rows)),
+                ],
+            );
+            Some(ClientMessage::Resize { cols, rows })
+        }
         Event::Paste(s) => Some(ClientMessage::Paste(s)),
         // Regained focus: the window may have moved or been repainted while we
         // were away, and luvus never saw it. Re-send the current size, which the

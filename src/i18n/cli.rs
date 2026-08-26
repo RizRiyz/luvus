@@ -127,6 +127,36 @@ macro_rules! tr {
 /// suffix, so canonical syntax at the start of a row is never rewritten.
 static HELP: &[Translation] = &[
     tr!(
+        "Read local structured server and client diagnostics",
+        "Leer diagnósticos estructurados locales del servidor y cliente",
+        "Ler diagnósticos estruturados locais do servidor e cliente",
+        "Lire les diagnostics structurés locaux du serveur et du client",
+        "Lokale strukturierte Server- und Clientdiagnosen lesen",
+        "Baca diagnostik terstruktur server dan klien lokal",
+        "读取本地结构化服务器和客户端诊断",
+        "ローカルの構造化サーバー・クライアント診断を読み取る"
+    ),
+    tr!(
+        "read local structured diagnostics",
+        "leer diagnósticos estructurados locales",
+        "ler diagnósticos estruturados locais",
+        "lire les diagnostics structurés locaux",
+        "lokale strukturierte Diagnosen lesen",
+        "baca diagnostik terstruktur lokal",
+        "读取本地结构化诊断",
+        "ローカルの構造化診断を読み取る"
+    ),
+    tr!(
+        "Read local structured runtime diagnostics without starting the server.",
+        "Leer diagnósticos estructurados locales del entorno sin iniciar el servidor.",
+        "Ler diagnósticos estruturados locais do runtime sem iniciar o servidor.",
+        "Lire les diagnostics structurés locaux sans démarrer le serveur.",
+        "Lokale strukturierte Laufzeitdiagnosen lesen, ohne den Server zu starten.",
+        "Baca diagnostik runtime terstruktur lokal tanpa memulai server.",
+        "无需启动服务器即可读取本地结构化运行时诊断。",
+        "サーバーを起動せずにローカルの構造化ランタイム診断を読み取ります。"
+    ),
+    tr!(
         "luvus: Mission control for your AI coding agents",
         "luvus: Centro de control para tus agentes de programación con IA",
         "luvus: Central de controle para seus agentes de programação com IA",
@@ -2245,6 +2275,8 @@ static TEXT: &[Translation] = &[
     tr!("needed for", "necesario para", "necessário para", "requis pour", "benötigt für", "diperlukan untuk", "需要用于", "必要："),
     tr!("optional -", "opcional -", "opcional -", "facultatif -", "optional -", "opsional -", "可选 -", "任意 -"),
     tr!("not found", "no encontrado", "não encontrado", "introuvable", "nicht gefunden", "tidak ditemukan", "未找到", "見つかりません"),
+    tr!("directory writable", "directorio escribible", "diretório gravável", "répertoire accessible en écriture", "Verzeichnis beschreibbar", "direktori dapat ditulis", "目录可写", "ディレクトリに書き込み可能"),
+    tr!("not writable", "no escribible", "não gravável", "non accessible en écriture", "nicht beschreibbar", "tidak dapat ditulis", "不可写", "書き込み不可"),
     tr!("run `luvus doctor` outside a luvus pane to test your terminal", "ejecuta `luvus doctor` fuera de un panel de luvus para probar tu terminal", "execute `luvus doctor` fora de um painel luvus para testar seu terminal", "exécutez `luvus doctor` hors d'un volet luvus pour tester votre terminal", "`luvus doctor` außerhalb eines Luvus-Bereichs ausführen, um das Terminal zu testen", "jalankan `luvus doctor` di luar panel luvus untuk menguji terminal", "请在 luvus 窗格外运行 `luvus doctor` 以测试终端", "端末を確認するには luvus ペイン外で `luvus doctor` を実行してください"),
     tr!("Shift+Enter works (terminal reports modified keys)", "Shift+Enter funciona (el terminal informa teclas modificadas)", "Shift+Enter funciona (o terminal informa teclas modificadas)", "Shift+Entrée fonctionne (le terminal signale les touches modifiées)", "Shift+Enter funktioniert (Terminal meldet modifizierte Tasten)", "Shift+Enter berfungsi (terminal melaporkan tombol bermodifier)", "Shift+Enter 可用（终端报告修饰键）", "Shift+Enter は利用できます（端末が修飾キーを通知）"),
     tr!("Shift+Enter isn't distinguishable here · optional", "Shift+Enter no se distingue aquí · opcional", "Shift+Enter não é distinguível aqui · opcional", "Shift+Entrée n'est pas distinguable ici · facultatif", "Shift+Enter ist hier nicht unterscheidbar · optional", "Shift+Enter tidak dapat dibedakan di sini · opsional", "此处无法区分 Shift+Enter · 可选", "ここでは Shift+Enter を区別できません · 任意"),

@@ -175,6 +175,13 @@ impl App {
                     pane.cwd = cwd;
                 }
                 self.register_backend_terminal(id);
+                crate::logging::event(
+                    crate::logging::EventKind::PaneOpen,
+                    &[
+                        crate::logging::Field::PaneId(u64::from(id.0)),
+                        crate::logging::Field::SpawnKind(crate::logging::SpawnKind::Deferred),
+                    ],
+                );
                 return true;
             }
             AppEvent::BackendObserve { params, reply } => {
@@ -203,6 +210,10 @@ impl App {
                 reply,
             } => {
                 self.apply_socket_manifests(manifests);
+                crate::logging::event(
+                    crate::logging::EventKind::ManifestReload,
+                    &[crate::logging::Field::Outcome(crate::logging::Outcome::Ok)],
+                );
                 let _ = reply.send(
                     json!({"id":id,"result":{
                         "type":"agent_manifests_reloaded","rules":self.manifests.rule_count()
@@ -236,7 +247,10 @@ impl App {
             AppEvent::SearchHandoffReady { session, result } => {
                 match result {
                     Ok(()) => self.pending_session_switch = Some(session),
-                    Err(error) => self.show_toast(format!("session switch failed: {error}")),
+                    Err(error) => {
+                        log_worker_failed(crate::logging::Worker::Search, "handoff");
+                        self.show_toast(format!("session switch failed: {error}"));
+                    }
                 }
                 return true;
             }
@@ -366,8 +380,19 @@ impl App {
                 true // the pane's screen advanced
             }
             AppEvent::PtyExit(id) => {
+                crate::logging::event(
+                    crate::logging::EventKind::PtyExit,
+                    &[
+                        crate::logging::Field::PaneId(u64::from(id.0)),
+                        crate::logging::Field::ExitClass(crate::logging::ExitClass::Unknown),
+                    ],
+                );
                 self.emit_backend_terminal_event(id, "terminal.exited", json!({}));
                 self.close_pane(id);
+                crate::logging::event(
+                    crate::logging::EventKind::PaneClose,
+                    &[crate::logging::Field::PaneId(u64::from(id.0))],
+                );
                 true
             }
             // Control-API requests arrive on the event channel so the loop wakes
@@ -462,6 +487,9 @@ impl App {
                 out,
                 err,
             } => {
+                if code != Some(0) {
+                    log_worker_failed(crate::logging::Worker::Module, "exit");
+                }
                 self.module_command_finished(log_id, code, out, err);
                 true
             }
@@ -500,18 +528,40 @@ impl App {
                 visible_root,
                 result,
             } => {
+                if result.is_err() {
+                    log_worker_failed(crate::logging::Worker::Diff, "scan");
+                }
                 let changed = self.apply_diff_status(token, visible_root, result);
                 self.finish_pending_diff_api();
                 changed
             }
-            AppEvent::DiffLoaded { id, token, result } => self.apply_diff_loaded(id, token, result),
+            AppEvent::DiffLoaded { id, token, result } => {
+                if result.is_err() {
+                    log_worker_failed(crate::logging::Worker::Diff, "load");
+                }
+                self.apply_diff_loaded(id, token, result)
+            }
             AppEvent::DiffNotesLoaded { review_id, result } => {
+                if result.is_err() {
+                    log_worker_failed(crate::logging::Worker::Diff, "notes");
+                }
                 self.apply_diff_notes_loaded(review_id, result)
             }
-            AppEvent::DiffNoteSaved { note, result } => self.apply_diff_note_saved(note, result),
-            AppEvent::DiffNoteRemoved { id, result } => self.apply_diff_note_removed(id, result),
+            AppEvent::DiffNoteSaved { note, result } => {
+                if result.is_err() {
+                    log_worker_failed(crate::logging::Worker::Diff, "note_save");
+                }
+                self.apply_diff_note_saved(note, result)
+            }
+            AppEvent::DiffNoteRemoved { id, result } => {
+                if result.is_err() {
+                    log_worker_failed(crate::logging::Worker::Diff, "note_remove");
+                }
+                self.apply_diff_note_removed(id, result)
+            }
             AppEvent::DiffProgressSaved { result } => {
                 if let Err(error) = result {
+                    log_worker_failed(crate::logging::Worker::Diff, "progress_save");
                     self.show_toast(format!("review progress not saved: {error}"));
                 }
                 true
@@ -2774,6 +2824,19 @@ impl App {
             Mode::Resize => self.handle_resize_mode_key(key),
         }
     }
+}
+
+fn log_worker_failed(worker: crate::logging::Worker, error_code: &'static str) {
+    let Some(error_code) = crate::logging::SafeId::new(error_code) else {
+        return;
+    };
+    crate::logging::event(
+        crate::logging::EventKind::WorkerFailed,
+        &[
+            crate::logging::Field::Worker(worker),
+            crate::logging::Field::ErrorCode(error_code),
+        ],
+    );
 }
 
 /// Encode one mouse-wheel notch as the bytes a mouse-tracking app expects.

@@ -528,8 +528,24 @@ pub fn check_now_reporting(tx: Sender<AppEvent>) {
 /// One fetch-compare-report, silent unless there is news. Takes the URL so tests
 /// can point it at a file without mutating process-wide environment.
 fn check_once(tx: &Sender<AppEvent>, url: &str) {
-    if let CheckOutcome::Newer(latest) = fetch_outcome(url) {
-        let _ = tx.send(AppEvent::UpdateAvailable(latest));
+    match fetch_outcome(url) {
+        CheckOutcome::Newer(latest) => {
+            crate::logging::event(
+                crate::logging::EventKind::UpdateCheck,
+                &[crate::logging::Field::Outcome(crate::logging::Outcome::Ok)],
+            );
+            let _ = tx.send(AppEvent::UpdateAvailable(latest));
+        }
+        CheckOutcome::Current => crate::logging::event(
+            crate::logging::EventKind::UpdateCheck,
+            &[crate::logging::Field::Outcome(crate::logging::Outcome::Ok)],
+        ),
+        CheckOutcome::Failed => crate::logging::event(
+            crate::logging::EventKind::UpdateCheck,
+            &[crate::logging::Field::Outcome(
+                crate::logging::Outcome::Error,
+            )],
+        ),
     }
 }
 

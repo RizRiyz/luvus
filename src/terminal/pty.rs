@@ -156,6 +156,9 @@ pub struct MouseModes {
 }
 
 pub struct Pane {
+    /// Stable application identity for operational lifecycle events. This is
+    /// never derived from the child command or terminal contents.
+    id: PaneId,
     pub engine: Arc<Mutex<dyn VtEngine>>,
     /// `None` until a deferred spawn's worker stores it (docs/82).
     master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
@@ -517,6 +520,7 @@ impl Pane {
         register_child_reaper(id, child, child_exited.clone(), app_tx);
 
         Ok(Pane {
+            id,
             engine,
             child_pid: Arc::new(AtomicU32::new(child_pid)),
             terminal_runtime: Arc::new(Mutex::new(Some(terminal_runtime))),
@@ -739,6 +743,7 @@ impl Pane {
         drop(worker);
 
         Pane {
+            id,
             engine,
             child_pid,
             terminal_runtime,
@@ -1091,6 +1096,14 @@ impl Pane {
         if let Ok(mut e) = self.engine.lock() {
             e.resize(cols, rows);
         }
+        crate::logging::event(
+            crate::logging::EventKind::PtyResize,
+            &[
+                crate::logging::Field::PaneId(u64::from(self.id.0)),
+                crate::logging::Field::Cols(u64::from(cols)),
+                crate::logging::Field::Rows(u64::from(rows)),
+            ],
+        );
         true
     }
 

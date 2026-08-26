@@ -820,6 +820,7 @@ impl App {
                     || s.agent_report.is_some();
                 s.agent = detected;
                 if agent_changed {
+                    log_agent_identity(id, &s.agent, s.identity_source);
                     visible_identity_changed |= was_visible_agent || is_visible_agent;
                     if crate::agent::is_resumable(&s.agent) {
                         agent_appeared = true;
@@ -848,7 +849,9 @@ impl App {
                 };
                 if s.state != desired && now.duration_since(s.candidate_since) >= dwell {
                     let was_working = s.state == State::Working;
+                    let previous = s.state;
                     s.state = desired;
+                    log_agent_state(id, &s.agent, previous, desired);
                     // Snapshot what a blocked agent is waiting on **once**, at the
                     // moment it enters Blocked (not every tick), for Mission
                     // Control's "why blocked / answer inline" (docs/54); cleared
@@ -2450,6 +2453,7 @@ impl App {
                     "agent.authority_reported",
                     json!({"pane":id.0.to_string(), "source":source, "agent":agent, "status":state_str(state), "sequence":sequence, "ttl_s":ttl_s}),
                 );
+                log_agent_authority(id, agent, crate::logging::Outcome::Ok);
                 if changed {
                     self.emit_event(
                         "pane.agent_status_changed",
@@ -2485,10 +2489,12 @@ impl App {
                 }
                 status.agent_report = None;
                 status.force_detect = true;
+                let agent = status.agent.clone();
                 self.emit_event(
                     "agent.authority_released",
                     json!({"pane":id.0.to_string(), "source":source, "reason":"released"}),
                 );
+                log_agent_authority(id, &agent, crate::logging::Outcome::Ok);
                 Ok(json!({"type":"agent_release", "pane":id.0.to_string()}))
             }
             "agent.wait" => Err((
@@ -5738,6 +5744,65 @@ fn state_str(s: State) -> &'static str {
         State::Idle => "idle",
         State::Unknown => "unknown",
     }
+}
+
+fn log_agent_identity(id: PaneId, agent: &str, source: &str) {
+    let authority = match source {
+        "integration_report" => crate::logging::Authority::Hook,
+        source if source.contains("process") => crate::logging::Authority::Process,
+        "command_fallback" => crate::logging::Authority::None,
+        _ => crate::logging::Authority::Text,
+    };
+    let mut fields = [crate::logging::Field::IdOmitted(false); 4];
+    fields[0] = crate::logging::Field::PaneId(u64::from(id.0));
+    fields[1] = crate::logging::Field::Authority(authority);
+    let count = if let Some(agent) = crate::logging::SafeId::new(agent) {
+        fields[2] = crate::logging::Field::Agent(agent);
+        3
+    } else {
+        fields[2] = crate::logging::Field::IdOmitted(true);
+        3
+    };
+    crate::logging::event(crate::logging::EventKind::AgentIdentity, &fields[..count]);
+}
+
+fn log_agent_state(id: PaneId, agent: &str, from: State, to: State) {
+    fn map(state: State) -> crate::logging::AgentState {
+        match state {
+            State::Blocked => crate::logging::AgentState::Blocked,
+            State::Working => crate::logging::AgentState::Working,
+            State::Done => crate::logging::AgentState::Done,
+            State::Idle | State::Unknown => crate::logging::AgentState::Idle,
+        }
+    }
+
+    let mut fields = [crate::logging::Field::IdOmitted(false); 5];
+    fields[0] = crate::logging::Field::PaneId(u64::from(id.0));
+    fields[1] = crate::logging::Field::FromState(map(from));
+    fields[2] = crate::logging::Field::AgentState(map(to));
+    let count = if let Some(agent) = crate::logging::SafeId::new(agent) {
+        fields[3] = crate::logging::Field::Agent(agent);
+        4
+    } else {
+        fields[3] = crate::logging::Field::IdOmitted(true);
+        4
+    };
+    crate::logging::event(crate::logging::EventKind::AgentState, &fields[..count]);
+}
+
+fn log_agent_authority(id: PaneId, agent: &str, outcome: crate::logging::Outcome) {
+    let mut fields = [crate::logging::Field::IdOmitted(false); 5];
+    fields[0] = crate::logging::Field::PaneId(u64::from(id.0));
+    fields[1] = crate::logging::Field::Authority(crate::logging::Authority::Hook);
+    fields[2] = crate::logging::Field::Outcome(outcome);
+    let count = if let Some(agent) = crate::logging::SafeId::new(agent) {
+        fields[3] = crate::logging::Field::Agent(agent);
+        4
+    } else {
+        fields[3] = crate::logging::Field::IdOmitted(true);
+        4
+    };
+    crate::logging::event(crate::logging::EventKind::AgentAuthority, &fields[..count]);
 }
 
 #[cfg(test)]

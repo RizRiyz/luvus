@@ -1,0 +1,46 @@
+---
+title: Runtime Logs
+description: Diagnose Luvus server, client, pane, agent, and UHP failures with private structured logs.
+---
+
+Luvus records bounded structured diagnostics for long-lived server and display
+client processes. Logging is local only. Nothing is uploaded.
+
+## Read the logs
+
+```sh
+tail -n 200 ~/.luvus/logs/server.log
+tail -n 200 ~/.luvus/logs/client.log
+```
+
+The default session stores logs under `~/.luvus/logs`. Named sessions use
+`~/.luvus/sessions/<name>/logs`. Debug builds and `LUVUS_HOME` overrides retain
+their normal isolation. `luvus doctor` shows the resolved directory and whether
+its nearest existing parent is writable.
+
+Each line is one JSON record. `server.log` and `client.log` rotate at 3 MiB and
+keep one archived file, which caps both streams at 12 MiB per session.
+
+## Choose a level
+
+The default is `info`. Set `LUVUS_LOG` before starting the relevant process:
+
+```sh
+LUVUS_LOG=debug luvus server restart
+LUVUS_LOG=off luvus server restart
+```
+
+Supported values are `debug`, `info`, `warn`, `error`, and `off`. `off` starts
+no writer thread and creates no log directory. A running server keeps the level
+it had at startup, so restart it after changing the variable.
+
+## Privacy
+
+Records contain allowlisted lifecycle metadata such as event names, numeric pane
+IDs, terminal dimensions, safe method names, outcomes, and durations. They do
+not contain prompts, keystrokes, pane output, scrollback, command arguments,
+paths, file or DIFF contents, clipboard data, environment variables, native
+agent session IDs, UHP parameters, responses, or error messages.
+
+Logs are still private runtime data. Review them before attaching them to a
+public issue.

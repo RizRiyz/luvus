@@ -25,6 +25,7 @@ pub fn is_cli(args: &[String]) -> bool {
                 // Reserved so the removed, unreleased command family fails as
                 // an unknown command instead of accidentally opening the TUI.
                 | "api"
+                | "logs"
                 | "uhp"
                 | "socket"
                 | "module"
@@ -1452,6 +1453,15 @@ fn doctor(context: crate::i18n::cli::Context) -> i32 {
                 println!("           ↳ {hint}");
             }
         }
+    }
+
+    let log_dir = crate::logging::resolved_dir();
+    println!();
+    println!("  · logs    {}", log_dir.display());
+    if crate::logging::log_dir_writable() {
+        println!("  ✓ logs    {}", context.text("directory writable"));
+    } else {
+        println!("  ✗ logs    {}", context.text("not writable"));
     }
 
     // Whether this terminal can tell Shift+Enter from Enter. Legacy encoding
@@ -3850,11 +3860,14 @@ mod tests {
 
     #[test]
     fn unreleased_api_aliases_are_rejected() {
-        assert!(is_cli(&argv("luvus api schema")));
-        assert_eq!(
-            parse(&argv("luvus api schema")).unwrap_err().to_string(),
-            "unknown command. Try `luvus --help`."
-        );
+        for command in ["luvus api schema", "luvus logs server"] {
+            let args = argv(command);
+            assert!(is_cli(&args));
+            assert_eq!(
+                parse(&args).unwrap_err().to_string(),
+                "unknown command. Try `luvus --help`."
+            );
+        }
     }
 
     #[test]

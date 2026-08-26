@@ -51,6 +51,18 @@ agent. Identity now comes from the running process instead. If you still see it,
 please [open an issue](https://github.com/RizRiyz/luvus/issues) with what the
 pane was running.
 
+## Where can I find runtime diagnostics?
+
+Luvus keeps private structured diagnostics in the selected session directory.
+The default session writes `~/.luvus/logs/server.log` and
+`~/.luvus/logs/client.log`. Read recent records with ordinary tools such as
+`tail -n 200 ~/.luvus/logs/server.log`. Named sessions keep the same files under
+`~/.luvus/sessions/<name>/logs/`.
+
+Logs never include pane output, prompts, keystrokes, file contents, command
+arguments, or UHP request bodies. They can still describe your local runtime,
+so review them before attaching them to a public issue.
+
 ## Where did my scrollback go?
 
 Each pane has a 10 MiB retained-history budget by default, adjustable in
