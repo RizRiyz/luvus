@@ -1417,6 +1417,20 @@ mod tests {
     }
 
     #[test]
+    fn pi_fullscreen_mouse_modes_are_detected() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 2_000));
+
+        // Pi fullscreen enters the alternate screen, disables autowrap, and
+        // enables normal, button-motion, focus, and SGR mouse reporting.
+        e.advance(b"\x1b[?1049h\x1b[?7l\x1b[?1000h\x1b[?1002h\x1b[?1004h\x1b[?1006h");
+
+        assert!(e.alt_screen());
+        assert!(e.mouse_report());
+        assert!(e.sgr_mouse());
+    }
+
+    #[test]
     fn codex_composer_region_finds_the_real_default_background_layout() {
         let (tx, _rx) = channel();
         let mut e = AlacrittyEngine::new(40, 8, tx, budget_for_rows(40, 2_000));

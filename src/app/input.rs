@@ -1529,10 +1529,12 @@ impl App {
                         let base = content.unwrap_or(Rect::new(0, 0, 1, 1));
                         let col = m.column.saturating_sub(base.x) + 1;
                         let row = m.row.saturating_sub(base.y) + 1;
-                        let seq = mouse_wheel_seq(up, col, row, mm.sgr);
-                        for _ in 0..3 {
-                            pane.send(&seq);
-                        }
+                        // Preserve the terminal protocol's one-event/one-report
+                        // boundary. In particular, Windows ConPTY may coalesce
+                        // rapid writes; sending duplicates here can make a TUI
+                        // receive several concatenated SGR reports as one input
+                        // record and reject the entire wheel action.
+                        pane.send(&mouse_wheel_seq(up, col, row, mm.sgr));
                         scrolled_the_app = true;
                     } else if !pane.alt_screen() {
                         // Primary screen with real history: scroll luvus's
@@ -3430,6 +3432,8 @@ mod tests {
 
     #[test]
     fn sgr_wheel_encodes_button_and_coords() {
+        // Each physical wheel event produces exactly one complete report.
+        // Fullscreen TUIs may reject multiple reports coalesced into one read.
         // Wheel up = button 64, down = 65; coords are 1-based, pane-local.
         assert_eq!(mouse_wheel_seq(true, 5, 3, true), b"\x1b[<64;5;3M".to_vec());
         assert_eq!(
