@@ -88,6 +88,40 @@ fn strip_uniform_single_cell_margin(text: String) -> String {
         .join("\n")
 }
 
+/// A second left click within this of the first, on the same cell (±1), is a
+/// double-click. Terminals emit no native double-click, so luvus times it.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// A run of grid cells on one row: `(row, start_col, end_col)`, `end_col`
+/// exclusive — the same shape as [`crate::links::Link::spans`].
+type CellSpan = (u16, u16, u16);
+
+/// The whitespace-delimited word covering grid cell (`col`, `row`), and the one
+/// span it occupies. `None` on a whitespace or out-of-range cell. Char indices
+/// are the columns, matching how [`crate::links::link_at`] and the grid renderer
+/// address cells.
+fn word_at_grid(rows: &[String], col: u16, row: u16) -> Option<(String, Vec<CellSpan>)> {
+    let line = rows.get(row as usize)?;
+    let chars: Vec<char> = line.chars().collect();
+    let idx = col as usize;
+    if idx >= chars.len() || chars[idx].is_whitespace() {
+        return None;
+    }
+    let mut lo = idx;
+    while lo > 0 && !chars[lo - 1].is_whitespace() {
+        lo -= 1;
+    }
+    let mut hi = idx + 1;
+    while hi < chars.len() && !chars[hi].is_whitespace() {
+        hi += 1;
+    }
+    let text: String = chars[lo..hi].iter().collect();
+    if text.is_empty() {
+        return None;
+    }
+    Some((text, vec![(row, lo as u16, hi as u16)]))
+}
+
 impl App {
     fn handle_api_request(&mut self, req: crate::ipc::api::ApiRequest) -> bool {
         if req.method == "terminal.backend.create" {
@@ -1319,6 +1353,27 @@ impl App {
                 if !m.modifiers.contains(KeyModifiers::SHIFT) && self.begin_mouse_forward(&m, 0) {
                     return;
                 }
+                // A second left press on (or within one cell of) the first,
+                // inside the double-click window, copies and highlights the
+                // path / URL / word under the cursor. This point is reached only
+                // when the press was *not* forwarded to a mouse-tracking app (its
+                // reporting is off, or `Shift` bypassed it), so it never steals a
+                // click a pane app wanted.
+                let now = Instant::now();
+                let is_double = self.last_left_click.take().is_some_and(|(at, when)| {
+                    now.duration_since(when) <= DOUBLE_CLICK
+                        && m.column.abs_diff(at.0) <= 1
+                        && m.row.abs_diff(at.1) <= 1
+                });
+                if is_double {
+                    if self.copy_token_at(m.column, m.row) {
+                        // Its release keeps the highlight instead of re-copying.
+                        self.dbl_click_release = true;
+                        return;
+                    }
+                } else {
+                    self.last_left_click = Some(((m.column, m.row), now));
+                }
                 // Begin a selection only inside a pane's content; otherwise drop
                 // any old one. Falls through to normal click handling (focus/etc).
                 self.selection = self
@@ -1378,10 +1433,20 @@ impl App {
                     }
                     return;
                 }
+                // Dragging after a double-click turns it back into an ordinary
+                // selection, so its release copies what was dragged.
+                self.dbl_click_release = false;
                 self.update_mouse_selection_cursor(m.column, m.row);
                 return;
             }
             MouseEventKind::Up(MouseButton::Left) | MouseEventKind::Up(MouseButton::Middle) => {
+                // A double-click already copied and highlighted on its press; its
+                // release keeps that selection rather than re-copying it or
+                // clearing it the way a plain click would.
+                if self.dbl_click_release {
+                    self.dbl_click_release = false;
+                    return;
+                }
                 if let Some(p) = self.link_press.take() {
                     if (m.column, m.row) == p.at {
                         self.activate_link(p.target);
@@ -2325,6 +2390,67 @@ impl App {
         } else {
             text
         })
+    }
+
+    /// Copy the path, URL, or word under screen cell (`col`, `row`) to the
+    /// clipboard and highlight it — the double-click gesture. A path or URL is
+    /// copied as its full raw token (`src/main.rs:42:7` verbatim, a soft-wrapped
+    /// path rejoined); anything else falls back to the whitespace-delimited word,
+    /// and a whitespace or empty cell copies nothing. Returns whether it copied.
+    ///
+    /// Uses the pure [`crate::links::link_at`], not [`Self::link_at_screen`]:
+    /// copying doesn't need the file to exist, so a `pwd` directory or a
+    /// not-yet-created path still copies.
+    fn copy_token_at(&mut self, col: u16, row: u16) -> bool {
+        let Some((pane, content)) = self.pane_content_at(col, row) else {
+            return false;
+        };
+        let rows = {
+            let Some(p) = self.panes.get(&pane) else {
+                return false;
+            };
+            let Ok(engine) = p.engine.lock() else {
+                return false;
+            };
+            engine.visible_rows()
+        };
+        let (gcol, grow) = (col - content.x, row - content.y);
+        let (text, spans) = match crate::links::link_at(&rows, gcol, grow) {
+            Some(link) => {
+                let text = match link.hit {
+                    crate::links::Hit::Url(u) => u,
+                    crate::links::Hit::Path { raw, .. } => raw,
+                };
+                (text, link.spans)
+            }
+            None => match word_at_grid(&rows, gcol, grow) {
+                Some(pair) => pair,
+                None => return false,
+            },
+        };
+        if text.is_empty() {
+            return false;
+        }
+        // Highlight exactly the copied cells: from the first covered cell to the
+        // last, which for a rejoined soft-wrapped path runs through the full rows
+        // between them (the same reading-order rule `Selection` copies with). The
+        // highlight is transient (screen coordinates, cleared on the next click),
+        // so it carries no retained-history span.
+        if let (Some(first), Some(last)) = (spans.first(), spans.last()) {
+            self.selection = Some(Selection {
+                pane,
+                content,
+                anchor: (content.x + first.1, content.y + first.0),
+                cursor: (content.x + last.2.saturating_sub(1), content.y + last.0),
+                retained: None,
+                scrolled: false,
+                dragging: false,
+            });
+        }
+        self.pending_clipboard = Some(text);
+        let msg = self.catalog.copied;
+        self.show_toast(msg);
+        true
     }
 
     /// Show a transient toast (e.g. "Copied") bottom-center for ~1.4s.
@@ -4140,6 +4266,32 @@ mod link_click_tests {
         assert!(app.pane_menu_items().contains(&PaneMenuItem::OpenLink));
         app.pane_menu_action(PaneMenuItem::OpenLink);
         assert_eq!(app.pending_open_url.as_deref(), Some(URL));
+    }
+
+    /// The double-click fallback: the whitespace-delimited word under a cell,
+    /// with the single span it covers. Used when a cell isn't a path or URL.
+    #[test]
+    fn word_at_grid_takes_the_whitespace_word_under_the_cell() {
+        let rows = vec!["  foo(bar) baz  ".to_string()];
+        // Anywhere inside the token grabs the whole whitespace-delimited run,
+        // punctuation included, and reports its exact span.
+        for col in 2..=9 {
+            assert_eq!(
+                word_at_grid(&rows, col, 0),
+                Some(("foo(bar)".to_string(), vec![(0, 2, 10)])),
+                "col {col}"
+            );
+        }
+        // A neighbouring word is its own token.
+        assert_eq!(
+            word_at_grid(&rows, 11, 0),
+            Some(("baz".to_string(), vec![(0, 11, 14)]))
+        );
+        // Whitespace and out-of-range cells copy nothing.
+        assert_eq!(word_at_grid(&rows, 1, 0), None, "leading blank");
+        assert_eq!(word_at_grid(&rows, 10, 0), None, "gap between words");
+        assert_eq!(word_at_grid(&rows, 99, 0), None, "past the line");
+        assert_eq!(word_at_grid(&rows, 0, 5), None, "past the last row");
     }
 
     #[test]

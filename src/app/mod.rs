@@ -1464,6 +1464,13 @@ pub struct App {
     /// gesture dragged is the RESIZE-5 divider grab: moving off the cell hands
     /// the press over to the resize, releasing on it opens the link.
     pub link_press: Option<LinkPress>,
+    /// The last left press (screen cell + when), for detecting a double-click. A
+    /// second left press within the double-click window on the same cell (±1)
+    /// copies the path / URL / word under the cursor.
+    pub last_left_click: Option<((u16, u16), Instant)>,
+    /// Set between a double-click's press (which already copied) and its release,
+    /// so the release keeps the highlighted token instead of re-copying it.
+    pub dbl_click_release: bool,
     /// A transient toast (text, expiry) shown bottom-center — e.g. "Copied".
     pub toast: Option<(String, Instant)>,
     /// Downsample RGB → 256-color (for the local path on non-truecolor terms).
@@ -1892,6 +1899,8 @@ impl App {
             link_scan_at: None,
             hover_link: None,
             link_press: None,
+            last_left_click: None,
+            dbl_click_release: false,
             toast: None,
             downsample: false,
             last_cwd_at: Instant::now(),
@@ -2432,6 +2441,8 @@ impl App {
             link_scan_at: None,
             hover_link: None,
             link_press: None,
+            last_left_click: None,
+            dbl_click_release: false,
             toast: None,
             downsample: false,
             last_cwd_at: Instant::now(),
