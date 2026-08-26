@@ -10,6 +10,7 @@
 //! to [`EN`] (worst case: shows English, never a crash or a blank label).
 
 pub mod cli;
+pub mod settings;
 
 /// Every translatable UI label. One field per string; all required. Footer/hint
 /// "action words" are shared across surfaces (picker, git tab, help) for
@@ -145,6 +146,7 @@ pub struct Catalog {
     pub set_new_pane_to_workspace_root: &'static str,
     pub set_agent_title: &'static str,
     // ── settings ──
+    pub settings: &'static settings::Catalog,
     pub settings_title: &'static str,
     pub tab_theme: &'static str,
     pub tab_layout: &'static str,
@@ -344,6 +346,7 @@ pub struct Catalog {
 
 /// The English baseline — every other catalog mirrors this shape exactly.
 pub static EN: Catalog = Catalog {
+    settings: &settings::EN,
     workspaces: "WORKSPACES",
     agents: "AGENTS",
     files: "FILES",
@@ -643,6 +646,7 @@ pub static EN: Catalog = Catalog {
 };
 
 static ES: Catalog = Catalog {
+    settings: &settings::ES,
     workspaces: "ESPACIOS",
     agents: "AGENTES",
     files: "ARCHIVOS",
@@ -942,6 +946,7 @@ static ES: Catalog = Catalog {
 };
 
 static PT: Catalog = Catalog {
+    settings: &settings::PT,
     workspaces: "ESPAÇOS",
     agents: "AGENTES",
     files: "ARQUIVOS",
@@ -1241,6 +1246,7 @@ static PT: Catalog = Catalog {
 };
 
 static FR: Catalog = Catalog {
+    settings: &settings::FR,
     workspaces: "ESPACES",
     agents: "AGENTS",
     files: "FICHIERS",
@@ -1540,6 +1546,7 @@ static FR: Catalog = Catalog {
 };
 
 static DE: Catalog = Catalog {
+    settings: &settings::DE,
     workspaces: "BEREICHE",
     agents: "AGENTEN",
     files: "DATEIEN",
@@ -1839,6 +1846,7 @@ static DE: Catalog = Catalog {
 };
 
 static ID: Catalog = Catalog {
+    settings: &settings::ID,
     workspaces: "RUANG KERJA",
     agents: "AGEN",
     files: "BERKAS",
@@ -2138,6 +2146,7 @@ static ID: Catalog = Catalog {
 };
 
 static ZH: Catalog = Catalog {
+    settings: &settings::ZH,
     workspaces: "工作区",
     agents: "代理",
     files: "文件",
@@ -2437,6 +2446,7 @@ static ZH: Catalog = Catalog {
 };
 
 static JA: Catalog = Catalog {
+    settings: &settings::JA,
     workspaces: "ワークスペース",
     agents: "エージェント",
     files: "ファイル",
@@ -2796,5 +2806,74 @@ mod tests {
         assert_ne!(by_code("de").board_title, EN.board_title);
         assert_ne!(by_code("es").task_done, EN.task_done);
         assert_ne!(by_code("ja").board_new_task, EN.board_new_task);
+        assert_ne!(
+            by_code("es").settings.keys_intro_prefix,
+            EN.settings.keys_intro_prefix
+        );
+        assert_ne!(
+            by_code("id").settings.preset_custom,
+            EN.settings.preset_custom
+        );
+        assert_ne!(
+            by_code("zh").settings.modules_empty,
+            EN.settings.modules_empty
+        );
+    }
+
+    #[test]
+    fn every_language_covers_the_complete_settings_reference() {
+        for &code in LANGS {
+            let settings = by_code(code).settings;
+            assert_eq!(
+                settings.key_reference_headings.len(),
+                settings::KEY_REFERENCE_KEYS.len(),
+                "{code} settings reference heading count"
+            );
+            assert!(
+                settings.keys_intro_prefix.contains("{prefix}"),
+                "{code} prefix introduction keeps its placeholder"
+            );
+            assert!(
+                settings.keys_intro_move.contains("{prefix}"),
+                "{code} movement introduction keeps its placeholder"
+            );
+            assert!(
+                settings.keys_capture_again.contains("{key}"),
+                "{code} capture prompt keeps its placeholder"
+            );
+            assert!(
+                settings.key_prefix_twice.contains("{prefix}"),
+                "{code} doubled-prefix label keeps its placeholder"
+            );
+            assert!(
+                settings.keys_confirm_prefix.contains("{key}"),
+                "{code} confirmation prompt keeps its placeholder"
+            );
+            assert!(
+                settings.theme_bundled.contains("{id}")
+                    && settings.theme_removing.contains("{id}")
+                    && settings.theme_removed.contains("{id}")
+                    && settings.theme_remove_failed.contains("{id}")
+                    && settings.theme_remove_failed.contains("{error}"),
+                "{code} theme messages keep their placeholders"
+            );
+            for (section, keys) in settings::KEY_REFERENCE_KEYS.iter().enumerate() {
+                assert!(
+                    !settings.key_reference_headings[section].is_empty(),
+                    "{code} reference section {section} has a heading"
+                );
+                assert_eq!(
+                    settings.key_reference_descriptions[section].len(),
+                    keys.len(),
+                    "{code} reference section {section} covers every key row"
+                );
+                assert!(
+                    settings.key_reference_descriptions[section]
+                        .iter()
+                        .all(|description| !description.is_empty()),
+                    "{code} reference section {section} has no blank descriptions"
+                );
+            }
+        }
     }
 }

@@ -40,7 +40,7 @@ mod switcher;
 
 pub use search::{GlobalSearch, SearchFlash};
 
-pub use keys::{key_reference_rows, presets, Cmd, PrefixSpec, KEY_REFERENCE};
+pub use keys::{key_reference_rows, presets, Cmd, PrefixSpec};
 pub use modules::ModuleMenuAction;
 pub use picker::{FolderPicker, PickerHit, Row};
 pub use settings::{

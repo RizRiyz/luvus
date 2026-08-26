@@ -153,8 +153,7 @@ impl Cmd {
             Cmd::ClosePane => cat.cmd_close_pane,
             Cmd::ZoomPane => cat.cmd_zoom_pane,
             Cmd::ResizeMode => cat.cmd_resize_mode,
-            // The Keys tab's section headings are intentionally English too.
-            Cmd::CopyMode => "Copy terminal text",
+            Cmd::CopyMode => cat.settings.keys_copy_terminal_text,
             Cmd::NewTab => cat.cmd_new_tab,
             Cmd::NextTab => cat.cmd_next_tab,
             Cmd::PrevTab => cat.cmd_prev_tab,
@@ -177,11 +176,9 @@ impl Cmd {
         }
     }
 
-    /// Group heading for the Settings → Keys list. `Cmd::ALL` is ordered so each
-    /// group is contiguous; the Keys tab prints this label when it changes. Kept
-    /// English to match the tab's (English) how-to intro; the per-command
-    /// `label()` stays localized.
-    pub fn section(self) -> &'static str {
+    /// Localized group heading for the Settings → Keys list. `Cmd::ALL` is
+    /// ordered so each group is contiguous.
+    pub fn section(self, cat: &crate::i18n::Catalog) -> &'static str {
         match self {
             Cmd::FocusLeft
             | Cmd::FocusDown
@@ -195,13 +192,15 @@ impl Cmd {
             | Cmd::ClosePane
             | Cmd::ZoomPane
             | Cmd::ResizeMode
-            | Cmd::CopyMode => "Panes",
-            Cmd::NewTab | Cmd::NextTab | Cmd::PrevTab | Cmd::RenameTab => "Tabs",
+            | Cmd::CopyMode => cat.settings.keys_sections[0],
+            Cmd::NewTab | Cmd::NextTab | Cmd::PrevTab | Cmd::RenameTab => {
+                cat.settings.keys_sections[1]
+            }
             Cmd::NewWorkspace
             | Cmd::CloseWorkspace
             | Cmd::NextWorkspace
             | Cmd::PrevWorkspace
-            | Cmd::NewWorktree => "Nodes & worktrees",
+            | Cmd::NewWorktree => cat.settings.keys_sections[2],
             Cmd::OpenGit
             | Cmd::OpenBoard
             | Cmd::OpenSettings
@@ -209,8 +208,8 @@ impl Cmd {
             | Cmd::ToggleRightSidebar
             | Cmd::ToggleAgents
             | Cmd::ToggleFiles
-            | Cmd::GlobalSearch => "Views & panels",
-            Cmd::Switcher | Cmd::Detach => "Session",
+            | Cmd::GlobalSearch => cat.settings.keys_sections[3],
+            Cmd::Switcher | Cmd::Detach => cat.settings.keys_sections[4],
         }
     }
 
@@ -279,120 +278,13 @@ impl Cmd {
     }
 }
 
-/// Read-only reference blocks shown below the rebindable commands in Settings →
-/// Keys: the fixed keys and the context-specific shortcuts (scroll mode, the git
-/// tab, the task board, the folder picker, the mouse). Kept in one table so the
-/// count is authoritative for cursor bounds and the renderer just draws it. Each
-/// entry is `(section heading, &[(keys, what it does)])`. English, like the tab's
-/// how-to intro; the rebindable command labels stay localized.
-pub const KEY_REFERENCE: &[(&str, &[(&str, &str)])] = &[
-    (
-        "Always on (not rebindable)",
-        &[
-            ("h j k l", "focus panes (vim aliases)"),
-            ("q", "detach, leave the server running"),
-            ("X", "close pane"),
-            ("-", "split down"),
-            ("⇥ / ⇧⇥", "next / previous tab"),
-            ("prefix ×2", "send the literal configured prefix"),
-        ],
-    ),
-    (
-        "Scroll history  (no prefix)",
-        &[
-            ("Shift+↑", "enter scroll mode on the focused pane"),
-            ("j / k", "line down / up"),
-            ("Space / b", "page down / up"),
-            ("g / G", "top of history / back to live"),
-            ("1–9", "jump through history (1 oldest, 9 newest)"),
-            ("q  esc", "back to live"),
-        ],
-    ),
-    (
-        "Copy mode  (after Copy terminal text)",
-        &[
-            ("arrows  hjkl", "extend the selection by character / line"),
-            ("w / B", "next / previous word"),
-            ("Space / b", "page down / up"),
-            ("v", "reset the selection anchor at the cursor"),
-            ("y  ⏎", "copy and return to live output"),
-            ("q  esc", "cancel and restore the prior viewport"),
-        ],
-    ),
-    (
-        "Resize mode  (after prefix + r)",
-        &[
-            ("arrows  hjkl", "resize the focused pane"),
-            ("Shift+arrow", "bigger step"),
-            ("=  0", "equalize splits"),
-            ("esc", "exit resize mode"),
-        ],
-    ),
-    (
-        "Git tab  (after prefix + g)",
-        &[
-            ("1–6", "Commits Flow Branches PRs Issues Status"),
-            ("⇥ / ⇧⇥", "next / previous view"),
-            ("j / k", "scroll the list"),
-            ("/", "filter the list"),
-            ("d  c", "diff / create a PR"),
-            ("m", "scope: this repo or my work"),
-            ("o", "open on GitHub"),
-            ("r  q", "refresh / close the tab"),
-        ],
-    ),
-    (
-        "Task board  (after prefix + o)",
-        &[
-            ("a", "new task"),
-            ("s  d  m", "start / done / merge"),
-            ("x  D", "release / delete"),
-            ("o  ⏎", "detail / jump to worker pane"),
-            ("j / k", "move the cursor"),
-            ("q", "close the board"),
-        ],
-    ),
-    (
-        "Folder picker  (after prefix + N)",
-        &[
-            ("j / k", "move"),
-            ("→ / ←", "enter folder / go up"),
-            ("⏎", "open the folder as a node"),
-            ("n  w", "new folder / open as a worktree"),
-            ("esc", "cancel"),
-        ],
-    ),
-    (
-        "Copy & paste",
-        &[
-            ("drag", "select text; on release it copies to the clipboard"),
-            (
-                "shift+drag",
-                "select inside a mouse-aware app (e.g. an agent)",
-            ),
-            (
-                "⌘V  Ctrl+⇧V",
-                "your terminal's paste, into the focused pane",
-            ),
-        ],
-    ),
-    (
-        "Mouse",
-        &[
-            ("click", "focus a pane, or hit a row / button"),
-            ("right-click", "context menu: pane, node, agent, tab"),
-            ("wheel", "scroll the pane's history, or a list"),
-            ("drag divider", "resize the split"),
-            ("click branch", "open that node's git tab"),
-            ("tap pane", "zoom it (touch / mobile)"),
-        ],
-    ),
-];
-
 /// Total reference rows (not counting the section headings) — the authoritative
 /// count for the Keys-tab cursor, which steps through commands then these.
 pub fn key_reference_rows() -> usize {
-    KEY_REFERENCE.iter().map(|(_, rows)| rows.len()).sum()
+    crate::i18n::settings::KEY_REFERENCE_KEYS
+        .iter()
+        .map(|rows| rows.len())
+        .sum()
 }
 
 /// Canonical string for a command key after the prefix has been consumed.
@@ -603,6 +495,17 @@ pub struct Preset {
     pub prefix: &'static str,
     /// Command overrides (`cmd_id → key`). Anything absent keeps its default key.
     pub binds: &'static [(&'static str, &'static str)],
+}
+
+impl Preset {
+    pub fn localized_label(&self, cat: &crate::i18n::Catalog) -> &'static str {
+        match self.id {
+            "default" => cat.settings.preset_default,
+            "function" => cat.settings.preset_function,
+            "tmux" => cat.settings.preset_tmux,
+            _ => self.label,
+        }
+    }
 }
 
 /// The built-in presets. `default` restores luvus's own keys; `tmux` matches the

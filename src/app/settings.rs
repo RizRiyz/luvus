@@ -304,7 +304,7 @@ impl App {
                     return;
                 }
                 let Some(spec) = Self::prefix_spec_from_key(&key) else {
-                    self.show_toast("Use F1-F12 or a Ctrl/Alt chord");
+                    self.show_toast(self.catalog.settings.keys_invalid_prefix);
                     return;
                 };
                 if prefix_candidate.as_deref() == Some(spec.as_str()) {
@@ -320,7 +320,12 @@ impl App {
                     if let Some(ui) = self.settings.as_mut() {
                         ui.prefix_candidate = Some(spec);
                     }
-                    self.show_toast(format!("Press {label} again to confirm"));
+                    self.show_toast(
+                        self.catalog
+                            .settings
+                            .keys_confirm_prefix
+                            .replace("{key}", &label),
+                    );
                 }
                 return;
             }
@@ -824,7 +829,7 @@ impl App {
             )
         });
         if !removable {
-            self.show_toast(format!("Theme {id} is bundled and cannot be removed"));
+            self.show_toast(self.catalog.settings.theme_bundled.replace("{id}", id));
             return;
         }
 
@@ -844,7 +849,7 @@ impl App {
             .insert(id.to_string(), restore);
         let tx = self.app_tx.clone();
         let id = id.to_string();
-        self.show_toast(format!("Removing theme {id}…"));
+        self.show_toast(self.catalog.settings.theme_removing.replace("{id}", &id));
         std::thread::spawn(move || {
             let result = crate::theme::install::uninstall(&id)
                 .map(|_| crate::theme::ThemeRegistry::load())
@@ -866,7 +871,7 @@ impl App {
                 self.settings_theme_remove_rects
                     .retain(|(theme_id, _)| theme_id != &id);
                 self.clamp_settings_cursor();
-                self.show_toast(format!("Removed theme {id}"));
+                self.show_toast(self.catalog.settings.theme_removed.replace("{id}", &id));
             }
             Err(error) => {
                 if let Some((previous_theme, fallback_revision)) = restore {
@@ -874,7 +879,13 @@ impl App {
                         self.apply_theme(&previous_theme);
                     }
                 }
-                self.show_toast(format!("Could not remove {id}: {error}"));
+                self.show_toast(
+                    self.catalog
+                        .settings
+                        .theme_remove_failed
+                        .replace("{id}", &id)
+                        .replace("{error}", &error),
+                );
             }
         }
     }
@@ -1170,7 +1181,11 @@ impl App {
         config::SHIFT_ENTER_CHOICES
             .iter()
             .find(|(k, _, _)| *k == self.config.layout.shift_enter)
-            .map(|(_, label, _)| label.to_string())
+            .map(|(key, label, _)| match *key {
+                "esc-cr" => format!("ESC CR ({})", self.catalog.settings.shift_default),
+                "lf" => format!("LF ({})", self.catalog.settings.shift_newline),
+                _ => label.to_string(),
+            })
             .unwrap_or_else(|| self.config.layout.shift_enter.clone())
     }
 
@@ -1179,7 +1194,7 @@ impl App {
     pub fn file_open_label(&self) -> String {
         let choice = &self.config.layout.file_open;
         if choice == config::FILE_OPEN_READONLY {
-            return "read-only".to_string();
+            return self.catalog.settings.read_only.to_string();
         }
         self.editors
             .iter()
@@ -1749,6 +1764,113 @@ mod tests {
         // A blank line separates the options from the section header.
         let (res, div) = (res.unwrap(), div.unwrap());
         assert!(div >= res + 2, "a blank gap sits above the section divider");
+    }
+
+    #[test]
+    fn settings_chrome_and_values_follow_the_active_catalog() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        fn screen(app: &mut crate::app::App) -> String {
+            let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+            terminal
+                .draw(|frame| crate::ui::render(frame, app))
+                .unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect()
+        }
+
+        let _env = crate::persist::test_env("settings-complete-i18n");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(160, 40, tx).unwrap();
+        app.catalog = crate::i18n::by_code("es");
+        app.open_settings();
+
+        app.settings_set_tab(SettingsTab::Keys);
+        let keys = screen(&mut app);
+        assert!(keys.contains("Pulsa el prefijo"));
+        assert!(keys.contains("Modo de comandos"));
+        assert!(keys.contains("Preajuste"));
+        assert!(!keys.contains("Press the prefix"));
+
+        if let Some(ui) = app.settings.as_mut() {
+            ui.cursor = KEYS_HEADER_ROWS + crate::app::Cmd::ALL.len();
+        }
+        let reference = screen(&mut app);
+        assert!(reference.contains("Siempre activos"));
+        assert!(reference.contains("enfocar paneles"));
+        assert!(!reference.contains("Always on"));
+
+        if let Some(ui) = app.settings.as_mut() {
+            ui.cursor =
+                KEYS_HEADER_ROWS + crate::app::Cmd::ALL.len() + crate::app::key_reference_rows()
+                    - 1;
+        }
+        let mouse_reference = screen(&mut app);
+        assert!(mouse_reference.contains("Ratón"));
+        assert!(mouse_reference.contains("clic derecho"));
+        assert!(mouse_reference.contains("tocar panel"));
+        assert!(!mouse_reference.contains("right-click"));
+
+        if let Some(ui) = app.settings.as_mut() {
+            ui.cursor = KEYS_PREFIX_ROW;
+            ui.capturing = true;
+        }
+        app.handle_settings_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app
+            .toast
+            .as_ref()
+            .is_some_and(|(message, _)| message == "Usa F1-F12 o un atajo Ctrl/Alt"));
+
+        app.settings_set_tab(SettingsTab::General);
+        let general = screen(&mut app);
+        assert!(general.contains("solo lectura"));
+        assert!(general.contains("predeterminado"));
+
+        app.settings_set_tab(SettingsTab::Layout);
+        let diff_layout = app
+            .layout_rows()
+            .iter()
+            .position(|row| matches!(row, LayoutRow::DiffLayout))
+            .unwrap();
+        if let Some(ui) = app.settings.as_mut() {
+            ui.cursor = diff_layout;
+        }
+        let layout = screen(&mut app);
+        assert!(layout.contains("automático"));
+
+        app.settings_set_tab(SettingsTab::Modules);
+        let modules = screen(&mut app);
+        assert!(modules.contains("No hay módulos instalados"));
+    }
+
+    #[test]
+    fn every_language_renders_every_settings_tab() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("settings-all-languages");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(160, 40, tx).unwrap();
+        app.open_settings();
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+
+        for &code in crate::i18n::LANGS {
+            app.catalog = crate::i18n::by_code(code);
+            for tab in SettingsTab::ALL {
+                app.settings_set_tab(tab);
+                let last = app.settings_rows(tab).saturating_sub(1);
+                if let Some(ui) = app.settings.as_mut() {
+                    ui.cursor = last;
+                }
+                terminal
+                    .draw(|frame| crate::ui::render(frame, &mut app))
+                    .unwrap_or_else(|error| panic!("{code} {tab:?} failed to render: {error}"));
+            }
+        }
     }
 
     /// Notifications is no longer its own tab: General leads the tab strip and

@@ -67,14 +67,6 @@ impl DiffMarkerStyle {
         }
     }
 
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Symbols => "symbols",
-            Self::Bars => "bars",
-            Self::Both => "both",
-        }
-    }
-
     pub fn shows_symbols(self) -> bool {
         matches!(self, Self::Symbols | Self::Both)
     }
@@ -97,13 +89,6 @@ impl DiffColorMode {
         match self {
             Self::Theme => Self::Standard,
             Self::Standard => Self::Theme,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Theme => "theme",
-            Self::Standard => "red + green",
         }
     }
 }
