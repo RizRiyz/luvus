@@ -121,8 +121,11 @@ pub fn run_cli(args: &[String], context: crate::i18n::cli::Context) -> Result<i3
     };
 
     println!(
-        "Luvus {latest} {} {CURRENT}).",
-        context.text("is available (current:")
+        "{}",
+        context.render(
+            "Luvus {latest} is available (current: {current}).",
+            &[("latest", &latest), ("current", CURRENT)],
+        )
     );
     let executable = std::env::current_exe().context("find the running Luvus binary")?;
     let executable = executable.canonicalize().unwrap_or(executable);

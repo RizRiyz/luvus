@@ -314,16 +314,24 @@ server:
 ";
 
 pub fn run(args: &[String]) -> Result<i32> {
-    run_inner(args).map_err(localize_usage_error)
+    run_inner(args).map_err(localize_cli_error)
 }
 
-fn localize_usage_error(error: anyhow::Error) -> anyhow::Error {
+fn localize_cli_error(error: anyhow::Error) -> anyhow::Error {
+    localize_cli_error_with(error, crate::i18n::cli::Context::configured())
+}
+
+fn localize_cli_error_with(
+    error: anyhow::Error,
+    context: crate::i18n::cli::Context,
+) -> anyhow::Error {
     let message = error.to_string();
-    if !message.starts_with("usage:") && !message.starts_with("Usage:") {
-        return error;
+    let localized = crate::i18n::cli::diagnostic(&message, context.language());
+    if localized == message {
+        error
+    } else {
+        anyhow!(localized.into_owned())
     }
-    let context = crate::i18n::cli::Context::configured();
-    anyhow!("{}", crate::i18n::cli::help(&message, context.language()))
 }
 
 fn run_inner(args: &[String]) -> Result<i32> {
@@ -1915,21 +1923,24 @@ fn skill_cmd(rest: &[String], context: crate::i18n::cli::Context) -> Result<i32>
             print!("{}", crate::skill::show());
             Ok(0)
         }
-        Some("update") => Err(anyhow!(
+        Some("update") => Err(anyhow!(context.text(
             "`luvus skill update` was removed; update Luvus, then run `luvus skill enable` to install its version-matched skill"
-        )),
-        Some("install" | "uninstall" | "on" | "off") => Err(anyhow!(
-            "`luvus skill {}` was removed; use `luvus skill {}`",
-            rest[0],
-            if matches!(rest[0].as_str(), "install" | "on") {
+        ))),
+        Some("install" | "uninstall" | "on" | "off") => {
+            let replacement = if matches!(rest[0].as_str(), "install" | "on") {
                 "enable"
             } else {
                 "disable"
-            }
-        )),
-        Some(command) => Err(anyhow!(
-            "unknown skill command `{command}`; expected enable, status, disable, or show"
-        )),
+            };
+            Err(anyhow!(context.render(
+                "`luvus skill {command}` was removed; use `luvus skill {replacement}`",
+                &[("command", &rest[0]), ("replacement", replacement)],
+            )))
+        }
+        Some(command) => Err(anyhow!(context.render(
+            "unknown skill command `{command}`; expected enable, status, disable, or show",
+            &[("command", command)],
+        ))),
     }
 }
 
@@ -3496,6 +3507,24 @@ fn parse_setting_value(s: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_error_localization_translates_catalogued_diagnostics_only() {
+        let context = crate::i18n::cli::Context::for_language(crate::i18n::cli::Language::Zh);
+        let localized =
+            localize_cli_error_with(anyhow!("unknown command. Try `luvus --help`."), context);
+        assert_eq!(localized.to_string(), "未知命令。请运行 `luvus --help`。");
+
+        let skill_error = skill_cmd(&["mystery".into()], context).unwrap_err();
+        assert_eq!(
+            skill_error.to_string(),
+            "未知技能命令 `mystery`。应为 enable、status、disable 或 show"
+        );
+
+        let server_message = "remote policy rejected request: permission denied";
+        let unchanged = localize_cli_error_with(anyhow!(server_message), context);
+        assert_eq!(unchanged.to_string(), server_message);
+    }
 
     fn argv(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()

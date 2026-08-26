@@ -90,28 +90,32 @@ pub fn run(args: &[String], context: crate::i18n::cli::Context) -> Result<i32> {
         (Some("install"), Some(agent)) if AGENTS.contains(&agent) => {
             install(agent)?;
             println!(
-                "{} {agent} {}",
-                context.text("installed luvus"),
-                context.text("integration")
+                "{}",
+                context.render(
+                    "Installed Luvus integration for {agent}.",
+                    &[("agent", agent)]
+                )
             );
             Ok(0)
         }
         (Some("uninstall"), Some(agent)) if AGENTS.contains(&agent) => {
             uninstall(agent)?;
             println!(
-                "{} {agent} {} ({agent}: {})",
-                context.text("removed luvus"),
-                context.text("integration"),
-                context.text("agent itself is untouched")
+                "{}",
+                context.render(
+                    "Removed Luvus integration for {agent}. The agent itself was not changed.",
+                    &[("agent", agent)],
+                )
             );
             Ok(0)
         }
-        (Some("install" | "uninstall"), Some(other)) => Err(anyhow!(
-            "{}: {other} ({}: {})",
-            context.text("unsupported agent"),
-            context.text("supported"),
-            AGENTS.join(", ")
-        )),
+        (Some("install" | "uninstall"), Some(other)) => {
+            let supported = AGENTS.join(", ");
+            Err(anyhow!(context.render(
+                "Unsupported agent: {agent} (supported: {supported})",
+                &[("agent", other), ("supported", &supported)],
+            )))
+        }
         _ => Err(anyhow!(
             "usage: luvus integration <install|uninstall> <{}>",
             AGENTS.join("|")
@@ -675,6 +679,25 @@ fn set_executable(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_agent_message_is_a_complete_localized_sentence() {
+        let args = [
+            "luvus".into(),
+            "integration".into(),
+            "install".into(),
+            "mystery".into(),
+        ];
+        let context = crate::i18n::cli::Context::for_language(crate::i18n::cli::Language::Ja);
+        let error = run(&args, context).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "未対応のエージェント：mystery（対応：{}）",
+                AGENTS.join(", ")
+            )
+        );
+    }
 
     #[test]
     fn install_writes_hook_and_settings() {

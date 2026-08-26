@@ -40,6 +40,16 @@ impl Context {
     pub fn text(self, english: &'static str) -> &'static str {
         text(english, self.language)
     }
+
+    /// Translate a complete Luvus-owned message, then substitute canonical
+    /// values such as command names, versions, paths, and agent identifiers.
+    pub fn render(self, english: &'static str, values: &[(&str, &str)]) -> String {
+        let mut rendered = self.text(english).to_string();
+        for (name, value) in values {
+            rendered = rendered.replace(&format!("{{{name}}}"), value);
+        }
+        rendered
+    }
 }
 
 impl Language {
@@ -2216,7 +2226,7 @@ static TEXT: &[Translation] = &[
     tr!("Check for a newer release and install it through the detected safe update channel.", "Buscar una versión nueva e instalarla mediante el canal seguro detectado.", "Verificar uma nova versão e instalá-la pelo canal seguro detectado.", "Rechercher une nouvelle version et l'installer via le canal sûr détecté.", "Nach neuer Version suchen und über den erkannten sicheren Kanal installieren.", "Periksa rilis baru dan pasang lewat kanal aman yang terdeteksi.", "检查新版本并通过检测到的安全更新渠道安装。", "新しいリリースを確認し、検出した安全な更新経路でインストールします。"),
     tr!("Checking for Luvus updates...", "Buscando actualizaciones de Luvus...", "Verificando atualizações do Luvus...", "Recherche des mises à jour de Luvus...", "Luvus-Aktualisierungen werden gesucht...", "Memeriksa pembaruan Luvus...", "正在检查 Luvus 更新...", "Luvus の更新を確認しています..."),
     tr!("is already up to date.", "ya está actualizado.", "já está atualizado.", "est déjà à jour.", "ist bereits aktuell.", "sudah terbaru.", "已是最新版本。", "はすでに最新です。"),
-    tr!("is available (current:", "está disponible (actual:", "está disponível (atual:", "est disponible (actuelle :", "ist verfügbar (aktuell:", "tersedia (saat ini:", "可用（当前：", "が利用できます（現在："),
+    tr!("Luvus {latest} is available (current: {current}).", "Luvus {latest} está disponible (actual: {current}).", "Luvus {latest} está disponível (atual: {current}).", "Luvus {latest} est disponible (version actuelle : {current}).", "Luvus {latest} ist verfügbar (aktuell: {current}).", "Luvus {latest} tersedia (saat ini: {current}).", "Luvus {latest} 可用（当前版本：{current}）。", "Luvus {latest} が利用できます（現在のバージョン：{current}）。"),
     tr!("Updated Luvus", "Luvus actualizado", "Luvus atualizado", "Luvus mis à jour", "Luvus aktualisiert", "Luvus diperbarui", "Luvus 已更新", "Luvus を更新しました"),
     tr!("Run `luvus server restart` when you are ready to load the new server binary.", "Ejecuta `luvus server restart` cuando quieras cargar el nuevo binario del servidor.", "Execute `luvus server restart` quando quiser carregar o novo binário do servidor.", "Exécutez `luvus server restart` lorsque vous souhaitez charger le nouveau binaire serveur.", "Führe `luvus server restart` aus, wenn das neue Server-Binary geladen werden soll.", "Jalankan `luvus server restart` saat siap memuat binary server baru.", "准备加载新的服务器二进制文件时，请运行 `luvus server restart`。", "新しいサーバーバイナリを読み込む準備ができたら `luvus server restart` を実行してください。"),
     tr!("could not check", "no se pudo comprobar", "não foi possível verificar", "impossible de vérifier", "konnte nicht prüfen", "tidak dapat memeriksa", "无法检查", "確認できませんでした"),
@@ -2238,12 +2248,13 @@ static TEXT: &[Translation] = &[
     tr!("use Alt/Option+Enter or a terminal with the keyboard protocol", "usa Alt/Option+Enter o un terminal con el protocolo de teclado", "use Alt/Option+Enter ou um terminal com o protocolo de teclado", "utilisez Alt/Option+Entrée ou un terminal avec le protocole clavier", "Alt/Option+Enter oder ein Terminal mit Tastaturprotokoll verwenden", "gunakan Alt/Option+Enter atau terminal dengan protokol keyboard", "请使用 Alt/Option+Enter 或支持键盘协议的终端", "Alt/Option+Enter またはキーボードプロトコル対応端末を使用してください"),
     tr!("Tip: install `git` to use the git tab & worktrees. Everything else works now.", "Consejo: instala `git` para usar la pestaña Git y los worktrees. Todo lo demás ya funciona.", "Dica: instale `git` para usar a aba Git e worktrees. Todo o restante já funciona.", "Conseil : installez `git` pour utiliser l'onglet Git et les worktrees. Tout le reste fonctionne.", "Tipp: `git` für Git-Tab und Worktrees installieren. Alles andere funktioniert bereits.", "Tip: pasang `git` untuk memakai tab Git dan worktree. Fitur lain sudah berfungsi.", "提示：安装 `git` 以使用 Git 标签页和工作树。其他功能均可正常使用。", "ヒント：Git タブとワークツリーには `git` をインストールしてください。他はすべて利用できます。"),
     tr!("All set — you're good to go. ✓", "Todo listo. ✓", "Tudo pronto. ✓", "Tout est prêt. ✓", "Alles bereit. ✓", "Semua siap. ✓", "一切就绪。✓", "準備完了です。✓"),
-    tr!("installed luvus", "integración de luvus instalada para", "integração luvus instalada para", "intégration luvus installée pour", "Luvus-Integration installiert für", "integrasi luvus terpasang untuk", "已安装 luvus 集成：", "luvus 連携をインストール："),
-    tr!("integration", "integración", "integração", "intégration", "Integration", "integrasi", "集成", "連携"),
-    tr!("removed luvus", "integración de luvus eliminada para", "integração luvus removida para", "intégration luvus supprimée pour", "Luvus-Integration entfernt für", "integrasi luvus dihapus untuk", "已移除 luvus 集成：", "luvus 連携を削除："),
-    tr!("agent itself is untouched", "el agente no se modifica", "o agente não é alterado", "l'agent lui-même n'est pas modifié", "der Agent selbst bleibt unverändert", "agen tidak diubah", "智能体本身未被修改", "エージェント自体は変更されません"),
-    tr!("unsupported agent", "agente no compatible", "agente não suportado", "agent non pris en charge", "nicht unterstützter Agent", "agen tidak didukung", "不支持的智能体", "未対応のエージェント"),
-    tr!("supported", "compatibles", "suportados", "pris en charge", "unterstützt", "didukung", "支持", "対応"),
+    tr!("Installed Luvus integration for {agent}.", "Integración de Luvus instalada para {agent}.", "Integração do Luvus instalada para {agent}.", "Intégration Luvus installée pour {agent}.", "Luvus-Integration für {agent} installiert.", "Integrasi Luvus untuk {agent} telah dipasang.", "已为 {agent} 安装 Luvus 集成。", "{agent} 用の Luvus 連携をインストールしました。"),
+    tr!("Removed Luvus integration for {agent}. The agent itself was not changed.", "Integración de Luvus eliminada para {agent}. El agente no se ha modificado.", "Integração do Luvus removida para {agent}. O agente não foi alterado.", "Intégration Luvus supprimée pour {agent}. L'agent n'a pas été modifié.", "Luvus-Integration für {agent} entfernt. Der Agent selbst wurde nicht geändert.", "Integrasi Luvus untuk {agent} telah dihapus. Agen tidak diubah.", "已移除 {agent} 的 Luvus 集成。智能体本身未被修改。", "{agent} 用の Luvus 連携を削除しました。エージェント自体は変更されていません。"),
+    tr!("Unsupported agent: {agent} (supported: {supported})", "Agente no compatible: {agent} (compatibles: {supported})", "Agente não suportado: {agent} (suportados: {supported})", "Agent non pris en charge : {agent} (pris en charge : {supported})", "Nicht unterstützter Agent: {agent} (unterstützt: {supported})", "Agen tidak didukung: {agent} (didukung: {supported})", "不支持的智能体：{agent}（支持：{supported}）", "未対応のエージェント：{agent}（対応：{supported}）"),
+    tr!("unknown command. Try `luvus --help`.", "comando desconocido. Ejecuta `luvus --help`.", "comando desconhecido. Execute `luvus --help`.", "commande inconnue. Exécutez `luvus --help`.", "unbekannter Befehl. Führe `luvus --help` aus.", "perintah tidak dikenal. Jalankan `luvus --help`.", "未知命令。请运行 `luvus --help`。", "不明なコマンドです。`luvus --help` を実行してください。"),
+    tr!("`luvus skill update` was removed; update Luvus, then run `luvus skill enable` to install its version-matched skill", "Se eliminó `luvus skill update`; actualiza Luvus y ejecuta `luvus skill enable` para instalar la skill de la versión correspondiente", "`luvus skill update` foi removido; atualize o Luvus e execute `luvus skill enable` para instalar a skill da versão correspondente", "`luvus skill update` a été supprimé ; mettez Luvus à jour, puis exécutez `luvus skill enable` pour installer la skill correspondant à cette version", "`luvus skill update` wurde entfernt; aktualisiere Luvus und führe dann `luvus skill enable` aus, um den zur Version passenden Skill zu installieren", "`luvus skill update` telah dihapus; perbarui Luvus, lalu jalankan `luvus skill enable` untuk memasang skill yang sesuai dengan versinya", "`luvus skill update` 已移除。请更新 Luvus，然后运行 `luvus skill enable` 安装与版本匹配的技能", "`luvus skill update` は削除されました。Luvus を更新してから `luvus skill enable` を実行し、バージョンに対応するスキルをインストールしてください"),
+    tr!("`luvus skill {command}` was removed; use `luvus skill {replacement}`", "Se eliminó `luvus skill {command}`; usa `luvus skill {replacement}`", "`luvus skill {command}` foi removido; use `luvus skill {replacement}`", "`luvus skill {command}` a été supprimé ; utilisez `luvus skill {replacement}`", "`luvus skill {command}` wurde entfernt; verwende `luvus skill {replacement}`", "`luvus skill {command}` telah dihapus; gunakan `luvus skill {replacement}`", "`luvus skill {command}` 已移除。请使用 `luvus skill {replacement}`", "`luvus skill {command}` は削除されました。`luvus skill {replacement}` を使用してください"),
+    tr!("unknown skill command `{command}`; expected enable, status, disable, or show", "comando de skill desconocido `{command}`; se esperaba enable, status, disable o show", "comando de skill desconhecido `{command}`; esperado enable, status, disable ou show", "commande de skill inconnue `{command}` ; attendu : enable, status, disable ou show", "unbekannter Skill-Befehl `{command}`; erwartet wurde enable, status, disable oder show", "perintah skill tidak dikenal `{command}`; gunakan enable, status, disable, atau show", "未知技能命令 `{command}`。应为 enable、status、disable 或 show", "不明なスキルコマンド `{command}`。enable、status、disable、show のいずれかを指定してください"),
     tr!("unknown server command", "comando de servidor desconocido", "comando de servidor desconhecido", "commande serveur inconnue", "unbekannter Serverbefehl", "perintah server tidak dikenal", "未知服务器命令", "不明なサーバーコマンド"),
     tr!("server already running", "el servidor ya está en ejecución", "o servidor já está em execução", "le serveur est déjà en cours", "Server läuft bereits", "server sudah berjalan", "服务器已在运行", "サーバーはすでに実行中です"),
     tr!("server started", "servidor iniciado", "servidor iniciado", "serveur démarré", "Server gestartet", "server dimulai", "服务器已启动", "サーバーを起動しました"),
@@ -2342,6 +2353,24 @@ pub fn help<'a>(source: &'a str, language: Language) -> Cow<'a, str> {
         output.push_str(newline);
     }
     Cow::Owned(output)
+}
+
+/// Translate one Luvus-owned CLI diagnostic. Unlike help rows, diagnostic
+/// prose must match a catalog entry exactly so server and protocol text cannot
+/// be rewritten accidentally.
+pub fn diagnostic<'a>(source: &'a str, language: Language) -> Cow<'a, str> {
+    let localized_help = help(source, language);
+    if localized_help != source {
+        return localized_help;
+    }
+    if language == Language::En {
+        return Cow::Borrowed(source);
+    }
+    TEXT.iter()
+        .find(|entry| entry.en == source)
+        .map_or(Cow::Borrowed(source), |entry| {
+            Cow::Borrowed(entry.get(language))
+        })
 }
 
 fn usage_rest(rest: &str, language: Language) -> &str {
@@ -2454,6 +2483,34 @@ mod tests {
         assert_eq!(
             unicode_width::UnicodeWidthStr::width(pad("status", 10).as_str()),
             10
+        );
+    }
+
+    #[test]
+    fn complete_messages_keep_locale_owned_grammar_and_punctuation() {
+        let chinese = Context::for_language(Language::Zh);
+        assert_eq!(
+            chinese.render(
+                "Luvus {latest} is available (current: {current}).",
+                &[("latest", "1.2.0"), ("current", "1.1.0")],
+            ),
+            "Luvus 1.2.0 可用（当前版本：1.1.0）。"
+        );
+        assert_eq!(
+            chinese.render(
+                "Installed Luvus integration for {agent}.",
+                &[("agent", "codex")],
+            ),
+            "已为 codex 安装 Luvus 集成。"
+        );
+
+        let japanese = Context::for_language(Language::Ja);
+        assert_eq!(
+            japanese.render(
+                "Removed Luvus integration for {agent}. The agent itself was not changed.",
+                &[("agent", "claude")],
+            ),
+            "claude 用の Luvus 連携を削除しました。エージェント自体は変更されていません。"
         );
     }
 
