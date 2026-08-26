@@ -1,7 +1,8 @@
-//! Git & GitHub integration — the **git tab** (docs/17). A workspace's branch is
-//! clickable; clicking it opens a built-in dashboard of the repo's branches,
-//! commit flow, working tree, and (later) GitHub PRs/issues. Data is shelled out
-//! to `git`/`gh` and fetched on a background thread — no HTTP dependency.
+//! Git & GitHub integration — the **git tab** (docs/17). Open it from a
+//! workspace's context menu or with the configured `OpenGit` command to view
+//! branches, commit flow, the working tree, and GitHub PRs/issues. Data is
+//! shelled out to `git`/`gh` and fetched on a background thread — no HTTP
+//! dependency.
 //!
 //! GIT-1 (this layer): the tab, local-git sections (Branches / Commits / Status),
 //! async fetch. PRs/issues (GIT-2), actions (GIT-3), and the flow renderer +

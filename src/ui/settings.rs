@@ -62,8 +62,7 @@ fn key_reference_label(section: usize, row: usize, app: &App) -> String {
         (8, 1) => cat.key_right_click.to_string(),
         (8, 2) => cat.key_wheel.to_string(),
         (8, 3) => cat.key_drag_divider.to_string(),
-        (8, 4) => cat.key_click_branch.to_string(),
-        (8, 5) => cat.key_tap_pane.to_string(),
+        (8, 4) => cat.key_tap_pane.to_string(),
         _ => crate::i18n::settings::KEY_REFERENCE_KEYS[section][row].to_string(),
     }
 }
