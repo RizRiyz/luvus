@@ -69,24 +69,31 @@ function binPath(): string {
 }
 
 /**
- * Spawn one fire-and-forget report through the luvus CLI.
+ * Spawn one report through the luvus CLI.
  *
  * The CLI targets this exact luvus session via LUVUS_SOCKET_PATH, so no
- * endpoint discovery happens here. Failures (server down, mid-restart) are
- * swallowed: reporting is best-effort and must never disturb the agent run.
- * The exec result is not awaited — reports must never delay the agent loop.
+ * endpoint discovery happens here.
+ *
+ * Returns a Promise<boolean> indicating whether the CLI executed and exited
+ * cleanly with code 0 (and was not killed by timeout). Failures never throw or reject.
  */
-function makeSender(pi: ExtensionAPI): (args: string[]) => void {
+function makeSender(pi: ExtensionAPI): (args: string[]) => Promise<boolean> {
 	return (args: string[]) => {
-		if (!ENABLED) return;
-		const bin = binPath();
+		if (!ENABLED) return Promise.resolve(false);
+		let result: unknown;
 		try {
-			const result = pi.exec(bin, args, { timeout: 1500 });
-			// Swallow async failures; a nonzero exit (server restarting) is fine.
-			void Promise.resolve(result).catch(() => {});
+			result = pi.exec(binPath(), args, { timeout: 1500 });
 		} catch {
-			// luvus not running or spawn failure — best effort only.
+			return Promise.resolve(false);
 		}
+		return Promise.resolve(result).then(
+			(res) => {
+				const r = res as { code?: number; exitCode?: number; killed?: boolean } | undefined;
+				const exit = r?.code ?? r?.exitCode;
+				return exit === 0 && !r?.killed;
+			},
+			() => false,
+		);
 	};
 }
 
@@ -111,15 +118,23 @@ export function createLuvusExtension(pi: ExtensionAPI): void {
 	function reportSession(sessionRefValue: string | undefined): void {
 		if (!sessionRefValue || sessionRefValue === lastSessionRef) return;
 		lastSessionRef = sessionRefValue;
-		sendReport(["pane", "report", "--agent", AGENT, "--session", sessionRefValue]);
+		void sendReport(["pane", "report", "--agent", AGENT, "--session", sessionRefValue]).then(
+			(ok) => {
+				// Compare-and-clear: only drop the marker if no newer session
+				// report has committed since this one was sent.
+				if (!ok && lastSessionRef === sessionRefValue) {
+					lastSessionRef = undefined;
+				}
+			},
+		);
 	}
 
 	function reportStop(): void {
-		sendReport(["pane", "report-event", "--agent", AGENT, "--kind", "Stop"]);
+		void sendReport(["pane", "report-event", "--agent", AGENT, "--kind", "Stop"]);
 	}
 
 	function reportNotification(message: string): void {
-		sendReport([
+		void sendReport([
 			"pane",
 			"report-event",
 			"--agent",

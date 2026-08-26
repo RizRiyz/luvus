@@ -1264,6 +1264,17 @@ mod tests {
             !OMP_EXTENSION.contains("getSessionFile"),
             "sessionRef must not fall back to a file path"
         );
+        // Failed session reports must clear lastSessionRef so subsequent events
+        // (e.g. agent_start) can retry. Setting it immediately before send
+        // without failure recovery would permanently lock out retries.
+        assert!(
+            OMP_EXTENSION.contains("lastSessionRef = undefined;"),
+            "session reporting must clear lastSessionRef on send failure to permit retries"
+        );
+        assert!(
+            OMP_EXTENSION.contains("lastSessionRef === sessionRefValue"),
+            "compare-and-clear must guard against clobbering a newer in-flight session"
+        );
         // Reports route through the exact-session CLI, not pipe discovery.
         assert!(OMP_EXTENSION.contains("LUVUS_BIN_PATH"));
         assert!(

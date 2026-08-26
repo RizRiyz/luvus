@@ -40,6 +40,7 @@ description: What luvus supports per agent, covering live status, session resume
   `luvus integration uninstall <agent>` touches only luvus's own entry. Kimi keeps
   its hooks in `~/.kimi-code/config.toml`, the same file as your API keys, so
   luvus edits it in place and leaves your keys, comments, and own hooks untouched.
+  Grok Build reads hooks from `~/.grok/hooks/*.json`, so luvus just adds its own
   `luvus.json` there and never touches your `~/.grok/config.toml`. Oh My Pi
   (omp) auto-loads extension factories from `~/.omp/agent/extensions/`, so
   `luvus integration install omp` drops a single `luvus.ts` there — no config
