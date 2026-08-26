@@ -13,6 +13,7 @@ pub(super) fn draw_picker(
     f: &mut RenderTarget,
     area: Rect,
     p: &FolderPicker,
+    mobile: bool,
     cat: &Catalog,
     t: &Theme,
 ) -> Vec<(PickerHit, Rect)> {
@@ -20,7 +21,11 @@ pub(super) fn draw_picker(
 
     let w = area.width.saturating_sub(6).clamp(46, 76).min(area.width);
     let h = area.height.saturating_sub(4).clamp(14, 26).min(area.height);
-    let modal = centered_rect(area, w, h);
+    let modal = if mobile {
+        super::mobile::sheets::full_screen(area)
+    } else {
+        centered_rect(area, w, h)
+    };
     f.render_widget(Clear, modal);
     let block = Block::new()
         .borders(Borders::ALL)

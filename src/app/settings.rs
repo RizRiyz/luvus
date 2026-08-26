@@ -92,6 +92,7 @@ pub enum LayoutRow {
     ColGap,
     RowGap,
     Scrollback,
+    MobileWidth,
     PaneTitles,
     PaneTitlePath,
     ResumeWs,
@@ -176,6 +177,7 @@ impl App {
             LayoutRow::ColGap,
             LayoutRow::RowGap,
             LayoutRow::Scrollback,
+            LayoutRow::MobileWidth,
             LayoutRow::PaneTitles,
             LayoutRow::PaneTitlePath,
             LayoutRow::ResumeWs,
@@ -433,6 +435,7 @@ impl App {
                     self.layout_rows().get(i),
                     Some(LayoutRow::SidebarWidth)
                         | Some(LayoutRow::RightWidth)
+                        | Some(LayoutRow::MobileWidth)
                         | Some(LayoutRow::DiffContext)
                         | Some(LayoutRow::Dock(_))
                         | Some(LayoutRow::Bar(_))
@@ -957,6 +960,16 @@ impl App {
                 self.apply_history_budget();
                 config::save(&self.config);
             }
+            LayoutRow::MobileWidth => {
+                let current = self.config.layout.mobile_width;
+                self.config.layout.mobile_width = match (current, delta.cmp(&0)) {
+                    (0, std::cmp::Ordering::Greater) => 24,
+                    (0, _) => 0,
+                    (24, std::cmp::Ordering::Less) => 0,
+                    _ => (current as i32 + 4 * delta).clamp(24, 200) as u16,
+                };
+                config::save(&self.config);
+            }
             LayoutRow::PaneTitles => {
                 self.config.layout.show_titles = !self.config.layout.show_titles;
                 config::save(&self.config);
@@ -1362,6 +1375,24 @@ mod tests {
         assert_eq!(right_visible, left_visible + 1);
         assert_eq!(left_width, right_visible + 1);
         assert_eq!(right_width, left_width + 1);
+    }
+
+    #[test]
+    fn mobile_width_setting_can_disable_and_restore_automatic_layout() {
+        let _env = crate::persist::test_env("mobile-width-settings");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let row = app
+            .layout_rows()
+            .iter()
+            .position(|row| matches!(row, LayoutRow::MobileWidth))
+            .expect("the mobile width row is present");
+
+        app.config.layout.mobile_width = 24;
+        app.adjust_layout(row, -1);
+        assert_eq!(app.config.layout.mobile_width, 0);
+        app.adjust_layout(row, 1);
+        assert_eq!(app.config.layout.mobile_width, 24);
     }
 
     #[test]

@@ -272,7 +272,11 @@ fn item_lines<'a>(
             ));
             (Some(*target), l1, l2)
         }
-        SwitcherRow::Action { target, label } => {
+        SwitcherRow::Action {
+            target,
+            label,
+            detail: _,
+        } => {
             let l1 = Line::from(vec![
                 Span::styled(arrow, Style::new().fg(t.accent)),
                 Span::styled(label.clone(), Style::new().fg(t.accent).bold()),

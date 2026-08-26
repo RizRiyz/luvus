@@ -105,6 +105,13 @@ impl TileLayout {
         count(&self.root)
     }
 
+    /// Zero-based visual position of a pane without allocating the full leaf
+    /// list. Mobile chrome uses this on every rendered frame.
+    pub fn leaf_position(&self, id: PaneId) -> Option<usize> {
+        let mut next = 0;
+        find_leaf_position(&self.root, id, &mut next)
+    }
+
     /// Leaves in left-to-right / top-to-bottom order.
     pub fn leaves(&self) -> Vec<PaneId> {
         let mut v = Vec::new();
@@ -491,6 +498,19 @@ fn contains_leaf(node: &Node, id: PaneId) -> bool {
     }
 }
 
+fn find_leaf_position(node: &Node, id: PaneId, next: &mut usize) -> Option<usize> {
+    match node {
+        Node::Leaf(candidate) => {
+            let position = *next;
+            *next += 1;
+            (*candidate == id).then_some(position)
+        }
+        Node::Split { a, b, .. } => {
+            find_leaf_position(a, id, next).or_else(|| find_leaf_position(b, id, next))
+        }
+    }
+}
+
 fn collect(node: &Node, area: Rect, out: &mut Vec<PaneInfo>) {
     match node {
         Node::Leaf(id) => out.push(PaneInfo {
@@ -727,6 +747,9 @@ mod tests {
         assert_eq!(l.len(), 2);
         assert!(l.contains(a));
         assert!(l.contains(b));
+        assert_eq!(l.leaf_position(a), Some(0));
+        assert_eq!(l.leaf_position(b), Some(1));
+        assert_eq!(l.leaf_position(PaneId::alloc()), None);
         assert_eq!(l.focus, b);
 
         let area = Rect::new(0, 0, 80, 24);

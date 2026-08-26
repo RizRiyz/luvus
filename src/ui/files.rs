@@ -299,12 +299,19 @@ pub(super) fn draw_file_view(
     area: Rect,
     v: &FileView,
     sel: Option<&crate::app::Selection>,
+    mobile: bool,
     t: &Theme,
 ) {
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let body = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
+    let show_footer = !mobile || v.search.is_some();
+    let body = Rect::new(
+        area.x,
+        area.y,
+        area.width,
+        area.height.saturating_sub(u16::from(show_footer)),
+    );
     let footer_y = area.bottom().saturating_sub(1);
 
     match &v.load {
@@ -338,6 +345,10 @@ pub(super) fn draw_file_view(
                 }
             }
         }
+    }
+
+    if !show_footer {
+        return;
     }
 
     // Footer: path · lines · encoding, or the state.

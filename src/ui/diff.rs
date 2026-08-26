@@ -21,6 +21,7 @@ pub(super) struct DiffRenderContext<'a> {
     pub picker: Option<&'a DiffAgentPicker>,
     pub marker_style: DiffMarkerStyle,
     pub color_mode: DiffColorMode,
+    pub mobile: bool,
     pub source_hits: &'a mut Vec<(crate::ids::PaneId, usize, DiffSide, Rect)>,
     pub note_hits: &'a mut Vec<(crate::ids::PaneId, String, Rect)>,
 }
@@ -56,6 +57,7 @@ pub(super) fn draw_diff_view(
         picker,
         marker_style,
         color_mode,
+        mobile,
         source_hits,
         note_hits,
     } = context;
@@ -68,12 +70,14 @@ pub(super) fn draw_diff_view(
         return;
     }
     let header = Rect::new(area.x, area.y, area.width, 1);
+    let show_footer =
+        !mobile || view.note_draft.is_some() || view.note_selecting || view.search_editing;
     let footer = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
     let body = Rect::new(
         area.x,
         area.y.saturating_add(1),
         area.width,
-        area.height.saturating_sub(2),
+        area.height.saturating_sub(1 + u16::from(show_footer)),
     );
     let effective = if view.wrap {
         DiffLayoutPreference::Stack
@@ -182,15 +186,17 @@ pub(super) fn draw_diff_view(
     if truncated {
         hint.push_str("  TRUNCATED");
     }
-    f.buffer_mut().set_line(
-        footer.x,
-        footer.y,
-        &Line::from(Span::styled(
-            clip(&hint, footer.width),
-            Style::new().fg(if truncated { t.coral } else { t.overlay0 }),
-        )),
-        footer.width,
-    );
+    if show_footer {
+        f.buffer_mut().set_line(
+            footer.x,
+            footer.y,
+            &Line::from(Span::styled(
+                clip(&hint, footer.width),
+                Style::new().fg(if truncated { t.coral } else { t.overlay0 }),
+            )),
+            footer.width,
+        );
+    }
     if let Some(picker) = picker.filter(|picker| picker.view == id) {
         draw_agent_picker(f, body, picker, t);
     }

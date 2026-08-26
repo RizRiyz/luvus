@@ -460,10 +460,9 @@ pub enum WsMenuItem {
     Module(usize),
 }
 
-/// Below this many columns the UI switches to **compact (touch) mode** (docs/18):
-/// one full-screen pane instead of tiling + sidebars, with a `≡` switcher button.
-/// A phone in portrait is ~30–45 cols; landscape and desktops sit well above.
-pub const COMPACT_WIDTH: u16 = 50;
+/// At or below this many columns the UI uses the automatic mobile presentation
+/// (docs/100). The threshold is inclusive and configurable per installation.
+pub const MOBILE_WIDTH: u16 = 64;
 
 /// A destination in the touch **switcher** overlay (docs/18): jump to a pane,
 /// switch nodes, or make a new one. Big tap targets for a phone.
@@ -477,6 +476,11 @@ pub enum SwitcherTarget {
     },
     Workspace(usize),
     NewWorkspace,
+    NewTab,
+    Settings,
+    MissionControl,
+    Version,
+    Exit,
 }
 
 /// One rendered row of the switcher — a section header or a tappable item.
@@ -504,6 +508,7 @@ pub enum SwitcherRow {
     Action {
         target: SwitcherTarget,
         label: String,
+        detail: String,
     },
 }
 
@@ -1588,8 +1593,15 @@ pub struct App {
     pub switcher_rects: Vec<(SwitcherTarget, Rect)>,
     /// The scope chips' rects (docs/65), set by the renderer for click-to-switch.
     pub switcher_scope_rects: Vec<(SwitcherScope, Rect)>,
-    /// The `≡` switcher button's rect (compact mode), for tap hit-testing.
+    /// The mobile MENU button's rect, for tap hit-testing.
     pub switcher_button_rect: Option<Rect>,
+    /// Previous/next pane halves of the mobile header's second row. They are
+    /// present only when the active tab contains more than one pane.
+    pub mobile_pane_prev_rect: Option<Rect>,
+    pub mobile_pane_next_rect: Option<Rect>,
+    /// The mobile navigator's explicit CLOSE button. Desktop switcher palettes
+    /// do not set this geometry.
+    pub switcher_close_rect: Option<Rect>,
     /// The global scrollback-search overlay (docs/63). `Some` => it owns input.
     pub search: Option<GlobalSearch>,
     /// A brief highlight of the line a search jump landed on (docs/63).
@@ -1967,6 +1979,9 @@ impl App {
             switcher_rects: Vec::new(),
             switcher_scope_rects: Vec::new(),
             switcher_button_rect: None,
+            mobile_pane_prev_rect: None,
+            mobile_pane_next_rect: None,
+            switcher_close_rect: None,
             last_active_ws_shown: 0,
             hover: None,
             app_tx,
@@ -2505,6 +2520,9 @@ impl App {
             switcher_rects: Vec::new(),
             switcher_scope_rects: Vec::new(),
             switcher_button_rect: None,
+            mobile_pane_prev_rect: None,
+            mobile_pane_next_rect: None,
+            switcher_close_rect: None,
             last_active_ws_shown: 0,
             hover: None,
             app_tx,
@@ -4803,17 +4821,24 @@ impl App {
         self.layout_mut().focus_dir(area, dir);
     }
 
-    /// Cycle focus to the next pane in the current tab, in leaf order, wrapping
-    /// at the end (tmux's `o`). A no-op with fewer than two panes.
-    fn focus_next_pane(&mut self) {
+    /// Cycle focus within the current tab's leaf order, wrapping at both ends.
+    /// Used by tmux-style `o` and the mobile header's previous/next halves.
+    fn cycle_pane(&mut self, delta: isize) {
         let leaves = self.layout().leaves();
         if leaves.len() < 2 {
             return;
         }
         let focus = self.layout().focus;
         let idx = leaves.iter().position(|&id| id == focus).unwrap_or(0);
-        let next = leaves[(idx + 1) % leaves.len()];
+        let len = leaves.len() as isize;
+        let next = leaves[((idx as isize + delta) % len + len) as usize % leaves.len()];
         self.layout_mut().focus = next;
+        self.scroll_pane = None;
+        self.mode = Mode::Normal;
+    }
+
+    fn focus_next_pane(&mut self) {
+        self.cycle_pane(1);
     }
 
     // ── pane resize (docs/27) ───────────────────────────────────────────────
@@ -6125,6 +6150,9 @@ mod tests {
         use ratatui::Terminal;
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
+        // This test covers the desktop tab strip. Automatic mobile presentation
+        // intentionally replaces it at this width.
+        app.config.layout.mobile_width = 0;
         // Add enough tabs to overflow a narrow tab bar.
         for _ in 0..4 {
             app.handle_event(key(' ', KeyModifiers::CONTROL));

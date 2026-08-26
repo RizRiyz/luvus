@@ -25,6 +25,7 @@ fn render_popup(
     anchor: (u16, u16),
     rows: &[MenuRow],
     hover: Option<(u16, u16)>,
+    mobile: bool,
     t: &Theme,
 ) -> Vec<Rect> {
     let (ax, ay) = anchor;
@@ -34,10 +35,23 @@ fn render_popup(
         .map(|r| super::display_width(&r.text))
         .max()
         .unwrap_or(6) as u16;
-    let w = (label_w + 3).clamp(12, area.width.max(1));
-    let h = (rows.len() as u16 + 2).min(area.height.max(1));
-    let x = ax.min(area.right().saturating_sub(w)).max(area.x);
-    let y = ay.min(area.bottom().saturating_sub(h)).max(area.y);
+    let row_height = if mobile { 2 } else { 1 };
+    let w = if mobile {
+        area.width.max(1)
+    } else {
+        (label_w + 3).clamp(12, area.width.max(1))
+    };
+    let h = ((rows.len() as u16).saturating_mul(row_height) + 2).min(area.height.max(1));
+    let x = if mobile {
+        area.x
+    } else {
+        ax.min(area.right().saturating_sub(w)).max(area.x)
+    };
+    let y = if mobile {
+        area.bottom().saturating_sub(h)
+    } else {
+        ay.min(area.bottom().saturating_sub(h)).max(area.y)
+    };
     let popup = Rect::new(x, y, w, h);
 
     f.render_widget(Clear, popup);
@@ -50,7 +64,25 @@ fn render_popup(
 
     let mut rects = Vec::with_capacity(rows.len());
     for (i, r) in rows.iter().enumerate() {
-        let row = Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
+        let row = Rect::new(
+            inner.x,
+            inner.y + i as u16 * row_height,
+            inner.width,
+            row_height.min(
+                inner
+                    .bottom()
+                    .saturating_sub(inner.y + i as u16 * row_height),
+            ),
+        );
+        if row.height == 0 {
+            break;
+        }
+        let text_row = Rect::new(
+            row.x,
+            row.y + row.height.saturating_sub(1) / 2,
+            row.width,
+            1,
+        );
         if r.divider {
             // A thin, non-interactive separator across the inner width.
             let line = "─".repeat(inner.width as usize);
@@ -59,7 +91,7 @@ fn render_popup(
                     line,
                     Style::new().fg(t.surface1).bg(t.surface0),
                 )),
-                row,
+                text_row,
             );
             rects.push(row);
             continue;
@@ -78,7 +110,7 @@ fn render_popup(
                 format!(" {}", r.text),
                 Style::new().fg(fg).bg(bg),
             )),
-            row,
+            text_row,
         );
         rects.push(row);
     }
@@ -110,7 +142,7 @@ pub(super) fn draw_ws_menu(
             destructive: matches!(it, WsMenuItem::Close | WsMenuItem::DeleteWorktree),
         })
         .collect();
-    let rects = render_popup(f, area, anchor, &rows, app.hover, t);
+    let rects = render_popup(f, area, anchor, &rows, app.hover, app.compact, t);
     if let Some(menu) = app.ws_menu.as_mut() {
         menu.items = items.into_iter().zip(rects).collect();
     }
@@ -140,7 +172,7 @@ pub(super) fn draw_tab_menu(
             destructive: false,
         })
         .collect();
-    let rects = render_popup(f, area, anchor, &rows, app.hover, t);
+    let rects = render_popup(f, area, anchor, &rows, app.hover, app.compact, t);
     let swap_rect = items
         .iter()
         .zip(&rects)
@@ -183,7 +215,7 @@ pub(super) fn draw_tab_menu(
             })
             .collect();
         let sub_anchor = (parent.right() + 1, parent.y.saturating_sub(1));
-        let sub_rects = render_popup(f, area, sub_anchor, &sub_rows, app.hover, t);
+        let sub_rects = render_popup(f, area, sub_anchor, &sub_rows, app.hover, app.compact, t);
         if let Some(menu) = app.tab_menu.as_mut() {
             menu.swap_rects = swap_targets
                 .iter()
@@ -222,7 +254,7 @@ pub(super) fn draw_pane_menu(
             destructive: matches!(it, PaneMenuItem::Close),
         })
         .collect();
-    let rects = render_popup(f, area, anchor, &rows, app.hover, t);
+    let rects = render_popup(f, area, anchor, &rows, app.hover, app.compact, t);
     let move_rect = items
         .iter()
         .zip(&rects)
@@ -265,7 +297,7 @@ pub(super) fn draw_pane_menu(
                 .collect();
             // Beside the main popup, first row aligned with the "Move to tab" row.
             let sub_anchor = (mrect.right() + 1, mrect.y.saturating_sub(1));
-            let sub_rects = render_popup(f, area, sub_anchor, &sub_rows, app.hover, t);
+            let sub_rects = render_popup(f, area, sub_anchor, &sub_rows, app.hover, app.compact, t);
             if let Some(menu) = app.pane_menu.as_mut() {
                 menu.tab_rects = move_targets
                     .iter()
@@ -303,7 +335,7 @@ pub(super) fn draw_agent_menu(
             destructive: matches!(it, AgentMenuItem::Close),
         })
         .collect();
-    let rects = render_popup(f, area, anchor, &rows, app.hover, t);
+    let rects = render_popup(f, area, anchor, &rows, app.hover, app.compact, t);
     if let Some(menu) = app.agent_menu.as_mut() {
         menu.items = items.into_iter().zip(rects).collect();
     }
@@ -398,7 +430,7 @@ pub(super) fn draw_file_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
             destructive: matches!(it, FileMenuItem::Delete),
         })
         .collect();
-    let rects = render_popup(f, area, anchor, &rows, app.hover, t);
+    let rects = render_popup(f, area, anchor, &rows, app.hover, app.compact, t);
     if let Some(menu) = app.file_menu.as_mut() {
         menu.items = items.into_iter().zip(rects).collect();
     }
@@ -428,7 +460,7 @@ pub(super) fn draw_diff_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
             destructive: false,
         })
         .collect();
-    let rects = render_popup(f, area, menu.anchor, &rows, app.hover, t);
+    let rects = render_popup(f, area, menu.anchor, &rows, app.hover, app.compact, t);
     if let Some(menu) = app.diff_menu.as_mut() {
         menu.items = items.into_iter().zip(rects).collect();
     }
@@ -470,7 +502,7 @@ pub(super) fn draw_dock_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
         })
         .collect();
     let anchor = menu.anchor;
-    let rects = render_popup(f, area, anchor, &rows, app.hover, t);
+    let rects = render_popup(f, area, anchor, &rows, app.hover, app.compact, t);
     if let Some(menu) = app.dock_menu.as_mut() {
         menu.rects = rects;
     }

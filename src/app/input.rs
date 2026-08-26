@@ -850,6 +850,7 @@ impl App {
                 .iter()
                 .map(|(_, rect)| *rect)
                 .chain(self.switcher_scope_rects.iter().map(|(_, rect)| *rect))
+                .chain(self.switcher_close_rect)
                 .find(|rect| hit(*rect));
         }
 
@@ -875,6 +876,8 @@ impl App {
             .chain(
                 [
                     self.switcher_button_rect,
+                    self.mobile_pane_prev_rect,
+                    self.mobile_pane_next_rect,
                     self.sidebar_toggle_rect,
                     self.right_sidebar_toggle_rect,
                     self.version_rect,
@@ -1158,7 +1161,7 @@ impl App {
             }
             return;
         }
-        // Tapping the compact-mode `≡` button opens the switcher.
+        // Tapping the mobile MENU button opens the full-screen navigator.
         if let (MouseEventKind::Down(MouseButton::Left), Some(r)) =
             (m.kind, self.switcher_button_rect)
         {
@@ -1166,6 +1169,27 @@ impl App {
                 self.open_switcher();
                 return;
             }
+        }
+        if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+            let hit = |rect: Rect| {
+                m.column >= rect.x
+                    && m.column < rect.right()
+                    && m.row >= rect.y
+                    && m.row < rect.bottom()
+            };
+            if self.mobile_pane_prev_rect.is_some_and(hit) {
+                self.cycle_pane(-1);
+                return;
+            }
+            if self.mobile_pane_next_rect.is_some_and(hit) {
+                self.cycle_pane(1);
+                return;
+            }
+        }
+        // The complete two-row mobile header is chrome. Only MENU acts; every
+        // other header tap is consumed instead of leaking into a mouse-aware PTY.
+        if self.compact && m.row < self.last_pane_area.y {
+            return;
         }
         // Text-input modals: only the ⏎/esc footer buttons respond to the mouse;
         // any other click is swallowed (the centered modal owns the screen).

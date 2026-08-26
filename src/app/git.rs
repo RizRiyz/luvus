@@ -1410,9 +1410,9 @@ mod tests {
     }
 
     /// On a phone the git tab drops its keyboard-hint footer and gives those two
-    /// rows to the list (docs/18); the desktop layout is unchanged.
+    /// rows to the list (docs/100); the desktop layout is unchanged.
     #[test]
-    fn compact_git_tab_hides_the_footer_and_reclaims_its_rows() {
+    fn mobile_git_tab_hides_the_footer_and_reclaims_its_rows() {
         use ratatui::{backend::TestBackend, Terminal};
         let _env = crate::persist::test_env("compact-git-footer");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -1438,12 +1438,12 @@ mod tests {
         assert!(app.compact);
         let compact_body = app.active_git_mut().unwrap().list_area.height;
 
-        // Two rows reclaimed here (the footer + its separator), plus the compact
-        // layout already gave the whole tab one more row (the hidden status bar).
+        // Two rows are reclaimed here (the footer + its separator). The hidden
+        // desktop status row is balanced by mobile's second header row.
         assert_eq!(
             compact_body,
-            wide_body + 3,
-            "the git list grows by the footer's rows plus the reclaimed status row"
+            wide_body + 2,
+            "the git list grows by the reclaimed footer rows"
         );
     }
 

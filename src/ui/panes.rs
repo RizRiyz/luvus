@@ -202,11 +202,11 @@ fn draw_one_pane(
     let app = context.app;
     // A view leaf (docs/38 FILE-3) renders natively, not from a PTY.
     if let Some(view) = app.views.get(&id) {
-        let content = pane_content(area, bordered)?;
+        let content = pane_content(area, bordered, app.compact)?;
         match view {
             crate::app::ViewKind::File(v) => {
                 let sel = app.selection.filter(|s| s.pane == id);
-                super::files::draw_file_view(f, content, v, sel.as_ref(), t);
+                super::files::draw_file_view(f, content, v, sel.as_ref(), app.compact, t);
             }
             crate::app::ViewKind::Diff(v) => super::diff::draw_diff_view(
                 f,
@@ -218,6 +218,7 @@ fn draw_one_pane(
                     picker: app.diff_agent_picker.as_ref(),
                     marker_style: app.config.layout.diff_marker_style,
                     color_mode: app.config.layout.diff_color_mode,
+                    mobile: app.compact,
                     source_hits: context.diff_source_rects,
                     note_hits: context.diff_note_rects,
                 },
@@ -228,12 +229,12 @@ fn draw_one_pane(
     }
     let pane = app.panes.get(&id)?;
     let st = pane_state(app, id);
-    let content = pane_content(area, bordered)?;
+    let content = pane_content(area, bordered, app.compact)?;
 
     // A lone pane has no border, so it shows a header bar on its top row.
     // Bordered panes instead get their dot+path+close as a title ON the top
     // border row (see `draw_pane_titles`), so it touches the tab bar.
-    if !bordered {
+    if !bordered && !app.compact {
         // Match the content's horizontal pad so the header bar aligns with the
         // tab bar and the terminal text below it.
         let pad = lone_pad(area.width);

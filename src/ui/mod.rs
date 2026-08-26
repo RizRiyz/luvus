@@ -90,6 +90,7 @@ mod git;
 mod help;
 mod menu;
 mod mission;
+mod mobile;
 mod panes;
 mod picker;
 mod search;
@@ -238,6 +239,9 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     let tab_next_rect = app.tab_next_rect;
     let new_ws_rect = app.new_ws_rect;
     let switcher_button_rect = app.switcher_button_rect;
+    let mobile_pane_prev_rect = app.mobile_pane_prev_rect;
+    let mobile_pane_next_rect = app.mobile_pane_next_rect;
+    let switcher_close_rect = app.switcher_close_rect;
     let settings_modal_rect = app.settings_modal_rect;
     let settings_close_rect = app.settings_close_rect;
     let changelog_modal_rect = app.changelog_modal_rect;
@@ -352,6 +356,9 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     app.tab_next_rect = tab_next_rect;
     app.new_ws_rect = new_ws_rect;
     app.switcher_button_rect = switcher_button_rect;
+    app.mobile_pane_prev_rect = mobile_pane_prev_rect;
+    app.mobile_pane_next_rect = mobile_pane_next_rect;
+    app.switcher_close_rect = switcher_close_rect;
     app.settings_modal_rect = settings_modal_rect;
     app.settings_close_rect = settings_close_rect;
     app.changelog_modal_rect = changelog_modal_rect;
@@ -377,6 +384,8 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     f.render_widget(Block::new().style(Style::new().bg(t.mantle)), area);
     app.bar.hits.clear();
     app.bar.overflow_hits.clear();
+    app.mobile_pane_prev_rect = None;
+    app.mobile_pane_next_rect = None;
 
     // An absurdly small window can't hold the chrome — say so instead of
     // drawing degraded fragments. (Every draw fn is underflow-safe regardless;
@@ -410,12 +419,13 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         return;
     }
 
-    // Compact (touch) mode on a narrow phone screen (docs/18): no sidebars, one
-    // full-screen pane, a `≡` switcher for navigation. A vertical split doesn't
-    // change the width, so decide it from `area.width` here — early enough that
-    // it can also drop the bottom status bar (a dense, keyboard-oriented row that
-    // just eats space on a phone) and give that row back to the content.
-    app.compact = area.width < app.config.layout.compact_width;
+    // Automatic mobile presentation is derived from this client's viewport.
+    // `app.compact` remains a compatibility flag for existing compact renderers,
+    // but it is never persisted and projection rendering restores it afterward.
+    app.compact = matches!(
+        mobile::resolve_profile(area.width, app.config.layout.mobile_width),
+        mobile::MobileProfile::Mobile
+    );
     app.refresh_core_bar_widgets();
     let status_h = if app.compact { 0 } else { 1 };
     let [main, status] =
@@ -462,8 +472,14 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.left_seam = sidebar_left.map(|a| Rect::new(a.right().saturating_sub(1), a.y, 1, a.height));
     app.right_seam = sidebar_right.map(|a| Rect::new(a.x, a.y, 1, a.height));
 
-    let [tabbar, pane_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(content);
+    let mobile_layout = app.compact.then(|| mobile::compute_layout(content));
+    let (tabbar, pane_area) = if let Some(layout) = mobile_layout {
+        (layout.header, layout.content)
+    } else {
+        let [tabbar, pane_area] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(content);
+        (tabbar, pane_area)
+    };
 
     app.last_pane_area = pane_area;
 
@@ -483,7 +499,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     let bordered = rects.len() > 1;
     if resize_panes {
         for (id, rect) in &rects {
-            let Some(content) = pane_content(*rect, bordered) else {
+            let Some(content) = pane_content(*rect, bordered, app.compact) else {
                 continue;
             };
             let resized = app
@@ -539,7 +555,14 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
             new_ws_rect = new_ws_rect.or(n);
         }
     }
-    let (tab_rects, tab_close_rects, tab_prev, tab_next) = tabbar::draw_tabbar(f, tabbar, app, &t);
+    let (tab_rects, tab_close_rects, tab_prev, tab_next) = if let Some(layout) = mobile_layout {
+        app.sidebar_toggle_rect = None;
+        app.right_sidebar_toggle_rect = None;
+        mobile::render_header(f, layout, app, &t);
+        (Vec::new(), Vec::new(), None, None)
+    } else {
+        tabbar::draw_tabbar(f, tabbar, app, &t)
+    };
     // Behind the panes, use the (dark) pane background.
     f.render_widget(Block::new().style(Style::new().bg(t.mantle)), pane_area);
     // The focused pane's ✕ close and ⤢ zoom buttons, for mouse hit-testing.
@@ -646,7 +669,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         } else {
             rects
                 .iter()
-                .filter_map(|(id, r)| pane_content(*r, bordered).map(|c| (*id, c)))
+                .filter_map(|(id, r)| pane_content(*r, bordered, app.compact).map(|c| (*id, c)))
                 .collect()
         };
     status::draw_status(f, status, app, &t);
@@ -685,7 +708,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     let picker_open = app.picker.is_some();
     let mut picker_rects = Vec::new();
     if let Some(p) = &app.picker {
-        picker_rects = picker::draw_picker(f, area, p, cat, &t);
+        picker_rects = picker::draw_picker(f, area, p, app.compact, cat, &t);
     }
     app.picker_rects = picker_rects;
 
@@ -833,9 +856,16 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     }
     // The touch switcher overlay (docs/18), above the chrome but below a toast.
     if app.switcher {
-        switcher::draw_switcher(f, area, app, &t);
+        if app.compact {
+            mobile::render_navigator(f, area, app, &t);
+        } else {
+            app.switcher_close_rect = None;
+            switcher::draw_switcher(f, area, app, &t);
+        }
     } else {
         app.switcher_rects.clear();
+        app.switcher_scope_rects.clear();
+        app.switcher_close_rect = None;
     }
     // The global scrollback-search overlay (docs/63), above the chrome.
     if app.search.is_some() {
@@ -1028,9 +1058,12 @@ pub(super) fn lone_pad(width: u16) -> u16 {
 /// The terminal content area: inside the box when bordered (the dot+path+close
 /// live on the top border row as a title), else just below the header row with a
 /// small horizontal pad so it aligns with the tab bar.
-fn pane_content(rect: Rect, bordered: bool) -> Option<Rect> {
+fn pane_content(rect: Rect, bordered: bool, mobile: bool) -> Option<Rect> {
     if bordered {
         return pane_inner(rect, true);
+    }
+    if mobile {
+        return (rect.width > 0 && rect.height > 0).then_some(rect);
     }
     let pad = lone_pad(rect.width);
     let c = Rect::new(
@@ -1133,5 +1166,37 @@ mod bar_projection_tests {
 
         assert_eq!(app.bar.hits, vec![hit]);
         assert_eq!(app.bar.overflow.as_ref().unwrap().rect, expected_popup);
+    }
+
+    #[test]
+    fn mobile_projection_does_not_leak_profile_or_mobile_hits() {
+        let _env = crate::persist::test_env("mobile-projection");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.config.layout.mobile_width = 80;
+        app.open_switcher();
+
+        let desktop_area = Rect::new(0, 0, 120, 40);
+        let mut desktop_buffer = Buffer::empty(desktop_area);
+        let mut desktop = RenderTarget::new(&mut desktop_buffer, desktop_area);
+        render_into(&mut desktop, &mut app);
+        assert!(!app.compact);
+        assert!(app.switcher_close_rect.is_none());
+        let desktop_content = app.pane_content_rects.clone();
+        let focus = app.layout().focus;
+        let pty_size = app.panes[&focus].size();
+
+        let phone_area = Rect::new(0, 0, 79, 35);
+        let mut phone_buffer = Buffer::empty(phone_area);
+        let mut phone = RenderTarget::new(&mut phone_buffer, phone_area);
+        render_projection(&mut phone, &mut app);
+
+        assert!(
+            !app.compact,
+            "passive phone projection cannot replace desktop profile"
+        );
+        assert!(app.switcher_close_rect.is_none());
+        assert_eq!(app.pane_content_rects, desktop_content);
+        assert_eq!(app.panes[&focus].size(), pty_size);
     }
 }

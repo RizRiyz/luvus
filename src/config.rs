@@ -245,12 +245,11 @@ pub struct LayoutConfig {
     pub diff_color_mode: crate::diff::DiffColorMode,
     #[serde(default = "yes")]
     pub diff_live_refresh: bool,
-    /// Terminal width (columns) below which the touch/compact layout kicks in
-    /// (docs/18): one zoomed pane, sidebars hidden, the `≡` switcher. Configurable
-    /// because phone terminals in landscape often sit right around the default;
-    /// `0` disables compact mode entirely (the full UI always renders).
-    #[serde(default = "default_compact_width")]
-    pub compact_width: u16,
+    /// Terminal width (columns) at or below which the automatic mobile layout
+    /// kicks in (docs/100). This is resolved independently for each attached
+    /// client's viewport. `0` disables mobile presentation entirely.
+    #[serde(default = "default_mobile_width", alias = "compact_width")]
+    pub mobile_width: u16,
     /// What luvus forwards to a pane for **Shift/Alt+Enter** ("new line, don't
     /// submit"). A keyword from [`SHIFT_ENTER_CHOICES`]; default `esc-cr`
     /// (`ESC CR`, the sequence Claude Code's `/terminal-setup` installs). Exposed
@@ -261,8 +260,8 @@ pub struct LayoutConfig {
     pub shift_enter: String,
 }
 
-fn default_compact_width() -> u16 {
-    crate::app::COMPACT_WIDTH
+fn default_mobile_width() -> u16 {
+    crate::app::MOBILE_WIDTH
 }
 
 fn default_diff_context_lines() -> u16 {
@@ -427,7 +426,7 @@ impl Default for LayoutConfig {
             diff_marker_style: crate::diff::DiffMarkerStyle::Symbols,
             diff_color_mode: crate::diff::DiffColorMode::Theme,
             diff_live_refresh: true,
-            compact_width: default_compact_width(),
+            mobile_width: default_mobile_width(),
             shift_enter: default_shift_enter(),
         }
     }
@@ -559,6 +558,7 @@ mod tests {
         assert_eq!(c.theme, "quattro-rally");
         assert!(c.layout.show_titles);
         assert_eq!(c.layout.col_gap, 1);
+        assert_eq!(c.layout.mobile_width, crate::app::MOBILE_WIDTH);
         // Empty object → all defaults (forward/back compat).
         let from_empty: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(from_empty.theme, "quattro-rally");
@@ -591,6 +591,12 @@ mod tests {
         assert_eq!(old.scrollback_bytes(), SCROLLBACK_BYTES_DEFAULT);
         let old_custom: Config = serde_json::from_str(r#"{"layout":{"scrollback":5000}}"#).unwrap();
         assert_eq!(old_custom.scrollback_bytes(), SCROLLBACK_BYTES_DEFAULT);
+        let legacy_mobile: Config =
+            serde_json::from_str(r#"{"layout":{"compact_width":80}}"#).unwrap();
+        assert_eq!(legacy_mobile.layout.mobile_width, 80);
+        let migrated = serde_json::to_string(&legacy_mobile).unwrap();
+        assert!(migrated.contains("\"mobile_width\":80"));
+        assert!(!migrated.contains("compact_width"));
 
         // Sounds are optional and must default to off.
         assert!(!c.notifications.sound_on_done);

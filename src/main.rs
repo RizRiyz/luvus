@@ -1355,6 +1355,44 @@ mod tests {
         println!();
     }
 
+    /// Focused docs/100 check: compare forced desktop/mobile frames at the same
+    /// viewport and measure the full-screen navigator separately. It intentionally
+    /// performs no IO and creates no background task.
+    #[cfg(feature = "dev-tools")]
+    #[test]
+    fn bench_mobile_render_hotpath() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let render = |label: &str, app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(64, 35)).unwrap();
+            terminal.draw(|frame| ui::render(frame, app)).unwrap();
+            let frames = 5_000u32;
+            let started = Instant::now();
+            for _ in 0..frames {
+                terminal.draw(|frame| ui::render(frame, app)).unwrap();
+            }
+            let elapsed = started.elapsed();
+            println!("{label:>18}: {:>10?}/frame", elapsed / frames);
+            elapsed / frames
+        };
+
+        let (tx, _rx) = mpsc::channel::<AppEvent>();
+        let mut desktop = App::new(64, 35, tx.clone()).unwrap();
+        desktop.config.layout.mobile_width = 0;
+        let desktop_frame = render("desktop 64x35", &mut desktop);
+
+        let mut mobile = App::new(64, 35, tx).unwrap();
+        let mobile_frame = render("mobile closed", &mut mobile);
+        mobile.open_switcher();
+        let navigator_frame = render("mobile navigator", &mut mobile);
+
+        println!(
+            "mobile/desktop: {:.3}x, navigator/desktop: {:.3}x",
+            mobile_frame.as_secs_f64() / desktop_frame.as_secs_f64(),
+            navigator_frame.as_secs_f64() / desktop_frame.as_secs_f64(),
+        );
+    }
+
     #[test]
     fn base64_matches_known_vectors() {
         // RFC 4648 test vectors — the OSC 52 clipboard payload must encode right.

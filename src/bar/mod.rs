@@ -685,6 +685,37 @@ impl BarState {
 }
 
 impl crate::app::App {
+    pub fn mobile_bar_notification(&self) -> Option<String> {
+        self.bar
+            .notifications
+            .back()
+            .map(|notification| mobile_segment_text(&notification.widget.content))
+            .filter(|text| !text.is_empty())
+    }
+
+    pub fn mobile_agent_summary(&self) -> Option<(String, crate::ui::theme::State)> {
+        let widget = self.bar.widgets.get(CORE_AGENTS)?;
+        widget.content.iter().find_map(|segment| {
+            let BarSegmentKind::State { state, label } = &segment.kind else {
+                return None;
+            };
+            let parsed = match state.as_str() {
+                "blocked" => crate::ui::theme::State::Blocked,
+                "working" => crate::ui::theme::State::Working,
+                "done" => crate::ui::theme::State::Done,
+                "idle" => crate::ui::theme::State::Idle,
+                _ => crate::ui::theme::State::Unknown,
+            };
+            Some((
+                label
+                    .as_deref()
+                    .map(|count| format!("{count} {}", parsed.label()))
+                    .unwrap_or_else(|| parsed.label().to_string()),
+                parsed,
+            ))
+        })
+    }
+
     /// Refresh the two built-ins from already-cached application state. This is
     /// pure in-process composition: no IO, manifest lookup, or subprocess work.
     pub fn refresh_core_bar_widgets(&mut self) {
@@ -826,6 +857,38 @@ impl crate::app::App {
         }
         true
     }
+}
+
+fn mobile_segment_text(segments: &[BarSegment]) -> String {
+    let mut output = String::new();
+    for segment in segments {
+        match &segment.kind {
+            BarSegmentKind::Text { text } | BarSegmentKind::Symbol { symbol: text } => {
+                output.push_str(text)
+            }
+            BarSegmentKind::State { state, label } => {
+                output.push_str(match state.as_str() {
+                    "blocked" | "working" | "done" => "●",
+                    _ => "○",
+                });
+                if let Some(label) = label {
+                    output.push(' ');
+                    output.push_str(label);
+                }
+            }
+            BarSegmentKind::Badge { text } => {
+                output.push('[');
+                output.push_str(text);
+                output.push(']');
+            }
+            BarSegmentKind::Progress { value, total, .. } => {
+                output.push_str(&format!("{value}/{total}"));
+            }
+            BarSegmentKind::Spacer { width } => output.push_str(&" ".repeat(*width as usize)),
+            BarSegmentKind::Separator => output.push_str("  ·  "),
+        }
+    }
+    output
 }
 
 pub struct WidgetCandidate<'a> {

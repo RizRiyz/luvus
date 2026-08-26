@@ -85,15 +85,29 @@ impl App {
         };
         let mut rows = Vec::new();
 
-        // Agents: one row per pane running an agent, wherever it lives.
+        // Desktop can jump to agents across the session. Mobile shows the
+        // active workspace only so changing workspace also changes this list.
         if scope.shows(SwitcherScope::Agents) {
             let mut agents = Vec::new();
-            for ws in self.workspaces.iter() {
+            for (_wi, ws) in self
+                .workspaces
+                .iter()
+                .enumerate()
+                .filter(|(wi, _)| !self.compact || *wi == self.active_ws)
+            {
                 for (ti, tab) in ws.tabs.iter().enumerate() {
-                    for id in tab.layout.leaves() {
+                    let panes = tab.layout.leaves();
+                    let pane_count = panes.len();
+                    for (pi, id) in panes.into_iter().enumerate() {
                         if let Some(s) = self.status.get(&id) {
                             if self.manifests.is_agent(&s.agent) || s.agent_session.is_some() {
-                                let location = format!("{} · {}", ws.name, ti + 1);
+                                let location = format!(
+                                    "{} · tab {} · p{}/{}",
+                                    ws.name,
+                                    ti + 1,
+                                    pi + 1,
+                                    pane_count
+                                );
                                 if matches(&format!("{} {}", s.agent, location)) {
                                     agents.push(SwitcherRow::Agent {
                                         target: SwitcherTarget::Pane(id),
@@ -108,22 +122,38 @@ impl App {
                 }
             }
             if !agents.is_empty() {
+                agents.sort_by_key(|row| match row {
+                    SwitcherRow::Agent { state, .. } => match state {
+                        crate::ui::theme::State::Blocked => 0,
+                        crate::ui::theme::State::Working => 1,
+                        crate::ui::theme::State::Done => 2,
+                        crate::ui::theme::State::Idle => 3,
+                        crate::ui::theme::State::Unknown => 4,
+                    },
+                    _ => 5,
+                });
                 rows.push(SwitcherRow::Header(self.catalog.agents.to_string()));
                 rows.append(&mut agents);
             }
         }
 
-        // Tabs (the window list): every tab across every workspace.
+        // Desktop remains a global window list. Mobile is scoped to the active
+        // workspace, matching the workspace-local tab strip it replaces.
         if scope.shows(SwitcherScope::Tabs) {
             let mut tabs = Vec::new();
-            for (wi, ws) in self.workspaces.iter().enumerate() {
+            for (wi, ws) in self
+                .workspaces
+                .iter()
+                .enumerate()
+                .filter(|(wi, _)| !self.compact || *wi == self.active_ws)
+            {
                 for (ti, tab) in ws.tabs.iter().enumerate() {
                     let name = Self::switcher_tab_name(tab, ti);
                     if matches(&format!("{} {}", name, ws.name)) {
                         tabs.push(SwitcherRow::Tab {
                             target: SwitcherTarget::Tab { ws: wi, tab: ti },
                             name,
-                            location: ws.name.clone(),
+                            location: format!("{} · tab {}/{}", ws.name, ti + 1, ws.tabs.len()),
                             active: wi == self.active_ws && ti == ws.active_tab,
                         });
                     }
@@ -143,10 +173,20 @@ impl App {
             for (i, ws) in self.workspaces.iter().enumerate() {
                 let branch = ws.branch.clone().unwrap_or_default();
                 if matches(&format!("{} {}", ws.name, branch)) {
+                    let tab_count = format!(
+                        "{} {}",
+                        ws.tabs.len(),
+                        self.catalog.switch_scope_tabs.to_lowercase()
+                    );
+                    let detail = if branch.is_empty() {
+                        tab_count
+                    } else {
+                        format!("{branch} · {tab_count}")
+                    };
                     nodes.push(SwitcherRow::Node {
                         target: SwitcherTarget::Workspace(i),
                         name: ws.name.clone(),
-                        branch: ws.branch.clone(),
+                        branch: Some(detail),
                         active: i == self.active_ws,
                     });
                 }
@@ -155,13 +195,51 @@ impl App {
                 rows.push(SwitcherRow::Header(self.catalog.workspaces.to_string()));
                 rows.append(&mut nodes);
             }
-            // The "new node" action is only offered when nothing is being filtered.
-            if query.is_empty() {
+            // Keep the established desktop action here. Mobile groups common
+            // phone-safe actions in its dedicated Actions section below.
+            if query.is_empty() && !self.compact {
                 rows.push(SwitcherRow::Action {
                     target: SwitcherTarget::NewWorkspace,
                     label: format!("+ {}", self.catalog.cmd_new_workspace),
+                    detail: String::new(),
                 });
             }
+        }
+        if self.compact && scope == SwitcherScope::All && query.is_empty() {
+            rows.push(SwitcherRow::Header(self.catalog.mobile_actions.to_string()));
+            rows.push(SwitcherRow::Action {
+                target: SwitcherTarget::NewTab,
+                label: format!("+ {}", self.catalog.act_new_tab),
+                detail: self.ws().name.clone(),
+            });
+            rows.push(SwitcherRow::Action {
+                target: SwitcherTarget::NewWorkspace,
+                label: format!("+ {}", self.catalog.cmd_new_workspace),
+                detail: self.catalog.enter_folder_path.to_string(),
+            });
+            rows.push(SwitcherRow::Action {
+                target: SwitcherTarget::Settings,
+                label: self.catalog.settings_title.to_string(),
+                detail: format!(
+                    "{} · {} · {}",
+                    self.catalog.tab_general, self.catalog.tab_layout, self.catalog.tab_keys
+                ),
+            });
+            rows.push(SwitcherRow::Action {
+                target: SwitcherTarget::MissionControl,
+                label: self.catalog.mc_title.to_string(),
+                detail: self.catalog.agents.to_string(),
+            });
+            rows.push(SwitcherRow::Action {
+                target: SwitcherTarget::Version,
+                label: self.catalog.changelog.to_string(),
+                detail: format!("v{}", env!("CARGO_PKG_VERSION")),
+            });
+            rows.push(SwitcherRow::Action {
+                target: SwitcherTarget::Exit,
+                label: self.catalog.act_exit.to_string(),
+                detail: self.catalog.cmd_detach.to_string(),
+            });
         }
         rows
     }
@@ -223,6 +301,11 @@ impl App {
                 }
             }
             SwitcherTarget::NewWorkspace => self.open_folder_picker(),
+            SwitcherTarget::NewTab => self.new_tab(),
+            SwitcherTarget::Settings => self.open_settings(),
+            SwitcherTarget::MissionControl => self.open_mission_control(self.active_ws),
+            SwitcherTarget::Version => self.open_changelog(),
+            SwitcherTarget::Exit => self.detach_requested = true,
         }
     }
 
@@ -233,9 +316,15 @@ impl App {
         self.switcher_scroll = 0;
     }
 
-    /// A click inside the switcher: a scope chip switches scope, a row activates,
-    /// anything else dismisses.
+    /// A click inside the switcher. Mobile requires an explicit Close target so
+    /// unused space cannot dismiss the full-screen navigator accidentally.
     pub fn switcher_click(&mut self, col: u16, row: u16) {
+        if self.switcher_close_rect.is_some_and(|rect| {
+            col >= rect.x && col < rect.right() && row >= rect.y && row < rect.bottom()
+        }) {
+            self.close_switcher();
+            return;
+        }
         if self.switcher_scope_click(col, row) {
             return;
         }
@@ -246,7 +335,8 @@ impl App {
             .map(|(t, _)| *t);
         match hit {
             Some(t) => self.switcher_activate(t),
-            None => self.close_switcher(),
+            None if !self.compact => self.close_switcher(),
+            None => {}
         }
     }
 
@@ -329,6 +419,16 @@ mod tests {
             .collect()
     }
 
+    fn agent_targets(app: &App) -> Vec<SwitcherTarget> {
+        app.switcher_rows()
+            .into_iter()
+            .filter_map(|r| match r {
+                SwitcherRow::Agent { target, .. } => Some(target),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn switcher_palette_renders_chips_query_and_tabs() {
         use ratatui::{backend::TestBackend, Terminal};
@@ -396,6 +496,49 @@ mod tests {
         app.switcher_activate(SwitcherTarget::Tab { ws: 0, tab: 0 });
         assert_eq!(app.ws().active_tab, 0, "switcher jumped to the tab");
         assert!(!app.switcher, "activating closes the overlay");
+    }
+
+    #[test]
+    fn mobile_agents_and_tabs_follow_the_active_workspace() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("mobile-switcher-active-workspace");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let first_pane = app.workspaces[0].tabs[0].layout.focus;
+        let first_status = app.status.get_mut(&first_pane).unwrap();
+        first_status.agent = "claude".to_string();
+
+        assert!(app.create_workspace_at(std::env::temp_dir()));
+        let second_pane = app.workspaces[1].tabs[0].layout.focus;
+        let second_status = app.status.get_mut(&second_pane).unwrap();
+        second_status.agent = "codex".to_string();
+        app.new_tab();
+        assert_eq!(app.workspaces[1].tabs.len(), 2);
+
+        let mut mobile = Terminal::new(TestBackend::new(40, 60)).unwrap();
+        mobile.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(app.compact);
+        app.open_switcher();
+        assert!(
+            tab_targets(&app)
+                == vec![
+                    SwitcherTarget::Tab { ws: 1, tab: 0 },
+                    SwitcherTarget::Tab { ws: 1, tab: 1 }
+                ]
+        );
+        assert!(agent_targets(&app) == vec![SwitcherTarget::Pane(second_pane)]);
+
+        app.switcher_activate(SwitcherTarget::Workspace(0));
+        app.open_switcher();
+        assert!(tab_targets(&app) == vec![SwitcherTarget::Tab { ws: 0, tab: 0 }]);
+        assert!(agent_targets(&app) == vec![SwitcherTarget::Pane(first_pane)]);
+
+        let mut desktop = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        desktop.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(!app.compact);
+        assert_eq!(tab_targets(&app).len(), 3, "desktop remains session-wide");
+        assert_eq!(agent_targets(&app).len(), 2, "desktop remains session-wide");
     }
 
     #[test]
@@ -494,27 +637,27 @@ mod tests {
     /// The compact threshold is configurable (docs/18): raising it makes a wider
     /// terminal go compact, and `0` disables compact mode entirely.
     #[test]
-    fn compact_width_is_configurable() {
+    fn mobile_width_is_configurable_and_inclusive() {
         use ratatui::{backend::TestBackend, Terminal};
         let _env = crate::persist::test_env("compact-width-config");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
 
-        // A 70-col terminal is not compact at the default (50)…
+        // A 70-col terminal is not mobile at the default (64)…
         let mut term = Terminal::new(TestBackend::new(70, 24)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         assert!(!app.compact, "70 cols is above the default threshold");
 
         // …but is once the threshold is raised past it.
-        app.config.layout.compact_width = 90;
+        app.config.layout.mobile_width = 70;
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
-        assert!(app.compact, "70 cols is below a 90-col threshold");
+        assert!(app.compact, "the configured threshold is inclusive");
 
         // `0` disables compact mode, even on a phone-narrow terminal.
-        app.config.layout.compact_width = 0;
+        app.config.layout.mobile_width = 0;
         let mut narrow = Terminal::new(TestBackend::new(30, 60)).unwrap();
         narrow.draw(|f| crate::ui::render(f, &mut app)).unwrap();
-        assert!(!app.compact, "compact_width 0 never goes compact");
+        assert!(!app.compact, "mobile_width 0 disables mobile mode");
     }
 
     /// Compact mode drops the bottom status bar to reclaim its row for content
@@ -531,15 +674,15 @@ mod tests {
         let mut wide = Terminal::new(TestBackend::new(100, 40)).unwrap();
         wide.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         assert!(!app.compact);
-        let wide_pane_h = app.last_pane_area.height;
+        let wide_content_h = app.pane_content_rects[0].1.height;
 
         let mut narrow = Terminal::new(TestBackend::new(40, 40)).unwrap();
         narrow.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         assert!(app.compact);
         assert_eq!(
-            app.last_pane_area.height,
-            wide_pane_h + 1,
-            "the reclaimed status row goes to the pane content"
+            app.pane_content_rects[0].1.height,
+            wide_content_h + 1,
+            "mobile removes the duplicate lone-pane header from terminal content"
         );
     }
 
@@ -601,5 +744,51 @@ mod tests {
             ),
             "the most urgent state is the one retained"
         );
+    }
+
+    #[test]
+    fn mobile_navigator_only_closes_from_close_or_activation() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let _env = crate::persist::test_env("mobile-navigator-explicit-close");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(64, 35, tx).unwrap();
+        app.open_switcher();
+        let mut terminal = Terminal::new(TestBackend::new(64, 35)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        app.switcher_click(63, 34);
+        assert!(
+            app.switcher,
+            "unused mobile space does not dismiss navigation"
+        );
+        let close = app.switcher_close_rect.unwrap();
+        app.switcher_click(close.x, close.y + 1);
+        assert!(
+            !app.switcher,
+            "either row of the explicit close target dismisses navigation"
+        );
+    }
+
+    #[test]
+    fn mobile_exit_action_detaches_like_prefix_q() {
+        let _env = crate::persist::test_env("mobile-navigator-exit");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(64, 35, tx).unwrap();
+        app.compact = true;
+        let actions: Vec<_> = app
+            .switcher_rows()
+            .into_iter()
+            .filter_map(|row| match row {
+                SwitcherRow::Action { target, .. } => Some(target),
+                _ => None,
+            })
+            .collect();
+        assert!(matches!(actions.last(), Some(SwitcherTarget::Exit)));
+
+        app.switcher_activate(SwitcherTarget::Exit);
+        assert!(app.detach_requested, "Exit detaches the current client");
+        assert!(!app.should_quit, "Exit does not stop the persistent server");
     }
 }

@@ -28,6 +28,7 @@ cleanly across versions because unknown fields get defaults.
 |---|---|
 | `theme` | active bundled, installed, or virtual theme ID. A missing installed ID falls back visually without erasing the stored value. |
 | `layout.scrollback_bytes` | approximate memory budget per pane's retained history; defaults to `10485760` (10 MiB). The legacy `layout.scrollback` line count is read for compatibility. (See [Scrollback](/docs/guides/scrollback/).) |
+| `layout.mobile_width` | inclusive viewport width for automatic mobile presentation; defaults to `64`, and `0` disables it. The legacy `layout.compact_width` key is accepted and migrated. (See [Mobile Sessions](/docs/guides/mobile/).) |
 | `layout.show_titles` | show the title on each pane border |
 | `layout.resume_in_new_workspace` | resume a session into its own workspace instead of a new tab |
 | `layout.file_open` | what a click in the FILES dock does: `readonly` (default) or an editor command such as `vim` (see [Browsing & Opening Files](/docs/guides/files/)) |

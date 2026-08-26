@@ -24,22 +24,7 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
     // edge. (The right sidebar reopens via ⌃Space B or Settings.)
     app.switcher_button_rect = None;
     let left_hidden = !app.sidebars.left.visible && !app.sidebars.left.docks.is_empty();
-    // In compact (touch) mode a `≡` switcher button replaces the sidebar toggle —
-    // it's the primary navigation on a phone (docs/18).
-    let tog_w = if app.compact {
-        let r = Rect::new(area.x, area.y, 3, 1);
-        let hov = app
-            .hover
-            .is_some_and(|(c, rr)| c >= r.x && c < r.right() && rr == r.y);
-        let style = if hov {
-            Style::new().fg(t.crust).bg(t.accent).bold()
-        } else {
-            Style::new().fg(t.accent).bg(t.surface0).bold()
-        };
-        f.render_widget(Paragraph::new(Span::styled(" ≡ ", style)), r);
-        app.switcher_button_rect = Some(r);
-        3u16
-    } else if !left_hidden {
+    let tog_w = if !left_hidden {
         0
     } else {
         let r = Rect::new(area.x, area.y, 3, 1);
@@ -90,11 +75,9 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
         .saturating_sub(crate::bar::MIN_TOP_TAB_FLEX_WIDTH)
         .min(crate::bar::MAX_BAR_REGION_WIDTH);
     let (bar_hits, bar_overflow, bar_w) = {
-        let candidates = app.bar.widgets_for(
-            crate::bar::BarRegion::TopRight,
-            &app.config.bars,
-            app.compact,
-        );
+        let candidates =
+            app.bar
+                .widgets_for(crate::bar::BarRegion::TopRight, &app.config.bars, false);
         let layout = crate::bar::compose(&candidates, top_budget, crate::bar::MAX_BAR_WIDGET_WIDTH);
         let width = layout.width;
         let region = Rect::new(
