@@ -10,15 +10,20 @@ pub const COMPACT_AT: f32 = 0.85;
 /// Rough USD price per **million** tokens as `(input, output, cache)` for `model`
 /// (substring match on the model id). `None` for an unknown model, so its cost is
 /// shown as "—" rather than a wrong number. Estimates only; overridable via config
-/// (MC-5). Kept deliberately conservative and easy to eyeball.
+/// (MC-5). Kept deliberately conservative and easy to eyeball. Anthropic rows
+/// track the current first-party API rates (2026-08): Fable/Mythos 5 at
+/// $10/$50, Opus 4.6–5 at $5/$25, Haiku 4.5 at $1/$5, with cache at the
+/// standard 0.1× input read rate.
 pub fn model_price(model: &str) -> Option<(f64, f64, f64)> {
     let m = model.to_lowercase();
-    let p = if m.contains("opus") {
-        (15.0, 75.0, 1.5)
+    let p = if m.contains("fable") || m.contains("mythos") {
+        (10.0, 50.0, 1.0)
+    } else if m.contains("opus") {
+        (5.0, 25.0, 0.5)
     } else if m.contains("sonnet") {
         (3.0, 15.0, 0.3)
     } else if m.contains("haiku") {
-        (0.8, 4.0, 0.08)
+        (1.0, 5.0, 0.1)
     } else if m.contains("gpt-4o") || m.contains("gpt-4.1") || m.contains("gpt-5") {
         (2.5, 10.0, 1.25)
     } else if m.contains("o1") || m.contains("o3") {
@@ -33,7 +38,12 @@ pub fn model_price(model: &str) -> Option<(f64, f64, f64)> {
 /// unknown, so the context bar still shows something reasonable.
 pub fn model_window(model: &str) -> u64 {
     let m = model.to_lowercase();
-    if m.contains("gpt") || m.contains("o1") || m.contains("o3") {
+    if m.contains("fable") || m.contains("mythos") {
+        // Claude Fable/Mythos 5 run a 1M window always (it is also the default),
+        // so the 200k base + inference in `context_frac` would read a sub-200k
+        // session as 5× fuller than it is.
+        1_000_000
+    } else if m.contains("gpt") || m.contains("o1") || m.contains("o3") {
         128_000
     } else {
         200_000 // Claude default (see `context_frac` for the 1M extended window)
@@ -94,6 +104,10 @@ mod tests {
         // 1M input tokens of sonnet at $3/M = $3.00.
         assert_eq!(estimate_cost("claude-sonnet-4", 1_000_000, 0, 0), Some(3.0));
         assert_eq!(estimate_cost("mystery", 1000, 1000, 0), None);
+        // Fable/Mythos 5 are priced ($10/M input) rather than falling through
+        // to the unknown-model "—".
+        assert_eq!(estimate_cost("claude-fable-5", 1_000_000, 0, 0), Some(10.0));
+        assert!(model_price("claude-mythos-5").is_some());
         // Context fraction: 100k of a 200k Claude window = 0.5.
         assert!((context_frac("claude-opus", 100_000) - 0.5).abs() < 1e-6);
         // A session past 200k is inferred to be on the 1M window: a real ~978k
@@ -108,6 +122,9 @@ mod tests {
         );
         // Over even the 1M window clamps to 1.0.
         assert_eq!(context_frac("claude-opus", 9_999_999_999), 1.0);
+        // Fable's window is 1M always: 100k reads as 10%, not 50% of an assumed
+        // 200k base.
+        assert!((context_frac("claude-fable-5", 100_000) - 0.1).abs() < 1e-6);
         // A user override wins over the built-in table.
         let mut ov = std::collections::HashMap::new();
         ov.insert("opus".to_string(), [10.0, 20.0, 1.0]);
