@@ -336,7 +336,6 @@ Use these read routes to resolve state and exact targets:
   `luvus module log <id>`
 - Themes and UI: `luvus theme list`, `luvus bar list`,
   `luvus ui dock list`
-- Mission Control: `luvus mission open [<workspace>]`
 
 Run `luvus help all` only when the requested mutation grammar is uncertain.
 This remains compatible with older Luvus releases. Before changing an advanced

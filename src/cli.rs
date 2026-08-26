@@ -245,7 +245,7 @@ git:
   files refresh              re-read the tree from disk
 
 mission control:
-  mission open [<workspace>] open Mission Control for a workspace
+  mission open [<workspace>]  open Mission Control for a workspace
 
 diff review:
   diff list [--layer staged|worktree|untracked|conflict]   list exact diff layers

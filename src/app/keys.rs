@@ -748,6 +748,20 @@ mod tests {
     }
 
     #[test]
+    fn legacy_switcher_override_does_not_mask_mission() {
+        let mut config = crate::config::Config {
+            version: 1,
+            ..Default::default()
+        };
+        config.keybindings.insert("switcher".into(), "m".into());
+
+        let config = crate::config::normalize_config(config);
+        let map = build_keymap(&config.keybindings);
+        assert_eq!(map.get("m"), Some(&Cmd::OpenMission));
+        assert_eq!(map.get("M"), Some(&Cmd::Switcher));
+    }
+
+    #[test]
     fn rebind_moves_the_key() {
         let mut o = HashMap::new();
         o.insert(Cmd::NewTab.id().to_string(), "t".to_string());

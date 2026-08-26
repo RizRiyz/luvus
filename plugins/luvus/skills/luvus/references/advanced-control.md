@@ -19,7 +19,6 @@ it conflicts with `SKILL.md`, follow `SKILL.md`.
   `luvus module log <id>`
 - Themes and UI: `luvus theme list`, `luvus bar list`,
   `luvus ui dock list`
-- Mission Control: `luvus mission open [<workspace>]`
 - Layout: `luvus workspace list`, `luvus tab list`, `luvus pane list`
 - UHP: `luvus uhp capabilities`, `luvus uhp schema`,
   `luvus uhp snapshot`

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::{SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN};
 
-const CONFIG_VERSION: u32 = 1;
+const CONFIG_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -504,11 +504,16 @@ pub fn load() -> Config {
         .unwrap_or_default()
 }
 
-/// Hydrate an old line-count setting into the new persisted byte budget. The
-/// old default becomes today's 10 MiB default; custom values retain their rough
-/// relative size using the previous measured 5,000 lines at 120 columns ≈ 10
-/// MiB relationship.
+/// Apply versioned config migrations and clamp persisted values. The legacy
+/// scrollback line count becomes a byte budget using the previous measured
+/// 5,000 lines at 120 columns ≈ 10 MiB relationship.
 pub(crate) fn normalize_config(mut cfg: Config) -> Config {
+    // v2 assigns the former Switcher key (`m`) to Mission Control and moves
+    // Switcher to `M`. An explicit old-default override would otherwise claim
+    // `m` before defaults are applied and silently leave Mission unbound.
+    if cfg.version < 2 && cfg.keybindings.get("switcher").map(String::as_str) == Some("m") {
+        cfg.keybindings.remove("switcher");
+    }
     if cfg.layout.scrollback_bytes.is_none() {
         cfg.layout.scrollback_bytes = Some(legacy_scrollback_bytes(cfg.layout.scrollback));
     }
@@ -516,6 +521,7 @@ pub(crate) fn normalize_config(mut cfg: Config) -> Config {
         .layout
         .diff_context_lines
         .min(crate::diff::MAX_CONTEXT_LINES);
+    cfg.version = cfg.version.max(CONFIG_VERSION);
     cfg
 }
 
@@ -614,6 +620,26 @@ mod tests {
         assert_eq!(back.theme, "mono");
         assert!(back.notifications.sound_on_done);
         assert!(!back.notifications.sound_on_blocked);
+    }
+
+    #[test]
+    fn v2_migrates_the_old_switcher_default_without_overriding_new_choices() {
+        let mut old = Config {
+            version: 1,
+            ..Default::default()
+        };
+        old.keybindings.insert("switcher".into(), "m".into());
+        let migrated = normalize_config(old);
+        assert_eq!(migrated.version, 2);
+        assert!(!migrated.keybindings.contains_key("switcher"));
+
+        let mut current = Config::default();
+        current.keybindings.insert("switcher".into(), "m".into());
+        let current = normalize_config(current);
+        assert_eq!(
+            current.keybindings.get("switcher").map(String::as_str),
+            Some("m")
+        );
     }
 
     #[test]
