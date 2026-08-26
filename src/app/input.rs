@@ -1320,11 +1320,21 @@ impl App {
                 // any old one. Falls through to normal click handling (focus/etc).
                 self.selection = self
                     .pane_content_at(m.column, m.row)
-                    .map(|(pane, content)| Selection {
-                        pane,
-                        content,
-                        anchor: (m.column, m.row),
-                        cursor: (m.column, m.row),
+                    .map(|(pane, content)| {
+                        let retained = self
+                            .retained_selection_point(pane, content, m.column, m.row)
+                            .map(|point| RetainedSelection {
+                                anchor: point,
+                                cursor: point,
+                            });
+                        Selection {
+                            pane,
+                            content,
+                            anchor: (m.column, m.row),
+                            cursor: (m.column, m.row),
+                            retained,
+                            dragging: true,
+                        }
                     });
             }
             MouseEventKind::Down(MouseButton::Middle) => {
@@ -1364,13 +1374,7 @@ impl App {
                     }
                     return;
                 }
-                if let Some(sel) = self.selection.as_mut() {
-                    let c = sel.content;
-                    sel.cursor = (
-                        m.column.clamp(c.x, c.right().saturating_sub(1)),
-                        m.row.clamp(c.y, c.bottom().saturating_sub(1)),
-                    );
-                }
+                self.update_mouse_selection_cursor(m.column, m.row);
                 return;
             }
             MouseEventKind::Up(MouseButton::Left) | MouseEventKind::Up(MouseButton::Middle) => {
@@ -1392,6 +1396,10 @@ impl App {
                 if let Some(g) = self.mouse_grab.take() {
                     self.send_grabbed_mouse(g, MouseSeq::Release, m.column, m.row);
                     return;
+                }
+                self.update_mouse_selection_cursor(m.column, m.row);
+                if let Some(selection) = self.selection.as_mut() {
+                    selection.dragging = false;
                 }
                 // A real drag copies its text + flashes a toast; a plain click
                 // clears the (1-cell) selection so nothing stays highlighted.
@@ -1542,9 +1550,21 @@ impl App {
                 // Forwarding the wheel makes the app repaint; that output is the
                 // user scrolling, not the agent working (docs/07).
                 let mut scrolled_the_app = false;
+                let extending_selection = self.selection.is_some_and(|selection| {
+                    selection.pane == id && selection.dragging && selection.retained.is_some()
+                });
+                let mut scrolled_selection = false;
                 if let Some(pane) = self.panes.get(&id) {
                     let mm = pane.mouse_mode();
-                    if mm.report {
+                    if extending_selection && !pane.alt_screen() {
+                        // The selection gesture owns primary-screen scrolling,
+                        // even when the child reports mouse input. Its endpoints
+                        // are retained-history rows, so the original anchor stays
+                        // attached to the same text while the cursor extends.
+                        pane.scroll(-scroll);
+                        set_scroll = Some((pane.scroll_state().0 > 0).then_some(id));
+                        scrolled_selection = true;
+                    } else if mm.report {
                         // The app tracks the mouse (e.g. a TUI agent like Claude
                         // Code on the alternate screen) — forward the wheel so it
                         // scrolls its own transcript, exactly like a real terminal.
@@ -1581,6 +1601,9 @@ impl App {
                 }
                 if let Some(v) = set_scroll {
                     self.scroll_pane = v;
+                }
+                if scrolled_selection {
+                    self.update_mouse_selection_cursor(m.column, m.row);
                 }
             }
             return;
@@ -2208,6 +2231,54 @@ impl App {
             .map(|(id, r)| (*id, *r))
     }
 
+    /// Map one visible terminal cell into the pane's retained-history space.
+    /// Native file and diff views intentionally stay in screen coordinates.
+    fn retained_selection_point(
+        &self,
+        pane: PaneId,
+        content: Rect,
+        x: u16,
+        y: u16,
+    ) -> Option<(usize, usize)> {
+        if self.views.contains_key(&pane) {
+            return None;
+        }
+        let pane = self.panes.get(&pane)?;
+        let (visible_top, row_count) = pane.retained_viewport()?;
+        if row_count == 0 {
+            return None;
+        }
+        let row = visible_top
+            .saturating_add(y.saturating_sub(content.y) as usize)
+            .min(row_count.saturating_sub(1));
+        let col = x
+            .saturating_sub(content.x)
+            .min(content.width.saturating_sub(1)) as usize;
+        Some((row, col))
+    }
+
+    /// Move the visible cursor endpoint and, for terminal panes, resolve that
+    /// cell against the viewport *now*. The retained anchor is never rewritten.
+    fn update_mouse_selection_cursor(&mut self, x: u16, y: u16) {
+        let Some(selection) = self.selection else {
+            return;
+        };
+        let content = selection.content;
+        let screen = (
+            x.clamp(content.x, content.right().saturating_sub(1)),
+            y.clamp(content.y, content.bottom().saturating_sub(1)),
+        );
+        let retained = selection.retained.and_then(|_| {
+            self.retained_selection_point(selection.pane, content, screen.0, screen.1)
+        });
+        if let Some(selection) = self.selection.as_mut() {
+            selection.cursor = screen;
+            if let (Some(cursor), Some(retained)) = (retained, selection.retained.as_mut()) {
+                retained.cursor = cursor;
+            }
+        }
+    }
+
     /// Extract the current selection's text from the pane's grid (linear, with
     /// trailing blanks trimmed). `None` for a click without a drag or empty text.
     pub(crate) fn selection_text(&self) -> Option<String> {
@@ -2219,6 +2290,28 @@ impl App {
         // its rendered lines instead, so drag-to-copy works just like a pane.
         if let Some(crate::app::ViewKind::File(v)) = self.views.get(&sel.pane) {
             return crate::files::selection_text(v, sel.content, sel.ordered());
+        }
+        if let Some(selection) = sel.retained {
+            let range = selection.ordered();
+            let mut output = String::new();
+            let mut appended = false;
+            self.panes
+                .get(&sel.pane)?
+                .for_each_retained_row(&mut |row, _, _, line| {
+                    if (range.0 .0..=range.1 .0).contains(&row) {
+                        append_selected_row(&mut output, &mut appended, line, row, range);
+                    }
+                });
+            let text = finish_selected_text(output)?;
+            let is_codex = self
+                .status
+                .get(&sel.pane)
+                .is_some_and(|status| status.agent == "codex");
+            return Some(if range.0 .1 == 0 || is_codex {
+                strip_uniform_single_cell_margin(text)
+            } else {
+                text
+            });
         }
         let rows = self
             .panes
@@ -4167,6 +4260,83 @@ mod link_click_tests {
     }
 
     #[test]
+    fn mouse_selection_anchor_survives_scrollback_while_dragging() {
+        let _env = crate::persist::test_env("mouse-selection-scroll-anchor");
+        let source = (0..100)
+            .map(|line| format!("line-{line:03}\r\n"))
+            .collect::<String>();
+        let (mut app, _term, _) = fixture_showing(&source, 0);
+        let pane = app.layout().focus;
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("pane content rect");
+        let start = (
+            content.x + "line-000".len() as u16 - 1,
+            content.bottom().saturating_sub(4),
+        );
+
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            start,
+            KeyModifiers::NONE,
+        ));
+        let anchor = app
+            .selection
+            .and_then(|selection| selection.retained)
+            .expect("terminal selection uses retained rows")
+            .anchor;
+        let anchor_text = app
+            .panes
+            .get(&pane)
+            .and_then(|pane| pane.retained_row_text(anchor.0))
+            .expect("anchored row")
+            .trim_end()
+            .to_string();
+        assert!(!anchor_text.is_empty(), "fixture anchor contains text");
+
+        // Extend beyond the original viewport. Each wheel event scrolls three
+        // retained rows while the pointer remains part of the active gesture.
+        for _ in 0..8 {
+            app.handle_event(mouse(MouseEventKind::ScrollUp, start, KeyModifiers::NONE));
+        }
+        let end = (content.x, content.y + 1);
+        app.handle_event(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            end,
+            KeyModifiers::NONE,
+        ));
+
+        let retained = app
+            .selection
+            .and_then(|selection| selection.retained)
+            .expect("retained selection after scrolling");
+        assert_eq!(
+            retained.anchor, anchor,
+            "scrolling must never re-anchor the original press"
+        );
+        assert!(
+            retained.cursor.0 < retained.anchor.0,
+            "dragging after wheel scroll extends into older history"
+        );
+        let selected = app.selection_text().expect("selected history text");
+        assert_eq!(
+            selected.lines().last(),
+            Some(anchor_text.as_str()),
+            "the copied range still ends on the row where the drag began"
+        );
+
+        app.handle_event(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            end,
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.pending_clipboard.as_deref(), Some(selected.as_str()));
+    }
+
+    #[test]
     fn codex_copy_drops_its_one_cell_transcript_gutter() {
         let _env = crate::persist::test_env("codex-copy-gutter");
         let (mut app, _term, _) = fixture_showing("  hello\r\n  world", 0);
@@ -4185,6 +4355,8 @@ mod link_click_tests {
             content,
             anchor: (content.x + 1, content.y),
             cursor: (content.x + 6, content.y + 1),
+            retained: None,
+            dragging: false,
         });
 
         assert_eq!(app.selection_text().as_deref(), Some("hello\nworld"));

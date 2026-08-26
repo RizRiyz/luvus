@@ -891,6 +891,18 @@ impl Pane {
             .unwrap_or(0)
     }
 
+    /// `(visible_top, retained_rows)` from one terminal snapshot. Mouse
+    /// selection uses this to bind a screen row to retained history without an
+    /// output burst changing the history length between separate reads.
+    pub(crate) fn retained_viewport(&self) -> Option<(usize, usize)> {
+        self.engine.lock().ok().map(|engine| {
+            (
+                engine.history_len().saturating_sub(engine.scroll_offset()),
+                engine.retained_row_count(),
+            )
+        })
+    }
+
     /// Read one retained row without allocating every other row.
     pub fn retained_row_text(&self, index: usize) -> Option<String> {
         self.engine.lock().ok()?.retained_row_text(index)

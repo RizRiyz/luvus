@@ -303,6 +303,9 @@ fn draw_one_pane(
         Ok(engine) => {
             let copy_top =
                 copy.map(|_| engine.history_len().saturating_sub(engine.scroll_offset()));
+            let selection_top = sel
+                .and_then(|selection| selection.retained)
+                .map(|_| engine.history_len().saturating_sub(engine.scroll_offset()));
             {
                 let buf = f.buffer_mut();
                 engine.for_each_cell(&mut |row, col, sym, cell| {
@@ -331,7 +334,20 @@ fn draw_one_pane(
                         style = style.bg(conv(cell.bg));
                     }
                     // Highlight the cell if it's inside the mouse selection.
-                    if sel.is_some_and(|s| s.contains(x, y)) {
+                    if sel.is_some_and(|selection| {
+                        selection.retained.map_or_else(
+                            || selection.contains(x, y),
+                            |retained| {
+                                selection_top.is_some_and(|top| {
+                                    retained.contains(
+                                        top.saturating_add(row as usize),
+                                        col as usize,
+                                        content.width as usize,
+                                    )
+                                })
+                            },
+                        )
+                    }) {
                         style = style.bg(t.sel_bg);
                     }
                     if copy.is_some_and(|copy| {

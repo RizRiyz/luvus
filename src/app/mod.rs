@@ -1083,14 +1083,51 @@ pub struct LinkPress {
     pub at: (u16, u16),
 }
 
-/// A drag text-selection inside a pane. Coordinates are **terminal** cells; the
-/// pane's `content` rect maps them to grid positions for extraction/highlight.
+/// A drag text-selection inside a pane. Screen coordinates keep native file
+/// views aligned with their renderer. Terminal panes additionally store stable
+/// retained-history coordinates, so scrolling the viewport cannot move either
+/// endpoint onto different text.
 #[derive(Clone, Copy)]
 pub struct Selection {
     pub pane: PaneId,
     pub content: Rect,
     pub anchor: (u16, u16),
     pub cursor: (u16, u16),
+    pub retained: Option<RetainedSelection>,
+    pub dragging: bool,
+}
+
+/// Mouse-selection endpoints in the same absolute retained-row coordinate
+/// space used by keyboard copy mode (oldest retained row is zero).
+#[derive(Clone, Copy)]
+pub struct RetainedSelection {
+    pub anchor: (usize, usize),
+    pub cursor: (usize, usize),
+}
+
+impl RetainedSelection {
+    pub(crate) fn ordered(&self) -> ((usize, usize), (usize, usize)) {
+        if self.anchor <= self.cursor {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
+    }
+
+    pub(crate) fn contains(&self, row: usize, col: usize, width: usize) -> bool {
+        let ((sr, sc), (er, ec)) = self.ordered();
+        if row < sr || row > er {
+            return false;
+        }
+        let middle_left = sc.min(ec);
+        let left = if row == sr { sc } else { middle_left };
+        let right = if row == er {
+            ec
+        } else {
+            width.saturating_sub(1)
+        };
+        col >= left && col <= right
+    }
 }
 
 /// An in-progress pane-divider resize drag (docs/27, RESIZE-2): the split node
@@ -1145,7 +1182,9 @@ impl Selection {
 
     /// True only when the drag actually moved (so a plain click isn't a copy).
     fn has_range(&self) -> bool {
-        self.anchor != self.cursor
+        self.retained
+            .is_some_and(|selection| selection.anchor != selection.cursor)
+            || (self.retained.is_none() && self.anchor != self.cursor)
     }
 }
 
@@ -5834,6 +5873,8 @@ mod tests {
             content,
             anchor: (4, 1),
             cursor: (6, 3),
+            retained: None,
+            dragging: false,
         };
         // First row: from the anchor column to the right edge.
         assert!(sel.contains(4, 1));
