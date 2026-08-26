@@ -123,6 +123,14 @@ const KNOWN_AGENTS: &[KnownAgent] = &[
         distinct: &["pi-coding-agent"],
         ambiguous: &["pi"],
     },
+    // Oh My Pi (omp): brand + npm binary are distinctive, so trust them from
+    // pane output; the bare `omp` is ambiguous (matches ordinary prose) and
+    // is therefore believed only from the spawn command or OSC title.
+    KnownAgent {
+        name: "omp",
+        distinct: &["oh-my-pi", "omp-coding-agent"],
+        ambiguous: &["omp"],
+    },
     // `fx` is a short, common token in filenames and prose, so never infer it
     // from arbitrary screen output. Its process name and OSC title are
     // deliberate identity signals and therefore safe.
@@ -1704,6 +1712,21 @@ mod tests {
             named(Some("zsh"), "pi-coding-agent starting\n", "zsh"),
             "pi",
             "the npm binary is distinctive enough to trust from output"
+        );
+        // omp: the brand + npm binary are distinctive; bare "omp" is ambiguous
+        // (ordinary prose can contain it) and is trusted only from the spawn
+        // command or OSC title.
+        assert_eq!(named(Some("zsh"), "", "omp"), "omp", "command names it");
+        assert_eq!(named(Some("omp"), "", "zsh"), "omp", "title names it");
+        assert_eq!(
+            named(Some("zsh"), "oh-my-pi session restored\n", "zsh"),
+            "omp",
+            "the brand string is distinctive enough to trust from output"
+        );
+        assert_eq!(
+            named(Some("zsh"), "compiles with omp flags\n", "zsh"),
+            "zsh",
+            "the word omp in output must not name the agent"
         );
         assert_eq!(named(Some("amp"), "", "zsh"), "amp", "title names it");
         assert_eq!(named(Some("zsh"), "", "droid"), "droid", "command names it");

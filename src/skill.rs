@@ -61,10 +61,11 @@ pub enum SkillHost {
     Grok,
     Qwen,
     Kiro,
+    Omp,
 }
 
 impl SkillHost {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Shared,
         Self::Claude,
         Self::Opencode,
@@ -72,6 +73,7 @@ impl SkillHost {
         Self::Grok,
         Self::Qwen,
         Self::Kiro,
+        Self::Omp,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -83,6 +85,7 @@ impl SkillHost {
             Self::Grok => "grok",
             Self::Qwen => "qwen",
             Self::Kiro => "kiro",
+            Self::Omp => "omp",
         }
     }
 
@@ -380,6 +383,7 @@ fn target_dir_at(host: SkillHost, home: &Path, xdg_config: Option<&Path>) -> Pat
         SkillHost::Grok => home.join(".grok").join("skills").join("luvus"),
         SkillHost::Qwen => home.join(".qwen").join("skills").join("luvus"),
         SkillHost::Kiro => home.join(".kiro").join("skills").join("luvus"),
+        SkillHost::Omp => home.join(".omp").join("agent").join("skills").join("luvus"),
     }
 }
 
@@ -531,6 +535,7 @@ fn host_commands(host: SkillHost) -> &'static [&'static str] {
         SkillHost::Grok => &["grok"],
         SkillHost::Qwen => &["qwen"],
         SkillHost::Kiro => &["kiro", "kiro-cli"],
+        SkillHost::Omp => &["omp"],
     }
 }
 
@@ -569,6 +574,7 @@ fn host_config_dirs(
         SkillHost::Grok => vec![home.join(".grok")],
         SkillHost::Qwen => vec![home.join(".qwen")],
         SkillHost::Kiro => vec![home.join(".kiro")],
+        SkillHost::Omp => vec![home.join(".omp").join("agent")],
     }
 }
 
@@ -1338,5 +1344,25 @@ mod tests {
         assert!(cleaned.ends_with("\nkeep"));
         assert!(!cleaned.contains(POINTER_BEGIN));
         assert!(!cleaned.contains(LEGACY_POINTER_BEGIN));
+    }
+
+    #[test]
+    fn omp_is_a_recognized_skill_host_by_dir_or_binary() {
+        // Detection must fire on either signal: the ~/.omp/agent config dir
+        // or the omp executable on PATH. OMP reads the shared ~/.agents/skills
+        // location, so `skill enable` covers it once detected.
+        let root = crate::persist::skills_dir().join("omp-host-home");
+        let _ = fs::remove_dir_all(&root);
+        let agent_dir = root.join(".omp").join("agent");
+        fs::create_dir_all(&agent_dir).unwrap();
+
+        let dirs = host_config_dirs(SkillHost::Omp, &root, None, None, None, None);
+        assert_eq!(dirs, vec![agent_dir.clone()]);
+        assert!(any_dir(&dirs), "config dir presence detects the omp host");
+        assert_eq!(host_commands(SkillHost::Omp), &["omp"]);
+        assert_eq!(SkillHost::Omp.as_str(), "omp");
+        assert!(SkillHost::ALL.contains(&SkillHost::Omp));
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

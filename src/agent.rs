@@ -134,6 +134,21 @@ static SOURCES: &[SessionSource] = &[
         fork: Some(|q| format!("pi --fork {q}\r")),
     },
     SessionSource {
+        // Oh My Pi (omp) — pi's end-user packaging. Sessions share pi's file
+        // layout (header line carries `id` + `cwd`) and `PI_CODING_AGENT_SESSION_DIR`
+        // override. omp resumes with `--resume` (not `--session` like pi) and
+        // has no native fork. Hook-reported ids arrive via pane.report_session.
+        name: "omp",
+        discover: Some(Discovery {
+            base: omp_base,
+            recent: omp_recent,
+            latest: omp_latest,
+            list: Some(omp_list),
+        }),
+        resume: |q| format!("omp --resume {q}\r"),
+        fork: None,
+    },
+    SessionSource {
         name: "gemini",
         discover: Some(Discovery {
             base: gemini_base,
@@ -1187,6 +1202,64 @@ fn pi_recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
     out
 }
 
+/// Oh My Pi (omp) sessions. omp ships pi's session layout unchanged — the
+/// first line is a self-describing header with `id` + `cwd`. omp's data root
+/// is `~/.omp/agent/sessions`; `PI_CODING_AGENT_SESSION_DIR` (also read by
+/// omp) overrides it.
+fn omp_base() -> PathBuf {
+    if let Some(d) = std::env::var_os("PI_CODING_AGENT_SESSION_DIR") {
+        return PathBuf::from(d);
+    }
+    home().join(".omp").join("agent").join("sessions")
+}
+
+fn omp_list(base: &Path, cwd: &Path) -> Vec<String> {
+    let mut files = pi_session_files(base);
+    files.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
+    files
+        .into_iter()
+        .filter_map(|(_, path)| read_pi_session(&path))
+        .filter(|(_, dir)| dir == cwd)
+        .map(|(id, _)| id)
+        .collect()
+}
+
+fn omp_latest(base: &Path, cwd: &Path) -> Option<String> {
+    let mut files = pi_session_files(base);
+    files.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
+    for (_, path) in files {
+        if let Some((id, dir)) = read_pi_session(&path) {
+            if dir == cwd {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+fn omp_recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
+    let mut files = pi_session_files(base);
+    files.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (updated, path) in files {
+        if out.len() >= limit {
+            break;
+        }
+        if let Some((id, cwd)) = read_pi_session(&path) {
+            if seen.insert(cwd.clone()) {
+                out.push(SessionInfo {
+                    agent: "omp".to_string(),
+                    session_id: id,
+                    cwd,
+                    updated,
+                });
+            }
+        }
+    }
+    out
+}
+
 // ── Gemini CLI and Qwen Code ────────────────────────────────────────────────
 // Both keep project-scoped JSONL chats under `<base>/tmp/<project>/chats/` and
 // write the original project path to the sibling `.project_root` file. The
@@ -1928,6 +2001,37 @@ mod tests {
                 .session_id,
             "cccc"
         );
+    }
+
+    #[test]
+    fn omp_discovers_pi_layout_sessions_and_resumes_with_omp_flag() {
+        // omp ships pi's session layout: <base>/<encoded-cwd>/<uuid>.jsonl with
+        // a self-describing header. Discovery matches by cwd; the resume command
+        // uses `omp --resume` (not pi's `--session`) and omp has no fork.
+        let base = tmp("omp");
+        let app = base.join("-work-app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("dddd.jsonl"),
+            "{\"type\":\"session\",\"id\":\"dddd\",\"cwd\":\"/work/app\"}\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            omp_latest(&base, Path::new("/work/app")).as_deref(),
+            Some("dddd")
+        );
+        let recent = omp_recent(&base, 10);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].agent, "omp");
+        assert_eq!(recent[0].session_id, "dddd");
+
+        let cmd = resume_command("omp", "dddd").unwrap();
+        assert!(cmd.contains("omp --resume"), "uses omp's flag: {cmd}");
+        assert!(!cmd.contains("--session"), "pi's flag must not leak");
+        assert!(is_resumable("omp"));
+        assert!(!can_fork("omp"), "omp has no native fork");
+        assert!(fork_command("omp", "dddd").is_none());
     }
 
     #[test]

@@ -82,6 +82,13 @@ export const luvus = async () => {
 }
 "#;
 
+/// The OMP extension (docs/23): omp ships the ExtensionAPI factory surface,
+/// so we drop a dependency-free `luvus.ts` into `~/.omp/agent/extensions/`
+/// and omp auto-loads it on launch — no agent config wiring needed. The
+/// factory reports the omp session id on lifecycle events via the same
+/// `pane.report_session` / `pane.report_event` RPCs the other agent hooks use.
+const OMP_EXTENSION: &str = include_str!("../agents/omp/extensions/luvus.ts");
+
 pub fn run(args: &[String], context: crate::i18n::cli::Context) -> Result<i32> {
     match (
         args.get(2).map(String::as_str),
@@ -192,6 +199,16 @@ fn opencode_plugin_path() -> PathBuf {
     opencode_plugin_dir().join("luvus.js")
 }
 
+/// OMP's extension directory: `~/.omp/agent/extensions/` (the default
+/// profile's agent dir). omp auto-discovers `.ts`/`.js` factories here.
+fn omp_extensions_dir() -> PathBuf {
+    home().join(".omp").join("agent").join("extensions")
+}
+
+fn omp_extension_path() -> PathBuf {
+    omp_extensions_dir().join("luvus.ts")
+}
+
 /// Where + how an agent's shell hook is configured (docs/23). `file` is the JSON
 /// config file inside `dir`; `event` is the hook key; `matcher` is an optional
 /// group matcher (Codex reports `startup` and `resume` SessionStart sources).
@@ -293,6 +310,24 @@ pub fn install_codex() -> Result<PathBuf> {
         Some(5),
     );
     fs::write(&cfg_path, serde_json::to_string_pretty(&cfg)?)?;
+    Ok(dir)
+}
+
+/// Install the OMP extension (docs/23). OMP unifies hooks and custom tools as
+/// `extensions` (its v0.35.0 migration moved `~/.pi/agent/hooks/*.ts` to
+/// `~/.pi/agent/extensions/*.ts`; the OMP root is `.omp`). The extension
+/// runner discovers JS/TS factories under `~/.omp/agent/extensions/`, so
+/// install writes one file there — no agent config is edited.
+pub fn install_omp() -> Result<PathBuf> {
+    let dir = omp_extensions_dir();
+    fs::create_dir_all(&dir)?;
+    fs::write(omp_extension_path(), OMP_EXTENSION)?;
+    let _ = fs::remove_file(dir.join("bohay.ts"));
+    let _ = fs::remove_file(dir.join("bohay.js"));
+    // An earlier revision of this integration (never released) wrote the hook
+    // to ~/.omp/hooks/luvus.ts, the pre-unification directory. Remove it on
+    // reinstall so no stale artifact survives an upgrade path.
+    let _ = fs::remove_file(home().join(".omp").join("hooks").join("luvus.ts"));
     Ok(dir)
 }
 
@@ -434,6 +469,13 @@ fn legacy_is_installed(agent: &str) -> bool {
     if agent == "grok" {
         return grok_hooks_dir().join("bohay.json").is_file();
     }
+    if agent == "omp" {
+        // Legacy names from an unreleased attempt at omp support (never
+        // shipped; cleaned up on install/uninstall).
+        return home().join(".omp").join("hooks").join("luvus.ts").is_file()
+            || omp_extensions_dir().join("bohay.ts").is_file()
+            || omp_extensions_dir().join("bohay.js").is_file();
+    }
     if agent == "kimi" {
         return fs::read_to_string(kimi_config_path())
             .ok()
@@ -466,7 +508,9 @@ fn legacy_is_installed(agent: &str) -> bool {
 }
 
 /// Agents the integration hook supports (for the Settings UI + CLI).
-pub const AGENTS: &[&str] = &["claude", "copilot", "codex", "opencode", "kimi", "grok"];
+pub const AGENTS: &[&str] = &[
+    "claude", "copilot", "codex", "opencode", "kimi", "grok", "omp",
+];
 
 /// Install the integration for `agent` (used by the Settings tab + CLI).
 pub fn install(agent: &str) -> Result<()> {
@@ -477,6 +521,7 @@ pub fn install(agent: &str) -> Result<()> {
         "opencode" => install_opencode().map(|_| ()),
         "kimi" => install_kimi().map(|_| ()),
         "grok" => install_grok().map(|_| ()),
+        "omp" => install_omp().map(|_| ()),
         other => Err(anyhow!("no integration for {other}")),
     }
 }
@@ -489,6 +534,15 @@ pub fn uninstall(agent: &str) -> Result<()> {
     if agent == "opencode" {
         let _ = fs::remove_file(opencode_plugin_path());
         let _ = fs::remove_file(opencode_plugin_dir().join("bohay.js"));
+        return Ok(());
+    }
+    if agent == "omp" {
+        // omp's extensions directory is shared with user-installed factories;
+        // remove only the file we wrote plus any stale legacy name.
+        let _ = fs::remove_file(omp_extension_path());
+        let _ = fs::remove_file(omp_extensions_dir().join("bohay.ts"));
+        let _ = fs::remove_file(omp_extensions_dir().join("bohay.js"));
+        let _ = fs::remove_file(home().join(".omp").join("hooks").join("luvus.ts"));
         return Ok(());
     }
     if agent == "grok" {
@@ -559,6 +613,9 @@ pub fn is_installed(agent: &str) -> bool {
     }
     if agent == "grok" {
         return grok_hook_json_path().exists();
+    }
+    if agent == "omp" {
+        return omp_extension_path().exists();
     }
     if agent == "kimi" {
         let Ok(s) = fs::read_to_string(kimi_config_path()) else {
@@ -1032,5 +1089,173 @@ mod tests {
 
         std::env::remove_var("XDG_CONFIG_HOME");
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn omp_install_writes_extension_and_is_idempotent() {
+        let _env = crate::persist::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("luvus-omp-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let saved_home = std::env::var_os("HOME");
+        let saved_userprofile = std::env::var_os("USERPROFILE");
+        std::env::set_var("HOME", &tmp);
+        std::env::set_var("USERPROFILE", &tmp);
+
+        install_omp().unwrap();
+        install_omp().unwrap(); // idempotent
+
+        let ext = tmp
+            .join(".omp")
+            .join("agent")
+            .join("extensions")
+            .join("luvus.ts");
+        assert!(ext.exists(), "luvus.ts dropped in the omp extensions dir");
+        // A user-installed factory in the same directory must survive.
+        let sibling = tmp
+            .join(".omp")
+            .join("agent")
+            .join("extensions")
+            .join("mine.ts");
+        fs::write(&sibling, "export default () => {}").unwrap();
+
+        install_omp().unwrap();
+        assert!(sibling.exists(), "unrelated omp extension preserved");
+        assert!(is_installed("omp"));
+
+        uninstall("omp").unwrap();
+        assert!(!is_installed("omp"), "luvus.ts removed");
+        assert!(sibling.exists(), "unrelated omp extension still preserved");
+        uninstall("omp").unwrap(); // idempotent
+
+        match saved_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match saved_userprofile {
+            Some(v) => std::env::set_var("USERPROFILE", v),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn omp_install_accepts_pi_spelling_only_as_separate_agent() {
+        // omp and pi are different agents. `install("pi")` must NOT install the
+        // OMP extension — pi has no hook integration, so the request errors.
+        assert!(install("pi").is_err(), "pi is not omp; no alias");
+        assert!(!AGENTS.contains(&"pi"));
+    }
+
+    #[test]
+    fn omp_extension_source_is_syntactically_valid_typescript() {
+        // Rust CI embeds the extension as text and never type-checks it, so
+        // validate the generated file with Node's parser (available on every
+        // GitHub runner). `node --check` parses the source without executing
+        // it; a missing identifier or syntax error fails the build.
+        let node = std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join(if cfg!(windows) { "node.exe" } else { "node" }))
+                .find(|candidate| candidate.is_file())
+        });
+        let Some(node) = node else {
+            return; // node not installed locally — CI runners always have it
+        };
+        let dir = std::env::temp_dir().join(format!("luvus-omp-parse-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("luvus.mts"); // .mts: parsed as an ES module
+        fs::write(&path, OMP_EXTENSION).unwrap();
+        let output = std::process::Command::new(node)
+            .args(["--check", "--experimental-strip-types"])
+            .arg(&path)
+            .output()
+            .expect("node --check should spawn");
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            output.status.success(),
+            "generated omp extension failed to parse: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn omp_extension_registers_only_documented_events_and_reports_via_cli() {
+        // Every pi.on(...) registration must name an event from omp's public
+        // ExtensionAPI catalog (docs/extension-authoring), and all reports go
+        // through the luvus CLI so routing follows LUVUS_SOCKET_PATH exactly.
+        const DOCUMENTED_EVENTS: &[&str] = &[
+            "resources_discover",
+            "session_start",
+            "session_before_switch",
+            "session_switch",
+            "session_before_branch",
+            "session_branch",
+            "session_before_compact",
+            "session.compacting",
+            "session_compact",
+            "session_before_tree",
+            "session_tree",
+            "session_shutdown",
+            "input",
+            "before_agent_start",
+            "before_provider_request",
+            "after_provider_response",
+            "context",
+            "agent_start",
+            "agent_end",
+            "session_stop",
+            "turn_start",
+            "turn_end",
+            "message_start",
+            "message_update",
+            "message_end",
+            "tool_call",
+            "tool_result",
+            "tool_execution_start",
+            "tool_execution_update",
+            "tool_execution_end",
+            "tool_approval_requested",
+            "tool_approval_resolved",
+            "user_bash",
+            "user_python",
+            "mcp_notification",
+            "auto_compaction_start",
+            "auto_compaction_end",
+            "auto_retry_start",
+            "auto_retry_end",
+            "retry_fallback_applied",
+            "retry_fallback_succeeded",
+            "ttsr_triggered",
+            "todo_reminder",
+            "goal_updated",
+            "credential_disabled",
+        ];
+        for capture in OMP_EXTENSION.match_indices("pi.on(\"") {
+            let start = capture.0 + "pi.on(\"".len();
+            let rest = &OMP_EXTENSION[start..];
+            let end = rest.find('"').expect("unterminated event name");
+            let event = &rest[..end];
+            assert!(
+                DOCUMENTED_EVENTS.contains(&event),
+                "`{event}` is not in omp's documented ExtensionAPI event list"
+            );
+        }
+        // Root completion comes only from session_stop — never agent_end or
+        // turn_end, which child subagent sessions also emit.
+        assert!(OMP_EXTENSION.contains("pi.on(\"session_stop\""));
+        assert!(
+            !OMP_EXTENSION.contains("pi.on(\"agent_end\"")
+                && !OMP_EXTENSION.contains("pi.on(\"turn_end\""),
+            "child sessions forward agent_end/turn_end; reporting Stop from \
+             them would mark the root pane done when a subagent finishes"
+        );
+        // Reports route through the exact-session CLI, not pipe discovery.
+        assert!(OMP_EXTENSION.contains("LUVUS_BIN_PATH"));
+        assert!(
+            !OMP_EXTENSION.contains("readdirSync") && !OMP_EXTENSION.contains("\\\\.\\pipe\\"),
+            "no named-pipe enumeration: reports must target the inherited \
+             session socket via the luvus CLI"
+        );
     }
 }

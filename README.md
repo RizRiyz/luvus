@@ -93,6 +93,7 @@ Keyboard → Keyboard Shortcuts → Input Sources** to free `Ctrl+Space`.
 | Kimi | ✓ | ✓ | ✓ |
 | Grok | ✓ | ✓ | ✓ |
 | Pi | ✓ | ✓ | No |
+| Oh My Pi (omp) | ✓ | ✓ | ✓ |
 | Fx | ✓ | No | No |
 | Cursor | ✓ | resume command | No |
 | Gemini · Aider · Amp · Droid · Qwen · Kiro | ✓ | No | No |
