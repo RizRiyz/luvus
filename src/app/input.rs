@@ -1333,6 +1333,7 @@ impl App {
                             anchor: (m.column, m.row),
                             cursor: (m.column, m.row),
                             retained,
+                            scrolled: false,
                             dragging: true,
                         }
                     });
@@ -1603,6 +1604,9 @@ impl App {
                     self.scroll_pane = v;
                 }
                 if scrolled_selection {
+                    if let Some(selection) = self.selection.as_mut() {
+                        selection.scrolled = true;
+                    }
                     self.update_mouse_selection_cursor(m.column, m.row);
                 }
             }
@@ -4337,6 +4341,123 @@ mod link_click_tests {
     }
 
     #[test]
+    fn stationary_click_stays_empty_when_output_advances_history() {
+        let _env = crate::persist::test_env("mouse-selection-output-drift");
+        let source = (0..100)
+            .map(|line| format!("line-{line:03}\r\n"))
+            .collect::<String>();
+        let (mut app, _term, _) = fixture_showing(&source, 0);
+        let pane = app.layout().focus;
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("pane content rect");
+        let at = (content.x + 2, content.bottom().saturating_sub(2));
+
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        assert!(app.selection.is_some(), "the press begins a selection");
+        app.panes
+            .get(&pane)
+            .expect("pane")
+            .engine
+            .lock()
+            .expect("terminal engine")
+            .advance(b"incoming-output\r\n");
+        app.handle_event(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+
+        assert!(app.pending_clipboard.is_none());
+        assert!(app.toast.is_none());
+        assert!(app.selection.is_none(), "a plain click leaves no highlight");
+    }
+
+    #[test]
+    fn wheel_alone_can_extend_an_active_selection() {
+        let _env = crate::persist::test_env("mouse-selection-wheel-only");
+        let source = (0..100)
+            .map(|line| format!("line-{line:03}\r\n"))
+            .collect::<String>();
+        let (mut app, _term, _) = fixture_showing(&source, 0);
+        let pane = app.layout().focus;
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("pane content rect");
+        let at = (content.x + 2, content.bottom().saturating_sub(4));
+
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        assert!(app.selection.is_some(), "the press begins a selection");
+        app.handle_event(mouse(MouseEventKind::ScrollUp, at, KeyModifiers::NONE));
+        let selection = app.selection.expect("active selection");
+        let retained = selection.retained.expect("retained endpoints");
+        assert!(selection.scrolled);
+        assert_ne!(retained.anchor, retained.cursor);
+        let selected = app.selection_text().expect("wheel-extended text");
+
+        app.handle_event(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.pending_clipboard.as_deref(), Some(selected.as_str()));
+    }
+
+    #[test]
+    fn wheel_returning_to_the_anchor_does_not_copy_one_cell() {
+        let _env = crate::persist::test_env("mouse-selection-wheel-return");
+        let source = (0..100)
+            .map(|line| format!("line-{line:03}\r\n"))
+            .collect::<String>();
+        let (mut app, _term, _) = fixture_showing(&source, 0);
+        let pane = app.layout().focus;
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("pane content rect");
+        let at = (content.x + 2, content.bottom().saturating_sub(4));
+
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        assert!(app.selection.is_some(), "the press begins a selection");
+        app.handle_event(mouse(MouseEventKind::ScrollUp, at, KeyModifiers::NONE));
+        app.handle_event(mouse(MouseEventKind::ScrollDown, at, KeyModifiers::NONE));
+        let retained = app
+            .selection
+            .and_then(|selection| selection.retained)
+            .expect("retained endpoints");
+        assert_eq!(retained.anchor, retained.cursor);
+        assert!(app.selection_text().is_none());
+
+        app.handle_event(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        assert!(app.pending_clipboard.is_none());
+        assert!(app.selection.is_none());
+    }
+
+    #[test]
     fn codex_copy_drops_its_one_cell_transcript_gutter() {
         let _env = crate::persist::test_env("codex-copy-gutter");
         let (mut app, _term, _) = fixture_showing("  hello\r\n  world", 0);
@@ -4356,6 +4477,7 @@ mod link_click_tests {
             anchor: (content.x + 1, content.y),
             cursor: (content.x + 6, content.y + 1),
             retained: None,
+            scrolled: false,
             dragging: false,
         });
 

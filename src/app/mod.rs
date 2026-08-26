@@ -1094,6 +1094,10 @@ pub struct Selection {
     pub anchor: (u16, u16),
     pub cursor: (u16, u16),
     pub retained: Option<RetainedSelection>,
+    /// The active gesture deliberately moved the retained endpoint by wheel.
+    /// Incoming PTY output may also remap retained coordinates, but must never
+    /// turn a stationary click into a copied range.
+    pub scrolled: bool,
     pub dragging: bool,
 }
 
@@ -1182,9 +1186,11 @@ impl Selection {
 
     /// True only when the drag actually moved (so a plain click isn't a copy).
     fn has_range(&self) -> bool {
-        self.retained
-            .is_some_and(|selection| selection.anchor != selection.cursor)
-            || (self.retained.is_none() && self.anchor != self.cursor)
+        self.anchor != self.cursor
+            || (self.scrolled
+                && self
+                    .retained
+                    .is_some_and(|selection| selection.anchor != selection.cursor))
     }
 }
 
@@ -5874,6 +5880,7 @@ mod tests {
             anchor: (4, 1),
             cursor: (6, 3),
             retained: None,
+            scrolled: false,
             dragging: false,
         };
         // First row: from the anchor column to the right edge.
