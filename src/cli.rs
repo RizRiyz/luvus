@@ -594,6 +594,47 @@ const HELP_BUG: &str = r#"
 /|_|\
 "#;
 
+const STATUS_BUG: [&str; 4] = [r"\   /", r" \_/", "(o_o)", r"/|_|\"];
+
+/// Render the Luvus bug beside a compact human-facing status card.
+///
+/// This is deliberately separate from JSON/UHP output: lifecycle commands use
+/// it only for their normal terminal output, so scripts keep their existing
+/// machine-readable contracts.
+pub(crate) fn status_card(title: &str, rows: &[(&str, &str)]) -> String {
+    use std::fmt::Write as _;
+
+    let label_width = rows
+        .iter()
+        .map(|(label, _)| unicode_width::UnicodeWidthStr::width(*label))
+        .max()
+        .unwrap_or(0);
+    let line_count = STATUS_BUG.len().max(rows.len() + 1);
+    let mut output = String::new();
+
+    for line in 0..line_count {
+        let bug = STATUS_BUG.get(line).copied().unwrap_or("");
+        let bug = crate::i18n::cli::pad(bug, 5);
+        if line == 0 {
+            let _ = writeln!(output, "{bug}   {title}");
+        } else if let Some((label, value)) = rows.get(line - 1) {
+            if label.is_empty() {
+                let _ = writeln!(output, "{bug}   {value}");
+            } else {
+                let label = crate::i18n::cli::pad(label, label_width);
+                let _ = writeln!(output, "{bug}   {label}  {value}");
+            }
+        } else {
+            let _ = writeln!(output, "{bug}");
+        }
+    }
+    output
+}
+
+pub(crate) fn print_status_card(title: &str, rows: &[(&str, &str)]) {
+    print!("{}", status_card(title, rows));
+}
+
 fn write_topic_help(
     mut output: impl Write,
     requested: &str,
@@ -3507,6 +3548,18 @@ fn parse_setting_value(s: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_card_keeps_the_bug_and_rows_aligned() {
+        let card = status_card(
+            "Luvus server",
+            &[("status", "running"), ("session", "default")],
+        );
+        assert_eq!(
+            card,
+            "\\   /   Luvus server\n \\_/    status   running\n(o_o)   session  default\n/|_|\\\n"
+        );
+    }
 
     #[test]
     fn cli_error_localization_translates_catalogued_diagnostics_only() {

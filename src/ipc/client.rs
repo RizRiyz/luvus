@@ -47,12 +47,28 @@ where
     ratatui::restore();
     match result? {
         ClientExit::Done => Ok(()),
+        ClientExit::Detached => {
+            crate::print_detached_status(crate::i18n::cli::Context::configured());
+            Ok(())
+        }
+        ClientExit::ServerStopped => {
+            let context = crate::i18n::cli::Context::configured();
+            let session = crate::session::display_name();
+            let rows = [
+                (context.text("status"), context.text("stopped")),
+                (context.text("session"), session.as_str()),
+            ];
+            crate::cli::print_status_card("Luvus session", &rows);
+            Ok(())
+        }
         ClientExit::SwitchSession(name) => switch_session_process(&name),
     }
 }
 
 enum ClientExit {
     Done,
+    Detached,
+    ServerStopped,
     SwitchSession(String),
 }
 
@@ -148,9 +164,8 @@ where
             Ok(ServerMessage::Clipboard(text)) => crate::emit_clipboard(&text),
             Ok(ServerMessage::OpenUrl(url)) => crate::platform::open_url(&url),
             Ok(ServerMessage::SwitchSession { name }) => break ClientExit::SwitchSession(name),
-            Ok(ServerMessage::Detach) | Ok(ServerMessage::ServerShutdown { .. }) => {
-                break ClientExit::Done
-            }
+            Ok(ServerMessage::Detach) => break ClientExit::Detached,
+            Ok(ServerMessage::ServerShutdown { .. }) => break ClientExit::ServerStopped,
             Ok(_) => {}
             Err(_) => break ClientExit::Done, // server gone
         }

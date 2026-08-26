@@ -409,7 +409,10 @@ fn run_local() -> Result<()> {
         DisableBracketedPaste
     );
     ratatui::restore();
-    result
+    if result? {
+        print_detached_status(i18n::cli::Context::configured());
+    }
+    Ok(())
 }
 
 fn autodetect_and_attach() -> Result<()> {
@@ -712,19 +715,16 @@ fn update_manifest(context: i18n::cli::Context) -> Result<()> {
 fn server_start(context: i18n::cli::Context) -> Result<()> {
     let sock = persist::client_socket_path();
     if server_running(&sock) {
-        println!(
-            "luvus {} (session {})",
-            context.text("server already running"),
-            session::display_name()
-        );
+        print_server_card(context, context.text("running"), None, &sock);
         return Ok(());
     }
     spawn_server()?;
     wait_for_socket(&sock)?;
-    println!(
-        "luvus {} (session {})",
-        context.text("server started"),
-        session::display_name()
+    print_server_card(
+        context,
+        context.text("started"),
+        Some(env!("CARGO_PKG_VERSION")),
+        &sock,
     );
     Ok(())
 }
@@ -736,13 +736,14 @@ fn server_stop(context: i18n::cli::Context) -> Result<()> {
         // socket — then `stop` returning means it's really down (and a following
         // `status` reports "not running", not a half-shutdown "running").
         wait_for_shutdown(&sock)?;
-        println!(
-            "luvus {} (session {})",
-            context.text("server stopped"),
-            session::display_name()
-        );
+        print_server_card(context, context.text("stopped"), None, &sock);
     } else {
-        println!("{}", context.text("no luvus server running"));
+        print_server_card(
+            context,
+            context.text("no luvus server running"),
+            None,
+            &sock,
+        );
     }
     Ok(())
 }
@@ -756,10 +757,11 @@ fn server_restart(context: i18n::cli::Context) -> Result<()> {
     }
     spawn_server()?;
     wait_for_socket(&sock)?;
-    println!(
-        "luvus {} (session {})",
-        context.text("server restarted"),
-        session::display_name()
+    print_server_card(
+        context,
+        context.text("restarted"),
+        Some(env!("CARGO_PKG_VERSION")),
+        &sock,
     );
     Ok(())
 }
@@ -783,20 +785,12 @@ fn wait_for_shutdown(sock: &Path) -> Result<()> {
 fn server_status(context: i18n::cli::Context) -> Result<()> {
     let sock = persist::client_socket_path();
     if !server_running(&sock) {
-        println!(
-            "luvus server: {} (session {})",
-            context.text("not running"),
-            session::display_name()
-        );
+        print_server_card(context, context.text("not running"), None, &sock);
         return Ok(());
     }
     match server_version() {
         Ok(running) => {
-            println!(
-                "luvus server: {} (v{running}, session {})",
-                context.text("running"),
-                session::display_name()
-            );
+            print_server_card(context, context.text("running"), Some(&running), &sock);
             let binary = env!("CARGO_PKG_VERSION");
             if running != binary {
                 println!(
@@ -814,6 +808,37 @@ fn server_status(context: i18n::cli::Context) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn print_server_card(
+    context: i18n::cli::Context,
+    state: &str,
+    version: Option<&str>,
+    socket: &Path,
+) {
+    let session = session::display_name();
+    let socket = socket.display().to_string();
+    let version = version.map(|value| format!("v{value}"));
+    let mut rows = vec![
+        (context.text("status"), state),
+        (context.text("session"), session.as_str()),
+    ];
+    if let Some(version) = version.as_deref() {
+        rows.push((context.text("version"), version));
+    }
+    rows.push((context.text("socket"), socket.as_str()));
+    cli::print_status_card("Luvus server", &rows);
+}
+
+fn print_detached_status(context: i18n::cli::Context) {
+    let session = session::display_name();
+    let runtime = format!("{} + {}", context.text("server"), context.text("panes"));
+    let rows = [
+        (context.text("status"), context.text("detached")),
+        (context.text("session"), session.as_str()),
+        (runtime.as_str(), context.text("running")),
+    ];
+    cli::print_status_card("Luvus session", &rows);
 }
 
 /// Send `server.stop` to a running server; returns whether one was present.
@@ -876,7 +901,7 @@ fn server_control_request(method: &str) -> Result<serde_json::Value> {
     Ok(response)
 }
 
-fn run(terminal: &mut DefaultTerminal) -> Result<()> {
+fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     let (tx, rx) = mpsc::channel::<AppEvent>();
 
     let size = terminal.size()?;
@@ -1020,8 +1045,9 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
         app.rearm_pty_notify();
     }
 
+    let detached = app.detach_requested;
     persist::save(&app);
-    Ok(())
+    Ok(detached)
 }
 
 /// Clean up a just-bound Unix socket before a local startup aborts. The caller
