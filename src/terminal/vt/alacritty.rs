@@ -5,14 +5,14 @@ use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color as VtColor, Processor};
 
 use ratatui::style::{Color, Modifier};
 
-use super::{CodexComposerRegion, Cursor, HistoryMetrics, RenderCell, VtEngine};
+use super::{CodexComposerRegion, Cursor, HistoryMetrics, RenderCell, RetainedRowLayout, VtEngine};
 use crate::terminal::backend::{CaptureMode, CaptureResult};
 use crate::terminal::pty::InputAction;
 
@@ -667,6 +667,7 @@ impl VtEngine for AlacrittyEngine {
             .saturating_add(self.term.grid().screen_lines())
     }
 
+    #[cfg(test)]
     fn retained_row_text(&self, index: usize) -> Option<String> {
         let mut output = String::with_capacity(self.term.grid().columns());
         self.write_retained_row(index, &mut output)
@@ -680,6 +681,88 @@ impl VtEngine for AlacrittyEngine {
                 f(index, &output);
             }
         }
+    }
+
+    fn retained_selection_text(
+        &self,
+        ((start_row, start_col), (end_row, end_col)): ((usize, usize), (usize, usize)),
+    ) -> Option<String> {
+        if start_row > end_row {
+            return None;
+        }
+        let last_column = self.term.grid().columns().checked_sub(1)?;
+        let middle_left = start_col.min(end_col);
+        let mut output = String::new();
+        let mut appended = false;
+
+        for row_index in start_row..=end_row {
+            let Some(line) = self.retained_line(row_index) else {
+                continue;
+            };
+            let left = if row_index == start_row {
+                start_col
+            } else {
+                middle_left
+            }
+            .min(last_column);
+            let right = if row_index == end_row {
+                end_col
+            } else {
+                last_column
+            }
+            .min(last_column);
+
+            if appended {
+                output.push('\n');
+            }
+            appended = true;
+            if left <= right {
+                let row = self.term.bounds_to_string(
+                    Point::new(line, Column(left)),
+                    Point::new(line, Column(right)),
+                );
+                output.push_str(row.trim_end_matches(' '));
+            }
+        }
+
+        appended.then_some(output)
+    }
+
+    fn retained_row_layout(&self, index: usize) -> Option<RetainedRowLayout> {
+        let line = self.retained_line(index)?;
+        let grid = self.term.grid();
+        let row = &grid[line];
+        let mut whitespace = Vec::with_capacity(grid.columns());
+        let mut previous_whitespace = true;
+        let mut last_content = None;
+
+        for column in 0..grid.columns() {
+            let cell = &row[Column(column)];
+            let wide_spacer = cell.flags.contains(Flags::WIDE_CHAR_SPACER);
+            let leading_spacer = cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER);
+            let cell_whitespace = if wide_spacer {
+                previous_whitespace
+            } else if leading_spacer {
+                false
+            } else {
+                cell.c == '\0' || cell.c.is_whitespace()
+            };
+            whitespace.push(cell_whitespace);
+
+            let has_content = leading_spacer
+                || (!wide_spacer && cell.c != '\0' && cell.c != ' ')
+                || (wide_spacer && last_content == column.checked_sub(1));
+            if has_content {
+                last_content = Some(column);
+            }
+            if !wide_spacer && !leading_spacer {
+                previous_whitespace = cell_whitespace;
+            }
+        }
+
+        let has_text = last_content.is_some();
+        whitespace.truncate(last_content.map_or(1, |column| column + 1));
+        Some(RetainedRowLayout::new(whitespace, has_text))
     }
 
     fn scroll_to(&mut self, offset: usize) {
@@ -973,6 +1056,95 @@ mod tests {
         );
         e.advance(b" world");
         assert_eq!(e.output_generation(), 2);
+    }
+
+    #[test]
+    fn retained_selection_preserves_unicode_scripts_and_clusters() {
+        let samples = [
+            "你好，世界",
+            "こんにちは",
+            "안녕하세요",
+            "مرحبا",
+            "שלום",
+            "नमस्ते",
+            "สวัสดี",
+            "cafe\u{301}",
+            "🖥️ coding",
+            "👩‍💻 pair",
+        ];
+
+        for sample in samples {
+            let (tx, _rx) = channel();
+            let mut engine = AlacrittyEngine::new(80, 3, tx, budget_for_rows(80, 20));
+            engine.advance(format!("\x1b[H\x1b[2J{sample}").as_bytes());
+            let row = (0..engine.retained_row_count())
+                .find(|row| engine.retained_row_text(*row).as_deref() == Some(sample))
+                .expect("sample retained row");
+            let layout = engine
+                .retained_row_layout(row)
+                .expect("retained row layout");
+            let selected = engine
+                .retained_selection_text(((row, 0), (row, layout.last_column())))
+                .expect("selected row");
+            assert_eq!(selected, sample, "Unicode selection changed {sample:?}");
+        }
+    }
+
+    #[test]
+    fn retained_selection_uses_visual_columns_for_mixed_cjk_text() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(40, 4, tx, budget_for_rows(40, 20));
+        engine.advance("\x1b[H\x1b[2J你好，hello.\r\nمرحبا world".as_bytes());
+        let first = (0..engine.retained_row_count())
+            .find(|row| engine.retained_row_text(*row).as_deref() == Some("你好，hello."))
+            .expect("first retained row");
+        let second = (0..engine.retained_row_count())
+            .find(|row| engine.retained_row_text(*row).as_deref() == Some("مرحبا world"))
+            .expect("second retained row");
+
+        assert_eq!(
+            engine
+                .retained_selection_text(((first, 0), (first, 3)))
+                .as_deref(),
+            Some("你好")
+        );
+        assert_eq!(
+            engine
+                .retained_selection_text(((first, 1), (first, 2)))
+                .as_deref(),
+            Some("你好"),
+            "starting on a wide spacer still includes its complete glyph"
+        );
+        let second_layout = engine
+            .retained_row_layout(second)
+            .expect("second row layout");
+        assert_eq!(
+            engine
+                .retained_selection_text(((first, 0), (second, second_layout.last_column())))
+                .as_deref(),
+            Some("你好，hello.\nمرحبا world")
+        );
+    }
+
+    #[test]
+    fn retained_selection_keeps_the_drag_left_edge_on_middle_rows() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 20));
+        engine.advance(b"\x1b[H\x1b[2J - first\r\n - second\r\n - third");
+        let mut rows = Vec::new();
+        engine.for_each_retained_row(&mut |row, text| {
+            if text.starts_with(" - ") {
+                rows.push(row);
+            }
+        });
+        assert_eq!(rows.len(), 3);
+
+        assert_eq!(
+            engine
+                .retained_selection_text(((rows[0], 1), (rows[2], 7)))
+                .as_deref(),
+            Some("- first\n- second\n- third")
+        );
     }
 
     #[test]

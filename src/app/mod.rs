@@ -10669,6 +10669,93 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_copy_mode_navigates_and_yanks_wide_cells() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(40, 8, tx).unwrap();
+        let pane = app.layout().focus;
+        app.panes
+            .get(&pane)
+            .expect("pane")
+            .engine
+            .lock()
+            .expect("engine")
+            .advance("\x1b[H\x1b[2J你好，hello.".as_bytes());
+        let mut target_row = None;
+        app.panes
+            .get(&pane)
+            .expect("pane")
+            .for_each_retained_row(&mut |row, _, _, text| {
+                if text == "你好，hello." {
+                    target_row = Some(row);
+                }
+            });
+        let row = target_row.expect("fixture row");
+        app.copy_mode = Some(CopyMode {
+            pane,
+            anchor: (row, 0),
+            cursor: (row, 0),
+            saved_scroll: 0,
+        });
+
+        for _ in 0..3 {
+            app.handle_event(AppEvent::Key(KeyEvent::new(
+                KeyCode::Char('l'),
+                KeyModifiers::NONE,
+            )));
+        }
+        assert_eq!(app.copy_mode.expect("copy mode").cursor, (row, 3));
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(app.pending_clipboard.as_deref(), Some("你好"));
+    }
+
+    #[test]
+    fn keyboard_copy_word_navigation_uses_visual_columns() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(40, 8, tx).unwrap();
+        let pane = app.layout().focus;
+        app.panes
+            .get(&pane)
+            .expect("pane")
+            .engine
+            .lock()
+            .expect("engine")
+            .advance("\x1b[H\x1b[2J你好 world".as_bytes());
+        let mut target_row = None;
+        app.panes
+            .get(&pane)
+            .expect("pane")
+            .for_each_retained_row(&mut |row, _, _, text| {
+                if text == "你好 world" {
+                    target_row = Some(row);
+                }
+            });
+        let row = target_row.expect("fixture row");
+        app.copy_mode = Some(CopyMode {
+            pane,
+            anchor: (row, 0),
+            cursor: (row, 0),
+            saved_scroll: 0,
+        });
+
+        let send = |app: &mut App, character| {
+            app.handle_event(AppEvent::Key(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::NONE,
+            )));
+        };
+        send(&mut app, 'w');
+        assert_eq!(app.copy_mode.expect("copy mode").cursor, (row, 5));
+        send(&mut app, 'B');
+        assert_eq!(app.copy_mode.expect("copy mode").cursor, (row, 0));
+        send(&mut app, '$');
+        assert_eq!(app.copy_mode.expect("copy mode").cursor, (row, 9));
+    }
+
+    #[test]
     fn keyboard_copy_trims_a_codex_transcript_gutter() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(40, 8, tx).unwrap();

@@ -92,6 +92,38 @@ pub struct HistoryMetrics {
     pub exact_bytes: bool,
 }
 
+/// Cell geometry for one retained terminal row.
+///
+/// Copy-mode navigation uses this instead of Unicode scalar counts. A terminal
+/// cell is the only stable unit across narrow scripts, double-width glyphs,
+/// combining marks, and emoji sequences.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetainedRowLayout {
+    whitespace: Vec<bool>,
+    has_text: bool,
+}
+
+impl RetainedRowLayout {
+    pub(crate) fn new(whitespace: Vec<bool>, has_text: bool) -> Self {
+        Self {
+            whitespace,
+            has_text,
+        }
+    }
+
+    pub(crate) fn last_column(&self) -> usize {
+        self.whitespace.len().saturating_sub(1)
+    }
+
+    pub(crate) fn is_whitespace(&self, column: usize) -> bool {
+        self.whitespace.get(column).copied().unwrap_or(true)
+    }
+
+    pub(crate) fn has_text(&self) -> bool {
+        self.has_text
+    }
+}
+
 /// Minimal terminal-emulator surface. Owns the grid + scrollback.
 pub trait VtEngine: Send {
     /// Feed child output. Must never panic on arbitrary bytes.
@@ -125,8 +157,8 @@ pub trait VtEngine: Send {
     /// the user's scroll position.
     fn detection_text(&self, n: u16) -> String;
 
-    /// Every visible row as a plain string (one char per cell, full width,
-    /// untrimmed) — used to copy a mouse text selection.
+    /// Every visible row as normalized plain text. Wide-character spacer cells
+    /// are omitted, so callers must not use string indexes as terminal columns.
     fn visible_rows(&self) -> Vec<String>;
 
     /// Bounded public capture for harnesses. Implementations serialize only
@@ -176,11 +208,23 @@ pub trait VtEngine: Send {
 
     /// Read one retained row by oldest-first index without materializing the
     /// entire history.
+    #[cfg(test)]
     fn retained_row_text(&self, index: usize) -> Option<String>;
 
     /// Visit retained rows oldest-first using one reusable line buffer. The
     /// callback must not retain the borrowed text after it returns.
     fn for_each_retained_row(&self, f: &mut dyn FnMut(usize, &str));
+
+    /// Extract an inclusive retained-row selection using terminal cell
+    /// coordinates. Implementations must preserve complete wide glyphs and
+    /// zero-width marks rather than treating columns as string character
+    /// indexes.
+    fn retained_selection_text(&self, range: ((usize, usize), (usize, usize))) -> Option<String>;
+
+    /// Return copy-mode navigation geometry for one retained row. Trailing
+    /// unused cells are omitted, while wide-character spacer cells remain part
+    /// of the layout.
+    fn retained_row_layout(&self, index: usize) -> Option<RetainedRowLayout>;
 
     /// Jump the viewport so the row `offset` lines above the live bottom sits at
     /// the top (clamped to `history_len()`); `0` is live. Lands on a search match

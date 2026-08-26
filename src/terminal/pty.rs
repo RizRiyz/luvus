@@ -904,6 +904,7 @@ impl Pane {
     }
 
     /// Read one retained row without allocating every other row.
+    #[cfg(test)]
     pub fn retained_row_text(&self, index: usize) -> Option<String> {
         self.engine.lock().ok()?.retained_row_text(index)
     }
@@ -917,6 +918,44 @@ impl Pane {
             let row_count = engine.retained_row_count();
             engine.for_each_retained_row(&mut |index, line| f(index, history, row_count, line));
         }
+    }
+
+    /// Extract retained terminal text by grid cell rather than string index.
+    /// This keeps wide glyphs and combining sequences aligned with selection
+    /// highlights.
+    pub fn retained_selection_text(
+        &self,
+        range: ((usize, usize), (usize, usize)),
+    ) -> Option<String> {
+        self.engine.lock().ok()?.retained_selection_text(range)
+    }
+
+    /// Extract a selection expressed in the currently visible viewport. This
+    /// is the fallback when a mouse press could not snapshot retained-history
+    /// coordinates, and still preserves terminal cell semantics for Unicode.
+    pub fn visible_selection_text(
+        &self,
+        ((start_row, start_col), (end_row, end_col)): ((usize, usize), (usize, usize)),
+    ) -> Option<String> {
+        let engine = self.engine.lock().ok()?;
+        let visible_top = engine.history_len().saturating_sub(engine.scroll_offset());
+        let row_count = engine.retained_row_count();
+        let last_row = row_count.checked_sub(1)?;
+        engine.retained_selection_text((
+            (
+                visible_top.saturating_add(start_row).min(last_row),
+                start_col,
+            ),
+            (visible_top.saturating_add(end_row).min(last_row), end_col),
+        ))
+    }
+
+    /// Cell geometry used by keyboard copy-mode navigation.
+    pub fn retained_row_layout(
+        &self,
+        index: usize,
+    ) -> Option<crate::terminal::vt::RetainedRowLayout> {
+        self.engine.lock().ok()?.retained_row_layout(index)
     }
 
     /// Jump the scrollback viewport so the row `offset` lines above the live
