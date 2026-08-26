@@ -79,10 +79,42 @@ pub(super) fn draw_settings(
         Paragraph::new(Span::styled(" ✕ ", Style::new().fg(t.accent).bold())),
         close,
     );
-    hline(f, inner.x, inner.y + 1, inner.width, t);
+    if inner.height > 1 {
+        hline(f, inner.x, inner.y + 1, inner.width, t);
+    }
+
+    let mut tabs = Vec::new();
+    // A complete settings layout needs room for the title, tabs, separators,
+    // at least one content row, and the footer. Very short phone terminals do
+    // not have that space, so show only the active section instead of creating
+    // tab and rule rectangles beyond the buffer. Keyboard section switching
+    // remains available and a later resize restores the full layout.
+    if inner.height < 9 {
+        if inner.height > 2 && inner.width > 0 {
+            let rect = Rect::new(inner.x, inner.y + 2, inner.width, 1);
+            let label = format!("{} {}", tab.icon(), tab.label(app.catalog));
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    truncate(&label, rect.width as usize),
+                    Style::new().fg(t.crust).bg(t.accent).bold(),
+                ))
+                .alignment(Alignment::Center),
+                rect,
+            );
+            tabs.push((tab, rect));
+        }
+        return SettingsHits {
+            modal,
+            close,
+            tabs,
+            ctls: Vec::new(),
+            theme_remove: Vec::new(),
+            arrows: Vec::new(),
+            layout_scroll,
+        };
+    }
 
     // ── tab toolbar (Mac-style pills) ──
-    let mut tabs = Vec::new();
     let ty = inner.y + 2;
     let tab_rows = if app.compact {
         SettingsTab::ALL.len().div_ceil(3) as u16

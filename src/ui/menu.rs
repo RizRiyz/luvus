@@ -16,6 +16,15 @@ struct MenuRow {
     destructive: bool,
 }
 
+fn row_is_hovered(row: Rect, hover: Option<(u16, u16)>) -> bool {
+    hover.is_some_and(|(column, pointer_row)| {
+        column >= row.x
+            && column < row.right()
+            && pointer_row >= row.y
+            && pointer_row < row.bottom()
+    })
+}
+
 /// Render a context-menu popup anchored near `anchor` (clamped so it stays on
 /// screen) and return one clickable rect per row — dividers included — in order,
 /// for the input layer to hit-test.
@@ -96,7 +105,7 @@ fn render_popup(
             rects.push(row);
             continue;
         }
-        let hot = hover.is_some_and(|(c, hr)| c >= row.x && c < row.right() && hr == row.y);
+        let hot = row_is_hovered(row, hover);
         let fg = if hot {
             t.crust
         } else if r.destructive {
@@ -517,6 +526,15 @@ mod label_case_tests {
     const MINOR: [&str; 11] = [
         "a", "an", "the", "to", "in", "on", "of", "for", "and", "or", "with",
     ];
+
+    #[test]
+    fn mobile_menu_hover_covers_the_full_touch_row() {
+        let row = Rect::new(4, 7, 20, 2);
+        assert!(row_is_hovered(row, Some((5, 7))));
+        assert!(row_is_hovered(row, Some((5, 8))));
+        assert!(!row_is_hovered(row, Some((5, 9))));
+        assert!(!row_is_hovered(row, Some((24, 8))));
+    }
 
     /// Every context-menu row reads as **Title Case**: each word capitalized bar
     /// the short articles/prepositions, which never lead. Hyphenated parts count

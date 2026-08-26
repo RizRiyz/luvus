@@ -43,15 +43,11 @@ pub(crate) fn render_header(f: &mut RenderTarget, layout: MobileLayout, app: &mu
         layout.menu_button,
     );
 
-    let top_info_width = layout
+    let info_width = layout
         .header
         .width
         .saturating_sub(layout.menu_button.width + 1) as usize;
-    let pane_info_width = layout
-        .header
-        .width
-        .saturating_sub(layout.menu_button.width + 1) as usize;
-    if top_info_width == 0 || pane_info_width == 0 {
+    if info_width == 0 {
         return;
     }
     let ws = app.ws();
@@ -74,7 +70,7 @@ pub(crate) fn render_header(f: &mut RenderTarget, layout: MobileLayout, app: &mu
     let pane_switch = Rect::new(
         layout.header.x + 1,
         layout.header.y + 1,
-        pane_info_width as u16,
+        info_width as u16,
         1,
     );
     if pane_count > 1 {
@@ -130,26 +126,21 @@ pub(crate) fn render_header(f: &mut RenderTarget, layout: MobileLayout, app: &mu
         String::new()
     };
     let left_text = format!("{} · {}/{}", agent, pane_position, pane_count.max(1));
-    let summary = truncate(&summary, pane_info_width / 2);
+    let summary = truncate(&summary, info_width / 2);
     let summary_width = display_width(&summary);
     let fixed_width = if pane_count > 1 { 6 } else { 2 };
     let left_budget = if summary.is_empty() {
-        pane_info_width.saturating_sub(fixed_width)
+        info_width.saturating_sub(fixed_width)
     } else {
-        pane_info_width.saturating_sub(summary_width + fixed_width + 1)
+        info_width.saturating_sub(summary_width + fixed_width + 1)
     };
 
     f.render_widget(
         Paragraph::new(Span::styled(
-            truncate(&row_one, top_info_width),
+            truncate(&row_one, info_width),
             Style::new().fg(t.text).bold(),
         )),
-        Rect::new(
-            layout.header.x + 1,
-            layout.header.y,
-            top_info_width as u16,
-            1,
-        ),
+        Rect::new(layout.header.x + 1, layout.header.y, info_width as u16, 1),
     );
     if layout.header.height < 2 {
         return;
@@ -173,7 +164,7 @@ pub(crate) fn render_header(f: &mut RenderTarget, layout: MobileLayout, app: &mu
             .iter()
             .map(|span| display_width(span.content.as_ref()))
             .sum::<usize>();
-        let gap = pane_info_width.saturating_sub(used + summary_width);
+        let gap = info_width.saturating_sub(used + summary_width);
         spans.push(Span::raw(" ".repeat(gap)));
         let color = if !has_notification {
             summary_state.map_or(t.accent, |state| state.color(t))
@@ -187,7 +178,7 @@ pub(crate) fn render_header(f: &mut RenderTarget, layout: MobileLayout, app: &mu
         Rect::new(
             layout.header.x + 1,
             layout.header.y + 1,
-            pane_info_width as u16,
+            info_width as u16,
             1,
         ),
     );

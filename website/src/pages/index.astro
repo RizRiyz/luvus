@@ -619,15 +619,19 @@ const ogImage = 'https://luvus.dev/og.png';
           <div class="fr-text">
             <h3>Your session, from a phone</h3>
             <p>SSH in from any terminal app (Termius, Blink, Mosh) and run <code>luvus</code>. At 64 columns or fewer it switches automatically to one focused pane, a two-row status header, and a full-screen navigator with large touch targets. It is the same session your laptop left running.</p>
-            <a class="fc-go" href="/docs/guides/remote/">Working remotely →</a>
+            <a class="fc-go" href="/docs/guides/mobile/">Mobile sessions →</a>
           </div>
           <div class="fm phone" aria-hidden="true">
-            <div class="fm-head"><span>≡ sudos</span><em>compact</em></div>
-            <div class="fm-tap"><span class="d run"></span><b>claude</b><em>sudos · core</em></div>
-            <div class="fm-tap"><span class="d blk"></span><b>copilot</b><em>webapp · main</em></div>
-            <div class="fm-tap"><span class="d done"></span><b>codex</b><em>sudos · notes</em></div>
-            <div class="fm-tap dim"><span class="c-dim">＋</span><b>new node</b></div>
-            <div class="fm-foot">tap a row to jump · ⤢ makes a pane full screen</div>
+            <div class="fm-phone-status">
+              <span>sudos · core</span><b>OPEN<br />MENU</b>
+              <span>‹ codex · pane 2/3 ›</span>
+            </div>
+            <div class="fm-head"><span>Navigator</span><em>Close menu</em></div>
+            <div class="fm-seg fm-phone-scopes"><i class="on">All</i><i>Agents</i><i>Tabs</i></div>
+            <div class="fm-cmd">⌕ Jump to anything</div>
+            <div class="fm-tap"><span class="d blk"></span><span><b>copilot</b><small>webapp · main · blocked</small></span></div>
+            <div class="fm-tap"><span class="d run"></span><span><b>claude</b><small>sudos · core · working</small></span></div>
+            <div class="fm-foot">large touch rows · one focused pane</div>
           </div>
         </article>
 
@@ -2104,17 +2108,32 @@ const ogImage = 'https://luvus.dev/og.png';
       .fm-tabs i { font-style: normal; }
       .fm-tabs i.on { color: var(--text); }
       .fm-cmd { color: var(--sub2); padding: 0.2rem 0; }
-      /* The compact-mode mock: portrait-ish, with the switcher's two-line,
-         finger-sized rows rather than the dense desktop lists. */
+      /* The mobile mock mirrors the real two-row status header and full-screen
+         navigator rather than the retired compact switcher. */
       .fm.phone { max-width: 15rem; margin-inline: auto; }
+      .fm-phone-status {
+        display: grid; grid-template-columns: minmax(0, 1fr) 3.2rem;
+        grid-template-rows: 1fr 1fr; align-items: center;
+        min-height: 2.5rem; margin: -0.15rem -0.2rem 0.35rem;
+        border-bottom: 1px solid var(--line); color: var(--sub2);
+      }
+      .fm-phone-status span { padding-left: 0.2rem; white-space: nowrap; }
+      .fm-phone-status b {
+        grid-column: 2; grid-row: 1 / span 2; align-self: stretch;
+        display: grid; place-content: center; text-align: center;
+        background: var(--accent); color: var(--bg); font-size: 0.57rem;
+        line-height: 1.35; letter-spacing: 0.06em;
+      }
+      .fm-phone-scopes { justify-content: space-between; padding: 0.1rem 0 0.25rem; }
       .fm-tap {
         display: flex; align-items: center; gap: 0.5rem;
-        padding: 0.42rem 0.5rem; border-radius: 4px;
+        min-height: 2.35rem; padding: 0.42rem 0.5rem; border-radius: 4px;
         white-space: nowrap; min-width: 0;
       }
       .fm-tap + .fm-tap { border-top: 1px solid var(--line); border-radius: 0; }
+      .fm-tap > span:not(.d) { display: flex; flex-direction: column; min-width: 0; }
       .fm-tap b { color: var(--text); font-weight: 500; }
-      .fm-tap em { font-style: normal; color: var(--overlay1); margin-left: auto; font-size: 0.62rem; }
+      .fm-tap small { color: var(--overlay1); font-size: 0.58rem; }
       .fm-tap.dim b { color: var(--sub); }
       /* A replica of the pane context menu (`render_popup` in ui/menu.rs): a
          flat list, one highlighted row, a divider, and the destructive item

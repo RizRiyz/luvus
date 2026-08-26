@@ -736,7 +736,7 @@ fn server_stop(context: i18n::cli::Context) -> Result<()> {
         // socket — then `stop` returning means it's really down (and a following
         // `status` reports "not running", not a half-shutdown "running").
         wait_for_shutdown(&sock)?;
-        print_server_card(context, context.text("stopped"), None, &sock);
+        print_server_card(context, context.text("server stopped"), None, &sock);
     } else {
         print_server_card(
             context,

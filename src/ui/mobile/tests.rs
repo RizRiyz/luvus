@@ -180,6 +180,28 @@ fn mobile_settings_uses_equal_three_column_touch_grid() {
 }
 
 #[test]
+fn short_mobile_settings_stays_inside_the_viewport() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let _env = crate::persist::test_env("mobile-settings-short-viewport");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = crate::app::App::new(24, 6, tx).unwrap();
+    app.open_settings();
+    let mut terminal = Terminal::new(TestBackend::new(24, 6)).unwrap();
+
+    terminal
+        .draw(|frame| crate::ui::render(frame, &mut app))
+        .unwrap();
+
+    assert!(app.compact);
+    assert_eq!(app.settings_tab_rects.len(), 1);
+    assert!(app
+        .settings_tab_rects
+        .iter()
+        .all(|(_, rect)| rect.right() <= 24 && rect.bottom() <= 6));
+}
+
+#[test]
 fn mobile_replacement_surfaces_clear_underlying_symbols() {
     use ratatui::buffer::Buffer;
 

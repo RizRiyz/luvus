@@ -40,8 +40,10 @@ Selecting another workspace closes the navigator. The next time you open it,
 Agents and Tabs are rebuilt from that active workspace; Workspaces continues to
 show the whole running session.
 
-Exit appears after Changelog and behaves like `Ctrl+Space q`: it detaches the
-current client while the persistent server and its panes keep running.
+Exit appears after Changelog and behaves like `Ctrl+Space q`. In a server-backed
+session it detaches the current client while the server and panes keep running.
+In a `--local` session it exits the local process without leaving a persistent
+server running.
 
 Mobile Settings places all seven section tabs in an equal-width three-column
 grid, so every tab remains aligned and tappable. With a keyboard, `Tab` and
