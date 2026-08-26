@@ -1414,7 +1414,7 @@ fn slider_row(
         row,
     );
     // Place "‹ value ›" two cells in from the right edge so positions are exact.
-    let w = format!("‹ {value} ›").chars().count() as u16;
+    let w = display_width(&format!("‹ {value} ›")) as u16;
     let sx = row.right().saturating_sub(2 + w);
     f.render_widget(
         Paragraph::new(Line::from(vec![
@@ -1652,7 +1652,8 @@ fn fill_bg(f: &mut RenderTarget, rect: Rect, color: ratatui::style::Color) {
 
 #[cfg(test)]
 mod tests {
-    use super::keep_visible_scroll;
+    use super::{display_width, keep_visible_scroll, slider_row, Rect, RenderTarget, Theme};
+    use ratatui::buffer::Buffer;
 
     #[test]
     fn layout_scroll_moves_only_when_selection_leaves_the_viewport() {
@@ -1661,5 +1662,40 @@ mod tests {
         assert_eq!(keep_visible_scroll(10, 9, 12, 40), 9);
         assert_eq!(keep_visible_scroll(10, 22, 12, 40), 11);
         assert_eq!(keep_visible_scroll(30, 15, 12, 20), 8);
+    }
+
+    #[test]
+    fn slider_uses_terminal_width_for_cjk_value_and_arrow_targets() {
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buffer = Buffer::empty(area);
+        let mut arrows = Vec::new();
+        let value = "只读";
+        let rendered = format!("‹ {value} ›");
+        let width = display_width(&rendered) as u16;
+        assert!(width > rendered.chars().count() as u16);
+
+        {
+            let mut target = RenderTarget::new(&mut buffer, area);
+            slider_row(
+                &mut target,
+                area,
+                0,
+                3,
+                false,
+                "打开文件方式",
+                value.to_string(),
+                &Theme::noir(),
+                &mut arrows,
+            );
+        }
+
+        let start = area.right().saturating_sub(2 + width);
+        assert_eq!(arrows[0], (3, -1, Rect::new(start, 0, 2, 1)));
+        assert_eq!(
+            arrows[1],
+            (3, 1, Rect::new(start + width.saturating_sub(2), 0, 2, 1))
+        );
+        assert_eq!(buffer[(start, 0)].symbol(), "‹");
+        assert_eq!(buffer[(start + width.saturating_sub(1), 0)].symbol(), "›");
     }
 }
