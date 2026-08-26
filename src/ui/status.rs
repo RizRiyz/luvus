@@ -101,13 +101,18 @@ fn fixed_guidance(app: &App, t: &Theme) -> (Line<'static>, bool) {
         left.extend(hint("q", cat.scroll_live, t));
         return (Line::from(left), false);
     }
-    if app.copy_mode.is_some() {
-        left.push(mode_label("COPY", t));
+    if let Some(copy) = app.copy_mode {
+        left.push(mode_label(cat.mode_copy, t));
         left.push(Span::raw("  "));
-        left.extend(hint("hjkl arrows", "move", t));
-        left.extend(hint("v", "anchor", t));
-        left.extend(hint("y", "copy", t));
-        left.extend(hint("q", "cancel", t));
+        // Vim's showcmd: a typed count is invisible otherwise, so `12j` looks
+        // like a dead keypress until the motion lands.
+        if copy.pending_count > 0 {
+            left.extend(hint(&copy.pending_count.to_string(), cat.copy_count, t));
+        }
+        left.extend(hint("hjkl arrows", cat.act_move, t));
+        left.extend(hint("v", cat.copy_anchor, t));
+        left.extend(hint("y", cat.act_copy, t));
+        left.extend(hint("q", cat.act_cancel, t));
         return (Line::from(left), false);
     }
     if app.mode == Mode::Resize {
@@ -289,5 +294,38 @@ mod tests {
         assert_eq!(hit.rect.width, crate::bar::MAX_BAR_REGION_WIDTH);
         let version = app.version_rect.expect("version remains fixed");
         assert_eq!(hit.rect.right() + 5, version.x);
+    }
+    /// Copy mode's guidance is clipped, never wrapped, so every hint added to the
+    /// row pushes the last one off the end. Cancel has to survive: a user who
+    /// cannot see `q` has no visible way out of the mode. Asserted with a count
+    /// pending, which is the widest the row ever gets.
+    #[test]
+    fn copy_mode_guidance_keeps_its_exit_hint_at_eighty_columns() {
+        let _env = crate::persist::test_env("bar-status-copy-width");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.copy_mode = Some(crate::app::CopyMode {
+            pane,
+            anchor: (0, 0),
+            cursor: (0, 0),
+            saved_scroll: 0,
+            pending_count: 12,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        let status = row(&terminal, 23);
+        let cat = app.catalog;
+        assert!(
+            status.contains(cat.act_cancel),
+            "copy mode must still show how to leave:\n{status}"
+        );
+        assert!(
+            status.contains(cat.act_copy),
+            "copy mode must still show how to copy:\n{status}"
+        );
     }
 }

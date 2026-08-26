@@ -46,8 +46,23 @@ toast. luvus writes both your native OS clipboard (`pbcopy` / `wl-copy` /
 For keyboard selection, press **`Ctrl+Space`**, then **`y`** by default. Change
 the second key in **Settings → Keys → Copy terminal text**. Shift-based `V`
 input always passes through to the terminal, including inside agent prompts. Copy
-mode keeps all navigation inside Luvus: use arrows or `h`/`j`/`k`/`l` for
-character and line movement, `w` / `B` for words, `Space` / `b` for pages, and
-`g` / `G` for the oldest / newest retained row. Press `v` to reset the selection
-anchor at the cursor. Press **`y`** or Enter to copy and return to live output.
-Press **`q`** or Esc to cancel and restore the viewport where copy mode began.
+mode keeps all navigation inside Luvus. Its word motions are whitespace-delimited,
+so `w` and `e` behave like vim's `W` and `E`:
+
+| Key | Action |
+|---|---|
+| arrows or `h`/`j`/`k`/`l` | character and line movement |
+| `w` / `e` / `B` | next word start / word end / previous word start |
+| `Space` or `f` / `b` | page down / up |
+| `Ctrl+D` / `Ctrl+U` | half a page down / up |
+| `g` / `G` | oldest / newest retained row |
+| `1`–`9` then a motion | repeat it, so `12j` moves twelve rows |
+| `N` then `g` or `G` | jump to retained row `N`, like vim's `NG` |
+| `v` | reset the selection anchor at the cursor |
+| `y` or Enter | copy and return to live output |
+| `q` or Esc | cancel and restore the viewport where copy mode began |
+
+A typed count shows in the status bar until a motion consumes it. `0` only joins
+a count already being typed — on its own it stays "first column". Counts are
+capped at four digits, and any key copy mode does not recognise clears the
+pending count instead of reaching the program in the pane.

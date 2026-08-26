@@ -33,6 +33,49 @@ fn copy_word_forward(
     (last, column)
 }
 
+/// Vim `E`: the last cell of the word under the cursor, or of the next word when
+/// the cursor already sits on that cell.
+///
+/// Copy mode's whole word family is whitespace-delimited, with no `iskeyword`
+/// notion: `w` is really vim's `W`, `B` is vim's `b`, and both `e` and `E` land
+/// here. One rule for all three, so they always agree on where a word ends.
+///
+/// Row-local on purpose: a retained row is a physical terminal row, and `w`
+/// already treats a row edge as a break, so the trailing scan never crosses one.
+fn copy_word_end(
+    row_count: usize,
+    mut row_layout: impl FnMut(usize) -> Option<crate::terminal::vt::RetainedRowLayout>,
+    at: (usize, usize),
+) -> (usize, usize) {
+    // Step off the current cell first, so pressing `e` again advances instead of
+    // parking on the same word end.
+    let mut cur = (at.0, at.1.saturating_add(1));
+    while cur.0 < row_count {
+        let Some(layout) = row_layout(cur.0) else {
+            cur = (cur.0 + 1, 0);
+            continue;
+        };
+        let last = layout.last_column();
+        if cur.1 > last || layout.is_whitespace(cur.1) {
+            if cur.1 >= last {
+                cur = (cur.0 + 1, 0);
+            } else {
+                cur.1 += 1;
+            }
+            continue;
+        }
+        while cur.1 < last && !layout.is_whitespace(cur.1 + 1) {
+            cur.1 += 1;
+        }
+        return cur;
+    }
+    let last = row_count.saturating_sub(1);
+    (
+        last,
+        row_layout(last).map_or(0, |layout| layout.last_column()),
+    )
+}
+
 fn copy_word_back(
     mut row_layout: impl FnMut(usize) -> Option<crate::terminal::vt::RetainedRowLayout>,
     mut at: (usize, usize),
@@ -62,6 +105,25 @@ fn copy_word_back(
         at.0 -= 1;
         at.1 = row_layout(at.0).map_or(0, |layout| layout.last_column().saturating_add(1));
     }
+}
+
+/// Apply a copy-mode motion `count` times, stopping as soon as it stops moving.
+/// A motion that has saturated at the edge of retained history must not keep
+/// re-scanning the grid: every word step takes the engine lock the PTY reader
+/// also needs, so `9999e` near the bottom has to cost one step, not 9999.
+fn repeat_motion(
+    count: usize,
+    mut at: (usize, usize),
+    mut step: impl FnMut((usize, usize)) -> (usize, usize),
+) -> (usize, usize) {
+    for _ in 0..count {
+        let next = step(at);
+        if next == at {
+            break;
+        }
+        at = next;
+    }
+    at
 }
 
 fn finish_selected_text(mut out: String) -> Option<String> {
@@ -2003,6 +2065,7 @@ impl App {
             anchor: (history.saturating_sub(offset), 0),
             cursor: (history.saturating_sub(offset), 0),
             saved_scroll: offset,
+            pending_count: 0,
         });
         true
     }
@@ -2082,6 +2145,10 @@ impl App {
 
     /// Copy-mode navigation starts from the configured prefix command, then hjkl/arrows, word jumps,
     /// page keys, Home/End, and g/G move the visual selection; y copies it.
+    ///
+    /// Motions take vim's count prefix (`12j`), `e` jumps to a word end, and
+    /// `Ctrl+D`/`Ctrl+U` move by half a page. Anything unrecognised is swallowed
+    /// rather than forwarded, so a stray key can never reach the selected program.
     fn handle_copy_mode_key(&mut self, key: KeyEvent) -> bool {
         let Some(mut copy) = self.copy_mode else {
             return false;
@@ -2095,9 +2162,9 @@ impl App {
             return true;
         }
         if matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V')) {
-            if let Some(copy) = self.copy_mode.as_mut() {
-                copy.anchor = copy.cursor;
-            }
+            copy.anchor = copy.cursor;
+            copy.pending_count = 0;
+            self.copy_mode = Some(copy);
             return true;
         }
         let Some(pane) = self.panes.get(&copy.pane) else {
@@ -2109,26 +2176,65 @@ impl App {
             self.cancel_copy_mode();
             return true;
         }
+        // Vim's count prefix, after the pane checks above: a digit must not keep
+        // copy mode alive on a pane that has gone away. `0` joins a count already
+        // being typed; on its own it keeps its older meaning of "first column",
+        // so no existing key changes.
+        if let KeyCode::Char(typed @ '0'..='9') = key.code {
+            let digit = typed as usize - '0' as usize;
+            if digit != 0 || copy.pending_count > 0 {
+                copy.push_count_digit(digit);
+                self.copy_mode = Some(copy);
+                return true;
+            }
+        }
         let last_row = row_count.saturating_sub(1);
         let page = self.focused_page() as usize;
+        let half_page = page.div_ceil(2).max(1);
+        let count = copy.count();
+        let rows = |per: usize| count.saturating_mul(per);
+        // A count turns `g`/`G` into vim's absolute line jump. The rows a user
+        // counts are 1-based, so `5G` is index 4. Read the raw count beside
+        // `count` above, never through `copy`, so both derive from one snapshot.
+        let explicit = copy.pending_count;
+        let counted_row = |n: usize| n.saturating_sub(1).min(last_row);
+        let ctrl = super::keys::is_ctrl_chord(key.modifiers);
         match key.code {
-            KeyCode::Left | KeyCode::Char('h') => copy.cursor.1 = copy.cursor.1.saturating_sub(1),
+            // The only chords copy mode reads. Guarded so bare `d`/`u` stay unbound
+            // instead of silently becoming half-page motions.
+            KeyCode::Char('d') if ctrl => {
+                copy.cursor.0 = copy.cursor.0.saturating_add(rows(half_page)).min(last_row)
+            }
+            KeyCode::Char('u') if ctrl => {
+                copy.cursor.0 = copy.cursor.0.saturating_sub(rows(half_page))
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                copy.cursor.1 = copy.cursor.1.saturating_sub(count)
+            }
             KeyCode::Right | KeyCode::Char('l') => {
                 let last = pane
                     .retained_row_layout(copy.cursor.0)
                     .map_or(0, |layout| layout.last_column());
-                copy.cursor.1 = copy.cursor.1.saturating_add(1).min(last);
+                copy.cursor.1 = copy.cursor.1.saturating_add(count).min(last);
             }
-            KeyCode::Up | KeyCode::Char('k') => copy.cursor.0 = copy.cursor.0.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => copy.cursor.0 = (copy.cursor.0 + 1).min(last_row),
+            KeyCode::Up | KeyCode::Char('k') => copy.cursor.0 = copy.cursor.0.saturating_sub(count),
+            KeyCode::Down | KeyCode::Char('j') => {
+                copy.cursor.0 = copy.cursor.0.saturating_add(count).min(last_row)
+            }
             KeyCode::PageUp | KeyCode::Char('b') => {
-                copy.cursor.0 = copy.cursor.0.saturating_sub(page)
+                copy.cursor.0 = copy.cursor.0.saturating_sub(rows(page))
             }
             KeyCode::PageDown | KeyCode::Char(' ') | KeyCode::Char('f') => {
-                copy.cursor.0 = copy.cursor.0.saturating_add(page).min(last_row)
+                copy.cursor.0 = copy.cursor.0.saturating_add(rows(page)).min(last_row)
             }
-            KeyCode::Home | KeyCode::Char('g') => copy.cursor.0 = 0,
-            KeyCode::End | KeyCode::Char('G') => copy.cursor.0 = last_row,
+            KeyCode::Home | KeyCode::Char('g') => copy.cursor.0 = counted_row(explicit),
+            KeyCode::End | KeyCode::Char('G') => {
+                copy.cursor.0 = if explicit > 0 {
+                    counted_row(explicit)
+                } else {
+                    last_row
+                }
+            }
             KeyCode::Char('0') => copy.cursor.1 = 0,
             KeyCode::Char('$') => {
                 copy.cursor.1 = pane
@@ -2136,14 +2242,29 @@ impl App {
                     .map_or(0, |layout| layout.last_column())
             }
             KeyCode::Char('w') => {
-                copy.cursor =
-                    copy_word_forward(row_count, |row| pane.retained_row_layout(row), copy.cursor)
+                copy.cursor = repeat_motion(count, copy.cursor, |at| {
+                    copy_word_forward(row_count, |row| pane.retained_row_layout(row), at)
+                })
+            }
+            KeyCode::Char('e') => {
+                copy.cursor = repeat_motion(count, copy.cursor, |at| {
+                    copy_word_end(row_count, |row| pane.retained_row_layout(row), at)
+                })
             }
             KeyCode::Char('B') => {
-                copy.cursor = copy_word_back(|row| pane.retained_row_layout(row), copy.cursor)
+                copy.cursor = repeat_motion(count, copy.cursor, |at| {
+                    copy_word_back(|row| pane.retained_row_layout(row), at)
+                })
             }
-            _ => return true,
+            _ => {
+                // An unrecognised key aborts the pending count the way vim does, so
+                // a mistyped chord cannot silently multiply the next motion.
+                copy.pending_count = 0;
+                self.copy_mode = Some(copy);
+                return true;
+            }
         }
+        copy.pending_count = 0;
         copy.cursor.1 = copy.cursor.1.min(
             pane.retained_row_layout(copy.cursor.0)
                 .map_or(0, |layout| layout.last_column()),

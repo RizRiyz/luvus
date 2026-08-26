@@ -1199,6 +1199,12 @@ impl Selection {
     }
 }
 
+/// Ceiling for copy mode's typed count. Row and column motions are O(1), but a
+/// word motion walks the grid a step at a time, so an accidental `9999999w`
+/// would hold the engine lock the PTY reader needs. Four digits covers a jump
+/// across a full scrollback and keeps the worst case bounded.
+pub const COPY_COUNT_MAX: usize = 9_999;
+
 /// Keyboard-driven selection in a terminal pane. Rows are absolute indices in
 /// retained-row coordinates (oldest retained row is zero), so the selection remains
 /// stable while its viewport scrolls.
@@ -1209,6 +1215,9 @@ pub struct CopyMode {
     pub cursor: (usize, usize),
     /// The viewport to restore when the user cancels instead of copying.
     pub saved_scroll: usize,
+    /// Digits typed since the last motion — vim's count prefix, so `12j` moves
+    /// twelve rows. Zero means "no count typed", which every motion reads as 1.
+    pub pending_count: usize,
 }
 
 impl CopyMode {
@@ -1218,6 +1227,22 @@ impl CopyMode {
         } else {
             (self.cursor, self.anchor)
         }
+    }
+
+    /// How many times the next motion repeats. A typed count of zero means the
+    /// user typed none, and every motion still has to move once.
+    pub(crate) fn count(&self) -> usize {
+        self.pending_count.max(1)
+    }
+
+    /// Append a typed digit, saturating at [`COPY_COUNT_MAX`] so a leaned-on
+    /// key cannot turn one motion into unbounded scanning work.
+    pub(crate) fn push_count_digit(&mut self, digit: usize) {
+        self.pending_count = self
+            .pending_count
+            .saturating_mul(10)
+            .saturating_add(digit)
+            .min(COPY_COUNT_MAX);
     }
 
     pub(crate) fn contains(&self, row: usize, col: usize) -> bool {
@@ -10816,6 +10841,7 @@ mod tests {
             anchor: (row, 0),
             cursor: (row, 0),
             saved_scroll: 0,
+            pending_count: 0,
         });
 
         for _ in 0..3 {
@@ -10860,6 +10886,7 @@ mod tests {
             anchor: (row, 0),
             cursor: (row, 0),
             saved_scroll: 0,
+            pending_count: 0,
         });
 
         let send = |app: &mut App, character| {
@@ -10874,6 +10901,184 @@ mod tests {
         assert_eq!(app.copy_mode.expect("copy mode").cursor, (row, 0));
         send(&mut app, '$');
         assert_eq!(app.copy_mode.expect("copy mode").cursor, (row, 9));
+    }
+
+    #[test]
+    fn copy_mode_word_end_stops_on_the_last_cell_of_each_word() {
+        let _env = crate::persist::test_env("copy-mode-word-end");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(40, 8, tx).unwrap();
+        let pane = app.layout().focus;
+        app.panes
+            .get(&pane)
+            .expect("pane")
+            .engine
+            .lock()
+            .expect("engine")
+            .advance("\x1b[H\x1b[2J你好 world again".as_bytes());
+        let mut target_row = None;
+        app.panes
+            .get(&pane)
+            .expect("pane")
+            .for_each_retained_row(&mut |row, _, _, text| {
+                if text == "你好 world again" {
+                    target_row = Some(row);
+                }
+            });
+        let row = target_row.expect("fixture row");
+        let start = CopyMode {
+            pane,
+            anchor: (row, 0),
+            cursor: (row, 0),
+            saved_scroll: 0,
+            pending_count: 0,
+        };
+        app.copy_mode = Some(start);
+
+        let send = |app: &mut App, character| {
+            app.handle_event(AppEvent::Key(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::NONE,
+            )));
+        };
+
+        // Cell columns, not scalar counts: 你好 ends at column 3, `world` at 9.
+        send(&mut app, 'e');
+        assert_eq!(app.copy_mode.expect("copy mode").cursor, (row, 3));
+        send(&mut app, 'e');
+        assert_eq!(app.copy_mode.expect("copy mode").cursor, (row, 9));
+
+        // A count repeats the motion and is consumed by it.
+        app.copy_mode = Some(start);
+        send(&mut app, '2');
+        let counted = app.copy_mode.expect("copy mode");
+        assert_eq!(counted.pending_count, 2, "a digit is held for the motion");
+        assert_eq!(counted.cursor, (row, 0), "a count alone never moves");
+        send(&mut app, 'e');
+        let moved = app.copy_mode.expect("copy mode");
+        assert_eq!(moved.cursor, (row, 9), "2e lands where e e does");
+        assert_eq!(moved.pending_count, 0, "the motion consumed the count");
+
+        // A count is exactly repetition: `12e` must land where twelve presses do,
+        // including where the motion saturates. No magic column here, because the
+        // saturation point belongs to the fixture, not to the contract.
+        app.copy_mode = Some(start);
+        for _ in 0..12 {
+            send(&mut app, 'e');
+        }
+        let stepwise = app.copy_mode.expect("copy mode").cursor;
+        assert_ne!(stepwise, (row, 3), "twelve presses outrun a single step");
+
+        app.copy_mode = Some(start);
+        send(&mut app, '1');
+        send(&mut app, '2');
+        assert_eq!(
+            app.copy_mode.expect("copy mode").pending_count,
+            12,
+            "digits stack into one count instead of replacing it"
+        );
+        send(&mut app, 'e');
+        assert_eq!(
+            app.copy_mode.expect("copy mode").cursor,
+            stepwise,
+            "12e lands where twelve e presses land"
+        );
+    }
+
+    #[test]
+    fn copy_mode_counts_rows_and_moves_by_half_pages() {
+        let _env = crate::persist::test_env("copy-mode-counts");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(40, 8, tx).unwrap();
+        let pane = app.layout().focus;
+        {
+            let held = app.panes.get(&pane).expect("pane");
+            let mut engine = held.engine.lock().expect("engine");
+            engine.advance(b"\x1b[H\x1b[2J");
+            for line in 0..40 {
+                engine.advance(format!("line-{line:03}\r\n").as_bytes());
+            }
+        }
+        let last_row = app
+            .panes
+            .get(&pane)
+            .expect("pane")
+            .retained_row_count()
+            .saturating_sub(1);
+        assert!(
+            last_row > 20,
+            "the fixture has real history to move through"
+        );
+        app.copy_mode = Some(CopyMode {
+            pane,
+            anchor: (0, 0),
+            cursor: (0, 0),
+            saved_scroll: 0,
+            pending_count: 0,
+        });
+
+        let send = |app: &mut App, code, mods| {
+            app.handle_event(AppEvent::Key(KeyEvent::new(code, mods)));
+        };
+        let row = |app: &App| app.copy_mode.expect("copy mode").cursor.0;
+
+        send(&mut app, KeyCode::Char('1'), KeyModifiers::NONE);
+        send(&mut app, KeyCode::Char('2'), KeyModifiers::NONE);
+        send(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(row(&app), 12, "12j moves twelve rows, not one");
+
+        // Derive half a page from the rendered pane, not from `focused_page`'s
+        // unrendered fallback: otherwise this test pins an unrelated default
+        // instead of the contract, and passes even if the page math is wrong.
+        let mut term =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 8)).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render");
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("pane content rect");
+        // A page is the content height minus one row of overlap; half rounds up.
+        let page = content.height as usize - 1;
+        let half = page.div_ceil(2).max(1);
+        assert!(
+            half < page,
+            "the fixture must distinguish a half page from a whole one"
+        );
+
+        send(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(row(&app), 12 - half, "Ctrl+U is half a page up");
+        send(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(row(&app), 12, "Ctrl+D is half a page down");
+
+        send(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(row(&app), 12, "a bare d stays unbound");
+
+        // An unrecognised key must clear a pending count, or the next motion
+        // silently inherits it.
+        send(&mut app, KeyCode::Char('5'), KeyModifiers::NONE);
+        send(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+        send(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(row(&app), 13, "a swallowed key drops the count it followed");
+
+        send(&mut app, KeyCode::Char('5'), KeyModifiers::NONE);
+        send(&mut app, KeyCode::Char('G'), KeyModifiers::NONE);
+        assert_eq!(row(&app), 4, "5G is vim's absolute line jump");
+
+        // `0` keeps its own meaning while no count is being typed. Asserted on a
+        // row that holds text: the newest retained row is the blank line the
+        // cursor sits on, where every column motion is already clamped to zero.
+        send(&mut app, KeyCode::Char('$'), KeyModifiers::NONE);
+        assert!(app.copy_mode.expect("copy mode").cursor.1 > 0);
+        send(&mut app, KeyCode::Char('0'), KeyModifiers::NONE);
+        let copy = app.copy_mode.expect("copy mode");
+        assert_eq!(copy.cursor, (4, 0), "0 is still the first column");
+        assert_eq!(copy.pending_count, 0, "and never starts a count");
+
+        send(&mut app, KeyCode::Char('G'), KeyModifiers::NONE);
+        assert_eq!(row(&app), last_row, "a bare G is still the newest row");
     }
 
     #[test]
@@ -10894,6 +11099,7 @@ mod tests {
             anchor: (1, 0),
             cursor: (2, 5),
             saved_scroll: 0,
+            pending_count: 0,
         });
 
         app.finish_copy_mode();

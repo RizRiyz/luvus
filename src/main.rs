@@ -2164,6 +2164,24 @@ mod tests {
             "there is a Copy & paste reference block:\n{reference_view}"
         );
 
+        // Copy mode's motions cannot be rebound, so the Keys tab is the only place
+        // in the app that can teach them. A user who never reads the website has
+        // to be able to find `e`, `^D`/`^U`, and the count prefix right here.
+        let mut copy_view = reference_view;
+        for _ in 0..app.settings_rows(crate::app::SettingsTab::Keys) {
+            if copy_view.contains("w / e / B") {
+                break;
+            }
+            app.handle_settings_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+            copy_view = screen(&mut app);
+        }
+        assert!(
+            copy_view.contains("w / e / B")
+                && copy_view.contains("^D / ^U")
+                && copy_view.contains("12j moves twelve rows"),
+            "copy mode's fixed motions are discoverable in the Keys tab:\n{copy_view}"
+        );
+
         // The mouse wheel scrolls the list (moves the selection) without the arrows.
         app.handle_event(AppEvent::Mouse(MouseEvent {
             kind: MouseEventKind::ScrollUp,
