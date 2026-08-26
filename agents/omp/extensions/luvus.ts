@@ -97,12 +97,9 @@ function sessionRef(ctx: ExtensionContext): string | undefined {
 	} catch {
 		// session manager unavailable in this context
 	}
-	try {
-		const file = ctx.sessionManager?.getSessionFile?.();
-		if (typeof file === "string" && file.length > 0) return file;
-	} catch {
-		// fallthrough
-	}
+	// No session-file fallback: a file path is not a session id. If the
+	// id is unavailable here, the next agent_start reports it — by then
+	// getSessionId() is reliably populated.
 	return undefined;
 }
 
@@ -167,3 +164,8 @@ export function createLuvusExtension(pi: ExtensionAPI): void {
 		reportNotification(question ?? "waiting for user input");
 	});
 }
+
+// omp's extension loader accepts a module-as-function or `module.default`;
+// a named-only export fails both checks and the file is skipped. This line
+// is the load contract — do not remove.
+export default createLuvusExtension;

@@ -115,6 +115,15 @@ const KNOWN_AGENTS: &[KnownAgent] = &[
         distinct: &[],
         ambiguous: &["grok"],
     },
+    // Oh My Pi (omp) precedes pi in this registry ON PURPOSE: the brand
+    // "oh-my-pi" word-contains pi's ambiguous token, and the first match wins.
+    // omp's brand + npm binary are distinctive, so trust them from pane
+    // output; bare `omp` is believed only from the spawn command or OSC title.
+    KnownAgent {
+        name: "omp",
+        distinct: &["oh-my-pi", "omp-coding-agent"],
+        ambiguous: &["omp"],
+    },
     // Pi (pi.dev): the npm binary is distinctive, but the bare brand name is an
     // ordinary word (and a substring of "api"/"pip"…), so believe it only from
     // the spawn command or OSC title — never incidental output.
@@ -122,14 +131,6 @@ const KNOWN_AGENTS: &[KnownAgent] = &[
         name: "pi",
         distinct: &["pi-coding-agent"],
         ambiguous: &["pi"],
-    },
-    // Oh My Pi (omp): brand + npm binary are distinctive, so trust them from
-    // pane output; the bare `omp` is ambiguous (matches ordinary prose) and
-    // is therefore believed only from the spawn command or OSC title.
-    KnownAgent {
-        name: "omp",
-        distinct: &["oh-my-pi", "omp-coding-agent"],
-        ambiguous: &["omp"],
     },
     // `fx` is a short, common token in filenames and prose, so never infer it
     // from arbitrary screen output. Its process name and OSC title are
@@ -1722,6 +1723,18 @@ mod tests {
             named(Some("zsh"), "oh-my-pi session restored\n", "zsh"),
             "omp",
             "the brand string is distinctive enough to trust from output"
+        );
+        // Registry order matters: "oh-my-pi" word-contains pi's ambiguous
+        // token, so omp must be consulted before pi or this pane reads as pi.
+        assert_eq!(
+            named(Some("zsh"), "", "oh-my-pi"),
+            "omp",
+            "an oh-my-pi command/title must not degrade to pi"
+        );
+        assert_eq!(
+            named(Some("oh-my-pi"), "", "zsh"),
+            "omp",
+            "an oh-my-pi title must not degrade to pi"
         );
         assert_eq!(
             named(Some("zsh"), "compiles with omp flags\n", "zsh"),

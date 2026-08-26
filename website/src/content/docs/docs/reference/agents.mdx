@@ -12,7 +12,7 @@ description: What luvus supports per agent, covering live status, session resume
 | Kimi Code CLI | ✓ | ✓ | no | ✓ |
 | Grok Build | ✓ | ✓ | ✓ | ✓ |
 | Pi | ✓ | ✓ | ✓ | no |
-| Oh My Pi (omp) | ✓ | ✓ | no | ✓ |
+| Oh My Pi (omp) | ✓ | ✓ | ✓ | ✓ |
 | Cursor | ✓ | resume command | no | no |
 | Gemini | ✓ | no | no | no |
 | Aider | ✓ | no | no | no |
@@ -31,8 +31,8 @@ description: What luvus supports per agent, covering live status, session resume
   preserving the original's full context under a new session id while the
   original keeps running. It needs an agent with a native fork command, so today
   that is **Claude** (`claude --resume <id> --fork-session`), **Grok**
-  (`grok --resume <id> --fork-session`), **Codex** (`codex fork <id>`), and
-  **Pi** (`pi --fork <id>`). Right-click the pane and
+  (`grok --resume <id> --fork-session`), **Codex** (`codex fork <id>`),
+  **Pi** (`pi --fork <id>`), and **Oh My Pi (omp)** (`omp --fork <id>`). Right-click the pane and
   choose **Fork to New Pane**, or press `Ctrl+Space f`. The action only appears
   for agents that can fork.
 - **Hook**, via `luvus integration install <agent>`, makes the agent report its

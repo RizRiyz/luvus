@@ -1250,6 +1250,20 @@ mod tests {
             "child sessions forward agent_end/turn_end; reporting Stop from \
              them would mark the root pane done when a subagent finishes"
         );
+        // The omp loader accepts a module-as-function or module.default; a
+        // named-only export is skipped at load. This is the real load
+        // contract — node --check cannot catch it.
+        assert!(
+            OMP_EXTENSION.contains("export default createLuvusExtension"),
+            "the extension must keep its default export or omp never loads it"
+        );
+        // A file path is not a session id: the session-file fallback must
+        // stay gone (safe_id() rejects `\\` on Windows, so a path would
+        // silently break resume there).
+        assert!(
+            !OMP_EXTENSION.contains("getSessionFile"),
+            "sessionRef must not fall back to a file path"
+        );
         // Reports route through the exact-session CLI, not pipe discovery.
         assert!(OMP_EXTENSION.contains("LUVUS_BIN_PATH"));
         assert!(
