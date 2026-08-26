@@ -50,6 +50,7 @@ pub enum Cmd {
     PrevWorkspace,
     NewWorktree,
     OpenGit,
+    OpenMission,
     OpenBoard,
     OpenSettings,
     ToggleSidebar,
@@ -87,6 +88,7 @@ impl Cmd {
         Cmd::PrevWorkspace,
         Cmd::NewWorktree,
         Cmd::OpenGit,
+        Cmd::OpenMission,
         Cmd::OpenBoard,
         Cmd::OpenSettings,
         Cmd::ToggleSidebar,
@@ -124,6 +126,7 @@ impl Cmd {
             Cmd::PrevWorkspace => "prev_node",
             Cmd::NewWorktree => "new_worktree",
             Cmd::OpenGit => "open_git",
+            Cmd::OpenMission => "open_mission",
             Cmd::OpenBoard => "open_board",
             Cmd::OpenSettings => "open_settings",
             Cmd::ToggleSidebar => "toggle_sidebar",
@@ -164,6 +167,7 @@ impl Cmd {
             Cmd::PrevWorkspace => cat.cmd_prev_workspace,
             Cmd::NewWorktree => cat.cmd_new_worktree,
             Cmd::OpenGit => cat.cmd_open_git,
+            Cmd::OpenMission => cat.mc_open,
             Cmd::OpenBoard => cat.cmd_open_board,
             Cmd::OpenSettings => cat.cmd_open_settings,
             Cmd::ToggleSidebar => cat.cmd_toggle_sidebar,
@@ -202,6 +206,7 @@ impl Cmd {
             | Cmd::PrevWorkspace
             | Cmd::NewWorktree => cat.settings.keys_sections[2],
             Cmd::OpenGit
+            | Cmd::OpenMission
             | Cmd::OpenBoard
             | Cmd::OpenSettings
             | Cmd::ToggleSidebar
@@ -240,6 +245,7 @@ impl Cmd {
             Cmd::PrevWorkspace => "W",
             Cmd::NewWorktree => "G",
             Cmd::OpenGit => "g",
+            Cmd::OpenMission => "m",
             Cmd::OpenBoard => "o",
             // `=` opens Settings (`,` now renames the tab, matching tmux). The
             // Menu button is always available too, so this is just the shortcut.
@@ -248,7 +254,7 @@ impl Cmd {
             Cmd::ToggleRightSidebar => "B",
             Cmd::ToggleAgents => "a",
             Cmd::ToggleFiles => "e",
-            Cmd::Switcher => "m",
+            Cmd::Switcher => "M",
             Cmd::GlobalSearch => "/",
             Cmd::Detach => "d",
         }
@@ -669,6 +675,7 @@ impl App {
             Cmd::PrevWorkspace => self.cycle_workspace(-1),
             Cmd::NewWorktree => self.open_worktree_prompt(),
             Cmd::OpenGit => self.open_git_tab_active(),
+            Cmd::OpenMission => self.open_mission_control(self.active_ws),
             Cmd::OpenBoard => self.open_orch_board(),
             Cmd::OpenSettings => self.open_settings(),
             Cmd::ToggleSidebar => self.toggle_all_sides(),
@@ -732,6 +739,8 @@ mod tests {
         assert_eq!(m.get(","), Some(&Cmd::RenameTab));
         assert_eq!(m.get("="), Some(&Cmd::OpenSettings));
         assert_eq!(m.get("y"), Some(&Cmd::CopyMode));
+        assert_eq!(m.get("m"), Some(&Cmd::OpenMission));
+        assert_eq!(m.get("M"), Some(&Cmd::Switcher));
         // every command is reachable by its default key
         for &c in Cmd::ALL {
             assert!(m.values().any(|v| *v == c), "{c:?} bound");
@@ -1039,6 +1048,17 @@ mod tests {
         assert!(app.tab_rename.is_none());
         app.run_cmd(Cmd::RenameTab);
         assert!(app.tab_rename.is_some(), "rename tab opened the modal");
+    }
+
+    #[test]
+    fn mission_command_opens_the_dashboard_in_the_active_workspace() {
+        let _env = crate::persist::test_env("mission-prefix-command");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        assert!(!app.active_is_mission());
+        app.run_cmd(Cmd::OpenMission);
+        assert!(app.active_is_mission());
     }
 
     #[test]

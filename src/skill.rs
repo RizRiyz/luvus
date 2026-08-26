@@ -1284,6 +1284,8 @@ mod tests {
         assert!(show().contains("name: luvus"));
         assert!(show().contains("agent send"));
         assert!(show().contains("luvus uhp capabilities"));
+        assert!(show().contains("luvus mission open"));
+        assert!(show().contains("mission.open"));
         assert!(show().contains("ui.bar.*"));
         assert!(show().contains("Agent detection is built into Luvus"));
     }

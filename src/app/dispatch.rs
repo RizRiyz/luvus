@@ -3513,6 +3513,14 @@ impl App {
                 self.open_git_tab(i);
                 Ok(json!({"type":"ok","git": self.active_is_git()}))
             }
+            "mission.open" => {
+                let i = self.optional_socket_workspace(p)?.unwrap_or(self.active_ws);
+                if i >= self.workspaces.len() {
+                    return Err(workspace_update_error(i, WorkspaceUpdateError::NotFound));
+                }
+                self.open_mission_control(i);
+                Ok(json!({"type":"ok","mission": self.active_is_mission()}))
+            }
             // ── file viewer (docs/38) ──
             "files.open" => {
                 let raw = p.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -5756,6 +5764,32 @@ mod tests {
             "git {args:?} failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn mission_open_targets_a_workspace_and_rejects_missing_ones() {
+        let _env = crate::persist::test_env("mission-open-api");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let second = std::path::PathBuf::from(std::env::var_os("LUVUS_HOME").unwrap())
+            .join("second-workspace");
+        std::fs::create_dir_all(&second).unwrap();
+        assert!(app.create_workspace_at(second));
+        app.active_ws = 0;
+
+        let opened = app
+            .dispatch("mission.open", &json!({"workspace": "1"}))
+            .expect("existing workspace opens Mission Control");
+        assert_eq!(opened, json!({"type":"ok", "mission":true}));
+        assert_eq!(app.active_ws, 1);
+        assert!(app.active_is_mission());
+
+        let before = (app.active_ws, app.ws().active_tab);
+        let error = app
+            .dispatch("mission.open", &json!({"workspace": "9"}))
+            .expect_err("missing workspace must not change the active view");
+        assert_eq!(error.0, "not_found");
+        assert_eq!((app.active_ws, app.ws().active_tab), before);
     }
 
     #[test]

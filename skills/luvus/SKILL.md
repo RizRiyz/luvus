@@ -336,6 +336,7 @@ Use these read routes to resolve state and exact targets:
   `luvus module log <id>`
 - Themes and UI: `luvus theme list`, `luvus bar list`,
   `luvus ui dock list`
+- Mission Control: `luvus mission open [<workspace>]`
 
 Run `luvus help all` only when the requested mutation grammar is uncertain.
 This remains compatible with older Luvus releases. Before changing an advanced
@@ -360,6 +361,9 @@ surface:
   `ui.bar.*`. Inspect widgets and docks before changing placement or content.
   Avoid sidebar, dock, notification, toast, bar, or focus changes unless they
   serve the user's request.
+- Open Mission Control directly when the user asks for it. The optional
+  workspace index is 0-based; omit it to target the active workspace. For UHP
+  automation, use the workspace-scoped `mission.open` method.
 - Agent detection is built into Luvus. `luvus integration install` manages
   optional native session-resume hooks and must not be used merely to make an
   agent appear in the sidebar. Install or remove an integration only when the

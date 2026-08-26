@@ -51,6 +51,7 @@ read current state and reconcile instead of blindly retrying.
 - Workspace topology: `workspace.*`, `tab.*`, `pane.*`, and `layout.*`
 - Agents: `agent.*`, with `agent.prompt` preferred for atomic prompt submission
 - Search, files, Git, and review: `search.*`, `files.*`, `git.*`, and `diff.*`
+- Mission Control: `mission.open`
 - Worktrees and orchestration: `worktree.*`, `task.*`, and `lease.*`
 - Extensions: `module.*`
 - Themes and configuration: `theme.*`, `config.*`, and `manifest.reload`

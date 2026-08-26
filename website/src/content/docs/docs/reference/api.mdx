@@ -75,6 +75,7 @@ Luvus release number.
 | search | `search` · `search.capabilities` · `search.query` · `search.activate` |
 | files | `files.tree` · `files.open` · `files.reveal` · `files.refresh` |
 | git | `git.status` · `git.branches` · `git.log` · `git.open` |
+| mission control | `mission.open` |
 | diff | `diff.refresh` · `diff.list` · `diff.open` · `diff.get` · `diff.navigate` · `diff.note.add` · `diff.note.apply` · `diff.note.list` · `diff.note.edit` · `diff.note.resolve` · `diff.note.reopen` · `diff.note.remove` · `diff.note.send` |
 | terminal | `terminal.backend.inventory` · `terminal.backend.snapshot` · `terminal.backend.validate` · `terminal.backend.processes` · `terminal.backend.capture` · `terminal.backend.observe` · `terminal.backend.control` · `terminal.backend.type_literal` · `terminal.backend.submit_text` · `terminal.backend.send_key` · `terminal.backend.set_title` · `terminal.backend.notify` · `terminal.backend.create` · `terminal.backend.close` · `terminal.backend.wait_change` · `terminal.backend.wait_output` · `terminal.backend.events.subscribe` |
 | worktrees | `worktree.list` · `worktree.create` · `worktree.open` · `worktree.remove` |
@@ -324,6 +325,20 @@ session. The owner revalidates workspace, tab, pane, file containment, and
 output anchors before focusing or opening anything. It is primarily used by
 Luvus during named-session handoff. Invalid or stale targets return a structured
 `invalid_request` error instead of focusing a different object.
+
+## Opening Mission Control
+
+`mission.open` opens Mission Control in the active workspace. Pass a zero-based
+`workspace` index or stable `workspace_id` to open it in another workspace.
+The dashboard is reused when it is already open.
+
+| Method | Params | Result |
+|---|---|---|
+| `mission.open` | `{workspace?}` or `{workspace_id?}` | `{type:"ok", mission:true}` |
+
+The CLI equivalent is `luvus mission open [<workspace>]`. This is a write
+method with the `workspace` authorization scope because it changes the visible
+tab, but it does not start agents or modify repository files.
 
 ## Organizing workspaces
 
