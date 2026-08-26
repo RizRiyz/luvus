@@ -2144,13 +2144,18 @@ mod tests {
             "the last reference block (Mouse) is reachable:\n{bottom}"
         );
         // Copy & paste is its own labeled section (just above Mouse), so a user
-        // looking for it finds it — scroll up a little from the bottom.
-        for _ in 0..8 {
+        // looking for it can reach it even when reference row counts change.
+        let mut reference_view = bottom;
+        for _ in 0..app.settings_rows(crate::app::SettingsTab::Keys) {
+            if reference_view.contains("Copy & paste") {
+                break;
+            }
             app.handle_settings_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+            reference_view = screen(&mut app);
         }
         assert!(
-            screen(&mut app).contains("Copy & paste"),
-            "there is a Copy & paste reference block"
+            reference_view.contains("Copy & paste"),
+            "there is a Copy & paste reference block:\n{reference_view}"
         );
 
         // The mouse wheel scrolls the list (moves the selection) without the arrows.
