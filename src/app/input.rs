@@ -1726,16 +1726,6 @@ impl App {
             }
             return;
         }
-        // Clicking a workspace's branch opens its git tab (docs/17).
-        if let Some((i, _)) = self
-            .workspace_branch_rects
-            .iter()
-            .find(|(_, rect)| hit(*rect))
-        {
-            let i = *i;
-            self.open_git_tab(i);
-            return;
-        }
         if let Some((i, _)) = self.ws_rects.iter().find(|(_, rect)| hit(*rect)) {
             let i = (*i).min(self.workspaces.len().saturating_sub(1));
             self.active_ws = i;

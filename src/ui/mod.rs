@@ -162,7 +162,6 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     let tab_rects = std::mem::take(&mut app.tab_rects);
     let tab_close_rects = std::mem::take(&mut app.tab_close_rects);
     let ws_rects = std::mem::take(&mut app.ws_rects);
-    let workspace_branch_rects = std::mem::take(&mut app.workspace_branch_rects);
     let git_section_rects = std::mem::take(&mut app.git_section_rects);
     let agents_filter_rects = std::mem::take(&mut app.agents_filter_rects);
     let agent_rects = std::mem::take(&mut app.agent_rects);
@@ -286,7 +285,6 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     app.tab_rects = tab_rects;
     app.tab_close_rects = tab_close_rects;
     app.ws_rects = ws_rects;
-    app.workspace_branch_rects = workspace_branch_rects;
     app.git_section_rects = git_section_rects;
     app.agents_filter_rects = agents_filter_rects;
     app.agent_rects = agent_rects;
@@ -529,7 +527,6 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.workspaces_area = Rect::ZERO;
     app.agents_area = Rect::ZERO;
     app.agents_filter_rects.clear();
-    app.workspace_branch_rects.clear();
     app.module_dock_rects.clear();
     // The FILES dock's geometry must be zeroed here too, or its row rects go stale
     // when it isn't drawn this frame (its sidebar hidden, or the dock moved/off as

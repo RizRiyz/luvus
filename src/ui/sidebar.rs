@@ -363,7 +363,6 @@ fn draw_workspaces_dock(
     app.workspaces_scroll = app.workspaces_scroll.min(ntotal.saturating_sub(ncap));
     app.workspaces_area = Rect::new(area.x, nlist_top, area.width, nrows);
     let nscroll = app.workspaces_scroll;
-    app.workspace_branch_rects.clear();
     for (vi, (i, is_member)) in order.into_iter().skip(nscroll).take(ncap).enumerate() {
         let y = nlist_top + vi as u16 * ROW_STRIDE;
         let active = i == app.active_ws;
@@ -405,18 +404,8 @@ fn draw_workspaces_dock(
         }
         line1.push(Span::styled(st.dot(), Style::new().fg(st.color(t))));
         line1.push(Span::raw(" "));
-        let name_dw = crate::ui::display_width(&name_disp) as u16;
         line1.push(Span::styled(name_disp, name_style));
         if let Some(b) = &branch_disp {
-            // Record the branch text as a clickable rect (opens the git tab),
-            // positioned by the *displayed* name width so a click still lands.
-            let bx = cx + 2 + indent + name_dw;
-            let bw = 2 + crate::ui::display_width(b) as u16;
-            if bx < area.right() {
-                let bw = bw.min(area.right().saturating_sub(bx));
-                app.workspace_branch_rects
-                    .push((i, Rect::new(bx, y, bw, 1)));
-            }
             line1.push(Span::styled(
                 format!("  {b}"),
                 Style::new().fg(if active { t.green } else { t.overlay0 }),

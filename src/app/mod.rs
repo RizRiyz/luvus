@@ -1663,8 +1663,6 @@ pub struct App {
     pub tab_rects: Vec<(usize, Rect)>,
     pub tab_close_rects: Vec<(usize, Rect)>,
     pub ws_rects: Vec<(usize, Rect)>,
-    /// Clickable git-branch text per workspace (opens the git tab — docs/17).
-    pub workspace_branch_rects: Vec<(usize, Rect)>,
     /// Clickable view-selector tabs in the active git tab (Commits/Flow/…).
     pub git_section_rects: Vec<(crate::git::Section, Rect)>,
     /// The All/Active filter toggle in the AGENTS header (`bool` = active_only).
@@ -1998,7 +1996,6 @@ impl App {
             last_main_area: Rect::ZERO,
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
-            workspace_branch_rects: Vec::new(),
             git_section_rects: Vec::new(),
             agents_filter_rects: Vec::new(),
             agent_rects: Vec::new(),
@@ -2539,7 +2536,6 @@ impl App {
             last_main_area: Rect::ZERO,
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
-            workspace_branch_rects: Vec::new(),
             git_section_rects: Vec::new(),
             agents_filter_rects: Vec::new(),
             agent_rects: Vec::new(),
@@ -7941,6 +7937,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn clicking_workspace_branch_text_focuses_workspace_without_opening_git() {
+        let _env = crate::persist::test_env("workspace-branch-display-only");
+        use crate::event::AppEvent;
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.workspaces[0].name = "target".into();
+        app.workspaces[0].branch = Some("feat/branch".into());
+        assert!(app.create_workspace_at(std::env::current_dir().unwrap().join("src")));
+        assert_ne!(app.active_ws, 0, "the second workspace starts focused");
+
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let row = app
+            .ws_rects
+            .iter()
+            .find(|(index, _)| *index == 0)
+            .map(|(_, rect)| *rect)
+            .expect("the target workspace row is visible");
+        let branch_column = row.x + 6 + crate::ui::display_width("target") as u16;
+
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: branch_column,
+            row: row.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+
+        assert_eq!(app.active_ws, 0, "the row focuses the target workspace");
+        assert_eq!(app.workspaces[0].tabs.len(), 1, "no Git tab was created");
+        assert!(
+            !app.workspaces[0].tabs[0].is_git(),
+            "the existing terminal tab stays active"
+        );
+    }
+
     /// Stability guard for the whole dock system (docs/29): whatever a dock — a
     /// built-in *or* a user module dock — leaves in the app's click geometry, one
     /// frame where that dock isn't drawn (its sidebar hidden) must zero it, so no
@@ -7964,7 +8001,6 @@ mod tests {
         app.files_area = junk;
         app.file_tree_rects = vec![(0, junk)];
         app.agents_filter_rects = vec![(true, junk)];
-        app.workspace_branch_rects = vec![(0, junk)];
         app.module_dock_rects = vec![("example.buzz".into(), 0, junk)]; // a user module dock
 
         // Hide both sidebars so no dock draws this frame — the worst stale case.
@@ -7979,10 +8015,6 @@ mod tests {
         assert_eq!(app.files_area, Rect::ZERO, "FILES area cleared");
         assert!(app.file_tree_rects.is_empty(), "FILES row rects cleared");
         assert!(app.agents_filter_rects.is_empty(), "AGENTS filter cleared");
-        assert!(
-            app.workspace_branch_rects.is_empty(),
-            "branch rects cleared"
-        );
         assert!(
             app.module_dock_rects.is_empty(),
             "user module dock rects cleared — a stale module dock can't fire"
