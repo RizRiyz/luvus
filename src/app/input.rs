@@ -1528,15 +1528,7 @@ impl App {
                         v.scroll_by(scroll, viewport, text_w);
                     }
                     Some(crate::app::ViewKind::Diff(v)) => {
-                        let is_split = if v.wrap {
-                            false
-                        } else {
-                            matches!(
-                                v.preference,
-                                crate::diff::DiffLayoutPreference::Split
-                                    | crate::diff::DiffLayoutPreference::Auto
-                            ) && rect.width >= 96
-                        };
+                        let is_split = v.effective_split(rect.width);
                         if hscroll != 0 {
                             if hscroll < 0 {
                                 v.horizontal = v.horizontal.saturating_sub(8);
@@ -1551,15 +1543,27 @@ impl App {
                             } else {
                                 v.stack_rows.len()
                             };
-                            if scroll < 0 {
+                            if is_split {
+                                let current = v.split_row_for_stack(v.scroll);
+                                let split = if scroll < 0 {
+                                    current.saturating_sub(3)
+                                } else {
+                                    current.saturating_add(3).min(rows.saturating_sub(viewport))
+                                };
+                                if let Some(stack) = v.stack_row_for_split(split) {
+                                    v.scroll = stack;
+                                    v.selected = stack;
+                                }
+                            } else if scroll < 0 {
                                 v.scroll = v.scroll.saturating_sub(3);
+                                v.selected = v.scroll;
                             } else {
                                 v.scroll = v
                                     .scroll
                                     .saturating_add(3)
                                     .min(rows.saturating_sub(viewport));
+                                v.selected = v.scroll;
                             }
-                            v.selected = v.scroll;
                         }
                     }
                     None => {}

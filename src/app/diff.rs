@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::layout::Rect;
 
 use crate::app::{App, DiffMenu, DiffMenuItem, Tab, ViewKind};
 use crate::diff::{DiffKey, DiffListRow, DiffLoad, DiffView, FilesMode};
@@ -210,7 +211,6 @@ impl App {
         self.diff.status_root = Some(visible_root.clone());
         match result {
             Ok(mut snapshot) => {
-                let old_selected = self.diff.selected_key.clone();
                 let old_fingerprints = self
                     .diff
                     .snapshot
@@ -255,25 +255,6 @@ impl App {
                 self.diff.snapshot = Some(snapshot);
                 self.apply_diff_progress();
                 self.diff.rebuild_rows();
-                let mut cursor_restored = false;
-                if let Some(key) = old_selected {
-                    if let Some(position) = self.diff.rows.iter().position(|row| {
-                        let DiffListRow::File(index) = row else {
-                            return false;
-                        };
-                        self.diff
-                            .snapshot
-                            .as_ref()
-                            .and_then(|snapshot| snapshot.files.get(*index))
-                            .is_some_and(|file| file.key == key)
-                    }) {
-                        self.diff.cursor = position;
-                        cursor_restored = true;
-                    }
-                }
-                if cursor_restored {
-                    self.diff.ensure_cursor_visible();
-                }
                 let live_refresh = self.config.layout.diff_live_refresh;
                 let visible: std::collections::HashSet<PaneId> =
                     self.layout().leaves().into_iter().collect();
@@ -325,6 +306,7 @@ impl App {
     }
 
     pub fn diff_scroll_by(&mut self, delta: isize) {
+        self.diff.scroll_detached = true;
         if delta < 0 {
             self.diff.scroll = self.diff.scroll.saturating_sub(delta.unsigned_abs());
         } else {
@@ -392,6 +374,7 @@ impl App {
             return;
         }
         self.diff.cursor = row.min(self.diff.rows.len().saturating_sub(1));
+        self.diff.scroll_detached = false;
         self.diff.ensure_cursor_visible();
         let Some(file) = self.diff.selected_file().cloned() else {
             return;
@@ -619,20 +602,7 @@ impl App {
                 reconciled = loaded.reconciled_notes;
                 view.stack_rows = crate::diff::rows::stack_rows(&diff);
                 view.split_rows = crate::diff::rows::split_rows(&diff);
-                view.stack_indices = view
-                    .stack_rows
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(index, line)| {
-                        let old = line
-                            .old_line
-                            .map(|n| ((crate::diff::DiffSide::Old, n), index));
-                        let new = line
-                            .new_line
-                            .map(|n| ((crate::diff::DiffSide::New, n), index));
-                        old.into_iter().chain(new)
-                    })
-                    .collect();
+                view.rebuild_row_indices();
                 cache = Some(diff.clone());
                 DiffLoad::Ready(Box::new(diff))
             }
@@ -1037,18 +1007,22 @@ impl App {
         let Some(pane) = self.diff_note_drag.take() else {
             return;
         };
-        let viewport = self
+        let content = self
             .pane_content_rects
             .iter()
             .find(|(p, _)| *p == pane)
-            .map(|(_, rect)| rect.height.saturating_sub(2) as usize)
-            .unwrap_or(20);
+            .map(|(_, rect)| *rect)
+            .unwrap_or(Rect::new(0, 0, 80, 22));
+        let viewport = content.height.saturating_sub(2) as usize;
+        let marker_style = self.config.layout.diff_marker_style;
         let Some(ViewKind::Diff(view)) = self.views.get_mut(&pane) else {
             return;
         };
         view.note_selecting = false;
         view.note_draft = Some(String::new());
         view.scroll = view.selected.saturating_sub(viewport.saturating_sub(9));
+        let split = view.effective_split(content.width);
+        view.ensure_horizontal_visible(content.width, marker_style, split);
     }
 
     fn commit_diff_note(&mut self, id: PaneId, body: String) {
@@ -1476,17 +1450,7 @@ impl App {
             .map(|(_, rect)| rect.width)
             .unwrap_or(80);
         let marker_style = self.config.layout.diff_marker_style;
-        let is_split = {
-            if view.wrap {
-                false
-            } else {
-                matches!(
-                    view.preference,
-                    crate::diff::DiffLayoutPreference::Split
-                        | crate::diff::DiffLayoutPreference::Auto
-                ) && pane_width >= 96
-            }
-        };
+        let is_split = view.effective_split(pane_width);
         let next = if delta > 0 {
             rows.into_iter().find(|row| *row > view.selected)
         } else {
@@ -1523,15 +1487,7 @@ impl App {
             let Some(ViewKind::Diff(view)) = self.views.get(&id) else {
                 return false;
             };
-            if view.wrap {
-                false
-            } else {
-                matches!(
-                    view.preference,
-                    crate::diff::DiffLayoutPreference::Split
-                        | crate::diff::DiffLayoutPreference::Auto
-                ) && pane_width >= 96
-            }
+            view.effective_split(pane_width)
         };
 
         enum Deferred {
@@ -1774,16 +1730,11 @@ impl App {
                 }
                 // Recompute effective split after s/w may have changed
                 // preference or wrap.
-                let now_split = if view.wrap {
-                    false
-                } else {
-                    matches!(
-                        view.preference,
-                        crate::diff::DiffLayoutPreference::Split
-                            | crate::diff::DiffLayoutPreference::Auto
-                    ) && pane_width >= 96
-                };
-                if view.selected != old_selected || now_split != is_split {
+                let now_split = view.effective_split(pane_width);
+                if view.selected != old_selected
+                    || now_split != is_split
+                    || matches!(key.code, KeyCode::Char('h' | 'l'))
+                {
                     view.ensure_horizontal_visible(pane_width, marker_style, now_split);
                 }
             }
@@ -2356,20 +2307,8 @@ mod tests {
         view.preference = crate::diff::DiffLayoutPreference::Split;
         view.stack_rows = stack_rows;
         view.split_rows = split_rows;
-        view.stack_indices = view
-            .stack_rows
-            .iter()
-            .enumerate()
-            .flat_map(|(index, line)| {
-                let old = line
-                    .old_line
-                    .map(|n| ((crate::diff::DiffSide::Old, n), index));
-                let new = line
-                    .new_line
-                    .map(|n| ((crate::diff::DiffSide::New, n), index));
-                old.into_iter().chain(new)
-            })
-            .collect();
+        view.rebuild_row_indices();
+        view.horizontal = usize::MAX;
         view.load = DiffLoad::Ready(Box::new(file_diff));
 
         let mut terminal = Terminal::new(TestBackend::new(180, 40)).unwrap();
@@ -2431,7 +2370,9 @@ mod tests {
         assert!(matches!(
             app.views.get(&id),
             Some(ViewKind::Diff(view))
-                if view.selected == last_row && view.note_draft.as_deref() == Some("")
+                if view.selected == last_row
+                    && view.note_draft.as_deref() == Some("")
+                    && view.horizontal < view.stack_rows[last_row].text.chars().count()
         ));
 
         // A press and release on the same row is the one-line form of the same
@@ -2454,6 +2395,110 @@ mod tests {
             Some(ViewKind::Diff(view))
                 if view.note_draft.as_deref() == Some("")
                     && view.range_anchor == Some((crate::diff::DiffSide::New, 9))
+        ));
+    }
+
+    #[test]
+    fn repeated_horizontal_navigation_stays_inside_the_selected_line() {
+        let _env = crate::persist::test_env("diff-horizontal-keys");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(40, 20, tx).unwrap();
+        let key = install_snapshot(&mut app);
+        app.open_diff_view(key, OpenTarget::Tab);
+        let id = app.layout().focus;
+        app.pane_content_rects = vec![(id, Rect::new(0, 0, 20, 12))];
+        let Some(ViewKind::Diff(view)) = app.views.get_mut(&id) else {
+            panic!("native DIFF view");
+        };
+        view.preference = crate::diff::DiffLayoutPreference::Stack;
+        view.stack_rows = vec![DiffLine {
+            kind: DiffLineKind::Context,
+            old_line: Some(1),
+            new_line: Some(1),
+            text: "abcdefghijklmnopqrstuvwxyz".into(),
+        }];
+
+        for _ in 0..20 {
+            assert!(app.handle_diff_key(id, KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+        }
+        let max = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view.horizontal,
+            _ => unreachable!(),
+        };
+        assert!(max < 26, "selected line retains visible text");
+
+        for _ in 0..20 {
+            assert!(app.handle_diff_key(id, KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)));
+        }
+        assert!(matches!(
+            app.views.get(&id),
+            Some(ViewKind::Diff(view)) if view.horizontal == 0
+        ));
+    }
+
+    #[test]
+    fn split_wheel_scroll_maps_visible_rows_back_to_stack_selection() {
+        let _env = crate::persist::test_env("diff-split-wheel");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 20, tx).unwrap();
+        let key = install_snapshot(&mut app);
+        app.open_diff_view(key.clone(), OpenTarget::Tab);
+        let id = app.layout().focus;
+        let file_diff = FileDiff {
+            key,
+            status: DiffFileStatus::Modified,
+            additions: 1,
+            deletions: 2,
+            binary: false,
+            truncated: false,
+            omitted_lines: 0,
+            hunks: vec![DiffHunk {
+                id: "hunk".into(),
+                old_start: 1,
+                new_start: 1,
+                header: "@@ -1,2 +1 @@".into(),
+                lines: vec![
+                    DiffLine {
+                        kind: DiffLineKind::Deletion,
+                        old_line: Some(1),
+                        new_line: None,
+                        text: "old one".into(),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Deletion,
+                        old_line: Some(2),
+                        new_line: None,
+                        text: "old two".into(),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Addition,
+                        old_line: None,
+                        new_line: Some(1),
+                        text: "new".into(),
+                    },
+                ],
+            }],
+        };
+        let Some(ViewKind::Diff(view)) = app.views.get_mut(&id) else {
+            panic!("native DIFF view");
+        };
+        view.preference = crate::diff::DiffLayoutPreference::Split;
+        view.stack_rows = crate::diff::rows::stack_rows(&file_diff);
+        view.split_rows = crate::diff::rows::split_rows(&file_diff);
+        view.selected_side = crate::diff::DiffSide::New;
+        view.rebuild_row_indices();
+        view.load = DiffLoad::Ready(Box::new(file_diff));
+        app.pane_content_rects = vec![(id, Rect::new(0, 0, 120, 4))];
+
+        assert!(app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        })));
+        assert!(matches!(
+            app.views.get(&id),
+            Some(ViewKind::Diff(view)) if view.selected == 3 && view.scroll == 3
         ));
     }
 
