@@ -691,6 +691,26 @@ impl VtEngine for AlacrittyEngine {
             return None;
         }
         let last_column = self.term.grid().columns().checked_sub(1)?;
+        let leading_blank_cells = |line: Line, limit: usize| {
+            let row = &self.term.grid()[line];
+            (0..limit.min(last_column.saturating_add(1)))
+                .take_while(|column| {
+                    let cell = &row[Column(*column)];
+                    !cell
+                        .flags
+                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                        && (cell.c == '\0' || cell.c.is_whitespace())
+                })
+                .count()
+        };
+        // When the drag starts after a whitespace-only pane margin, treat that
+        // prefix as presentation padding. Following rows may begin earlier, so
+        // remove only blank cells and stop before their first real character.
+        // Additional indentation remains relative to the selected margin.
+        let margin = self
+            .retained_line(start_row)
+            .filter(|line| start_col > 0 && leading_blank_cells(*line, start_col) == start_col)
+            .map_or(0, |_| start_col);
         let mut output = String::new();
         let mut appended = false;
 
@@ -698,7 +718,12 @@ impl VtEngine for AlacrittyEngine {
             let Some(line) = self.retained_line(row_index) else {
                 continue;
             };
-            let left = if row_index == start_row { start_col } else { 0 }.min(last_column);
+            let left = if row_index == start_row {
+                start_col
+            } else {
+                leading_blank_cells(line, margin)
+            }
+            .min(last_column);
             let right = if row_index == end_row {
                 end_col
             } else {
@@ -1121,7 +1146,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_selection_uses_linear_reading_order_on_middle_rows() {
+    fn retained_selection_removes_only_the_selected_blank_margin() {
         let (tx, _rx) = channel();
         let mut engine = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 20));
         engine.advance(b"\x1b[H\x1b[2J - first\r\n - second\r\n - third");
@@ -1137,7 +1162,48 @@ mod tests {
             engine
                 .retained_selection_text(((rows[0], 1), (rows[2], 7)))
                 .as_deref(),
-            Some("- first\n - second\n - third")
+            Some("- first\n- second\n- third")
+        );
+    }
+
+    #[test]
+    fn retained_selection_preserves_content_and_relative_indentation() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(40, 6, tx, budget_for_rows(40, 20));
+        engine.advance(
+            b"\x1b[H\x1b[2J    first\r\n    second\r\n      nested\r\nprefix chosen\r\nstarts-left",
+        );
+        let mut rows = Vec::new();
+        engine.for_each_retained_row(&mut |row, text| {
+            if !text.is_empty() {
+                rows.push((row, text.to_string()));
+            }
+        });
+
+        let first = rows
+            .iter()
+            .find(|(_, text)| text == "    first")
+            .map(|(row, _)| *row)
+            .expect("indented prose row");
+        assert_eq!(
+            engine
+                .retained_selection_text(((first, 4), (first + 2, 11)))
+                .as_deref(),
+            Some("first\nsecond\n  nested"),
+            "the selected blank margin is removed while deeper indentation remains"
+        );
+
+        let chosen = rows
+            .iter()
+            .find(|(_, text)| text == "prefix chosen")
+            .map(|(row, _)| *row)
+            .expect("mid-line selection row");
+        assert_eq!(
+            engine
+                .retained_selection_text(((chosen, 7), (chosen + 1, 10)))
+                .as_deref(),
+            Some("chosen\nstarts-left"),
+            "text before the anchor disables margin cleanup on following rows"
         );
     }
 
