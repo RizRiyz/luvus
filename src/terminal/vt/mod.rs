@@ -161,6 +161,16 @@ pub trait VtEngine: Send {
     /// are omitted, so callers must not use string indexes as terminal columns.
     fn visible_rows(&self) -> Vec<String>;
 
+    /// Like [`Self::visible_rows`], but every terminal column contributes exactly
+    /// one `char`: a wide-character spacer cell is kept as a blank placeholder, so
+    /// a string char index equals its terminal column. Use this (never
+    /// `visible_rows`) when a screen column must address a character — e.g. the
+    /// token under a double-click, or the link under a `Ctrl`-hover. A token that
+    /// itself contains a wide char is not recoverable here (its glyph reads as one
+    /// column plus a blank); that is out of scope — callers only need alignment
+    /// for tokens sitting after wide characters.
+    fn visible_rows_aligned(&self) -> Vec<String>;
+
     /// Bounded public capture for harnesses. Implementations serialize only
     /// normalized grid text and SGR styles; raw child control sequences never
     /// cross this boundary.

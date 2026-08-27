@@ -470,6 +470,26 @@ impl VtEngine for AlacrittyEngine {
         lines
     }
 
+    fn visible_rows_aligned(&self) -> Vec<String> {
+        // Identical to `visible_rows`, except a wide-char spacer cell is kept (as
+        // its blank) instead of skipped, so each terminal column contributes one
+        // char and a string index equals a column. See the trait doc for why a
+        // caller addressing a column needs this.
+        let grid = self.term.grid();
+        let rows = grid.screen_lines();
+        let offset = grid.display_offset() as i32;
+        let mut lines = vec![String::new(); rows];
+        for indexed in grid.display_iter() {
+            let r = indexed.point.line.0 + offset;
+            if r < 0 || r as usize >= rows {
+                continue;
+            }
+            let c = indexed.cell.c;
+            lines[r as usize].push(if c == '\0' { ' ' } else { c });
+        }
+        lines
+    }
+
     fn backend_capture(
         &self,
         mode: CaptureMode,

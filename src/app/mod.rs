@@ -1464,10 +1464,12 @@ pub struct App {
     /// gesture dragged is the RESIZE-5 divider grab: moving off the cell hands
     /// the press over to the resize, releasing on it opens the link.
     pub link_press: Option<LinkPress>,
-    /// The last left press (screen cell + when), for detecting a double-click. A
-    /// second left press within the double-click window on the same cell (±1)
-    /// copies the path / URL / word under the cursor.
-    pub last_left_click: Option<((u16, u16), Instant)>,
+    /// The last left press (pane + screen cell + when), for detecting a
+    /// double-click. A second left press within the double-click window, in the
+    /// same pane's content and on the same cell (±1), copies the path / URL / word
+    /// under the cursor. Armed only for a press inside pane content, so a
+    /// title/border click never turns a following body click into a double-click.
+    pub last_left_click: Option<(PaneId, (u16, u16), Instant)>,
     /// Set between a double-click's press (which already copied) and its release,
     /// so the release keeps the highlighted token instead of re-copying it.
     pub dbl_click_release: bool,
