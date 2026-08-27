@@ -2088,6 +2088,37 @@ mod tests {
         assert_eq!(app.active_preview_view(), Some(preview_a));
     }
 
+    /// `preview_views` is shared between DIFF and FILES, and a plain FILES
+    /// click now previews. Browsing a diff and then clicking a file must
+    /// repoint that one preview at the file: matching only `ViewKind::File`
+    /// when swapping content left the diff on screen and the click looked dead.
+    #[test]
+    fn a_file_preview_takes_over_the_diff_preview_pane() {
+        let _env = crate::persist::test_env("preview-diff-then-file");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let key = install_snapshot(&mut app);
+        app.open_diff_view(key, OpenTarget::Preview);
+        let preview = app.active_preview_view().expect("a diff preview is open");
+
+        let dir = std::env::temp_dir().join(format!("luvus-pvswap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, b"body\n").unwrap();
+
+        app.open_file_view(file.clone(), OpenTarget::Preview);
+
+        assert_eq!(app.layout().focus, preview, "the same preview leaf");
+        assert_eq!(app.preview_views.len(), 1, "still one preview");
+        assert!(
+            matches!(app.views.get(&preview), Some(ViewKind::File(view)) if view.path == file),
+            "the file replaced the diff instead of being swallowed"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn preview_click_replaces_the_focused_diff_tab_in_place() {
         let _env = crate::persist::test_env("diff-focused-tab-preview");

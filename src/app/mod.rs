@@ -601,7 +601,11 @@ pub enum DiffMenuItem {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FileMenuItem {
-    /// Open in the native read-only viewer (files only).
+    /// Reuse the workspace's native read-only preview (files only). Offered
+    /// whatever `layout.file_click` is set to, so someone who clicks into tabs
+    /// can still take one quick look without adding a tab.
+    OpenPreview,
+    /// Open in the native read-only viewer, in its own tab (files only).
     OpenReadonly,
     /// Open with editor `editors[i]` (files only).
     OpenWith(usize),
@@ -619,6 +623,7 @@ impl FileMenu {
     pub fn build_items(&self) -> Vec<FileMenuItem> {
         let mut v = Vec::new();
         if !self.is_dir {
+            v.push(FileMenuItem::OpenPreview);
             v.push(FileMenuItem::OpenReadonly);
             v.extend((0..self.editors.len()).map(FileMenuItem::OpenWith));
             v.push(FileMenuItem::Divider);

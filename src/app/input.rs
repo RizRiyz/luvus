@@ -1797,14 +1797,15 @@ impl App {
             return;
         }
         // Clicking a FILES row expands/collapses a folder or opens a file (docs/38).
-        // A plain click opens the file in a full tab (the native default); Shift
-        // opens it in a pane split beside the focus.
+        // A plain click follows the `File click behavior` setting — reuse one
+        // preview (the default) or open a whole tab; Shift is the permanent
+        // read-only pane beside the focus, and never configurable.
         if let Some((i, _)) = self.file_tree_rects.iter().find(|(_, rect)| hit(*rect)) {
             let i = *i;
             let target = if m.modifiers.contains(KeyModifiers::SHIFT) {
                 crate::app::files::OpenTarget::Pane
             } else {
-                crate::app::files::OpenTarget::Tab
+                self.file_click_target()
             };
             self.file_row_activate(i, target);
             return;

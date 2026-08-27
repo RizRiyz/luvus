@@ -38,13 +38,36 @@ pane, show up on their own within a couple of seconds.
 
 | Gesture | What happens |
 |---|---|
-| **Click** | opens using your default (see below) |
+| **Click** | **previews** the file by default, or opens a tab — see [What a click does](#what-a-click-does) |
 | **Shift+click** | always opens the **read-only viewer** in a pane beside the focus |
-| **Right-click** | pick per file: read-only, or any editor you have installed |
+| **Right-click** | **Open Preview**, read-only in a tab, or any editor you have installed |
 
 Shift+click is the fixed "just let me look at this" gesture. It stays read-only
 no matter what you set as the default, which is what you want when you are
 reading a file next to a running agent.
+
+## What a click does
+
+**Settings → General → "File click behavior"** has two choices:
+
+| Choice | What a plain click does |
+|---|---|
+| **Preview** (default) | reuses **one** read-only preview pane in the workspace |
+| **Open in tab** | gives the file a whole tab, using **Open files with** |
+
+Preview is the browsing gesture. Click `a.rs` and the preview shows `a.rs`;
+click `b.rs` and the *same* pane shows `b.rs`; click `a.rs` again and it comes
+back. Reading through twenty files leaves you with one pane, not twenty tabs.
+A preview click always uses Luvus's own read-only viewer — it never starts,
+replaces, or quits an editor, so an agent working next door is never disturbed.
+
+Choose **Open in tab** for the behavior clicks had before this setting existed:
+every plain click opens a tab and follows your **Open files with** choice, which
+means it can launch your terminal editor. Clicking a file that already has a tab
+focuses that tab.
+
+**Open Preview** is on the right-click menu in either mode, so one quick look is
+always available without changing the setting.
 
 ## The read-only viewer
 
@@ -77,10 +100,11 @@ An editor opens in a **new tab** at full width, running as a real terminal
 program. The tab is titled after the editor, and when you quit the editor the
 tab closes itself.
 
-To set what a plain click does, go to **Settings → General → "Open files with"**
-and step through the choices with `‹ ›`: **read-only** (the default) or any
-detected editor. To override it for one file, right-click that file and pick
-from the menu.
+To set which viewer opens a file, go to **Settings → General → "Open files
+with"** and step through the choices with `‹ ›`: **read-only** (the default) or
+any detected editor. That choice applies when a click opens a **tab** — in
+Preview mode a click always uses the built-in viewer. To override it for one
+file, right-click that file and pick from the menu.
 
 If you set an editor and later uninstall it, luvus falls back to the read-only
 viewer rather than doing nothing.

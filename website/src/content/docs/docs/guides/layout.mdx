@@ -208,10 +208,11 @@ follows it. If you would rather not hold a modifier, **right-click** and pick
 
 ### Files
 
-A file path opens **in luvus**, not in some other app. It goes through exactly the
-same path as clicking the file in the FILES tree, so it respects your
-**Settings → General → Open files with** choice: the built-in read-only viewer by
-default, or your terminal editor if you set one.
+A file path opens **in luvus**, not in some other app. It opens in a tab and
+respects your **Settings → General → Open files with** choice: the built-in
+read-only viewer by default, or your terminal editor if you set one. (This is
+the tab gesture regardless of **File click behavior**, which governs clicks in
+the FILES tree.)
 
 **A path only underlines if the file is really there.** Paths are resolved against
 that pane's working directory, so `src/main.rs` means what it means to the shell

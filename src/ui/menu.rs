@@ -479,6 +479,7 @@ pub(super) fn draw_diff_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
 /// workspace/pane menus — and editor names are proper nouns anyway).
 fn file_label(it: FileMenuItem, editors: &[(String, String)]) -> String {
     match it {
+        FileMenuItem::OpenPreview => "Open Preview".to_string(),
         FileMenuItem::OpenReadonly => "Open (Read-Only)".to_string(),
         FileMenuItem::OpenWith(i) => editors
             .get(i)
@@ -614,6 +615,7 @@ mod label_case_tests {
             rows.push(agent_label(it, cat, none));
         }
         for it in [
+            FileMenuItem::OpenPreview,
             FileMenuItem::OpenReadonly,
             FileMenuItem::OpenWith(0),
             FileMenuItem::NewFile,

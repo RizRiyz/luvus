@@ -208,10 +208,22 @@ pub struct LayoutConfig {
     pub new_pane_to_workspace_root: bool,
     /// Default action when a file is opened from the FILES tree (docs/38):
     /// `"readonly"` (the native viewer) or an editor run-command such as `"vim"`
-    /// / `"emacs -nw"`. A plain click uses this; Shift+click always reads it
-    /// read-only, and the right-click menu picks per file.
+    /// / `"emacs -nw"`. Consulted whenever a file opens in a *tab* — see
+    /// `file_click` for whether a plain click does that; Shift+click always
+    /// reads it read-only, and the right-click menu picks per file.
     #[serde(default = "default_file_open")]
     pub file_open: String,
+    /// What a plain left click on a FILES row does (docs/38): `"preview"` (the
+    /// default) reuses one native read-only preview pane in the active
+    /// workspace, VS Code style; `"tab"` opens a whole tab through
+    /// `layout.file_open`, which is what a click did before this setting
+    /// existed and the only mode that may launch an editor PTY. Deliberately
+    /// separate from `file_open`: that setting answers *which viewer*, this one
+    /// answers *where a click puts it*. Stored as a string rather than an enum
+    /// so a value written by a newer Luvus cannot fail the whole config's
+    /// deserialization — an unrecognized value reads back as the default.
+    #[serde(default = "default_file_click")]
+    pub file_click: String,
     /// Retained scrollback budget per pane. This is the user-facing memory dial:
     /// 10 MiB by default, regardless of how many panes are open. The Alacritty
     /// adapter derives a conservative row limit from it until the Ghostty engine
@@ -371,6 +383,13 @@ pub const FILE_OPEN_READONLY: &str = "readonly";
 fn default_file_open() -> String {
     FILE_OPEN_READONLY.to_string()
 }
+/// `layout.file_click`: reuse one preview pane for a plain click.
+pub const FILE_CLICK_PREVIEW: &str = "preview";
+/// `layout.file_click`: a plain click opens a whole tab, honoring `file_open`.
+pub const FILE_CLICK_TAB: &str = "tab";
+fn default_file_click() -> String {
+    FILE_CLICK_PREVIEW.to_string()
+}
 fn default_sidebar_width() -> u16 {
     SIDEBAR_WIDTH_DEFAULT
 }
@@ -421,6 +440,7 @@ impl Default for LayoutConfig {
             resume_in_new_workspace: true,
             new_pane_to_workspace_root: false,
             file_open: default_file_open(),
+            file_click: default_file_click(),
             scrollback_bytes: Some(SCROLLBACK_BYTES_DEFAULT),
             scrollback: default_scrollback(),
             files_show_hidden: true,
@@ -606,6 +626,12 @@ mod tests {
         // An old config written before this field still loads, at the new default.
         let old: Config = serde_json::from_str(r#"{"layout":{"col_gap":1}}"#).unwrap();
         assert_eq!(old.scrollback_bytes(), SCROLLBACK_BYTES_DEFAULT);
+        // Likewise a config written before `file_click`: an existing user gets
+        // the new preview default without their `file_open` choice moving.
+        assert_eq!(old.layout.file_click, FILE_CLICK_PREVIEW);
+        assert_eq!(c.layout.file_click, FILE_CLICK_PREVIEW);
+        let picked: Config = serde_json::from_str(r#"{"layout":{"file_click":"tab"}}"#).unwrap();
+        assert_eq!(picked.layout.file_click, FILE_CLICK_TAB);
         let old_custom: Config = serde_json::from_str(r#"{"layout":{"scrollback":5000}}"#).unwrap();
         assert_eq!(old_custom.scrollback_bytes(), SCROLLBACK_BYTES_DEFAULT);
         let legacy_mobile: Config =

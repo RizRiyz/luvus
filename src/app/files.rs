@@ -239,8 +239,22 @@ impl App {
         crate::config::save(&self.config);
     }
 
-    /// A FILES row was clicked: expand/collapse a folder, or open a file in a
-    /// **preview** pane (VS Code style — one reused pane while browsing).
+    /// What a plain left click on a FILES row does, from `layout.file_click`
+    /// (docs/38). `Preview` is the default: one reused native read-only pane,
+    /// VS Code style. `Tab` is what a click did before this setting existed
+    /// and the *only* mode that consults `layout.file_open`, so it is also the
+    /// only mode that can launch an editor PTY. An unrecognized value — a config
+    /// touched by a newer Luvus — reads back as the default rather than leaving
+    /// a click doing nothing.
+    pub fn file_click_target(&self) -> OpenTarget {
+        match self.config.layout.file_click.trim() {
+            crate::config::FILE_CLICK_TAB => OpenTarget::Tab,
+            _ => OpenTarget::Preview,
+        }
+    }
+
+    /// A FILES row was clicked: expand/collapse a folder, or open a file at
+    /// `target` — the click behavior for a plain click, `Pane` for Shift+click.
     pub fn file_row_activate(&mut self, index: usize, target: OpenTarget) {
         let Some(row) = self.file_tree.visible_rows().get(index).cloned() else {
             return;
@@ -252,10 +266,11 @@ impl App {
             // re-root/refresh, not a user click).
             self.load_pending_dirs();
         } else if target == OpenTarget::Tab {
-            // A plain click honors the configured default (read-only or an editor).
+            // "Open in tab" honors the configured viewer (read-only or an editor).
             self.open_file_at(row.path, None);
         } else {
-            // Shift+click (Pane) / preview always opens the native read-only view.
+            // Shift+click (Pane) and Preview stay inside Luvus: the native
+            // read-only view, never an external editor process.
             self.open_file_view(row.path, target);
         }
     }
@@ -448,6 +463,11 @@ impl App {
         };
         match item {
             // Open actions target the clicked file (never a folder).
+            // Offered whatever `layout.file_click` says, so the preview is always
+            // one right-click away even for someone who clicks into tabs.
+            FileMenuItem::OpenPreview => {
+                self.open_file_view(menu.path.clone(), OpenTarget::Preview)
+            }
             FileMenuItem::OpenReadonly => self.open_file_view(menu.path.clone(), OpenTarget::Tab),
             FileMenuItem::OpenWith(i) => {
                 if let Some((cmd, _)) = menu.editors.get(i).cloned() {
@@ -622,10 +642,12 @@ impl App {
     /// Open `path` in a native file view (docs/38 FILE-3). `Preview` reuses the
     /// one preview pane in the active workspace; `Pane` splits a fresh permanent
     /// pane; `Tab` opens a new tab. The file is read on a worker thread and
-    /// applied via `FileRead`.
+    /// applied via `FileRead`. No target ever spawns a process — an external
+    /// editor only ever comes from `open_file_at`.
     pub fn open_file_view(&mut self, path: PathBuf, target: OpenTarget) {
         self.remember_file(&path);
-        // Already open? Focus that view instead of opening a duplicate.
+        // Already open? Focus that view instead of opening a duplicate. This is
+        // also what makes clicking the same row twice a no-op in Preview mode.
         if let Some(id) = self.view_showing(&path) {
             self.focus_pane_global(id);
             return;
@@ -642,7 +664,22 @@ impl App {
         self.create_file_view(path, target);
     }
 
-    fn create_file_view(&mut self, path: PathBuf, target: OpenTarget) {
+    fn create_file_view(&mut self, path: PathBuf, mut target: OpenTarget) {
+        // Remember what was *asked* for: a preview redirected to its own tab is
+        // still the workspace's preview, so the next click reuses it instead of
+        // stacking a tab per file.
+        let preview = target == OpenTarget::Preview;
+        // A Git/Board/Mission tab is a whole-tab dashboard over an invisible
+        // placeholder leaf: splitting it would wedge a file view into half a
+        // dashboard. The first preview opened from one gets its own tab and
+        // becomes the workspace's preview from then on. Mirrors the same guard
+        // in `open_diff_view`, which now matters for FILES too because Preview
+        // is what a plain click does.
+        if target == OpenTarget::Preview
+            && (self.active_is_git() || self.active_is_orch() || self.active_is_mission())
+        {
+            target = OpenTarget::Tab;
+        }
         let id = PaneId::alloc();
         self.views
             .insert(id, ViewKind::File(FileView::new(path.clone())));
@@ -657,19 +694,22 @@ impl App {
                 self.layout_mut().focus = id;
             }
         }
-        if target == OpenTarget::Preview {
+        if preview {
             self.preview_views.insert(id);
         }
         self.schedule_file_read(id, path);
         self.mode = Mode::Normal;
     }
 
-    /// Point an existing view leaf at a different file and re-read it.
+    /// Point an existing view leaf at a different file and re-read it. The leaf
+    /// is *replaced*, not patched: `preview_views` is shared with DIFF, so the
+    /// reused preview may currently hold a `ViewKind::Diff` (browse a diff, then
+    /// click a file). Matching only `File` there would leave the diff on screen
+    /// and make the click look dead.
     fn set_view_file(&mut self, id: PaneId, path: PathBuf) {
         self.remember_file(&path);
-        if let Some(ViewKind::File(v)) = self.views.get_mut(&id) {
-            *v = FileView::new(path.clone());
-        }
+        self.views
+            .insert(id, ViewKind::File(FileView::new(path.clone())));
         self.schedule_file_read(id, path);
     }
 
@@ -984,6 +1024,356 @@ mod tests {
         // Present on PATH → returned as the editor command.
         app.editors = vec![("vim".to_string(), "vim".to_string())];
         assert_eq!(app.file_open_editor().as_deref(), Some("vim"));
+    }
+
+    // ── File click behavior (issue #152) ─────────────────────────────────────
+
+    /// A FILES dock over a real directory holding `names`, tree already read —
+    /// the shape every click test needs before it can click a row.
+    fn click_tree_app(
+        tag: &str,
+        names: &[&str],
+    ) -> (App, std::sync::mpsc::Receiver<AppEvent>, PathBuf) {
+        let root = std::env::temp_dir().join(format!("luvus-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for name in names {
+            std::fs::write(root.join(name), b"body\n").unwrap();
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.workspaces[app.active_ws].cwd = root.clone();
+        app.sidebars.left.docks.push(DockKind::Files);
+        app.ensure_file_tree();
+        pump_until_dir_read(&rx, &mut app, &root);
+        (app, rx, root)
+    }
+
+    fn row_index(app: &mut App, name: &str) -> usize {
+        app.file_tree
+            .visible_rows()
+            .iter()
+            .position(|r| r.name == name)
+            .unwrap_or_else(|| panic!("{name} has a visible row"))
+    }
+
+    /// Activate a row the way a plain left click does: resolve the configured
+    /// click behavior first, exactly as the mouse path in `input.rs` does.
+    fn plain_click(app: &mut App, name: &str) {
+        let idx = row_index(app, name);
+        let target = app.file_click_target();
+        app.file_row_activate(idx, target);
+    }
+
+    /// The path a native file-view leaf is currently showing.
+    fn shown(app: &App, id: PaneId) -> PathBuf {
+        match app.views.get(&id) {
+            Some(ViewKind::File(v)) => v.path.clone(),
+            _ => panic!("the focused leaf is not a native file view"),
+        }
+    }
+
+    /// The setting decides where a plain click puts the file, through the real
+    /// mouse path: Preview (the default) reuses a pane inside the current tab,
+    /// "open in tab" gives the file a tab of its own.
+    #[test]
+    fn a_plain_click_follows_the_file_click_behavior_setting() {
+        use crate::event::AppEvent;
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let _env = crate::persist::test_env("file-click-routing");
+        let (mut app, _rx, root) = click_tree_app("clickroute", &["a.txt", "b.txt"]);
+
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let click = |app: &mut App, term: &mut Terminal<TestBackend>, name: &str| {
+            term.draw(|f| crate::ui::render(f, app)).unwrap();
+            let (_, rect) = app
+                .file_tree_rects
+                .iter()
+                .find(|(i, _)| app.file_tree.visible_rows()[*i].name == name)
+                .cloned()
+                .unwrap_or_else(|| panic!("{name} has a clickable rect"));
+            app.handle_event(AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x + 3,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            }));
+        };
+
+        // Default: Preview. The file lands in a reused pane beside the focus,
+        // not in a tab of its own.
+        assert_eq!(
+            app.config.layout.file_click,
+            crate::config::FILE_CLICK_PREVIEW,
+            "preview is the shipped default"
+        );
+        let tabs_before = app.workspaces[app.active_ws].tabs.len();
+        click(&mut app, &mut term, "a.txt");
+        let preview = app.layout().focus;
+        assert_eq!(shown(&app, preview), root.join("a.txt"));
+        assert!(
+            app.preview_views.contains(&preview),
+            "a plain click opened the reusable preview"
+        );
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before,
+            "preview does not add a tab"
+        );
+
+        // Switched to "open in tab": the same gesture opens a whole tab, and
+        // that tab is not the reusable preview.
+        app.config.layout.file_click = crate::config::FILE_CLICK_TAB.to_string();
+        click(&mut app, &mut term, "b.txt");
+        let tab_view = app.layout().focus;
+        assert_eq!(shown(&app, tab_view), root.join("b.txt"));
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before + 1,
+            "open in tab adds a tab"
+        );
+        assert!(
+            !app.preview_views.contains(&tab_view),
+            "a tab is permanent, never the reused preview"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The behavior the issue spells out: A → B → C all land in the *same*
+    /// preview, and clicking A again brings that one preview back to A.
+    #[test]
+    fn preview_reuses_one_pane_across_files_and_back_again() {
+        let _env = crate::persist::test_env("file-click-reuse");
+        let (mut app, _rx, root) = click_tree_app("clickreuse", &["a.txt", "b.txt", "c.txt"]);
+        let tabs_before = app.workspaces[app.active_ws].tabs.len();
+
+        plain_click(&mut app, "a.txt");
+        let preview = app.layout().focus;
+        assert_eq!(shown(&app, preview), root.join("a.txt"));
+
+        for name in ["b.txt", "c.txt", "a.txt"] {
+            plain_click(&mut app, name);
+            assert_eq!(
+                app.layout().focus,
+                preview,
+                "{name} reused the same preview leaf"
+            );
+            assert_eq!(shown(&app, preview), root.join(name), "{name} is on screen");
+            assert_eq!(app.views.len(), 1, "still exactly one native view");
+        }
+        assert_eq!(app.preview_views.len(), 1, "one preview, not one per file");
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before,
+            "browsing three files added no tabs"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Clicking the same row over and over is idempotent in Preview mode: the
+    /// preview is already showing that file, so nothing is created or replaced.
+    #[test]
+    fn repeated_preview_clicks_on_one_file_add_nothing() {
+        let _env = crate::persist::test_env("file-click-repeat");
+        let (mut app, _rx, root) = click_tree_app("clickrepeat", &["a.txt"]);
+        let tabs_before = app.workspaces[app.active_ws].tabs.len();
+        let panes_before = app.panes.len();
+
+        plain_click(&mut app, "a.txt");
+        let preview = app.layout().focus;
+        for _ in 0..3 {
+            plain_click(&mut app, "a.txt");
+        }
+        assert_eq!(app.layout().focus, preview, "the same leaf stays focused");
+        assert_eq!(app.views.len(), 1, "no second view accumulated");
+        assert_eq!(app.preview_views.len(), 1, "no second preview accumulated");
+        assert_eq!(app.workspaces[app.active_ws].tabs.len(), tabs_before);
+        assert_eq!(app.panes.len(), panes_before, "and no PTY was spawned");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// "Open in tab" reuses the tab a file already has instead of stacking a
+    /// second one, and focusing it switches back to that tab.
+    #[test]
+    fn open_in_tab_focuses_the_tab_a_file_already_has() {
+        let _env = crate::persist::test_env("file-click-existing-tab");
+        let (mut app, _rx, root) = click_tree_app("clicktab", &["a.txt", "b.txt"]);
+        app.config.layout.file_click = crate::config::FILE_CLICK_TAB.to_string();
+        let tabs_before = app.workspaces[app.active_ws].tabs.len();
+
+        plain_click(&mut app, "a.txt");
+        let a_tab = app.workspaces[app.active_ws].active_tab;
+        let a_view = app.layout().focus;
+        plain_click(&mut app, "b.txt");
+        assert_ne!(
+            app.workspaces[app.active_ws].active_tab, a_tab,
+            "b got its own tab"
+        );
+        assert_eq!(app.workspaces[app.active_ws].tabs.len(), tabs_before + 2);
+
+        plain_click(&mut app, "a.txt");
+        assert_eq!(
+            app.workspaces[app.active_ws].active_tab, a_tab,
+            "clicking a again returned to its tab"
+        );
+        assert_eq!(app.layout().focus, a_view, "and to its existing view leaf");
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before + 2,
+            "no duplicate tab was opened"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The issue's hard constraint: with an external editor configured, a plain
+    /// click in Preview mode must not launch, replace, terminate, or talk to an
+    /// editor PTY. It opens Luvus's own read-only viewer and nothing else. The
+    /// second half proves the editor really was configured, so the first half
+    /// cannot pass by accident.
+    #[test]
+    fn preview_never_launches_the_configured_editor() {
+        let _env = crate::persist::test_env("file-click-no-editor");
+        let (mut app, _rx, root) = click_tree_app("clicknoed", &["a.txt", "b.txt"]);
+        // `cat` stands in for an editor, exactly as in the editor-open test.
+        app.editors = vec![("cat".to_string(), "cat".to_string())];
+        app.config.layout.file_open = "cat".to_string();
+        let panes_before = app.panes.len();
+
+        plain_click(&mut app, "a.txt");
+        let preview = app.layout().focus;
+        assert_eq!(
+            app.panes.len(),
+            panes_before,
+            "Preview spawned no editor PTY"
+        );
+        assert!(
+            app.editor_files.is_empty(),
+            "and tracked no pane as an editor"
+        );
+        assert!(
+            matches!(app.views.get(&preview), Some(ViewKind::File(_))),
+            "the click opened the native read-only viewer"
+        );
+        assert!(app.preview_views.contains(&preview), "in the one preview");
+
+        // Same file, same session, "open in tab": *now* the editor runs. Without
+        // this the assertions above would also hold for an unconfigured editor.
+        app.config.layout.file_click = crate::config::FILE_CLICK_TAB.to_string();
+        plain_click(&mut app, "b.txt");
+        let editor = app.layout().focus;
+        assert_eq!(
+            app.panes.len(),
+            panes_before + 1,
+            "open in tab honors Open files with and runs the editor"
+        );
+        assert_eq!(
+            app.editor_files.get(&editor).map(|p| p.as_path()),
+            Some(root.join("b.txt").as_path())
+        );
+        app.close_pane(editor);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `Open Preview` is on the FILES context menu whatever the click behavior
+    /// is set to, and it opens the reusable preview rather than a tab.
+    #[test]
+    fn the_files_menu_always_offers_open_preview() {
+        let _env = crate::persist::test_env("file-menu-preview");
+        let (mut app, _rx, root) = click_tree_app("menuprev", &["a.txt"]);
+
+        for mode in [
+            crate::config::FILE_CLICK_PREVIEW,
+            crate::config::FILE_CLICK_TAB,
+        ] {
+            app.config.layout.file_click = mode.to_string();
+            let idx = row_index(&mut app, "a.txt");
+            app.open_file_menu(idx, 1, 1);
+            let items = app.file_menu.as_ref().expect("menu opened").build_items();
+            assert!(
+                items.first() == Some(&FileMenuItem::OpenPreview),
+                "Open Preview leads the file menu in {mode} mode"
+            );
+        }
+
+        // And it really previews: one reused leaf, no new tab.
+        let tabs_before = app.workspaces[app.active_ws].tabs.len();
+        app.file_menu_action_pub(FileMenuItem::OpenPreview);
+        let preview = app.layout().focus;
+        assert_eq!(shown(&app, preview), root.join("a.txt"));
+        assert!(app.preview_views.contains(&preview));
+        assert_eq!(app.workspaces[app.active_ws].tabs.len(), tabs_before);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A Git/Board/Mission tab is a whole-tab dashboard over an invisible
+    /// placeholder leaf. Now that a plain click previews, clicking a file while
+    /// one is active must not wedge the viewer into half a dashboard: the
+    /// preview gets its own tab, and stays the workspace's one preview.
+    #[test]
+    fn previewing_from_a_dashboard_tab_opens_a_tab_and_still_reuses_it() {
+        let _env = crate::persist::test_env("file-click-dashboard");
+        let (mut app, _rx, root) = click_tree_app("clickdash", &["a.txt", "b.txt"]);
+        app.open_git_tab(app.active_ws);
+        assert!(app.active_is_git(), "a dashboard tab is active");
+        let tabs_before = app.workspaces[app.active_ws].tabs.len();
+
+        plain_click(&mut app, "a.txt");
+        let preview = app.layout().focus;
+        assert_eq!(shown(&app, preview), root.join("a.txt"));
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before + 1,
+            "the first preview from a dashboard takes a tab of its own"
+        );
+        assert!(
+            !app.active_is_git(),
+            "and the dashboard was left intact, not split"
+        );
+        assert!(
+            app.preview_views.contains(&preview),
+            "it is still the workspace preview"
+        );
+
+        // Which means the next file reuses it rather than stacking tabs.
+        plain_click(&mut app, "b.txt");
+        assert_eq!(app.layout().focus, preview, "reused the same leaf");
+        assert_eq!(shown(&app, preview), root.join("b.txt"));
+        assert_eq!(app.workspaces[app.active_ws].tabs.len(), tabs_before + 1);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A config written before `layout.file_click` existed still loads, and an
+    /// unrecognized value (a config touched by a newer Luvus) reads as the
+    /// default instead of leaving a click doing nothing.
+    #[test]
+    fn missing_or_unknown_file_click_reads_as_preview() {
+        let _env = crate::persist::test_env("file-click-migrate");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        let old: crate::config::Config =
+            serde_json::from_str(r#"{"layout":{"file_open":"vim"}}"#).unwrap();
+        assert_eq!(
+            old.layout.file_click,
+            crate::config::FILE_CLICK_PREVIEW,
+            "an older config gains the new default"
+        );
+        assert_eq!(old.layout.file_open, "vim", "without losing its own choice");
+
+        app.config.layout.file_click = "somethingelse".to_string();
+        assert!(
+            app.file_click_target() == OpenTarget::Preview,
+            "an unknown value degrades to the default"
+        );
+        app.config.layout.file_click = crate::config::FILE_CLICK_TAB.to_string();
+        assert!(app.file_click_target() == OpenTarget::Tab);
     }
 
     fn buffer_text(term: &Terminal<TestBackend>) -> String {
@@ -1708,6 +2098,8 @@ mod tests {
     /// End-to-end through the real mouse path: click a file row to open it, close
     /// its tab, then click the row again — it must reopen. Reproduces the reported
     /// "won't open the second time" via `handle_event(Mouse)`, not direct calls.
+    /// Pinned to "open in tab", because that is the mode this bug lives in: a
+    /// preview never gets a tab of its own to close.
     #[test]
     fn clicking_a_file_reopens_after_its_tab_is_closed() {
         use crate::event::AppEvent;
@@ -1720,6 +2112,7 @@ mod tests {
 
         let (tx, rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
+        app.config.layout.file_click = crate::config::FILE_CLICK_TAB.to_string();
         app.workspaces[app.active_ws].cwd = root.clone();
         app.sidebars.left.docks.push(DockKind::Files);
         app.ensure_file_tree();

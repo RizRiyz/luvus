@@ -752,12 +752,14 @@ fn draw_content(
             }
         }
         SettingsTab::General => {
-            // The file-open chooser, then a blank gap + `── Notifications ──`
-            // divider and the sound rows, mirroring the Layout tab's Docks section.
+            // The two file choosers (which viewer, then what a click does), then
+            // a blank gap + `── Notifications ──` divider and the sound rows,
+            // mirroring the Layout tab's Docks section.
             let rows = app.general_rows();
             let sec = app.general_section_start();
             let n = &app.config.notifications;
             let file_open = app.file_open_label();
+            let file_click = app.file_click_label();
             let mut y = area.y;
             for (i, row) in rows.iter().enumerate() {
                 if i == sec {
@@ -790,6 +792,20 @@ fn draw_content(
                             cursor == i,
                             cat.set_file_open,
                             file_open.clone(),
+                            t,
+                            &mut arrows,
+                        );
+                        ctls.push((i, r));
+                    }
+                    GeneralRow::FileClick => {
+                        let r = slider_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor == i,
+                            cat.set_file_click,
+                            file_click.clone(),
                             t,
                             &mut arrows,
                         );

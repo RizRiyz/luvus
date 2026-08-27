@@ -26,6 +26,9 @@ pub struct Catalog {
     #[cfg_attr(not(windows), allow(dead_code))]
     pub shell_command_prompt: &'static str,
     pub read_only: &'static str,
+    /// `layout.file_click` values, shown in the General tab's slider.
+    pub click_preview: &'static str,
+    pub click_tab: &'static str,
     pub diff_auto: &'static str,
     pub diff_split: &'static str,
     pub diff_stack: &'static str,
@@ -90,6 +93,8 @@ pub static EN: Catalog = Catalog {
     shell_default: "Default",
     shell_command_prompt: "Command Prompt",
     read_only: "read-only",
+    click_preview: "Preview",
+    click_tab: "Open in tab",
     diff_auto: "auto",
     diff_split: "split",
     diff_stack: "stack",
@@ -233,7 +238,7 @@ pub static EN: Catalog = Catalog {
 };
 
 pub static ES: Catalog = Catalog {
-    remove: "eliminar", install: "Instalar", shell: "Shell", shell_default: "Predeterminado", shell_command_prompt: "Símbolo del sistema", read_only: "solo lectura",
+    remove: "eliminar", install: "Instalar", shell: "Shell", shell_default: "Predeterminado", shell_command_prompt: "Símbolo del sistema", read_only: "solo lectura", click_preview: "Vista previa", click_tab: "Abrir en pestaña",
     diff_auto: "automático", diff_split: "dividido", diff_stack: "apilado", diff_symbols: "símbolos", diff_bars: "barras", diff_both: "ambos", diff_theme: "tema", diff_red_green: "rojo + verde",
     shift_default: "predeterminado", shift_newline: "nueva línea", preset_default: "luvus (predeterminado)", preset_function: "sin Ctrl (F12)", preset_tmux: "tmux", preset_custom: "Personalizado",
     keys_intro_prefix: "Pulsa el prefijo ({prefix}) y luego una tecla de abajo. Los modificadores de comando son opcionales.",
@@ -259,7 +264,7 @@ pub static ES: Catalog = Catalog {
 };
 
 pub static PT: Catalog = Catalog {
-    remove: "remover", install: "Instalar", shell: "Shell", shell_default: "Padrão", shell_command_prompt: "Prompt de Comando", read_only: "somente leitura",
+    remove: "remover", install: "Instalar", shell: "Shell", shell_default: "Padrão", shell_command_prompt: "Prompt de Comando", read_only: "somente leitura", click_preview: "Pré-visualização", click_tab: "Abrir em aba",
     diff_auto: "automático", diff_split: "dividido", diff_stack: "empilhado", diff_symbols: "símbolos", diff_bars: "barras", diff_both: "ambos", diff_theme: "tema", diff_red_green: "vermelho + verde",
     shift_default: "padrão", shift_newline: "nova linha", preset_default: "luvus (padrão)", preset_function: "sem Ctrl (F12)", preset_tmux: "tmux", preset_custom: "Personalizado",
     keys_intro_prefix: "Pressione o prefixo ({prefix}) e depois uma tecla abaixo. Os modificadores de comando são opcionais.", keys_intro_move: "Mova com as setas ou h j k l. {prefix} ? mostra o guia de teclas.", keys_intro_edit: "Selecione uma linha. Enter reatribui, Backspace redefine e Esc cancela.",
@@ -283,7 +288,7 @@ pub static PT: Catalog = Catalog {
 };
 
 pub static FR: Catalog = Catalog {
-    remove: "supprimer", install: "Installer", shell: "Shell", shell_default: "Par défaut", shell_command_prompt: "Invite de commandes", read_only: "lecture seule",
+    remove: "supprimer", install: "Installer", shell: "Shell", shell_default: "Par défaut", shell_command_prompt: "Invite de commandes", read_only: "lecture seule", click_preview: "Aperçu", click_tab: "Ouvrir dans un onglet",
     diff_auto: "automatique", diff_split: "séparé", diff_stack: "empilé", diff_symbols: "symboles", diff_bars: "barres", diff_both: "les deux", diff_theme: "thème", diff_red_green: "rouge + vert",
     shift_default: "par défaut", shift_newline: "nouvelle ligne", preset_default: "luvus (par défaut)", preset_function: "sans Ctrl (F12)", preset_tmux: "tmux", preset_custom: "Personnalisé",
     keys_intro_prefix: "Appuyez sur le préfixe ({prefix}), puis sur une touche ci-dessous. Les modificateurs sont facultatifs.", keys_intro_move: "Déplacez-vous avec les flèches ou h j k l. {prefix} ? affiche l'aide des touches.", keys_intro_edit: "Sélectionnez une ligne. Entrée réaffecte, Retour arrière réinitialise et Échap annule.",
@@ -307,7 +312,7 @@ pub static FR: Catalog = Catalog {
 };
 
 pub static DE: Catalog = Catalog {
-    remove: "entfernen", install: "Installieren", shell: "Shell", shell_default: "Standard", shell_command_prompt: "Eingabeaufforderung", read_only: "schreibgeschützt",
+    remove: "entfernen", install: "Installieren", shell: "Shell", shell_default: "Standard", shell_command_prompt: "Eingabeaufforderung", read_only: "schreibgeschützt", click_preview: "Vorschau", click_tab: "In Tab öffnen",
     diff_auto: "automatisch", diff_split: "geteilt", diff_stack: "gestapelt", diff_symbols: "Symbole", diff_bars: "Balken", diff_both: "beides", diff_theme: "Theme", diff_red_green: "rot + grün",
     shift_default: "Standard", shift_newline: "neue Zeile", preset_default: "luvus (Standard)", preset_function: "ohne Ctrl (F12)", preset_tmux: "tmux", preset_custom: "Benutzerdefiniert",
     keys_intro_prefix: "Drücke den Präfix ({prefix}) und danach eine Taste unten. Befehlsmodifikatoren sind optional.", keys_intro_move: "Bewege dich mit Pfeilen oder h j k l. {prefix} ? zeigt die Tastenhilfe.", keys_intro_edit: "Wähle eine Zeile. Eingabe bindet neu, Rücktaste setzt zurück und Esc bricht ab.",
@@ -337,6 +342,8 @@ pub static ID: Catalog = Catalog {
     shell_default: "Bawaan",
     shell_command_prompt: "Command Prompt",
     read_only: "hanya baca",
+    click_preview: "Pratinjau",
+    click_tab: "Buka di tab",
     diff_auto: "otomatis",
     diff_split: "terbagi",
     diff_stack: "bertumpuk",
@@ -486,6 +493,8 @@ pub static ZH: Catalog = Catalog {
     shell_default: "默认",
     shell_command_prompt: "命令提示符",
     read_only: "只读",
+    click_preview: "预览",
+    click_tab: "在标签页中打开",
     diff_auto: "自动",
     diff_split: "分栏",
     diff_stack: "堆叠",
@@ -628,6 +637,8 @@ pub static JA: Catalog = Catalog {
     shell_default: "デフォルト",
     shell_command_prompt: "コマンドプロンプト",
     read_only: "読み取り専用",
+    click_preview: "プレビュー",
+    click_tab: "タブで開く",
     diff_auto: "自動",
     diff_split: "分割",
     diff_stack: "積み重ね",
