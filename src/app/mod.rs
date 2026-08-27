@@ -10915,8 +10915,9 @@ mod tests {
             .engine
             .lock()
             .expect("engine")
-            .advance("\x1b[H\x1b[2J你好 world again".as_bytes());
+            .advance("\x1b[H\x1b[2J你好 world again\r\na bb ccc".as_bytes());
         let mut target_row = None;
+        let mut narrow_row = None;
         app.panes
             .get(&pane)
             .expect("pane")
@@ -10924,8 +10925,12 @@ mod tests {
                 if text == "你好 world again" {
                     target_row = Some(row);
                 }
+                if text == "a bb ccc" {
+                    narrow_row = Some(row);
+                }
             });
         let row = target_row.expect("fixture row");
+        let narrow = narrow_row.expect("single-cell fixture row");
         let start = CopyMode {
             pane,
             anchor: (row, 0),
@@ -10982,6 +10987,30 @@ mod tests {
             app.copy_mode.expect("copy mode").cursor,
             stepwise,
             "12e lands where twelve e presses land"
+        );
+
+        // A one-cell word leaves the cursor already sitting on its own word end,
+        // so `e` has nowhere to stop inside it and moves to the next word's end.
+        // Vim does the same: on `a bb ccc` from column 0, `e` lands on 3 and then
+        // 7, never on 0. Staying put would make `e` a dead key on short words.
+        app.copy_mode = Some(CopyMode {
+            pane,
+            anchor: (narrow, 0),
+            cursor: (narrow, 0),
+            saved_scroll: 0,
+            pending_count: 0,
+        });
+        send(&mut app, 'e');
+        assert_eq!(
+            app.copy_mode.expect("copy mode").cursor,
+            (narrow, 3),
+            "e off a one-cell word ends the next word, like vim"
+        );
+        send(&mut app, 'e');
+        assert_eq!(
+            app.copy_mode.expect("copy mode").cursor,
+            (narrow, 7),
+            "the following e keeps advancing by whole words"
         );
     }
 
