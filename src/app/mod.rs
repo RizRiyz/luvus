@@ -1078,8 +1078,9 @@ impl PaneStatus {
 pub enum LinkTarget {
     /// Hand to the client's browser.
     Url(String),
-    /// Open in luvus's own viewer or editor, exactly like a FILES click (docs/38),
-    /// jumping to `line` when the reference carried one.
+    /// Open in luvus's own viewer or editor in a tab (docs/38), jumping to
+    /// `line` when the reference carried one. Always a tab: `File click
+    /// behavior` governs the FILES tree, not path activation.
     File { path: PathBuf, line: Option<u32> },
 }
 

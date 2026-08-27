@@ -453,10 +453,14 @@ impl App {
                         | Some(LayoutRow::Dock(_))
                         | Some(LayoutRow::Bar(_))
                 ),
-                // The file-open chooser only moves via its `‹ ›` arrows.
-                Some(SettingsTab::General) => {
-                    self.general_rows().get(i) == Some(&GeneralRow::FileOpen)
-                }
+                // Both file choosers only move via their `‹ ›` arrows: a click
+                // on the row body selects it. Missing one here is silent — the
+                // click falls through to `settings_activate`, which steps the
+                // value and persists it, so selecting a row would change it.
+                Some(SettingsTab::General) => matches!(
+                    self.general_rows().get(i),
+                    Some(GeneralRow::FileOpen) | Some(GeneralRow::FileClick)
+                ),
                 // Number/enum module settings likewise only move via `‹ ›`.
                 Some(SettingsTab::Modules) => self.module_row_is_slider(i),
                 _ => false,
@@ -2030,6 +2034,91 @@ mod tests {
         app.settings_adjust(open, 1);
         assert_eq!(app.config.layout.file_open, "vim");
         assert_eq!(app.config.layout.file_click, config::FILE_CLICK_PREVIEW);
+    }
+
+    /// A click on a `‹ ›` slider's row *body* selects it and nothing more —
+    /// only the arrows step the value. Both General-tab file choosers are
+    /// sliders, and a row missing from `handle_settings_click`'s slider list
+    /// fails silently: the click falls through to `settings_activate`, which
+    /// cycles the setting and writes it to disk. So a user reaching to select
+    /// the row would change their setting instead.
+    #[test]
+    fn clicking_a_file_chooser_row_body_selects_it_without_changing_it() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("settings-slider-body-click");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(100, 30, tx).unwrap();
+        app.editors = vec![("vim".into(), "vim".into())];
+        app.open_settings();
+        if let Some(ui) = app.settings.as_mut() {
+            ui.tab = SettingsTab::General;
+            // Park the cursor elsewhere so "the cursor moved" is a real signal.
+            ui.cursor = 0;
+        }
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        for row in [GeneralRow::FileClick, GeneralRow::FileOpen] {
+            let i = app
+                .general_rows()
+                .iter()
+                .position(|r| *r == row)
+                .unwrap_or_else(|| panic!("{row:?} is on the General tab"));
+            let rect = app
+                .settings_ctl_rects
+                .iter()
+                .find(|(index, _)| *index == i)
+                .map(|(_, rect)| *rect)
+                .unwrap_or_else(|| panic!("{row:?} has a control rect"));
+            let before = (
+                app.config.layout.file_click.clone(),
+                app.config.layout.file_open.clone(),
+            );
+
+            // The row body: two cells in from the left, far from the right-aligned
+            // `‹ ›` arrows.
+            app.handle_settings_click(rect.x + 2, rect.y);
+
+            assert_eq!(
+                app.settings.as_ref().unwrap().cursor,
+                i,
+                "{row:?} body click moves the cursor to it"
+            );
+            assert_eq!(
+                (
+                    app.config.layout.file_click.clone(),
+                    app.config.layout.file_open.clone()
+                ),
+                before,
+                "{row:?} body click must not step any chooser"
+            );
+            assert_eq!(
+                crate::config::load().layout.file_click,
+                before.0,
+                "{row:?} body click must not persist a change either"
+            );
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        }
+
+        // The arrows still work: `›` on the click-behavior row steps it.
+        let i = app
+            .general_rows()
+            .iter()
+            .position(|r| *r == GeneralRow::FileClick)
+            .expect("the click-behavior row");
+        let (_, _, arrow) = app
+            .settings_arrow_rects
+            .iter()
+            .find(|(index, delta, _)| *index == i && *delta == 1)
+            .copied()
+            .expect("the click-behavior row has a `›` arrow");
+        app.handle_settings_click(arrow.x, arrow.y);
+        assert_eq!(
+            app.config.layout.file_click,
+            config::FILE_CLICK_TAB,
+            "the arrow is what steps the value"
+        );
     }
 
     /// The General tab's Shift+Enter chooser cycles through the known sequences

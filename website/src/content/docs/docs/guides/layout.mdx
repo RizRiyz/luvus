@@ -203,16 +203,16 @@ follows it. If you would rather not hold a modifier, **right-click** and pick
 | `https://luvus.dev/docs` | opens in your browser |
 | `luvus.dev/docs` | same, with `https://` filled in |
 | `localhost:3000` | opens your dev server, over `http` |
-| `src/main.rs` | opens in a luvus tab, like clicking it in FILES |
+| `src/main.rs` | opens in a luvus tab, using **Open files with** |
 | `src/main.rs:42` | opens in a tab, scrolled to line 42 |
 
 ### Files
 
-A file path opens **in luvus**, not in some other app. It opens in a tab and
-respects your **Settings → General → Open files with** choice: the built-in
-read-only viewer by default, or your terminal editor if you set one. (This is
-the tab gesture regardless of **File click behavior**, which governs clicks in
-the FILES tree.)
+A file path opens **in luvus**, not in some other app. It always opens in a
+**tab**, and respects your **Settings → General → Open files with** choice: the
+built-in read-only viewer by default, or your terminal editor if you set one.
+**File click behavior** does not apply here — that setting governs clicks in the
+FILES tree, which preview by default.
 
 **A path only underlines if the file is really there.** Paths are resolved against
 that pane's working directory, so `src/main.rs` means what it means to the shell

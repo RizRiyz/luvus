@@ -275,9 +275,11 @@ impl App {
         }
     }
 
-    /// Open `path` in a new tab the way a plain FILES click does (docs/38): the
-    /// configured default, read-only viewer or a terminal editor. Shared by the
-    /// FILES tree and by `Ctrl`+clicking a path printed in a pane (docs/58).
+    /// Open `path` in a new **tab** (docs/38), through the configured viewer:
+    /// read-only or a terminal editor. This is the "open in tab" click
+    /// behavior, the fuzzy finder's action, and what `Ctrl`+clicking a path
+    /// printed in a pane always does (docs/58) — a *preview* click never comes
+    /// through here, which is why it can never reach an editor.
     ///
     /// `line` scrolls the built-in viewer to that line. It survives the async read
     /// because `FileView::apply` keeps `scroll` and clamps it to the file's length.
@@ -318,8 +320,8 @@ impl App {
 
     /// The configured default open action (docs/38), resolved to an editor
     /// run-command — or `None` for the read-only viewer. A configured editor
-    /// that is no longer installed degrades to read-only, so a plain click never
-    /// silently does nothing.
+    /// that is no longer installed degrades to read-only, so opening a file
+    /// never silently does nothing. Only consulted on the tab path.
     fn file_open_editor(&self) -> Option<String> {
         let choice = self.config.layout.file_open.trim();
         if choice.is_empty() || choice == crate::config::FILE_OPEN_READONLY {

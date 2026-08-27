@@ -1800,7 +1800,7 @@ mod tests {
         assert_eq!(
             app.workspaces[0].tabs.len(),
             tabs_before + 1,
-            "the read-only default opens a full file tab, like a plain FILES click"
+            "the read-only default opens a full file tab, never a preview"
         );
         assert!(app
             .views
