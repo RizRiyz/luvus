@@ -4496,9 +4496,9 @@ mod link_click_tests {
     }
 
     #[test]
-    fn codex_copy_drops_its_one_cell_transcript_gutter() {
+    fn codex_copy_drops_its_one_cell_transcript_gutter_on_one_row() {
         let _env = crate::persist::test_env("codex-copy-gutter");
-        let (mut app, _term, _) = fixture_showing("  hello\r\n  world", 0);
+        let (mut app, _term, _) = fixture_showing("  hello", 0);
         let pane = app.layout().focus;
         app.status.get_mut(&pane).expect("pane status").agent = "codex".into();
         let content = app
@@ -4507,18 +4507,19 @@ mod link_click_tests {
             .find(|(id, _)| *id == pane)
             .map(|(_, rect)| *rect)
             .expect("pane content rect");
-        // The drag starts one cell in, so this verifies Codex detection rather
-        // than the generic pane-edge case above.
+        // The drag starts one cell inside the pane and selects one row, so this
+        // verifies Codex gutter cleanup without relying on rectangular
+        // multiline selection.
         app.selection = Some(crate::app::Selection {
             pane,
             content,
             anchor: (content.x + 1, content.y),
-            cursor: (content.x + 6, content.y + 1),
+            cursor: (content.x + 6, content.y),
             retained: None,
             scrolled: false,
             dragging: false,
         });
 
-        assert_eq!(app.selection_text().as_deref(), Some("hello\nworld"));
+        assert_eq!(app.selection_text().as_deref(), Some("hello"));
     }
 }
