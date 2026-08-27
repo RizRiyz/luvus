@@ -1,0 +1,164 @@
+# Pull request area labels derived from changed files. Keep these rules focused:
+# broad files such as src/app/mod.rs intentionally do not label every subsystem.
+
+"area: agents":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/agent.rs"
+          - "src/agent/**"
+          - "src/detect.rs"
+          - "src/integration.rs"
+          - "src/skill.rs"
+          - "skills/luvus/**"
+          - "plugins/luvus/skills/luvus/**"
+          - "website/public/agent-readme.md"
+          - "website/src/content/docs/docs/guides/agents.mdx"
+          - "website/src/content/docs/docs/guides/agent-messaging.mdx"
+          - "website/src/content/docs/docs/reference/agents.mdx"
+
+"area: server":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/ipc/**"
+          - "src/logging/**"
+          - "src/persist.rs"
+          - "src/session.rs"
+
+"area: terminal":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/terminal/**"
+          - "vendor/alacritty_terminal/**"
+          - "vendor/vte/**"
+          - "website/src/content/docs/docs/guides/scrollback.mdx"
+          - "website/src/content/docs/docs/reference/terminal-backend.mdx"
+
+"area: panes and tabs":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/layout.rs"
+          - "src/ui/panes.rs"
+          - "src/ui/tabbar.rs"
+          - "website/src/content/docs/docs/guides/layout.mdx"
+
+"area: workspaces":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/ui/sidebar.rs"
+          - "src/app/switcher.rs"
+          - "src/ui/switcher.rs"
+
+"area: input":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/app/input.rs"
+          - "src/app/keys.rs"
+          - "website/src/content/docs/docs/reference/keybindings.mdx"
+
+"area: files":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/files/**"
+          - "src/app/files.rs"
+          - "src/ui/files.rs"
+          - "website/src/content/docs/docs/guides/files.mdx"
+
+"area: git and diff":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/git/**"
+          - "src/diff/**"
+          - "src/app/git.rs"
+          - "src/app/diff.rs"
+          - "src/ui/git.rs"
+          - "src/ui/diff.rs"
+          - "website/src/content/docs/docs/guides/git.mdx"
+          - "website/src/content/docs/docs/guides/diff.mdx"
+
+"area: mission control":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/mission/**"
+          - "src/app/mission.rs"
+          - "src/ui/mission.rs"
+
+"area: settings":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/config.rs"
+          - "src/app/settings.rs"
+          - "src/ui/settings.rs"
+          - "website/src/content/docs/docs/guides/settings.mdx"
+          - "website/src/content/docs/docs/reference/configuration.mdx"
+
+"area: automation":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/cli.rs"
+          - "src/api/**"
+          - "src/app/dispatch.rs"
+          - "protocol/uhp/**"
+          - "examples/uhp/**"
+          - "plugins/luvus/**"
+          - "website/src/content/docs/docs/guides/codex-plugin.mdx"
+          - "website/src/content/docs/docs/guides/scripting.mdx"
+          - "website/src/content/docs/docs/guides/uhp.mdx"
+          - "website/src/content/docs/docs/reference/api.mdx"
+          - "website/src/content/docs/docs/reference/cli.mdx"
+          - "website/src/content/docs/docs/reference/uhp.mdx"
+
+"area: modules":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/module/**"
+          - "MODULE-GUIDE.md"
+          - "website/src/content/docs/docs/extend/**"
+
+"area: orchestration":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/orch/**"
+          - "src/app/board.rs"
+          - "src/ui/board.rs"
+          - "website/src/content/docs/docs/guides/orchestration.mdx"
+          - "website/src/content/docs/docs/guides/worktrees.mdx"
+
+"area: bars":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/bar/**"
+          - "website/src/content/docs/docs/guides/bar.mdx"
+
+"area: themes":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/theme/**"
+          - "src/ui/theme.rs"
+          - "community/themes/**"
+          - "website/src/content/docs/docs/guides/themes.mdx"
+
+"area: localization":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/i18n/**"
+
+"area: website":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "website/**"
+
+"area: packaging":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "Cargo.toml"
+          - "Cargo.lock"
+          - "flake.nix"
+          - "flake.lock"
+          - "install.sh"
+          - ".github/workflows/release.yml"
+
+"platform: windows":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/platform/windows.rs"
+          - "**/*.ps1"
