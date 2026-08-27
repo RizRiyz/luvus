@@ -76,6 +76,8 @@ jobs:
   binary-size:
     name: macos binary size
     runs-on: macos-14
+    permissions:
+      contents: read
     env:
       SQLITE3_LIB_DIR: /usr/lib
     steps:

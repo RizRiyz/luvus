@@ -73,7 +73,9 @@ jobs:
           archive: luvus-$tag-$target
           checksum: sha256
           locked: true
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # Build and package first; publish only after the size gate passes.
+          dry-run: true
+          dry-run-intended: true
       - name: Report binary size
         shell: bash
         run: |
@@ -89,6 +91,25 @@ jobs:
             --target "${{ matrix.target }}" \
             --binary "$binary" \
             --archive "$archive"
+      - name: Upload validated archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARCHIVE_TAR: ${{ steps.package.outputs.tar }}
+          ARCHIVE_ZIP: ${{ steps.package.outputs.zip }}
+          CHECKSUM_SHA256: ${{ steps.package.outputs.sha256 }}
+        run: |
+          archive="$ARCHIVE_TAR"
+          if [[ -z "$archive" ]]; then
+            archive="$ARCHIVE_ZIP"
+          fi
+          if [[ -z "$archive" || -z "$CHECKSUM_SHA256" ]]; then
+            echo "release package outputs are missing" >&2
+            exit 1
+          fi
+          gh release upload "$GITHUB_REF_NAME" \
+            "$archive" "$CHECKSUM_SHA256" \
+            --repo "$GITHUB_REPOSITORY" --clobber
 
   # Build native Linux packages (.deb + .rpm) for both arches and attach them to
   # the Release. luvus is a static musl binary, so each package just drops the
