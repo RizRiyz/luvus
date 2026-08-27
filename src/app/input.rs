@@ -4,6 +4,33 @@
 use super::*;
 use crate::files::view_text_w;
 
+/// Keep the command overlay useful when a just-spawned child has not appeared
+/// in the platform process snapshot yet. The OS tree remains authoritative for
+/// every process it reports; the pane's launch command only fills a missing
+/// depth-zero root.
+fn ensure_process_tree_root(
+    pid: u32,
+    command: &str,
+    mut processes: Vec<crate::platform::ProcInfo>,
+) -> Vec<crate::platform::ProcInfo> {
+    if pid != 0
+        && !command.trim().is_empty()
+        && !processes
+            .iter()
+            .any(|process| process.pid == pid && process.depth == 0)
+    {
+        processes.insert(
+            0,
+            crate::platform::ProcInfo {
+                pid,
+                depth: 0,
+                command: command.to_string(),
+            },
+        );
+    }
+    processes
+}
+
 fn copy_word_forward(
     row_count: usize,
     mut row_layout: impl FnMut(usize) -> Option<crate::terminal::vt::RetainedRowLayout>,
@@ -2338,7 +2365,7 @@ impl App {
         let cwd = pane.cwd.clone();
         let pid = pane.child_pid.load(std::sync::atomic::Ordering::SeqCst);
         let procs = if pid != 0 {
-            crate::platform::process_tree(pid)
+            ensure_process_tree_root(pid, &pane.command, crate::platform::process_tree(pid))
         } else {
             Vec::new()
         };
@@ -3062,6 +3089,30 @@ fn csi_tilde_key(code: u8, modifiers: KeyModifiers) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_inspect_fills_only_a_missing_process_root() {
+        let descendant = crate::platform::ProcInfo {
+            pid: 43,
+            depth: 1,
+            command: "worker".into(),
+        };
+        let processes = ensure_process_tree_root(42, "shell --login", vec![descendant.clone()]);
+        assert_eq!(processes.len(), 2);
+        assert_eq!(processes[0].pid, 42);
+        assert_eq!(processes[0].depth, 0);
+        assert_eq!(processes[0].command, "shell --login");
+        assert_eq!(processes[1], descendant);
+
+        let existing_root = crate::platform::ProcInfo {
+            pid: 42,
+            depth: 0,
+            command: "os-reported shell --login".into(),
+        };
+        let processes = ensure_process_tree_root(42, "fallback", vec![existing_root.clone()]);
+        assert_eq!(processes, vec![existing_root]);
+        assert!(ensure_process_tree_root(0, "pending", Vec::new()).is_empty());
+    }
 
     #[test]
     fn text_modal_suppresses_hover_from_covered_bar_geometry() {
