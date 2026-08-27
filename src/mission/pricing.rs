@@ -58,7 +58,7 @@ fn parse_generation(part: &str) -> Option<u32> {
 /// model ids. Before Claude 4.6, most ids put the family before the version and
 /// append a date, while Claude 3.5 Haiku used `claude-3-5-haiku-<date>`.
 fn claude_model(model: &str) -> Option<ClaudeModel<'_>> {
-    if matches!(model, "opus" | "sonnet" | "haiku") {
+    if matches!(model, "fable" | "opus" | "sonnet" | "haiku") {
         return Some(ClaudeModel::FamilyAlias { family: model });
     }
 
@@ -109,6 +109,7 @@ pub fn model_price(model: &str) -> Option<(f64, f64, f64)> {
     let m = model.to_lowercase();
     let p = match claude_model(&m) {
         Some(ClaudeModel::MythosPreview) => (25.0, 125.0, 2.5),
+        Some(ClaudeModel::FamilyAlias { family: "fable" }) => (10.0, 50.0, 1.0),
         Some(ClaudeModel::FamilyAlias { family: "opus" }) => (5.0, 25.0, 0.5),
         Some(ClaudeModel::FamilyAlias { family: "sonnet" }) => (2.0, 10.0, 0.2),
         Some(ClaudeModel::FamilyAlias { family: "haiku" }) => (1.0, 5.0, 0.1),
@@ -155,6 +156,7 @@ pub fn model_window(model: &str) -> u64 {
             "opus" | "sonnet" => version >= (4, 6),
             _ => false,
         },
+        Some(ClaudeModel::FamilyAlias { family: "fable" }) => true,
         Some(ClaudeModel::FamilyAlias { .. }) => false,
         None => false,
     };
@@ -307,15 +309,19 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_family_aliases_use_current_rates_and_conservative_windows() {
-        for (alias, expected_price) in [
-            ("opus", (5.0, 25.0, 0.5)),
-            ("sonnet", (2.0, 10.0, 0.2)),
-            ("haiku", (1.0, 5.0, 0.1)),
+    fn anthropic_family_aliases_use_current_rates_and_expected_windows() {
+        for (alias, expected_price, expected_window, expected_fraction) in [
+            ("fable", (10.0, 50.0, 1.0), 1_000_000, 0.1),
+            ("opus", (5.0, 25.0, 0.5), 200_000, 0.5),
+            ("sonnet", (2.0, 10.0, 0.2), 200_000, 0.5),
+            ("haiku", (1.0, 5.0, 0.1), 200_000, 0.5),
         ] {
             assert_eq!(model_price(alias), Some(expected_price), "{alias}");
-            assert_eq!(model_window(alias), 200_000, "{alias}");
-            assert!((context_frac(alias, 100_000) - 0.5).abs() < 1e-6, "{alias}");
+            assert_eq!(model_window(alias), expected_window, "{alias}");
+            assert!(
+                (context_frac(alias, 100_000) - expected_fraction).abs() < 1e-6,
+                "{alias}"
+            );
             assert!(
                 (context_frac(alias, 250_000) - 0.25).abs() < 1e-6,
                 "{alias}"
@@ -327,7 +333,10 @@ mod tests {
     fn anthropic_aliases_and_suffixes_are_strict() {
         for malformed in [
             "claude-opus",
+            "claude-fable",
             "pricing-for-opus-estimate",
+            "pricing-for-fable-estimate",
+            "best",
             "claude-opus-4-1-foo",
             "claude-mythos-preview-extra",
             "claude-mythos-preview-latest",
