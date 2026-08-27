@@ -735,13 +735,49 @@ fn fx_usage(dir: &Path) -> Option<AgentUsage> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::time::Instant;
 
     fn tmp(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("luvus-agent-usage-{tag}-{}", std::process::id()));
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-state/agent-usage")
+            .join(format!("{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn create_opencode_schema(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                directory TEXT NOT NULL,
+                model TEXT,
+                cost REAL NOT NULL,
+                tokens_input INTEGER NOT NULL,
+                tokens_output INTEGER NOT NULL,
+                tokens_reasoning INTEGER NOT NULL,
+                tokens_cache_read INTEGER NOT NULL,
+                tokens_cache_write INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+    }
+
+    fn insert_opencode_session(
+        conn: &Connection,
+        id: &str,
+        directory: &str,
+        model: &str,
+        cost: f64,
+        tokens: [i64; 4],
+    ) {
+        conn.execute(
+            "INSERT INTO session VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8)",
+            rusqlite::params![
+                id, directory, model, cost, tokens[0], tokens[1], tokens[2], tokens[3]
+            ],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -851,37 +887,18 @@ mod tests {
         let dir = tmp("opencode");
         let db = dir.join("opencode.db");
         let conn = Connection::open(&db).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE session (
-                id TEXT PRIMARY KEY,
-                directory TEXT NOT NULL,
-                model TEXT,
-                cost REAL NOT NULL,
-                tokens_input INTEGER NOT NULL,
-                tokens_output INTEGER NOT NULL,
-                tokens_reasoning INTEGER NOT NULL,
-                tokens_cache_read INTEGER NOT NULL,
-                tokens_cache_write INTEGER NOT NULL
-            );",
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO session VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            rusqlite::params![
-                "ses-1",
-                "/work/app",
-                r#"{"id":"anthropic/claude-sonnet-4"}"#,
-                0.42,
-                300i64,
-                40i64,
-                5i64,
-                600i64,
-                10i64
-            ],
-        )
-        .unwrap();
+        create_opencode_schema(&conn);
+        insert_opencode_session(
+            &conn,
+            "ses-1",
+            "/work/app",
+            r#"{"id":"anthropic/claude-sonnet-4"}"#,
+            0.42,
+            [300, 40, 600, 10],
+        );
         drop(conn);
 
+        let before = fs::read(&db).unwrap();
         let usage = opencode_usage(&db, "ses-1", Path::new("/work/app")).unwrap();
         assert_eq!(
             (usage.tokens_in, usage.tokens_out, usage.cache),
@@ -890,6 +907,203 @@ mod tests {
         assert_eq!(usage.model, "anthropic/claude-sonnet-4");
         assert_eq!(usage.cost, Some(0.42));
         assert!(opencode_usage(&db, "ses-1", Path::new("/work/other")).is_none());
+        assert!(opencode_usage(&db, "missing", Path::new("/work/app")).is_none());
+        assert_eq!(
+            fs::read(&db).unwrap(),
+            before,
+            "read-only query changed the database"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn opencode_accepts_plain_models_estimates_zero_cost_and_clamps_tokens() {
+        let dir = tmp("opencode-values");
+        let db = dir.join("opencode.db");
+        let conn = Connection::open(&db).unwrap();
+        create_opencode_schema(&conn);
+        insert_opencode_session(
+            &conn,
+            "plain",
+            "/work/plain",
+            "claude-sonnet-4",
+            0.0,
+            [300, 40, 600, 10],
+        );
+        insert_opencode_session(
+            &conn,
+            "negative",
+            "/work/negative",
+            "unknown-model",
+            0.0,
+            [-1, -2, -3, -4],
+        );
+        drop(conn);
+
+        let usage = opencode_usage(&db, "plain", Path::new("/work/plain")).unwrap();
+        assert_eq!(usage.model, "claude-sonnet-4");
+        assert_eq!(
+            (usage.tokens_in, usage.tokens_out, usage.cache),
+            (300, 40, 610)
+        );
+        let expected = estimate_cost("claude-sonnet-4", 300, 40, 610).unwrap();
+        assert_eq!(usage.cost, Some(expected));
+
+        let usage = opencode_usage(&db, "negative", Path::new("/work/negative")).unwrap();
+        assert_eq!((usage.tokens_in, usage.tokens_out, usage.cache), (0, 0, 0));
+        assert_eq!(usage.cost, None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn opencode_missing_incompatible_and_corrupt_databases_are_non_fatal() {
+        let dir = tmp("opencode-invalid");
+        let missing = dir.join("missing.db");
+        assert!(opencode_usage(&missing, "ses-1", Path::new("/work/app")).is_none());
+        assert!(
+            !missing.exists(),
+            "read-only open created a missing database"
+        );
+
+        let incompatible = dir.join("incompatible.db");
+        drop(Connection::open(&incompatible).unwrap());
+        assert!(opencode_usage(&incompatible, "ses-1", Path::new("/work/app")).is_none());
+
+        let corrupt = dir.join("corrupt.db");
+        fs::write(&corrupt, b"not a sqlite database").unwrap();
+        assert!(opencode_usage(&corrupt, "ses-1", Path::new("/work/app")).is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn opencode_reads_committed_wal_data_without_mutating_rows_or_schema() {
+        let dir = tmp("opencode-wal");
+        let db = dir.join("opencode.db");
+        let writer = Connection::open(&db).unwrap();
+        assert_eq!(
+            writer
+                .query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "wal"
+        );
+        create_opencode_schema(&writer);
+        insert_opencode_session(
+            &writer,
+            "ses-wal",
+            "/work/wal",
+            "gpt-5",
+            0.25,
+            [100, 20, 30, 4],
+        );
+        writer
+            .execute(
+                "UPDATE session SET tokens_input = 250, tokens_output = 45 WHERE id = 'ses-wal'",
+                [],
+            )
+            .unwrap();
+        let wal = db.with_extension("db-wal");
+        let shared_memory = db.with_extension("db-shm");
+        let db_before = fs::read(&db).unwrap();
+        let wal_before = fs::read(&wal).unwrap();
+        let shared_memory_len = fs::metadata(&shared_memory).unwrap().len();
+
+        let usage = opencode_usage(&db, "ses-wal", Path::new("/work/wal")).unwrap();
+        assert_eq!(
+            (usage.tokens_in, usage.tokens_out, usage.cache),
+            (250, 45, 34)
+        );
+        assert_eq!(usage.cost, Some(0.25));
+        let stored: (i64, i64) = writer
+            .query_row(
+                "SELECT tokens_input, tokens_output FROM session WHERE id = 'ses-wal'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, (250, 45));
+        let schema_rows: i64 = writer
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'session' AND type = 'table'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema_rows, 1);
+        assert_eq!(fs::read(&db).unwrap(), db_before);
+        assert_eq!(fs::read(&wal).unwrap(), wal_before);
+        assert_eq!(
+            fs::metadata(&shared_memory).unwrap().len(),
+            shared_memory_len
+        );
+        drop(writer);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn opencode_locked_database_wait_is_bounded_and_recovers() {
+        let dir = tmp("opencode-locked");
+        let db = dir.join("opencode.db");
+        let writer = Connection::open(&db).unwrap();
+        create_opencode_schema(&writer);
+        insert_opencode_session(
+            &writer,
+            "ses-locked",
+            "/work/locked",
+            "gpt-5",
+            0.5,
+            [100, 20, 30, 4],
+        );
+        writer
+            .execute_batch("BEGIN EXCLUSIVE; UPDATE session SET tokens_input = 200;")
+            .unwrap();
+
+        let started = Instant::now();
+        assert!(opencode_usage(&db, "ses-locked", Path::new("/work/locked")).is_none());
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "locked read exceeded its bounded wait: {:?}",
+            started.elapsed()
+        );
+
+        writer.execute_batch("ROLLBACK").unwrap();
+        let usage = opencode_usage(&db, "ses-locked", Path::new("/work/locked")).unwrap();
+        assert_eq!(usage.tokens_in, 100);
+        drop(writer);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn opencode_thousand_warm_reads_keep_values_stable() {
+        let dir = tmp("opencode-warm-reads");
+        let db = dir.join("opencode.db");
+        let conn = Connection::open(&db).unwrap();
+        create_opencode_schema(&conn);
+        insert_opencode_session(
+            &conn,
+            "ses-bench",
+            "/work/bench",
+            "gpt-5",
+            0.5,
+            [100, 20, 30, 4],
+        );
+        drop(conn);
+
+        let mut elapsed = Vec::with_capacity(1_000);
+        for _ in 0..1_000 {
+            let started = Instant::now();
+            let usage = opencode_usage(&db, "ses-bench", Path::new("/work/bench")).unwrap();
+            elapsed.push(started.elapsed());
+            assert_eq!(
+                (usage.tokens_in, usage.tokens_out, usage.cache),
+                (100, 20, 34)
+            );
+        }
+        elapsed.sort_unstable();
+        eprintln!(
+            "OpenCode 1,000 warm reads: median {:?}, total {:?}",
+            elapsed[elapsed.len() / 2],
+            elapsed.iter().sum::<Duration>()
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 

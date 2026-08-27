@@ -886,14 +886,18 @@ fn render_client(
         client.render_buf.reset();
     }
 
-    let (cursor, animation_mask) = {
+    let (cursor, cursor_visible, animation_mask) = {
         let mut target = ui::RenderTarget::new(&mut client.render_buf, area);
         if interactive {
             ui::render_into(&mut target, app);
         } else {
             ui::render_projection(&mut target, app);
         }
-        (target.cursor(), target.animation_mask())
+        (
+            target.cursor(),
+            target.cursor_visible(),
+            target.animation_mask(),
+        )
     };
     client.animation_mask = animation_mask;
 
@@ -905,15 +909,20 @@ fn render_client(
                 || previous.height != client.render_buf.area.height
         });
     let message = if full {
-        client.last_frame = Some(protocol::frame_from_buffer(&client.render_buf, cursor));
+        client.last_frame = Some(protocol::frame_from_buffer(
+            &client.render_buf,
+            cursor,
+            cursor_visible,
+        ));
         Some(ServerMessage::Frame(
             client.last_frame.as_ref().expect("frame stored").clone(),
         ))
     } else {
         let previous = client.last_frame.as_mut().expect("frame baseline exists");
-        let cursor_moved = previous.cursor != cursor;
+        let cursor_moved = previous.cursor != cursor || previous.cursor_visible != cursor_visible;
         let runs = protocol::diff_buffer(previous, &client.render_buf);
         previous.cursor = cursor;
+        previous.cursor_visible = cursor_visible;
         if runs.is_empty() && !cursor_moved {
             None
         } else {
@@ -922,6 +931,7 @@ fn render_client(
                 height: previous.height,
                 runs,
                 cursor,
+                cursor_visible,
             }))
         }
     };
@@ -1313,6 +1323,7 @@ mod tests {
                 height: 32,
                 runs: Vec::new(),
                 cursor: None,
+                cursor_visible: false,
             })
         };
 
@@ -1362,6 +1373,7 @@ mod tests {
                 height: 1,
                 runs: Vec::new(),
                 cursor: None,
+                cursor_visible: false,
             }))
             .is_ok());
         assert!(client.send_control(ServerMessage::Detach).is_ok());

@@ -7,33 +7,165 @@
 /// near this line are flagged "compacts soon". Matches the orch gate.
 pub const COMPACT_AT: f32 = 0.85;
 
-/// Rough USD price per **million** tokens as `(input, output, cache)` for `model`
-/// (substring match on the model id). `None` for an unknown model, so its cost is
-/// shown as "—" rather than a wrong number. Estimates only; overridable via config
-/// (MC-5). Kept deliberately conservative and easy to eyeball.
+enum ClaudeModel<'a> {
+    Versioned {
+        family: &'a str,
+        version: (u32, u32),
+    },
+    FamilyAlias {
+        family: &'a str,
+    },
+    MythosPreview,
+}
+
+fn is_snapshot(part: &str) -> bool {
+    part.len() == 8 && part.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn valid_model_suffix(parts: &[&str]) -> bool {
+    let parts = if parts.first().is_some_and(|part| is_snapshot(part)) {
+        &parts[1..]
+    } else {
+        parts
+    };
+    match parts {
+        [] => true,
+        [provider] => provider.strip_prefix('v').is_some_and(|version| {
+            !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit())
+        }),
+        [provider, revision] => {
+            provider.strip_prefix('v').is_some_and(|version| {
+                !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit())
+            }) && revision.bytes().all(|byte| byte.is_ascii_digit())
+        }
+        _ => false,
+    }
+}
+
+fn valid_versioned_model_suffix(parts: &[&str]) -> bool {
+    parts == ["latest"] || valid_model_suffix(parts)
+}
+
+fn parse_generation(part: &str) -> Option<u32> {
+    if is_snapshot(part) {
+        None
+    } else {
+        part.parse().ok()
+    }
+}
+
+/// Parse a Claude family and `(major, minor)` version from first-party or cloud
+/// model ids. Before Claude 4.6, most ids put the family before the version and
+/// append a date, while Claude 3.5 Haiku used `claude-3-5-haiku-<date>`.
+fn claude_model(model: &str) -> Option<ClaudeModel<'_>> {
+    if matches!(model, "fable" | "opus" | "sonnet" | "haiku") {
+        return Some(ClaudeModel::FamilyAlias { family: model });
+    }
+
+    let parts: Vec<_> = model
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect();
+    let claude_index = parts.iter().rposition(|part| *part == "claude")?;
+    if claude_index != 0 && parts.get(claude_index - 1) != Some(&"anthropic") {
+        return None;
+    }
+    let model = &parts[claude_index + 1..];
+    if model.starts_with(&["mythos", "preview"]) {
+        return valid_model_suffix(&model[2..]).then_some(ClaudeModel::MythosPreview);
+    }
+
+    let (family, version, suffix) =
+        if let Some(major) = model.first().and_then(|part| parse_generation(part)) {
+            // Claude 3.5 Haiku and other Claude 3 ids put the version first.
+            if let Some(minor) = model.get(1).and_then(|part| parse_generation(part)) {
+                (*model.get(2)?, (major, minor), &model[3..])
+            } else {
+                let family = *model.get(1)?;
+                if is_snapshot(family) {
+                    return None;
+                }
+                (family, (major, 0), &model[2..])
+            }
+        } else {
+            let family = *model.first()?;
+            let major = parse_generation(model.get(1)?)?;
+            if let Some(minor) = model.get(2).and_then(|part| parse_generation(part)) {
+                (family, (major, minor), &model[3..])
+            } else {
+                (family, (major, 0), &model[2..])
+            }
+        };
+    valid_versioned_model_suffix(suffix).then_some(ClaudeModel::Versioned { family, version })
+}
+
+/// Rough USD price per **million** tokens as `(input, output, cache)` for `model`.
+/// `None` for an unknown model, so its cost is shown as "—" rather than a wrong
+/// number. Estimates only; overridable via config (MC-5). Kept deliberately
+/// conservative and easy to eyeball. Anthropic rows track the current first-party
+/// API rates (2026-08): Fable/Mythos 5 at $10/$50, Opus 4.5–5 at $5/$25,
+/// Haiku 4.5 at $1/$5, with cache at the standard 0.1× input read rate.
 pub fn model_price(model: &str) -> Option<(f64, f64, f64)> {
     let m = model.to_lowercase();
-    let p = if m.contains("opus") {
-        (15.0, 75.0, 1.5)
-    } else if m.contains("sonnet") {
-        (3.0, 15.0, 0.3)
-    } else if m.contains("haiku") {
-        (0.8, 4.0, 0.08)
-    } else if m.contains("gpt-4o") || m.contains("gpt-4.1") || m.contains("gpt-5") {
-        (2.5, 10.0, 1.25)
-    } else if m.contains("o1") || m.contains("o3") {
-        (15.0, 60.0, 7.5)
-    } else {
-        return None;
+    let p = match claude_model(&m) {
+        Some(ClaudeModel::MythosPreview) => (25.0, 125.0, 2.5),
+        Some(ClaudeModel::FamilyAlias { family: "fable" }) => (10.0, 50.0, 1.0),
+        Some(ClaudeModel::FamilyAlias { family: "opus" }) => (5.0, 25.0, 0.5),
+        Some(ClaudeModel::FamilyAlias { family: "sonnet" }) => (2.0, 10.0, 0.2),
+        Some(ClaudeModel::FamilyAlias { family: "haiku" }) => (1.0, 5.0, 0.1),
+        Some(ClaudeModel::Versioned {
+            family: "fable" | "mythos",
+            version: (5, _),
+        }) => (10.0, 50.0, 1.0),
+        Some(ClaudeModel::Versioned {
+            family: "opus",
+            version,
+        }) if version >= (4, 5) => (5.0, 25.0, 0.5),
+        Some(ClaudeModel::Versioned { family: "opus", .. }) => (15.0, 75.0, 1.5),
+        Some(ClaudeModel::Versioned {
+            family: "sonnet",
+            version,
+        }) if version >= (5, 0) => (2.0, 10.0, 0.2),
+        Some(ClaudeModel::Versioned {
+            family: "sonnet", ..
+        }) => (3.0, 15.0, 0.3),
+        Some(ClaudeModel::Versioned {
+            family: "haiku",
+            version,
+        }) if version >= (4, 5) => (1.0, 5.0, 0.1),
+        Some(ClaudeModel::Versioned {
+            family: "haiku", ..
+        }) => (0.8, 4.0, 0.08),
+        _ if m.contains("gpt-4o") || m.contains("gpt-4.1") || m.contains("gpt-5") => {
+            (2.5, 10.0, 1.25)
+        }
+        _ if m.contains("o1") || m.contains("o3") => (15.0, 60.0, 7.5),
+        _ => return None,
     };
     Some(p)
 }
 
-/// The model's context window in tokens (substring match); a safe default when
-/// unknown, so the context bar still shows something reasonable.
+/// The model's context window in tokens; a safe default when unknown, so the
+/// context bar still shows something reasonable.
 pub fn model_window(model: &str) -> u64 {
     let m = model.to_lowercase();
-    if m.contains("gpt") || m.contains("o1") || m.contains("o3") {
+    let fixed_1m = match claude_model(&m) {
+        Some(ClaudeModel::MythosPreview) => true,
+        Some(ClaudeModel::Versioned { family, version }) => match family {
+            "fable" | "mythos" => version.0 == 5,
+            "opus" | "sonnet" => version >= (4, 6),
+            _ => false,
+        },
+        Some(ClaudeModel::FamilyAlias { family: "fable" }) => true,
+        Some(ClaudeModel::FamilyAlias { .. }) => false,
+        None => false,
+    };
+    if fixed_1m {
+        // Current Claude 1M models use that window by default, so the 200k base
+        // + inference in `context_frac` would read a sub-200k session as 5×
+        // fuller than it is.
+        1_000_000
+    } else if m.contains("gpt") || m.contains("o1") || m.contains("o3") {
         128_000
     } else {
         200_000 // Claude default (see `context_frac` for the 1M extended window)
@@ -94,6 +226,10 @@ mod tests {
         // 1M input tokens of sonnet at $3/M = $3.00.
         assert_eq!(estimate_cost("claude-sonnet-4", 1_000_000, 0, 0), Some(3.0));
         assert_eq!(estimate_cost("mystery", 1000, 1000, 0), None);
+        // Fable/Mythos 5 are priced ($10/M input) rather than falling through
+        // to the unknown-model "—".
+        assert_eq!(estimate_cost("claude-fable-5", 1_000_000, 0, 0), Some(10.0));
+        assert!(model_price("claude-mythos-5").is_some());
         // Context fraction: 100k of a 200k Claude window = 0.5.
         assert!((context_frac("claude-opus", 100_000) - 0.5).abs() < 1e-6);
         // A session past 200k is inferred to be on the 1M window: a real ~978k
@@ -108,6 +244,9 @@ mod tests {
         );
         // Over even the 1M window clamps to 1.0.
         assert_eq!(context_frac("claude-opus", 9_999_999_999), 1.0);
+        // Fable's window is 1M always: 100k reads as 10%, not 50% of an assumed
+        // 200k base.
+        assert!((context_frac("claude-fable-5", 100_000) - 0.1).abs() < 1e-6);
         // A user override wins over the built-in table.
         let mut ov = std::collections::HashMap::new();
         ov.insert("opus".to_string(), [10.0, 20.0, 1.0]);
@@ -121,6 +260,101 @@ mod tests {
             estimate_cost_with("claude-sonnet-4", 1_000_000, 0, 0, &empty),
             estimate_cost("claude-sonnet-4", 1_000_000, 0, 0),
         );
+    }
+
+    #[test]
+    fn anthropic_prices_distinguish_current_and_legacy_versions() {
+        assert_eq!(model_price("claude-opus-4-8"), Some((5.0, 25.0, 0.5)));
+        assert_eq!(model_price("claude-opus-4-5"), Some((5.0, 25.0, 0.5)));
+        assert_eq!(model_price("claude-opus-4-1"), Some((15.0, 75.0, 1.5)));
+        assert_eq!(
+            model_price("claude-opus-4-1-20250805"),
+            Some((15.0, 75.0, 1.5))
+        );
+        assert_eq!(
+            model_price("claude-haiku-4-5-20251001"),
+            Some((1.0, 5.0, 0.1))
+        );
+        assert_eq!(
+            model_price("claude-3-5-haiku-20241022"),
+            Some((0.8, 4.0, 0.08))
+        );
+        assert_eq!(model_price("claude-sonnet-5"), Some((2.0, 10.0, 0.2)));
+        assert_eq!(model_price("claude-fable-5"), Some((10.0, 50.0, 1.0)));
+        assert_eq!(model_price("claude-mythos-5"), Some((10.0, 50.0, 1.0)));
+        assert_eq!(
+            model_price("claude-mythos-preview"),
+            Some((25.0, 125.0, 2.5))
+        );
+        assert_eq!(
+            model_price("anthropic.claude-opus-4-100-v1:0"),
+            Some((5.0, 25.0, 0.5))
+        );
+        assert_eq!(model_price("claude-20250805-opus"), None);
+        assert_eq!(
+            model_price("pricing-for-claude-mythos-preview-estimate"),
+            None
+        );
+    }
+
+    #[test]
+    fn anthropic_latest_suffix_matches_resolved_version() {
+        let base = "claude-3-5-sonnet";
+        let latest = "claude-3-5-sonnet-latest";
+
+        assert_eq!(model_price(latest), Some((3.0, 15.0, 0.3)));
+        assert_eq!(model_price(latest), model_price(base));
+        assert_eq!(model_window(latest), 200_000);
+        assert_eq!(model_window(latest), model_window(base));
+    }
+
+    #[test]
+    fn anthropic_family_aliases_use_current_rates_and_expected_windows() {
+        for (alias, expected_price, expected_window, expected_fraction) in [
+            ("fable", (10.0, 50.0, 1.0), 1_000_000, 0.1),
+            ("opus", (5.0, 25.0, 0.5), 200_000, 0.5),
+            ("sonnet", (2.0, 10.0, 0.2), 200_000, 0.5),
+            ("haiku", (1.0, 5.0, 0.1), 200_000, 0.5),
+        ] {
+            assert_eq!(model_price(alias), Some(expected_price), "{alias}");
+            assert_eq!(model_window(alias), expected_window, "{alias}");
+            assert!(
+                (context_frac(alias, 100_000) - expected_fraction).abs() < 1e-6,
+                "{alias}"
+            );
+            assert!(
+                (context_frac(alias, 250_000) - 0.25).abs() < 1e-6,
+                "{alias}"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_aliases_and_suffixes_are_strict() {
+        for malformed in [
+            "claude-opus",
+            "claude-fable",
+            "pricing-for-opus-estimate",
+            "pricing-for-fable-estimate",
+            "best",
+            "claude-opus-4-1-foo",
+            "claude-mythos-preview-extra",
+            "claude-mythos-preview-latest",
+            "claude-3-5-sonnet-latest-v1",
+        ] {
+            assert_eq!(model_price(malformed), None, "{malformed}");
+        }
+    }
+
+    #[test]
+    fn anthropic_windows_distinguish_current_and_legacy_versions() {
+        assert_eq!(model_window("claude-opus-4-6"), 1_000_000);
+        assert_eq!(model_window("claude-opus-4-5-20251101"), 200_000);
+        assert_eq!(model_window("claude-sonnet-4-6"), 1_000_000);
+        assert_eq!(model_window("claude-sonnet-4-5-20250929"), 200_000);
+        assert_eq!(model_window("claude-fable-5"), 1_000_000);
+        assert_eq!(model_window("claude-mythos-5"), 1_000_000);
+        assert_eq!(model_window("claude-mythos-preview"), 1_000_000);
     }
 
     #[test]
