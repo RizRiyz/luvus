@@ -693,15 +693,30 @@ impl VtEngine for AlacrittyEngine {
         let last_column = self.term.grid().columns().checked_sub(1)?;
         let leading_blank_cells = |line: Line, limit: usize| {
             let row = &self.term.grid()[line];
-            (0..limit.min(last_column.saturating_add(1)))
-                .take_while(|column| {
-                    let cell = &row[Column(*column)];
-                    !cell
-                        .flags
-                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-                        && (cell.c == '\0' || cell.c.is_whitespace())
-                })
-                .count()
+            let limit = limit.min(last_column.saturating_add(1));
+            let mut column = 0;
+            while column < limit {
+                let cell = &row[Column(column)];
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                    || (cell.c != '\0' && !cell.c.is_whitespace())
+                {
+                    break;
+                }
+                if cell.flags.contains(Flags::WIDE_CHAR) {
+                    let spacer = column.saturating_add(1);
+                    if spacer >= limit
+                        || !row[Column(spacer)].flags.contains(Flags::WIDE_CHAR_SPACER)
+                    {
+                        break;
+                    }
+                    column += 2;
+                } else {
+                    column += 1;
+                }
+            }
+            column
         };
         // When the drag starts after a whitespace-only pane margin, treat that
         // prefix as presentation padding. Following rows may begin earlier, so
@@ -1204,6 +1219,27 @@ mod tests {
                 .as_deref(),
             Some("chosen\nstarts-left"),
             "text before the anchor disables margin cleanup on following rows"
+        );
+    }
+
+    #[test]
+    fn retained_selection_removes_a_complete_wide_whitespace_margin() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(40, 4, tx, budget_for_rows(40, 20));
+        engine.advance("\x1b[H\x1b[2J　first\r\n　second".as_bytes());
+        let mut rows = Vec::new();
+        engine.for_each_retained_row(&mut |row, text| {
+            if text.ends_with("first") || text.ends_with("second") {
+                rows.push(row);
+            }
+        });
+        assert_eq!(rows.len(), 2);
+
+        assert_eq!(
+            engine
+                .retained_selection_text(((rows[0], 2), (rows[1], 7)))
+                .as_deref(),
+            Some("first\nsecond")
         );
     }
 

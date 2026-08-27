@@ -335,10 +335,13 @@ pub(super) fn draw_file_view(
     // the selected cells, after the text so it tints whatever is under it. A
     // buffer post-pass keeps it independent of the text/search spans.
     if let Some(sel) = sel {
+        // Line numbers are presentation-only and selection_text deliberately
+        // excludes them, so do not tint the gutter as though it will be copied.
+        let text_x = body.x + crate::files::gutter_width(v.line_count()) + 1;
         let buf = f.buffer_mut();
         for y in body.y..body.bottom() {
             for x in body.x..body.right() {
-                if sel.contains(x, y) {
+                if file_selection_contains(sel, x, y, text_x) {
                     if let Some(cell) = buf.cell_mut((x, y)) {
                         cell.set_bg(t.sel_bg);
                     }
@@ -390,6 +393,10 @@ pub(super) fn draw_file_view(
             Rect::new(area.right().saturating_sub(6), footer_y, 6, 1),
         );
     }
+}
+
+fn file_selection_contains(sel: &crate::app::Selection, x: u16, y: u16, text_x: u16) -> bool {
+    x >= text_x && sel.contains(x, y)
 }
 
 fn draw_text(f: &mut RenderTarget, body: Rect, v: &FileView, lines: &[String], t: &Theme) {
@@ -655,12 +662,34 @@ pub(super) fn draw_delete_confirm(
 
 #[cfg(test)]
 mod tests {
-    use super::diff_note_count;
+    use super::{diff_note_count, file_selection_contains};
+    use crate::app::Selection;
+    use crate::ids::PaneId;
+    use ratatui::layout::Rect;
 
     #[test]
     fn diff_note_count_uses_singular_and_plural_labels() {
         assert_eq!(diff_note_count(0), "");
         assert_eq!(diff_note_count(1), "  1 note");
         assert_eq!(diff_note_count(2), "  2 notes");
+    }
+
+    #[test]
+    fn file_selection_highlight_excludes_the_line_number_gutter() {
+        let selection = Selection {
+            pane: PaneId(1),
+            content: Rect::new(2, 1, 20, 4),
+            anchor: (9, 1),
+            cursor: (12, 3),
+            retained: None,
+            scrolled: false,
+            dragging: true,
+        };
+        let text_x = 7;
+
+        assert!(!file_selection_contains(&selection, 2, 2, text_x));
+        assert!(!file_selection_contains(&selection, 6, 2, text_x));
+        assert!(file_selection_contains(&selection, 7, 2, text_x));
+        assert!(file_selection_contains(&selection, 12, 3, text_x));
     }
 }
