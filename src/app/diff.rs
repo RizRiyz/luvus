@@ -255,6 +255,7 @@ impl App {
                 self.diff.snapshot = Some(snapshot);
                 self.apply_diff_progress();
                 self.diff.rebuild_rows();
+                let mut cursor_restored = false;
                 if let Some(key) = old_selected {
                     if let Some(position) = self.diff.rows.iter().position(|row| {
                         let DiffListRow::File(index) = row else {
@@ -267,7 +268,11 @@ impl App {
                             .is_some_and(|file| file.key == key)
                     }) {
                         self.diff.cursor = position;
+                        cursor_restored = true;
                     }
+                }
+                if cursor_restored {
+                    self.diff.ensure_cursor_visible();
                 }
                 let live_refresh = self.config.layout.diff_live_refresh;
                 let visible: std::collections::HashSet<PaneId> =
@@ -387,6 +392,7 @@ impl App {
             return;
         }
         self.diff.cursor = row.min(self.diff.rows.len().saturating_sub(1));
+        self.diff.ensure_cursor_visible();
         let Some(file) = self.diff.selected_file().cloned() else {
             return;
         };
@@ -613,6 +619,20 @@ impl App {
                 reconciled = loaded.reconciled_notes;
                 view.stack_rows = crate::diff::rows::stack_rows(&diff);
                 view.split_rows = crate::diff::rows::split_rows(&diff);
+                view.stack_indices = view
+                    .stack_rows
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, line)| {
+                        let old = line
+                            .old_line
+                            .map(|n| ((crate::diff::DiffSide::Old, n), index));
+                        let new = line
+                            .new_line
+                            .map(|n| ((crate::diff::DiffSide::New, n), index));
+                        old.into_iter().chain(new)
+                    })
+                    .collect();
                 cache = Some(diff.clone());
                 DiffLoad::Ready(Box::new(diff))
             }
@@ -1020,7 +1040,7 @@ impl App {
         let viewport = self
             .pane_content_rects
             .iter()
-            .find(|(id, _)| *id == pane)
+            .find(|(p, _)| *p == pane)
             .map(|(_, rect)| rect.height.saturating_sub(2) as usize)
             .unwrap_or(20);
         let Some(ViewKind::Diff(view)) = self.views.get_mut(&pane) else {
@@ -1449,6 +1469,24 @@ impl App {
             .collect();
         rows.sort_unstable();
         rows.dedup();
+        let pane_width = self
+            .pane_content_rects
+            .iter()
+            .find(|(pane, _)| *pane == id)
+            .map(|(_, rect)| rect.width)
+            .unwrap_or(80);
+        let marker_style = self.config.layout.diff_marker_style;
+        let is_split = {
+            if view.wrap {
+                false
+            } else {
+                matches!(
+                    view.preference,
+                    crate::diff::DiffLayoutPreference::Split
+                        | crate::diff::DiffLayoutPreference::Auto
+                ) && pane_width >= 96
+            }
+        };
         let next = if delta > 0 {
             rows.into_iter().find(|row| *row > view.selected)
         } else {
@@ -1457,6 +1495,7 @@ impl App {
         if let (Some(row), Some(ViewKind::Diff(view))) = (next, self.views.get_mut(&id)) {
             view.selected = row;
             view.scroll = row.saturating_sub(2);
+            view.ensure_horizontal_visible(pane_width, marker_style, is_split);
         }
     }
 
@@ -1473,6 +1512,27 @@ impl App {
             .find(|(pane, _)| *pane == id)
             .map(|(_, rect)| rect.height.saturating_sub(2) as usize)
             .unwrap_or(20);
+        let pane_width = self
+            .pane_content_rects
+            .iter()
+            .find(|(pane, _)| *pane == id)
+            .map(|(_, rect)| rect.width)
+            .unwrap_or(80);
+        let marker_style = self.config.layout.diff_marker_style;
+        let is_split = {
+            let Some(ViewKind::Diff(view)) = self.views.get(&id) else {
+                return false;
+            };
+            if view.wrap {
+                false
+            } else {
+                matches!(
+                    view.preference,
+                    crate::diff::DiffLayoutPreference::Split
+                        | crate::diff::DiffLayoutPreference::Auto
+                ) && pane_width >= 96
+            }
+        };
 
         enum Deferred {
             None,
@@ -1569,6 +1629,7 @@ impl App {
                 } else if view.selected >= view.scroll.saturating_add(viewport) {
                     view.scroll = view.selected.saturating_sub(viewport.saturating_sub(1));
                 }
+                view.ensure_horizontal_visible(pane_width, marker_style, is_split);
             } else if view.search_editing {
                 match key.code {
                     KeyCode::Char(c) => view.search.get_or_insert_with(String::new).push(c),
@@ -1587,6 +1648,7 @@ impl App {
                             {
                                 view.selected = index;
                                 view.scroll = index.saturating_sub(viewport / 2);
+                                view.ensure_horizontal_visible(pane_width, marker_style, is_split);
                             }
                         }
                     }
@@ -1599,6 +1661,7 @@ impl App {
             } else {
                 let row_count = view.stack_rows.len();
                 let max = row_count.saturating_sub(1);
+                let old_selected = view.selected;
                 match key.code {
                     KeyCode::Char('j') | KeyCode::Down => {
                         view.selected = (view.selected + 1).min(max)
@@ -1618,7 +1681,25 @@ impl App {
                     KeyCode::Right => view.selected_side = crate::diff::DiffSide::New,
                     KeyCode::Char('h') => view.horizontal = view.horizontal.saturating_sub(8),
                     KeyCode::Char('l') => view.horizontal = view.horizontal.saturating_add(8),
-                    KeyCode::Char('s') => view.preference = view.preference.cycle(),
+                    KeyCode::Char('s') => {
+                        // When Auto resolves to Split (wide enough, no wrap),
+                        // skip directly to Stack so the user doesn't need to
+                        // press 's' twice to see a visual change.
+                        let was_effectively_split = !view.wrap
+                            && matches!(
+                                view.preference,
+                                crate::diff::DiffLayoutPreference::Split
+                                    | crate::diff::DiffLayoutPreference::Auto
+                            )
+                            && pane_width >= 96;
+                        if was_effectively_split
+                            && view.preference == crate::diff::DiffLayoutPreference::Auto
+                        {
+                            view.preference = crate::diff::DiffLayoutPreference::Stack;
+                        } else {
+                            view.preference = view.preference.cycle();
+                        }
+                    }
                     KeyCode::Char('w') => view.wrap = !view.wrap,
                     KeyCode::Char('+') | KeyCode::Char('=') => deferred = Deferred::Context(1),
                     KeyCode::Char('-') => deferred = Deferred::Context(-1),
@@ -1637,6 +1718,7 @@ impl App {
                             })
                         {
                             view.selected = next;
+                            view.ensure_horizontal_visible(pane_width, marker_style, is_split);
                         }
                     }
                     KeyCode::Char('{') => {
@@ -1651,6 +1733,7 @@ impl App {
                             })
                         {
                             view.selected = previous;
+                            view.ensure_horizontal_visible(pane_width, marker_style, is_split);
                         }
                     }
                     KeyCode::Char('/') => {
@@ -1688,6 +1771,20 @@ impl App {
                     view.scroll = view.selected;
                 } else if view.selected >= view.scroll.saturating_add(viewport) {
                     view.scroll = view.selected.saturating_sub(viewport.saturating_sub(1));
+                }
+                // Recompute effective split after s/w may have changed
+                // preference or wrap.
+                let now_split = if view.wrap {
+                    false
+                } else {
+                    matches!(
+                        view.preference,
+                        crate::diff::DiffLayoutPreference::Split
+                            | crate::diff::DiffLayoutPreference::Auto
+                    ) && pane_width >= 96
+                };
+                if view.selected != old_selected || now_split != is_split {
+                    view.ensure_horizontal_visible(pane_width, marker_style, now_split);
                 }
             }
         }
@@ -2259,6 +2356,20 @@ mod tests {
         view.preference = crate::diff::DiffLayoutPreference::Split;
         view.stack_rows = stack_rows;
         view.split_rows = split_rows;
+        view.stack_indices = view
+            .stack_rows
+            .iter()
+            .enumerate()
+            .flat_map(|(index, line)| {
+                let old = line
+                    .old_line
+                    .map(|n| ((crate::diff::DiffSide::Old, n), index));
+                let new = line
+                    .new_line
+                    .map(|n| ((crate::diff::DiffSide::New, n), index));
+                old.into_iter().chain(new)
+            })
+            .collect();
         view.load = DiffLoad::Ready(Box::new(file_diff));
 
         let mut terminal = Terminal::new(TestBackend::new(180, 40)).unwrap();

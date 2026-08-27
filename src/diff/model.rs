@@ -362,6 +362,7 @@ pub struct DiffState {
     pub notes: Vec<crate::diff::notes::ReviewNote>,
     pub progress: crate::diff::notes::ReviewProgress,
     pub selected_notes: std::collections::HashSet<String>,
+    pub viewport: usize,
     cache: DiffCache,
 }
 
@@ -382,6 +383,7 @@ impl Default for DiffState {
             notes: Vec::new(),
             progress: crate::diff::notes::ReviewProgress::default(),
             selected_notes: std::collections::HashSet::new(),
+            viewport: 0,
             cache: DiffCache::default(),
         }
     }
@@ -483,6 +485,20 @@ impl DiffState {
             if cursor == 0 || cursor == self.rows.len().saturating_sub(1) as isize {
                 break;
             }
+        }
+    }
+
+    pub fn ensure_cursor_visible(&mut self) {
+        let cap = self.viewport;
+        if cap == 0 {
+            return;
+        }
+        let max_scroll = self.rows.len().saturating_sub(cap);
+        self.scroll = self.scroll.min(max_scroll);
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll.saturating_add(cap) {
+            self.scroll = self.cursor.saturating_sub(cap.saturating_sub(1));
         }
     }
 
@@ -634,6 +650,7 @@ pub struct DiffView {
     pub load: DiffLoad,
     pub stack_rows: Vec<DiffLine>,
     pub split_rows: Vec<crate::diff::rows::SplitRow>,
+    pub stack_indices: HashMap<(DiffSide, u32), usize>,
     pub request_token: u64,
     pub preference: DiffLayoutPreference,
     pub scroll: usize,
@@ -668,6 +685,7 @@ impl DiffView {
             load: DiffLoad::Loading,
             stack_rows: Vec::new(),
             split_rows: Vec::new(),
+            stack_indices: HashMap::new(),
             request_token: 0,
             preference,
             scroll: 0,
@@ -684,6 +702,38 @@ impl DiffView {
             note_edit_id: None,
             range_anchor: None,
             dirty: false,
+        }
+    }
+
+    pub fn ensure_horizontal_visible(
+        &mut self,
+        pane_width: u16,
+        marker_style: DiffMarkerStyle,
+        split: bool,
+    ) {
+        let Some(line) = self.stack_rows.get(self.selected) else {
+            return;
+        };
+        let text_len = line.text.chars().count();
+        let bar_w = if marker_style.shows_bars() { 1 } else { 0 };
+        let symbol_w = if marker_style.shows_symbols() { 2 } else { 0 };
+        let numbers_w = if self.show_line_numbers { 12 } else { 0 };
+        let gutter_w = bar_w + symbol_w + numbers_w;
+        let side_width = if split {
+            (pane_width.saturating_sub(1)) / 2
+        } else {
+            pane_width
+        };
+        let text_w = side_width.saturating_sub(gutter_w as u16) as usize;
+        if text_w == 0 {
+            return;
+        }
+        if text_len <= text_w {
+            self.horizontal = 0;
+        } else if self.horizontal + text_w > text_len
+            || self.horizontal > text_len.saturating_sub(text_w)
+        {
+            self.horizontal = text_len.saturating_sub(text_w);
         }
     }
 }

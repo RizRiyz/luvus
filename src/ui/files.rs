@@ -210,11 +210,7 @@ fn draw_diff_list(
     }
     let max_scroll = app.diff.rows.len().saturating_sub(cap);
     app.diff.scroll = app.diff.scroll.min(max_scroll);
-    if app.diff.cursor < app.diff.scroll {
-        app.diff.scroll = app.diff.cursor;
-    } else if app.diff.cursor >= app.diff.scroll.saturating_add(cap) {
-        app.diff.scroll = app.diff.cursor.saturating_sub(cap.saturating_sub(1));
-    }
+    app.diff.viewport = cap;
     let snapshot = app.diff.snapshot.as_ref().expect("rows require snapshot");
     let rows = &app.diff.rows;
     for row_index in app.diff.scroll..rows.len().min(app.diff.scroll.saturating_add(cap)) {
