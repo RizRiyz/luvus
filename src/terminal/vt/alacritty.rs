@@ -691,7 +691,6 @@ impl VtEngine for AlacrittyEngine {
             return None;
         }
         let last_column = self.term.grid().columns().checked_sub(1)?;
-        let middle_left = start_col.min(end_col);
         let mut output = String::new();
         let mut appended = false;
 
@@ -699,12 +698,7 @@ impl VtEngine for AlacrittyEngine {
             let Some(line) = self.retained_line(row_index) else {
                 continue;
             };
-            let left = if row_index == start_row {
-                start_col
-            } else {
-                middle_left
-            }
-            .min(last_column);
+            let left = if row_index == start_row { start_col } else { 0 }.min(last_column);
             let right = if row_index == end_row {
                 end_col
             } else {
@@ -1127,7 +1121,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_selection_keeps_the_drag_left_edge_on_middle_rows() {
+    fn retained_selection_uses_linear_reading_order_on_middle_rows() {
         let (tx, _rx) = channel();
         let mut engine = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 20));
         engine.advance(b"\x1b[H\x1b[2J - first\r\n - second\r\n - third");
@@ -1143,7 +1137,7 @@ mod tests {
             engine
                 .retained_selection_text(((rows[0], 1), (rows[2], 7)))
                 .as_deref(),
-            Some("- first\n- second\n- third")
+            Some("- first\n - second\n - third")
         );
     }
 

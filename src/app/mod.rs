@@ -1128,8 +1128,7 @@ impl RetainedSelection {
         if row < sr || row > er {
             return false;
         }
-        let middle_left = sc.min(ec);
-        let left = if row == sr { sc } else { middle_left };
+        let left = if row == sr { sc } else { 0 };
         let right = if row == er {
             ec
         } else {
@@ -1178,9 +1177,9 @@ impl Selection {
         if y < sy || y > ey {
             return false;
         }
-        // Middle rows keep the drag's left edge instead of expanding into the
-        // pane margin. This keeps the highlighted range and copied text aligned.
-        let left = if y == sy { sx } else { sx.min(ex) };
+        // A terminal selection is linear: after the first selected row, every
+        // following row starts at the pane's left edge until the final endpoint.
+        let left = if y == sy { sx } else { c.x };
         let right = if y == ey {
             ex
         } else {
@@ -5981,7 +5980,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_keeps_the_drag_left_edge_between_lines() {
+    fn selection_uses_linear_reading_order_between_lines() {
         // Content rect at (x=2, y=1), 10 wide × 5 tall.
         let content = Rect::new(2, 1, 10, 5);
         let sel = Selection {
@@ -5995,16 +5994,15 @@ mod tests {
         };
         // First row: from the anchor column to the right edge.
         assert!(sel.contains(4, 1));
-        assert!(sel.contains(11, 1)); // last column (right() == 12)
-        assert!(!sel.contains(3, 1)); // before the anchor
-                                      // Middle row: it keeps the drag's left edge instead of
-                                      // expanding into the pane's left margin.
-        assert!(!sel.contains(2, 2));
-        assert!(sel.contains(4, 2) && sel.contains(11, 2));
+        // Last column (right() == 12), but not before the anchor.
+        assert!(sel.contains(11, 1));
+        assert!(!sel.contains(3, 1));
+        // Middle row: selection resumes at the pane's left edge.
+        assert!(sel.contains(2, 2) && sel.contains(11, 2));
         // Last row: up to the cursor column.
         assert!(sel.contains(6, 3));
-        assert!(!sel.contains(7, 3)); // past the cursor
-                                      // Outside the row range / pane.
+        assert!(!sel.contains(7, 3));
+        // Outside the row range / pane.
         assert!(!sel.contains(5, 0) && !sel.contains(5, 4) && !sel.contains(99, 2));
         // Dragging up-left selects the same range (anchor/cursor order-independent).
         let rev = Selection {
@@ -6012,7 +6010,18 @@ mod tests {
             cursor: (4, 1),
             ..sel
         };
-        assert!(rev.contains(11, 1) && rev.contains(6, 3) && !rev.contains(7, 3));
+        assert!(
+            rev.contains(11, 1) && rev.contains(2, 2) && rev.contains(6, 3) && !rev.contains(7, 3)
+        );
+
+        let retained = RetainedSelection {
+            anchor: (10, 2),
+            cursor: (12, 4),
+        };
+        assert!(retained.contains(10, 2, 10));
+        assert!(retained.contains(11, 0, 10));
+        assert!(retained.contains(12, 4, 10));
+        assert!(!retained.contains(12, 5, 10));
     }
 
     #[test]
