@@ -141,7 +141,7 @@ fn fixed_guidance(app: &App, t: &Theme) -> (Line<'static>, bool) {
             cat.act_tab,
             t,
         ));
-        left.extend(hint(&key(crate::app::Cmd::OpenMission), cat.mc_title, t));
+        left.extend(hint(&key(crate::app::Cmd::OpenMission), cat.mc_hint, t));
         left.extend(hint(&key(crate::app::Cmd::NewWorkspace), cat.workspace, t));
         left.extend(hint(&key(crate::app::Cmd::OpenGit), "git", t));
         left.extend(hint(&key(crate::app::Cmd::OpenBoard), "orch", t));
@@ -287,7 +287,7 @@ mod tests {
         let mission = format!(
             "{} {}",
             app.key_for(crate::app::Cmd::OpenMission),
-            app.catalog.mc_title
+            app.catalog.mc_hint
         );
         assert!(
             status.contains(&mission),
@@ -313,7 +313,7 @@ mod tests {
         assert!(app.key_for(crate::app::Cmd::OpenMission).is_empty());
         let status = row(&terminal, 23);
         assert!(
-            !status.contains(app.catalog.mc_title),
+            !status.contains(app.catalog.mc_hint),
             "prefix guidance advertised unbound Mission Control: {status:?}"
         );
     }
