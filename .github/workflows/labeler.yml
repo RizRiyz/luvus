@@ -24,7 +24,7 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           configuration-path: .github/labeler.yml
-          sync-labels: false
+          sync-labels: true
 
       - name: Label pull request type and platform
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
@@ -32,6 +32,19 @@ jobs:
           script: |
             const title = context.payload.pull_request.title.trim();
             const labels = new Set();
+            const managedLabels = new Set([
+              "bug",
+              "enhancement",
+              "documentation",
+              "performance",
+              "maintenance",
+              "tests",
+              "ci",
+              "dependencies",
+              "platform: windows",
+              "platform: macos",
+              "platform: linux",
+            ]);
 
             const types = [
               [/^fix(?:\([^)]*\))?!?:/i, "bug"],
@@ -66,6 +79,39 @@ jobs:
               labels.add("dependencies");
             }
 
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              per_page: 100,
+            });
+            if (
+              files.some(
+                ({ filename }) =>
+                  filename === "src/platform/windows.rs" || filename.endsWith(".ps1"),
+              )
+            ) {
+              labels.add("platform: windows");
+            }
+
+            const currentLabels = new Set(
+              context.payload.pull_request.labels.map(({ name }) => name),
+            );
+            for (const label of managedLabels) {
+              if (!labels.has(label) && currentLabels.has(label)) {
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: context.issue.number,
+                    name: label,
+                  });
+                } catch (error) {
+                  if (error.status !== 404) throw error;
+                }
+              }
+            }
+
             if (labels.size > 0) {
               await github.rest.issues.addLabels({
                 owner: context.repo.owner,
@@ -90,7 +136,10 @@ jobs:
             const title = issue.title.toLowerCase();
             const body = issue.body || "";
             const cleanBody = body.replace(/<!--[\s\S]*?-->/g, "");
-            const labels = new Set(["status: needs triage"]);
+            const labels = new Set();
+            if (context.payload.action !== "edited") {
+              labels.add("status: needs triage");
+            }
 
             function section(name) {
               const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -140,9 +189,33 @@ jobs:
               labels.add("platform: linux");
             }
 
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issue.number,
-              labels: [...labels],
-            });
+            const managedLabels = new Set([
+              ...areaRules.map(([, label]) => label),
+              "platform: windows",
+              "platform: macos",
+              "platform: linux",
+            ]);
+            const currentLabels = new Set(issue.labels.map(({ name }) => name));
+            for (const label of managedLabels) {
+              if (!labels.has(label) && currentLabels.has(label)) {
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    name: label,
+                  });
+                } catch (error) {
+                  if (error.status !== 404) throw error;
+                }
+              }
+            }
+
+            if (labels.size > 0) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: [...labels],
+              });
+            }

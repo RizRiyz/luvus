@@ -156,9 +156,3 @@
           - "flake.lock"
           - "install.sh"
           - ".github/workflows/release.yml"
-
-"platform: windows":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "src/platform/windows.rs"
-          - "**/*.ps1"
