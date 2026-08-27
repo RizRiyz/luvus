@@ -304,8 +304,13 @@ fn file_tab_name(tab: &crate::app::Tab, app: &App) -> Option<String> {
             v.key.display_path()
         )),
         None => {
-            let path = app.editor_files.get(&id)?;
-            let name = path.file_name()?.to_string_lossy().into_owned();
+            let name = app
+                .editor_files
+                .get(&id)?
+                .path
+                .file_name()?
+                .to_string_lossy()
+                .into_owned();
             Some(format!("■ {name}"))
         }
     }

@@ -322,12 +322,14 @@ impl App {
     /// shell quoting is involved), so quitting the editor fires `PtyExit` and the
     /// tab closes. The pane's cwd is the file's folder.
     ///
-    /// Re-opening a file that already has an editor tab focuses that tab instead
-    /// of launching a second editor on it (docs/38): the read-only viewer
-    /// has always de-duplicated this way, and a second `vim` on one file would
-    /// only fight the first over its swap file.
+    /// Re-opening a file in the editor it is *already* open in focuses that tab
+    /// instead of launching a second one (docs/38): the read-only viewer has
+    /// always de-duplicated this way, and a second `vim` on one file would only
+    /// fight the first over its swap file. A **different** editor is not a
+    /// duplicate — `Open With` is an explicit per-file override — so it opens its
+    /// own tab.
     pub fn open_file_in_editor(&mut self, path: PathBuf, editor: &str) {
-        if let Some(id) = self.editor_tab_showing(&path) {
+        if let Some(id) = self.editor_tab_showing(&path, editor) {
             self.remember_file(&path);
             self.focus_pane_global(id);
             return;
@@ -361,7 +363,13 @@ impl App {
                 // like a read-only view tab. An editor pane is an ordinary PTY
                 // pane with no file view behind it, so without this the tab bar
                 // has nothing to derive a name from and falls back to the number.
-                self.editor_files.insert(id, path.clone());
+                self.editor_files.insert(
+                    id,
+                    crate::app::EditorFile {
+                        path: path.clone(),
+                        command: editor.to_string(),
+                    },
+                );
                 self.remember_file(&path);
                 let ws = &mut self.workspaces[self.active_ws];
                 ws.tabs.push(Tab::panes(TileLayout::new(id)));
@@ -629,13 +637,18 @@ impl App {
         })
     }
 
-    /// An editor PTY that owns its whole tab, keyed by the file it was launched
-    /// on — the terminal-editor twin of `file_tab_showing`. An editor tab has no
-    /// `views` entry to match against (it is an ordinary PTY pane), so
-    /// `editor_files` is the only record of what a tab is editing. That map is
-    /// cleared by `drop_leaf_runtime`, so a quit editor stops matching here and
-    /// the next click gets a fresh one rather than focus into a dead pane.
-    fn editor_tab_showing(&self, path: &std::path::Path) -> Option<PaneId> {
+    /// A tab whose whole content is `editor` already running on `path` — the
+    /// terminal-editor twin of `file_tab_showing`. An editor tab has no `views`
+    /// entry to match against (it is an ordinary PTY pane), so `editor_files` is
+    /// the only record of what a tab is editing. That map is cleared by
+    /// `drop_leaf_runtime`, so a quit editor stops matching here and the next
+    /// click gets a fresh one rather than focus into a dead pane.
+    ///
+    /// The command comparison is exact, not normalized: every caller passes a
+    /// run-command taken straight out of `self.editors` (the default resolved by
+    /// `file_open_editor`, or the one `Open With` snapshotted from the same
+    /// list), so both sides are the same canonical string.
+    fn editor_tab_showing(&self, path: &std::path::Path, editor: &str) -> Option<PaneId> {
         self.ws().tabs.iter().find_map(|tab| {
             let leaves = tab.layout.leaves();
             let [id] = leaves.as_slice() else {
@@ -643,7 +656,7 @@ impl App {
             };
             self.editor_files
                 .get(id)
-                .is_some_and(|open| open == path)
+                .is_some_and(|open| open.path == path && open.command == editor)
                 .then_some(*id)
         })
     }
@@ -973,7 +986,7 @@ mod tests {
         // the pane is tracked in `editor_files`, which is what makes the tab bar
         // render the same `■ name` label instead of the bare tab number.
         assert_eq!(
-            app.editor_files.get(&focus).map(|p| p.as_path()),
+            app.editor_files.get(&focus).map(|open| open.path.as_path()),
             Some(file.as_path()),
             "the editor pane is tracked with its file for the tab label"
         );
@@ -1101,6 +1114,76 @@ mod tests {
             app.workspaces[app.active_ws].tabs.len(),
             tabs_before + 2,
             "two files, two editor tabs"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `Open With` is an explicit per-file override, not a duplicate: a file
+    /// already open in one editor must still launch in a *different* one picked
+    /// from the right-click menu. De-duplicating on the path alone swallowed it.
+    #[test]
+    fn open_with_a_different_editor_still_launches_it() {
+        let _env = crate::persist::test_env("file-open-with-other-editor");
+        let dir = std::env::temp_dir().join(format!("luvus-cw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("both.txt");
+        std::fs::write(&file, b"hello\n").unwrap();
+
+        // `cat` and `head` stand in for two installed editors: real programs that
+        // take the file as a literal argv element, as elsewhere in these tests.
+        let editors = vec![
+            ("cat".to_string(), "cat".to_string()),
+            ("head".to_string(), "head".to_string()),
+        ];
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.editors = editors.clone();
+        app.config.layout.file_open = "cat".to_string();
+        let tabs_before = app.workspaces[app.active_ws].tabs.len();
+        let menu = |editors: &[(String, String)]| FileMenu {
+            path: file.clone(),
+            is_dir: false,
+            anchor: (0, 0),
+            items: Vec::new(),
+            editors: editors.to_vec(),
+        };
+
+        // A plain click opens the configured default, `cat`.
+        app.open_file_at(file.clone(), None);
+        let first = app.layout().focus;
+
+        // Right-click the same file and pick the *other* editor.
+        app.file_menu = Some(menu(&editors));
+        app.file_menu_action_pub(FileMenuItem::OpenWith(1));
+        let second = app.layout().focus;
+        assert_ne!(second, first, "the override got a pane of its own");
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before + 2,
+            "two editors on one file means two tabs"
+        );
+        assert_eq!(
+            app.editor_files
+                .get(&second)
+                .map(|open| open.command.as_str()),
+            Some("head"),
+            "the new tab runs the editor the user actually picked"
+        );
+
+        // The same editor is still a duplicate: picking `cat` again focuses it.
+        app.file_menu = Some(menu(&editors));
+        app.file_menu_action_pub(FileMenuItem::OpenWith(0));
+        assert_eq!(
+            app.layout().focus,
+            first,
+            "re-picking the running editor focuses its tab"
+        );
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before + 2,
+            "and opens no third tab"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
