@@ -762,6 +762,24 @@ mod tests {
     }
 
     #[test]
+    fn legacy_m_and_uppercase_m_collisions_keep_both_entrypoints_usable() {
+        for occupied in ["m", "M"] {
+            let mut config = crate::config::Config {
+                version: 1,
+                ..Default::default()
+            };
+            config
+                .keybindings
+                .insert("open_git".into(), occupied.into());
+
+            let config = crate::config::normalize_config(config);
+            let map = build_keymap(&config.keybindings);
+            assert_eq!(map.get("m"), Some(&Cmd::OpenMission));
+            assert_eq!(map.get("M"), Some(&Cmd::Switcher));
+        }
+    }
+
+    #[test]
     fn rebind_moves_the_key() {
         let mut o = HashMap::new();
         o.insert(Cmd::NewTab.id().to_string(), "t".to_string());

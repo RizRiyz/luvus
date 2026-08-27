@@ -509,10 +509,16 @@ pub fn load() -> Config {
 /// 5,000 lines at 120 columns ≈ 10 MiB relationship.
 pub(crate) fn normalize_config(mut cfg: Config) -> Config {
     // v2 assigns the former Switcher key (`m`) to Mission Control and moves
-    // Switcher to `M`. An explicit old-default override would otherwise claim
-    // `m` before defaults are applied and silently leave Mission unbound.
-    if cfg.version < 2 && cfg.keybindings.get("switcher").map(String::as_str) == Some("m") {
-        cfg.keybindings.remove("switcher");
+    // Switcher to `M`. Old overrides that claim either new default would win
+    // over the defaults and leave an entry point unavailable. Keep only an
+    // override that already agrees with the v2 owner; conflicting commands
+    // return to their own defaults and can be rebound explicitly afterward.
+    if cfg.version < 2 {
+        cfg.keybindings.retain(|command, key| match key.as_str() {
+            "m" => command == "open_mission",
+            "M" => command == "switcher",
+            _ => true,
+        });
     }
     if cfg.layout.scrollback_bytes.is_none() {
         cfg.layout.scrollback_bytes = Some(legacy_scrollback_bytes(cfg.layout.scrollback));
@@ -632,6 +638,27 @@ mod tests {
         let migrated = normalize_config(old);
         assert_eq!(migrated.version, 2);
         assert!(!migrated.keybindings.contains_key("switcher"));
+
+        let mut conflicting = Config {
+            version: 1,
+            ..Default::default()
+        };
+        conflicting
+            .keybindings
+            .insert("open_git".into(), "m".into());
+        conflicting
+            .keybindings
+            .insert("open_board".into(), "M".into());
+        conflicting
+            .keybindings
+            .insert("toggle_files".into(), "u".into());
+        let migrated = normalize_config(conflicting);
+        assert!(!migrated.keybindings.contains_key("open_git"));
+        assert!(!migrated.keybindings.contains_key("open_board"));
+        assert_eq!(
+            migrated.keybindings.get("toggle_files").map(String::as_str),
+            Some("u")
+        );
 
         let mut current = Config::default();
         current.keybindings.insert("switcher".into(), "m".into());
