@@ -2800,6 +2800,7 @@ static KO: Catalog = Catalog {
     pane: "패널",
     panes: "패널",
     workspace: "작업 공간",
+    mc_hint: "컨트롤",
     act_move: "이동",
     act_select: "선택",
     act_up: "위로",
