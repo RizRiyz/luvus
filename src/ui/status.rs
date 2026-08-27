@@ -174,7 +174,12 @@ fn mode_label(label: &str, t: &Theme) -> Span<'static> {
     )
 }
 
+/// Render one actionable status hint, omitting commands the user explicitly unbound.
 fn hint(key: &str, word: &str, t: &Theme) -> Vec<Span<'static>> {
+    if key.is_empty() {
+        return Vec::new();
+    }
+
     vec![
         Span::styled(key.to_string(), Style::new().fg(t.accent).bold()),
         Span::styled(format!(" {word}   "), Style::new().fg(t.subtext0)),
@@ -283,6 +288,29 @@ mod tests {
         assert!(
             status.contains(&mission),
             "prefix guidance omitted Mission Control: {status:?}"
+        );
+    }
+
+    #[test]
+    fn prefix_guidance_omits_unbound_mission_control() {
+        let _env = crate::persist::test_env("bar-status-mission-unbound");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 24, tx).unwrap();
+        app.config
+            .keybindings
+            .insert(crate::app::Cmd::OpenMission.id().to_string(), String::new());
+        app.mode = Mode::Prefix;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        assert!(app.key_for(crate::app::Cmd::OpenMission).is_empty());
+        let status = row(&terminal, 23);
+        assert!(
+            !status.contains(app.catalog.mc_title),
+            "prefix guidance advertised unbound Mission Control: {status:?}"
         );
     }
 
