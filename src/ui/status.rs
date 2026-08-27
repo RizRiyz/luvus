@@ -146,6 +146,7 @@ fn fixed_guidance(app: &App, t: &Theme) -> (Line<'static>, bool) {
             cat.act_tab,
             t,
         ));
+        left.extend(hint(&key(crate::app::Cmd::OpenMission), cat.mc_title, t));
         left.extend(hint(&key(crate::app::Cmd::NewWorkspace), cat.workspace, t));
         left.extend(hint(&key(crate::app::Cmd::OpenGit), "git", t));
         left.extend(hint(&key(crate::app::Cmd::OpenBoard), "orch", t));
@@ -257,6 +258,31 @@ mod tests {
         assert!(
             app.bar.hits.is_empty(),
             "mode guidance temporarily owns the middle lane"
+        );
+    }
+
+    #[test]
+    fn prefix_guidance_shows_the_mission_control_binding() {
+        let _env = crate::persist::test_env("bar-status-mission");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 24, tx).unwrap();
+        app.mode = Mode::Prefix;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        let status = row(&terminal, 23);
+        assert_eq!(app.key_for(crate::app::Cmd::OpenMission), "m");
+        let mission = format!(
+            "{} {}",
+            app.key_for(crate::app::Cmd::OpenMission),
+            app.catalog.mc_title
+        );
+        assert!(
+            status.contains(&mission),
+            "prefix guidance omitted Mission Control: {status:?}"
         );
     }
 
