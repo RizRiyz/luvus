@@ -2912,6 +2912,7 @@ static KO: Catalog = Catalog {
     set_pane_title_path: "이름 붙은 제목에 경로 표시",
     set_resume_workspace: "새 작업 공간에서 재개",
     set_file_open: "파일 여는 프로그램",
+    set_file_click: "파일 클릭 동작",
     set_files_hidden: "숨김 파일 표시",
     set_shift_enter: "Shift+Enter로 전송",
     set_sound_blocked: "차단 시 소리",

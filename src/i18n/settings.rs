@@ -790,6 +790,8 @@ pub static KO: Catalog = Catalog {
     shell_default: "기본값",
     shell_command_prompt: "명령 프롬프트",
     read_only: "읽기 전용",
+    click_preview: "미리보기",
+    click_tab: "탭으로 열기",
     diff_auto: "자동",
     diff_split: "분할",
     diff_stack: "누적",
