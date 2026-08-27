@@ -292,6 +292,10 @@ pub struct SidebarsConfig {
     pub left: SideConfig,
     #[serde(default = "SideConfig::right_default")]
     pub right: SideConfig,
+    /// Last explicit FILES placement, retained while the dock is off so the
+    /// show/hide shortcut restores it to the same side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_side: Option<crate::app::Side>,
 }
 
 /// One sidebar's persisted state: shown/hidden, width, and its ordered dock ids.
@@ -330,6 +334,7 @@ impl SidebarsConfig {
         SidebarsConfig {
             left: SideConfig::left_default(),
             right: SideConfig::right_default(),
+            files_side: None,
         }
     }
     /// Migrate a pre-DOCK config: the default layout at the stored width.

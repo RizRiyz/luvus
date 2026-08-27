@@ -125,7 +125,8 @@ pub enum ViewKind {
 }
 
 /// Which sidebar a dock lives in (docs/29).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Side {
     Left,
     Right,
@@ -251,6 +252,9 @@ impl SideState {
 pub struct Sidebars {
     pub left: SideState,
     pub right: SideState,
+    /// Last explicit FILES placement. Unlike the mounted dock vectors, this
+    /// survives turning FILES off so the toggle can restore the user's side.
+    pub files_side: Side,
 }
 
 impl Sidebars {
@@ -267,15 +271,26 @@ impl Sidebars {
         }
     }
     fn from_config(cfg: &crate::config::SidebarsConfig) -> Sidebars {
+        let left = SideState::from_config(&cfg.left);
+        let right = SideState::from_config(&cfg.right);
+        let files_side = if left.has(&DockKind::Files) {
+            Side::Left
+        } else if right.has(&DockKind::Files) {
+            Side::Right
+        } else {
+            cfg.files_side.unwrap_or(Side::Left)
+        };
         Sidebars {
-            left: SideState::from_config(&cfg.left),
-            right: SideState::from_config(&cfg.right),
+            left,
+            right,
+            files_side,
         }
     }
     fn to_config(&self) -> crate::config::SidebarsConfig {
         crate::config::SidebarsConfig {
             left: self.left.to_config(),
             right: self.right.to_config(),
+            files_side: Some(self.files_side),
         }
     }
     /// Whether `side` has a free dock slot (below `MAX_DOCKS_PER_SIDE`, docs/29).
@@ -2650,6 +2665,9 @@ impl App {
         let dst = self.sidebars.get_mut(target);
         if !dst.docks.contains(kind) {
             dst.docks.push(kind.clone());
+        }
+        if kind == &DockKind::Files {
+            self.sidebars.files_side = target;
         }
         // Placing a module dock on a side is the user opting it back in, so clear
         // any explicit "off" flag (the inverse of `unmount_dock`).
@@ -9983,6 +10001,7 @@ mod tests {
                 width: 26,
                 docks: Vec::new(),
             },
+            files_side: None,
         };
         let sidebars = Sidebars::from_config(&cfg);
         assert_eq!(
