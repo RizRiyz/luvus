@@ -695,6 +695,17 @@ static HELP: &[Translation] = &[
         "번들된 에이전트 스킬 관리"
     ),
     tr!(
+        "Enable, inspect, show, or remove the bundled agent skill",
+        "Activar, inspeccionar, mostrar o eliminar la habilidad de agente incluida",
+        "Ativar, inspecionar, mostrar ou remover a skill de agente incluída",
+        "Activer, inspecter, afficher ou supprimer la compétence d'agent intégrée",
+        "Gebündelten Agenten-Skill aktivieren, prüfen, anzeigen oder entfernen",
+        "Aktifkan, periksa, tampilkan, atau hapus skill agen bawaan",
+        "启用、检查、显示或移除内置智能体技能",
+        "同梱エージェントスキルを有効化、確認、表示、削除",
+        "번들 에이전트 스킬 활성화, 검사, 표시, 제거"
+    ),
+    tr!(
         "Wait for pane output or an agent state",
         "Esperar la salida de un panel o el estado de un agente",
         "Aguardar a saída de um painel ou o estado de um agente",
