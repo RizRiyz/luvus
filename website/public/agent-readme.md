@@ -266,8 +266,12 @@ session IDs. List sessions and use the exact returned identifier.
 ## UHP for harnesses
 
 Universal Harness Protocol 1.0 is Luvus's public automation contract for
-workspaces, tabs, panes, agents, terminals, files, Git, DIFF, tasks, leases,
-modules, bars, configuration, and events.
+workspaces, tabs, panes, agents, terminals, files, Git, DIFF, Mission Control,
+tasks, leases, modules, bars, configuration, and events.
+
+Open Mission Control in the active workspace with `luvus mission open`, target
+a zero-based workspace with `luvus mission open <workspace>`, or call the
+workspace-scoped UHP method `mission.open`.
 
 Start with capability discovery and validate against the installed JSON Schema
 bundle. Do not infer method support from a release number alone.

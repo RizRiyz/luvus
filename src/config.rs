@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::{SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN};
 
-const CONFIG_VERSION: u32 = 1;
+const CONFIG_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -292,6 +292,10 @@ pub struct SidebarsConfig {
     pub left: SideConfig,
     #[serde(default = "SideConfig::right_default")]
     pub right: SideConfig,
+    /// Last explicit FILES placement, retained while the dock is off so the
+    /// show/hide shortcut restores it to the same side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_side: Option<crate::app::Side>,
 }
 
 /// One sidebar's persisted state: shown/hidden, width, and its ordered dock ids.
@@ -330,6 +334,7 @@ impl SidebarsConfig {
         SidebarsConfig {
             left: SideConfig::left_default(),
             right: SideConfig::right_default(),
+            files_side: None,
         }
     }
     /// Migrate a pre-DOCK config: the default layout at the stored width.
@@ -504,11 +509,22 @@ pub fn load() -> Config {
         .unwrap_or_default()
 }
 
-/// Hydrate an old line-count setting into the new persisted byte budget. The
-/// old default becomes today's 10 MiB default; custom values retain their rough
-/// relative size using the previous measured 5,000 lines at 120 columns ≈ 10
-/// MiB relationship.
+/// Apply versioned config migrations and clamp persisted values. The legacy
+/// scrollback line count becomes a byte budget using the previous measured
+/// 5,000 lines at 120 columns ≈ 10 MiB relationship.
 pub(crate) fn normalize_config(mut cfg: Config) -> Config {
+    // v2 assigns the former Switcher key (`m`) to Mission Control and moves
+    // Switcher to `M`. Old overrides that claim either new default would win
+    // over the defaults and leave an entry point unavailable. Keep only an
+    // override that already agrees with the v2 owner; conflicting commands
+    // return to their own defaults and can be rebound explicitly afterward.
+    if cfg.version < 2 {
+        cfg.keybindings.retain(|command, key| match key.as_str() {
+            "m" => command == "open_mission",
+            "M" => command == "switcher",
+            _ => true,
+        });
+    }
     if cfg.layout.scrollback_bytes.is_none() {
         cfg.layout.scrollback_bytes = Some(legacy_scrollback_bytes(cfg.layout.scrollback));
     }
@@ -516,6 +532,7 @@ pub(crate) fn normalize_config(mut cfg: Config) -> Config {
         .layout
         .diff_context_lines
         .min(crate::diff::MAX_CONTEXT_LINES);
+    cfg.version = cfg.version.max(CONFIG_VERSION);
     cfg
 }
 
@@ -614,6 +631,47 @@ mod tests {
         assert_eq!(back.theme, "mono");
         assert!(back.notifications.sound_on_done);
         assert!(!back.notifications.sound_on_blocked);
+    }
+
+    #[test]
+    fn v2_migrates_the_old_switcher_default_without_overriding_new_choices() {
+        let mut old = Config {
+            version: 1,
+            ..Default::default()
+        };
+        old.keybindings.insert("switcher".into(), "m".into());
+        let migrated = normalize_config(old);
+        assert_eq!(migrated.version, 2);
+        assert!(!migrated.keybindings.contains_key("switcher"));
+
+        let mut conflicting = Config {
+            version: 1,
+            ..Default::default()
+        };
+        conflicting
+            .keybindings
+            .insert("open_git".into(), "m".into());
+        conflicting
+            .keybindings
+            .insert("open_board".into(), "M".into());
+        conflicting
+            .keybindings
+            .insert("toggle_files".into(), "u".into());
+        let migrated = normalize_config(conflicting);
+        assert!(!migrated.keybindings.contains_key("open_git"));
+        assert!(!migrated.keybindings.contains_key("open_board"));
+        assert_eq!(
+            migrated.keybindings.get("toggle_files").map(String::as_str),
+            Some("u")
+        );
+
+        let mut current = Config::default();
+        current.keybindings.insert("switcher".into(), "m".into());
+        let current = normalize_config(current);
+        assert_eq!(
+            current.keybindings.get("switcher").map(String::as_str),
+            Some("m")
+        );
     }
 
     #[test]

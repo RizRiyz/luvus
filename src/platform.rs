@@ -451,9 +451,9 @@ fn ps_command_table() -> Option<PsTable> {
 }
 
 /// Process identities running under each of `roots` (the root's own included),
-/// from one platform snapshot: command lines on Unix and executable names on
-/// Windows. This batched form lets agent detection cover every pane without one
-/// process-table operation per pane. `None` means the platform cannot tell.
+/// from one platform snapshot. This batched form lets agent detection cover
+/// every pane without one process-table operation per pane. `None` means the
+/// platform cannot tell.
 #[cfg(unix)]
 pub fn descendant_commands(roots: &[u32]) -> Option<std::collections::HashMap<u32, Vec<String>>> {
     use std::collections::{HashMap, HashSet};

@@ -308,6 +308,16 @@ static HELP: &[Translation] = &[
     ),
     tr!("git:", "git:", "git:", "git :", "Git:", "git:", "Git：", "Git："),
     tr!(
+        "mission control:",
+        "control de misión:",
+        "controle de missão:",
+        "contrôle de mission :",
+        "Missionskontrolle:",
+        "kontrol misi:",
+        "任务控制：",
+        "ミッションコントロール："
+    ),
+    tr!(
         "diff review:",
         "revisión de diff:",
         "revisão de diff:",
@@ -496,6 +506,16 @@ static HELP: &[Translation] = &[
         "Periksa repositori dan buka UI Git",
         "检查仓库状态并打开 Git 界面",
         "リポジトリ状態を確認して Git UI を開く"
+    ),
+    tr!(
+        "Open Mission Control for a workspace",
+        "Abrir Control de Misión para un espacio de trabajo",
+        "Abrir Controle de Missão para um espaço de trabalho",
+        "Ouvrir le Contrôle de Mission pour un espace de travail",
+        "Missionskontrolle für einen Arbeitsbereich öffnen",
+        "Buka Kontrol Misi untuk ruang kerja",
+        "为工作区打开任务控制",
+        "ワークスペースのミッションコントロールを開く"
     ),
     tr!(
         "Review Git diffs, notes, and agent feedback",
@@ -1776,6 +1796,16 @@ static HELP: &[Translation] = &[
         "buka tab Git untuk ruang kerja",
         "打开工作区的 Git 标签页",
         "ワークスペースの Git タブを開く"
+    ),
+    tr!(
+        "open Mission Control for a workspace",
+        "abrir Control de Misión para un espacio de trabajo",
+        "abrir Controle de Missão para um espaço de trabalho",
+        "ouvrir le Contrôle de Mission pour un espace de travail",
+        "Missionskontrolle für einen Arbeitsbereich öffnen",
+        "buka Kontrol Misi untuk ruang kerja",
+        "为工作区打开任务控制",
+        "ワークスペースのミッションコントロールを開く"
     ),
     tr!(
         "print the FILES tree of the active node",

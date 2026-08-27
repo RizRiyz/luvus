@@ -4,6 +4,33 @@
 use super::*;
 use crate::files::view_text_w;
 
+/// Keep the command overlay useful when a just-spawned child has not appeared
+/// in the platform process snapshot yet. The OS tree remains authoritative for
+/// every process it reports; the pane's launch command only fills a missing
+/// depth-zero root.
+fn ensure_process_tree_root(
+    pid: u32,
+    command: &str,
+    mut processes: Vec<crate::platform::ProcInfo>,
+) -> Vec<crate::platform::ProcInfo> {
+    if pid != 0
+        && !command.trim().is_empty()
+        && !processes
+            .iter()
+            .any(|process| process.pid == pid && process.depth == 0)
+    {
+        processes.insert(
+            0,
+            crate::platform::ProcInfo {
+                pid,
+                depth: 0,
+                command: command.to_string(),
+            },
+        );
+    }
+    processes
+}
+
 fn copy_word_forward(
     row_count: usize,
     mut row_layout: impl FnMut(usize) -> Option<crate::terminal::vt::RetainedRowLayout>,
@@ -1514,15 +1541,23 @@ impl App {
             _ => {}
         }
         let scroll: i32 = match m.kind {
-            MouseEventKind::Down(MouseButton::Left) => 0,
             MouseEventKind::ScrollUp => -3,
             MouseEventKind::ScrollDown => 3,
-            _ => return, // motion / release: hover updated, nothing else to do
+            _ => 0,
         };
+        let hscroll: i32 = match m.kind {
+            MouseEventKind::ScrollLeft => -3,
+            MouseEventKind::ScrollRight => 3,
+            _ => 0,
+        };
+        if scroll == 0 && hscroll == 0 && !matches!(m.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            return; // motion / release: hover updated, nothing else to do
+        }
         let (c, r) = (m.column, m.row);
         let hit = |rect: Rect| c >= rect.x && c < rect.right() && r >= rect.y && r < rect.bottom();
 
-        if scroll != 0 {
+        if scroll != 0 || hscroll != 0 {
             // Wheel over a sidebar list scrolls it one item per notch (the next
             // render clamps the offset to the list length).
             let step = |off: usize| {
@@ -1532,15 +1567,15 @@ impl App {
                     off + 1
                 }
             };
-            if hit(self.workspaces_area) {
+            if scroll != 0 && hit(self.workspaces_area) {
                 self.workspaces_scroll = step(self.workspaces_scroll);
                 return;
             }
-            if hit(self.agents_area) {
+            if scroll != 0 && hit(self.agents_area) {
                 self.agents_scroll = step(self.agents_scroll);
                 return;
             }
-            if hit(self.files_area) {
+            if scroll != 0 && hit(self.files_area) {
                 if self.files_mode == crate::diff::FilesMode::Diff {
                     self.diff_scroll_by(if scroll < 0 { -1 } else { 1 });
                 } else {
@@ -1549,17 +1584,17 @@ impl App {
                 return;
             }
             // Wheel over a git tab scrolls its active view (docs/17).
-            if self.active_is_git() && hit(self.last_pane_area) {
+            if scroll != 0 && self.active_is_git() && hit(self.last_pane_area) {
                 self.git_scroll(scroll);
                 return;
             }
             // Wheel over the orchestration board scrolls its list (docs/22).
-            if self.active_is_orch() && hit(self.orch_area) {
+            if scroll != 0 && self.active_is_orch() && hit(self.orch_area) {
                 self.orch_scroll_by(scroll);
                 return;
             }
             // Wheel over Mission Control scrolls its agent list (docs/54).
-            if self.active_is_mission() && hit(self.mission_area) {
+            if scroll != 0 && self.active_is_mission() && hit(self.mission_area) {
                 let n = self.mission_rows.len();
                 self.mission_cursor = match scroll {
                     s if s < 0 => self.mission_cursor.saturating_sub(1),
@@ -1575,108 +1610,139 @@ impl App {
                 .find(|(id, rect)| self.views.contains_key(id) && hit(*rect))
                 .map(|(id, rect)| (*id, *rect))
             {
-                let viewport = rect.height.saturating_sub(1) as usize;
+                let viewport = rect.height.saturating_sub(2) as usize;
                 match self.views.get_mut(&id) {
                     Some(crate::app::ViewKind::File(v)) => {
                         let text_w = view_text_w(v, rect.width);
                         v.scroll_by(scroll, viewport, text_w);
                     }
                     Some(crate::app::ViewKind::Diff(v)) => {
-                        let rows = v.stack_rows.len().max(v.split_rows.len());
-                        if scroll < 0 {
-                            v.scroll = v.scroll.saturating_sub(3);
+                        let is_split = v.effective_split(rect.width);
+                        if hscroll != 0 {
+                            if hscroll < 0 {
+                                v.horizontal = v.horizontal.saturating_sub(8);
+                            } else {
+                                v.horizontal = v.horizontal.saturating_add(8);
+                            }
+                            let marker_style = self.config.layout.diff_marker_style;
+                            v.ensure_horizontal_visible(rect.width, marker_style, is_split);
                         } else {
-                            v.scroll = v
-                                .scroll
-                                .saturating_add(3)
-                                .min(rows.saturating_sub(viewport));
+                            let rows = if is_split {
+                                v.split_rows.len()
+                            } else {
+                                v.stack_rows.len()
+                            };
+                            if is_split {
+                                let current = v.split_row_for_stack(v.scroll);
+                                let split = if scroll < 0 {
+                                    current.saturating_sub(3)
+                                } else {
+                                    current.saturating_add(3).min(rows.saturating_sub(viewport))
+                                };
+                                if let Some(stack) = v.stack_row_for_split(split) {
+                                    v.scroll = stack;
+                                    v.selected = stack;
+                                }
+                            } else if scroll < 0 {
+                                v.scroll = v.scroll.saturating_sub(3);
+                                v.selected = v.scroll;
+                            } else {
+                                v.scroll = v
+                                    .scroll
+                                    .saturating_add(3)
+                                    .min(rows.saturating_sub(viewport));
+                                v.selected = v.scroll;
+                            }
                         }
-                        v.selected = v.scroll;
                     }
                     None => {}
                 }
                 return;
             }
             // Otherwise the wheel scrolls the pane under the cursor.
-            if let Some(id) = self
-                .pane_rects
-                .iter()
-                .find(|(_, rect)| hit(*rect))
-                .map(|(id, _)| *id)
-            {
-                let up = scroll < 0;
-                // Pane-local, 1-based coordinates for a forwarded mouse event.
-                let content = self
-                    .pane_content_rects
+            // Skip when only horizontal scroll is active — there is no
+            // meaningful terminal horizontal-wheel protocol to forward.
+            if scroll != 0 {
+                if let Some(id) = self
+                    .pane_rects
                     .iter()
-                    .find(|(pid, _)| *pid == id)
-                    .map(|(_, r)| *r);
-                // Set after the pane borrow ends: `Some(v)` writes `scroll_pane = v`.
-                let mut set_scroll: Option<Option<PaneId>> = None;
-                // Forwarding the wheel makes the app repaint; that output is the
-                // user scrolling, not the agent working (docs/07).
-                let mut scrolled_the_app = false;
-                let extending_selection = self.selection.is_some_and(|selection| {
-                    selection.pane == id && selection.dragging && selection.retained.is_some()
-                });
-                let mut scrolled_selection = false;
-                if let Some(pane) = self.panes.get(&id) {
-                    let mm = pane.mouse_mode();
-                    if extending_selection && !pane.alt_screen() {
-                        // The selection gesture owns primary-screen scrolling,
-                        // even when the child reports mouse input. Its endpoints
-                        // are retained-history rows, so the original anchor stays
-                        // attached to the same text while the cursor extends.
-                        pane.scroll(-scroll);
-                        set_scroll = Some((pane.scroll_state().0 > 0).then_some(id));
-                        scrolled_selection = true;
-                    } else if mm.report {
-                        // The app tracks the mouse (e.g. a TUI agent like Claude
-                        // Code on the alternate screen) — forward the wheel so it
-                        // scrolls its own transcript, exactly like a real terminal.
-                        let base = content.unwrap_or(Rect::new(0, 0, 1, 1));
-                        let col = m.column.saturating_sub(base.x) + 1;
-                        let row = m.row.saturating_sub(base.y) + 1;
-                        // Preserve the terminal protocol's one-event/one-report
-                        // boundary. In particular, Windows ConPTY may coalesce
-                        // rapid writes; sending duplicates here can make a TUI
-                        // receive several concatenated SGR reports as one input
-                        // record and reject the entire wheel action.
-                        pane.send(&mouse_wheel_seq(up, col, row, mm.sgr));
-                        scrolled_the_app = true;
-                    } else if !pane.alt_screen() {
-                        // Primary screen with real history: scroll luvus's
-                        // scrollback viewport (`scroll` is -3 up / +3 down, and a
-                        // positive delta scrolls up into history — so negate it).
-                        pane.scroll(-scroll);
-                        // Engage keyboard scroll mode while scrolled up (so the
-                        // number/j/k keys work); disengage once back at live.
-                        set_scroll = Some((pane.scroll_state().0 > 0).then_some(id));
-                    } else if mm.alternate_scroll {
-                        // The application explicitly requested alternate
-                        // scrolling, so translate wheel movement into its
-                        // cursor-key scroll input. Without that mode there is
-                        // no host history on an alternate screen to move.
-                        let seq: &[u8] = if up { b"\x1b[A" } else { b"\x1b[B" };
-                        for _ in 0..scroll.abs() {
-                            pane.send(seq);
+                    .find(|(_, rect)| hit(*rect))
+                    .map(|(id, _)| *id)
+                {
+                    let up = scroll < 0;
+                    // Pane-local, 1-based coordinates for a forwarded mouse event.
+                    let content = self
+                        .pane_content_rects
+                        .iter()
+                        .find(|(pid, _)| *pid == id)
+                        .map(|(_, r)| *r);
+                    // Set after the pane borrow ends: `Some(v)` writes `scroll_pane = v`.
+                    let mut set_scroll: Option<Option<PaneId>> = None;
+                    // Forwarding the wheel makes the app repaint; that output is the
+                    // user scrolling, not the agent working (docs/07).
+                    let mut scrolled_the_app = false;
+                    let extending_selection = self.selection.is_some_and(|selection| {
+                        selection.pane == id && selection.dragging && selection.retained.is_some()
+                    });
+                    let mut scrolled_selection = false;
+                    if let Some(pane) = self.panes.get(&id) {
+                        let mm = pane.mouse_mode();
+                        if extending_selection && !pane.alt_screen() {
+                            // The selection gesture owns primary-screen scrolling,
+                            // even when the child reports mouse input. Its endpoints
+                            // are retained-history rows, so the original anchor stays
+                            // attached to the same text while the cursor extends.
+                            pane.scroll(-scroll);
+                            set_scroll = Some((pane.scroll_state().0 > 0).then_some(id));
+                            scrolled_selection = true;
+                        } else if mm.report {
+                            // The app tracks the mouse (e.g. a TUI agent like Claude
+                            // Code on the alternate screen) — forward the wheel so it
+                            // scrolls its own transcript, exactly like a real terminal.
+                            let base = content.unwrap_or(Rect::new(0, 0, 1, 1));
+                            let col = m.column.saturating_sub(base.x) + 1;
+                            let row = m.row.saturating_sub(base.y) + 1;
+                            // Preserve the terminal protocol's one-event/one-report
+                            // boundary. In particular, Windows ConPTY may coalesce
+                            // rapid writes; sending duplicates here can make a TUI
+                            // receive several concatenated SGR reports as one input
+                            // record and reject the entire wheel action.
+                            pane.send(&mouse_wheel_seq(up, col, row, mm.sgr));
+                            scrolled_the_app = true;
+                        } else if !pane.alt_screen() {
+                            // Primary screen with real history: scroll luvus's
+                            // scrollback viewport (`scroll` is -3 up / +3 down, and a
+                            // positive delta scrolls up into history — so negate it).
+                            pane.scroll(-scroll);
+                            // Engage keyboard scroll mode while scrolled up (so the
+                            // number/j/k keys work); disengage once back at live.
+                            set_scroll = Some((pane.scroll_state().0 > 0).then_some(id));
+                        } else if mm.alternate_scroll {
+                            // The application explicitly requested alternate
+                            // scrolling, so translate wheel movement into its
+                            // cursor-key scroll input. Without that mode there is
+                            // no host history on an alternate screen to move.
+                            let seq: &[u8] = if up { b"\x1b[A" } else { b"\x1b[B" };
+                            for _ in 0..scroll.abs() {
+                                pane.send(seq);
+                            }
+                            scrolled_the_app = true;
                         }
-                        scrolled_the_app = true;
+                    }
+                    if scrolled_the_app {
+                        self.mark_input_for(id);
+                    }
+                    if let Some(v) = set_scroll {
+                        self.scroll_pane = v;
+                    }
+                    if scrolled_selection {
+                        if let Some(selection) = self.selection.as_mut() {
+                            selection.scrolled = true;
+                        }
+                        self.update_mouse_selection_cursor(m.column, m.row);
                     }
                 }
-                if scrolled_the_app {
-                    self.mark_input_for(id);
-                }
-                if let Some(v) = set_scroll {
-                    self.scroll_pane = v;
-                }
-                if scrolled_selection {
-                    if let Some(selection) = self.selection.as_mut() {
-                        selection.scrolled = true;
-                    }
-                    self.update_mouse_selection_cursor(m.column, m.row);
-                }
-            }
+            } // scroll != 0
             return;
         }
 
@@ -2459,7 +2525,7 @@ impl App {
         let cwd = pane.cwd.clone();
         let pid = pane.child_pid.load(std::sync::atomic::Ordering::SeqCst);
         let procs = if pid != 0 {
-            crate::platform::process_tree(pid)
+            ensure_process_tree_root(pid, &pane.command, crate::platform::process_tree(pid))
         } else {
             Vec::new()
         };
@@ -3183,6 +3249,30 @@ fn csi_tilde_key(code: u8, modifiers: KeyModifiers) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_inspect_fills_only_a_missing_process_root() {
+        let descendant = crate::platform::ProcInfo {
+            pid: 43,
+            depth: 1,
+            command: "worker".into(),
+        };
+        let processes = ensure_process_tree_root(42, "shell --login", vec![descendant.clone()]);
+        assert_eq!(processes.len(), 2);
+        assert_eq!(processes[0].pid, 42);
+        assert_eq!(processes[0].depth, 0);
+        assert_eq!(processes[0].command, "shell --login");
+        assert_eq!(processes[1], descendant);
+
+        let existing_root = crate::platform::ProcInfo {
+            pid: 42,
+            depth: 0,
+            command: "os-reported shell --login".into(),
+        };
+        let processes = ensure_process_tree_root(42, "fallback", vec![existing_root.clone()]);
+        assert_eq!(processes, vec![existing_root]);
+        assert!(ensure_process_tree_root(0, "pending", Vec::new()).is_empty());
+    }
 
     #[test]
     fn text_modal_suppresses_hover_from_covered_bar_geometry() {
@@ -4617,9 +4707,9 @@ mod link_click_tests {
     }
 
     #[test]
-    fn codex_copy_drops_its_one_cell_transcript_gutter() {
+    fn codex_copy_drops_its_one_cell_transcript_gutter_on_one_row() {
         let _env = crate::persist::test_env("codex-copy-gutter");
-        let (mut app, _term, _) = fixture_showing("  hello\r\n  world", 0);
+        let (mut app, _term, _) = fixture_showing("  hello", 0);
         let pane = app.layout().focus;
         app.status.get_mut(&pane).expect("pane status").agent = "codex".into();
         let content = app
@@ -4628,18 +4718,19 @@ mod link_click_tests {
             .find(|(id, _)| *id == pane)
             .map(|(_, rect)| *rect)
             .expect("pane content rect");
-        // The drag starts one cell in, so this verifies Codex detection rather
-        // than the generic pane-edge case above.
+        // The drag starts one cell inside the pane and selects one row, so this
+        // verifies Codex gutter cleanup without relying on rectangular
+        // multiline selection.
         app.selection = Some(crate::app::Selection {
             pane,
             content,
             anchor: (content.x + 1, content.y),
-            cursor: (content.x + 6, content.y + 1),
+            cursor: (content.x + 6, content.y),
             retained: None,
             scrolled: false,
             dragging: false,
         });
 
-        assert_eq!(app.selection_text().as_deref(), Some("hello\nworld"));
+        assert_eq!(app.selection_text().as_deref(), Some("hello"));
     }
 }

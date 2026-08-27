@@ -61,13 +61,55 @@ jobs:
       # Builds (cross-compiling musl/aarch64 via `cross` automatically), packages
       # `luvus-<tag>-<target>.{tar.gz,zip}` + a .sha256, and uploads them to the
       # Release created above.
-      - uses: taiki-e/upload-rust-binary-action@v1
+      - id: package
+        uses: taiki-e/upload-rust-binary-action@v1
+        env:
+          # Keep official macOS archives tied to the SDK library even when a
+          # runner also has a Homebrew SQLite pkg-config entry.
+          SQLITE3_LIB_DIR: ${{ contains(matrix.target, 'apple-darwin') && '/usr/lib' || '' }}
         with:
           bin: luvus
           target: ${{ matrix.target }}
           archive: luvus-$tag-$target
           checksum: sha256
-          token: ${{ secrets.GITHUB_TOKEN }}
+          locked: true
+          # Build and package first; publish only after the size gate passes.
+          dry-run: true
+          dry-run-intended: true
+      - name: Report binary size
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/luvus"
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            binary="${binary}.exe"
+          fi
+          archive="${{ steps.package.outputs.tar }}"
+          if [[ -z "$archive" ]]; then
+            archive="${{ steps.package.outputs.zip }}"
+          fi
+          python3 scripts/check-binary-size.py \
+            --target "${{ matrix.target }}" \
+            --binary "$binary" \
+            --archive "$archive"
+      - name: Upload validated archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARCHIVE_TAR: ${{ steps.package.outputs.tar }}
+          ARCHIVE_ZIP: ${{ steps.package.outputs.zip }}
+          CHECKSUM_SHA256: ${{ steps.package.outputs.sha256 }}
+        run: |
+          archive="$ARCHIVE_TAR"
+          if [[ -z "$archive" ]]; then
+            archive="$ARCHIVE_ZIP"
+          fi
+          if [[ -z "$archive" || -z "$CHECKSUM_SHA256" ]]; then
+            echo "release package outputs are missing" >&2
+            exit 1
+          fi
+          gh release upload "$GITHUB_REF_NAME" \
+            "$archive" "$CHECKSUM_SHA256" \
+            --repo "$GITHUB_REPOSITORY" --clobber
 
   # Build native Linux packages (.deb + .rpm) for both arches and attach them to
   # the Release. luvus is a static musl binary, so each package just drops the

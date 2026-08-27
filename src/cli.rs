@@ -31,6 +31,7 @@ pub fn is_cli(args: &[String]) -> bool {
                 | "module"
                 | "theme"
                 | "git"
+                | "mission"
                 | "diff"
                 | "files"
                 | "worktree"
@@ -63,6 +64,7 @@ Commands:
   agent        Start, fork, message, inspect, and resume coding agents
   files        Browse and open workspace files
   git          Inspect repository state and open the Git UI
+  mission      Open Mission Control for a workspace
   diff         Review Git diffs, notes, and agent feedback
   worktree     Create, open, list, and remove Git worktrees
   task         Coordinate work across multiple coding agents
@@ -242,6 +244,9 @@ git:
   files open <path> [--target pane|tab|preview]   open a file in a view
   files reveal <path>        expand the tree to a path
   files refresh              re-read the tree from disk
+
+mission control:
+  mission open [<workspace>]  open Mission Control for a workspace
 
 diff review:
   diff list [--layer staged|worktree|untracked|conflict]   list exact diff layers
@@ -559,6 +564,7 @@ fn help_topic_has_subcommands(topic: &str) -> bool {
             | "agent"
             | "files"
             | "git"
+            | "mission"
             | "diff"
             | "worktree"
             | "task"
@@ -578,10 +584,10 @@ fn help_topic_has_subcommands(topic: &str) -> bool {
 
 fn normalize_help_topic(topic: &str) -> Option<&str> {
     match topic {
-        "workspace" | "tab" | "pane" | "agent" | "files" | "git" | "worktree" | "task"
-        | "lease" | "module" | "theme" | "bar" | "ui" | "session" | "server" | "integration"
-        | "diff" | "skill" | "wait" | "search" | "events" | "uhp" | "ping" | "doctor"
-        | "update" | "attach" => Some(topic),
+        "workspace" | "tab" | "pane" | "agent" | "files" | "git" | "mission" | "worktree"
+        | "task" | "lease" | "module" | "theme" | "bar" | "ui" | "session" | "server"
+        | "integration" | "diff" | "skill" | "wait" | "search" | "events" | "uhp" | "ping"
+        | "doctor" | "update" | "attach" => Some(topic),
         "node" => Some("pane"),
         "remote" | "--remote" => Some("remote"),
         _ => None,
@@ -723,7 +729,11 @@ fn write_topic_help_english(
         ),
         "git" => (
             "luvus git <status|branches|log|open> [args]",
-            detailed_section("git:\n", "\ndiff review:\n"),
+            detailed_section("git:\n", "\nmission control:\n"),
+        ),
+        "mission" => (
+            "luvus mission open [<workspace>]",
+            detailed_section("mission control:\n", "\ndiff review:\n"),
         ),
         "files" => (
             "luvus files <tree|open|reveal|refresh> [args]",
@@ -3386,6 +3396,12 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             ("git.log".into(), Value::Object(obj))
         }
         ("git", "open") => ("git.open".into(), one("workspace", arg0())),
+        ("mission", "open") => ("mission.open".into(), one("workspace", arg0())),
+        ("mission", other) => {
+            return Err(anyhow!(
+                "unknown mission command `{other}`. Try `luvus help mission`."
+            ))
+        }
         ("files", "open") => {
             let mut obj = serde_json::Map::new();
             obj.insert("path".to_string(), json!(arg0().unwrap_or_default()));
@@ -3658,6 +3674,7 @@ mod tests {
             ("ui", "ui"),
             ("module", "module"),
             ("git", "git"),
+            ("mission", "mission"),
             ("files", "files"),
             ("diff", "diff"),
             ("worktree", "worktree"),
@@ -4517,6 +4534,17 @@ mod tests {
         let (m, p) = parse(&argv("luvus git open 2")).unwrap();
         assert_eq!(m, "git.open");
         assert_eq!(p.get("workspace").and_then(|v| v.as_str()), Some("2"));
+    }
+
+    #[test]
+    fn maps_mission_control_command() {
+        let (method, params) = parse(&argv("luvus mission open 2")).unwrap();
+        assert_eq!(method, "mission.open");
+        assert_eq!(
+            params.get("workspace").and_then(|value| value.as_str()),
+            Some("2")
+        );
+        assert!(parse(&argv("luvus mission nope")).is_err());
     }
 
     #[test]

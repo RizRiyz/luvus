@@ -45,6 +45,9 @@ remains compatible with older Luvus releases.
   widget or dock.
 - Inspect docks before moving them. Avoid sidebar, dock, toast, or focus changes
   unless they serve the user's request.
+- Open Mission Control directly with `luvus mission open [<workspace>]` when
+  the user asks for it. The optional workspace index is 0-based; omit it to
+  target the active workspace.
 - With an explicit stable index, run `luvus workspace rename <i> <name>`, `pin
   <i>`, or `unpin <i>` directly. List workspaces only to resolve an unknown
   target or recover from `not_found`, and reuse a current list result. Workspace

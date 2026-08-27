@@ -1,7 +1,5 @@
 //! Native DIFF renderer (docs/88). It draws only the visible cached row slice.
 
-use std::collections::HashMap;
-
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -352,15 +350,6 @@ fn draw_split(
     t: &Theme,
 ) {
     let notes = DiffNotes { view, state };
-    let mut stack_indices = HashMap::new();
-    for (index, line) in view.stack_rows.iter().enumerate() {
-        if let Some(number) = line.old_line {
-            stack_indices.insert((DiffSide::Old, number), index);
-        }
-        if let Some(number) = line.new_line {
-            stack_indices.insert((DiffSide::New, number), index);
-        }
-    }
     let selected_anchor = view.stack_rows.get(view.selected).and_then(line_anchor);
     let scroll_anchor = view.stack_rows.get(view.scroll).and_then(line_anchor);
     let start = scroll_anchor
@@ -424,13 +413,13 @@ fn draw_split(
         );
         if hits.interactive {
             if let Some(number) = row.old.as_ref().and_then(|line| line.old_line) {
-                if let Some(index) = stack_indices.get(&(DiffSide::Old, number)) {
+                if let Some(index) = view.stack_indices.get(&(DiffSide::Old, number)) {
                     hits.source
                         .push((hits.pane, *index, DiffSide::Old, old_rect));
                 }
             }
             if let Some(number) = row.new.as_ref().and_then(|line| line.new_line) {
-                if let Some(index) = stack_indices.get(&(DiffSide::New, number)) {
+                if let Some(index) = view.stack_indices.get(&(DiffSide::New, number)) {
                     hits.source
                         .push((hits.pane, *index, DiffSide::New, new_rect));
                 }
@@ -463,13 +452,13 @@ fn draw_split(
             .old
             .as_ref()
             .and_then(|line| line.old_line)
-            .and_then(|number| stack_indices.get(&(DiffSide::Old, number)))
+            .and_then(|number| view.stack_indices.get(&(DiffSide::Old, number)))
             .is_some_and(|index| *index == view.selected)
             || row
                 .new
                 .as_ref()
                 .and_then(|line| line.new_line)
-                .and_then(|number| stack_indices.get(&(DiffSide::New, number)))
+                .and_then(|number| view.stack_indices.get(&(DiffSide::New, number)))
                 .is_some_and(|index| *index == view.selected);
         if selected_here && view.note_draft.is_some() {
             y = draw_note_composer(f, area, y, view, t);
@@ -996,6 +985,19 @@ mod tests {
             false,
             false,
         );
+        view.stack_indices = rows
+            .iter()
+            .enumerate()
+            .flat_map(|(index, line)| {
+                let old = line
+                    .old_line
+                    .map(|n| ((crate::diff::DiffSide::Old, n), index));
+                let new = line
+                    .new_line
+                    .map(|n| ((crate::diff::DiffSide::New, n), index));
+                old.into_iter().chain(new)
+            })
+            .collect();
         view.stack_rows = rows;
         view
     }

@@ -691,7 +691,41 @@ impl VtEngine for AlacrittyEngine {
             return None;
         }
         let last_column = self.term.grid().columns().checked_sub(1)?;
-        let middle_left = start_col.min(end_col);
+        let leading_blank_cells = |line: Line, limit: usize| {
+            let row = &self.term.grid()[line];
+            let limit = limit.min(last_column.saturating_add(1));
+            let mut column = 0;
+            while column < limit {
+                let cell = &row[Column(column)];
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                    || (cell.c != '\0' && !cell.c.is_whitespace())
+                {
+                    break;
+                }
+                if cell.flags.contains(Flags::WIDE_CHAR) {
+                    let spacer = column.saturating_add(1);
+                    if spacer >= limit
+                        || !row[Column(spacer)].flags.contains(Flags::WIDE_CHAR_SPACER)
+                    {
+                        break;
+                    }
+                    column += 2;
+                } else {
+                    column += 1;
+                }
+            }
+            column
+        };
+        // When the drag starts after a whitespace-only pane margin, treat that
+        // prefix as presentation padding. Following rows may begin earlier, so
+        // remove only blank cells and stop before their first real character.
+        // Additional indentation remains relative to the selected margin.
+        let margin = self
+            .retained_line(start_row)
+            .filter(|line| start_col > 0 && leading_blank_cells(*line, start_col) == start_col)
+            .map_or(0, |_| start_col);
         let mut output = String::new();
         let mut appended = false;
 
@@ -702,7 +736,7 @@ impl VtEngine for AlacrittyEngine {
             let left = if row_index == start_row {
                 start_col
             } else {
-                middle_left
+                leading_blank_cells(line, margin)
             }
             .min(last_column);
             let right = if row_index == end_row {
@@ -1127,7 +1161,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_selection_keeps_the_drag_left_edge_on_middle_rows() {
+    fn retained_selection_removes_only_the_selected_blank_margin() {
         let (tx, _rx) = channel();
         let mut engine = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 20));
         engine.advance(b"\x1b[H\x1b[2J - first\r\n - second\r\n - third");
@@ -1144,6 +1178,68 @@ mod tests {
                 .retained_selection_text(((rows[0], 1), (rows[2], 7)))
                 .as_deref(),
             Some("- first\n- second\n- third")
+        );
+    }
+
+    #[test]
+    fn retained_selection_preserves_content_and_relative_indentation() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(40, 6, tx, budget_for_rows(40, 20));
+        engine.advance(
+            b"\x1b[H\x1b[2J    first\r\n    second\r\n      nested\r\nprefix chosen\r\nstarts-left",
+        );
+        let mut rows = Vec::new();
+        engine.for_each_retained_row(&mut |row, text| {
+            if !text.is_empty() {
+                rows.push((row, text.to_string()));
+            }
+        });
+
+        let first = rows
+            .iter()
+            .find(|(_, text)| text == "    first")
+            .map(|(row, _)| *row)
+            .expect("indented prose row");
+        assert_eq!(
+            engine
+                .retained_selection_text(((first, 4), (first + 2, 11)))
+                .as_deref(),
+            Some("first\nsecond\n  nested"),
+            "the selected blank margin is removed while deeper indentation remains"
+        );
+
+        let chosen = rows
+            .iter()
+            .find(|(_, text)| text == "prefix chosen")
+            .map(|(row, _)| *row)
+            .expect("mid-line selection row");
+        assert_eq!(
+            engine
+                .retained_selection_text(((chosen, 7), (chosen + 1, 10)))
+                .as_deref(),
+            Some("chosen\nstarts-left"),
+            "text before the anchor disables margin cleanup on following rows"
+        );
+    }
+
+    #[test]
+    fn retained_selection_removes_a_complete_wide_whitespace_margin() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(40, 4, tx, budget_for_rows(40, 20));
+        engine.advance("\x1b[H\x1b[2J　first\r\n　second".as_bytes());
+        let mut rows = Vec::new();
+        engine.for_each_retained_row(&mut |row, text| {
+            if text.ends_with("first") || text.ends_with("second") {
+                rows.push(row);
+            }
+        });
+        assert_eq!(rows.len(), 2);
+
+        assert_eq!(
+            engine
+                .retained_selection_text(((rows[0], 2), (rows[1], 7)))
+                .as_deref(),
+            Some("first\nsecond")
         );
     }
 
@@ -1478,5 +1574,72 @@ mod tests {
         assert!(capture.text.contains("abcdefghij"), "{:?}", capture.text);
         assert!(capture.text.contains("next"), "{:?}", capture.text);
         assert!(capture.lines <= 3);
+    }
+
+    /// Pi alt-screen `doRender`: 2026 + row writes + CUP to fake caret + hide.
+    #[test]
+    fn pi_sync_frame_cursor_follows_final_cup_not_row_tail() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 4, tx, budget_for_rows(20, 20));
+        // Row 0 full of x (last cell col 19). Row 1: "> " + reverse space + pad.
+        // Then CUP to row 1 col 2 (1-based 2;3) and hide — Pi marker after prompt.
+        e.advance(
+            b"\x1b[?2026h\
+\x1b[1;1H\x1b[2Kxxxxxxxxxxxxxxxxxxxx\
+\x1b[2;1H\x1b[2K> \x1b[7m \x1b[27m               \
+\x1b[2;3H\x1b[?25l\
+\x1b[?2026l",
+        );
+        let cur = e.cursor();
+        assert_eq!((cur.x, cur.y), (2, 1), "cursor after complete 2026 frame");
+        assert!(!cur.visible, "Pi default hide");
+
+        let mut reversed = Vec::new();
+        e.for_each_cell(&mut |row, col, _, cell| {
+            if cell.mods.contains(Modifier::REVERSED) {
+                reversed.push((row, col));
+            }
+        });
+        assert_eq!(
+            reversed,
+            vec![(1, 2)],
+            "ESC[7m space at caret, not row tail"
+        );
+    }
+
+    #[test]
+    fn pi_sync_frame_without_closing_esu_does_not_apply_row_writes() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 4, tx, budget_for_rows(20, 20));
+        e.advance(b"\x1b[2;3H\x1b[?25h");
+        let before = e.cursor();
+        e.advance(b"\x1b[?2026h\x1b[1;1H\x1b[2Kxxxxxxxxxxxxxxxxxxxx");
+        let mid = e.cursor();
+        assert_eq!(
+            (mid.x, mid.y),
+            (before.x, before.y),
+            "open 2026 buffers; cursor stays at last committed CUP"
+        );
+    }
+
+    #[test]
+    fn pi_cursor_marker_apc_is_not_a_grid_cell() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 3, tx, budget_for_rows(20, 20));
+        e.advance(b"> \x1b_pi:c\x07\x1b[7m \x1b[27mhi");
+        let text = e.visible_rows().join("");
+        assert!(
+            !text.contains("pi:c"),
+            "APC marker must not become cells: {text:?}"
+        );
+        let mut reversed = Vec::new();
+        e.for_each_cell(&mut |row, col, _, cell| {
+            if cell.mods.contains(Modifier::REVERSED) {
+                reversed.push((row, col, cell.fg));
+            }
+        });
+        assert_eq!(reversed.len(), 1, "one reverse caret: {reversed:?}");
+        assert_eq!(reversed[0].0, 0);
+        assert_eq!(reversed[0].1, 2);
     }
 }

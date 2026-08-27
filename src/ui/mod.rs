@@ -26,6 +26,7 @@ pub struct RenderTarget<'a> {
     buf: &'a mut Buffer,
     area: Rect,
     cursor: Option<(u16, u16)>,
+    cursor_visible: bool,
     animation_mask: AnimationMask,
 }
 
@@ -50,6 +51,7 @@ impl<'a> RenderTarget<'a> {
             buf,
             area,
             cursor: None,
+            cursor_visible: false,
             animation_mask: AnimationMask::default(),
         }
     }
@@ -65,9 +67,17 @@ impl<'a> RenderTarget<'a> {
     pub fn set_cursor_position<P: Into<Position>>(&mut self, position: P) {
         let p = position.into();
         self.cursor = Some((p.x, p.y));
+        self.cursor_visible = true;
+    }
+    pub fn set_cursor_anchor(&mut self, x: u16, y: u16, visible: bool) {
+        self.cursor = Some((x, y));
+        self.cursor_visible = visible;
     }
     pub fn cursor(&self) -> Option<(u16, u16)> {
         self.cursor
+    }
+    pub fn cursor_visible(&self) -> bool {
+        self.cursor_visible
     }
 
     /// Mark that this projection contains a live working-state spinner.
@@ -104,18 +114,21 @@ mod tabbar;
 /// `RenderTarget`, render, then copy the resulting cursor back onto the frame.
 pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
-    let cursor = {
+    let (cursor, visible) = {
         let mut target = RenderTarget {
             buf: f.buffer_mut(),
             area,
             cursor: None,
+            cursor_visible: false,
             animation_mask: AnimationMask::default(),
         };
         render_into(&mut target, app);
-        target.cursor
+        (target.cursor, target.cursor_visible)
     };
     if let Some(p) = cursor {
-        f.set_cursor_position(p);
+        if visible {
+            f.set_cursor_position(p);
+        }
     }
 }
 
@@ -900,10 +913,10 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     } else {
         cursor
     };
-    if let Some(p) = cursor {
-        f.set_cursor_position(p);
+    if let Some((x, y, visible)) = cursor {
+        f.set_cursor_anchor(x, y, visible);
     }
-    app.last_cursor = cursor;
+    app.last_cursor = cursor.map(|(x, y, _)| (x, y));
     app.pane_rects = rects;
     app.tab_rects = tab_rects;
     app.tab_close_rects = tab_close_rects;

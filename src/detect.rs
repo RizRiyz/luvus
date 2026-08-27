@@ -930,22 +930,19 @@ impl Manifests {
 
     fn agent_in_process_command(&self, cmd: &str) -> Option<String> {
         let low = cmd.to_lowercase();
-        let mut tokens = low.split_whitespace();
-        let first = binary_name(tokens.next()?);
+        let tokens = Self::command_tokens(&low);
+        let tokens = unwrap_leading_env(&tokens);
+        let (first, rest) = tokens.split_first()?;
+        let first = binary_name(first);
         if let Some(a) = self.match_binary(first) {
             return Some(a);
         }
         // Several agents ship as a script run by an interpreter, so argv[0]
-        // is `node` / `python` and the real name is the script slot: the first
-        // non-flag argument. Nothing later counts -- `cargo test --example amp`
-        // must not resolve to amp.
+        // is `node` / `python` and the real name is the script slot. Nothing
+        // later counts -- `cargo test --example amp` must not resolve to amp.
         if is_interpreter(first) {
-            for t in tokens {
-                if t.starts_with('-') {
-                    continue;
-                }
-                return self.match_binary(binary_name(t));
-            }
+            let i = interpreter_script_slot(rest)?;
+            return self.match_interpreter_script(&rest[i]);
         }
         None
     }
@@ -959,7 +956,8 @@ impl Manifests {
     /// nothing rather than guessing.
     pub fn launch_args_for(&self, running: &[String], agent: &str) -> Option<Vec<String>> {
         for cmd in running {
-            let tokens: Vec<&str> = cmd.split_whitespace().collect();
+            let tokens = Self::command_tokens(cmd);
+            let tokens = unwrap_leading_env(&tokens);
             let Some((first, rest)) = tokens.split_first() else {
                 continue;
             };
@@ -967,22 +965,107 @@ impl Manifests {
             if self.match_binary(binary_name(&first_low)).as_deref() == Some(agent) {
                 return Some(rest.iter().map(|s| s.to_string()).collect());
             }
-            // Interpreter form: the agent token is the first non-flag argument,
-            // and nothing before it is a launch flag.
+            // Interpreter form: the agent token is the script slot, and nothing
+            // before it is a launch flag.
             if is_interpreter(binary_name(&first_low)) {
-                for (i, t) in rest.iter().enumerate() {
-                    if t.starts_with('-') {
-                        continue;
-                    }
-                    let t_low = t.to_lowercase();
-                    if self.match_binary(binary_name(&t_low)).as_deref() == Some(agent) {
+                if let Some(i) = interpreter_script_slot(rest) {
+                    let t_low = rest[i].to_lowercase();
+                    if self.match_interpreter_script(&t_low).as_deref() == Some(agent) {
                         return Some(rest[(i + 1)..].iter().map(|s| s.to_string()).collect());
                     }
-                    break; // the first non-flag arg is the script slot; nothing later counts
                 }
             }
         }
         None
+    }
+
+    /// Split a process command line into argv-like tokens, retaining spaces
+    /// inside quoted paths such as `"C:\\Program Files\\nodejs\\node.exe"`.
+    /// Apply the Windows backslash-before-quote rules so escaped quotes and
+    /// trailing backslashes survive when launch arguments are replayed.
+    fn command_tokens(command: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        let mut token = String::new();
+        let mut quoted = false;
+        let mut token_started = false;
+        let mut characters = command.chars().peekable();
+        while let Some(character) = characters.next() {
+            match character {
+                '\\' => {
+                    let mut backslashes = 1;
+                    while characters.peek().copied() == Some('\\') {
+                        characters.next();
+                        backslashes += 1;
+                    }
+                    token_started = true;
+                    if characters.peek().copied() == Some('"') {
+                        characters.next();
+                        for _ in 0..backslashes / 2 {
+                            token.push('\\');
+                        }
+                        if backslashes % 2 == 1 {
+                            token.push('"');
+                        } else {
+                            quoted = !quoted;
+                        }
+                    } else {
+                        for _ in 0..backslashes {
+                            token.push('\\');
+                        }
+                    }
+                }
+                '"' => {
+                    quoted = !quoted;
+                    token_started = true;
+                }
+                character if character.is_whitespace() && !quoted => {
+                    if token_started {
+                        tokens.push(std::mem::take(&mut token));
+                        token_started = false;
+                    }
+                }
+                character => {
+                    token.push(character);
+                    token_started = true;
+                }
+            }
+        }
+        if token_started {
+            tokens.push(token);
+        }
+        tokens
+    }
+
+    /// Match an interpreter's script slot by basename or by a distinctive npm
+    /// package root. npm shims commonly execute `cli.js` from a package path
+    /// such as `...\\node_modules\\pi-coding-agent\\dist\\cli.js`.
+    fn match_interpreter_script(&self, token: &str) -> Option<String> {
+        self.match_binary(binary_name(token)).or_else(|| {
+            let normalized = token.to_lowercase().replace('\\', "/");
+            let segments: Vec<&str> = normalized.split('/').collect();
+            let script = strip_script_extension(segments.last().copied()?);
+
+            self.agents
+                .iter()
+                .find(|agent| agent.all().any(|pattern| pattern == script))
+                .map(|agent| agent.name.clone())
+                .or_else(|| {
+                    let node_modules = segments
+                        .iter()
+                        .rposition(|segment| *segment == "node_modules")?;
+                    let package_index = node_modules + 1;
+                    let package = segments.get(package_index).copied()?;
+                    let package = if package.starts_with('@') {
+                        segments.get(package_index + 1).copied()?
+                    } else {
+                        package
+                    };
+                    self.agents
+                        .iter()
+                        .find(|agent| agent.distinct.iter().any(|pattern| pattern == package))
+                        .map(|agent| agent.name.clone())
+                })
+        })
     }
 
     /// The agent whose patterns name exactly this binary.
@@ -1039,6 +1122,16 @@ pub(crate) fn binary_name(token: &str) -> &str {
         .trim_end_matches(".exe")
 }
 
+/// The basename of a script without the extension used by common interpreters.
+fn strip_script_extension(token: &str) -> &str {
+    token
+        .strip_suffix(".cjs")
+        .or_else(|| token.strip_suffix(".mjs"))
+        .or_else(|| token.strip_suffix(".js"))
+        .or_else(|| token.strip_suffix(".py"))
+        .unwrap_or(token)
+}
+
 /// Runtimes that execute an agent as a script, so the name to look for is the
 /// argument rather than argv[0].
 pub(crate) fn is_interpreter(base: &str) -> bool {
@@ -1058,12 +1151,59 @@ pub(crate) fn is_interpreter(base: &str) -> bool {
             | "uvx"
             | "ruby"
             | "perl"
-            | "env"
             | "sh"
             | "bash"
             | "zsh"
             | "fish"
     )
+}
+
+/// Conservatively unwrap `env KEY=value command ...`.
+///
+/// Only that form is unwrapped: a leading `env` followed by zero or more
+/// `KEY=value` assignments, then a command. Flags after `env` are an unknown
+/// wrapper and the original argv is left untouched -- later arguments are not
+/// scanned for an agent-looking path.
+fn unwrap_leading_env(tokens: &[String]) -> &[String] {
+    let Some(first) = tokens.first() else {
+        return tokens;
+    };
+    if binary_name(&first.to_lowercase()) != "env" {
+        return tokens;
+    }
+    let mut i = 1;
+    while i < tokens.len() {
+        let t = &tokens[i];
+        if t.starts_with('-') {
+            return tokens;
+        }
+        if !t.contains('=') {
+            return &tokens[i..];
+        }
+        i += 1;
+    }
+    &tokens[i..]
+}
+
+/// Index of the script an interpreter will run, among the arguments after
+/// argv[0]. Flags are skipped. Values consumed by `-r`, `--require`, and
+/// `--loader` are skipped with their option. The first remaining argument is
+/// the script; later arguments are not scanned.
+fn interpreter_script_slot(args: &[String]) -> Option<usize> {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg.starts_with('-') {
+            if matches!(arg, "-r" | "--require" | "--loader") {
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        return Some(i);
+    }
+    None
 }
 
 /// True when `needle` appears in `hay` as a **standalone word**.
@@ -1269,6 +1409,103 @@ mod tests {
         assert_eq!(
             m.launch_args_for(&["claude".into()], "claude"),
             Some(vec![])
+        );
+        // Empty quoted arguments are real argv entries and must survive so a
+        // relaunch does not silently change the agent's configuration.
+        assert_eq!(
+            m.launch_args_for(&[r#"claude --model "" --yes"#.into()], "claude"),
+            Some(vec!["--model".into(), "".into(), "--yes".into()])
+        );
+        // Windows escapes a quote with an odd run of backslashes inside a
+        // quoted argument; the escaped quote must remain part of the value.
+        assert_eq!(
+            m.launch_args_for(
+                &["claude --append-system-prompt \"say \\\"hi\\\"\"".into()],
+                "claude",
+            ),
+            Some(vec!["--append-system-prompt".into(), "say \"hi\"".into()])
+        );
+        // An even run before a closing quote becomes half as many backslashes,
+        // and the quote remains the delimiter.
+        assert_eq!(
+            m.launch_args_for(&["claude --cwd \"C:\\work\\\\\"".into()], "claude"),
+            Some(vec!["--cwd".into(), r#"C:\work\"#.into()])
+        );
+        // Windows process inspection supplies the full Node command line, so
+        // Pi's npm package name in the script slot resolves to the agent.
+        assert_eq!(
+            m.agent_in_processes(&[
+                r#""C:\Program Files\nodejs\node.exe" C:\Users\me\AppData\Roaming\npm\node_modules\@earendil-works\pi-coding-agent\dist\cli.js"#.into()
+            ]),
+            Some("pi".into())
+        );
+        // An ambiguous brand name is still deliberate when it is the script
+        // basename in a running interpreter command.
+        assert_eq!(
+            m.agent_in_processes(&[r#"node C:\tools\grok.js"#.into()]),
+            Some("grok".into())
+        );
+        // A bare agent name in an unrelated project directory is not an
+        // installed package and must not identify the pane.
+        assert_eq!(
+            m.agent_in_processes(&[r#"node C:\work\claude\build.js"#.into()]),
+            None
+        );
+        // Package-directory matching remains available for npm shim paths.
+        assert_eq!(
+            m.agent_in_processes(&[r#"node C:\work\node_modules\claude\build.js"#.into()]),
+            Some("claude".into())
+        );
+        // Scoped npm packages use the package name after the `@scope` segment.
+        assert_eq!(
+            m.agent_in_processes(&[
+                r#"node C:\work\node_modules\@earendil-works\pi-coding-agent\dist\cli.js"#.into()
+            ]),
+            Some("pi".into())
+        );
+    }
+
+    #[test]
+    fn interpreter_script_slot_skips_require_value() {
+        let m = Manifests::builtin();
+        let cmd = r#"node --require C:\hooks\loader.js C:\Users\me\AppData\Roaming\npm\node_modules\@earendil-works\pi-coding-agent\dist\cli.js --yes"#;
+        assert_eq!(m.agent_in_processes(&[cmd.into()]), Some("pi".into()));
+        assert_eq!(
+            m.launch_args_for(&[cmd.into()], "pi"),
+            Some(vec!["--yes".into()])
+        );
+    }
+
+    #[test]
+    fn interpreter_script_slot_skips_loader_value() {
+        let m = Manifests::builtin();
+        let cmd = r#"node --loader C:\hooks\loader.js C:\Users\me\AppData\Roaming\npm\node_modules\@earendil-works\pi-coding-agent\dist\cli.js --yes"#;
+        assert_eq!(m.agent_in_processes(&[cmd.into()]), Some("pi".into()));
+        assert_eq!(
+            m.launch_args_for(&[cmd.into()], "pi"),
+            Some(vec!["--yes".into()])
+        );
+    }
+
+    #[test]
+    fn interpreter_script_slot_ignores_agent_looking_loader() {
+        let m = Manifests::builtin();
+        assert_eq!(
+            m.agent_in_processes(&[
+                r#"node --require C:\work\node_modules\pi-coding-agent\hooks\loader.js C:\work\build.js"#.into()
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn interpreter_script_slot_unwraps_env_key_value() {
+        let m = Manifests::builtin();
+        let cmd = r#"env FOO=bar node C:\work\node_modules\@earendil-works\pi-coding-agent\dist\cli.js --yes"#;
+        assert_eq!(m.agent_in_processes(&[cmd.into()]), Some("pi".into()));
+        assert_eq!(
+            m.launch_args_for(&[cmd.into()], "pi"),
+            Some(vec!["--yes".into()])
         );
     }
 
@@ -1638,6 +1875,26 @@ mod tests {
         );
         assert_eq!(detection.agent, "zsh");
         assert_eq!(detection.identity_source, "command_fallback");
+    }
+
+    #[test]
+    fn successful_process_scan_replaces_a_stale_identity() {
+        let detection = classify(
+            Some("claude"),
+            "claude prompt",
+            false,
+            false,
+            "cmd.exe",
+            "claude",
+            &[
+                r#"cmd.exe /d /k C:\Users\me\.grok\bin\grok.exe --prompt-file C:\Users\me\task.md"#
+                    .into(),
+                r#"C:\Users\me\.grok\bin\grok.exe --prompt-file C:\Users\me\task.md"#.into(),
+            ],
+            &Manifests::builtin(),
+        );
+        assert_eq!(detection.agent, "grok");
+        assert_eq!(detection.identity_source, "process_tree");
     }
 
     /// A pane is named after the agent *running in it*, never after a word that

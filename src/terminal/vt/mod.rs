@@ -218,7 +218,9 @@ pub trait VtEngine: Send {
     /// Extract an inclusive retained-row selection using terminal cell
     /// coordinates. Implementations must preserve complete wide glyphs and
     /// zero-width marks rather than treating columns as string character
-    /// indexes.
+    /// indexes. When the selection starts after a whitespace-only margin,
+    /// following rows may omit up to that many leading blank cells, but must
+    /// preserve earlier content and any additional relative indentation.
     fn retained_selection_text(&self, range: ((usize, usize), (usize, usize))) -> Option<String>;
 
     /// Return copy-mode navigation geometry for one retained row. Trailing

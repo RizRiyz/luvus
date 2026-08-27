@@ -214,15 +214,17 @@ impl App {
         }
     }
 
-    /// `Ctrl+Space e`: mount the FILES dock on the left sidebar, or unmount it if
-    /// it is already shown. Mounting also makes sure the sidebar is visible.
+    /// `Ctrl+Space e`: unmount the FILES dock, or restore it to the side where
+    /// the user last placed it. Mounting also makes sure that side is visible.
     pub fn toggle_files_dock(&mut self) {
         if self.sidebars.side_of(&DockKind::Files).is_some() {
             self.unmount_dock(&DockKind::Files);
         } else {
-            self.sidebars.left.docks.push(DockKind::Files);
-            self.sidebars.left.visible = true;
-            self.save_sidebars();
+            let target = self.sidebars.files_side;
+            if self.sidebars.has_room(target) {
+                self.sidebars.get_mut(target).visible = true;
+            }
+            self.move_dock(&DockKind::Files, target);
         }
     }
 
@@ -794,8 +796,42 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{DockKind, FileMenu, FileMenuItem};
+    use crate::app::{DockKind, FileMenu, FileMenuItem, Side};
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn files_toggle_restores_last_side_across_restart() {
+        let _env = crate::persist::test_env("files-toggle-side");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        assert!(app.move_dock(&DockKind::Files, Side::Right));
+        assert_eq!(app.sidebars.side_of(&DockKind::Files), Some(Side::Right));
+        app.toggle_files_dock();
+        assert_eq!(app.sidebars.side_of(&DockKind::Files), None);
+        assert_eq!(
+            app.config
+                .sidebars
+                .as_ref()
+                .and_then(|sidebars| sidebars.files_side),
+            Some(Side::Right),
+            "hiding FILES keeps its last placement in config"
+        );
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut reopened = App::new(80, 24, tx).unwrap();
+        assert_eq!(reopened.sidebars.side_of(&DockKind::Files), None);
+        reopened.toggle_files_dock();
+        assert_eq!(
+            reopened.sidebars.side_of(&DockKind::Files),
+            Some(Side::Right),
+            "showing FILES restores the persisted side"
+        );
+        assert!(
+            reopened.sidebars.right.visible,
+            "showing FILES also reveals its sidebar"
+        );
+    }
 
     #[test]
     fn recent_files_are_deduplicated_newest_first_and_bounded() {
