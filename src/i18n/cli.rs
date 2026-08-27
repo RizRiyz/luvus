@@ -648,7 +648,7 @@ static HELP: &[Translation] = &[
         "Konfigurasi bilah sisi, dock, dan notifikasi",
         "配置侧边栏、停靠栏和通知",
         "サイドバー、ドック、通知を設定",
-        "사이드바, 도크, 알림 설정"
+        "사이드바, 독, 알림 설정"
     ),
     tr!(
         "List, attach, stop, and delete server sessions",
@@ -1737,7 +1737,7 @@ static HELP: &[Translation] = &[
         "daftar dock dan sisinya",
         "列出停靠栏及其所在侧",
         "ドックと配置側を一覧表示",
-        "도크와 각 도크의 배치 위치 나열"
+        "독과 각 독의 배치 위치 나열"
     ),
     tr!(
         "place a dock on a side",
@@ -1748,7 +1748,7 @@ static HELP: &[Translation] = &[
         "tempatkan dock di satu sisi",
         "将停靠栏放置在一侧",
         "ドックを左右どちらかに配置",
-        "도크를 한쪽에 배치"
+        "독을 한쪽에 배치"
     ),
     tr!(
         "feed a module's sidebar dock its rows (JSON array,",
@@ -1759,7 +1759,7 @@ static HELP: &[Translation] = &[
         "kirim baris ke dock bilah sisi modul (array JSON,",
         "向模块侧边停靠栏提供行数据（JSON 数组，",
         "モジュールのサイドバードックへ行を送信（JSON 配列、",
-        "모듈의 사이드바 도크에 행 전달 (JSON 배열,"
+        "모듈의 사이드바 독에 행 전달 (JSON 배열,"
     ),
     tr!(
         "or piped on stdin). See docs/29 + the website",
@@ -2576,7 +2576,7 @@ static TEXT: &[Translation] = &[
     tr!("run `luvus doctor` outside a luvus pane to test your terminal", "ejecuta `luvus doctor` fuera de un panel de luvus para probar tu terminal", "execute `luvus doctor` fora de um painel luvus para testar seu terminal", "exécutez `luvus doctor` hors d'un volet luvus pour tester votre terminal", "`luvus doctor` außerhalb eines Luvus-Bereichs ausführen, um das Terminal zu testen", "jalankan `luvus doctor` di luar panel luvus untuk menguji terminal", "请在 luvus 窗格外运行 `luvus doctor` 以测试终端", "端末を確認するには luvus ペイン外で `luvus doctor` を実行してください",
         "터미널을 테스트하려면 luvus 패널 밖에서 `luvus doctor`를 실행하세요"),
     tr!("Shift+Enter works (terminal reports modified keys)", "Shift+Enter funciona (el terminal informa teclas modificadas)", "Shift+Enter funciona (o terminal informa teclas modificadas)", "Shift+Entrée fonctionne (le terminal signale les touches modifiées)", "Shift+Enter funktioniert (Terminal meldet modifizierte Tasten)", "Shift+Enter berfungsi (terminal melaporkan tombol bermodifier)", "Shift+Enter 可用（终端报告修饰键）", "Shift+Enter は利用できます（端末が修飾キーを通知）",
-        "Shift+Enter 작동함 (터미널이 보조 키 조합을 보고함)"),
+        "Shift+Enter 작동함 (터미널이 한정자 키 입력을 보고함)"),
     tr!("Shift+Enter isn't distinguishable here · optional", "Shift+Enter no se distingue aquí · opcional", "Shift+Enter não é distinguível aqui · opcional", "Shift+Entrée n'est pas distinguable ici · facultatif", "Shift+Enter ist hier nicht unterscheidbar · optional", "Shift+Enter tidak dapat dibedakan di sini · opsional", "此处无法区分 Shift+Enter · 可选", "ここでは Shift+Enter を区別できません · 任意",
         "여기서는 Shift+Enter를 구분할 수 없음 · 선택 사항"),
     tr!("WSL in Windows Terminal detected; all other features still work", "se detectó WSL en Windows Terminal; las demás funciones siguen disponibles", "WSL no Windows Terminal detectado; os demais recursos continuam funcionando", "WSL dans Windows Terminal détecté ; les autres fonctions restent disponibles", "WSL in Windows Terminal erkannt; alle anderen Funktionen arbeiten weiter", "WSL di Windows Terminal terdeteksi; fitur lain tetap berfungsi", "检测到 Windows Terminal 中的 WSL；其他功能仍可用", "Windows Terminal 上の WSL を検出。他の機能は引き続き利用できます",
@@ -2588,7 +2588,7 @@ static TEXT: &[Translation] = &[
     tr!("use Windows Terminal 1.25+ or bind Shift+Enter to ESC CR", "usa Windows Terminal 1.25+ o vincula Shift+Enter a ESC CR", "use Windows Terminal 1.25+ ou vincule Shift+Enter a ESC CR", "utilisez Windows Terminal 1.25+ ou liez Shift+Entrée à ESC CR", "Windows Terminal 1.25+ verwenden oder Shift+Enter an ESC CR binden", "gunakan Windows Terminal 1.25+ atau ikat Shift+Enter ke ESC CR", "使用 Windows Terminal 1.25+，或将 Shift+Enter 绑定为 ESC CR", "Windows Terminal 1.25+ を使うか Shift+Enter を ESC CR に割り当ててください",
         "Windows Terminal 1.25 이상을 사용하거나 Shift+Enter를 ESC CR에 바인딩하세요"),
     tr!("Luvus still works; only the modified-Enter shortcut is affected", "Luvus sigue funcionando; solo afecta al atajo Enter modificado", "Luvus continua funcionando; apenas o atalho Enter modificado é afetado", "Luvus fonctionne toujours ; seul le raccourci Entrée modifiée est affecté", "Luvus funktioniert weiter; nur der modifizierte Enter-Kurzbefehl ist betroffen", "Luvus tetap berfungsi; hanya pintasan Enter bermodifier yang terpengaruh", "Luvus 仍可正常工作；仅修饰 Enter 快捷键受影响", "Luvus は動作します。修飾 Enter のショートカットだけが影響を受けます",
-        "Luvus는 계속 작동하며 보조 키가 포함된 Enter 단축키만 영향을 받습니다"),
+        "Luvus는 계속 작동하며 한정자 키가 포함된 Enter 단축키만 영향을 받습니다"),
     tr!("use Alt/Option+Enter or a terminal with the keyboard protocol", "usa Alt/Option+Enter o un terminal con el protocolo de teclado", "use Alt/Option+Enter ou um terminal com o protocolo de teclado", "utilisez Alt/Option+Entrée ou un terminal avec le protocole clavier", "Alt/Option+Enter oder ein Terminal mit Tastaturprotokoll verwenden", "gunakan Alt/Option+Enter atau terminal dengan protokol keyboard", "请使用 Alt/Option+Enter 或支持键盘协议的终端", "Alt/Option+Enter またはキーボードプロトコル対応端末を使用してください",
         "Alt/Option+Enter를 사용하거나 키보드 프로토콜을 지원하는 터미널을 사용하세요"),
     tr!("Tip: install `git` to use the git tab & worktrees. Everything else works now.", "Consejo: instala `git` para usar la pestaña Git y los worktrees. Todo lo demás ya funciona.", "Dica: instale `git` para usar a aba Git e worktrees. Todo o restante já funciona.", "Conseil : installez `git` pour utiliser l'onglet Git et les worktrees. Tout le reste fonctionne.", "Tipp: `git` für Git-Tab und Worktrees installieren. Alles andere funktioniert bereits.", "Tip: pasang `git` untuk memakai tab Git dan worktree. Fitur lain sudah berfungsi.", "提示：安装 `git` 以使用 Git 标签页和工作树。其他功能均可正常使用。", "ヒント：Git タブとワークツリーには `git` をインストールしてください。他はすべて利用できます。",
