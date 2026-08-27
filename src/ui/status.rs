@@ -126,23 +126,18 @@ fn fixed_guidance(app: &App, t: &Theme) -> (Line<'static>, bool) {
         left.push(Span::raw("  "));
         left.extend(hint("?", cat.all_keys, t));
         left.extend(hint("←↓↑→", cat.pane, t));
-        left.extend(hint(
-            &format!(
-                "{}/{}",
+        left.extend(compound_hint(
+            &[
                 key(crate::app::Cmd::SplitRight),
-                key(crate::app::Cmd::SplitDown)
-            ),
+                key(crate::app::Cmd::SplitDown),
+            ],
             cat.act_split,
             t,
         ));
         left.extend(hint(&key(crate::app::Cmd::ClosePane), cat.act_close, t));
         left.extend(hint(&key(crate::app::Cmd::NewTab), cat.act_new_tab, t));
-        left.extend(hint(
-            &format!(
-                "{}/{}",
-                key(crate::app::Cmd::NextTab),
-                key(crate::app::Cmd::PrevTab)
-            ),
+        left.extend(compound_hint(
+            &[key(crate::app::Cmd::NextTab), key(crate::app::Cmd::PrevTab)],
             cat.act_tab,
             t,
         ));
@@ -184,6 +179,15 @@ fn hint(key: &str, word: &str, t: &Theme) -> Vec<Span<'static>> {
         Span::styled(key.to_string(), Style::new().fg(t.accent).bold()),
         Span::styled(format!(" {word}   "), Style::new().fg(t.subtext0)),
     ]
+}
+
+/// Render a slash-separated hint only when every constituent command is bound.
+fn compound_hint(keys: &[String], word: &str, t: &Theme) -> Vec<Span<'static>> {
+    if keys.iter().any(String::is_empty) {
+        return Vec::new();
+    }
+
+    hint(&keys.join("/"), word, t)
 }
 
 #[cfg(test)]
@@ -312,6 +316,40 @@ mod tests {
             !status.contains(app.catalog.mc_title),
             "prefix guidance advertised unbound Mission Control: {status:?}"
         );
+    }
+
+    #[test]
+    fn prefix_guidance_omits_incomplete_compound_bindings() {
+        let _env = crate::persist::test_env("bar-status-compound-unbound");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(160, 24, tx).unwrap();
+        for command in [
+            crate::app::Cmd::SplitRight,
+            crate::app::Cmd::NextTab,
+            crate::app::Cmd::PrevTab,
+        ] {
+            app.config
+                .keybindings
+                .insert(command.id().to_string(), String::new());
+        }
+        app.mode = Mode::Prefix;
+        let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        let status = row(&terminal, 23);
+        assert!(
+            !status.contains(app.catalog.act_split),
+            "prefix guidance advertised a partially bound split: {status:?}"
+        );
+        assert!(
+            !status.contains(&format!("/ {}", app.catalog.act_tab)),
+            "prefix guidance advertised an unbound tab pair: {status:?}"
+        );
+        assert!(compound_hint(&[String::new(), "v".to_string()], "split", &app.theme).is_empty());
+        assert!(compound_hint(&[String::new(), String::new()], "tab", &app.theme).is_empty());
     }
 
     #[test]
