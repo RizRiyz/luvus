@@ -552,7 +552,7 @@ mod label_case_tests {
                     continue;
                 };
                 let minor = MINOR.contains(&part.to_lowercase().as_str());
-                if !first.is_uppercase() && !(minor && !lead) {
+                if !first.is_uppercase() && (!minor || lead) {
                     return Some(part.to_string());
                 }
                 lead = false;
