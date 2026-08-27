@@ -162,15 +162,23 @@ pub enum AppEvent {
     DiffProgressSaved {
         result: Result<(), String>,
     },
-    /// A file-view read finished (docs/38 FILE-3): applied to the view leaf `id`.
+    /// A file-view read finished (docs/38 FILE-3): applied to the view leaf `id`,
+    /// but only while that leaf is still showing `path`. A preview leaf is
+    /// repointed at a new file without cancelling the read already in flight
+    /// (`set_view_file`), so browsing A → B can land A's text after B's; without
+    /// the path the header would say B over A's content.
     FileRead {
         id: PaneId,
+        path: std::path::PathBuf,
         load: crate::files::FileLoad,
     },
     /// Per-line git change markers for a file view finished computing
-    /// (docs/38 + docs/30).
+    /// (docs/38 + docs/30). `path` guards the same stale-result race as
+    /// `FileRead`, and matters more here: markers ride the *same* worker after
+    /// the text, so they are the later of the two to land.
     FileChanges {
         id: PaneId,
+        path: std::path::PathBuf,
         changes: Vec<crate::git::local::ChangeSpan>,
     },
     /// The periodic process scan finished: command lines running under each

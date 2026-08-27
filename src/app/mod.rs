@@ -2151,7 +2151,7 @@ impl App {
                         let p = path.clone();
                         std::thread::spawn(move || {
                             let load = crate::files::read_file(&p);
-                            let _ = tx.send(crate::event::AppEvent::FileRead { id, load });
+                            let _ = tx.send(crate::event::AppEvent::FileRead { id, path: p, load });
                         });
                         remap.insert(*raw, id);
                         continue;

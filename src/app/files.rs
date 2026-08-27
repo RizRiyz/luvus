@@ -733,12 +733,19 @@ impl App {
         let tx = self.app_tx.clone();
         std::thread::spawn(move || {
             let load = crate::files::read_file(&path);
-            let _ = tx.send(AppEvent::FileRead { id, load });
+            // Both events name the file they are about. A preview leaf can be
+            // repointed while this worker runs, and there is no way to cancel
+            // it, so the handler drops what no longer matches.
+            let _ = tx.send(AppEvent::FileRead {
+                id,
+                path: path.clone(),
+                load,
+            });
             // Change markers ride the same worker, *after* the text: the file
             // must render immediately even in a huge repo where `git diff` is
             // slow, and markers simply appear a moment later.
             let changes = crate::git::local::file_changes(&path);
-            let _ = tx.send(AppEvent::FileChanges { id, changes });
+            let _ = tx.send(AppEvent::FileChanges { id, path, changes });
         });
     }
 
@@ -1309,6 +1316,83 @@ mod tests {
         assert_eq!(shown(&app, preview), root.join("a.txt"));
         assert!(app.preview_views.contains(&preview));
         assert_eq!(app.workspaces[app.active_ws].tabs.len(), tabs_before);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A read is applied by `PaneId`, but a preview leaf gets repointed at a new
+    /// file without the read already in flight being cancelled — so browsing
+    /// A → B can finish A's read *after* B's. Without the path on the event, A's
+    /// text lands in a view whose header says B. Driven by handing the handler
+    /// the events directly, so it pins the race rather than racing it.
+    #[test]
+    fn a_late_read_for_the_previous_file_never_lands_in_the_preview() {
+        use crate::files::FileLoad;
+        use crate::git::local::{ChangeKind, ChangeSpan};
+
+        let _env = crate::persist::test_env("file-stale-read");
+        let (mut app, _rx, root) = click_tree_app("stalerd", &["a.txt", "b.txt"]);
+        let (a, b) = (root.join("a.txt"), root.join("b.txt"));
+
+        // One preview, pointed at A and then at B — the reuse path, so both
+        // reads carry the same PaneId.
+        plain_click(&mut app, "a.txt");
+        let preview = app.layout().focus;
+        plain_click(&mut app, "b.txt");
+        assert_eq!(app.layout().focus, preview, "one reused preview leaf");
+        assert_eq!(shown(&app, preview), b);
+
+        // B's own read lands: the guard must not reject the result the view is
+        // actually waiting for, or it would pass by dropping everything.
+        let repaint = app.handle_event(AppEvent::FileRead {
+            id: preview,
+            path: b.clone(),
+            load: FileLoad::Text(vec!["B CONTENT".to_string()]),
+        });
+        assert!(repaint, "the matching read repaints");
+        let b_marks = vec![ChangeSpan {
+            start: 1,
+            end: 1,
+            kind: ChangeKind::Modified,
+        }];
+        assert!(app.handle_event(AppEvent::FileChanges {
+            id: preview,
+            path: b.clone(),
+            changes: b_marks.clone(),
+        }));
+
+        // Now A's slow read finishes, addressed to the same leaf.
+        let stale = app.handle_event(AppEvent::FileRead {
+            id: preview,
+            path: a.clone(),
+            load: FileLoad::Text(vec!["A CONTENT".to_string()]),
+        });
+        assert!(!stale, "a stale read is dropped without a repaint");
+        let stale_marks = app.handle_event(AppEvent::FileChanges {
+            id: preview,
+            path: a,
+            changes: vec![
+                ChangeSpan {
+                    start: 7,
+                    end: 9,
+                    kind: ChangeKind::Added,
+                };
+                1
+            ],
+        });
+        assert!(!stale_marks, "stale markers are dropped too");
+
+        match app.views.get(&preview) {
+            Some(ViewKind::File(v)) => {
+                assert_eq!(v.path, b, "the view still points at B");
+                assert!(
+                    matches!(&v.load, FileLoad::Text(lines) if lines == &["B CONTENT"]),
+                    "and still shows B's text, not A's"
+                );
+                assert_eq!(v.changes, b_marks, "and B's markers, not A's");
+            }
+            _ => panic!("the preview is gone"),
+        }
 
         let _ = std::fs::remove_dir_all(&root);
     }
