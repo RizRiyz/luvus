@@ -12,6 +12,9 @@ enum ClaudeModel<'a> {
         family: &'a str,
         version: (u32, u32),
     },
+    FamilyAlias {
+        family: &'a str,
+    },
     MythosPreview,
 }
 
@@ -39,6 +42,10 @@ fn valid_model_suffix(parts: &[&str]) -> bool {
     }
 }
 
+fn valid_versioned_model_suffix(parts: &[&str]) -> bool {
+    parts == ["latest"] || valid_model_suffix(parts)
+}
+
 fn parse_generation(part: &str) -> Option<u32> {
     if is_snapshot(part) {
         None
@@ -51,6 +58,10 @@ fn parse_generation(part: &str) -> Option<u32> {
 /// model ids. Before Claude 4.6, most ids put the family before the version and
 /// append a date, while Claude 3.5 Haiku used `claude-3-5-haiku-<date>`.
 fn claude_model(model: &str) -> Option<ClaudeModel<'_>> {
+    if matches!(model, "opus" | "sonnet" | "haiku") {
+        return Some(ClaudeModel::FamilyAlias { family: model });
+    }
+
     let parts: Vec<_> = model
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|part| !part.is_empty())
@@ -85,7 +96,7 @@ fn claude_model(model: &str) -> Option<ClaudeModel<'_>> {
                 (family, (major, 0), &model[2..])
             }
         };
-    valid_model_suffix(suffix).then_some(ClaudeModel::Versioned { family, version })
+    valid_versioned_model_suffix(suffix).then_some(ClaudeModel::Versioned { family, version })
 }
 
 /// Rough USD price per **million** tokens as `(input, output, cache)` for `model`.
@@ -98,6 +109,9 @@ pub fn model_price(model: &str) -> Option<(f64, f64, f64)> {
     let m = model.to_lowercase();
     let p = match claude_model(&m) {
         Some(ClaudeModel::MythosPreview) => (25.0, 125.0, 2.5),
+        Some(ClaudeModel::FamilyAlias { family: "opus" }) => (5.0, 25.0, 0.5),
+        Some(ClaudeModel::FamilyAlias { family: "sonnet" }) => (2.0, 10.0, 0.2),
+        Some(ClaudeModel::FamilyAlias { family: "haiku" }) => (1.0, 5.0, 0.1),
         Some(ClaudeModel::Versioned {
             family: "fable" | "mythos",
             version: (5, _),
@@ -141,6 +155,7 @@ pub fn model_window(model: &str) -> u64 {
             "opus" | "sonnet" => version >= (4, 6),
             _ => false,
         },
+        Some(ClaudeModel::FamilyAlias { .. }) => false,
         None => false,
     };
     if fixed_1m {
@@ -278,6 +293,48 @@ mod tests {
             model_price("pricing-for-claude-mythos-preview-estimate"),
             None
         );
+    }
+
+    #[test]
+    fn anthropic_latest_suffix_matches_resolved_version() {
+        let base = "claude-3-5-sonnet";
+        let latest = "claude-3-5-sonnet-latest";
+
+        assert_eq!(model_price(latest), Some((3.0, 15.0, 0.3)));
+        assert_eq!(model_price(latest), model_price(base));
+        assert_eq!(model_window(latest), 200_000);
+        assert_eq!(model_window(latest), model_window(base));
+    }
+
+    #[test]
+    fn anthropic_family_aliases_use_current_rates_and_conservative_windows() {
+        for (alias, expected_price) in [
+            ("opus", (5.0, 25.0, 0.5)),
+            ("sonnet", (2.0, 10.0, 0.2)),
+            ("haiku", (1.0, 5.0, 0.1)),
+        ] {
+            assert_eq!(model_price(alias), Some(expected_price), "{alias}");
+            assert_eq!(model_window(alias), 200_000, "{alias}");
+            assert!((context_frac(alias, 100_000) - 0.5).abs() < 1e-6, "{alias}");
+            assert!(
+                (context_frac(alias, 250_000) - 0.25).abs() < 1e-6,
+                "{alias}"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_aliases_and_suffixes_are_strict() {
+        for malformed in [
+            "claude-opus",
+            "pricing-for-opus-estimate",
+            "claude-opus-4-1-foo",
+            "claude-mythos-preview-extra",
+            "claude-mythos-preview-latest",
+            "claude-3-5-sonnet-latest-v1",
+        ] {
+            assert_eq!(model_price(malformed), None, "{malformed}");
+        }
     }
 
     #[test]
