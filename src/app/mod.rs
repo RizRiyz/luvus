@@ -10903,6 +10903,120 @@ mod tests {
         assert_eq!(app.copy_mode.expect("copy mode").cursor, (row, 9));
     }
 
+    /// Copy mode's reference block in Settings -> Keys and its key handler have
+    /// to stay in step, and nothing else notices when they drift apart. The
+    /// parity test only counts rows against descriptions, so dropping a row
+    /// together with its eight translations keeps it quiet, and the clipping
+    /// test walks whatever rows happen to exist. That pairing is how copy mode
+    /// shipped without a `g / G` row while scroll mode carried one all along.
+    ///
+    /// Each case names a motion family, the key that leads it, and the change
+    /// that proves the handler still answers. Aliases stay out on purpose: `f`,
+    /// `Home`, `End`, the page keys, and the ctrl variants all work without
+    /// rows of their own, because the panel is a curated subset whose key
+    /// column has a width budget to respect.
+    #[test]
+    fn every_copy_mode_motion_family_has_a_reference_row_and_a_live_handler() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        #[derive(Clone, Copy)]
+        enum Proves {
+            Row,
+            Column,
+            Count,
+            Anchor,
+            Exit,
+        }
+
+        let cases = [
+            ("hjkl", KeyCode::Char('j'), KeyModifiers::NONE, Proves::Row),
+            (
+                "w / e / B",
+                KeyCode::Char('w'),
+                KeyModifiers::NONE,
+                Proves::Column,
+            ),
+            (
+                "Space / b",
+                KeyCode::Char(' '),
+                KeyModifiers::NONE,
+                Proves::Row,
+            ),
+            (
+                "^D / ^U",
+                KeyCode::Char('d'),
+                KeyModifiers::CONTROL,
+                Proves::Row,
+            ),
+            ("g / G", KeyCode::Char('G'), KeyModifiers::NONE, Proves::Row),
+            (
+                "1\u{2013}9",
+                KeyCode::Char('3'),
+                KeyModifiers::NONE,
+                Proves::Count,
+            ),
+            ("v", KeyCode::Char('v'), KeyModifiers::NONE, Proves::Anchor),
+            ("y", KeyCode::Enter, KeyModifiers::NONE, Proves::Exit),
+            ("q", KeyCode::Esc, KeyModifiers::NONE, Proves::Exit),
+        ];
+
+        let rows = crate::i18n::settings::KEY_REFERENCE_KEYS[2];
+        let _env = crate::persist::test_env("copy-mode-families");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(40, 8, tx).unwrap();
+        let pane = app.layout().focus;
+        if let Some(p) = app.panes.get(&pane) {
+            if let Ok(mut engine) = p.engine.lock() {
+                for i in 0..30 {
+                    engine.advance(format!("row {i} alpha beta gamma\r\n").as_bytes());
+                }
+            }
+        }
+        let mid = app.panes.get(&pane).expect("pane").retained_row_count() / 2;
+
+        for (label, code, mods, proves) in cases {
+            assert!(
+                rows.iter().any(|row| row.contains(label)),
+                "copy mode's reference block lost its {label} row"
+            );
+
+            // `v` only shows its work when the anchor sits away from the cursor.
+            let anchor = if matches!(proves, Proves::Anchor) {
+                (mid.saturating_sub(2), 0)
+            } else {
+                (mid, 4)
+            };
+            let start = CopyMode {
+                pane,
+                anchor,
+                cursor: (mid, 4),
+                saved_scroll: 0,
+                pending_count: 0,
+            };
+            app.copy_mode = Some(start);
+            app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(code, mods)));
+
+            if matches!(proves, Proves::Exit) {
+                assert!(
+                    app.copy_mode.is_none(),
+                    "{label} no longer leaves copy mode"
+                );
+                continue;
+            }
+            let Some(now) = app.copy_mode else {
+                panic!("{label} left copy mode instead of moving");
+            };
+            let answered = match proves {
+                Proves::Row => now.cursor.0 != start.cursor.0,
+                Proves::Column => now.cursor.1 != start.cursor.1,
+                Proves::Count => now.pending_count != 0,
+                Proves::Anchor => now.anchor == now.cursor,
+                Proves::Exit => unreachable!("handled above"),
+            };
+            assert!(answered, "{label} no longer answers in copy mode");
+        }
+    }
+
     #[test]
     fn copy_mode_word_end_stops_on_the_last_cell_of_each_word() {
         let _env = crate::persist::test_env("copy-mode-word-end");
