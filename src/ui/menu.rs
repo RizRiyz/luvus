@@ -943,6 +943,26 @@ mod tests {
         );
     }
 
+    /// A submenu is anchored beside its parent, but clamped back on screen at
+    /// the right edge — where it covers the parent it belongs to. The wheel goes
+    /// to what is on top, which is the one drawn last.
+    #[test]
+    fn an_overlapping_submenu_takes_the_wheel_from_the_menu_it_covers() {
+        let mut scroll = crate::app::MenuScroll::default();
+        let parent = Rect::new(40, 0, 20, 10);
+        let submenu = Rect::new(45, 0, 20, 10); // clamped left, over the parent
+        scroll.record(PopupId::Pane, parent, 5);
+        scroll.record(PopupId::PaneMove, submenu, 5);
+
+        assert!(scroll.wheel(50, 3, 1), "the overlap belongs to a popup");
+        assert_eq!(scroll.offset_of(PopupId::PaneMove), 1, "the visible one");
+        assert_eq!(scroll.offset_of(PopupId::Pane), 0, "not the covered one");
+
+        // And the parent still takes the wheel where it is not covered.
+        assert!(scroll.wheel(41, 3, 1));
+        assert_eq!(scroll.offset_of(PopupId::Pane), 1);
+    }
+
     #[test]
     fn reopening_a_menu_starts_it_at_the_top() {
         let _env = crate::persist::test_env("menu-scroll-reopen");

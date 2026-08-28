@@ -1340,7 +1340,11 @@ impl MenuScroll {
     /// a popup took the event, so the wheel goes on doing what it did before
     /// everywhere else.
     pub fn wheel(&mut self, column: u16, row: u16, delta: i32) -> bool {
-        let Some((id, _, max)) = self.frames.iter().copied().find(|(_, rect, _)| {
+        // Last drawn wins, the way the paint does: a submenu is anchored beside
+        // its parent but clamped back on screen at the right edge, where it
+        // lands on top of it. Searching forward would hand the wheel to the
+        // parent the submenu is covering.
+        let Some((id, _, max)) = self.frames.iter().rev().copied().find(|(_, rect, _)| {
             column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
         }) else {
             return false;
