@@ -135,6 +135,51 @@ fn word_at_grid(
     Some((text, vec![(row, lo as u16, hi as u16)]))
 }
 
+/// The URL or path covering a grid cell, reconstructed from its original
+/// graphemes. Link parsing remains deliberately ASCII-only for opening
+/// untrusted terminal output, but copying must also keep Unicode path segments.
+/// A searchable projection maps Unicode letters/digits and wide-cell
+/// continuations to ASCII while retaining one character per physical cell;
+/// the returned spans are then used to recover the exact displayed text.
+fn copy_link_at_grid(
+    rows: &crate::terminal::vt::AlignedRows,
+    col: u16,
+    row: u16,
+) -> Option<(String, Vec<CellSpan>)> {
+    let searchable: Vec<String> = rows
+        .rows()
+        .iter()
+        .map(|line| {
+            line.chars()
+                .map(|character| {
+                    if character == crate::terminal::vt::ALIGNED_WIDE_CELL
+                        || (!character.is_ascii() && character.is_alphanumeric())
+                    {
+                        'x'
+                    } else {
+                        character
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let link = crate::links::link_at(&searchable, col, row)?;
+
+    let mut text = String::new();
+    for (span_row, start, end) in &link.spans {
+        let line: Vec<char> = rows.rows().get(*span_row as usize)?.chars().collect();
+        for column in *start..*end {
+            let character = *line.get(column as usize)?;
+            if character == crate::terminal::vt::ALIGNED_WIDE_CELL {
+                continue;
+            }
+            text.push(character);
+            text.extend(rows.zero_width_at(*span_row, column));
+        }
+    }
+    (!text.is_empty()).then_some((text, link.spans))
+}
+
 impl App {
     fn handle_api_request(&mut self, req: crate::ipc::api::ApiRequest) -> bool {
         if req.method == "terminal.backend.create" {
@@ -2436,14 +2481,8 @@ impl App {
             engine.visible_rows_aligned()
         };
         let (gcol, grow) = (col - content.x, row - content.y);
-        let (text, spans) = match crate::links::link_at(rows.rows(), gcol, grow) {
-            Some(link) => {
-                let text = match link.hit {
-                    crate::links::Hit::Url(u) => u,
-                    crate::links::Hit::Path { raw, .. } => raw,
-                };
-                (text, link.spans)
-            }
+        let (text, spans) = match copy_link_at_grid(&rows, gcol, grow) {
+            Some(pair) => pair,
             None => match word_at_grid(&rows, gcol, grow) {
                 Some(pair) => pair,
                 None => return false,
@@ -4337,6 +4376,22 @@ mod link_click_tests {
                 word_at_grid(&rows, col, 0),
                 Some(("编码42".to_string(), vec![(0, 10, 16)])),
                 "mixed wide and narrow characters remain one word at col {col}"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_link_at_grid_keeps_unicode_paths_complete() {
+        let spacer = crate::terminal::vt::ALIGNED_WIDE_CELL;
+        let rows = crate::terminal::vt::AlignedRows::from_rows(vec![format!(
+            "dir/日{spacer}本{spacer}語{spacer}.rs next"
+        )]);
+
+        for col in 0..13 {
+            assert_eq!(
+                copy_link_at_grid(&rows, col, 0),
+                Some(("dir/日本語.rs".to_string(), vec![(0, 0, 13)])),
+                "the complete Unicode path is copied from physical column {col}"
             );
         }
     }
