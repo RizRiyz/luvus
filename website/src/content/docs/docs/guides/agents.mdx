@@ -10,8 +10,8 @@ back after a restart, all without wrapping or modifying the agents themselves.
 ## The AGENTS sidebar
 
 Every pane running a recognized agent (Claude Code, Copilot, Codex, opencode,
-Kimi, Grok, Pi, Oh My Pi (OMP), Cursor, Gemini, Qwen, Kiro, Aider, Amp, Droid,
-or fx) appears in the sidebar with a live state:
+Kimi, Grok, Muse Code, Pi, Oh My Pi (OMP), Cursor, Gemini, Qwen, Kiro, Aider,
+Amp, Droid, or fx) appears in the sidebar with a live state:
 
 | State | Meaning | How it's detected |
 |---|---|---|
@@ -64,7 +64,7 @@ one or Luvus has pricing for the model.
 | Gemini and Qwen | project chat records |
 | fx | session usage snapshot |
 
-Aider, Kiro, Cursor, Amp, Droid, and manifest-defined agents still receive live
+Aider, Kiro, Cursor, Amp, Droid, Muse, and manifest-defined agents still receive live
 identity and state detection, but show `—` for usage until they expose a stable
 per-session counter or report one through an integration. Luvus never estimates
 tokens from transcript text.
@@ -83,7 +83,7 @@ each pane and matches the program name. A pane running `claude` is Claude Code;
 a pane that merely prints the word "claude" is a shell.
 
 That distinction matters more than it sounds. Names like `amp`, `cursor`,
-`droid`, `grok` and `pi` are ordinary English words, so reading them off the
+`droid`, `grok`, `muse`, and `pi` are ordinary English words, so reading them off the
 screen turns "for example" into Amp and "cursor is out of bounds" into Cursor.
 Your sidebar fills with agents that were never running.
 
@@ -123,6 +123,7 @@ command for you:
 | Grok | its session directory (`~/.grok/sessions`) |
 | Pi | its session store (`~/.pi/agent/sessions`) |
 | Oh My Pi (OMP) | its profile-, XDG-, and override-aware native session store |
+| Muse Code | its XDG data store (`$XDG_DATA_HOME/muse/sessions`) |
 | Gemini | its project chat store (`~/.gemini/tmp`) |
 | Qwen | its project chat store (`~/.qwen/tmp`) |
 | fx | its session store (`~/.fx/sessions`) |
@@ -171,9 +172,13 @@ unsupported or unresolved fork for success.
 Codex forks require the exact session identity reported by its integration or
 recorded when Luvus resumes a session. Luvus never guesses the newest Codex
 rollout in a shared folder, because that could fork another pane's active
-conversation. Install or refresh the hook with
+conversation. Install or refresh the Codex hook with
 `luvus integration install codex`; its SessionStart and prompt hooks bind new
 and resumed Codex panes to their exact rollout.
+
+Muse Code supports native detection and resume, but not **Fork to New Pane**.
+Its `/fork` command exists only inside the active TUI, and its CLI refuses to
+resume the same live session in a sibling pane.
 
 ## Precise events: the integration hook
 

@@ -13,6 +13,7 @@ description: What luvus supports per agent, covering live status, session resume
 | Grok Build | ✓ | ✓ | ✓ | ✓ |
 | Pi | ✓ | ✓ | ✓ | no |
 | Oh My Pi (omp) | ✓ | ✓ | ✓ | ✓ |
+| Muse Code | ✓ | ✓ | no | no |
 | Cursor | ✓ | resume command | no | no |
 | Gemini | ✓ | no | no | no |
 | Aider | ✓ | no | no | no |
@@ -32,9 +33,9 @@ description: What luvus supports per agent, covering live status, session resume
   original keeps running. It needs an agent with a native fork command, so today
   that is **Claude** (`claude --resume <id> --fork-session`), **Grok**
   (`grok --resume <id> --fork-session`), **Codex** (`codex fork <id>`),
-  **Pi** (`pi --fork <id>`), and **Oh My Pi (omp)** (`omp --fork <id>`). Right-click the pane and
-  choose **Fork to New Pane**, or press `Ctrl+Space f`. The action only appears
-  for agents that can fork.
+  **Pi** (`pi --fork <id>`), and **Oh My Pi (omp)** (`omp --fork <id>`).
+  Right-click the pane and choose **Fork to New Pane**, or press `Ctrl+Space f`.
+  The action only appears when Luvus can resolve the source session safely.
 - **Hook**, via `luvus integration install <agent>`, makes the agent report its
   exact session id and lifecycle events. OMP additionally reports authoritative
   idle/working/blocked/done state through Luvus's bounded agent authority API.

@@ -115,6 +115,14 @@ const KNOWN_AGENTS: &[KnownAgent] = &[
         distinct: &[],
         ambiguous: &["grok"],
     },
+    // Muse's launcher execs a versioned `muse-bin-*` binary, handled by
+    // `match_binary`. The brand itself is an ordinary English word, so only
+    // trust bare `muse` in deliberate command/title evidence.
+    KnownAgent {
+        name: crate::agent::muse::NAME,
+        distinct: crate::agent::muse::DISTINCT_IDENTITIES,
+        ambiguous: crate::agent::muse::AMBIGUOUS_IDENTITIES,
+    },
     // Oh My Pi (omp) precedes pi in this registry ON PURPOSE: the brand
     // "oh-my-pi" word-contains pi's ambiguous token, and the first match wins.
     // omp's brand + npm binary are distinctive, so trust them from pane
@@ -611,6 +619,54 @@ fn builtin_rules() -> Vec<Rule> {
             Region::Screen,
             vec![any(&["send a message to interrupt"])],
         ),
+        // Muse question, trust, and approval overlays. These paired controls
+        // outrank its generic `esc to interrupt` working hint, including the
+        // multi-select question UI that deliberately retains that phrase.
+        per(
+            "muse",
+            State::Blocked,
+            325,
+            Region::Screen,
+            vec![all(&["enter to select", "tab for an optional note"])],
+        ),
+        per(
+            "muse",
+            State::Blocked,
+            325,
+            Region::Screen,
+            vec![all(&["enter to toggle", "esc to interrupt"])],
+        ),
+        per(
+            "muse",
+            State::Blocked,
+            325,
+            Region::Screen,
+            vec![all(&["do you trust this workspace?", "trust and continue"])],
+        ),
+        per(
+            "muse",
+            State::Blocked,
+            325,
+            Region::Screen,
+            vec![all(&[
+                "allow this stage once",
+                "always allow in this workspace",
+            ])],
+        ),
+        per(
+            "muse",
+            State::Blocked,
+            325,
+            Region::Screen,
+            vec![all(&["allow once", "allow for this session"])],
+        ),
+        per(
+            "muse",
+            State::Blocked,
+            325,
+            Region::Screen,
+            vec![all(&["yes, proceed", "yes, don't ask again this session"])],
+        ),
     ]
 }
 
@@ -1092,6 +1148,11 @@ impl Manifests {
 
     /// The agent whose patterns name exactly this binary.
     fn match_binary(&self, base: &str) -> Option<String> {
+        if crate::agent::muse::is_versioned_binary(base)
+            && self.agents.iter().any(|agent| agent.name == "muse")
+        {
+            return Some("muse".to_string());
+        }
         self.agents
             .iter()
             .find(|a| a.all().any(|p| p == base))
@@ -1319,6 +1380,70 @@ mod tests {
             &m,
         );
         assert_eq!(incidental.agent, "zsh", "screen prose must not name fx");
+    }
+
+    #[test]
+    fn muse_identity_accepts_native_binaries_without_trusting_prose() {
+        let m = Manifests::builtin();
+        assert_eq!(
+            m.agent_in_processes(&[
+                "/Users/me/.local/bin/muse-bin-0.2.1-R1215.1 --provider meta".into()
+            ]),
+            Some("muse".into())
+        );
+        assert_eq!(
+            m.agent_in_processes(&["/Users/me/.local/bin/muse --provider echo".into()]),
+            Some("muse".into())
+        );
+        assert_eq!(
+            m.agent_in_processes(&["/usr/local/bin/muse-bin-helper".into()]),
+            None,
+            "a similarly named helper is not Muse Code"
+        );
+
+        let incidental = classify(
+            Some("zsh"),
+            "the museum uses a muse as its example",
+            true,
+            false,
+            "zsh",
+            "",
+            &[],
+            &m,
+        );
+        assert_eq!(
+            incidental.agent, "zsh",
+            "bare muse is never trusted from pane output"
+        );
+    }
+
+    #[test]
+    fn muse_native_interactions_override_the_working_hint() {
+        let classify_muse = |bottom: &str| {
+            classify(
+                Some("Muse Code"),
+                bottom,
+                true,
+                false,
+                "zsh",
+                "muse",
+                &["muse-bin-0.2.1-R1215.1".into()],
+                &Manifests::builtin(),
+            )
+            .state
+        };
+        assert_eq!(
+            classify_muse("Which files?\nEnter to toggle · Esc to interrupt"),
+            State::Blocked
+        );
+        assert_eq!(
+            classify_muse("Do you trust this workspace?\nTrust and continue"),
+            State::Blocked
+        );
+        assert_eq!(
+            classify_muse("◆ Working (2s · esc to interrupt)"),
+            State::Working
+        );
     }
 
     #[test]

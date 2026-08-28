@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+pub(crate) mod muse;
 pub(crate) mod omp;
 mod usage;
 pub use usage::{session_mtime, session_usage};
@@ -98,6 +99,21 @@ static SOURCES: &[SessionSource] = &[
         // `fork` creates a new conversation from the selected rollout while
         // leaving the source session untouched.
         fork: Some(|q| format!("codex fork {q}\r")),
+    },
+    SessionSource {
+        name: muse::NAME,
+        discover: Some(Discovery {
+            base: muse::sessions_base,
+            recent: muse::recent,
+            latest: muse::latest,
+            list: Some(muse::list),
+        }),
+        resume: |q| format!("muse resume {q}\r"),
+        // Muse's `/fork` is available only inside the already-running TUI, and
+        // Muse refuses to resume that live UUID in a sibling. Luvus cannot keep
+        // the original pane running while creating a branch until Muse exposes
+        // an external fork command or flag.
+        fork: None,
     },
     SessionSource {
         name: "kimi",
@@ -268,13 +284,15 @@ fn filter_launch_flags(agent: &str, launch: &[String]) -> Vec<String> {
     const STANDALONE: &[&str] = &["--continue", "--fork-session", "--print", "-p"];
 
     let mut i = 0;
-    // Codex selects a session with positional `resume <id>` / `fork <id>`
-    // subcommands rather than flags, so drop either when it leads the captured
-    // argv. A restored fork must resume its new id, not fork the parent again.
-    if agent == "codex"
+    // Codex and Muse select sessions with positional subcommands rather than
+    // flags. Drop them when they lead captured argv so a restored pane gets
+    // exactly one fresh session selector. A restored Codex fork must resume its
+    // new id, not fork the parent again.
+    if (agent == "codex"
         && launch
             .first()
-            .is_some_and(|s| matches!(s.as_str(), "resume" | "fork"))
+            .is_some_and(|s| matches!(s.as_str(), "resume" | "fork")))
+        || (agent == muse::NAME && launch.first().is_some_and(|s| s == "resume"))
     {
         i = 1;
         if launch.get(1).is_some_and(|v| !v.starts_with('-')) {
@@ -1473,6 +1491,11 @@ mod tests {
         assert!(resume_command("codex", "c1")
             .unwrap()
             .contains("codex resume"));
+        assert_eq!(
+            resume_command("muse", "7de3d84e-31f9-4437-b2f8-0b56db788042").as_deref(),
+            Some("muse resume '7de3d84e-31f9-4437-b2f8-0b56db788042'\r")
+        );
+        assert!(is_resumable("muse"));
         assert!(resume_command("kimi", "k1")
             .unwrap()
             .contains("kimi --resume"));
@@ -1785,6 +1808,10 @@ mod tests {
             f("codex", &["fork", "sess_9", "--model", "o3"]),
             vec!["--model", "o3"]
         );
+        assert_eq!(
+            f("muse", &["resume", "muse-id", "--reasoning-effort", "high"]),
+            vec!["--reasoning-effort", "high"]
+        );
         // A kept flag keeps its value.
         assert_eq!(
             f("claude", &["--permission-mode", "bypassPermissions"]),
@@ -1884,6 +1911,10 @@ mod tests {
         let grok = fork_command("grok", "g1").unwrap();
         assert!(grok.contains("grok --resume") && grok.contains("--fork-session"));
         assert!(can_fork("claude") && can_fork("codex") && can_fork("pi") && can_fork("grok"));
+        assert!(
+            !can_fork("muse"),
+            "Muse has no external native fork entrypoint"
+        );
         // Resume-capable, but no native fork (the copy-then-resume tier is future).
         assert!(!can_fork("copilot"));
         assert!(!can_fork("cursor"));
