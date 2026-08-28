@@ -39,9 +39,11 @@ you were already working in, without submitting it — so you can name a file in
 agent prompt without leaving the keyboard to type the path out. Opening the
 FILES dock and its menu does not move focus, so the path lands where you were
 typing. It is inserted only; Luvus never sends Enter, and never adds an `@` or
-any other prefix, so the syntax stays yours. A path is left uninserted if the
-focused pane is a read-only file view rather than a terminal, or if the filename
-itself contains a line break — which would submit your prompt on arrival.
+any other prefix, so the syntax stays yours. A path is left uninserted if there
+is no focused live terminal pane (for example, when a read-only file view is
+focused), or if the absolute path contains a control character such as a line
+break, tab, or Escape. This prevents the path from submitting or altering your
+terminal input.
 
 ## Opening a file
 

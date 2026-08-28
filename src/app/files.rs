@@ -40,8 +40,8 @@ pub(crate) enum InsertPath {
     /// Nothing to insert into: the focused leaf is a native view, or the tab
     /// has no pane at all.
     NoPane,
-    /// The path holds `\n` or `\r`, either of which would submit the prompt.
-    Newline,
+    /// The path holds a terminal control character and cannot be pasted safely.
+    ControlCharacter,
 }
 
 impl App {
@@ -522,7 +522,9 @@ impl App {
                     // Both refusals are silent-looking otherwise: the menu closes
                     // and nothing appears in the prompt.
                     InsertPath::NoPane => self.show_toast("no pane to insert into"),
-                    InsertPath::Newline => self.show_toast("path contains a line break"),
+                    InsertPath::ControlCharacter => {
+                        self.show_toast("path contains a control character")
+                    }
                 }
             }
             FileMenuItem::Delete => self.file_delete = Some(menu.path),
@@ -543,15 +545,15 @@ impl App {
     /// FILES dock and its context menu never moves pane focus, so the pane the
     /// user was typing in is still the one that receives this.
     ///
-    /// A path holding a line break is refused rather than trimmed. `\n` and
-    /// `\r` are both legal in a filename on Unix, and either one would submit
-    /// the prompt on arrival — a command running itself, half-typed, is a
-    /// baffling thing to be handed, and no truncation of the path is a better
-    /// answer than not inserting it.
+    /// A path holding a control character is refused rather than trimmed.
+    /// Besides `\n` and `\r` submitting a prompt, Escape and other controls can
+    /// alter terminal input or terminate bracketed-paste mode. These characters
+    /// are legal in Unix filenames, but no truncation of the path is a better
+    /// answer than inserting unsafe or incorrect text.
     pub(crate) fn insert_path(&mut self, path: &Path) -> InsertPath {
         let text = path.to_string_lossy().into_owned();
-        if text.contains(['\n', '\r']) {
-            return InsertPath::Newline;
+        if text.chars().any(char::is_control) {
+            return InsertPath::ControlCharacter;
         }
         match self.paste_into_focused_pane(&text) {
             Some(target) => InsertPath::Inserted { target, text },
@@ -2416,25 +2418,32 @@ mod tests {
         );
     }
 
-    /// A filename may legally hold a line break on Unix, and inserting one would
-    /// submit the prompt by itself. Refuse the whole path rather than trim it:
+    /// Unix filenames may legally hold terminal controls. Newlines can submit
+    /// the prompt, while Escape can terminate bracketed paste and make the
+    /// remaining bytes act as input. Refuse the whole path rather than trim it:
     /// a silently shortened path is a wrong path.
     #[test]
-    fn insert_path_refuses_a_path_holding_a_line_break() {
-        let _env = crate::persist::test_env("files-insert-newline");
+    fn insert_path_refuses_terminal_control_characters() {
+        let _env = crate::persist::test_env("files-insert-control");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
 
-        for bad in ["two\nlines.txt", "carriage\rreturn.txt"] {
+        for bad in [
+            "two\nlines.txt",
+            "carriage\rreturn.txt",
+            "tab\tname.txt",
+            "escape\u{1b}[201~name.txt",
+            "delete\u{7f}name.txt",
+        ] {
             let path = std::env::temp_dir().join(bad);
             assert_eq!(
                 app.insert_path(&path),
-                InsertPath::Newline,
-                "{bad:?} would have submitted the prompt"
+                InsertPath::ControlCharacter,
+                "{bad:?} must not reach the terminal"
             );
         }
 
-        // And a path with no line break in it still inserts, so the guard is
+        // And a path with no control character still inserts, so the guard is
         // not simply refusing everything.
         let good = std::env::temp_dir().join("ordinary.txt");
         assert!(matches!(
@@ -2484,7 +2493,7 @@ mod tests {
         app.file_menu_action_pub(FileMenuItem::InsertPath);
         assert_eq!(
             app.toast.as_ref().map(|(text, _)| text.as_str()),
-            Some("path contains a line break"),
+            Some("path contains a control character"),
             "the row reached insert_path and reported its refusal"
         );
     }
