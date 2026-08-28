@@ -1282,6 +1282,101 @@ impl CopyMode {
     }
 }
 
+/// Which popup a menu scroll offset belongs to. A submenu scrolls independently
+/// of the menu that opened it, so the two have separate ids.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum PopupId {
+    Ws,
+    Tab,
+    TabSwap,
+    Pane,
+    PaneMove,
+    Agent,
+    Diff,
+    File,
+    Dock,
+}
+
+/// Scroll state for context menus taller than the space they are drawn in.
+///
+/// `render_popup` used to stop laying rows out once it ran out of height, and a
+/// row with no rect is unclickable rather than merely unpainted — so the actions
+/// a menu puts last went silently missing in a short or compact session. The
+/// rows scroll now instead.
+///
+/// Context menus are mouse-only — there is no keyboard route into one — so the
+/// wheel over the popup is the whole gesture, and this is the state it needs.
+#[derive(Default)]
+pub struct MenuScroll {
+    /// Rows scrolled off the top, per popup.
+    offsets: std::collections::HashMap<PopupId, usize>,
+    /// Where each popup was drawn this frame and how far it can scroll. A wheel
+    /// event hit-tests against these, so it moves the popup under the cursor
+    /// rather than whichever menu happens to be open.
+    frames: Vec<(PopupId, Rect, usize)>,
+}
+
+impl MenuScroll {
+    /// Start a frame. Last frame's geometry is stale, and a popup that is no
+    /// longer drawn forgets its offset — so reopening a menu starts at the top
+    /// rather than wherever the last one was left.
+    pub fn begin_frame(&mut self) {
+        let drawn = std::mem::take(&mut self.frames);
+        self.offsets
+            .retain(|id, _| drawn.iter().any(|(drawn_id, _, _)| drawn_id == id));
+    }
+
+    /// Record where a popup was drawn and how far it can scroll, returning the
+    /// offset to draw it at. Clamped, so a menu that grew shorter — or a window
+    /// that grew taller — cannot leave it scrolled past its last row.
+    pub fn record(&mut self, id: PopupId, popup: Rect, max: usize) -> usize {
+        let offset = self.offsets.get(&id).copied().unwrap_or(0).min(max);
+        self.offsets.insert(id, offset);
+        self.frames.push((id, popup, max));
+        offset
+    }
+
+    /// Scroll the popup under `(column, row)`, if there is one. Returns whether
+    /// a popup took the event, so the wheel goes on doing what it did before
+    /// everywhere else.
+    pub fn wheel(&mut self, column: u16, row: u16, delta: i32) -> bool {
+        let Some((id, _, max)) = self.frames.iter().copied().find(|(_, rect, _)| {
+            column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
+        }) else {
+            return false;
+        };
+        // A menu that fits still owns the wheel: scrolling the pane behind an
+        // open popup is not what the gesture means.
+        if max > 0 {
+            let now = self.offsets.get(&id).copied().unwrap_or(0) as i32;
+            let next = (now + delta).clamp(0, max as i32) as usize;
+            self.offsets.insert(id, next);
+        }
+        true
+    }
+
+    /// A press that is not on an open popup: whatever menu it opens (or
+    /// dismisses) starts at the top next time. Menus have no other identity to
+    /// key an offset on — the same popup id is reused for every file you
+    /// right-click — and a press outside is what opens and closes them, so it is
+    /// the honest moment to forget where the last one was scrolled to.
+    pub fn press(&mut self, column: u16, row: u16) {
+        let on_popup = self.frames.iter().any(|(_, rect, _)| {
+            column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
+        });
+        if !on_popup {
+            self.offsets.clear();
+        }
+    }
+
+    /// The offset a popup is drawn at. Tests read this; the renderer gets it
+    /// back from [`MenuScroll::record`].
+    #[cfg(test)]
+    pub fn offset_of(&self, id: PopupId) -> usize {
+        self.offsets.get(&id).copied().unwrap_or(0)
+    }
+}
+
 pub struct App {
     pub panes: HashMap<PaneId, Pane>,
     /// One random value for this server lifetime. Harness runtimes from an old
@@ -1681,6 +1776,9 @@ pub struct App {
     pub last_active_ws_shown: usize,
     /// Last mouse position, for hover affordances (the session delete ✕).
     pub hover: Option<(u16, u16)>,
+    /// Scroll offsets for context-menu popups that do not fit (see
+    /// [`MenuScroll`]), and the geometry a wheel event hit-tests against.
+    pub menu_scroll: MenuScroll,
     app_tx: Sender<AppEvent>,
     pub last_pane_area: Rect,
     // Hit-test geometry from the last render, for mouse clicks.
@@ -2033,6 +2131,7 @@ impl App {
             switcher_close_rect: None,
             last_active_ws_shown: 0,
             hover: None,
+            menu_scroll: MenuScroll::default(),
             app_tx,
             last_pane_area: Rect::ZERO,
             pane_rects: Vec::new(),
@@ -2573,6 +2672,7 @@ impl App {
             switcher_close_rect: None,
             last_active_ws_shown: 0,
             hover: None,
+            menu_scroll: MenuScroll::default(),
             app_tx,
             last_pane_area: Rect::ZERO,
             pane_rects: Vec::new(),

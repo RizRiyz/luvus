@@ -983,6 +983,9 @@ impl App {
         use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
         // Track the cursor for hover affordances (e.g. the session delete ✕).
         self.hover = Some((m.column, m.row));
+        if let MouseEventKind::Down(_) = m.kind {
+            self.menu_scroll.press(m.column, m.row);
+        }
         // Any click dismisses the help overlay.
         if self.help_open {
             if let MouseEventKind::Down(MouseButton::Left) = m.kind {
@@ -1150,6 +1153,20 @@ impl App {
                 _ => {}
             }
             return;
+        }
+        // A context menu taller than the space it has scrolls under the wheel:
+        // menus are mouse-only, so this is the only way to reach a row that does
+        // not fit. Only a popup actually under the cursor takes the event, so the
+        // wheel goes on doing what it did before everywhere else.
+        if let MouseEventKind::ScrollUp | MouseEventKind::ScrollDown = m.kind {
+            let delta = if matches!(m.kind, MouseEventKind::ScrollUp) {
+                -1
+            } else {
+                1
+            };
+            if self.menu_scroll.wheel(m.column, m.row, delta) {
+                return;
+            }
         }
         // The tab context menu owns the mouse while open.
         if self.tab_menu.is_some() {

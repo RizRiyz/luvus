@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::app::{
-    AgentMenuItem, DiffMenuItem, FileMenuItem, ModuleMenuAction, PaneMenuItem, TabMenuItem,
-    WsMenuItem,
+    AgentMenuItem, DiffMenuItem, FileMenuItem, MenuScroll, ModuleMenuAction, PaneMenuItem, PopupId,
+    TabMenuItem, WsMenuItem,
 };
 use crate::i18n::Catalog;
 use ratatui::widgets::{Borders, Clear};
@@ -25,18 +25,39 @@ fn row_is_hovered(row: Rect, hover: Option<(u16, u16)>) -> bool {
     })
 }
 
+/// What a popup needs from the app to draw itself: where the cursor is, whether
+/// this is the compact layout, and which popup it is — the last so its scroll
+/// offset survives between frames without every caller tracking one.
+struct PopupCtx<'a> {
+    hover: Option<(u16, u16)>,
+    mobile: bool,
+    id: PopupId,
+    scroll: &'a mut MenuScroll,
+}
+
 /// Render a context-menu popup anchored near `anchor` (clamped so it stays on
 /// screen) and return one clickable rect per row — dividers included — in order,
 /// for the input layer to hit-test.
+///
+/// A popup taller than the space it has scrolls, and a row that is out of view
+/// gets an empty rect: it can never be hit, and callers keep zipping their items
+/// against the full-length result. Dropping the overflow instead — which is what
+/// this did before — made the rows a menu puts last unreachable rather than
+/// merely unpainted.
 fn render_popup(
     f: &mut RenderTarget,
     area: Rect,
     anchor: (u16, u16),
     rows: &[MenuRow],
-    hover: Option<(u16, u16)>,
-    mobile: bool,
     t: &Theme,
+    ctx: PopupCtx<'_>,
 ) -> Vec<Rect> {
+    let PopupCtx {
+        hover,
+        mobile,
+        id,
+        scroll,
+    } = ctx;
     let (ax, ay) = anchor;
     // Size the box to the widest label (+ a leading pad + the border).
     let label_w = rows
@@ -71,17 +92,20 @@ fn render_popup(
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
-    let mut rects = Vec::with_capacity(rows.len());
-    for (i, r) in rows.iter().enumerate() {
+    // How many rows fit, and how far the list can therefore be scrolled.
+    let per_screen = (inner.height / row_height) as usize;
+    let max_offset = rows.len().saturating_sub(per_screen);
+    let offset = scroll.record(id, popup, max_offset);
+
+    let mut rects = vec![Rect::default(); rows.len()];
+    for (slot, i) in (offset..rows.len()).take(per_screen).enumerate() {
+        let r = &rows[i];
+        let slot = slot as u16;
         let row = Rect::new(
             inner.x,
-            inner.y + i as u16 * row_height,
+            inner.y + slot * row_height,
             inner.width,
-            row_height.min(
-                inner
-                    .bottom()
-                    .saturating_sub(inner.y + i as u16 * row_height),
-            ),
+            row_height.min(inner.bottom().saturating_sub(inner.y + slot * row_height)),
         );
         if row.height == 0 {
             break;
@@ -102,7 +126,7 @@ fn render_popup(
                 )),
                 text_row,
             );
-            rects.push(row);
+            rects[i] = row;
             continue;
         }
         let hot = row_is_hovered(row, hover);
@@ -121,7 +145,26 @@ fn render_popup(
             )),
             text_row,
         );
-        rects.push(row);
+        rects[i] = row;
+    }
+
+    // Say when rows are out of view, so a clipped menu does not read as a whole
+    // one. The marker sits in the border, which costs no row.
+    if popup.width >= 3 {
+        let marker_x = popup.right().saturating_sub(2);
+        let style = Style::new().fg(t.accent).bg(t.surface0);
+        if offset > 0 {
+            f.render_widget(
+                Paragraph::new(Span::styled("\u{25b2}", style)),
+                Rect::new(marker_x, popup.y, 1, 1),
+            );
+        }
+        if offset < max_offset {
+            f.render_widget(
+                Paragraph::new(Span::styled("\u{25bc}", style)),
+                Rect::new(marker_x, popup.bottom().saturating_sub(1), 1, 1),
+            );
+        }
     }
     rects
 }
@@ -151,7 +194,19 @@ pub(super) fn draw_ws_menu(
             destructive: matches!(it, WsMenuItem::Close | WsMenuItem::DeleteWorktree),
         })
         .collect();
-    let rects = render_popup(f, area, anchor, &rows, app.hover, app.compact, t);
+    let rects = render_popup(
+        f,
+        area,
+        anchor,
+        &rows,
+        t,
+        PopupCtx {
+            hover: app.hover,
+            mobile: app.compact,
+            id: PopupId::Ws,
+            scroll: &mut app.menu_scroll,
+        },
+    );
     if let Some(menu) = app.ws_menu.as_mut() {
         menu.items = items.into_iter().zip(rects).collect();
     }
@@ -181,12 +236,27 @@ pub(super) fn draw_tab_menu(
             destructive: false,
         })
         .collect();
-    let rects = render_popup(f, area, anchor, &rows, app.hover, app.compact, t);
+    let rects = render_popup(
+        f,
+        area,
+        anchor,
+        &rows,
+        t,
+        PopupCtx {
+            hover: app.hover,
+            mobile: app.compact,
+            id: PopupId::Tab,
+            scroll: &mut app.menu_scroll,
+        },
+    );
     let swap_rect = items
         .iter()
         .zip(&rects)
         .find(|(item, _)| **item == TabMenuItem::SwapWith)
-        .map(|(_, rect)| *rect);
+        .map(|(_, rect)| *rect)
+        // A parent row that scrolled out of view has no rect to hang a submenu
+        // off, and an empty one would anchor it at the origin.
+        .filter(|rect: &Rect| rect.height > 0);
     if let Some(menu) = app.tab_menu.as_mut() {
         menu.items = items.iter().copied().zip(rects.iter().copied()).collect();
     }
@@ -224,7 +294,19 @@ pub(super) fn draw_tab_menu(
             })
             .collect();
         let sub_anchor = (parent.right() + 1, parent.y.saturating_sub(1));
-        let sub_rects = render_popup(f, area, sub_anchor, &sub_rows, app.hover, app.compact, t);
+        let sub_rects = render_popup(
+            f,
+            area,
+            sub_anchor,
+            &sub_rows,
+            t,
+            PopupCtx {
+                hover: app.hover,
+                mobile: app.compact,
+                id: PopupId::TabSwap,
+                scroll: &mut app.menu_scroll,
+            },
+        );
         if let Some(menu) = app.tab_menu.as_mut() {
             menu.swap_rects = swap_targets
                 .iter()
@@ -263,12 +345,27 @@ pub(super) fn draw_pane_menu(
             destructive: matches!(it, PaneMenuItem::Close),
         })
         .collect();
-    let rects = render_popup(f, area, anchor, &rows, app.hover, app.compact, t);
+    let rects = render_popup(
+        f,
+        area,
+        anchor,
+        &rows,
+        t,
+        PopupCtx {
+            hover: app.hover,
+            mobile: app.compact,
+            id: PopupId::Pane,
+            scroll: &mut app.menu_scroll,
+        },
+    );
     let move_rect = items
         .iter()
         .zip(&rects)
         .find(|(it, _)| **it == PaneMenuItem::MoveToTab)
-        .map(|(_, r)| *r);
+        .map(|(_, r)| *r)
+        // A parent row that scrolled out of view has no rect to hang a submenu
+        // off, and an empty one would anchor it at the origin.
+        .filter(|rect: &Rect| rect.height > 0);
     if let Some(menu) = app.pane_menu.as_mut() {
         menu.items = items.iter().copied().zip(rects.iter().copied()).collect();
     }
@@ -306,7 +403,19 @@ pub(super) fn draw_pane_menu(
                 .collect();
             // Beside the main popup, first row aligned with the "Move to tab" row.
             let sub_anchor = (mrect.right() + 1, mrect.y.saturating_sub(1));
-            let sub_rects = render_popup(f, area, sub_anchor, &sub_rows, app.hover, app.compact, t);
+            let sub_rects = render_popup(
+                f,
+                area,
+                sub_anchor,
+                &sub_rows,
+                t,
+                PopupCtx {
+                    hover: app.hover,
+                    mobile: app.compact,
+                    id: PopupId::PaneMove,
+                    scroll: &mut app.menu_scroll,
+                },
+            );
             if let Some(menu) = app.pane_menu.as_mut() {
                 menu.tab_rects = move_targets
                     .iter()
@@ -344,7 +453,19 @@ pub(super) fn draw_agent_menu(
             destructive: matches!(it, AgentMenuItem::Close),
         })
         .collect();
-    let rects = render_popup(f, area, anchor, &rows, app.hover, app.compact, t);
+    let rects = render_popup(
+        f,
+        area,
+        anchor,
+        &rows,
+        t,
+        PopupCtx {
+            hover: app.hover,
+            mobile: app.compact,
+            id: PopupId::Agent,
+            scroll: &mut app.menu_scroll,
+        },
+    );
     if let Some(menu) = app.agent_menu.as_mut() {
         menu.items = items.into_iter().zip(rects).collect();
     }
@@ -439,7 +560,19 @@ pub(super) fn draw_file_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
             destructive: matches!(it, FileMenuItem::Delete),
         })
         .collect();
-    let rects = render_popup(f, area, anchor, &rows, app.hover, app.compact, t);
+    let rects = render_popup(
+        f,
+        area,
+        anchor,
+        &rows,
+        t,
+        PopupCtx {
+            hover: app.hover,
+            mobile: app.compact,
+            id: PopupId::File,
+            scroll: &mut app.menu_scroll,
+        },
+    );
     if let Some(menu) = app.file_menu.as_mut() {
         menu.items = items.into_iter().zip(rects).collect();
     }
@@ -469,7 +602,19 @@ pub(super) fn draw_diff_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
             destructive: false,
         })
         .collect();
-    let rects = render_popup(f, area, menu.anchor, &rows, app.hover, app.compact, t);
+    let rects = render_popup(
+        f,
+        area,
+        menu.anchor,
+        &rows,
+        t,
+        PopupCtx {
+            hover: app.hover,
+            mobile: app.compact,
+            id: PopupId::Diff,
+            scroll: &mut app.menu_scroll,
+        },
+    );
     if let Some(menu) = app.diff_menu.as_mut() {
         menu.items = items.into_iter().zip(rects).collect();
     }
@@ -511,7 +656,19 @@ pub(super) fn draw_dock_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
         })
         .collect();
     let anchor = menu.anchor;
-    let rects = render_popup(f, area, anchor, &rows, app.hover, app.compact, t);
+    let rects = render_popup(
+        f,
+        area,
+        anchor,
+        &rows,
+        t,
+        PopupCtx {
+            hover: app.hover,
+            mobile: app.compact,
+            id: PopupId::Dock,
+            scroll: &mut app.menu_scroll,
+        },
+    );
     if let Some(menu) = app.dock_menu.as_mut() {
         menu.rects = rects;
     }
@@ -631,5 +788,172 @@ mod label_case_tests {
             .filter_map(|r| offending_word(r).map(|w| format!("{r:?} (word {w:?})")))
             .collect();
         assert!(bad.is_empty(), "menu rows are not Title Case: {bad:#?}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{App, FileMenu, FileMenuItem, PopupId};
+    use crate::event::AppEvent;
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::Terminal;
+
+    /// A FILES menu with two editors is ten rows, which does not fit a ten-row
+    /// terminal — the shape that used to lose its last rows outright.
+    fn app_with_file_menu(height: u16) -> App {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, height, tx).unwrap();
+        app.file_menu = Some(file_menu());
+        app
+    }
+
+    fn file_menu() -> FileMenu {
+        FileMenu {
+            path: std::env::temp_dir().join("scroll.txt"),
+            is_dir: false,
+            anchor: (10, 0),
+            items: Vec::new(),
+            editors: vec![
+                ("vim".to_string(), "Vim".to_string()),
+                ("hx".to_string(), "Helix".to_string()),
+            ],
+        }
+    }
+
+    /// The rect the input layer would hit-test for `item`. An empty one means the
+    /// row is out of view, and so unreachable.
+    fn rect_of(app: &App, item: FileMenuItem) -> Rect {
+        app.file_menu
+            .as_ref()
+            .expect("menu open")
+            .items
+            .iter()
+            .find(|(it, _)| *it == item)
+            .map(|(_, rect)| *rect)
+            .expect("row is in the menu")
+    }
+
+    fn mouse(app: &mut App, kind: MouseEventKind, at: (u16, u16)) {
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind,
+            column: at.0,
+            row: at.1,
+            modifiers: KeyModifiers::NONE,
+        }));
+    }
+
+    #[test]
+    fn a_menu_taller_than_its_space_scrolls_instead_of_dropping_its_last_rows() {
+        let _env = crate::persist::test_env("menu-scroll-reach");
+        let mut app = app_with_file_menu(10);
+        let mut term = Terminal::new(TestBackend::new(80, 10)).unwrap();
+
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let top = rect_of(&app, FileMenuItem::OpenReadonly);
+        assert!(top.height > 0, "the first row is on screen");
+        assert_eq!(
+            rect_of(&app, FileMenuItem::Delete).height,
+            0,
+            "Delete does not fit yet, so it has no rect to click"
+        );
+
+        let over = (top.x + 1, top.y);
+        mouse(&mut app, MouseEventKind::ScrollDown, over);
+        mouse(&mut app, MouseEventKind::ScrollDown, over);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let delete = rect_of(&app, FileMenuItem::Delete);
+        assert!(
+            delete.height > 0,
+            "the wheel brought the last row into view — this is the bug"
+        );
+
+        // And it is genuinely clickable, not merely painted: the rect the render
+        // handed back is the one the input layer acts on.
+        mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            (delete.x + 1, delete.y),
+        );
+        assert!(
+            app.file_delete.is_some(),
+            "clicking the scrolled-in row ran its action"
+        );
+    }
+
+    #[test]
+    fn menu_scroll_stops_at_both_ends() {
+        let _env = crate::persist::test_env("menu-scroll-clamp");
+        let mut app = app_with_file_menu(10);
+        let mut term = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let over = {
+            let top = rect_of(&app, FileMenuItem::OpenReadonly);
+            (top.x + 1, top.y)
+        };
+
+        for _ in 0..20 {
+            mouse(&mut app, MouseEventKind::ScrollDown, over);
+        }
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let bottom = app.menu_scroll.offset_of(PopupId::File);
+        assert!(bottom > 0, "it scrolled");
+        assert!(
+            rect_of(&app, FileMenuItem::Delete).height > 0,
+            "the last row is in view and the list cannot run past it"
+        );
+
+        for _ in 0..20 {
+            mouse(&mut app, MouseEventKind::ScrollUp, over);
+        }
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(
+            app.menu_scroll.offset_of(PopupId::File),
+            0,
+            "and back to the first row, not past it"
+        );
+        assert!(rect_of(&app, FileMenuItem::OpenReadonly).height > 0);
+    }
+
+    #[test]
+    fn the_wheel_away_from_a_popup_leaves_it_alone() {
+        let _env = crate::persist::test_env("menu-scroll-elsewhere");
+        let mut app = app_with_file_menu(10);
+        let mut term = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        // Far from the popup, which is anchored at column 10.
+        mouse(&mut app, MouseEventKind::ScrollDown, (70, 8));
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(
+            app.menu_scroll.offset_of(PopupId::File),
+            0,
+            "the wheel belongs to whatever is under it, not to the open menu"
+        );
+    }
+
+    #[test]
+    fn reopening_a_menu_starts_it_at_the_top() {
+        let _env = crate::persist::test_env("menu-scroll-reopen");
+        let mut app = app_with_file_menu(10);
+        let mut term = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let over = {
+            let top = rect_of(&app, FileMenuItem::OpenReadonly);
+            (top.x + 1, top.y)
+        };
+        mouse(&mut app, MouseEventKind::ScrollDown, over);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(app.menu_scroll.offset_of(PopupId::File) > 0, "scrolled");
+
+        // A press away from the popup is what dismisses one menu and opens the
+        // next, so the next one starts where a menu should.
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Right), (70, 8));
+        app.file_menu = Some(file_menu());
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(app.menu_scroll.offset_of(PopupId::File), 0);
+        assert!(rect_of(&app, FileMenuItem::OpenReadonly).height > 0);
     }
 }

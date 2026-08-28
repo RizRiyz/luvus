@@ -166,6 +166,9 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     let mission_refresh_rect = app.mission_refresh_rect;
     let changelog_scroll = app.changelog_scroll;
     let file_tree_scroll = app.file_tree.scroll;
+    // Popup scroll offsets and geometry are recorded by an ordinary draw, and a
+    // projection renders at its own size — so keep them out of its way.
+    let menu_scroll = std::mem::take(&mut app.menu_scroll);
 
     // Geometry collections are write-only outputs of a render. Move the active
     // client's values aside instead of cloning them on every secondary frame.
@@ -292,6 +295,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     app.mission_refresh_rect = mission_refresh_rect;
     app.changelog_scroll = changelog_scroll;
     app.file_tree.scroll = file_tree_scroll;
+    app.menu_scroll = menu_scroll;
     app.pane_rects = pane_rects;
     app.pane_content_rects = pane_content_rects;
     app.pane_title_rects = pane_title_rects;
@@ -395,6 +399,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     f.render_widget(Block::new().style(Style::new().bg(t.mantle)), area);
     app.bar.hits.clear();
     app.bar.overflow_hits.clear();
+    app.menu_scroll.begin_frame();
     app.mobile_pane_prev_rect = None;
     app.mobile_pane_next_rect = None;
 
