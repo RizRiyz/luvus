@@ -609,6 +609,9 @@ pub enum FileMenuItem {
     NewFolder,
     Rename,
     CopyPath,
+    /// Type the path into the focused pane's prompt, without submitting it
+    /// (docs/38 FILE-6). Offered for folders too, exactly like `CopyPath`.
+    InsertPath,
     Divider,
     Delete,
 }
@@ -628,6 +631,7 @@ impl FileMenu {
             FileMenuItem::NewFolder,
             FileMenuItem::Rename,
             FileMenuItem::CopyPath,
+            FileMenuItem::InsertPath,
             FileMenuItem::Divider,
             FileMenuItem::Delete,
         ]);

@@ -31,8 +31,17 @@ conflicted, mint for renamed, with a letter badge and a mark on any folder that
 contains changes. Files created outside luvus, by an agent or a command in a
 pane, show up on their own within a couple of seconds.
 
-**Right-click a row** for New File, New Folder, Rename, Copy Path, and Delete
-(Delete always asks first).
+**Right-click a row** for New File, New Folder, Rename, Copy Path, Insert Path,
+and Delete (Delete always asks first).
+
+**Insert Path** types the file's absolute path into the pane you were already
+working in, without submitting it — so you can name a file in a command or an
+agent prompt without leaving the keyboard to type the path out. Opening the
+FILES dock and its menu does not move focus, so the path lands where you were
+typing. It is inserted only; Luvus never sends Enter, and never adds an `@` or
+any other prefix, so the syntax stays yours. A path is left uninserted if the
+focused pane is a read-only file view rather than a terminal, or if the filename
+itself contains a line break — which would submit your prompt on arrival.
 
 ## Opening a file
 

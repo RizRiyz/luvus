@@ -488,6 +488,7 @@ fn file_label(it: FileMenuItem, editors: &[(String, String)]) -> String {
         FileMenuItem::NewFolder => "New Folder".to_string(),
         FileMenuItem::Rename => "Rename".to_string(),
         FileMenuItem::CopyPath => "Copy Path".to_string(),
+        FileMenuItem::InsertPath => "Insert Path".to_string(),
         FileMenuItem::Divider => String::new(),
         FileMenuItem::Delete => "Delete".to_string(),
     }
@@ -620,6 +621,7 @@ mod label_case_tests {
             FileMenuItem::NewFolder,
             FileMenuItem::Rename,
             FileMenuItem::CopyPath,
+            FileMenuItem::InsertPath,
             FileMenuItem::Delete,
         ] {
             rows.push(file_label(it, &editors));

@@ -436,15 +436,8 @@ impl App {
                 if self.paste_into_modal(&s) {
                     return true; // the modal buffer changed → redraw
                 }
-                // Otherwise it goes to the focused pane. `send_paste` re-wraps in
-                // the bracketed-paste markers crossterm stripped, so a child that
-                // distinguishes paste from typing (an agent CLI attaching a
-                // dropped file, vim not auto-indenting) still sees a paste.
-                if let Some(p) = self.focused() {
-                    p.scroll_to_bottom(); // pasting is input → snap to live
-                    p.send_paste(&s);
-                }
-                self.mark_user_input(); // so the echo isn't misread as agent work
+                // Otherwise it goes to the focused pane.
+                self.paste_into_focused_pane(&s);
                 false // goes to the pane; its echo (PtyData) renders it
             }
             AppEvent::Resize => {
@@ -2653,6 +2646,30 @@ impl App {
         } else {
             false
         }
+    }
+
+    /// Deliver `text` to the focused pane exactly as a paste from the outer
+    /// terminal does, and report which pane took it (`None` when the focused
+    /// leaf is a native view or has no pane at all).
+    ///
+    /// `send_paste` re-wraps the text in the bracketed-paste markers crossterm
+    /// stripped, so a child that distinguishes paste from typing (an agent CLI
+    /// attaching a dropped file, vim not auto-indenting) still sees a paste.
+    /// The pane also snaps to live and the input is marked as the user's, so
+    /// detection doesn't read the echo as agent work.
+    ///
+    /// This is the one place that does it: `Insert Path` (docs/38) goes through
+    /// here rather than writing at the pane, so bracketed paste, scroll
+    /// position, and activity tracking cannot drift between the two.
+    pub(crate) fn paste_into_focused_pane(&mut self, text: &str) -> Option<PaneId> {
+        let id = self.layout().focus;
+        let target = self.panes.get(&id).map(|p| {
+            p.scroll_to_bottom(); // pasting is input → snap to live
+            p.send_paste(text);
+            id
+        });
+        self.mark_user_input(); // so the echo isn't misread as agent work
+        target
     }
 
     /// Record that the user just typed into the focused pane, so detection can
