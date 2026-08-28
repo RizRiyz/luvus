@@ -61,10 +61,6 @@ unicode-width = "0.2"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# OpenCode 1.18+ stores per-session token and cost aggregates in SQLite.  Read
-# it in-process and read-only: spawning the OpenCode/Bun runtime every Mission
-# Control refresh is both slower and substantially heavier.
-rusqlite = { version = "0.40", features = ["bundled"] }
 # SHA-256 tracks managed skill files and verifies release, theme, and diff
 # artifacts. The canonical Luvus skill itself is bundled with this release.
 semver = "1"
@@ -88,6 +84,18 @@ getrandom = "0.3"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# OpenCode 1.18+ stores per-session token and cost aggregates in SQLite. Read it
+# in-process and read-only: spawning the OpenCode/Bun runtime every Mission
+# Control refresh is both slower and substantially heavier. The one-shot query
+# does not use rusqlite's optional statement cache. macOS ships a stable SQLite
+# system library; other platforms retain the bundled engine so Cargo installs
+# and static release artifacts stay self-contained.
+[target.'cfg(target_os = "macos")'.dependencies]
+rusqlite = { version = "0.40", default-features = false }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+
 # Native Windows terminal-backend safety: owner verification for named-pipe
 # peers, PID-reuse-safe process creation timestamps, and one bounded ToolHelp
 # process snapshot for agent/runtime inspection.
@@ -98,8 +106,11 @@ windows-sys = { version = "0.61", features = [
     "Win32_Media_Audio",
     "Win32_Security",
     "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Debug",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Kernel",
     "Win32_System_Threading",
+    "Wdk_System_Threading",
 ] }
 
 [profile.release]

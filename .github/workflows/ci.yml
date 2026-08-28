@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # Harden dependency downloads: retry transient failures and disable HTTP/2
@@ -57,6 +60,8 @@ jobs:
   macos:
     name: macos test
     runs-on: macos-14
+    env:
+      SQLITE3_LIB_DIR: /usr/lib
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -70,6 +75,27 @@ jobs:
           cargo build --locked
           python3 examples/uhp/terminal/live_conformance.py --luvus target/debug/luvus
           python3 examples/uhp/terminal/failure_conformance.py --luvus target/debug/luvus
+
+  binary-size:
+    name: macos binary size
+    runs-on: macos-14
+    permissions:
+      contents: read
+    env:
+      SQLITE3_LIB_DIR: /usr/lib
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: Package measured binary
+        run: COPYFILE_DISABLE=1 tar -C target/release -czf target/luvus-size.tar.gz luvus
+      - name: Check reviewed baseline
+        run: |
+          python3 scripts/check-binary-size.py \
+            --target aarch64-apple-darwin \
+            --binary target/release/luvus \
+            --archive target/luvus-size.tar.gz
 
   windows:
     name: windows protocol · ConPTY

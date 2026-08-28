@@ -362,6 +362,8 @@ pub struct DiffState {
     pub notes: Vec<crate::diff::notes::ReviewNote>,
     pub progress: crate::diff::notes::ReviewProgress,
     pub selected_notes: std::collections::HashSet<String>,
+    pub viewport: usize,
+    pub scroll_detached: bool,
     cache: DiffCache,
 }
 
@@ -382,6 +384,8 @@ impl Default for DiffState {
             notes: Vec::new(),
             progress: crate::diff::notes::ReviewProgress::default(),
             selected_notes: std::collections::HashSet::new(),
+            viewport: 0,
+            scroll_detached: false,
             cache: DiffCache::default(),
         }
     }
@@ -432,8 +436,22 @@ pub struct DiffAgentPicker {
 
 impl DiffState {
     pub fn rebuild_rows(&mut self) {
+        let old_cursor = self.cursor;
+        let old_selected = self.selected_key.clone().or_else(|| {
+            let index = match self.rows.get(self.cursor)? {
+                DiffListRow::File(index) => *index,
+                DiffListRow::Group(_) => return None,
+            };
+            self.snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.files.get(index))
+                .map(|file| file.key.clone())
+        });
         self.rows.clear();
         let Some(snapshot) = &self.snapshot else {
+            self.cursor = 0;
+            self.scroll = 0;
+            self.scroll_detached = false;
             return;
         };
         for layer in [
@@ -462,10 +480,29 @@ impl DiffState {
                 self.rows.extend(group.into_iter().map(DiffListRow::File));
             }
         }
-        self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
-        if matches!(self.rows.get(self.cursor), Some(DiffListRow::Group(_))) {
-            self.move_cursor(1);
+        let restored = old_selected.as_ref().and_then(|selected| {
+            self.rows.iter().position(|row| {
+                let DiffListRow::File(index) = row else {
+                    return false;
+                };
+                snapshot
+                    .files
+                    .get(*index)
+                    .is_some_and(|file| &file.key == selected)
+            })
+        });
+        if let Some(position) = restored {
+            self.cursor = position;
+        } else {
+            self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
+            if matches!(self.rows.get(self.cursor), Some(DiffListRow::Group(_))) {
+                self.move_cursor(1);
+            }
         }
+        if self.cursor != old_cursor || old_selected.is_some() && restored.is_none() {
+            self.scroll_detached = false;
+        }
+        self.ensure_cursor_visible();
     }
 
     pub fn move_cursor(&mut self, delta: isize) {
@@ -483,6 +520,23 @@ impl DiffState {
             if cursor == 0 || cursor == self.rows.len().saturating_sub(1) as isize {
                 break;
             }
+        }
+    }
+
+    pub fn ensure_cursor_visible(&mut self) {
+        let cap = self.viewport;
+        if cap == 0 {
+            return;
+        }
+        let max_scroll = self.rows.len().saturating_sub(cap);
+        self.scroll = self.scroll.min(max_scroll);
+        if self.scroll_detached {
+            return;
+        }
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll.saturating_add(cap) {
+            self.scroll = self.cursor.saturating_sub(cap.saturating_sub(1));
         }
     }
 
@@ -634,6 +688,8 @@ pub struct DiffView {
     pub load: DiffLoad,
     pub stack_rows: Vec<DiffLine>,
     pub split_rows: Vec<crate::diff::rows::SplitRow>,
+    pub stack_indices: HashMap<(DiffSide, u32), usize>,
+    pub split_indices: Vec<(Option<usize>, Option<usize>)>,
     pub request_token: u64,
     pub preference: DiffLayoutPreference,
     pub scroll: usize,
@@ -668,6 +724,8 @@ impl DiffView {
             load: DiffLoad::Loading,
             stack_rows: Vec::new(),
             split_rows: Vec::new(),
+            stack_indices: HashMap::new(),
+            split_indices: Vec::new(),
             request_token: 0,
             preference,
             scroll: 0,
@@ -684,6 +742,109 @@ impl DiffView {
             note_edit_id: None,
             range_anchor: None,
             dirty: false,
+        }
+    }
+
+    pub fn ensure_horizontal_visible(
+        &mut self,
+        pane_width: u16,
+        marker_style: DiffMarkerStyle,
+        split: bool,
+    ) {
+        let Some(line) = self.stack_rows.get(self.selected) else {
+            return;
+        };
+        let text_len = line.text.chars().count();
+        let bar_w = if marker_style.shows_bars() { 1 } else { 0 };
+        let symbol_w = if marker_style.shows_symbols() { 2 } else { 0 };
+        let numbers_w = if self.show_line_numbers { 12 } else { 0 };
+        let gutter_w = bar_w + symbol_w + numbers_w;
+        let side_width = if split {
+            (pane_width.saturating_sub(1)) / 2
+        } else {
+            pane_width
+        };
+        let text_w = side_width.saturating_sub(gutter_w as u16) as usize;
+        if text_w == 0 {
+            return;
+        }
+        if text_len <= text_w {
+            self.horizontal = 0;
+        } else if self.horizontal.saturating_add(text_w) > text_len
+            || self.horizontal > text_len.saturating_sub(text_w)
+        {
+            self.horizontal = text_len.saturating_sub(text_w);
+        }
+    }
+
+    pub fn effective_split(&self, pane_width: u16) -> bool {
+        !self.wrap
+            && matches!(
+                self.preference,
+                DiffLayoutPreference::Split | DiffLayoutPreference::Auto
+            )
+            && pane_width >= 96
+    }
+
+    pub fn rebuild_row_indices(&mut self) {
+        self.stack_indices.clear();
+        let mut headers = Vec::new();
+        for (index, line) in self.stack_rows.iter().enumerate() {
+            if line.kind == DiffLineKind::Header {
+                headers.push(index);
+            }
+            if let Some(number) = line.old_line {
+                self.stack_indices.insert((DiffSide::Old, number), index);
+            }
+            if let Some(number) = line.new_line {
+                self.stack_indices.insert((DiffSide::New, number), index);
+            }
+        }
+
+        let mut header = 0;
+        self.split_indices = self
+            .split_rows
+            .iter()
+            .map(|row| {
+                if row
+                    .old
+                    .as_ref()
+                    .or(row.new.as_ref())
+                    .is_some_and(|line| line.kind == DiffLineKind::Header)
+                {
+                    let index = headers.get(header).copied();
+                    header += 1;
+                    return (index, index);
+                }
+                let old = row
+                    .old
+                    .as_ref()
+                    .and_then(|line| line.old_line)
+                    .and_then(|number| self.stack_indices.get(&(DiffSide::Old, number)))
+                    .copied();
+                let new = row
+                    .new
+                    .as_ref()
+                    .and_then(|line| line.new_line)
+                    .and_then(|number| self.stack_indices.get(&(DiffSide::New, number)))
+                    .copied();
+                (old, new)
+            })
+            .collect();
+    }
+
+    pub fn split_row_for_stack(&self, stack: usize) -> usize {
+        self.split_indices
+            .iter()
+            .position(|(old, new)| *old == Some(stack) || *new == Some(stack))
+            .unwrap_or(0)
+    }
+
+    pub fn stack_row_for_split(&self, split: usize) -> Option<usize> {
+        let (old, new) = *self.split_indices.get(split)?;
+        match self.selected_side {
+            DiffSide::Old => old.or(new),
+            DiffSide::New => new.or(old),
         }
     }
 }
@@ -729,6 +890,153 @@ mod tests {
         assert!(state.cache_get(&key, 3, "before").is_some());
         assert!(state.cache_get(&key, 3, "after").is_none());
         assert!(state.cache_get(&key, 4, "before").is_none());
+    }
+
+    #[test]
+    fn horizontal_visibility_clamps_without_hiding_the_selected_line() {
+        let mut view = DiffView::new(
+            PathBuf::from("/repo"),
+            test_key(),
+            DiffLayoutPreference::Stack,
+            3,
+            false,
+            false,
+        );
+        view.stack_rows.push(DiffLine {
+            kind: DiffLineKind::Context,
+            old_line: Some(1),
+            new_line: Some(1),
+            text: "abcdefghijklmnopqrstuvwxyz".into(),
+        });
+        view.horizontal = usize::MAX;
+        view.ensure_horizontal_visible(10, DiffMarkerStyle::Symbols, false);
+        assert_eq!(view.horizontal, 18);
+        assert!(view.horizontal < view.stack_rows[0].text.chars().count());
+
+        view.stack_rows[0].text = "short".into();
+        view.ensure_horizontal_visible(10, DiffMarkerStyle::Symbols, false);
+        assert_eq!(view.horizontal, 0);
+    }
+
+    #[test]
+    fn split_rows_map_to_stack_rows_on_the_selected_side() {
+        let mut view = DiffView::new(
+            PathBuf::from("/repo"),
+            test_key(),
+            DiffLayoutPreference::Split,
+            3,
+            false,
+            false,
+        );
+        view.stack_rows = vec![
+            DiffLine {
+                kind: DiffLineKind::Header,
+                old_line: None,
+                new_line: None,
+                text: "@@ -1,2 +1 @@".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Deletion,
+                old_line: Some(1),
+                new_line: None,
+                text: "old one".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Deletion,
+                old_line: Some(2),
+                new_line: None,
+                text: "old two".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Addition,
+                old_line: None,
+                new_line: Some(1),
+                text: "new".into(),
+            },
+        ];
+        view.split_rows = vec![
+            crate::diff::rows::SplitRow {
+                old: Some(view.stack_rows[0].clone()),
+                new: Some(view.stack_rows[0].clone()),
+            },
+            crate::diff::rows::SplitRow {
+                old: Some(view.stack_rows[1].clone()),
+                new: Some(view.stack_rows[3].clone()),
+            },
+            crate::diff::rows::SplitRow {
+                old: Some(view.stack_rows[2].clone()),
+                new: None,
+            },
+        ];
+        view.rebuild_row_indices();
+
+        view.selected_side = DiffSide::New;
+        assert_eq!(view.stack_row_for_split(1), Some(3));
+        view.selected_side = DiffSide::Old;
+        assert_eq!(view.stack_row_for_split(1), Some(1));
+        assert_eq!(view.stack_row_for_split(2), Some(2));
+        assert_eq!(view.split_row_for_stack(3), 1);
+    }
+
+    #[test]
+    fn row_rebuild_preserves_detached_scroll_until_selection_moves() {
+        let key = test_key();
+        let second_path = RepoPath::from_path(Path::new("src/second.rs")).unwrap();
+        let second_key = DiffKey {
+            new_path: Some(second_path.clone()),
+            old_path: Some(second_path),
+            ..key.clone()
+        };
+        let mut state = DiffState {
+            viewport: 1,
+            snapshot: Some(DiffSnapshot {
+                generation: 1,
+                fingerprint: "snapshot".into(),
+                repo_id: "repo".into(),
+                worktree_id: "tree".into(),
+                visible_root: PathBuf::from("/repo"),
+                repo_root: PathBuf::from("/repo"),
+                branch: "main".into(),
+                files: vec![
+                    DiffFile {
+                        key: key.clone(),
+                        status: DiffFileStatus::Modified,
+                        additions: Some(1),
+                        deletions: Some(0),
+                        binary: false,
+                        unresolved_notes: 0,
+                        viewed_fingerprint: None,
+                        fingerprint: "one".into(),
+                    },
+                    DiffFile {
+                        key: second_key,
+                        status: DiffFileStatus::Modified,
+                        additions: Some(1),
+                        deletions: Some(0),
+                        binary: false,
+                        unresolved_notes: 0,
+                        viewed_fingerprint: None,
+                        fingerprint: "two".into(),
+                    },
+                ],
+                omitted_files: 0,
+            }),
+            ..DiffState::default()
+        };
+        state.rebuild_rows();
+        state.selected_key = Some(key);
+        state.cursor = 1;
+        state.scroll = 2;
+        state.scroll_detached = true;
+
+        state.rebuild_rows();
+        assert_eq!(state.cursor, 1);
+        assert_eq!(state.scroll, 2, "manual viewport remains detached");
+
+        state.filter = DiffFilter::HasNotes;
+        state.rebuild_rows();
+        assert_eq!(state.scroll, 0, "shrinking rows clamps the viewport");
+        assert!(!state.scroll_detached, "invalid selection reattaches");
     }
 
     #[cfg(unix)]

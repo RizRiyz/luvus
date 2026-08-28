@@ -42,6 +42,10 @@ The **All / Active** toggle in the header switches between live agents only
 
 ## Usage in Mission Control
 
+Open Mission Control with `Ctrl+Space m`, from the desktop switcher, or with
+`luvus mission open [<workspace>]`. Automation clients can call the same
+workspace-scoped operation through UHP as `mission.open`.
+
 Mission Control reads the structured usage counters that each agent already
 stores for its own session. It shows input, output, and cache tokens, context
 usage when the agent records its context limit, and cost when the agent records

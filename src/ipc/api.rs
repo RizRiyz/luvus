@@ -74,6 +74,7 @@ const MAX_ACTIVE_CONNECTIONS: usize = 80;
 const API_WORKER_STACK_BYTES: usize = 256 * 1024;
 const EVENT_FORWARDER_STACK_BYTES: usize = 128 * 1024;
 const INITIAL_FRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(not(windows))]
 const INITIAL_FRAME_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 const MAX_REQUEST_ID_BYTES: usize = 128;
 
@@ -476,6 +477,9 @@ fn read_initial_frame(
     timeout: std::time::Duration,
 ) -> Result<Vec<u8>, FrameError> {
     let deadline = std::time::Instant::now() + timeout;
+    // Windows named pipes reject PIPE_NOWAIT after a write (`ERROR_PIPE_BUSY`).
+    // Peek for inbound bytes and keep the handle blocking.
+    #[cfg(not(windows))]
     let timeout_mode = stream
         .set_recv_timeout(INITIAL_FRAME_POLL)
         .map_err(|_| FrameError::Io)?;
@@ -485,14 +489,24 @@ fn read_initial_frame(
         if std::time::Instant::now() >= deadline {
             return Err(FrameError::Timeout);
         }
-        match stream.read(&mut chunk) {
-            Ok(0)
-                if timeout_mode == transport::TimeoutMode::Nonblocking
-                    && transport::nonblocking_zero_is_pending() =>
-            {
+        #[cfg(windows)]
+        match stream.recv_has_data() {
+            Ok(false) => {
                 thread::sleep(std::time::Duration::from_millis(10));
+                continue;
             }
+            Ok(true) => {}
+            Err(_) => return Err(FrameError::Io),
+        }
+        match stream.read(&mut chunk) {
             Ok(0) => {
+                #[cfg(not(windows))]
+                if timeout_mode == transport::TimeoutMode::Nonblocking
+                    && transport::nonblocking_zero_is_pending()
+                {
+                    thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
                 return Err(if frame.is_empty() {
                     FrameError::Eof
                 } else {
@@ -517,14 +531,24 @@ fn read_initial_frame(
                 if matches!(
                     error.kind(),
                     io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                ) || (timeout_mode == transport::TimeoutMode::Nonblocking
-                    && transport::nonblocking_read_pending(&error)) =>
+                ) =>
             {
+                #[cfg(not(windows))]
                 if timeout_mode == transport::TimeoutMode::Nonblocking {
                     thread::sleep(std::time::Duration::from_millis(10));
                 }
             }
-            Err(_) => return Err(FrameError::Io),
+            Err(error) => {
+                #[cfg(not(windows))]
+                if timeout_mode == transport::TimeoutMode::Nonblocking
+                    && transport::nonblocking_read_pending(&error)
+                {
+                    thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                let _ = error;
+                return Err(FrameError::Io);
+            }
         }
     }
 }
@@ -2470,6 +2494,59 @@ mod tests {
             "deadline reader blocked too long"
         );
         worker.join().unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn deadline_response_reader_returns_a_written_frame() {
+        let path = std::env::temp_dir().join(format!(
+            "luvus-response-written-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = transport::bind(&path).expect("bind test control socket");
+        let worker = std::thread::spawn(move || {
+            let mut connection = transport::incoming(&listener)
+                .next()
+                .expect("accept test connection");
+            let mut request = String::new();
+            BufReader::new(connection.clone())
+                .read_line(&mut request)
+                .expect("read request");
+            writeln!(connection, r#"{{"id":"1","result":"pong"}}"#).unwrap();
+        });
+
+        let mut client = transport::connect(&path).expect("connect test control socket");
+        writeln!(client, "request").unwrap();
+        let line =
+            read_response_frame_with_deadline(&mut client, std::time::Duration::from_secs(2))
+                .expect("written frame must arrive");
+        assert!(line.contains("pong"), "{line}");
+        worker.join().unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn deadline_response_reader_times_out_before_accept() {
+        let path = std::env::temp_dir().join(format!(
+            "luvus-response-before-accept-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let _listener = transport::bind(&path).expect("bind test control socket");
+        let mut client =
+            transport::connect(&path).expect("Windows can finish CreateFile before accept");
+        let started = std::time::Instant::now();
+        let error =
+            read_response_frame_with_deadline(&mut client, std::time::Duration::from_millis(200))
+                .expect_err("unread pipe must time out");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "deadline reader blocked too long before accept"
+        );
         let _ = std::fs::remove_file(path);
     }
 

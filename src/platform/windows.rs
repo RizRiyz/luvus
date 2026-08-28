@@ -4,22 +4,27 @@
 //! contract as macOS/Linux without carrying Windows handles through app state.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::c_void;
 use std::mem::size_of;
 
+use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
 use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Security::{
     EqualSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
 };
+use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetProcessTimes, OpenProcess, OpenProcessToken,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcess, GetProcessTimes, OpenProcess, OpenProcessToken, PEB,
+    PROCESS_BASIC_INFORMATION, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_VM_READ, RTL_USER_PROCESS_PARAMETERS,
 };
 
 const MAX_PROCESS_ENTRIES: usize = 16_384;
 const MAX_DESCENDANTS_PER_ROOT: usize = 64;
+const MAX_COMMAND_LINE_BYTES: usize = 64 * 1024;
 
 struct OwnedHandle(HANDLE);
 
@@ -42,6 +47,84 @@ impl Drop for OwnedHandle {
 fn open_process(pid: u32) -> Option<OwnedHandle> {
     // SAFETY: the access mask is read-only and `pid` is passed by value.
     OwnedHandle::new(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) })
+}
+
+fn read_process_memory<T: Default>(process: HANDLE, address: *const c_void) -> Option<T> {
+    let mut value = T::default();
+    let mut bytes_read = 0;
+    // SAFETY: `address` is supplied by the target process and is only read via
+    // the OS API; `value` is writable storage of the exact requested size.
+    let success = unsafe {
+        ReadProcessMemory(
+            process,
+            address,
+            (&mut value as *mut T).cast(),
+            size_of::<T>(),
+            &mut bytes_read,
+        )
+    } != 0;
+    (success && bytes_read == size_of::<T>()).then_some(value)
+}
+
+/// Read a process's full command line from its PEB.
+///
+/// Windows' ToolHelp snapshot exposes only the executable name. The command
+/// line is needed for runtimes such as `node ...\\pi-coding-agent\\...`, where
+/// the agent identity lives in a script argument rather than the executable.
+/// This is best-effort: protected, exited, or differently-bitness processes
+/// fall back to their executable name at the snapshot caller.
+fn process_command_line(pid: u32) -> Option<String> {
+    let process = OwnedHandle::new(unsafe {
+        OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid)
+    })?;
+    let mut basic_info = PROCESS_BASIC_INFORMATION::default();
+    let mut return_length = 0_u32;
+    // SAFETY: `basic_info` is writable storage of the documented result size.
+    let status = unsafe {
+        NtQueryInformationProcess(
+            process.0,
+            ProcessBasicInformation,
+            (&mut basic_info as *mut PROCESS_BASIC_INFORMATION).cast(),
+            size_of::<PROCESS_BASIC_INFORMATION>() as u32,
+            &mut return_length,
+        )
+    };
+    if status < 0 || basic_info.PebBaseAddress.is_null() {
+        return None;
+    }
+    let peb = read_process_memory::<PEB>(process.0, basic_info.PebBaseAddress.cast())?;
+    if peb.ProcessParameters.is_null() {
+        return None;
+    }
+    let parameters = read_process_memory::<RTL_USER_PROCESS_PARAMETERS>(
+        process.0,
+        peb.ProcessParameters.cast(),
+    )?;
+    let command_line = parameters.CommandLine;
+    let length = usize::from(command_line.Length);
+    if length == 0 || length % size_of::<u16>() != 0 || length > MAX_COMMAND_LINE_BYTES {
+        return None;
+    }
+    if command_line.Buffer.is_null() {
+        return None;
+    }
+    let mut buffer = vec![0_u16; length / size_of::<u16>()];
+    let mut bytes_read = 0;
+    // SAFETY: the target buffer and length come from the target's live process
+    // parameters; the destination is allocated for exactly `length` bytes.
+    let success = unsafe {
+        ReadProcessMemory(
+            process.0,
+            command_line.Buffer.cast(),
+            buffer.as_mut_ptr().cast(),
+            length,
+            &mut bytes_read,
+        )
+    } != 0;
+    if !success || bytes_read != length {
+        return None;
+    }
+    String::from_utf16(&buffer).ok()
 }
 
 fn token_user(process: HANDLE) -> Option<Vec<usize>> {
@@ -130,6 +213,7 @@ struct ProcessEntry {
 struct ProcessSnapshot {
     names: HashMap<u32, String>,
     children: HashMap<u32, Vec<u32>>,
+    command_lines: HashMap<u32, String>,
 }
 
 impl ProcessSnapshot {
@@ -177,10 +261,14 @@ impl ProcessSnapshot {
         for child_ids in children.values_mut() {
             child_ids.sort_unstable();
         }
-        Self { names, children }
+        Self {
+            names,
+            children,
+            command_lines: HashMap::new(),
+        }
     }
 
-    fn descendants(&self, root: u32) -> Vec<(u32, u16, String)> {
+    fn descendants(&self, root: u32) -> Vec<(u32, u16)> {
         let mut output = Vec::new();
         let mut pending = vec![(root, 0_u16)];
         let mut visited = HashSet::new();
@@ -188,8 +276,8 @@ impl ProcessSnapshot {
             if !visited.insert(pid) || output.len() >= MAX_DESCENDANTS_PER_ROOT {
                 continue;
             }
-            if let Some(executable) = self.names.get(&pid) {
-                output.push((pid, depth, executable.clone()));
+            if self.names.contains_key(&pid) {
+                output.push((pid, depth));
             }
             if let Some(children) = self.children.get(&pid) {
                 pending.extend(
@@ -203,10 +291,20 @@ impl ProcessSnapshot {
         }
         output
     }
+
+    fn command(&mut self, pid: u32) -> String {
+        if let Some(command) = self.command_lines.get(&pid) {
+            return command.clone();
+        }
+        let fallback = self.names.get(&pid).cloned().unwrap_or_default();
+        let command = process_command_line(pid).unwrap_or(fallback);
+        self.command_lines.insert(pid, command.clone());
+        command
+    }
 }
 
 pub(super) fn descendant_commands(roots: &[u32]) -> Option<HashMap<u32, Vec<String>>> {
-    let snapshot = ProcessSnapshot::capture()?;
+    let mut snapshot = ProcessSnapshot::capture()?;
     Some(
         roots
             .iter()
@@ -215,7 +313,7 @@ pub(super) fn descendant_commands(roots: &[u32]) -> Option<HashMap<u32, Vec<Stri
                 let commands = snapshot
                     .descendants(root)
                     .into_iter()
-                    .map(|(_, _, command)| command)
+                    .map(|(pid, _)| snapshot.command(pid))
                     .collect();
                 (root, commands)
             })
@@ -225,14 +323,14 @@ pub(super) fn descendant_commands(roots: &[u32]) -> Option<HashMap<u32, Vec<Stri
 
 pub(super) fn process_tree(root: u32) -> Vec<super::ProcInfo> {
     ProcessSnapshot::capture()
-        .map(|snapshot| {
+        .map(|mut snapshot| {
             snapshot
                 .descendants(root)
                 .into_iter()
-                .map(|(pid, depth, command)| super::ProcInfo {
+                .map(|(pid, depth)| super::ProcInfo {
                     pid,
                     depth,
-                    command,
+                    command: snapshot.command(pid),
                 })
                 .collect()
         })
@@ -257,7 +355,7 @@ mod tests {
         }));
         let descendants = ProcessSnapshot::from_entries(entries).descendants(1);
         assert_eq!(descendants.len(), MAX_DESCENDANTS_PER_ROOT);
-        assert_eq!(descendants[0], (1, 0, "root.exe".into()));
+        assert_eq!(descendants[0], (1, 0));
     }
 
     #[test]
@@ -272,9 +370,25 @@ mod tests {
     #[test]
     fn process_snapshot_contains_the_current_process() {
         let pid = std::process::id();
-        let snapshot = ProcessSnapshot::capture().expect("Windows ToolHelp snapshot");
+        let mut snapshot = ProcessSnapshot::capture().expect("Windows ToolHelp snapshot");
         let root = snapshot.descendants(pid);
         assert_eq!(root.first().map(|entry| entry.0), Some(pid));
-        assert!(root.first().is_some_and(|entry| !entry.2.is_empty()));
+        assert!(!snapshot.command(pid).is_empty());
+    }
+
+    #[test]
+    fn process_command_line_includes_arguments() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "ping.exe -n 3 127.0.0.1 > nul"])
+            .spawn()
+            .expect("spawn cmd");
+        let commands = descendant_commands(&[child.id()]).expect("capture process tree");
+        let command = commands
+            .get(&child.id())
+            .and_then(|commands| commands.first())
+            .expect("root command line");
+        assert!(command.to_ascii_lowercase().contains("/c"), "{command:?}");
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }

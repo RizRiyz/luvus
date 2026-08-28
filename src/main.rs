@@ -1216,7 +1216,7 @@ mod tests {
         }
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| ui::render(f, &mut app)).unwrap();
-        let mut last = frame_from_buffer(term.backend().buffer(), None);
+        let mut last = frame_from_buffer(term.backend().buffer(), None, false);
 
         let bench = |label: &str,
                      app: &mut App,
@@ -1360,7 +1360,7 @@ mod tests {
             "    NEW server frame:  {server_frame:>10?}  (render_into owned buf + diff_buffer)"
         );
         // (f) the CLIENT's per-frame cost: re-blit the whole frame via terminal.draw.
-        let frame = frame_from_buffer(&owned, None);
+        let frame = frame_from_buffer(&owned, None, false);
         let mut cterm = Terminal::new(TestBackend::new(w, h)).unwrap();
         let t = std::time::Instant::now();
         for _ in 0..n {

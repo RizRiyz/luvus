@@ -19,6 +19,14 @@ your workflow.
 2.
 3.
 
+**Area**
+<!--
+Replace this comment with one or more affected areas: agents, server, terminal,
+panes and tabs, workspaces, input, files, git and diff, mission control,
+settings, automation, modules, orchestration, bars, themes, localization,
+website, packaging.
+-->
+
 **Environment**
 - OS + version (for macOS, run `sw_vers`):
 - Terminal app + version (for example Ghostty, iTerm2, Windows Terminal, or kitty):

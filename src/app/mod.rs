@@ -125,7 +125,8 @@ pub enum ViewKind {
 }
 
 /// Which sidebar a dock lives in (docs/29).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Side {
     Left,
     Right,
@@ -251,6 +252,9 @@ impl SideState {
 pub struct Sidebars {
     pub left: SideState,
     pub right: SideState,
+    /// Last explicit FILES placement. Unlike the mounted dock vectors, this
+    /// survives turning FILES off so the toggle can restore the user's side.
+    pub files_side: Side,
 }
 
 impl Sidebars {
@@ -267,15 +271,26 @@ impl Sidebars {
         }
     }
     fn from_config(cfg: &crate::config::SidebarsConfig) -> Sidebars {
+        let left = SideState::from_config(&cfg.left);
+        let right = SideState::from_config(&cfg.right);
+        let files_side = if left.has(&DockKind::Files) {
+            Side::Left
+        } else if right.has(&DockKind::Files) {
+            Side::Right
+        } else {
+            cfg.files_side.unwrap_or(Side::Left)
+        };
         Sidebars {
-            left: SideState::from_config(&cfg.left),
-            right: SideState::from_config(&cfg.right),
+            left,
+            right,
+            files_side,
         }
     }
     fn to_config(&self) -> crate::config::SidebarsConfig {
         crate::config::SidebarsConfig {
             left: self.left.to_config(),
             right: self.right.to_config(),
+            files_side: Some(self.files_side),
         }
     }
     /// Whether `side` has a free dock slot (below `MAX_DOCKS_PER_SIDE`, docs/29).
@@ -637,6 +652,18 @@ pub enum FilePromptKind {
     NewFile,
     NewFolder,
     Rename,
+}
+
+/// What a terminal-editor pane is editing (docs/38): the file, and the editor
+/// run-command it was launched with. The command is part of the record because
+/// `Open With` can aim a *second*, different editor at a file that is already
+/// open in one — re-opening the same editor focuses the running tab, a
+/// different one is an explicit override and still launches.
+pub struct EditorFile {
+    pub path: PathBuf,
+    /// A run-command such as `"vim"` or `"emacs -nw"`, exactly as it appears in
+    /// `App::editors`.
+    pub command: String,
 }
 
 /// Cap a file-tree name entry (same spirit as [`TAB_NAME_MAX`]).
@@ -1128,8 +1155,7 @@ impl RetainedSelection {
         if row < sr || row > er {
             return false;
         }
-        let middle_left = sc.min(ec);
-        let left = if row == sr { sc } else { middle_left };
+        let left = if row == sr { sc } else { 0 };
         let right = if row == er {
             ec
         } else {
@@ -1178,9 +1204,9 @@ impl Selection {
         if y < sy || y > ey {
             return false;
         }
-        // Middle rows keep the drag's left edge instead of expanding into the
-        // pane margin. This keeps the highlighted range and copied text aligned.
-        let left = if y == sy { sx } else { sx.min(ex) };
+        // A terminal selection is linear: after the first selected row, every
+        // following row starts at the pane's left edge until the final endpoint.
+        let left = if y == sy { sx } else { c.x };
         let right = if y == ey {
             ex
         } else {
@@ -1615,7 +1641,7 @@ pub struct App {
     /// with the file exactly like a read-only view tab. Deliberately not
     /// persisted — after a restart the pane is no longer that editor, so the
     /// label must not survive it. Untracked in `drop_leaf_runtime`.
-    pub editor_files: HashMap<PaneId, PathBuf>,
+    pub editor_files: HashMap<PaneId, EditorFile>,
     /// Most recently opened files, newest first, scoped by workspace folder.
     /// This is a small in-memory finder convenience and is never persisted.
     pub recent_files: VecDeque<(PathBuf, PathBuf)>,
@@ -2651,6 +2677,9 @@ impl App {
         let dst = self.sidebars.get_mut(target);
         if !dst.docks.contains(kind) {
             dst.docks.push(kind.clone());
+        }
+        if kind == &DockKind::Files {
+            self.sidebars.files_side = target;
         }
         // Placing a module dock on a side is the user opting it back in, so clear
         // any explicit "off" flag (the inverse of `unmount_dock`).
@@ -5981,7 +6010,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_keeps_the_drag_left_edge_between_lines() {
+    fn selection_uses_linear_reading_order_between_lines() {
         // Content rect at (x=2, y=1), 10 wide × 5 tall.
         let content = Rect::new(2, 1, 10, 5);
         let sel = Selection {
@@ -5995,16 +6024,15 @@ mod tests {
         };
         // First row: from the anchor column to the right edge.
         assert!(sel.contains(4, 1));
-        assert!(sel.contains(11, 1)); // last column (right() == 12)
-        assert!(!sel.contains(3, 1)); // before the anchor
-                                      // Middle row: it keeps the drag's left edge instead of
-                                      // expanding into the pane's left margin.
-        assert!(!sel.contains(2, 2));
-        assert!(sel.contains(4, 2) && sel.contains(11, 2));
+        // Last column (right() == 12), but not before the anchor.
+        assert!(sel.contains(11, 1));
+        assert!(!sel.contains(3, 1));
+        // Middle row: selection resumes at the pane's left edge.
+        assert!(sel.contains(2, 2) && sel.contains(11, 2));
         // Last row: up to the cursor column.
         assert!(sel.contains(6, 3));
-        assert!(!sel.contains(7, 3)); // past the cursor
-                                      // Outside the row range / pane.
+        assert!(!sel.contains(7, 3));
+        // Outside the row range / pane.
         assert!(!sel.contains(5, 0) && !sel.contains(5, 4) && !sel.contains(99, 2));
         // Dragging up-left selects the same range (anchor/cursor order-independent).
         let rev = Selection {
@@ -6012,7 +6040,18 @@ mod tests {
             cursor: (4, 1),
             ..sel
         };
-        assert!(rev.contains(11, 1) && rev.contains(6, 3) && !rev.contains(7, 3));
+        assert!(
+            rev.contains(11, 1) && rev.contains(2, 2) && rev.contains(6, 3) && !rev.contains(7, 3)
+        );
+
+        let retained = RetainedSelection {
+            anchor: (10, 2),
+            cursor: (12, 4),
+        };
+        assert!(retained.contains(10, 2, 10));
+        assert!(retained.contains(11, 0, 10));
+        assert!(retained.contains(12, 4, 10));
+        assert!(!retained.contains(12, 5, 10));
     }
 
     #[test]
@@ -9974,6 +10013,7 @@ mod tests {
                 width: 26,
                 docks: Vec::new(),
             },
+            files_side: None,
         };
         let sidebars = Sidebars::from_config(&cfg);
         assert_eq!(

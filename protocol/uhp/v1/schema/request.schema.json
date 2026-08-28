@@ -23,6 +23,7 @@
         "search", "search.capabilities", "search.query", "search.activate",
         "files.tree", "files.open", "files.reveal", "files.refresh",
         "git.status", "git.branches", "git.log", "git.open",
+        "mission.open",
         "diff.refresh", "diff.list", "diff.open", "diff.get", "diff.navigate", "diff.note.add", "diff.note.apply", "diff.note.list", "diff.note.edit", "diff.note.resolve", "diff.note.reopen", "diff.note.remove", "diff.note.send",
         "worktree.list", "worktree.create", "worktree.open", "worktree.remove",
         "task.add", "task.list", "task.get", "task.claim", "task.next", "task.start", "task.heartbeat", "task.update", "task.done", "task.merge", "task.release", "task.delete",

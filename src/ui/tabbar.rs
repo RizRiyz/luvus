@@ -304,8 +304,13 @@ fn file_tab_name(tab: &crate::app::Tab, app: &App) -> Option<String> {
             v.key.display_path()
         )),
         None => {
-            let path = app.editor_files.get(&id)?;
-            let name = path.file_name()?.to_string_lossy().into_owned();
+            let name = app
+                .editor_files
+                .get(&id)?
+                .path
+                .file_name()?
+                .to_string_lossy()
+                .into_owned();
             Some(format!("■ {name}"))
         }
     }
@@ -497,8 +502,17 @@ mod width_tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(180, 40, tx).unwrap();
         for _ in 0..27 {
-            app.run_cmd(crate::app::Cmd::NewTab);
+            app.workspaces[0].tabs.push(crate::app::Tab {
+                id: crate::ids::public_id("tab"),
+                layout: crate::layout::TileLayout::new(crate::ids::PaneId::alloc()),
+                git: None,
+                orch: false,
+                mission: false,
+                name: None,
+            });
         }
+        app.workspaces[0].active_tab = 27;
+        assert_eq!(app.workspaces[0].tabs.len(), 28, "test has 28 tabs");
         let widget = crate::bar::BarWidget::new(
             crate::bar::BarWidgetKey::new("example", "wide"),
             crate::bar::BarRegion::TopRight,

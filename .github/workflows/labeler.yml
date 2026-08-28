@@ -1,0 +1,221 @@
+name: Label issues and pull requests
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  pull-request:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      # This workflow never checks out or executes pull request code.
+      - name: Label changed areas
+        uses: actions/labeler@b8dd2d9be0f68b860e7dae5dae7d772984eacd6d # v6
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          configuration-path: .github/labeler.yml
+          sync-labels: true
+
+      - name: Label pull request type and platform
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const title = context.payload.pull_request.title.trim();
+            const labels = new Set();
+            const managedLabels = new Set([
+              "bug",
+              "enhancement",
+              "documentation",
+              "performance",
+              "maintenance",
+              "tests",
+              "ci",
+              "dependencies",
+              "platform: windows",
+              "platform: macos",
+              "platform: linux",
+            ]);
+
+            const types = [
+              [/^fix(?:\([^)]*\))?!?:/i, "bug"],
+              [/^feat(?:\([^)]*\))?!?:/i, "enhancement"],
+              [/^docs(?:\([^)]*\))?!?:/i, "documentation"],
+              [/^perf(?:\([^)]*\))?!?:/i, "performance"],
+              [/^(?:refactor|chore)(?:\([^)]*\))?!?:/i, "maintenance"],
+              [/^test(?:\([^)]*\))?!?:/i, "tests"],
+              [/^(?:ci|build)(?:\([^)]*\))?!?:/i, "ci"],
+            ];
+
+            for (const [pattern, label] of types) {
+              if (pattern.test(title)) {
+                labels.add(label);
+                break;
+              }
+            }
+
+            const platformScopes = [
+              [/\bwindows\b|\(windows\)/i, "platform: windows"],
+              [/\bmacos\b|\(macos\)/i, "platform: macos"],
+              [/\blinux\b|\(linux\)/i, "platform: linux"],
+            ];
+            for (const [pattern, label] of platformScopes) {
+              if (pattern.test(title)) labels.add(label);
+            }
+
+            if (
+              context.actor === "dependabot[bot]" ||
+              /^(?:build|chore)\(deps(?:-[^)]+)?\)!?:/i.test(title)
+            ) {
+              labels.add("dependencies");
+            }
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              per_page: 100,
+            });
+            if (
+              files.some(
+                ({ filename }) =>
+                  filename === "src/platform/windows.rs" || filename.endsWith(".ps1"),
+              )
+            ) {
+              labels.add("platform: windows");
+            }
+
+            const currentLabels = new Set(
+              context.payload.pull_request.labels.map(({ name }) => name),
+            );
+            for (const label of managedLabels) {
+              if (!labels.has(label) && currentLabels.has(label)) {
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: context.issue.number,
+                    name: label,
+                  });
+                } catch (error) {
+                  if (error.status !== 404) throw error;
+                }
+              }
+            }
+
+            if (labels.size > 0) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                labels: [...labels],
+              });
+            }
+
+  issue:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Label issue area and platform
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const title = issue.title.toLowerCase();
+            const body = issue.body || "";
+            const cleanBody = body.replace(/<!--[\s\S]*?-->/g, "");
+            const labels = new Set();
+            if (context.payload.action !== "edited") {
+              labels.add("status: needs triage");
+            }
+
+            function section(name) {
+              const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+              const match = cleanBody.match(
+                new RegExp(
+                  `\\*\\*${escaped}\\*\\*[ \\t]*\\r?\\n([\\s\\S]*?)(?=\\r?\\n\\*\\*|$)`,
+                  "i",
+                ),
+              );
+              return match ? match[1].trim().toLowerCase() : "";
+            }
+
+            const explicitArea = section("Area");
+            const areaRules = [
+              ["agents", "area: agents", /\b(agent|agents|claude|codex|copilot|opencode|resume|fork)\b/i],
+              ["server", "area: server", /\b(server|socket|session|persistence)\b/i],
+              ["terminal", "area: terminal", /\b(terminal|pty|scrollback|vt engine)\b/i],
+              ["panes and tabs", "area: panes and tabs", /\b(pane|panes|tab|tabs|split|layout)\b/i],
+              ["workspaces", "area: workspaces", /\b(workspace|workspaces)\b/i],
+              ["input", "area: input", /\b(keyboard|keybinding|shortcut|mouse|clipboard|copy|paste|selection)\b/i],
+              ["files", "area: files", /\b(file browser|file preview|open file|files?)\b/i],
+              ["git and diff", "area: git and diff", /\b(git|diff|github)\b/i],
+              ["mission control", "area: mission control", /\b(mission control|usage|pricing)\b/i],
+              ["settings", "area: settings", /\b(settings?|configuration)\b/i],
+              ["automation", "area: automation", /\b(cli|api|uhp|skill|plugin|command)\b/i],
+              ["modules", "area: modules", /\b(module|modules)\b/i],
+              ["orchestration", "area: orchestration", /\b(orchestration|worktree|lease|task board)\b/i],
+              ["bars", "area: bars", /\b(top bar|bottom bar|luvus bar)\b/i],
+              ["themes", "area: themes", /\b(theme|themes)\b/i],
+              ["localization", "area: localization", /\b(i18n|localization|translation|language)\b/i],
+              ["website", "area: website", /\b(website|documentation|docs)\b/i],
+              ["packaging", "area: packaging", /\b(install|installer|homebrew|cargo install|nix|package|release)\b/i],
+            ];
+
+            for (const [value, label, titlePattern] of areaRules) {
+              if (explicitArea.includes(value) || (!explicitArea && titlePattern.test(title))) {
+                labels.add(label);
+              }
+            }
+
+            const explicitPlatform = section("Platform");
+            const osLine = cleanBody.match(/^- OS[^\n]*:[ \t]*(.+)$/im)?.[1] || "";
+            const platformText = `${explicitPlatform} ${osLine}`;
+            if (/\bwindows\b/i.test(platformText)) labels.add("platform: windows");
+            if (/\bmacos\b|\bmac os\b|\bos x\b/i.test(platformText)) labels.add("platform: macos");
+            if (/\blinux\b|\bubuntu\b|\bdebian\b|\bfedora\b|\barch\b/i.test(platformText)) {
+              labels.add("platform: linux");
+            }
+
+            const managedLabels = new Set([
+              ...areaRules.map(([, label]) => label),
+              "platform: windows",
+              "platform: macos",
+              "platform: linux",
+            ]);
+            const currentLabels = new Set(issue.labels.map(({ name }) => name));
+            for (const label of managedLabels) {
+              if (!labels.has(label) && currentLabels.has(label)) {
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    name: label,
+                  });
+                } catch (error) {
+                  if (error.status !== 404) throw error;
+                }
+              }
+            }
+
+            if (labels.size > 0) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: [...labels],
+              });
+            }

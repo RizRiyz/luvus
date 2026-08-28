@@ -125,8 +125,19 @@ impl Conn {
         match self.0.set_recv_timeout(Some(timeout)) {
             Ok(()) => Ok(TimeoutMode::Kernel),
             Err(_) => {
-                self.0.set_nonblocking(true)?;
-                Ok(TimeoutMode::Nonblocking)
+                // Named pipes reject kernel timeouts. PIPE_NOWAIT on an
+                // overlapped client handle also fails after a write, so Windows
+                // deadline readers poll with PeekNamedPipe instead of changing mode.
+                #[cfg(windows)]
+                {
+                    let _ = timeout;
+                    Ok(TimeoutMode::Nonblocking)
+                }
+                #[cfg(not(windows))]
+                {
+                    self.0.set_nonblocking(true)?;
+                    Ok(TimeoutMode::Nonblocking)
+                }
             }
         }
     }
@@ -149,6 +160,47 @@ impl Conn {
     pub fn set_blocking(&self) -> io::Result<()> {
         use interprocess::local_socket::traits::Stream as _;
         self.0.set_nonblocking(false)
+    }
+
+    /// True when a Windows deadline reader can issue a blocking read without
+    /// waiting. `ERROR_NO_DATA` / not-yet-accepted pipes count as empty.
+    ///
+    /// Do not switch the pipe to `PIPE_NOWAIT` after a write: that
+    /// `SetNamedPipeHandleState` call returns `ERROR_PIPE_BUSY`.
+    #[cfg(windows)]
+    pub fn recv_has_data(&self) -> io::Result<bool> {
+        use std::os::windows::io::{AsHandle, AsRawHandle};
+        use windows_sys::Win32::Foundation::{
+            ERROR_NO_DATA, ERROR_PIPE_LISTENING, ERROR_PIPE_NOT_CONNECTED,
+        };
+        use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+
+        let Stream::NamedPipe(pipe) = &*self.0;
+        let mut available = 0u32;
+        let ok = unsafe {
+            PeekNamedPipe(
+                pipe.inner().as_handle().as_raw_handle(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut available,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok != 0 {
+            return Ok(available > 0);
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(code)
+                if code == ERROR_NO_DATA as i32
+                    || code == ERROR_PIPE_NOT_CONNECTED as i32
+                    || code == ERROR_PIPE_LISTENING as i32 =>
+            {
+                Ok(false)
+            }
+            _ => Err(error),
+        }
     }
 }
 
@@ -501,6 +553,32 @@ mod windows_security_tests {
         let address = discovery_address(&test_pipe("discovery"));
         assert!(address.starts_with(r"\\.\pipe\luvus-"));
         assert!(!address.ends_with(".sock"));
+    }
+
+    #[test]
+    fn pipe_nowait_after_write_fails_on_a_fresh_pipe() {
+        use interprocess::local_socket::traits::Stream as _;
+
+        let path = test_pipe("nowait-after-write");
+        let listener = bind(&path).expect("bind owner-only named pipe");
+        let client_path = path.clone();
+        let client = std::thread::spawn(move || {
+            let mut conn = connect(&client_path).expect("same-user client connects");
+            let before = conn.0.set_nonblocking(true);
+            let _ = conn.0.set_nonblocking(false);
+            writeln!(conn, "x").unwrap();
+            let after = conn.0.set_nonblocking(true);
+            (before, after)
+        });
+        let _server = listener.accept().expect("accept same-user client");
+        let (before, after) = client.join().unwrap();
+        before.expect("PIPE_NOWAIT before write is allowed");
+        let error = after.expect_err("PIPE_NOWAIT after write must fail on a fresh pipe");
+        assert_eq!(
+            error.raw_os_error(),
+            Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32),
+            "expected ERROR_PIPE_BUSY after write, got {error}"
+        );
     }
 }
 

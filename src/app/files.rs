@@ -214,15 +214,17 @@ impl App {
         }
     }
 
-    /// `Ctrl+Space e`: mount the FILES dock on the left sidebar, or unmount it if
-    /// it is already shown. Mounting also makes sure the sidebar is visible.
+    /// `Ctrl+Space e`: unmount the FILES dock, or restore it to the side where
+    /// the user last placed it. Mounting also makes sure that side is visible.
     pub fn toggle_files_dock(&mut self) {
         if self.sidebars.side_of(&DockKind::Files).is_some() {
             self.unmount_dock(&DockKind::Files);
         } else {
-            self.sidebars.left.docks.push(DockKind::Files);
-            self.sidebars.left.visible = true;
-            self.save_sidebars();
+            let target = self.sidebars.files_side;
+            if self.sidebars.has_room(target) {
+                self.sidebars.get_mut(target).visible = true;
+            }
+            self.move_dock(&DockKind::Files, target);
         }
     }
 
@@ -319,7 +321,19 @@ impl App {
     /// (argv = the editor's words + the file path — a literal argument, so no
     /// shell quoting is involved), so quitting the editor fires `PtyExit` and the
     /// tab closes. The pane's cwd is the file's folder.
+    ///
+    /// Re-opening a file in the editor it is *already* open in focuses that tab
+    /// instead of launching a second one (docs/38): the read-only viewer has
+    /// always de-duplicated this way, and a second `vim` on one file would only
+    /// fight the first over its swap file. A **different** editor is not a
+    /// duplicate — `Open With` is an explicit per-file override — so it opens its
+    /// own tab.
     pub fn open_file_in_editor(&mut self, path: PathBuf, editor: &str) {
+        if let Some(id) = self.editor_tab_showing(&path, editor) {
+            self.remember_file(&path);
+            self.focus_pane_global(id);
+            return;
+        }
         let cwd = path
             .parent()
             .map(Path::to_path_buf)
@@ -349,7 +363,13 @@ impl App {
                 // like a read-only view tab. An editor pane is an ordinary PTY
                 // pane with no file view behind it, so without this the tab bar
                 // has nothing to derive a name from and falls back to the number.
-                self.editor_files.insert(id, path.clone());
+                self.editor_files.insert(
+                    id,
+                    crate::app::EditorFile {
+                        path: path.clone(),
+                        command: editor.to_string(),
+                    },
+                );
                 self.remember_file(&path);
                 let ws = &mut self.workspaces[self.active_ws];
                 ws.tabs.push(Tab::panes(TileLayout::new(id)));
@@ -617,6 +637,30 @@ impl App {
         })
     }
 
+    /// A tab whose whole content is `editor` already running on `path` — the
+    /// terminal-editor twin of `file_tab_showing`. An editor tab has no `views`
+    /// entry to match against (it is an ordinary PTY pane), so `editor_files` is
+    /// the only record of what a tab is editing. That map is cleared by
+    /// `drop_leaf_runtime`, so a quit editor stops matching here and the next
+    /// click gets a fresh one rather than focus into a dead pane.
+    ///
+    /// The command comparison is exact, not normalized: every caller passes a
+    /// run-command taken straight out of `self.editors` (the default resolved by
+    /// `file_open_editor`, or the one `Open With` snapshotted from the same
+    /// list), so both sides are the same canonical string.
+    fn editor_tab_showing(&self, path: &std::path::Path, editor: &str) -> Option<PaneId> {
+        self.ws().tabs.iter().find_map(|tab| {
+            let leaves = tab.layout.leaves();
+            let [id] = leaves.as_slice() else {
+                return None;
+            };
+            self.editor_files
+                .get(id)
+                .is_some_and(|open| open.path == path && open.command == editor)
+                .then_some(*id)
+        })
+    }
+
     /// Open `path` in a native file view (docs/38 FILE-3). `Preview` reuses the
     /// one preview pane in the active workspace; `Pane` splits a fresh permanent
     /// pane; `Tab` opens a new tab. The file is read on a worker thread and
@@ -794,8 +838,42 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{DockKind, FileMenu, FileMenuItem};
+    use crate::app::{DockKind, FileMenu, FileMenuItem, Side};
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn files_toggle_restores_last_side_across_restart() {
+        let _env = crate::persist::test_env("files-toggle-side");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        assert!(app.move_dock(&DockKind::Files, Side::Right));
+        assert_eq!(app.sidebars.side_of(&DockKind::Files), Some(Side::Right));
+        app.toggle_files_dock();
+        assert_eq!(app.sidebars.side_of(&DockKind::Files), None);
+        assert_eq!(
+            app.config
+                .sidebars
+                .as_ref()
+                .and_then(|sidebars| sidebars.files_side),
+            Some(Side::Right),
+            "hiding FILES keeps its last placement in config"
+        );
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut reopened = App::new(80, 24, tx).unwrap();
+        assert_eq!(reopened.sidebars.side_of(&DockKind::Files), None);
+        reopened.toggle_files_dock();
+        assert_eq!(
+            reopened.sidebars.side_of(&DockKind::Files),
+            Some(Side::Right),
+            "showing FILES restores the persisted side"
+        );
+        assert!(
+            reopened.sidebars.right.visible,
+            "showing FILES also reveals its sidebar"
+        );
+    }
 
     #[test]
     fn recent_files_are_deduplicated_newest_first_and_bounded() {
@@ -908,7 +986,7 @@ mod tests {
         // the pane is tracked in `editor_files`, which is what makes the tab bar
         // render the same `■ name` label instead of the bare tab number.
         assert_eq!(
-            app.editor_files.get(&focus).map(|p| p.as_path()),
+            app.editor_files.get(&focus).map(|open| open.path.as_path()),
             Some(file.as_path()),
             "the editor pane is tracked with its file for the tab label"
         );
@@ -923,6 +1001,238 @@ mod tests {
             !app.editor_files.contains_key(&focus),
             "closing the editor pane untracks its file"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A second click on an already-open file must land in the tab that is
+    /// already showing it, not stack up another one. Read-only half: the click
+    /// path (`open_file_at`) goes through `open_file_view`'s `view_showing` guard.
+    #[test]
+    fn clicking_a_file_twice_reuses_its_readonly_tab() {
+        let _env = crate::persist::test_env("file-click-readonly-dedup");
+        let dir = std::env::temp_dir().join(format!("luvus-cr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("once.txt");
+        std::fs::write(&file, b"hello\n").unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        assert_eq!(app.file_open_editor(), None, "read-only is the default");
+        let tabs_before = app.workspaces[app.active_ws].tabs.len();
+
+        app.open_file_at(file.clone(), None);
+        let first = app.layout().focus;
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before + 1,
+            "the first click opens a tab"
+        );
+
+        // Move away first, so "focused" is a real effect of the second click and
+        // not just where we already were.
+        app.workspaces[app.active_ws].active_tab = 0;
+        app.open_file_at(file.clone(), None);
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before + 1,
+            "the second click adds no tab"
+        );
+        assert_eq!(app.layout().focus, first, "it focuses the open view");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The editor half of the same rule: with `Open files with:` set, a second
+    /// click focuses the running editor instead of spawning a rival one on the
+    /// same file. Nothing but `editor_files` records what an editor tab holds.
+    #[test]
+    fn clicking_a_file_twice_reuses_its_editor_tab() {
+        let _env = crate::persist::test_env("file-click-editor-dedup");
+        let dir = std::env::temp_dir().join(format!("luvus-ce-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("edit.txt");
+        std::fs::write(&file, b"hello\n").unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        // `cat` stands in for the editor, as elsewhere in these tests: a real
+        // program that takes the file as a literal argv element.
+        app.editors = vec![("cat".to_string(), "cat".to_string())];
+        app.config.layout.file_open = "cat".to_string();
+        let tabs_before = app.workspaces[app.active_ws].tabs.len();
+
+        app.open_file_at(file.clone(), None);
+        let first = app.layout().focus;
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before + 1,
+            "the first click opens an editor tab"
+        );
+        assert!(app.panes.contains_key(&first), "the editor is a PTY pane");
+
+        app.workspaces[app.active_ws].active_tab = 0;
+        app.open_file_at(file.clone(), None);
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before + 1,
+            "the second click adds no tab"
+        );
+        assert_eq!(app.layout().focus, first, "it focuses the running editor");
+        assert_eq!(app.panes.len(), 2, "no second editor process was spawned");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// De-duplication is per path, not "one editor tab at a time": a different
+    /// file still gets its own tab.
+    #[test]
+    fn different_files_get_their_own_editor_tabs() {
+        let _env = crate::persist::test_env("file-editor-two-files");
+        let dir = std::env::temp_dir().join(format!("luvus-c2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let one = dir.join("one.txt");
+        let two = dir.join("two.txt");
+        std::fs::write(&one, b"1\n").unwrap();
+        std::fs::write(&two, b"2\n").unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.editors = vec![("cat".to_string(), "cat".to_string())];
+        app.config.layout.file_open = "cat".to_string();
+        let tabs_before = app.workspaces[app.active_ws].tabs.len();
+
+        app.open_file_at(one.clone(), None);
+        let first = app.layout().focus;
+        app.open_file_at(two.clone(), None);
+        let second = app.layout().focus;
+
+        assert_ne!(first, second, "the second file got its own pane");
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before + 2,
+            "two files, two editor tabs"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `Open With` is an explicit per-file override, not a duplicate: a file
+    /// already open in one editor must still launch in a *different* one picked
+    /// from the right-click menu. De-duplicating on the path alone swallowed it.
+    #[test]
+    fn open_with_a_different_editor_still_launches_it() {
+        let _env = crate::persist::test_env("file-open-with-other-editor");
+        let dir = std::env::temp_dir().join(format!("luvus-cw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("both.txt");
+        std::fs::write(&file, b"hello\n").unwrap();
+
+        // `cat` and `head` stand in for two installed editors: real programs that
+        // take the file as a literal argv element, as elsewhere in these tests.
+        let editors = vec![
+            ("cat".to_string(), "cat".to_string()),
+            ("head".to_string(), "head".to_string()),
+        ];
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.editors = editors.clone();
+        app.config.layout.file_open = "cat".to_string();
+        let tabs_before = app.workspaces[app.active_ws].tabs.len();
+        let menu = |editors: &[(String, String)]| FileMenu {
+            path: file.clone(),
+            is_dir: false,
+            anchor: (0, 0),
+            items: Vec::new(),
+            editors: editors.to_vec(),
+        };
+
+        // A plain click opens the configured default, `cat`.
+        app.open_file_at(file.clone(), None);
+        let first = app.layout().focus;
+
+        // Right-click the same file and pick the *other* editor.
+        app.file_menu = Some(menu(&editors));
+        app.file_menu_action_pub(FileMenuItem::OpenWith(1));
+        let second = app.layout().focus;
+        assert_ne!(second, first, "the override got a pane of its own");
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before + 2,
+            "two editors on one file means two tabs"
+        );
+        assert_eq!(
+            app.editor_files
+                .get(&second)
+                .map(|open| open.command.as_str()),
+            Some("head"),
+            "the new tab runs the editor the user actually picked"
+        );
+
+        // The same editor is still a duplicate: picking `cat` again focuses it.
+        app.file_menu = Some(menu(&editors));
+        app.file_menu_action_pub(FileMenuItem::OpenWith(0));
+        assert_eq!(
+            app.layout().focus,
+            first,
+            "re-picking the running editor focuses its tab"
+        );
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before + 2,
+            "and opens no third tab"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Quitting the editor must leave nothing behind to focus: `PtyExit` closes
+    /// the pane, which untracks its file, so the next click launches a new
+    /// editor rather than jumping to a tab that no longer exists.
+    #[test]
+    fn a_closed_editor_tab_reopens_on_the_next_click() {
+        use crate::event::AppEvent;
+        let _env = crate::persist::test_env("file-editor-reopen");
+        let dir = std::env::temp_dir().join(format!("luvus-cq-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("quit.txt");
+        std::fs::write(&file, b"hello\n").unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.editors = vec![("cat".to_string(), "cat".to_string())];
+        app.config.layout.file_open = "cat".to_string();
+        let tabs_before = app.workspaces[app.active_ws].tabs.len();
+
+        app.open_file_at(file.clone(), None);
+        let first = app.layout().focus;
+
+        // The editor quits.
+        app.handle_event(AppEvent::PtyExit(first));
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before,
+            "the editor tab closed with its process"
+        );
+        assert!(
+            !app.editor_files.contains_key(&first),
+            "the dead pane no longer claims the file"
+        );
+
+        app.open_file_at(file.clone(), None);
+        let second = app.layout().focus;
+        assert_ne!(second, first, "a fresh editor pane, not the dead id");
+        assert!(app.panes.contains_key(&second), "the new editor is running");
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before + 1,
+            "the file opened again in a tab of its own"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

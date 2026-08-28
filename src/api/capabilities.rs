@@ -98,6 +98,7 @@ pub const METHODS: &[&str] = &[
     "git.branches",
     "git.log",
     "git.open",
+    "mission.open",
     "diff.refresh",
     "diff.list",
     "diff.open",
@@ -274,6 +275,7 @@ pub fn required_scope(method: &str) -> &'static str {
         || method.starts_with("search")
         || method.starts_with("files.")
         || method.starts_with("git.")
+        || method.starts_with("mission.")
         || method.starts_with("diff.")
         || method.starts_with("worktree.")
     {
@@ -388,6 +390,8 @@ mod tests {
         assert_eq!(capabilities["limits"]["terminal_stream_capacity"], 8);
         assert_eq!(capabilities["limits"]["terminal_stream_queue"], 2);
         assert!(is_idempotent("pane.list"));
+        assert!(!is_read_only("mission.open"));
+        assert_eq!(required_scope("mission.open"), "workspace");
         for stream in [
             "events.subscribe",
             "terminal.backend.events.subscribe",

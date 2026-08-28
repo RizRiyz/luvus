@@ -168,7 +168,7 @@ pub(super) fn draw_panes(
     bordered: bool,
     app: &mut App,
     t: &Theme,
-) -> Option<(u16, u16)> {
+) -> Option<(u16, u16, bool)> {
     let focus = app.layout().focus;
     let mut cursor = None;
     let mut diff_source_rects = Vec::new();
@@ -198,7 +198,7 @@ fn draw_one_pane(
     bordered: bool,
     context: &mut PaneRenderContext<'_>,
     t: &Theme,
-) -> Option<(u16, u16)> {
+) -> Option<(u16, u16, bool)> {
     let app = context.app;
     // A view leaf (docs/38 FILE-3) renders natively, not from a PTY.
     if let Some(view) = app.views.get(&id) {
@@ -298,7 +298,8 @@ fn draw_one_pane(
         .filter(|fl| fl.pane == id)
         .map(|fl| (fl.row, fl.scroll));
     let mut scrolled = 0usize;
-    let is_codex = app.status.get(&id).is_some_and(|s| s.agent == "codex");
+    let agent = app.status.get(&id).map(|s| s.agent.as_str()).unwrap_or("");
+    let is_codex = agent == "codex";
     let mut composer_region = None;
     let cursor_pos = match pane.engine.lock() {
         Ok(engine) => {
@@ -307,11 +308,17 @@ fn draw_one_pane(
             let selection_top = sel
                 .and_then(|selection| selection.retained)
                 .map(|_| engine.history_len().saturating_sub(engine.scroll_offset()));
+            let cur = engine.cursor();
+            let scan_pi = agent == "pi";
+            let mut pi_caret: Option<(u16, u16)> = None;
             {
                 let buf = f.buffer_mut();
                 engine.for_each_cell(&mut |row, col, sym, cell| {
                     if row >= content.height || col >= content.width {
                         return;
+                    }
+                    if scan_pi && cell.mods.contains(ratatui::style::Modifier::REVERSED) {
+                        pi_caret = Some(pick_bottom_left_caret(pi_caret, (row, col)));
                     }
                     let x = content.x + col;
                     let y = content.y + row;
@@ -408,14 +415,12 @@ fn draw_one_pane(
             if is_codex {
                 composer_region = engine.codex_composer_region();
             }
-            let cur = engine.cursor();
-            if focused
-                && copy.is_none()
-                && cur.visible
-                && cur.x < content.width
-                && cur.y < content.height
-            {
-                Some((content.x + cur.x, content.y + cur.y))
+            if focused && copy.is_none() {
+                if let Some((row, col)) = pi_caret {
+                    Some((content.x + col, content.y + row, true))
+                } else {
+                    pane_ime_cursor(content, cur)
+                }
             } else {
                 None
             }
@@ -467,6 +472,38 @@ fn draw_one_pane(
         }
     }
     cursor_pos
+}
+
+/// In-view PTY cell, mapped into the pane. Hidden still returns a park so the
+/// client can CUP after chrome.
+fn pane_ime_cursor(content: Rect, cur: crate::terminal::vt::Cursor) -> Option<(u16, u16, bool)> {
+    if content.width == 0 || content.height == 0 {
+        return None;
+    }
+    if cur.x >= content.width || cur.y >= content.height {
+        return None;
+    }
+    Some((content.x + cur.x, content.y + cur.y, cur.visible))
+}
+
+/// Pi's `CURSOR_MARKER` (`ESC_pi:c BEL`) is stripped in `extractCursorPosition`
+/// before the PTY write, so Luvus never sees a direct marker. Hidden PTY CUP is
+/// often out of view or on the row tail while working. Bottom-most then leftmost
+/// reverse-video cell in this pane is the fake caret (`ESC[7m`). Show the host
+/// cursor there so IME preedit has a block; without this park the hardware
+/// cursor stays on the last painted cell (the `working` spinner).
+fn pick_bottom_left_caret(current: Option<(u16, u16)>, cell: (u16, u16)) -> (u16, u16) {
+    match current {
+        None => cell,
+        Some((row, col)) => {
+            let (r, c) = cell;
+            if r > row || (r == row && c < col) {
+                cell
+            } else {
+                (row, col)
+            }
+        }
+    }
 }
 
 /// Give Codex's input a gently raised, theme-aware surface while retaining all
@@ -527,5 +564,52 @@ mod tests {
         assert_eq!(buf[(10, 2)].bg, t.subtle_composer_surface());
         assert_ne!(buf[(10, 2)].bg, t.mantle);
         assert_ne!(buf[(10, 2)].bg, t.surface0);
+    }
+
+    fn cur(x: u16, y: u16, visible: bool) -> crate::terminal::vt::Cursor {
+        crate::terminal::vt::Cursor { x, y, visible }
+    }
+
+    #[test]
+    fn hidden_in_view_pty_is_parked() {
+        let content = Rect::new(2, 3, 20, 12);
+        assert_eq!(
+            pane_ime_cursor(content, cur(4, 8, false)),
+            Some((6, 11, false))
+        );
+    }
+
+    #[test]
+    fn visible_pty_caret_in_prompt_is_followed() {
+        let content = Rect::new(0, 0, 20, 12);
+        assert_eq!(
+            pane_ime_cursor(content, cur(5, 10, true)),
+            Some((5, 10, true))
+        );
+    }
+
+    #[test]
+    fn in_view_top_row_pty_is_followed() {
+        let content = Rect::new(2, 3, 20, 12);
+        assert_eq!(
+            pane_ime_cursor(content, cur(4, 0, true)),
+            Some((6, 3, true))
+        );
+    }
+
+    #[test]
+    fn out_of_view_pty_yields_none() {
+        let content = Rect::new(0, 0, 20, 12);
+        assert_eq!(pane_ime_cursor(content, cur(20, 0, true)), None);
+        assert_eq!(pane_ime_cursor(content, cur(0, 12, false)), None);
+    }
+
+    #[test]
+    fn pi_caret_prefers_bottom_then_left_reversed_cell() {
+        assert_eq!(pick_bottom_left_caret(None, (3, 9)), (3, 9));
+        assert_eq!(pick_bottom_left_caret(Some((3, 9)), (3, 2)), (3, 2));
+        assert_eq!(pick_bottom_left_caret(Some((3, 2)), (5, 18)), (5, 18));
+        assert_eq!(pick_bottom_left_caret(Some((5, 18)), (5, 4)), (5, 4));
+        assert_eq!(pick_bottom_left_caret(Some((5, 4)), (4, 0)), (5, 4));
     }
 }

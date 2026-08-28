@@ -203,6 +203,11 @@ impl App {
                     label: format!("+ {}", self.catalog.cmd_new_workspace),
                     detail: String::new(),
                 });
+                rows.push(SwitcherRow::Action {
+                    target: SwitcherTarget::MissionControl,
+                    label: self.catalog.mc_title.to_string(),
+                    detail: self.catalog.agents.to_string(),
+                });
             }
         }
         if self.compact && scope == SwitcherScope::All && query.is_empty() {
@@ -496,6 +501,27 @@ mod tests {
         app.switcher_activate(SwitcherTarget::Tab { ws: 0, tab: 0 });
         assert_eq!(app.ws().active_tab, 0, "switcher jumped to the tab");
         assert!(!app.switcher, "activating closes the overlay");
+    }
+
+    #[test]
+    fn desktop_switcher_offers_mission_control() {
+        let _env = crate::persist::test_env("desktop-switcher-mission-control");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.compact = false;
+        app.open_switcher();
+
+        assert!(app.switcher_rows().iter().any(|row| matches!(
+            row,
+            SwitcherRow::Action {
+                target: SwitcherTarget::MissionControl,
+                ..
+            }
+        )));
+
+        app.switcher_activate(SwitcherTarget::MissionControl);
+        assert!(app.active_is_mission());
+        assert!(!app.switcher);
     }
 
     #[test]
