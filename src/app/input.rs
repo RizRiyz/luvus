@@ -97,9 +97,11 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 type CellSpan = (u16, u16, u16);
 
 /// The whitespace-delimited word covering grid cell (`col`, `row`), and the one
-/// span it occupies. `None` on a whitespace or out-of-range cell. Char indices
-/// are the columns, matching how [`crate::links::link_at`] and the grid renderer
-/// address cells.
+/// span it occupies. `None` on a whitespace or out-of-range cell. Wide-cell
+/// continuation markers participate in the word boundary and are removed from
+/// the copied text, so either cell of `你` selects the same complete word. Char
+/// indices are the columns, matching how [`crate::links::link_at`] and the grid
+/// renderer address cells.
 fn word_at_grid(rows: &[String], col: u16, row: u16) -> Option<(String, Vec<CellSpan>)> {
     let line = rows.get(row as usize)?;
     let chars: Vec<char> = line.chars().collect();
@@ -115,7 +117,11 @@ fn word_at_grid(rows: &[String], col: u16, row: u16) -> Option<(String, Vec<Cell
     while hi < chars.len() && !chars[hi].is_whitespace() {
         hi += 1;
     }
-    let text: String = chars[lo..hi].iter().collect();
+    let text: String = chars[lo..hi]
+        .iter()
+        .copied()
+        .filter(|c| *c != crate::terminal::vt::ALIGNED_WIDE_CELL)
+        .collect();
     if text.is_empty() {
         return None;
     }
@@ -4305,6 +4311,27 @@ mod link_click_tests {
     }
 
     #[test]
+    fn word_at_grid_keeps_wide_glyph_cells_in_one_word() {
+        let spacer = crate::terminal::vt::ALIGNED_WIDE_CELL;
+        let rows = vec![format!("你{spacer}好{spacer} code 编{spacer}码{spacer}42")];
+
+        for col in 0..4 {
+            assert_eq!(
+                word_at_grid(&rows, col, 0),
+                Some(("你好".to_string(), vec![(0, 0, 4)])),
+                "either cell of each CJK glyph selects the complete word at col {col}"
+            );
+        }
+        for col in 10..16 {
+            assert_eq!(
+                word_at_grid(&rows, col, 0),
+                Some(("编码42".to_string(), vec![(0, 10, 16)])),
+                "mixed wide and narrow characters remain one word at col {col}"
+            );
+        }
+    }
+
+    #[test]
     fn mouse_copy_drops_a_uniform_one_cell_pane_margin() {
         assert_eq!(
             strip_uniform_single_cell_margin(
@@ -4610,6 +4637,38 @@ mod link_click_tests {
             (sel.anchor, sel.cursor),
             ((at.0, at.1), (at.0 + 10, at.1)),
             "the highlight covers the path's true cells (cols 5..16)"
+        );
+    }
+
+    /// Double-clicking either terminal cell of a wide glyph copies its complete
+    /// whitespace-delimited word, without leaking the internal cell marker.
+    #[test]
+    fn a_double_click_copies_a_wide_character_word() {
+        let _env = crate::persist::test_env("double-click-copy-wide-word");
+        // Click the continuation cell of `你`; `你好` occupies cols 0..4.
+        let (mut app, _t, at) = fixture_showing("你好 next", 1);
+
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+
+        assert_eq!(app.pending_clipboard.as_deref(), Some("你好"));
+        let sel = app.selection.expect("the full wide word is highlighted");
+        assert_eq!(
+            (sel.anchor, sel.cursor),
+            ((at.0 - 1, at.1), (at.0 + 2, at.1))
         );
     }
 

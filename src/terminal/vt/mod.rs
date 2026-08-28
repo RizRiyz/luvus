@@ -12,6 +12,11 @@ use ratatui::style::{Color, Modifier};
 
 use crate::terminal::pty::InputAction;
 
+/// Internal continuation marker used by [`VtEngine::visible_rows_aligned`].
+/// A terminal never renders NUL as text, so it can represent the second cell of
+/// a wide glyph without being confused with an actual space between words.
+pub(crate) const ALIGNED_WIDE_CELL: char = '\0';
+
 /// Which terminal engine backs a pane.
 ///
 /// One variant today. It exists so that the choice of engine is a named
@@ -162,13 +167,11 @@ pub trait VtEngine: Send {
     fn visible_rows(&self) -> Vec<String>;
 
     /// Like [`Self::visible_rows`], but every terminal column contributes exactly
-    /// one `char`: a wide-character spacer cell is kept as a blank placeholder, so
-    /// a string char index equals its terminal column. Use this (never
-    /// `visible_rows`) when a screen column must address a character — e.g. the
-    /// token under a double-click, or the link under a `Ctrl`-hover. A token that
-    /// itself contains a wide char is not recoverable here (its glyph reads as one
-    /// column plus a blank); that is out of scope — callers only need alignment
-    /// for tokens sitting after wide characters.
+    /// one `char`. A wide glyph's continuation cell is represented by
+    /// [`ALIGNED_WIDE_CELL`], so callers can preserve both cell coordinates and
+    /// the distinction between a continuation and an actual space. Use this
+    /// (never `visible_rows`) when a screen column must address text — e.g. the
+    /// token under a double-click, or the link under a `Ctrl`-hover.
     fn visible_rows_aligned(&self) -> Vec<String>;
 
     /// Bounded public capture for harnesses. Implementations serialize only

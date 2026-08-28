@@ -12,7 +12,10 @@ use alacritty_terminal::vte::ansi::{Color as VtColor, Processor};
 
 use ratatui::style::{Color, Modifier};
 
-use super::{CodexComposerRegion, Cursor, HistoryMetrics, RenderCell, RetainedRowLayout, VtEngine};
+use super::{
+    CodexComposerRegion, Cursor, HistoryMetrics, RenderCell, RetainedRowLayout, VtEngine,
+    ALIGNED_WIDE_CELL,
+};
 use crate::terminal::backend::{CaptureMode, CaptureResult};
 use crate::terminal::pty::InputAction;
 
@@ -471,10 +474,10 @@ impl VtEngine for AlacrittyEngine {
     }
 
     fn visible_rows_aligned(&self) -> Vec<String> {
-        // Identical to `visible_rows`, except a wide-char spacer cell is kept (as
-        // its blank) instead of skipped, so each terminal column contributes one
-        // char and a string index equals a column. See the trait doc for why a
-        // caller addressing a column needs this.
+        // Identical to `visible_rows`, except a wide-char spacer cell is kept as
+        // a non-text continuation marker instead of skipped. An actual blank must
+        // remain distinguishable so word lookup does not split a CJK/emoji word
+        // between the glyph and its second terminal cell.
         let grid = self.term.grid();
         let rows = grid.screen_lines();
         let offset = grid.display_offset() as i32;
@@ -484,8 +487,14 @@ impl VtEngine for AlacrittyEngine {
             if r < 0 || r as usize >= rows {
                 continue;
             }
-            let c = indexed.cell.c;
-            lines[r as usize].push(if c == '\0' { ' ' } else { c });
+            let c = if indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                ALIGNED_WIDE_CELL
+            } else if indexed.cell.c == '\0' {
+                ' '
+            } else {
+                indexed.cell.c
+            };
+            lines[r as usize].push(c);
         }
         lines
     }
