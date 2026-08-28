@@ -2180,15 +2180,22 @@ impl App {
                     // A file-view leaf (docs/38 FILE-3): rebuild the view and
                     // re-read the file off-loop; no PTY is spawned.
                     if let Some(path) = &ps.file {
-                        views.insert(
-                            id,
-                            ViewKind::File(crate::files::FileView::new(path.clone())),
-                        );
+                        let mut view = crate::files::FileView::new(path.clone());
+                        // The read spawned below is this view's first, so it
+                        // carries token 1 and the view waits for exactly that.
+                        // (0 stays "nothing scheduled", which matches nothing.)
+                        view.read_token = 1;
+                        views.insert(id, ViewKind::File(view));
                         let tx = app_tx.clone();
                         let p = path.clone();
                         std::thread::spawn(move || {
                             let load = crate::files::read_file(&p);
-                            let _ = tx.send(crate::event::AppEvent::FileRead { id, path: p, load });
+                            let _ = tx.send(crate::event::AppEvent::FileRead {
+                                id,
+                                path: p,
+                                token: 1,
+                                load,
+                            });
                         });
                         remap.insert(*raw, id);
                         continue;

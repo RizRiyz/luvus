@@ -807,8 +807,17 @@ impl App {
     /// and make the click look dead.
     fn set_view_file(&mut self, id: PaneId, path: PathBuf) {
         self.remember_file(&path);
-        self.views
-            .insert(id, ViewKind::File(FileView::new(path.clone())));
+        // Carry the read token across the replacement. A fresh `FileView`
+        // restarts at 0, and a read still in flight for the file being replaced
+        // would then match the new view by coincidence — which is the very race
+        // the token exists to stop.
+        let previous = match self.views.get(&id) {
+            Some(ViewKind::File(view)) => view.read_token,
+            _ => 0,
+        };
+        let mut view = FileView::new(path.clone());
+        view.read_token = previous;
+        self.views.insert(id, ViewKind::File(view));
         self.schedule_file_read(id, path);
     }
 
@@ -822,27 +831,38 @@ impl App {
     }
 
     fn schedule_file_read(&mut self, id: PaneId, path: PathBuf) {
-        // Record the mtime now so live refresh (FILE-5) only re-reads on a real
-        // change, not immediately after this read.
-        if let Some(ViewKind::File(v)) = self.views.get_mut(&id) {
-            v.mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-        }
+        // Claim the next token for this view and record the mtime now, so live
+        // refresh (FILE-5) only re-reads on a real change rather than
+        // immediately after this read. No view means nothing could apply the
+        // result, so there is nothing worth spawning a thread for.
+        let Some(ViewKind::File(v)) = self.views.get_mut(&id) else {
+            return;
+        };
+        v.read_token = v.read_token.wrapping_add(1);
+        v.mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let token = v.read_token;
         let tx = self.app_tx.clone();
         std::thread::spawn(move || {
             let load = crate::files::read_file(&path);
-            // Both events name the file they are about. A preview leaf can be
-            // repointed while this worker runs, and there is no way to cancel
-            // it, so the handler drops what no longer matches.
+            // Both events carry the token they were issued with and the file
+            // they are about. This worker cannot be cancelled, so the handler is
+            // what drops a result the view has moved past.
             let _ = tx.send(AppEvent::FileRead {
                 id,
                 path: path.clone(),
+                token,
                 load,
             });
             // Change markers ride the same worker, *after* the text: the file
             // must render immediately even in a huge repo where `git diff` is
             // slow, and markers simply appear a moment later.
             let changes = crate::git::local::file_changes(&path);
-            let _ = tx.send(AppEvent::FileChanges { id, path, changes });
+            let _ = tx.send(AppEvent::FileChanges {
+                id,
+                path,
+                token,
+                changes,
+            });
         });
     }
 
@@ -1804,11 +1824,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A read is applied by `PaneId`, but a preview leaf gets repointed at a new
-    /// file without the read already in flight being cancelled — so browsing
-    /// A → B can finish A's read *after* B's. Without the path on the event, A's
-    /// text lands in a view whose header says B. Driven by handing the handler
-    /// the events directly, so it pins the race rather than racing it.
+    /// The current read token of a file-view leaf.
+    fn token_of(app: &App, id: PaneId) -> u64 {
+        match app.views.get(&id) {
+            Some(ViewKind::File(v)) => v.read_token,
+            _ => panic!("the leaf is not a native file view"),
+        }
+    }
+
+    /// Reads are addressed by `PaneId`, a preview leaf gets repointed without
+    /// the read already in flight being cancelled, and the two finish in
+    /// whatever order the disk gives. Browsing A → B can land A's text in a view
+    /// whose header says B.
+    ///
+    /// Driven by handing the handler the events directly, so it pins the race
+    /// rather than racing it. The last arm feeds the *current* token with the
+    /// wrong path — a combination the real API cannot produce, which is exactly
+    /// what the path backstop is for.
     #[test]
     fn a_late_read_for_the_previous_file_never_lands_in_the_preview() {
         use crate::files::FileLoad;
@@ -1822,15 +1854,19 @@ mod tests {
         // reads carry the same PaneId.
         plain_click(&mut app, "a.txt");
         let preview = app.layout().focus;
+        let a_token = token_of(&app, preview);
         plain_click(&mut app, "b.txt");
         assert_eq!(app.layout().focus, preview, "one reused preview leaf");
         assert_eq!(shown(&app, preview), b);
+        let b_token = token_of(&app, preview);
+        assert_ne!(a_token, b_token, "the repointed view asked for a new read");
 
         // B's own read lands: the guard must not reject the result the view is
         // actually waiting for, or it would pass by dropping everything.
         let repaint = app.handle_event(AppEvent::FileRead {
             id: preview,
             path: b.clone(),
+            token: b_token,
             load: FileLoad::Text(vec!["B CONTENT".to_string()]),
         });
         assert!(repaint, "the matching read repaints");
@@ -1842,6 +1878,7 @@ mod tests {
         assert!(app.handle_event(AppEvent::FileChanges {
             id: preview,
             path: b.clone(),
+            token: b_token,
             changes: b_marks.clone(),
         }));
 
@@ -1849,22 +1886,35 @@ mod tests {
         let stale = app.handle_event(AppEvent::FileRead {
             id: preview,
             path: a.clone(),
+            token: a_token,
             load: FileLoad::Text(vec!["A CONTENT".to_string()]),
         });
         assert!(!stale, "a stale read is dropped without a repaint");
         let stale_marks = app.handle_event(AppEvent::FileChanges {
             id: preview,
-            path: a,
-            changes: vec![
-                ChangeSpan {
-                    start: 7,
-                    end: 9,
-                    kind: ChangeKind::Added,
-                };
-                1
-            ],
+            path: a.clone(),
+            token: a_token,
+            changes: vec![ChangeSpan {
+                start: 7,
+                end: 9,
+                kind: ChangeKind::Added,
+            }],
         });
         assert!(!stale_marks, "stale markers are dropped too");
+
+        // The backstop: right token, wrong file. Unreachable while every
+        // scheduler bumps the token, and dropped anyway — so a future one that
+        // forgets cannot paint another file's contents into this view.
+        let mismatched = app.handle_event(AppEvent::FileRead {
+            id: preview,
+            path: a,
+            token: b_token,
+            load: FileLoad::Text(vec!["A CONTENT".to_string()]),
+        });
+        assert!(
+            !mismatched,
+            "a read for another file is dropped on its path"
+        );
 
         match app.views.get(&preview) {
             Some(ViewKind::File(v)) => {
@@ -1874,6 +1924,70 @@ mod tests {
                     "and still shows B's text, not A's"
                 );
                 assert_eq!(v.changes, b_marks, "and B's markers, not A's");
+            }
+            _ => panic!("the preview is gone"),
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A → B → **A**: the same file twice, so every event's path matches and
+    /// only the token can tell the first read from the third. The first read
+    /// finishing last would quietly restore contents from before the file
+    /// changed on disk.
+    ///
+    /// Live refresh does not rescue this: `schedule_file_read` stamps the mtime
+    /// when it schedules, so the view already holds the newer one and no re-read
+    /// is triggered. The stale text would simply sit there.
+    #[test]
+    fn an_older_read_of_the_same_file_never_overwrites_a_newer_one() {
+        use crate::files::FileLoad;
+
+        let _env = crate::persist::test_env("file-stale-same-file");
+        let (mut app, _rx, root) = click_tree_app("stalegen", &["a.txt", "b.txt"]);
+        let a = root.join("a.txt");
+
+        // A, then B, then A again — one preview leaf throughout.
+        plain_click(&mut app, "a.txt");
+        let preview = app.layout().focus;
+        let first_a = token_of(&app, preview);
+        plain_click(&mut app, "b.txt");
+        plain_click(&mut app, "a.txt");
+        assert_eq!(app.layout().focus, preview, "one reused preview leaf");
+        assert_eq!(shown(&app, preview), a, "back on A");
+        let second_a = token_of(&app, preview);
+        assert_ne!(
+            first_a, second_a,
+            "returning to A scheduled its own read, rather than reusing the \
+             token of the one still in flight"
+        );
+
+        // The read the view is waiting for lands: A as it is now.
+        assert!(app.handle_event(AppEvent::FileRead {
+            id: preview,
+            path: a.clone(),
+            token: second_a,
+            load: FileLoad::Text(vec!["A AFTER THE EDIT".to_string()]),
+        }));
+
+        // The very first read of A finally finishes, carrying what A said
+        // before. Same leaf, same path — only the token differs.
+        let stale = app.handle_event(AppEvent::FileRead {
+            id: preview,
+            path: a.clone(),
+            token: first_a,
+            load: FileLoad::Text(vec!["A BEFORE THE EDIT".to_string()]),
+        });
+        assert!(!stale, "the superseded read is dropped without a repaint");
+
+        match app.views.get(&preview) {
+            Some(ViewKind::File(v)) => {
+                assert_eq!(v.path, a);
+                assert!(
+                    matches!(&v.load, FileLoad::Text(lines) if lines == &["A AFTER THE EDIT"]),
+                    "the newer read survived: {:?}",
+                    v.load
+                );
             }
             _ => panic!("the preview is gone"),
         }

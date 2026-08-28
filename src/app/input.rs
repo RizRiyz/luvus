@@ -651,29 +651,46 @@ impl App {
                 }
                 true
             }
-            AppEvent::FileChanges { id, path, changes } => {
+            AppEvent::FileChanges {
+                id,
+                path,
+                token,
+                changes,
+            } => {
                 match self.views.get_mut(&id) {
-                    // A preview leaf may have been repointed at another file
-                    // while this ran; markers for the old one would tint the
-                    // wrong lines.
-                    Some(crate::app::ViewKind::File(v)) if v.path == path => {
+                    // Markers from a superseded read would tint the wrong lines
+                    // — and they are the later half of their worker, so they are
+                    // the likelier half to arrive stale.
+                    Some(crate::app::ViewKind::File(v))
+                        if v.read_token == token && v.path == path =>
+                    {
                         v.changes = changes;
                         true
                     }
-                    // The leaf closed, became a diff, or moved on: drop it.
+                    // The leaf closed, became a diff, or has asked for a newer
+                    // read since: drop it.
                     _ => false,
                 }
             }
-            AppEvent::FileRead { id, path, load } => {
+            AppEvent::FileRead {
+                id,
+                path,
+                token,
+                load,
+            } => {
                 match self.views.get_mut(&id) {
-                    // Only apply a read the leaf is still waiting for. Browsing
-                    // A → B in one preview can finish A's read last, and the
-                    // header would then name B over A's text.
-                    Some(crate::app::ViewKind::File(v)) if v.path == path => {
+                    // Only the newest read the leaf asked for may apply. One
+                    // preview browsing A → B → A finishes those reads in any
+                    // order, and the first A read landing last would quietly
+                    // restore contents from before the file changed.
+                    Some(crate::app::ViewKind::File(v))
+                        if v.read_token == token && v.path == path =>
+                    {
                         v.apply(load);
                         true
                     }
-                    // The leaf closed, became a diff, or moved on: drop it.
+                    // The leaf closed, became a diff, or has asked for a newer
+                    // read since: drop it.
                     _ => false,
                 }
             }

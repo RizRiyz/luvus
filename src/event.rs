@@ -163,22 +163,28 @@ pub enum AppEvent {
         result: Result<(), String>,
     },
     /// A file-view read finished (docs/38 FILE-3): applied to the view leaf `id`,
-    /// but only while that leaf is still showing `path`. A preview leaf is
-    /// repointed at a new file without cancelling the read already in flight
-    /// (`set_view_file`), so browsing A → B can land A's text after B's; without
-    /// the path the header would say B over A's content.
+    /// but only if it is still the newest read that leaf asked for.
+    ///
+    /// A preview leaf is repointed at a new file without cancelling the read
+    /// already in flight (`set_view_file`), and reads finish out of order.
+    /// `token` is the `FileView::read_token` the read was issued with and is the
+    /// invariant: newest wins. `path` is the file it carries — redundant while
+    /// every scheduler bumps the token, kept as a cheap backstop so a future one
+    /// that forgets cannot put another file's contents in this view.
     FileRead {
         id: PaneId,
         path: std::path::PathBuf,
+        token: u64,
         load: crate::files::FileLoad,
     },
     /// Per-line git change markers for a file view finished computing
-    /// (docs/38 + docs/30). `path` guards the same stale-result race as
-    /// `FileRead`, and matters more here: markers ride the *same* worker after
-    /// the text, so they are the later of the two to land.
+    /// (docs/38 + docs/30). Guarded exactly like `FileRead`, and it matters more
+    /// here: markers ride the *same* worker after the text, so they are the
+    /// later of the two to land.
     FileChanges {
         id: PaneId,
         path: std::path::PathBuf,
+        token: u64,
         changes: Vec<crate::git::local::ChangeSpan>,
     },
     /// The periodic process scan finished: command lines running under each

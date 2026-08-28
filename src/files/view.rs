@@ -59,6 +59,13 @@ pub struct FileView {
     /// Empty for a clean file, an untracked file, or outside a repo — markers are
     /// an enhancement, never a requirement.
     pub changes: Vec<crate::git::local::ChangeSpan>,
+    /// Which scheduled read this view is waiting for (the `request_token` idea
+    /// `DiffView` already uses). Every read carries the token it was issued
+    /// with, and only a match may be applied, so a slow read cannot land after
+    /// a newer one — including a re-read of the *same* file, which a path check
+    /// alone cannot tell apart. `0` means no read has been scheduled yet, so no
+    /// event can ever match it.
+    pub read_token: u64,
 }
 
 impl FileView {
@@ -88,6 +95,7 @@ impl FileView {
             mtime: None,
             changes: Vec::new(),
             search: None,
+            read_token: 0,
         }
     }
 
