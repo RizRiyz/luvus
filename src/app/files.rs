@@ -17,6 +17,18 @@ use crate::layout::{Axis, TileLayout};
 
 const RECENT_FILE_CAP: usize = 12;
 
+/// Existing native views of one file in the active workspace, split by whether
+/// a later click can recycle them. Both can be set at once: opening a tab for a
+/// file the preview is showing deliberately leaves the preview alone.
+#[derive(Default)]
+struct OpenViews {
+    /// A view no click will recycle: a tab, or a split promoted out of the
+    /// preview.
+    permanent: Option<PaneId>,
+    /// The workspace's reusable preview, when it happens to show the file.
+    preview: Option<PaneId>,
+}
+
 /// Where a file opens.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum OpenTarget {
@@ -291,7 +303,9 @@ impl App {
             None => {
                 self.open_file_view(path.clone(), OpenTarget::Tab);
                 if let Some(l) = line {
-                    if let Some(id) = self.view_showing(&path) {
+                    // The tab, never a preview that happens to show the same
+                    // file: `Tab` always lands on the permanent view.
+                    if let Some(id) = self.views_showing(&path).permanent {
                         if let Some(crate::app::ViewKind::File(v)) = self.views.get_mut(&id) {
                             v.scroll = l.saturating_sub(1) as usize;
                         }
@@ -636,15 +650,24 @@ impl App {
         self.refresh_git_status();
     }
 
-    /// The leaf id of an open view already showing `path`, if any.
-    fn view_showing(&self, path: &std::path::Path) -> Option<PaneId> {
-        self.ws()
-            .tabs
-            .iter()
-            .flat_map(|tab| tab.layout.leaves())
-            .find(
-                |id| matches!(self.views.get(id), Some(ViewKind::File(view)) if view.path == path),
-            )
+    /// Where `path` is already open in the active workspace, told apart by
+    /// durability. Reuse has to make that distinction: a permanent view is a
+    /// home the user chose, so it answers any later request for the same file,
+    /// while the preview is scratch space the next click recycles and so only
+    /// answers a request for what it already is.
+    fn views_showing(&self, path: &std::path::Path) -> OpenViews {
+        let mut found = OpenViews::default();
+        for id in self.ws().tabs.iter().flat_map(|tab| tab.layout.leaves()) {
+            if !matches!(self.views.get(&id), Some(ViewKind::File(view)) if view.path == path) {
+                continue;
+            }
+            if self.preview_views.contains(&id) {
+                found.preview.get_or_insert(id);
+            } else {
+                found.permanent.get_or_insert(id);
+            }
+        }
+        found
     }
 
     /// A native file view that owns its whole tab, excluding preview/split panes.
@@ -690,11 +713,43 @@ impl App {
     /// editor only ever comes from `open_file_at`.
     pub fn open_file_view(&mut self, path: PathBuf, target: OpenTarget) {
         self.remember_file(&path);
-        // Already open? Focus that view instead of opening a duplicate. This is
-        // also what makes clicking the same row twice a no-op in Preview mode.
-        if let Some(id) = self.view_showing(&path) {
+        let open = self.views_showing(&path);
+        // A permanent view answers every request: the file already has a home
+        // the user chose, and a second copy of one file helps nobody.
+        if let Some(id) = open.permanent {
             self.focus_pane_global(id);
             return;
+        }
+        // The preview showing this file is a weaker match — it answers only the
+        // request that asks for what it already is. Reusing it for the others is
+        // what made "make this one stick" gestures silently do nothing.
+        if let Some(id) = open.preview {
+            match target {
+                // The file is already on screen: this is what keeps a second
+                // click on the same row a no-op.
+                OpenTarget::Preview => {
+                    self.focus_pane_global(id);
+                    return;
+                }
+                // Shift+click on the previewed file means "keep this one". The
+                // preview *is* a pane, so promote it where it stands instead of
+                // opening a second pane on the same file — dropping it from
+                // `preview_views` is the whole of becoming permanent, and the
+                // next preview click then starts a fresh one. (A preview that
+                // was redirected to its own tab, from a dashboard, promotes to
+                // a permanent tab. Placement is not what the user asked to
+                // change; durability is.)
+                OpenTarget::Pane => {
+                    self.preview_views.remove(&id);
+                    self.focus_pane_global(id);
+                    return;
+                }
+                // A tab is a different placement, not a state the preview can
+                // be talked into, so open one. The preview is left alone rather
+                // than closed: it is a pane the user did not ask to lose, and
+                // the next click recycles it anyway.
+                OpenTarget::Tab => {}
+            }
         }
         // Reuse the live preview pane: just swap its content.
         if target == OpenTarget::Preview {
@@ -1055,7 +1110,7 @@ mod tests {
 
     /// A second click on an already-open file must land in the tab that is
     /// already showing it, not stack up another one. Read-only half: the click
-    /// path (`open_file_at`) goes through `open_file_view`'s `view_showing` guard.
+    /// path (`open_file_at`) goes through `open_file_view`'s reuse guard.
     #[test]
     fn clicking_a_file_twice_reuses_its_readonly_tab() {
         let _env = crate::persist::test_env("file-click-readonly-dedup");
@@ -1346,6 +1401,159 @@ mod tests {
         let idx = row_index(app, name);
         let target = app.file_click_target();
         app.file_row_activate(idx, target);
+    }
+
+    /// Shift+click, the way the mouse path sends it: always a permanent pane.
+    fn shift_click(app: &mut App, name: &str) {
+        let idx = row_index(app, name);
+        app.file_row_activate(idx, OpenTarget::Pane);
+    }
+
+    // ── same-file transitions out of the preview (PR #164 review) ────────────
+
+    /// Preview A, then Shift+click A. Reuse used to answer this from the
+    /// preview, so "keep this one open" silently did nothing and the next click
+    /// on another file recycled A away. The preview is already a pane, so the
+    /// gesture promotes it in place rather than opening a second pane on A.
+    #[test]
+    fn preview_then_shift_click_promotes_that_pane_instead_of_adding_one() {
+        let _env = crate::persist::test_env("file-transition-promote");
+        let (mut app, _rx, root) = click_tree_app("trpromote", &["a.txt", "b.txt"]);
+        let tabs_before = app.workspaces[app.active_ws].tabs.len();
+
+        plain_click(&mut app, "a.txt");
+        let pane = app.layout().focus;
+        assert!(app.preview_views.contains(&pane), "A is in the preview");
+
+        shift_click(&mut app, "a.txt");
+        assert_eq!(app.layout().focus, pane, "the same pane, not a second one");
+        assert_eq!(app.views.len(), 1, "no duplicate view of A");
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before,
+            "and no extra tab"
+        );
+        assert!(
+            !app.preview_views.contains(&pane),
+            "A is now permanent — this is what was broken"
+        );
+        assert_eq!(shown(&app, pane), root.join("a.txt"));
+
+        // Permanent means the next file cannot recycle it: B needs its own pane.
+        plain_click(&mut app, "b.txt");
+        let b = app.layout().focus;
+        assert_ne!(b, pane, "B did not take over the promoted pane");
+        assert_eq!(shown(&app, pane), root.join("a.txt"), "A survived");
+        assert!(app.preview_views.contains(&b), "B started a fresh preview");
+
+        // And a preview click back on A focuses the promoted pane rather than
+        // dragging A into the new preview: permanent answers every request.
+        plain_click(&mut app, "a.txt");
+        assert_eq!(app.layout().focus, pane, "focused the permanent pane");
+        assert_eq!(shown(&app, b), root.join("b.txt"), "the preview kept B");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Preview A, switch the setting to "open in tab", click A. Reuse used to
+    /// answer this from the preview too, so the mode the user just chose did
+    /// nothing on the file they were looking at.
+    #[test]
+    fn preview_then_a_tab_mode_click_opens_a_tab_for_the_same_file() {
+        let _env = crate::persist::test_env("file-transition-tab");
+        let (mut app, _rx, root) = click_tree_app("trtab", &["a.txt"]);
+        let tabs_before = app.workspaces[app.active_ws].tabs.len();
+
+        plain_click(&mut app, "a.txt");
+        let preview = app.layout().focus;
+        assert!(app.preview_views.contains(&preview));
+
+        app.config.layout.file_click = crate::config::FILE_CLICK_TAB.to_string();
+        plain_click(&mut app, "a.txt");
+
+        let tab_view = app.layout().focus;
+        assert_ne!(tab_view, preview, "the tab is its own leaf");
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before + 1,
+            "a tab was opened — this is what was broken"
+        );
+        assert_eq!(shown(&app, tab_view), root.join("a.txt"));
+        assert!(!app.preview_views.contains(&tab_view), "a tab is permanent");
+        // The preview is left alone: it is a pane the user never asked to lose.
+        assert!(
+            app.preview_views.contains(&preview),
+            "the preview is still the workspace preview"
+        );
+        assert_eq!(shown(&app, preview), root.join("a.txt"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The transition that must NOT change: previewing the file already in the
+    /// preview stays one pane and one read. Target-aware reuse has to keep
+    /// answering this from the preview.
+    #[test]
+    fn preview_then_another_preview_click_stays_one_pane() {
+        let _env = crate::persist::test_env("file-transition-noop");
+        let (mut app, _rx, root) = click_tree_app("trnoop", &["a.txt"]);
+        let tabs_before = app.workspaces[app.active_ws].tabs.len();
+
+        plain_click(&mut app, "a.txt");
+        let preview = app.layout().focus;
+        plain_click(&mut app, "a.txt");
+
+        assert_eq!(app.layout().focus, preview, "the same leaf");
+        assert_eq!(app.views.len(), 1, "still one view");
+        assert_eq!(app.preview_views.len(), 1, "still one preview");
+        assert!(
+            app.preview_views.contains(&preview),
+            "and it is still a preview — a second click must not promote it"
+        );
+        assert_eq!(app.workspaces[app.active_ws].tabs.len(), tabs_before);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A file with a permanent tab is answered by that tab whatever the request
+    /// — including a Preview click, which must not drag the file into the
+    /// preview and leave two copies on screen.
+    #[test]
+    fn a_preview_click_focuses_the_permanent_tab_a_file_already_has() {
+        let _env = crate::persist::test_env("file-transition-existing-tab");
+        let (mut app, _rx, root) = click_tree_app("trexist", &["a.txt", "b.txt"]);
+
+        // Give A a tab, then browse B in the preview so a preview exists and is
+        // pointed somewhere else.
+        app.config.layout.file_click = crate::config::FILE_CLICK_TAB.to_string();
+        plain_click(&mut app, "a.txt");
+        let a_tab_index = app.workspaces[app.active_ws].active_tab;
+        let a_view = app.layout().focus;
+        app.config.layout.file_click = crate::config::FILE_CLICK_PREVIEW.to_string();
+        plain_click(&mut app, "b.txt");
+        let preview = app.layout().focus;
+        assert_ne!(preview, a_view);
+        let tabs_before = app.workspaces[app.active_ws].tabs.len();
+
+        plain_click(&mut app, "a.txt");
+
+        assert_eq!(app.layout().focus, a_view, "focused A's existing tab");
+        assert_eq!(
+            app.workspaces[app.active_ws].active_tab, a_tab_index,
+            "and switched to it"
+        );
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before,
+            "no duplicate tab"
+        );
+        assert_eq!(
+            shown(&app, preview),
+            root.join("b.txt"),
+            "the preview was not repointed at A"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The path a native file-view leaf is currently showing.
