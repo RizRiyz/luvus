@@ -55,10 +55,9 @@ fn list_capacity(rows: u16) -> usize {
 }
 
 /// A scrollbar on the sidebar's right edge, shown only when the list overflows
-/// its area. Drawn as a **background fill** (blank cell + coloured `bg`), so it
-/// renders as a solid line in every terminal (no box-drawing glyph to dash on
-/// macOS Terminal.app). A faint full-height track carries a small brighter
-/// thumb sized to the visible fraction of the list.
+/// its area. Thin block glyphs keep the indicator lighter than a full-cell
+/// background strip while remaining terminal-native: a faint quarter-cell
+/// track carries a brighter half-cell thumb sized to the visible fraction.
 fn draw_scrollbar(
     f: &mut RenderTarget,
     track: Rect,
@@ -80,8 +79,8 @@ fn draw_scrollbar(
     for i in 0..len {
         let on = i >= pos && i < pos + thumb;
         let cell = &mut buf[(track.x, track.y + i as u16)];
-        cell.set_symbol(" ");
-        cell.set_bg(if on { t.overlay1 } else { t.surface1 });
+        cell.set_symbol(if on { "▐" } else { "▕" });
+        cell.set_fg(if on { t.overlay1 } else { t.surface1 });
     }
 }
 
@@ -729,7 +728,33 @@ fn header(text: &str, t: &Theme) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use crate::app::App;
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, Terminal};
+
+    #[test]
+    fn sidebar_scrollbar_is_thin_and_proportional() {
+        let area = Rect::new(0, 0, 1, 6);
+        let mut buffer = Buffer::empty(area);
+        let theme = crate::ui::theme::by_name("quattro-rally");
+        {
+            let mut target = crate::ui::RenderTarget::new(&mut buffer, area);
+            super::draw_scrollbar(&mut target, area, 6, 2, 0, &theme);
+        }
+
+        let symbols: Vec<&str> = (0..area.height)
+            .map(|row| buffer.cell((0, row)).expect("scrollbar cell").symbol())
+            .collect();
+        assert_eq!(
+            symbols,
+            vec!["▐", "▐", "▕", "▕", "▕", "▕"],
+            "the two-row proportional thumb sits on a thin full-height track"
+        );
+        assert!(
+            (0..area.height).all(|row| buffer
+                .cell((0, row))
+                .is_some_and(|cell| cell.style().bg == Some(ratatui::style::Color::Reset))),
+            "the scrollbar must not paint a full-cell background strip"
+        );
+    }
 
     fn buffer_contains(term: &Terminal<TestBackend>, needle: &str) -> bool {
         let buf = term.backend().buffer();
