@@ -213,7 +213,7 @@ pub(crate) fn emit_sound(signal: sound::SoundSignal) {
 
 /// Synthesize a cue once per machine and reuse its small WAV file thereafter.
 fn ensure_sound(signal: sound::SoundSignal) -> Option<std::path::PathBuf> {
-    let path = std::env::temp_dir().join(format!(
+    let path = sound_cache_dir()?.join(format!(
         "luvus-sound-v1-{}-{}.wav",
         signal.style.key(),
         match signal.cue {
@@ -226,6 +226,76 @@ fn ensure_sound(signal: sound::SoundSignal) -> Option<std::path::PathBuf> {
         Some(path)
     } else {
         None
+    }
+}
+
+/// Return the shared, application-owned directory for synthesized cues.
+///
+/// The user-specific name lets attached clients reuse the cache without
+/// trusting a predictable file placed directly in a system-wide temp folder.
+fn sound_cache_dir() -> Option<std::path::PathBuf> {
+    #[cfg(unix)]
+    let name = format!("luvus-sound-cache-{}", unsafe { libc::geteuid() });
+    #[cfg(not(unix))]
+    let name = "luvus-sound-cache".to_string();
+
+    let path = std::env::temp_dir().join(name);
+    ensure_private_sound_cache_dir(&path).then_some(path)
+}
+
+/// Create the cache directory privately and reject hostile pre-existing paths.
+fn ensure_private_sound_cache_dir(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+        let created = std::fs::DirBuilder::new().mode(0o700).create(path);
+        if created.is_err_and(|error| error.kind() != std::io::ErrorKind::AlreadyExists) {
+            return false;
+        }
+        let Ok(mut metadata) = std::fs::symlink_metadata(path) else {
+            return false;
+        };
+        if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
+            return false;
+        }
+        if metadata.permissions().mode() & 0o077 != 0 {
+            if std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).is_err() {
+                return false;
+            }
+            let Ok(updated) = std::fs::symlink_metadata(path) else {
+                return false;
+            };
+            metadata = updated;
+        }
+        metadata.file_type().is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.permissions().mode() & 0o077 == 0
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        let created = std::fs::create_dir(path);
+        if created.is_err_and(|error| error.kind() != std::io::ErrorKind::AlreadyExists) {
+            return false;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(path) else {
+            return false;
+        };
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_type().is_dir()
+            && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let created = std::fs::create_dir(path);
+        if created.is_err_and(|error| error.kind() != std::io::ErrorKind::AlreadyExists) {
+            return false;
+        }
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
     }
 }
 
@@ -1183,6 +1253,37 @@ mod tests {
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_file(path.as_ref()).unwrap();
         std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn sound_cache_uses_a_private_application_directory() {
+        let dir = sound_cache_dir().expect("private sound cache");
+        assert_eq!(dir.parent(), Some(std::env::temp_dir().as_path()));
+        assert_ne!(dir, std::env::temp_dir());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+            let metadata = std::fs::symlink_metadata(&dir).expect("sound cache metadata");
+            assert!(metadata.file_type().is_dir());
+            assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+            assert_eq!(metadata.permissions().mode() & 0o077, 0);
+        }
+    }
+
+    #[test]
+    fn sound_cache_rejects_a_non_directory_path() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("sound-cache-file-{}-{nonce}", std::process::id()));
+        std::fs::write(&path, b"not a directory").unwrap();
+        assert!(!ensure_private_sound_cache_dir(&path));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
