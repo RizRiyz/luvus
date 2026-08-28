@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.85.0"
 name = "luvus-alacritty-terminal"
-version = "0.26.0"
+version = "0.26.1"
 authors = [
     "Christian Duerr <contact@christianduerr.com>",
     "Joe Wilm <joe@jwilm.com>",
@@ -47,6 +47,10 @@ path = "src/lib.rs"
 [[test]]
 name = "ref"
 path = "tests/ref.rs"
+
+[dependencies.arrayvec]
+version = "0.7.2"
+features = ["serde"]
 
 [dependencies.base64]
 version = "0.22.0"

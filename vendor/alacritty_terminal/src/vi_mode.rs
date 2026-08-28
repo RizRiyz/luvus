@@ -161,7 +161,7 @@ impl ViModeCursor {
                 // Skip empty lines until we find the next paragraph,
                 // then skip over the paragraph until we reach the next empty line.
                 let topmost_line = term.topmost_line();
-                self.point.line = (*topmost_line..*self.point.line)
+                self.point.line = (*topmost_line..=*self.point.line)
                     .rev()
                     .skip_while(|line| term.grid()[Line(*line)].is_clear())
                     .find(|line| term.grid()[Line(*line)].is_clear())
@@ -441,6 +441,18 @@ mod tests {
 
         cursor = cursor.motion(&mut term, ViMotion::Up);
         assert_eq!(cursor.point, Point::new(Line(0), Column(0)));
+    }
+
+    #[test]
+    fn paragraph_up_stops_at_adjacent_empty_line() {
+        let mut term = term();
+        term.grid_mut()[Line(3)][Column(0)].c = 'a';
+        term.grid_mut()[Line(5)][Column(0)].c = 'b';
+
+        let cursor = ViModeCursor::new(Point::new(Line(5), Column(0)));
+        let cursor = cursor.motion(&mut term, ViMotion::ParagraphUp);
+
+        assert_eq!(cursor.point, Point::new(Line(4), Column(0)));
     }
 
     #[test]
