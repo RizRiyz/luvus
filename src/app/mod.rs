@@ -654,6 +654,18 @@ pub enum FilePromptKind {
     Rename,
 }
 
+/// What a terminal-editor pane is editing (docs/38): the file, and the editor
+/// run-command it was launched with. The command is part of the record because
+/// `Open With` can aim a *second*, different editor at a file that is already
+/// open in one — re-opening the same editor focuses the running tab, a
+/// different one is an explicit override and still launches.
+pub struct EditorFile {
+    pub path: PathBuf,
+    /// A run-command such as `"vim"` or `"emacs -nw"`, exactly as it appears in
+    /// `App::editors`.
+    pub command: String,
+}
+
 /// Cap a file-tree name entry (same spirit as [`TAB_NAME_MAX`]).
 pub(crate) const FILE_NAME_MAX: usize = 120;
 
@@ -1654,7 +1666,7 @@ pub struct App {
     /// with the file exactly like a read-only view tab. Deliberately not
     /// persisted — after a restart the pane is no longer that editor, so the
     /// label must not survive it. Untracked in `drop_leaf_runtime`.
-    pub editor_files: HashMap<PaneId, PathBuf>,
+    pub editor_files: HashMap<PaneId, EditorFile>,
     /// Most recently opened files, newest first, scoped by workspace folder.
     /// This is a small in-memory finder convenience and is never persisted.
     pub recent_files: VecDeque<(PathBuf, PathBuf)>,

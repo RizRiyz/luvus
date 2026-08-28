@@ -589,6 +589,19 @@ fn builtin_rules() -> Vec<Rule> {
             Region::Screen,
             vec![any(&["ctrl+c:cancel"])],
         ),
+        // While a subagent is running, Grok replaces that footer entirely with
+        // "1 subagent still running - send a message to interrupt", so the rule
+        // above stops matching and the pane reads Idle for however long the
+        // subagent takes - minutes, in practice. Same reasoning as WORKING_HINTS:
+        // an invitation to interrupt only exists while there is something to
+        // interrupt.
+        per(
+            "grok",
+            State::Working,
+            105,
+            Region::Screen,
+            vec![any(&["send a message to interrupt"])],
+        ),
     ]
 }
 
@@ -1704,6 +1717,23 @@ mod tests {
             &Manifests::builtin(),
         );
         assert_eq!(d.state, State::Blocked);
+    }
+
+    #[test]
+    fn grok_running_a_subagent_is_working() {
+        // Grok swaps its `Ctrl+c:cancel` footer for a subagent line while a
+        // subagent runs; without a rule for it the pane read Idle throughout.
+        let d = classify(
+            Some("grok"),
+            "  * Run File issue to lift config live into configlist\n  * Running 1 subagent\n\n  o 1 subagent still running - send a message to interrupt",
+            true,
+            false,
+            "grok",
+            "grok",
+            &[],
+            &Manifests::builtin(),
+        );
+        assert_eq!(d.state, State::Working);
     }
 
     #[test]

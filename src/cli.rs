@@ -3734,6 +3734,7 @@ mod tests {
             crate::i18n::cli::Language::Id,
             crate::i18n::cli::Language::Zh,
             crate::i18n::cli::Language::Ja,
+            crate::i18n::cli::Language::Ko,
         ];
 
         for topic in topics {
@@ -3766,6 +3767,7 @@ mod tests {
             crate::i18n::cli::Language::Id,
             crate::i18n::cli::Language::Zh,
             crate::i18n::cli::Language::Ja,
+            crate::i18n::cli::Language::Ko,
         ] {
             let mut session = Vec::new();
             assert!(write_topic_help(&mut session, "session", None, language).unwrap());
