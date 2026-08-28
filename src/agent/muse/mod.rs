@@ -26,6 +26,14 @@ pub fn is_versioned_binary(binary: &str) -> bool {
         .is_some_and(u8::is_ascii_digit)
 }
 
+fn is_session_uuid(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
+}
+
 pub fn sessions_base() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .filter(|value| !value.is_empty())
@@ -90,19 +98,19 @@ fn read_session(path: &Path) -> Option<(String, PathBuf)> {
             session_id = record
                 .get("session_id")
                 .and_then(serde_json::Value::as_str)
-                .filter(|id| super::safe_id(id))
+                .filter(|id| is_session_uuid(id))
                 .map(str::to_owned);
         } else if payload_type == "runtime.session.metadata" {
             workspace = record
                 .get("workspace_root")
                 .and_then(serde_json::Value::as_str)
-                .filter(|cwd| !cwd.is_empty())
+                .filter(|cwd| Path::new(cwd).is_absolute())
                 .map(PathBuf::from);
         } else if payload_type == "runtime.session.route_facts" && workspace.is_none() {
             workspace = record
                 .get("cwd")
                 .and_then(serde_json::Value::as_str)
-                .filter(|cwd| !cwd.is_empty())
+                .filter(|cwd| Path::new(cwd).is_absolute())
                 .map(PathBuf::from);
         }
         if session_id.is_some() && workspace.is_some() {
@@ -131,7 +139,7 @@ pub fn recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
     let mut files = session_files(base);
     files.sort_by_key(|(updated, _)| std::cmp::Reverse(*updated));
     let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen: Vec<PathBuf> = Vec::new();
     for (updated, path) in files {
         if out.len() >= limit {
             break;
@@ -139,14 +147,19 @@ pub fn recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
         let Some((session_id, cwd)) = read_session(&path) else {
             continue;
         };
-        if seen.insert(cwd.clone()) {
-            out.push(SessionInfo {
-                agent: NAME.to_string(),
-                session_id,
-                cwd,
-                updated,
-            });
+        if seen
+            .iter()
+            .any(|workspace| crate::platform::same_path(workspace, &cwd))
+        {
+            continue;
         }
+        seen.push(cwd.clone());
+        out.push(SessionInfo {
+            agent: NAME.to_string(),
+            session_id,
+            cwd,
+            updated,
+        });
     }
     out
 }
@@ -155,6 +168,14 @@ pub fn recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
 mod tests {
     use super::*;
     use std::fs;
+
+    fn workspace_path() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\work\app")
+        } else {
+            PathBuf::from("/work/app")
+        }
+    }
 
     fn write_session(base: &Path, day: &str, id: &str, cwd: &str) -> PathBuf {
         let dir = base.join(day).join(id);
@@ -183,30 +204,92 @@ mod tests {
     fn discovers_native_sessions_by_metadata_not_directory_name() {
         let base = std::env::temp_dir().join(format!("luvus-muse-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
+        let workspace = workspace_path();
+        let workspace_text = workspace.to_string_lossy();
         let first = write_session(
             &base,
             "2026/08/27",
             "7de3d84e-31f9-4437-b2f8-0b56db788042",
-            "/work/app",
+            &workspace_text,
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
         write_session(
             &base,
             "2026/08/28",
             "8ef4e95f-42fa-5548-c309-1c67ec899153",
-            "/work/app",
+            &workspace_text,
         );
         fs::write(first.with_file_name("unrelated.jsonl"), "{not json}\n").unwrap();
 
         assert_eq!(
-            latest(&base, Path::new("/work/app")).as_deref(),
+            latest(&base, &workspace).as_deref(),
             Some("8ef4e95f-42fa-5548-c309-1c67ec899153")
         );
-        assert_eq!(list(&base, Path::new("/work/app")).len(), 2);
+        assert_eq!(list(&base, &workspace).len(), 2);
         let recent = recent(&base, 5);
         assert_eq!(recent.len(), 1, "recent sessions deduplicate by workspace");
         assert_eq!(recent[0].agent, NAME);
-        assert!(latest(&base, Path::new("/work/other")).is_none());
+        assert!(latest(&base, &workspace.with_file_name("other")).is_none());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn rejects_malformed_session_metadata() {
+        let base = std::env::temp_dir().join(format!("luvus-muse-invalid-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let workspace = workspace_path();
+        write_session(
+            &base,
+            "2026/08/27",
+            "not-a-muse-session",
+            &workspace.to_string_lossy(),
+        );
+        write_session(
+            &base,
+            "2026/08/28",
+            "7de3d84e-31f9-4437-b2f8-0b56db788042",
+            "relative/workspace",
+        );
+        let route_dir = base
+            .join("2026/08/29")
+            .join("8ef4e95f-42fa-5548-c309-1c67ec899153");
+        fs::create_dir_all(&route_dir).unwrap();
+        fs::write(
+            route_dir.join("session.jsonl"),
+            "{\"payload_type\":\"session.opened.observed\",\"payload\":{\"record\":{\"session_id\":\"8ef4e95f-42fa-5548-c309-1c67ec899153\"}}}\n\
+             {\"payload_type\":\"runtime.session.route_facts\",\"payload\":{\"record\":{\"cwd\":\"relative/fallback\"}}}\n",
+        )
+        .unwrap();
+
+        assert!(recent(&base, 5).is_empty());
+        assert!(list(&base, &workspace).is_empty());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn recent_uses_platform_path_identity() {
+        let base = std::env::temp_dir().join(format!("luvus-muse-paths-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let workspace = workspace_path();
+        let variant = if cfg!(windows) {
+            r"c:/WORK/app/".to_string()
+        } else {
+            "/work/app/".to_string()
+        };
+        write_session(
+            &base,
+            "2026/08/27",
+            "7de3d84e-31f9-4437-b2f8-0b56db788042",
+            &workspace.to_string_lossy(),
+        );
+        write_session(
+            &base,
+            "2026/08/28",
+            "8ef4e95f-42fa-5548-c309-1c67ec899153",
+            &variant,
+        );
+
+        assert_eq!(recent(&base, 5).len(), 1);
         let _ = fs::remove_dir_all(base);
     }
 }

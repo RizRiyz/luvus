@@ -157,6 +157,7 @@ struct AgentIdent {
     name: String,
     distinct: Vec<String>,
     ambiguous: Vec<String>,
+    binary_matcher: Option<fn(&str) -> bool>,
 }
 
 impl AgentIdent {
@@ -174,6 +175,8 @@ fn builtin_agents() -> Vec<AgentIdent> {
             name: a.name.to_string(),
             distinct: a.distinct.iter().map(|s| s.to_string()).collect(),
             ambiguous: a.ambiguous.iter().map(|s| s.to_string()).collect(),
+            binary_matcher: (a.name == crate::agent::muse::NAME)
+                .then_some(crate::agent::muse::is_versioned_binary as fn(&str) -> bool),
         })
         .collect()
 }
@@ -787,6 +790,7 @@ impl ManifestFile {
                     name: name.clone(),
                     distinct: Vec::new(),
                     ambiguous: Vec::new(),
+                    binary_matcher: None,
                 });
                 agents.last_mut().expect("just pushed")
             }
@@ -794,6 +798,7 @@ impl ManifestFile {
         if id.replace {
             entry.distinct.clear();
             entry.ambiguous.clear();
+            entry.binary_matcher = None;
         }
         entry.distinct.extend(lc(&id.distinct));
         entry.ambiguous.extend(lc(&id.ambiguous));
@@ -1148,10 +1153,12 @@ impl Manifests {
 
     /// The agent whose patterns name exactly this binary.
     fn match_binary(&self, base: &str) -> Option<String> {
-        if crate::agent::muse::is_versioned_binary(base)
-            && self.agents.iter().any(|agent| agent.name == "muse")
+        if let Some(agent) = self
+            .agents
+            .iter()
+            .find(|agent| agent.binary_matcher.is_some_and(|matcher| matcher(base)))
         {
-            return Some("muse".to_string());
+            return Some(agent.name.clone());
         }
         self.agents
             .iter()
@@ -1414,6 +1421,30 @@ mod tests {
         assert_eq!(
             incidental.agent, "zsh",
             "bare muse is never trusted from pane output"
+        );
+    }
+
+    #[test]
+    fn muse_identity_replace_disables_the_versioned_binary_matcher() {
+        let mut m = Manifests::builtin();
+        toml::from_str::<ManifestFile>(
+            r#"
+            agent = "muse"
+            [identity]
+            distinct = ["custom-muse"]
+            replace = true
+        "#,
+        )
+        .unwrap()
+        .apply_identity(&mut m.agents);
+
+        assert_eq!(
+            m.agent_in_processes(&["muse-bin-0.2.1-R1215.1".into()]),
+            None
+        );
+        assert_eq!(
+            m.agent_in_processes(&["custom-muse".into()]),
+            Some("muse".into())
         );
     }
 
