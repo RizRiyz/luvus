@@ -10,8 +10,8 @@ back after a restart, all without wrapping or modifying the agents themselves.
 ## The AGENTS sidebar
 
 Every pane running a recognized agent (Claude Code, Copilot, Codex, opencode,
-Kimi, Grok, Pi, Cursor, Gemini, Qwen, Kiro, Aider, Amp, Droid, or fx) appears in
-the sidebar with a live state:
+Kimi, Grok, Pi, Oh My Pi (OMP), Cursor, Gemini, Qwen, Kiro, Aider, Amp, Droid,
+or fx) appears in the sidebar with a live state:
 
 | State | Meaning | How it's detected |
 |---|---|---|
@@ -60,6 +60,7 @@ one or Luvus has pricing for the model.
 | Kimi | session status records |
 | Grok | completed-turn usage records |
 | Pi | assistant message usage |
+| Oh My Pi (OMP) | assistant message usage |
 | Gemini and Qwen | project chat records |
 | fx | session usage snapshot |
 
@@ -121,6 +122,7 @@ command for you:
 | Kimi | its session index (`~/.kimi-code/session_index.jsonl`) |
 | Grok | its session directory (`~/.grok/sessions`) |
 | Pi | its session store (`~/.pi/agent/sessions`) |
+| Oh My Pi (OMP) | its profile-, XDG-, and override-aware native session store |
 | Gemini | its project chat store (`~/.gemini/tmp`) |
 | Qwen | its project chat store (`~/.qwen/tmp`) |
 | fx | its session store (`~/.fx/sessions`) |
@@ -160,6 +162,7 @@ support it natively:
 | Grok Build | `grok --resume <id> --fork-session` |
 | Codex | `codex fork <id>` |
 | Pi | `pi --fork <id>` |
+| Oh My Pi (OMP) | `omp --fork <id>` |
 
 The TUI action only appears for supported agents and otherwise remains a no-op.
 The CLI reports a structured error instead, so automation never mistakes an
@@ -179,7 +182,7 @@ Screen-based detection needs no setup and works for everything. The optional
 lifecycle events (permission prompt raised, turn ended) into luvus:
 
 ```sh
-luvus integration install claude    # or: copilot · codex · opencode · kimi
+luvus integration install claude    # or: copilot · codex · opencode · kimi · grok · omp
 ```
 
 or toggle it in **Settings → Integrations**. What it does per agent:
@@ -189,6 +192,12 @@ or toggle it in **Settings → Integrations**. What it does per agent:
 - **opencode**: installs a tiny plugin file.
 - **kimi**: adds a `[[hooks]]` entry to `~/.kimi-code/config.toml`, edited in
   place so your API keys, comments, and own hooks are left untouched.
+- **grok**: installs its own hook file without editing Grok's authentication
+  configuration.
+- **omp**: installs one managed TypeScript extension in OMP's active agent
+  directory. It reports exact session identity and authoritative
+  idle/working/blocked/done transitions while preserving Luvus's native
+  process/screen detection as the zero-setup fallback.
 
 Uninstalling (`luvus integration uninstall <agent>`, or the same Settings
 toggle) surgically removes **only luvus's hook entry**. Your other settings

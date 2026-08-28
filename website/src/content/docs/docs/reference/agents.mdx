@@ -36,15 +36,18 @@ description: What luvus supports per agent, covering live status, session resume
   choose **Fork to New Pane**, or press `Ctrl+Space f`. The action only appears
   for agents that can fork.
 - **Hook**, via `luvus integration install <agent>`, makes the agent report its
-  exact session id and lifecycle events. Removal is surgical:
+  exact session id and lifecycle events. OMP additionally reports authoritative
+  idle/working/blocked/done state through Luvus's bounded agent authority API.
+  Removal is surgical:
   `luvus integration uninstall <agent>` touches only luvus's own entry. Kimi keeps
   its hooks in `~/.kimi-code/config.toml`, the same file as your API keys, so
   luvus edits it in place and leaves your keys, comments, and own hooks untouched.
   Grok Build reads hooks from `~/.grok/hooks/*.json`, so luvus just adds its own
   `luvus.json` there and never touches your `~/.grok/config.toml`. Oh My Pi
-  (omp) auto-loads extension factories from `~/.omp/agent/extensions/`, so
+  (OMP) auto-loads extension factories from its active agent directory, so
   `luvus integration install omp` drops a single `luvus.ts` there — no config
-  file is edited.
+  file is edited. Named profiles, `PI_CODING_AGENT_DIR`, `PI_CONFIG_DIR`, and
+  OMP's XDG session store remain supported.
 
 Missing your agent? You can add it yourself without waiting for a release: drop
 an `[identity]` block in `~/.luvus/manifests/<agent>.toml` and luvus will

@@ -120,9 +120,9 @@ const KNOWN_AGENTS: &[KnownAgent] = &[
     // omp's brand + npm binary are distinctive, so trust them from pane
     // output; bare `omp` is believed only from the spawn command or OSC title.
     KnownAgent {
-        name: "omp",
-        distinct: &["oh-my-pi", "omp-coding-agent"],
-        ambiguous: &["omp"],
+        name: crate::agent::omp::NAME,
+        distinct: crate::agent::omp::DISTINCT_IDENTITIES,
+        ambiguous: crate::agent::omp::AMBIGUOUS_IDENTITIES,
     },
     // Pi (pi.dev): the npm binary is distinctive, but the bare brand name is an
     // ordinary word (and a substring of "api"/"pip"…), so believe it only from

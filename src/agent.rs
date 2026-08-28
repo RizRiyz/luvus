@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+pub(crate) mod omp;
 mod usage;
 pub use usage::{session_mtime, session_usage};
 
@@ -138,12 +139,12 @@ static SOURCES: &[SessionSource] = &[
         // layout (header line carries `id` + `cwd`) and `PI_CODING_AGENT_SESSION_DIR`
         // override. omp resumes with `--resume` (not `--session` like pi) and
         // forks with `--fork <session>` — both accept an id prefix or a path.
-        // Hook-reported ids arrive via pane.report_session.
-        name: "omp",
+        // Extension-reported ids arrive through the authoritative agent API.
+        name: omp::NAME,
         discover: Some(Discovery {
-            base: omp_base,
-            recent: omp_recent,
-            latest: pi_latest,
+            base: omp::sessions_base,
+            recent: omp::recent,
+            latest: omp::latest,
             list: Some(pi_list),
         }),
         resume: |q| format!("omp --resume {q}\r"),
@@ -1203,38 +1204,6 @@ fn pi_recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
     out
 }
 
-/// Oh My Pi (omp) sessions. omp ships pi's session layout unchanged — the
-/// first line is a self-describing header with `id` + `cwd`. omp's data root
-/// is `~/.omp/agent/sessions`; `PI_CODING_AGENT_SESSION_DIR` (also read by
-/// omp) overrides it.
-fn omp_base() -> PathBuf {
-    if let Some(d) = std::env::var_os("PI_CODING_AGENT_SESSION_DIR") {
-        return PathBuf::from(d);
-    }
-    home().join(".omp").join("agent").join("sessions")
-}
-
-/// omp shares pi's session format, so discovery delegates to the pi
-/// implementations (`pi_latest`/`pi_list` above) — a fix in one place keeps
-/// both agents correct. Only `omp_recent` exists to relabel results.
-/// Test-visible alias: omp's `latest` discovery is pi's verbatim (wired
-/// directly as `Discovery.latest = pi_latest`), but tests target omp by name.
-#[cfg_attr(not(test), allow(dead_code))]
-fn omp_latest(base: &Path, cwd: &Path) -> Option<String> {
-    pi_latest(base, cwd)
-}
-
-fn omp_recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
-    // Same scan as `pi_recent`; only the reported agent label differs.
-    pi_recent(base, limit)
-        .into_iter()
-        .map(|mut s| {
-            s.agent = "omp".to_string();
-            s
-        })
-        .collect()
-}
-
 // ── Gemini CLI and Qwen Code ────────────────────────────────────────────────
 // Both keep project-scoped JSONL chats under `<base>/tmp/<project>/chats/` and
 // write the original project path to the sibling `.project_root` file. The
@@ -1994,10 +1963,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            omp_latest(&base, Path::new("/work/app")).as_deref(),
+            omp::latest(&base, Path::new("/work/app")).as_deref(),
             Some("dddd")
         );
-        let recent = omp_recent(&base, 10);
+        let recent = omp::recent(&base, 10);
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].agent, "omp");
         assert_eq!(recent[0].session_id, "dddd");
@@ -2031,7 +2000,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            omp_latest(&base, Path::new("/work/app")).as_deref(),
+            omp::latest(&base, Path::new("/work/app")).as_deref(),
             Some("eeee")
         );
     }

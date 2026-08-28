@@ -383,11 +383,14 @@ fn target_dir_at(host: SkillHost, home: &Path, xdg_config: Option<&Path>) -> Pat
         SkillHost::Grok => home.join(".grok").join("skills").join("luvus"),
         SkillHost::Qwen => home.join(".qwen").join("skills").join("luvus"),
         SkillHost::Kiro => home.join(".kiro").join("skills").join("luvus"),
-        SkillHost::Omp => home.join(".omp").join("agent").join("skills").join("luvus"),
+        SkillHost::Omp => crate::agent::omp::default_skill_dir_at(home),
     }
 }
 
 fn target_dir(host: SkillHost) -> Result<PathBuf> {
+    if host == SkillHost::Omp {
+        return crate::agent::omp::skill_dir();
+    }
     let home = crate::platform::home_dir().ok_or_else(|| anyhow!("home directory not found"))?;
     if host == SkillHost::Claude {
         if let Some(config) = std::env::var_os("CLAUDE_CONFIG_DIR") {
@@ -574,7 +577,7 @@ fn host_config_dirs(
         SkillHost::Grok => vec![home.join(".grok")],
         SkillHost::Qwen => vec![home.join(".qwen")],
         SkillHost::Kiro => vec![home.join(".kiro")],
-        SkillHost::Omp => vec![home.join(".omp").join("agent")],
+        SkillHost::Omp => vec![crate::agent::omp::default_agent_dir_at(home)],
     }
 }
 
@@ -587,6 +590,9 @@ fn host_detected(host: SkillHost, state: &SkillState, target: &Path) -> Result<b
     let claude = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
     let codex = std::env::var_os("CODEX_HOME").map(PathBuf::from);
     let kimi = std::env::var_os("KIMI_CODE_HOME").map(PathBuf::from);
+    if host == SkillHost::Omp && crate::agent::omp::agent_dir().is_ok_and(|path| path.is_dir()) {
+        return Ok(true);
+    }
     Ok(any_dir(&host_config_dirs(
         host,
         &home,
@@ -1351,8 +1357,8 @@ mod tests {
     #[test]
     fn omp_is_a_recognized_skill_host_by_dir_or_binary() {
         // Detection must fire on either signal: the ~/.omp/agent config dir
-        // or the omp executable on PATH. OMP reads the shared ~/.agents/skills
-        // location, so `skill enable` covers it once detected.
+        // or the omp executable on PATH. OMP receives its own managed skill
+        // copy because profiles and PI_CODING_AGENT_DIR can isolate agent data.
         let root = crate::persist::skills_dir().join("omp-host-home");
         let _ = fs::remove_dir_all(&root);
         let agent_dir = root.join(".omp").join("agent");
