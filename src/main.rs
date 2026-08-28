@@ -213,22 +213,58 @@ pub(crate) fn emit_sound(signal: sound::SoundSignal) {
 
 /// Synthesize a cue once per machine and reuse its small WAV file thereafter.
 fn ensure_sound(signal: sound::SoundSignal) -> Option<std::path::PathBuf> {
-    static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let path = std::env::temp_dir().join(format!(
-        "luvus-{}-{}.wav",
+        "luvus-sound-v1-{}-{}.wav",
         signal.style.key(),
         match signal.cue {
             sound::SoundCue::Done => "done",
             sound::SoundCue::Blocked => "blocked",
         }
     ));
-    if !path.exists() {
-        let _guard = WRITE_LOCK.lock().ok()?;
-        if !path.exists() {
-            std::fs::write(&path, sound::synth_wav(signal)).ok()?;
-        }
+    let wav = sound::synth_wav(signal);
+    if publish_sound_cache(&path, &wav) {
+        Some(path)
+    } else {
+        None
     }
-    Some(path)
+}
+
+/// Publish a complete WAV atomically. Every process writes a unique staging
+/// file, then renames it into place. Concurrent clients can replace one complete
+/// copy with another on Unix; on Windows the loser validates and reuses the
+/// winner. A partial file is never exposed at the playback path.
+fn publish_sound_cache(path: &Path, wav: &[u8]) -> bool {
+    if std::fs::read(path).is_ok_and(|cached| cached == wav) {
+        return true;
+    }
+
+    static STAGING_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = STAGING_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let staging = path.with_file_name(format!(".{name}.{}.{}.tmp", std::process::id(), id));
+
+    let wrote = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)?;
+        file.write_all(wav)
+    })();
+    if wrote.is_err() {
+        let _ = std::fs::remove_file(&staging);
+        return false;
+    }
+
+    if std::fs::rename(&staging, path).is_ok() {
+        return true;
+    }
+
+    // Windows does not replace an existing destination. Another client may
+    // have won the race, so accept only the exact bytes we intended to publish.
+    let published = std::fs::read(path).is_ok_and(|cached| cached == wav);
+    let _ = std::fs::remove_file(&staging);
+    published
 }
 
 /// Play a WAV with the platform's audio tool (blocking — called in a thread).
@@ -1096,6 +1132,57 @@ mod tests {
         assert!(is_backend_discovery_request(&strings(&[
             "luvus", "uhp", "schema"
         ])));
+    }
+
+    #[test]
+    fn concurrent_sound_cache_publication_never_exposes_partial_wav() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("sound-cache-test-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = Arc::new(dir.join("cue.wav"));
+        let wav = Arc::new(crate::sound::synth_wav(crate::sound::SoundSignal {
+            cue: crate::sound::SoundCue::Blocked,
+            style: crate::sound::SoundStyle::Retro,
+        }));
+        let writers_done = Arc::new(AtomicBool::new(false));
+
+        let reader_path = Arc::clone(&path);
+        let reader_wav = Arc::clone(&wav);
+        let reader_done = Arc::clone(&writers_done);
+        let reader = std::thread::spawn(move || {
+            while !reader_done.load(Ordering::Acquire) {
+                if let Ok(bytes) = std::fs::read(reader_path.as_ref()) {
+                    assert_eq!(bytes, *reader_wav, "published WAV is always complete");
+                }
+                std::thread::yield_now();
+            }
+        });
+
+        let writers: Vec<_> = (0..8)
+            .map(|_| {
+                let path = Arc::clone(&path);
+                let wav = Arc::clone(&wav);
+                std::thread::spawn(move || assert!(publish_sound_cache(&path, &wav)))
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        writers_done.store(true, Ordering::Release);
+        reader.join().unwrap();
+
+        assert_eq!(std::fs::read(path.as_ref()).unwrap(), *wav);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_file(path.as_ref()).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 
     #[test]
