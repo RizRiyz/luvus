@@ -278,31 +278,36 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
     // Prepare signal handling before spawning child.
     let (signals, sig_id) = {
         let (sender, recv) = UnixStream::pair()?;
+        recv.set_nonblocking(true)?;
 
         // Register the recv end of the pipe for SIGCHLD.
         let sig_id = signal_pipe::register(sigconsts::SIGCHLD, sender)?;
-        recv.set_nonblocking(true)?;
         (recv, sig_id)
     };
 
     match builder.spawn() {
         Ok(child) => {
+            let pty = Pty { child, file: File::from(master), signals, sig_id };
+
             unsafe {
                 // Maybe this should be done outside of this function so nonblocking
                 // isn't forced upon consumers. Although maybe it should be?
-                set_nonblocking(master_fd)?;
+                set_nonblocking(pty.file.as_raw_fd())?;
             }
 
-            Ok(Pty { child, file: File::from(master), signals, sig_id })
+            Ok(pty)
         },
-        Err(err) => Err(Error::new(
-            err.kind(),
-            format!(
-                "Failed to spawn command '{}': {}",
-                builder.get_program().to_string_lossy(),
-                err
-            ),
-        )),
+        Err(err) => {
+            unregister_signal(sig_id);
+            Err(Error::new(
+                err.kind(),
+                format!(
+                    "Failed to spawn command '{}': {}",
+                    builder.get_program().to_string_lossy(),
+                    err
+                ),
+            ))
+        },
     }
 }
 
