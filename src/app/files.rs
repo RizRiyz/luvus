@@ -42,6 +42,9 @@ pub(crate) enum InsertPath {
     NoPane,
     /// The path holds a terminal control character and cannot be pasted safely.
     ControlCharacter,
+    /// The path is not valid UTF-8, so the text that would reach the pane is not
+    /// the path that was clicked.
+    NotUtf8,
 }
 
 impl App {
@@ -525,6 +528,7 @@ impl App {
                     InsertPath::ControlCharacter => {
                         self.show_toast("path contains a control character")
                     }
+                    InsertPath::NotUtf8 => self.show_toast("path is not valid UTF-8"),
                 }
             }
             FileMenuItem::Delete => self.file_delete = Some(menu.path),
@@ -550,13 +554,23 @@ impl App {
     /// alter terminal input or terminate bracketed-paste mode. These characters
     /// are legal in Unix filenames, but no truncation of the path is a better
     /// answer than inserting unsafe or incorrect text.
+    ///
+    /// A path that is not valid UTF-8 is refused for the same reason. Unix
+    /// paths are bytes, not text, so `to_string_lossy` would replace the
+    /// invalid ones with U+FFFD and hand the pane a path that reads plausibly
+    /// and does not exist — a wrong path is worse than no path.
     pub(crate) fn insert_path(&mut self, path: &Path) -> InsertPath {
-        let text = path.to_string_lossy().into_owned();
+        let Some(text) = path.to_str() else {
+            return InsertPath::NotUtf8;
+        };
         if text.chars().any(char::is_control) {
             return InsertPath::ControlCharacter;
         }
-        match self.paste_into_focused_pane(&text) {
-            Some(target) => InsertPath::Inserted { target, text },
+        match self.paste_into_focused_pane(text) {
+            Some(target) => InsertPath::Inserted {
+                target,
+                text: text.to_owned(),
+            },
             None => InsertPath::NoPane,
         }
     }
@@ -2450,6 +2464,28 @@ mod tests {
             app.insert_path(&good),
             InsertPath::Inserted { .. }
         ));
+    }
+
+    /// A Unix path is bytes, not text. `to_string_lossy` would turn an invalid
+    /// byte into U+FFFD and insert a path that reads plausibly and does not
+    /// exist — the same "a wrong path is worse than no path" argument that
+    /// refuses control characters rather than trimming them.
+    #[cfg(unix)]
+    #[test]
+    fn insert_path_refuses_a_path_that_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let _env = crate::persist::test_env("files-insert-not-utf8");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+
+        let name = std::ffi::OsStr::from_bytes(b"not\xffutf8.txt");
+        let path = std::env::temp_dir().join(name);
+        assert_eq!(
+            app.insert_path(&path),
+            InsertPath::NotUtf8,
+            "a lossy conversion would have inserted a path that does not exist"
+        );
     }
 
     /// A native read-only view is not a terminal: there is no prompt to insert

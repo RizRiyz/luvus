@@ -41,9 +41,10 @@ FILES dock and its menu does not move focus, so the path lands where you were
 typing. It is inserted only; Luvus never sends Enter, and never adds an `@` or
 any other prefix, so the syntax stays yours. A path is left uninserted if there
 is no focused live terminal pane (for example, when a read-only file view is
-focused), or if the absolute path contains a control character such as a line
-break, tab, or Escape. This prevents the path from submitting or altering your
-terminal input.
+focused), if the absolute path contains a control character such as a line
+break, tab, or Escape — which would submit or alter your terminal input — or if
+it is not valid UTF-8, since the text Luvus could insert would not be the path
+you clicked.
 
 ## Opening a file
 
