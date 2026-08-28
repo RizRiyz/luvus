@@ -859,9 +859,18 @@ mod tests {
             "Delete does not fit yet, so it has no rect to click"
         );
 
+        // One notch moves the list by one row.
         let over = (top.x + 1, top.y);
         mouse(&mut app, MouseEventKind::ScrollDown, over);
-        mouse(&mut app, MouseEventKind::ScrollDown, over);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(app.menu_scroll.offset_of(PopupId::File), 1);
+
+        // Then to the bottom. Deliberately more notches than this menu has rows:
+        // the offset clamps, and the test should not have to be edited every time
+        // the FILES menu grows a row.
+        for _ in 0..20 {
+            mouse(&mut app, MouseEventKind::ScrollDown, over);
+        }
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
 
         let delete = rect_of(&app, FileMenuItem::Delete);
