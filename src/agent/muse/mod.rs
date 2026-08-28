@@ -78,6 +78,7 @@ fn read_session(path: &Path) -> Option<(String, PathBuf)> {
     let file = std::fs::File::open(path).ok()?;
     let mut session_id = None;
     let mut workspace = None;
+    let mut route_workspace = None;
     for line in std::io::BufReader::new(file)
         .take(256 * 1024)
         .lines()
@@ -106,8 +107,8 @@ fn read_session(path: &Path) -> Option<(String, PathBuf)> {
                 .and_then(serde_json::Value::as_str)
                 .filter(|cwd| Path::new(cwd).is_absolute())
                 .map(PathBuf::from);
-        } else if payload_type == "runtime.session.route_facts" && workspace.is_none() {
-            workspace = record
+        } else if payload_type == "runtime.session.route_facts" && route_workspace.is_none() {
+            route_workspace = record
                 .get("cwd")
                 .and_then(serde_json::Value::as_str)
                 .filter(|cwd| Path::new(cwd).is_absolute())
@@ -117,7 +118,7 @@ fn read_session(path: &Path) -> Option<(String, PathBuf)> {
             break;
         }
     }
-    Some((session_id?, workspace?))
+    Some((session_id?, workspace.or(route_workspace)?))
 }
 
 pub fn list(base: &Path, cwd: &Path) -> Vec<String> {
@@ -181,14 +182,15 @@ mod tests {
         let dir = base.join(day).join(id);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("session.jsonl");
-        fs::write(
-            &path,
-            format!(
-                "{{\"payload_type\":\"session.opened.observed\",\"payload\":{{\"record\":{{\"session_id\":\"{id}\"}}}}}}\n\
-                 {{\"payload_type\":\"runtime.session.metadata\",\"payload\":{{\"record\":{{\"workspace_root\":\"{cwd}\"}}}}}}\n"
-            ),
-        )
-        .unwrap();
+        let opened = serde_json::json!({
+            "payload_type": "session.opened.observed",
+            "payload": {"record": {"session_id": id}},
+        });
+        let metadata = serde_json::json!({
+            "payload_type": "runtime.session.metadata",
+            "payload": {"record": {"workspace_root": cwd}},
+        });
+        fs::write(&path, format!("{opened}\n{metadata}\n")).unwrap();
         path
     }
 
@@ -290,6 +292,41 @@ mod tests {
         );
 
         assert_eq!(recent(&base, 5).len(), 1);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn metadata_workspace_outranks_earlier_route_facts() {
+        let base = std::env::temp_dir().join(format!("luvus-muse-order-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let workspace = workspace_path();
+        let fallback = workspace.with_file_name("fallback");
+        let id = "7de3d84e-31f9-4437-b2f8-0b56db788042";
+        let dir = base.join("2026/08/28").join(id);
+        fs::create_dir_all(&dir).unwrap();
+        let records = [
+            serde_json::json!({
+                "payload_type": "session.opened.observed",
+                "payload": {"record": {"session_id": id}},
+            }),
+            serde_json::json!({
+                "payload_type": "runtime.session.route_facts",
+                "payload": {"record": {"cwd": fallback}},
+            }),
+            serde_json::json!({
+                "payload_type": "runtime.session.metadata",
+                "payload": {"record": {"workspace_root": workspace}},
+            }),
+        ];
+        let body = records
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(dir.join("session.jsonl"), format!("{body}\n")).unwrap();
+
+        assert_eq!(latest(&base, &workspace).as_deref(), Some(id));
+        assert!(latest(&base, &fallback).is_none());
         let _ = fs::remove_dir_all(base);
     }
 }
