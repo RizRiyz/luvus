@@ -609,7 +609,7 @@ impl App {
             .collect();
         let mut changes: Vec<(PaneId, State, String)> = Vec::new();
         // Panes that just finished a working stretch (Working → Idle/Done) — the
-        // retro "done" chime fires on these, whether or not the pane is focused.
+        // selected completion cue fires whether or not the pane is focused.
         let mut finished: Vec<PaneId> = Vec::new();
         // A newly-detected resumable agent means there's a session worth saving;
         // flag a snapshot so it's captured even if we later crash (no clean exit).
@@ -919,7 +919,7 @@ impl App {
                 }),
             );
             self.check_agent_waits(id);
-            // The optional retro chime (off by default). A plain shell going
+            // Optional sound cues (off by default). A plain shell going
             // quiet or blocking is not an agent, so it stays silent either way.
             let is_agent_pane = self.manifests.is_agent(&agent)
                 || self
@@ -930,14 +930,14 @@ impl App {
             // debounce already absorbs mid-turn pauses, and it rings whether or
             // not the pane is focused (that's the point: you looked away).
             if sound_done && is_agent_pane && finished.contains(&id) {
-                self.pending_sound = true;
+                self.queue_sound(crate::sound::SoundCue::Done);
             }
-            // *Blocked*: the same chime, but armed per pane — a prompt that
+            // *Blocked*: a distinct attention cue, armed per pane — a prompt that
             // flaps while you ignore it rings once, and focusing the pane
             // re-arms it for the next prompt.
             let armed = self.status.get(&id).is_some_and(|s| s.notify_armed);
             if sound_blocked && is_agent_pane && st == State::Blocked && armed {
-                self.pending_sound = true;
+                self.queue_sound(crate::sound::SoundCue::Blocked);
                 if let Some(s) = self.status.get_mut(&id) {
                     s.notify_armed = false;
                 }

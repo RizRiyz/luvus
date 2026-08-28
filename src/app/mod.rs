@@ -1483,9 +1483,9 @@ pub struct App {
     /// Notification messages queued by detection; the loop flushes them to the
     /// terminal (bell + desktop) and clears.
     pub pending_notify: Vec<String>,
-    /// Set when an agent just finished (transition to Done); the loop plays the
-    /// retro "done" jingle once and clears it.
-    pub pending_sound: bool,
+    /// Coalesced notification cue waiting for the client. A blocked cue takes
+    /// priority over a completion cue when both arrive before the next flush.
+    pub pending_sound: Option<crate::sound::SoundSignal>,
     /// Active mouse text selection in a pane (drag to select). Cleared on a new
     /// click; on release its text is queued to `pending_clipboard`.
     pub selection: Option<Selection>,
@@ -1934,7 +1934,7 @@ impl App {
             end_session: false,
             force_redraw: false,
             pending_notify: Vec::new(),
-            pending_sound: false,
+            pending_sound: None,
             selection: None,
             copy_mode: None,
             mouse_grab: None,
@@ -2474,7 +2474,7 @@ impl App {
             end_session: false,
             force_redraw: false,
             pending_notify: Vec::new(),
-            pending_sound: false,
+            pending_sound: None,
             selection: None,
             copy_mode: None,
             mouse_grab: None,
@@ -9706,8 +9706,8 @@ mod tests {
         assert_ne!(f0, f1, "the spinner advances with app.spinner");
     }
 
-    // An agent that finishes a working stretch (Working → Idle) queues the retro
-    // chime, whether or not its pane is focused.
+    // An agent that finishes a working stretch (Working → Idle) queues the
+    // selected completion cue, whether or not its pane is focused.
     #[test]
     fn agent_finish_plays_sound() {
         let _env = crate::persist::test_env("chime");
@@ -9733,10 +9733,11 @@ mod tests {
         });
         app.status.insert(pid, ps);
 
-        assert!(!app.pending_sound);
+        assert!(app.pending_sound.is_none());
         app.detect_tick(now);
-        assert!(
-            app.pending_sound,
+        assert_eq!(
+            app.pending_sound.map(|signal| signal.cue),
+            Some(crate::sound::SoundCue::Done),
             "an agent finishing its working stretch plays the chime"
         );
     }
@@ -10644,23 +10645,33 @@ mod tests {
         // Off by default: the same transition stays silent.
         app.status.get_mut(&id).unwrap().state = State::Idle;
         app.detect_tick(t0);
-        assert!(!app.pending_sound, "sound on blocked is off by default");
+        assert!(
+            app.pending_sound.is_none(),
+            "sound on blocked is off by default"
+        );
 
         // Enabled → a transition to Blocked rings once…
         app.config.notifications.sound_on_blocked = true;
         app.status.get_mut(&id).unwrap().state = State::Idle; // re-run the transition
         app.detect_tick(t0 + Duration::from_millis(200));
-        assert!(app.pending_sound, "blocked transition rings when enabled");
+        assert_eq!(
+            app.pending_sound.map(|signal| signal.cue),
+            Some(crate::sound::SoundCue::Blocked),
+            "blocked transition rings when enabled"
+        );
 
         // …and is disarmed: a flap back into Blocked doesn't ring again until
         // the user looks at the pane (focus re-arms; this pane is focused, so
         // simulate the unfocused case by moving focus away).
-        app.pending_sound = false;
+        app.pending_sound = None;
         let bogus = PaneId::alloc();
         app.layout_mut().focus = bogus; // unfocused → no auto re-arm
         app.status.get_mut(&id).unwrap().state = State::Idle;
         app.detect_tick(t0 + Duration::from_millis(400));
-        assert!(!app.pending_sound, "an ignored prompt doesn't ring twice");
+        assert!(
+            app.pending_sound.is_none(),
+            "an ignored prompt doesn't ring twice"
+        );
     }
 
     // A bursty/streaming agent has long pauses *within* one turn. The debounce
@@ -10727,17 +10738,21 @@ mod tests {
         app.detect_tick(t0); // candidate=Done, but not yet committed
         app.detect_tick(t0 + Duration::from_millis(500));
         assert_eq!(state(&app), State::Working, "a short pause stays Working");
-        assert!(!app.pending_sound, "a short pause does not chime");
+        assert!(app.pending_sound.is_none(), "a short pause does not chime");
 
         // (2) Sustained quiet past the dwell → Done, chiming.
         app.detect_tick(t0 + QUIET_DWELL + Duration::from_millis(100));
         assert_eq!(state(&app), State::Done, "sustained quiet commits Done");
-        assert!(app.pending_sound, "a genuine completion chimes");
+        assert_eq!(
+            app.pending_sound.map(|signal| signal.cue),
+            Some(crate::sound::SoundCue::Done),
+            "a genuine completion chimes"
+        );
 
         // (3) Work again, then complete again → a second genuine finish chimes
         // too (the chime is per finish; the debounce is what stops mid-turn
         // pauses from ringing).
-        app.pending_sound = false;
+        app.pending_sound = None;
         let t1 = t0 + QUIET_DWELL + Duration::from_millis(300);
         go_working(&mut app, t1); // spinner back on screen → Working
         app.detect_tick(t1); // commits Working instantly
@@ -10754,7 +10769,11 @@ mod tests {
             State::Done,
             "second completion still reaches Done"
         );
-        assert!(app.pending_sound, "each real finish chimes");
+        assert_eq!(
+            app.pending_sound.map(|signal| signal.cue),
+            Some(crate::sound::SoundCue::Done),
+            "each real finish chimes"
+        );
     }
 
     // Keyboard scroll mode: Shift+↑ enters, plain keys navigate the scrollback

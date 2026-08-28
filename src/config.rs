@@ -345,16 +345,33 @@ impl SidebarsConfig {
     }
 }
 
-/// Sound alerts. The retro chime is optional, so both default to **off** —
-/// nothing rings until the user turns it on in Settings → General.
-#[derive(Serialize, Deserialize, Clone, Default)]
+/// Sound alerts. Both events default to **off**, while the existing Retro
+/// completion cue remains the default style for backward compatibility.
+#[derive(Serialize, Deserialize, Clone)]
 pub struct NotifyConfig {
-    /// Play the retro chime when an agent finishes a working stretch.
+    /// The synthesized cue family used by both notification events.
+    #[serde(default = "default_sound_style")]
+    pub sound_style: String,
+    /// Play the selected completion cue when an agent finishes a working stretch.
     #[serde(default)]
     pub sound_on_done: bool,
-    /// Play the same chime when an agent blocks on a permission prompt.
+    /// Play the selected attention cue when an agent blocks on a prompt.
     #[serde(default)]
     pub sound_on_blocked: bool,
+}
+
+impl Default for NotifyConfig {
+    fn default() -> Self {
+        Self {
+            sound_style: default_sound_style(),
+            sound_on_done: false,
+            sound_on_blocked: false,
+        }
+    }
+}
+
+fn default_sound_style() -> String {
+    crate::sound::STYLE_RETRO.to_string()
 }
 
 fn default_theme() -> String {
@@ -618,6 +635,7 @@ mod tests {
         // Sounds are optional and must default to off.
         assert!(!c.notifications.sound_on_done);
         assert!(!c.notifications.sound_on_blocked);
+        assert_eq!(c.notifications.sound_style, crate::sound::STYLE_RETRO);
         let c2 = Config {
             theme: "mono".into(),
             notifications: NotifyConfig {
@@ -631,6 +649,14 @@ mod tests {
         assert_eq!(back.theme, "mono");
         assert!(back.notifications.sound_on_done);
         assert!(!back.notifications.sound_on_blocked);
+        assert_eq!(back.notifications.sound_style, crate::sound::STYLE_RETRO);
+
+        // Configs written before sound styles existed retain the original cue.
+        let old: Config = serde_json::from_str(
+            r#"{"notifications":{"sound_on_done":true,"sound_on_blocked":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(old.notifications.sound_style, crate::sound::STYLE_RETRO);
     }
 
     #[test]

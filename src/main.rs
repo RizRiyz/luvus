@@ -30,6 +30,7 @@ mod platform;
 mod search;
 mod session;
 mod skill;
+mod sound;
 mod terminal;
 mod theme;
 mod ui;
@@ -200,71 +201,34 @@ pub(crate) fn emit_clipboard(text: &str) {
     let _ = out.flush();
 }
 
-/// Play a short retro "done" jingle when an agent finishes. Runs client-side,
-/// like `emit_notification`. The WAV is synthesized once and cached in the temp
-/// dir, then played with the platform's audio tool in a detached thread so it
-/// never blocks the event loop. A silent no-op if no player is available.
-pub(crate) fn emit_sound() {
-    std::thread::spawn(|| {
-        if let Some(path) = ensure_done_jingle() {
+/// Play a synthesized notification cue. Playback stays client-side so remote
+/// sessions ring where the user is sitting, not on the server host.
+pub(crate) fn emit_sound(signal: sound::SoundSignal) {
+    std::thread::spawn(move || {
+        if let Some(path) = ensure_sound(signal) {
             play_sound_file(&path);
         }
     });
 }
 
-/// Synthesize the jingle WAV to `<tmp>/luvus-done.wav` on first use; return it.
-fn ensure_done_jingle() -> Option<std::path::PathBuf> {
-    let path = std::env::temp_dir().join("luvus-done.wav");
+/// Synthesize a cue once per machine and reuse its small WAV file thereafter.
+fn ensure_sound(signal: sound::SoundSignal) -> Option<std::path::PathBuf> {
+    static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let path = std::env::temp_dir().join(format!(
+        "luvus-{}-{}.wav",
+        signal.style.key(),
+        match signal.cue {
+            sound::SoundCue::Done => "done",
+            sound::SoundCue::Blocked => "blocked",
+        }
+    ));
     if !path.exists() {
-        std::fs::write(&path, synth_done_wav()).ok()?;
-    }
-    Some(path)
-}
-
-/// A tiny 8-bit-style "level up" flourish: four ascending square-wave notes
-/// (C-E-G-C), the last held a beat longer, with short fades so edges don't click.
-fn synth_done_wav() -> Vec<u8> {
-    const SR: u32 = 22_050;
-    let notes = [523.25f32, 659.25, 783.99, 1046.5]; // C5 E5 G5 C6
-    let amp = 0.22f32;
-    let mut samples: Vec<i16> = Vec::new();
-    for (i, &freq) in notes.iter().enumerate() {
-        let base = SR * 90 / 1000; // 90 ms
-        let n = if i + 1 == notes.len() { base * 2 } else { base };
-        let fade = (SR / 200).max(1); // ~5 ms
-        for s in 0..n {
-            let phase = (s as f32 * freq / SR as f32) % 1.0;
-            let sq = if phase < 0.5 { amp } else { -amp };
-            let up = s.min(fade) as f32 / fade as f32;
-            let down = n.saturating_sub(s).min(fade) as f32 / fade as f32;
-            let env = up.min(down);
-            samples.push((sq * env * i16::MAX as f32) as i16);
+        let _guard = WRITE_LOCK.lock().ok()?;
+        if !path.exists() {
+            std::fs::write(&path, sound::synth_wav(signal)).ok()?;
         }
     }
-    wav_bytes(&samples, SR)
-}
-
-/// Wrap 16-bit mono PCM in a minimal WAV container.
-fn wav_bytes(samples: &[i16], sr: u32) -> Vec<u8> {
-    let data_len = (samples.len() * 2) as u32;
-    let mut v = Vec::with_capacity(44 + data_len as usize);
-    v.extend_from_slice(b"RIFF");
-    v.extend_from_slice(&(36 + data_len).to_le_bytes());
-    v.extend_from_slice(b"WAVE");
-    v.extend_from_slice(b"fmt ");
-    v.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
-    v.extend_from_slice(&1u16.to_le_bytes()); // format = PCM
-    v.extend_from_slice(&1u16.to_le_bytes()); // channels = mono
-    v.extend_from_slice(&sr.to_le_bytes()); // sample rate
-    v.extend_from_slice(&(sr * 2).to_le_bytes()); // byte rate
-    v.extend_from_slice(&2u16.to_le_bytes()); // block align
-    v.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
-    v.extend_from_slice(b"data");
-    v.extend_from_slice(&data_len.to_le_bytes());
-    for s in samples {
-        v.extend_from_slice(&s.to_le_bytes());
-    }
-    v
+    Some(path)
 }
 
 /// Play a WAV with the platform's audio tool (blocking — called in a thread).
@@ -1017,9 +981,8 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
         for msg in app.pending_notify.drain(..) {
             emit_notification(&msg);
         }
-        if app.pending_sound {
-            app.pending_sound = false;
-            emit_sound();
+        if let Some(signal) = app.pending_sound.take() {
+            emit_sound(signal);
         }
         // Advance the working spinner ~10x/s (the loop redraws every frame).
         if last_spin.elapsed() >= Duration::from_millis(100)
@@ -1133,19 +1096,6 @@ mod tests {
         assert!(is_backend_discovery_request(&strings(&[
             "luvus", "uhp", "schema"
         ])));
-    }
-
-    // The synthesized "done" jingle is a well-formed 16-bit mono WAV.
-    #[test]
-    fn done_jingle_is_valid_wav() {
-        let w = synth_done_wav();
-        assert_eq!(&w[0..4], b"RIFF");
-        assert_eq!(&w[8..12], b"WAVE");
-        assert_eq!(&w[12..16], b"fmt ");
-        assert_eq!(&w[36..40], b"data");
-        let data_len = u32::from_le_bytes(w[40..44].try_into().unwrap()) as usize;
-        assert_eq!(w.len(), 44 + data_len, "header data length matches payload");
-        assert!(data_len > 0, "non-empty audio");
     }
 
     #[test]

@@ -545,9 +545,8 @@ pub fn run() -> Result<()> {
         for msg in app.pending_notify.drain(..) {
             broadcast(&mut clients, ServerMessage::Notify(msg));
         }
-        if app.pending_sound {
-            app.pending_sound = false;
-            broadcast(&mut clients, ServerMessage::Sound);
+        if let Some(signal) = app.pending_sound.take() {
+            broadcast(&mut clients, ServerMessage::Sound(signal));
         }
         // A finished mouse selection copies to the client's clipboard (OSC 52).
         if let Some(url) = app.pending_open_url.take() {
