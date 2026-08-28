@@ -4,10 +4,29 @@
 //! Settings copy in one required sub-catalog makes every supported language
 //! cover the same controls, values, prompts, and fixed-key reference rows.
 
+/// Fixed keys, per section, paired row-for-row with each language's
+/// `key_reference_descriptions`. A mismatch silently drops the extra rows from
+/// the Keys tab, so `every_language_covers_the_complete_settings_reference`
+/// asserts the counts agree.
+///
+/// `key_reference_label` special-cases a few rows by `(section, row)` index, so
+/// append within a section, or insert *after* the last special-cased row - never
+/// before it. Today those are `(0,5)`, `(1,2)`, `(2,0)`, `(2,2)`, `(3,0)`,
+/// `(3,1)`, and all of sections 7 and 8.
 pub const KEY_REFERENCE_KEYS: &[&[&str]] = &[
     &["h j k l", "q", "X", "-", "⇥ / ⇧⇥", "prefix ×2"],
     &["Shift+↑", "j / k", "Space / b", "g / G", "1–9", "q  esc"],
-    &["arrows  hjkl", "w / B", "Space / b", "v", "y  ⏎", "q  esc"],
+    &[
+        "arrows  hjkl",
+        "w / e / B",
+        "Space / b",
+        "^D / ^U",
+        "g / G",
+        "1–9",
+        "v",
+        "y  ⏎",
+        "q  esc",
+    ],
     &["arrows  hjkl", "Shift+arrow", "=  0", "esc"],
     &["1–6", "⇥ / ⇧⇥", "j / k", "/", "d  c", "m", "o", "r  q"],
     &["a", "s  d  m", "x  D", "o  ⏎", "j / k", "q"],
@@ -170,8 +189,11 @@ pub static EN: Catalog = Catalog {
         ],
         &[
             "extend the selection by character / line",
-            "next / previous word",
+            "word start / word end / previous word",
             "page down / up",
+            "half a page down / up (^ is Ctrl)",
+            "oldest / newest row, so 5G jumps to row 5",
+            "repeat the next motion, so 12j moves twelve rows",
             "reset the selection anchor at the cursor",
             "copy and return to live output",
             "cancel and restore the prior viewport",
@@ -249,16 +271,15 @@ pub static ES: Catalog = Catalog {
     keys_sections: ["Paneles", "Pestañas", "Espacios y worktrees", "Vistas y paneles", "Sesión"],
     key_reference_headings: ["Siempre activos (no reasignables)", "Historial (sin prefijo)", "Modo copia (tras Copiar texto del terminal)", "Modo redimensionar (tras prefijo + r)", "Pestaña Git (tras prefijo + g)", "Tablero de tareas (tras prefijo + o)", "Selector de carpetas (tras prefijo + N)", "Copiar y pegar", "Ratón"],
     key_reference_descriptions: [
-        &["enfocar paneles (alias de vim)", "desconectar y dejar el servidor activo", "cerrar panel", "dividir abajo", "pestaña siguiente / anterior", "enviar el prefijo configurado literalmente"],
+&["enfocar paneles (alias de vim)", "desconectar y dejar el servidor activo", "cerrar panel", "dividir abajo", "pestaña siguiente / anterior", "enviar el prefijo configurado literalmente"],
         &["entrar al historial del panel enfocado", "línea abajo / arriba", "página abajo / arriba", "inicio del historial / volver al vivo", "saltar por el historial (1 más antiguo, 9 más nuevo)", "volver al vivo"],
-        &["ampliar la selección por carácter / línea", "palabra siguiente / anterior", "página abajo / arriba", "reiniciar el ancla en el cursor", "copiar y volver al vivo", "cancelar y restaurar la vista anterior"],
-        &["redimensionar el panel enfocado", "paso mayor", "igualar divisiones", "salir del modo redimensionar"],
-        &["Commits Flujo Ramas PRs Incidencias Estado", "vista siguiente / anterior", "desplazar la lista", "filtrar la lista", "diff / crear un PR", "ámbito: este repo o mi trabajo", "abrir en GitHub", "actualizar / cerrar la pestaña"],
-        &["nueva tarea", "iniciar / terminar / fusionar", "liberar / eliminar", "detalle / ir al panel del trabajador", "mover el cursor", "cerrar el tablero"],
-        &["mover", "entrar en carpeta / subir", "abrir la carpeta como espacio", "nueva carpeta / abrir como worktree", "cancelar"],
-        &["seleccionar texto y copiar al soltar", "seleccionar dentro de una app que usa el ratón, como un agente", "pegado del terminal en el panel enfocado"],
-        &["enfocar un panel o activar una fila / botón", "menú contextual de panel, espacio, agente o pestaña", "desplazar historial del panel o una lista", "redimensionar la división", "ampliar con toque / móvil"],
-    ],
+        &["ampliar la selección por carácter / línea", "inicio de palabra / final de palabra / palabra anterior", "página abajo / arriba", "media página abajo / arriba (^ es Ctrl)", "fila más antigua / más nueva, así 5G salta a la fila 5", "repetir el siguiente movimiento, así 12j mueve doce filas", "reiniciar el ancla en el cursor", "copiar y volver al vivo", "cancelar y restaurar la vista anterior"],
+&["redimensionar el panel enfocado", "paso mayor", "igualar divisiones", "salir del modo redimensionar"],
+&["Commits Flujo Ramas PRs Incidencias Estado", "vista siguiente / anterior", "desplazar la lista", "filtrar la lista", "diff / crear un PR", "ámbito: este repo o mi trabajo", "abrir en GitHub", "actualizar / cerrar la pestaña"],
+&["nueva tarea", "iniciar / terminar / fusionar", "liberar / eliminar", "detalle / ir al panel del trabajador", "mover el cursor", "cerrar el tablero"],
+&["mover", "entrar en carpeta / subir", "abrir la carpeta como espacio", "nueva carpeta / abrir como worktree", "cancelar"],
+&["seleccionar texto y copiar al soltar", "seleccionar dentro de una app que usa el ratón, como un agente", "pegado del terminal en el panel enfocado"],
+&["enfocar un panel o activar una fila / botón", "menú contextual de panel, espacio, agente o pestaña", "desplazar historial del panel o una lista", "redimensionar la división", "ampliar con toque / móvil"],],
     modules_empty: "No hay módulos instalados. Ejecuta `luvus module link <dir>`.", module_unavailable: "no disponible", module_action: "acción", module_actions: "acciones", module_pane: "panel", module_panes: "paneles", module_dock: "panel acoplado", module_docks: "paneles acoplados", module_setting: "ajuste", module_settings: "ajustes", module_edit_hint: "Enter guardar · Esc cancelar",
     theme_bundled: "El tema {id} viene incluido y no se puede eliminar", theme_removing: "Eliminando tema {id}…", theme_removed: "Tema {id} eliminado", theme_remove_failed: "No se pudo eliminar {id}: {error}",
 };
@@ -273,16 +294,15 @@ pub static PT: Catalog = Catalog {
     keys_sections: ["Painéis", "Abas", "Espaços e worktrees", "Vistas e painéis", "Sessão"],
     key_reference_headings: ["Sempre ativos (não reatribuíveis)", "Histórico (sem prefixo)", "Modo de cópia (após Copiar texto do terminal)", "Modo de redimensionar (após prefixo + r)", "Aba Git (após prefixo + g)", "Quadro de tarefas (após prefixo + o)", "Seletor de pastas (após prefixo + N)", "Copiar e colar", "Mouse"],
     key_reference_descriptions: [
-        &["focar painéis (aliases do vim)", "desconectar e manter o servidor ativo", "fechar painel", "dividir abaixo", "aba seguinte / anterior", "enviar o prefixo configurado literalmente"],
+&["focar painéis (aliases do vim)", "desconectar e manter o servidor ativo", "fechar painel", "dividir abaixo", "aba seguinte / anterior", "enviar o prefixo configurado literalmente"],
         &["entrar no histórico do painel focado", "linha abaixo / acima", "página abaixo / acima", "início do histórico / voltar ao vivo", "saltar pelo histórico (1 mais antigo, 9 mais novo)", "voltar ao vivo"],
-        &["estender seleção por caractere / linha", "palavra seguinte / anterior", "página abaixo / acima", "redefinir âncora no cursor", "copiar e voltar ao vivo", "cancelar e restaurar a visualização anterior"],
-        &["redimensionar o painel focado", "passo maior", "igualar divisões", "sair do modo de redimensionar"],
-        &["Commits Fluxo Ramos PRs Issues Estado", "vista seguinte / anterior", "rolar a lista", "filtrar a lista", "diff / criar um PR", "escopo: este repo ou meu trabalho", "abrir no GitHub", "atualizar / fechar a aba"],
-        &["nova tarefa", "iniciar / concluir / mesclar", "liberar / excluir", "detalhe / ir ao painel do agente", "mover o cursor", "fechar o quadro"],
-        &["mover", "entrar na pasta / subir", "abrir a pasta como espaço", "nova pasta / abrir como worktree", "cancelar"],
-        &["selecionar texto e copiar ao soltar", "selecionar dentro de um app que usa o mouse, como um agente", "colar do terminal no painel focado"],
-        &["focar um painel ou ativar uma linha / botão", "menu de contexto de painel, espaço, agente ou aba", "rolar histórico do painel ou uma lista", "redimensionar a divisão", "ampliar por toque / móvel"],
-    ],
+        &["estender seleção por caractere / linha", "início da palavra / fim da palavra / palavra anterior", "página abaixo / acima", "meia página abaixo / acima (^ é Ctrl)", "linha mais antiga / mais nova, então 5G salta para a linha 5", "repetir o próximo movimento, então 12j move doze linhas", "redefinir âncora no cursor", "copiar e voltar ao vivo", "cancelar e restaurar a visualização anterior"],
+&["redimensionar o painel focado", "passo maior", "igualar divisões", "sair do modo de redimensionar"],
+&["Commits Fluxo Ramos PRs Issues Estado", "vista seguinte / anterior", "rolar a lista", "filtrar a lista", "diff / criar um PR", "escopo: este repo ou meu trabalho", "abrir no GitHub", "atualizar / fechar a aba"],
+&["nova tarefa", "iniciar / concluir / mesclar", "liberar / excluir", "detalhe / ir ao painel do agente", "mover o cursor", "fechar o quadro"],
+&["mover", "entrar na pasta / subir", "abrir a pasta como espaço", "nova pasta / abrir como worktree", "cancelar"],
+&["selecionar texto e copiar ao soltar", "selecionar dentro de um app que usa o mouse, como um agente", "colar do terminal no painel focado"],
+&["focar um painel ou ativar uma linha / botão", "menu de contexto de painel, espaço, agente ou aba", "rolar histórico do painel ou uma lista", "redimensionar a divisão", "ampliar por toque / móvel"],],
     modules_empty: "Nenhum módulo instalado. Execute `luvus module link <dir>`.", module_unavailable: "indisponível", module_action: "ação", module_actions: "ações", module_pane: "painel", module_panes: "painéis", module_dock: "painel acoplado", module_docks: "painéis acoplados", module_setting: "configuração", module_settings: "configurações", module_edit_hint: "Enter salvar · Esc cancelar",
     theme_bundled: "O tema {id} vem incluído e não pode ser removido", theme_removing: "Removendo tema {id}…", theme_removed: "Tema {id} removido", theme_remove_failed: "Não foi possível remover {id}: {error}",
 };
@@ -297,16 +317,15 @@ pub static FR: Catalog = Catalog {
     keys_sections: ["Volets", "Onglets", "Espaces et worktrees", "Vues et panneaux", "Session"],
     key_reference_headings: ["Toujours actifs (non réaffectables)", "Historique (sans préfixe)", "Mode copie (après Copier le texte du terminal)", "Mode redimensionnement (après préfixe + r)", "Onglet Git (après préfixe + g)", "Tableau des tâches (après préfixe + o)", "Sélecteur de dossiers (après préfixe + N)", "Copier et coller", "Souris"],
     key_reference_descriptions: [
-        &["cibler les volets (alias vim)", "se détacher en laissant le serveur actif", "fermer le volet", "diviser vers le bas", "onglet suivant / précédent", "envoyer littéralement le préfixe configuré"],
+&["cibler les volets (alias vim)", "se détacher en laissant le serveur actif", "fermer le volet", "diviser vers le bas", "onglet suivant / précédent", "envoyer littéralement le préfixe configuré"],
         &["ouvrir l'historique du volet ciblé", "ligne suivante / précédente", "page suivante / précédente", "début de l'historique / retour au direct", "parcourir l'historique (1 ancien, 9 récent)", "retour au direct"],
-        &["étendre la sélection par caractère / ligne", "mot suivant / précédent", "page suivante / précédente", "replacer l'ancre sur le curseur", "copier et revenir au direct", "annuler et restaurer la vue précédente"],
-        &["redimensionner le volet ciblé", "pas plus grand", "égaliser les divisions", "quitter le mode redimensionnement"],
-        &["Commits Flux Branches PRs Issues État", "vue suivante / précédente", "faire défiler la liste", "filtrer la liste", "diff / créer une PR", "portée : ce dépôt ou mon travail", "ouvrir sur GitHub", "actualiser / fermer l'onglet"],
-        &["nouvelle tâche", "démarrer / terminer / fusionner", "libérer / supprimer", "détail / aller au volet de l'agent", "déplacer le curseur", "fermer le tableau"],
-        &["déplacer", "entrer dans le dossier / remonter", "ouvrir le dossier comme espace", "nouveau dossier / ouvrir comme worktree", "annuler"],
-        &["sélectionner le texte et copier au relâchement", "sélectionner dans une app qui gère la souris, comme un agent", "coller depuis le terminal dans le volet ciblé"],
-        &["cibler un volet ou activer une ligne / un bouton", "menu contextuel de volet, espace, agent ou onglet", "faire défiler l'historique du volet ou une liste", "redimensionner la division", "agrandir par toucher / mobile"],
-    ],
+        &["étendre la sélection par caractère / ligne", "début du mot / fin du mot / mot précédent", "page suivante / précédente", "demi-page vers le bas / haut (^ est Ctrl)", "ligne la plus ancienne / récente : 5G va à la ligne 5", "répéter le mouvement suivant : 12j déplace de douze lignes", "replacer l'ancre sur le curseur", "copier et revenir au direct", "annuler et restaurer la vue précédente"],
+&["redimensionner le volet ciblé", "pas plus grand", "égaliser les divisions", "quitter le mode redimensionnement"],
+&["Commits Flux Branches PRs Issues État", "vue suivante / précédente", "faire défiler la liste", "filtrer la liste", "diff / créer une PR", "portée : ce dépôt ou mon travail", "ouvrir sur GitHub", "actualiser / fermer l'onglet"],
+&["nouvelle tâche", "démarrer / terminer / fusionner", "libérer / supprimer", "détail / aller au volet de l'agent", "déplacer le curseur", "fermer le tableau"],
+&["déplacer", "entrer dans le dossier / remonter", "ouvrir le dossier comme espace", "nouveau dossier / ouvrir comme worktree", "annuler"],
+&["sélectionner le texte et copier au relâchement", "sélectionner dans une app qui gère la souris, comme un agent", "coller depuis le terminal dans le volet ciblé"],
+&["cibler un volet ou activer une ligne / un bouton", "menu contextuel de volet, espace, agent ou onglet", "faire défiler l'historique du volet ou une liste", "redimensionner la division", "agrandir par toucher / mobile"],],
     modules_empty: "Aucun module installé. Exécutez `luvus module link <dir>`.", module_unavailable: "indisponible", module_action: "action", module_actions: "actions", module_pane: "volet", module_panes: "volets", module_dock: "panneau ancré", module_docks: "panneaux ancrés", module_setting: "paramètre", module_settings: "paramètres", module_edit_hint: "Entrée enregistrer · Échap annuler",
     theme_bundled: "Le thème {id} est inclus et ne peut pas être supprimé", theme_removing: "Suppression du thème {id}…", theme_removed: "Thème {id} supprimé", theme_remove_failed: "Impossible de supprimer {id} : {error}",
 };
@@ -321,16 +340,15 @@ pub static DE: Catalog = Catalog {
     keys_sections: ["Bereiche", "Tabs", "Arbeitsbereiche und Worktrees", "Ansichten und Panels", "Sitzung"],
     key_reference_headings: ["Immer aktiv (nicht änderbar)", "Verlauf (ohne Präfix)", "Kopiermodus (nach Terminaltext kopieren)", "Größenmodus (nach Präfix + r)", "Git-Tab (nach Präfix + g)", "Aufgabenboard (nach Präfix + o)", "Ordnerauswahl (nach Präfix + N)", "Kopieren und Einfügen", "Maus"],
     key_reference_descriptions: [
-        &["Bereiche fokussieren (vim-Aliasse)", "trennen und Server weiterlaufen lassen", "Bereich schließen", "nach unten teilen", "nächster / vorheriger Tab", "konfigurierten Präfix wörtlich senden"],
+&["Bereiche fokussieren (vim-Aliasse)", "trennen und Server weiterlaufen lassen", "Bereich schließen", "nach unten teilen", "nächster / vorheriger Tab", "konfigurierten Präfix wörtlich senden"],
         &["Verlauf des fokussierten Bereichs öffnen", "Zeile ab / auf", "Seite ab / auf", "Verlaufsanfang / zurück zu live", "im Verlauf springen (1 älteste, 9 neueste)", "zurück zu live"],
-        &["Auswahl um Zeichen / Zeile erweitern", "nächstes / vorheriges Wort", "Seite ab / auf", "Auswahlanker am Cursor neu setzen", "kopieren und zu live zurückkehren", "abbrechen und vorherige Ansicht wiederherstellen"],
-        &["fokussierten Bereich vergrößern", "größerer Schritt", "Teilungen ausgleichen", "Größenmodus verlassen"],
-        &["Commits Fluss Branches PRs Issues Status", "nächste / vorherige Ansicht", "Liste scrollen", "Liste filtern", "Diff / PR erstellen", "Bereich: dieses Repo oder meine Arbeit", "auf GitHub öffnen", "aktualisieren / Tab schließen"],
-        &["neue Aufgabe", "starten / erledigen / mergen", "freigeben / löschen", "Details / zum Worker-Bereich", "Cursor bewegen", "Board schließen"],
-        &["bewegen", "Ordner öffnen / nach oben", "Ordner als Arbeitsbereich öffnen", "neuer Ordner / als Worktree öffnen", "abbrechen"],
-        &["Text auswählen und beim Loslassen kopieren", "in einer mausfähigen App wie einem Agenten auswählen", "Terminalinhalt in den fokussierten Bereich einfügen"],
-        &["Bereich fokussieren oder Zeile / Schaltfläche aktivieren", "Kontextmenü für Bereich, Arbeitsbereich, Agent oder Tab", "Bereichsverlauf oder Liste scrollen", "Teilung vergrößern", "per Touch / mobil zoomen"],
-    ],
+        &["Auswahl um Zeichen / Zeile erweitern", "Wortanfang / Wortende / vorheriges Wort", "Seite ab / auf", "halbe Seite ab / auf (^ ist Ctrl)", "älteste / neueste Zeile, 5G springt zu Zeile 5", "nächste Bewegung wiederholen, 12j bewegt zwölf Zeilen", "Auswahlanker am Cursor neu setzen", "kopieren und zu live zurückkehren", "abbrechen und vorherige Ansicht wiederherstellen"],
+&["fokussierten Bereich vergrößern", "größerer Schritt", "Teilungen ausgleichen", "Größenmodus verlassen"],
+&["Commits Fluss Branches PRs Issues Status", "nächste / vorherige Ansicht", "Liste scrollen", "Liste filtern", "Diff / PR erstellen", "Bereich: dieses Repo oder meine Arbeit", "auf GitHub öffnen", "aktualisieren / Tab schließen"],
+&["neue Aufgabe", "starten / erledigen / mergen", "freigeben / löschen", "Details / zum Worker-Bereich", "Cursor bewegen", "Board schließen"],
+&["bewegen", "Ordner öffnen / nach oben", "Ordner als Arbeitsbereich öffnen", "neuer Ordner / als Worktree öffnen", "abbrechen"],
+&["Text auswählen und beim Loslassen kopieren", "in einer mausfähigen App wie einem Agenten auswählen", "Terminalinhalt in den fokussierten Bereich einfügen"],
+&["Bereich fokussieren oder Zeile / Schaltfläche aktivieren", "Kontextmenü für Bereich, Arbeitsbereich, Agent oder Tab", "Bereichsverlauf oder Liste scrollen", "Teilung vergrößern", "per Touch / mobil zoomen"],],
     modules_empty: "Keine Module installiert. Führe `luvus module link <dir>` aus.", module_unavailable: "nicht verfügbar", module_action: "Aktion", module_actions: "Aktionen", module_pane: "Bereich", module_panes: "Bereiche", module_dock: "Dock", module_docks: "Docks", module_setting: "Einstellung", module_settings: "Einstellungen", module_edit_hint: "Eingabe speichern · Esc abbrechen",
     theme_bundled: "Theme {id} ist integriert und kann nicht entfernt werden", theme_removing: "Theme {id} wird entfernt…", theme_removed: "Theme {id} entfernt", theme_remove_failed: "{id} konnte nicht entfernt werden: {error}",
 };
@@ -398,10 +416,9 @@ pub static ID: Catalog = Catalog {
         "Papan tugas (setelah prefiks + o)",
         "Pemilih folder (setelah prefiks + N)",
         "Salin dan tempel",
-        "Mouse",
-    ],
+        "Mouse",],
     key_reference_descriptions: [
-        &[
+&[
             "fokus panel (alias vim)",
             "lepas dan biarkan server berjalan",
             "tutup panel",
@@ -419,19 +436,21 @@ pub static ID: Catalog = Catalog {
         ],
         &[
             "perluas pilihan per karakter / baris",
-            "kata berikutnya / sebelumnya",
+            "awal kata / akhir kata / kata sebelumnya",
             "halaman turun / naik",
+            "setengah halaman turun / naik (^ berarti Ctrl)", "baris terlama / terbaru, jadi 5G lompat ke baris 5",
+            "ulangi gerakan berikutnya, jadi 12j pindah dua belas baris",
             "reset jangkar pilihan di kursor",
             "salin dan kembali live",
             "batal dan pulihkan tampilan sebelumnya",
         ],
-        &[
+&[
             "ubah ukuran panel aktif",
             "langkah lebih besar",
             "samakan pembagian",
             "keluar dari mode ubah ukuran",
         ],
-        &[
+&[
             "Commit Alur Branch PR Isu Status",
             "tampilan berikutnya / sebelumnya",
             "gulir daftar",
@@ -441,7 +460,7 @@ pub static ID: Catalog = Catalog {
             "buka di GitHub",
             "segarkan / tutup tab",
         ],
-        &[
+&[
             "tugas baru",
             "mulai / selesai / gabung",
             "lepas / hapus",
@@ -449,26 +468,25 @@ pub static ID: Catalog = Catalog {
             "gerakkan kursor",
             "tutup papan",
         ],
-        &[
+&[
             "bergerak",
             "masuk folder / naik",
             "buka folder sebagai ruang kerja",
             "folder baru / buka sebagai worktree",
             "batal",
         ],
-        &[
+&[
             "pilih teks dan salin saat dilepas",
             "pilih di aplikasi yang memakai mouse seperti agen",
             "tempel dari terminal ke panel aktif",
         ],
-        &[
+&[
             "fokus panel atau aktifkan baris / tombol",
             "menu konteks panel, ruang kerja, agen, atau tab",
             "gulir riwayat panel atau daftar",
             "ubah ukuran pembagian",
             "zoom dengan sentuhan / seluler",
-        ],
-    ],
+        ],],
     modules_empty: "Belum ada modul terpasang. Jalankan `luvus module link <dir>`.",
     module_unavailable: "tidak tersedia",
     module_action: "aksi",
@@ -563,8 +581,11 @@ pub static ZH: Catalog = Catalog {
         ],
         &[
             "按字符 / 行扩展选择",
-            "下 / 上一个单词",
+            "单词开头 / 单词结尾 / 上一个单词",
             "下 / 上一页",
+            "下 / 上半页(^ 即 Ctrl)",
+            "最旧 / 最新的行，因此 5G 跳到第 5 行",
+            "重复下一次移动，因此 12j 移动十二行",
             "在光标处重设选择锚点",
             "复制并返回实时输出",
             "取消并恢复之前的视口",
@@ -715,8 +736,11 @@ pub static JA: Catalog = Catalog {
         ],
         &[
             "文字 / 行単位で選択を拡張",
-            "次 / 前の単語",
+            "単語の先頭 / 単語の末尾 / 前の単語",
             "下 / 上のページ",
+            "半ページ下 / 上(^ は Ctrl)",
+            "最古 / 最新の行（5G で5行目へ）",
+            "次の移動を繰り返す（12j で12行移動）",
             "カーソル位置に選択アンカーを再設定",
             "コピーしてライブ表示へ戻る",
             "キャンセルして前の表示位置を復元",
@@ -868,8 +892,11 @@ pub static KO: Catalog = Catalog {
         ],
         &[
             "글자 / 줄 단위로 선택 확장",
-            "다음 / 이전 단어",
+            "다음 단어 시작 / 단어 끝 / 이전 단어",
             "한 페이지 아래 / 위",
+            "반 페이지 아래 / 위 (^는 Ctrl)",
+            "최초 / 최신 행, 5G는 5행으로 이동",
+            "다음 이동 반복, 12j는 12행 이동",
             "커서 위치에서 선택 기준점 초기화",
             "복사 후 실시간으로 복귀",
             "취소 후 이전 화면으로 복원",

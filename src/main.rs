@@ -2084,6 +2084,73 @@ mod tests {
     /// list at the top, and the cursor steps through the commands *and* the
     /// read-only reference blocks, so holding Down eventually reveals every one
     /// (the last is the Mouse block) on a short modal.
+    /// Every copy-mode reference row has to render its description in full. The
+    /// i18n arity check counts rows but cannot see the panel, and the panel's
+    /// description column is exactly what a longer translation runs out of: the
+    /// Indonesian count row was clipped mid-word at 63 characters while English
+    /// fit at 48. Wide cells leave an empty continuation cell, so the comparison
+    /// ignores whitespace rather than pretending CJK reads back cell-for-cell.
+    #[test]
+    fn copy_mode_reference_rows_are_not_clipped_in_any_language() {
+        use ratatui::buffer::Buffer;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::layout::Rect;
+        let flatten = |s: &str| -> String { s.chars().filter(|c| !c.is_whitespace()).collect() };
+        for code in crate::i18n::LANGS {
+            let _env = crate::persist::test_env(&format!("keys-clip-{code}"));
+            let (tx, _rx) = mpsc::channel::<AppEvent>();
+            let mut app = App::new(80, 24, tx).expect("spawn pane");
+            app.catalog = crate::i18n::by_code(code);
+            app.open_settings();
+            app.handle_settings_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+            let render = |app: &mut App| -> String {
+                let area = Rect::new(0, 0, 80, 24);
+                let mut buf = Buffer::empty(area);
+                {
+                    let mut target = ui::RenderTarget::new(&mut buf, area);
+                    ui::render_into(&mut target, app);
+                }
+                let mut out = String::new();
+                for y in 0..area.height {
+                    for x in 0..area.width {
+                        out.push_str(buf[(x, y)].symbol());
+                    }
+                    out.push('\n');
+                }
+                out
+            };
+
+            let rows = app.settings_rows(crate::app::SettingsTab::Keys);
+            for _ in 0..rows {
+                app.handle_settings_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            }
+            let heading = flatten(app.catalog.settings.key_reference_headings[2]);
+            let mut view = render(&mut app);
+            for _ in 0..rows {
+                if flatten(&view).contains(&heading) {
+                    break;
+                }
+                app.handle_settings_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+                view = render(&mut app);
+            }
+            assert!(
+                flatten(&view).contains(&heading),
+                "{code} never scrolled the copy-mode block into view"
+            );
+
+            let keys = crate::i18n::settings::KEY_REFERENCE_KEYS[2];
+            let descs = app.catalog.settings.key_reference_descriptions[2];
+            let seen = flatten(&view);
+            for (key, desc) in keys.iter().zip(descs.iter()) {
+                assert!(
+                    seen.contains(&flatten(desc)),
+                    "{code} clips the {key} row at {} characters:\n{desc}\n{view}",
+                    desc.chars().count()
+                );
+            }
+        }
+    }
+
     #[test]
     fn keys_tab_shows_help_and_scrolls_to_the_reference() {
         use ratatui::buffer::Buffer;
@@ -2162,6 +2229,24 @@ mod tests {
         assert!(
             reference_view.contains("Copy & paste"),
             "there is a Copy & paste reference block:\n{reference_view}"
+        );
+
+        // Copy mode's motions cannot be rebound, so the Keys tab is the only place
+        // in the app that can teach them. A user who never reads the website has
+        // to be able to find `e`, `^D`/`^U`, and the count prefix right here.
+        let mut copy_view = reference_view;
+        for _ in 0..app.settings_rows(crate::app::SettingsTab::Keys) {
+            if copy_view.contains("w / e / B") {
+                break;
+            }
+            app.handle_settings_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+            copy_view = screen(&mut app);
+        }
+        assert!(
+            copy_view.contains("w / e / B")
+                && copy_view.contains("^D / ^U")
+                && copy_view.contains("12j moves twelve rows"),
+            "copy mode's fixed motions are discoverable in the Keys tab:\n{copy_view}"
         );
 
         // The mouse wheel scrolls the list (moves the selection) without the arrows.

@@ -73,9 +73,12 @@ impl Theme {
 
         if is_dark {
             Theme {
-                crust: blend_rgb(bg, [0, 0, 0], 0.15),
-                mantle: blend_rgb(bg, [0, 0, 0], 0.07),
-                surface0: blend_rgb(bg, dim, 0.35),
+                // OSC 11 reports only RGB, not the terminal background's alpha.
+                // Painting that RGB explicitly makes transparent terminals
+                // opaque, so primary surfaces must keep using the default color.
+                crust: Color::Reset,
+                mantle: Color::Reset,
+                surface0: Color::Reset,
                 surface1: blend_rgb(bg, dim, 0.70),
                 subtext0: blend_rgb(bg, fg, 0.62),
                 subtext1: blend_rgb(bg, fg, 0.78),
@@ -86,9 +89,9 @@ impl Theme {
             }
         } else {
             Theme {
-                crust: blend_rgb(bg, [255, 255, 255], 0.40),
-                mantle: blend_rgb(bg, [255, 255, 255], 0.20),
-                surface0: blend_rgb(bg, dim, 0.30),
+                crust: Color::Reset,
+                mantle: Color::Reset,
+                surface0: Color::Reset,
                 surface1: blend_rgb(bg, dim, 0.60),
                 subtext0: blend_rgb(bg, fg, 0.55),
                 subtext1: blend_rgb(bg, fg, 0.70),
@@ -105,7 +108,7 @@ impl Theme {
         Theme {
             crust: Color::Reset,
             mantle: Color::Reset,
-            base: pal(bg),
+            base: Color::Reset,
             surface0: Color::Reset,
             surface1: Color::Reset,
             overlay0: blend_rgb(bg, fg, 0.28),
@@ -939,8 +942,7 @@ mod tests {
     }
 
     #[test]
-    fn from_terminal_does_not_panic() {
-        // Dark terminal.
+    fn from_terminal_preserves_the_default_background() {
         let dark = TerminalColors {
             fg: [0xee, 0xee, 0xee],
             bg: [0x1a, 0x1a, 0x2e],
@@ -949,9 +951,6 @@ mod tests {
                 [0x1a, 0x1a, 0x2e],
             ),
         };
-        let _ = Theme::from_terminal(&dark);
-
-        // Light terminal.
         let light = TerminalColors {
             fg: [0x33, 0x33, 0x33],
             bg: [0xf5, 0xf5, 0xf0],
@@ -960,7 +959,16 @@ mod tests {
                 [0xf5, 0xf5, 0xf0],
             ),
         };
-        let _ = Theme::from_terminal(&light);
+
+        for colors in [&dark, &light] {
+            let theme = Theme::from_terminal(colors);
+            assert_eq!(theme.crust, Color::Reset);
+            assert_eq!(theme.mantle, Color::Reset);
+            assert_eq!(theme.base, Color::Reset);
+            assert_eq!(theme.surface0, Color::Reset);
+            assert_eq!(theme.text, pal(colors.fg));
+            assert_eq!(theme.accent, pal(colors.palette[4]));
+        }
     }
 
     #[test]

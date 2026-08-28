@@ -659,6 +659,18 @@ pub enum FilePromptKind {
     Rename,
 }
 
+/// What a terminal-editor pane is editing (docs/38): the file, and the editor
+/// run-command it was launched with. The command is part of the record because
+/// `Open With` can aim a *second*, different editor at a file that is already
+/// open in one — re-opening the same editor focuses the running tab, a
+/// different one is an explicit override and still launches.
+pub struct EditorFile {
+    pub path: PathBuf,
+    /// A run-command such as `"vim"` or `"emacs -nw"`, exactly as it appears in
+    /// `App::editors`.
+    pub command: String,
+}
+
 /// Cap a file-tree name entry (same spirit as [`TAB_NAME_MAX`]).
 pub(crate) const FILE_NAME_MAX: usize = 120;
 
@@ -1219,6 +1231,12 @@ impl Selection {
     }
 }
 
+/// Ceiling for copy mode's typed count. Row and column motions are O(1), but a
+/// word motion walks the grid a step at a time, so an accidental `9999999w`
+/// would hold the engine lock the PTY reader needs. Four digits covers a jump
+/// across a full scrollback and keeps the worst case bounded.
+pub const COPY_COUNT_MAX: usize = 9_999;
+
 /// Keyboard-driven selection in a terminal pane. Rows are absolute indices in
 /// retained-row coordinates (oldest retained row is zero), so the selection remains
 /// stable while its viewport scrolls.
@@ -1229,6 +1247,9 @@ pub struct CopyMode {
     pub cursor: (usize, usize),
     /// The viewport to restore when the user cancels instead of copying.
     pub saved_scroll: usize,
+    /// Digits typed since the last motion — vim's count prefix, so `12j` moves
+    /// twelve rows. Zero means "no count typed", which every motion reads as 1.
+    pub pending_count: usize,
 }
 
 impl CopyMode {
@@ -1238,6 +1259,22 @@ impl CopyMode {
         } else {
             (self.cursor, self.anchor)
         }
+    }
+
+    /// How many times the next motion repeats. A typed count of zero means the
+    /// user typed none, and every motion still has to move once.
+    pub(crate) fn count(&self) -> usize {
+        self.pending_count.max(1)
+    }
+
+    /// Append a typed digit, saturating at [`COPY_COUNT_MAX`] so a leaned-on
+    /// key cannot turn one motion into unbounded scanning work.
+    pub(crate) fn push_count_digit(&mut self, digit: usize) {
+        self.pending_count = self
+            .pending_count
+            .saturating_mul(10)
+            .saturating_add(digit)
+            .min(COPY_COUNT_MAX);
     }
 
     pub(crate) fn contains(&self, row: usize, col: usize) -> bool {
@@ -1635,7 +1672,7 @@ pub struct App {
     /// with the file exactly like a read-only view tab. Deliberately not
     /// persisted — after a restart the pane is no longer that editor, so the
     /// label must not survive it. Untracked in `drop_leaf_runtime`.
-    pub editor_files: HashMap<PaneId, PathBuf>,
+    pub editor_files: HashMap<PaneId, EditorFile>,
     /// Most recently opened files, newest first, scoped by workspace folder.
     /// This is a small in-memory finder convenience and is never persisted.
     pub recent_files: VecDeque<(PathBuf, PathBuf)>,
@@ -10850,6 +10887,7 @@ mod tests {
             anchor: (row, 0),
             cursor: (row, 0),
             saved_scroll: 0,
+            pending_count: 0,
         });
 
         for _ in 0..3 {
@@ -10894,6 +10932,7 @@ mod tests {
             anchor: (row, 0),
             cursor: (row, 0),
             saved_scroll: 0,
+            pending_count: 0,
         });
 
         let send = |app: &mut App, character| {
@@ -10908,6 +10947,327 @@ mod tests {
         assert_eq!(app.copy_mode.expect("copy mode").cursor, (row, 0));
         send(&mut app, '$');
         assert_eq!(app.copy_mode.expect("copy mode").cursor, (row, 9));
+    }
+
+    /// Copy mode's reference block in Settings -> Keys and its key handler have
+    /// to stay in step, and nothing else notices when they drift apart. The
+    /// parity test only counts rows against descriptions, so dropping a row
+    /// together with its eight translations keeps it quiet, and the clipping
+    /// test walks whatever rows happen to exist. That pairing is how copy mode
+    /// shipped without a `g / G` row while scroll mode carried one all along.
+    ///
+    /// Each case names a motion family, the key that leads it, and the change
+    /// that proves the handler still answers. Aliases stay out on purpose: `f`,
+    /// `Home`, `End`, the page keys, and the ctrl variants all work without
+    /// rows of their own, because the panel is a curated subset whose key
+    /// column has a width budget to respect.
+    #[test]
+    fn every_copy_mode_motion_family_has_a_reference_row_and_a_live_handler() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        #[derive(Clone, Copy)]
+        enum Proves {
+            Row,
+            Column,
+            Count,
+            Anchor,
+            Exit,
+        }
+
+        let cases = [
+            ("hjkl", KeyCode::Char('j'), KeyModifiers::NONE, Proves::Row),
+            (
+                "w / e / B",
+                KeyCode::Char('w'),
+                KeyModifiers::NONE,
+                Proves::Column,
+            ),
+            (
+                "Space / b",
+                KeyCode::Char(' '),
+                KeyModifiers::NONE,
+                Proves::Row,
+            ),
+            (
+                "^D / ^U",
+                KeyCode::Char('d'),
+                KeyModifiers::CONTROL,
+                Proves::Row,
+            ),
+            ("g / G", KeyCode::Char('G'), KeyModifiers::NONE, Proves::Row),
+            (
+                "1\u{2013}9",
+                KeyCode::Char('3'),
+                KeyModifiers::NONE,
+                Proves::Count,
+            ),
+            ("v", KeyCode::Char('v'), KeyModifiers::NONE, Proves::Anchor),
+            ("y", KeyCode::Enter, KeyModifiers::NONE, Proves::Exit),
+            ("q", KeyCode::Esc, KeyModifiers::NONE, Proves::Exit),
+        ];
+
+        let rows = crate::i18n::settings::KEY_REFERENCE_KEYS[2];
+        let _env = crate::persist::test_env("copy-mode-families");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(40, 8, tx).unwrap();
+        let pane = app.layout().focus;
+        if let Some(p) = app.panes.get(&pane) {
+            if let Ok(mut engine) = p.engine.lock() {
+                for i in 0..30 {
+                    engine.advance(format!("row {i} alpha beta gamma\r\n").as_bytes());
+                }
+            }
+        }
+        let mid = app.panes.get(&pane).expect("pane").retained_row_count() / 2;
+
+        for (label, code, mods, proves) in cases {
+            assert!(
+                rows.iter().any(|row| row.contains(label)),
+                "copy mode's reference block lost its {label} row"
+            );
+
+            // `v` only shows its work when the anchor sits away from the cursor.
+            let anchor = if matches!(proves, Proves::Anchor) {
+                (mid.saturating_sub(2), 0)
+            } else {
+                (mid, 4)
+            };
+            let start = CopyMode {
+                pane,
+                anchor,
+                cursor: (mid, 4),
+                saved_scroll: 0,
+                pending_count: 0,
+            };
+            app.copy_mode = Some(start);
+            app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(code, mods)));
+
+            if matches!(proves, Proves::Exit) {
+                assert!(
+                    app.copy_mode.is_none(),
+                    "{label} no longer leaves copy mode"
+                );
+                continue;
+            }
+            let Some(now) = app.copy_mode else {
+                panic!("{label} left copy mode instead of moving");
+            };
+            let answered = match proves {
+                Proves::Row => now.cursor.0 != start.cursor.0,
+                Proves::Column => now.cursor.1 != start.cursor.1,
+                Proves::Count => now.pending_count != 0,
+                Proves::Anchor => now.anchor == now.cursor,
+                Proves::Exit => unreachable!("handled above"),
+            };
+            assert!(answered, "{label} no longer answers in copy mode");
+        }
+    }
+
+    #[test]
+    fn copy_mode_word_end_stops_on_the_last_cell_of_each_word() {
+        let _env = crate::persist::test_env("copy-mode-word-end");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(40, 8, tx).unwrap();
+        let pane = app.layout().focus;
+        app.panes
+            .get(&pane)
+            .expect("pane")
+            .engine
+            .lock()
+            .expect("engine")
+            .advance("\x1b[H\x1b[2J你好 world again\r\na bb ccc".as_bytes());
+        let mut target_row = None;
+        let mut narrow_row = None;
+        app.panes
+            .get(&pane)
+            .expect("pane")
+            .for_each_retained_row(&mut |row, _, _, text| {
+                if text == "你好 world again" {
+                    target_row = Some(row);
+                }
+                if text == "a bb ccc" {
+                    narrow_row = Some(row);
+                }
+            });
+        let row = target_row.expect("fixture row");
+        let narrow = narrow_row.expect("single-cell fixture row");
+        let start = CopyMode {
+            pane,
+            anchor: (row, 0),
+            cursor: (row, 0),
+            saved_scroll: 0,
+            pending_count: 0,
+        };
+        app.copy_mode = Some(start);
+
+        let send = |app: &mut App, character| {
+            app.handle_event(AppEvent::Key(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::NONE,
+            )));
+        };
+
+        // Cell columns, not scalar counts: 你好 ends at column 3, `world` at 9.
+        send(&mut app, 'e');
+        assert_eq!(app.copy_mode.expect("copy mode").cursor, (row, 3));
+        send(&mut app, 'e');
+        assert_eq!(app.copy_mode.expect("copy mode").cursor, (row, 9));
+
+        // A count repeats the motion and is consumed by it.
+        app.copy_mode = Some(start);
+        send(&mut app, '2');
+        let counted = app.copy_mode.expect("copy mode");
+        assert_eq!(counted.pending_count, 2, "a digit is held for the motion");
+        assert_eq!(counted.cursor, (row, 0), "a count alone never moves");
+        send(&mut app, 'e');
+        let moved = app.copy_mode.expect("copy mode");
+        assert_eq!(moved.cursor, (row, 9), "2e lands where e e does");
+        assert_eq!(moved.pending_count, 0, "the motion consumed the count");
+
+        // A count is exactly repetition: `12e` must land where twelve presses do,
+        // including where the motion saturates. No magic column here, because the
+        // saturation point belongs to the fixture, not to the contract.
+        app.copy_mode = Some(start);
+        for _ in 0..12 {
+            send(&mut app, 'e');
+        }
+        let stepwise = app.copy_mode.expect("copy mode").cursor;
+        assert_ne!(stepwise, (row, 3), "twelve presses outrun a single step");
+
+        app.copy_mode = Some(start);
+        send(&mut app, '1');
+        send(&mut app, '2');
+        assert_eq!(
+            app.copy_mode.expect("copy mode").pending_count,
+            12,
+            "digits stack into one count instead of replacing it"
+        );
+        send(&mut app, 'e');
+        assert_eq!(
+            app.copy_mode.expect("copy mode").cursor,
+            stepwise,
+            "12e lands where twelve e presses land"
+        );
+
+        // A one-cell word leaves the cursor already sitting on its own word end,
+        // so `e` has nowhere to stop inside it and moves to the next word's end.
+        // Vim does the same: on `a bb ccc` from column 0, `e` lands on 3 and then
+        // 7, never on 0. Staying put would make `e` a dead key on short words.
+        app.copy_mode = Some(CopyMode {
+            pane,
+            anchor: (narrow, 0),
+            cursor: (narrow, 0),
+            saved_scroll: 0,
+            pending_count: 0,
+        });
+        send(&mut app, 'e');
+        assert_eq!(
+            app.copy_mode.expect("copy mode").cursor,
+            (narrow, 3),
+            "e off a one-cell word ends the next word, like vim"
+        );
+        send(&mut app, 'e');
+        assert_eq!(
+            app.copy_mode.expect("copy mode").cursor,
+            (narrow, 7),
+            "the following e keeps advancing by whole words"
+        );
+    }
+
+    #[test]
+    fn copy_mode_counts_rows_and_moves_by_half_pages() {
+        let _env = crate::persist::test_env("copy-mode-counts");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(40, 8, tx).unwrap();
+        let pane = app.layout().focus;
+        {
+            let held = app.panes.get(&pane).expect("pane");
+            let mut engine = held.engine.lock().expect("engine");
+            engine.advance(b"\x1b[H\x1b[2J");
+            for line in 0..40 {
+                engine.advance(format!("line-{line:03}\r\n").as_bytes());
+            }
+        }
+        let last_row = app
+            .panes
+            .get(&pane)
+            .expect("pane")
+            .retained_row_count()
+            .saturating_sub(1);
+        assert!(
+            last_row > 20,
+            "the fixture has real history to move through"
+        );
+        app.copy_mode = Some(CopyMode {
+            pane,
+            anchor: (0, 0),
+            cursor: (0, 0),
+            saved_scroll: 0,
+            pending_count: 0,
+        });
+
+        let send = |app: &mut App, code, mods| {
+            app.handle_event(AppEvent::Key(KeyEvent::new(code, mods)));
+        };
+        let row = |app: &App| app.copy_mode.expect("copy mode").cursor.0;
+
+        send(&mut app, KeyCode::Char('1'), KeyModifiers::NONE);
+        send(&mut app, KeyCode::Char('2'), KeyModifiers::NONE);
+        send(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(row(&app), 12, "12j moves twelve rows, not one");
+
+        // Derive half a page from the rendered pane, not from `focused_page`'s
+        // unrendered fallback: otherwise this test pins an unrelated default
+        // instead of the contract, and passes even if the page math is wrong.
+        let mut term =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 8)).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render");
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("pane content rect");
+        // A page is the content height minus one row of overlap; half rounds up.
+        let page = content.height as usize - 1;
+        let half = page.div_ceil(2).max(1);
+        assert!(
+            half < page,
+            "the fixture must distinguish a half page from a whole one"
+        );
+
+        send(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(row(&app), 12 - half, "Ctrl+U is half a page up");
+        send(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(row(&app), 12, "Ctrl+D is half a page down");
+
+        send(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(row(&app), 12, "a bare d stays unbound");
+
+        // An unrecognised key must clear a pending count, or the next motion
+        // silently inherits it.
+        send(&mut app, KeyCode::Char('5'), KeyModifiers::NONE);
+        send(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+        send(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(row(&app), 13, "a swallowed key drops the count it followed");
+
+        send(&mut app, KeyCode::Char('5'), KeyModifiers::NONE);
+        send(&mut app, KeyCode::Char('G'), KeyModifiers::NONE);
+        assert_eq!(row(&app), 4, "5G is vim's absolute line jump");
+
+        // `0` keeps its own meaning while no count is being typed. Asserted on a
+        // row that holds text: the newest retained row is the blank line the
+        // cursor sits on, where every column motion is already clamped to zero.
+        send(&mut app, KeyCode::Char('$'), KeyModifiers::NONE);
+        assert!(app.copy_mode.expect("copy mode").cursor.1 > 0);
+        send(&mut app, KeyCode::Char('0'), KeyModifiers::NONE);
+        let copy = app.copy_mode.expect("copy mode");
+        assert_eq!(copy.cursor, (4, 0), "0 is still the first column");
+        assert_eq!(copy.pending_count, 0, "and never starts a count");
+
+        send(&mut app, KeyCode::Char('G'), KeyModifiers::NONE);
+        assert_eq!(row(&app), last_row, "a bare G is still the newest row");
     }
 
     #[test]
@@ -10928,6 +11288,7 @@ mod tests {
             anchor: (1, 0),
             cursor: (2, 5),
             saved_scroll: 0,
+            pending_count: 0,
         });
 
         app.finish_copy_mode();
