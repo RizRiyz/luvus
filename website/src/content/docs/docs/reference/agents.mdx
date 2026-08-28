@@ -12,6 +12,8 @@ description: What luvus supports per agent, covering live status, session resume
 | Kimi Code CLI | ✓ | ✓ | no | ✓ |
 | Grok Build | ✓ | ✓ | ✓ | ✓ |
 | Pi | ✓ | ✓ | ✓ | no |
+| Oh My Pi (omp) | ✓ | ✓ | ✓ | ✓ |
+| Muse Code | ✓ | ✓ | no | no |
 | Cursor | ✓ | resume command | no | no |
 | Gemini | ✓ | no | no | no |
 | Aider | ✓ | no | no | no |
@@ -30,17 +32,23 @@ description: What luvus supports per agent, covering live status, session resume
   preserving the original's full context under a new session id while the
   original keeps running. It needs an agent with a native fork command, so today
   that is **Claude** (`claude --resume <id> --fork-session`), **Grok**
-  (`grok --resume <id> --fork-session`), **Codex** (`codex fork <id>`), and
-  **Pi** (`pi --fork <id>`). Right-click the pane and
-  choose **Fork to New Pane**, or press `Ctrl+Space f`. The action only appears
-  for agents that can fork.
+  (`grok --resume <id> --fork-session`), **Codex** (`codex fork <id>`),
+  **Pi** (`pi --fork <id>`), and **Oh My Pi (omp)** (`omp --fork <id>`).
+  Right-click the pane and choose **Fork to New Pane**, or press `Ctrl+Space f`.
+  The action only appears when Luvus can resolve the source session safely.
 - **Hook**, via `luvus integration install <agent>`, makes the agent report its
-  exact session id and lifecycle events. Removal is surgical:
+  exact session id and lifecycle events. OMP additionally reports authoritative
+  idle/working/blocked/done state through Luvus's bounded agent authority API.
+  Removal is surgical:
   `luvus integration uninstall <agent>` touches only luvus's own entry. Kimi keeps
   its hooks in `~/.kimi-code/config.toml`, the same file as your API keys, so
   luvus edits it in place and leaves your keys, comments, and own hooks untouched.
   Grok Build reads hooks from `~/.grok/hooks/*.json`, so luvus just adds its own
-  `luvus.json` there and never touches your `~/.grok/config.toml`.
+  `luvus.json` there and never touches your `~/.grok/config.toml`. Oh My Pi
+  (OMP) auto-loads extension factories from its active agent directory, so
+  `luvus integration install omp` drops a single `luvus.ts` there — no config
+  file is edited. Named profiles, `PI_CODING_AGENT_DIR`, `PI_CONFIG_DIR`, and
+  OMP's XDG session store remain supported.
 
 Missing your agent? You can add it yourself without waiting for a release: drop
 an `[identity]` block in `~/.luvus/manifests/<agent>.toml` and luvus will
@@ -59,9 +67,9 @@ Print the release-matched instructions for one conversation with
 The shared `~/.agents/skills/luvus/` destination is understood by Codex,
 GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, and fx. Luvus uses
 dedicated native destinations for Claude Code, OpenCode, Kimi Code CLI, Grok
-Build, Qwen Code, and Kiro. Aider does not expose a native Agent Skills
-installation directory, so use `luvus skill show` when an Aider conversation
-needs the instructions.
+Build, Qwen Code, Oh My Pi (omp), and Kiro. Aider does not expose a native
+Agent Skills installation directory, so use `luvus skill show` when an Aider
+conversation needs the instructions.
 
 `luvus skill status` reports the bundled release separately from its managed
 filesystem installations. Codex marketplace plugins are managed by Codex and

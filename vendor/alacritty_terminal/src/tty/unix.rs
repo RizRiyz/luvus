@@ -278,31 +278,36 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
     // Prepare signal handling before spawning child.
     let (signals, sig_id) = {
         let (sender, recv) = UnixStream::pair()?;
+        recv.set_nonblocking(true)?;
 
         // Register the recv end of the pipe for SIGCHLD.
         let sig_id = signal_pipe::register(sigconsts::SIGCHLD, sender)?;
-        recv.set_nonblocking(true)?;
         (recv, sig_id)
     };
 
     match builder.spawn() {
         Ok(child) => {
+            let pty = Pty { child, file: File::from(master), signals, sig_id };
+
             unsafe {
                 // Maybe this should be done outside of this function so nonblocking
                 // isn't forced upon consumers. Although maybe it should be?
-                set_nonblocking(master_fd);
+                set_nonblocking(pty.file.as_raw_fd())?;
             }
 
-            Ok(Pty { child, file: File::from(master), signals, sig_id })
+            Ok(pty)
         },
-        Err(err) => Err(Error::new(
-            err.kind(),
-            format!(
-                "Failed to spawn command '{}': {}",
-                builder.get_program().to_string_lossy(),
-                err
-            ),
-        )),
+        Err(err) => {
+            unregister_signal(sig_id);
+            Err(Error::new(
+                err.kind(),
+                format!(
+                    "Failed to spawn command '{}': {}",
+                    builder.get_program().to_string_lossy(),
+                    err
+                ),
+            ))
+        },
     }
 }
 
@@ -436,9 +441,14 @@ impl ToWinsize for WindowSize {
     }
 }
 
-unsafe fn set_nonblocking(fd: c_int) {
+unsafe fn set_nonblocking(fd: c_int) -> Result<()> {
     let res = unsafe { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK) };
-    assert_eq!(res, 0);
+    if res == 0 { Ok(()) } else { Err(Error::last_os_error()) }
+}
+
+#[test]
+fn invalid_fd_cannot_be_set_nonblocking() {
+    assert!(unsafe { set_nonblocking(-1) }.is_err());
 }
 
 #[test]

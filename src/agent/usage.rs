@@ -165,6 +165,7 @@ pub fn session_usage(agent: &str, cwd: &Path, session_id: &str) -> Option<AgentU
         "kimi" => kimi_usage(&kimi_dir(&kimi_base(), session_id)?),
         "grok" => grok_usage(&grok_dir(&grok_base(), cwd, session_id)?),
         "pi" => pi_usage(&pi_path(&pi_base(), session_id)?),
+        "omp" => pi_usage(&pi_path(&omp::sessions_base(), session_id)?),
         "gemini" => gemini_usage(&chat_path(&gemini_base(), session_id)?),
         "qwen" => gemini_usage(&chat_path(&qwen_base(), session_id)?),
         "fx" => fx_usage(&fx_dir(&fx_base(), session_id)),
@@ -186,6 +187,7 @@ pub fn session_mtime(agent: &str, cwd: &Path, session_id: &str) -> Option<System
         "kimi" => kimi_dir(&kimi_base(), session_id)?.join("agents/main/wire.jsonl"),
         "grok" => grok_dir(&grok_base(), cwd, session_id)?.join("updates.jsonl"),
         "pi" => pi_path(&pi_base(), session_id)?,
+        "omp" => pi_path(&omp::sessions_base(), session_id)?,
         "gemini" => chat_path(&gemini_base(), session_id)?,
         "qwen" => chat_path(&qwen_base(), session_id)?,
         "fx" => fx_dir(&fx_base(), session_id).join("usage-v2.json"),
@@ -1175,6 +1177,41 @@ mod tests {
         assert_eq!(pu.cost, Some(0.01));
         fs::remove_dir_all(kimi).unwrap();
         fs::remove_dir_all(pi).unwrap();
+    }
+
+    #[test]
+    fn omp_usage_uses_its_native_session_root() {
+        let _env = crate::persist::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let previous = std::env::var_os("PI_CODING_AGENT_SESSION_DIR");
+        let root = tmp("omp-native-usage");
+        let project = root.join("-work-app");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("session.jsonl"),
+            concat!(
+                r#"{"type":"session","id":"omp-session","cwd":"/work/app"}"#,
+                "\n",
+                r#"{"type":"message","message":{"role":"assistant","responseId":"r1","model":"gpt-5","usage":{"input":50,"output":20,"cacheRead":100,"cacheWrite":5,"cost":{"total":0.01}}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        std::env::set_var("PI_CODING_AGENT_SESSION_DIR", &root);
+
+        let usage = session_usage("omp", Path::new("/work/app"), "omp-session").unwrap();
+        assert_eq!(
+            (usage.tokens_in, usage.tokens_out, usage.cache),
+            (50, 20, 105)
+        );
+        assert!(session_mtime("omp", Path::new("/work/app"), "omp-session").is_some());
+
+        match previous {
+            Some(value) => std::env::set_var("PI_CODING_AGENT_SESSION_DIR", value),
+            None => std::env::remove_var("PI_CODING_AGENT_SESSION_DIR"),
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

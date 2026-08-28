@@ -10,9 +10,10 @@ use ratatui::style::{Color, Modifier};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::sound::SoundSignal;
 use crate::terminal::theme_probe::TerminalColors;
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -47,8 +48,8 @@ pub enum ServerMessage {
     FrameDiff(FrameDiff),
     /// Ring the bell + raise a desktop notification on the client's terminal.
     Notify(String),
-    /// Play the retro "done" jingle on the client (an agent finished).
-    Sound,
+    /// Play the selected notification cue on the client.
+    Sound(SoundSignal),
     /// Set the client's system clipboard (OSC 52) to this text — sent when a
     /// mouse selection finishes, so drag-to-select auto-copies.
     Clipboard(String),
@@ -460,6 +461,20 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn sound_signal_roundtrip_preserves_style_and_cue() {
+        let signal = crate::sound::SoundSignal {
+            cue: crate::sound::SoundCue::Blocked,
+            style: crate::sound::SoundStyle::Pulse,
+        };
+        let mut bytes = Vec::new();
+        write_message(&mut bytes, &ServerMessage::Sound(signal)).unwrap();
+        assert!(matches!(
+            read_message::<_, ServerMessage>(&mut &bytes[..]).unwrap(),
+            ServerMessage::Sound(decoded) if decoded == signal
+        ));
     }
 
     #[test]

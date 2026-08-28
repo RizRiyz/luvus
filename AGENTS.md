@@ -101,7 +101,9 @@ boundaries are:
   Git/files/diff, Mission Control, overlays, and hit-test geometry.
 - `src/detect.rs`: agent identity and state evidence. Detection is native Luvus
   behavior and must not depend on an installed agent skill.
-- `src/agent.rs`: native session discovery, resume, fork, and command building.
+- `src/agent.rs`: native session registry, resume/fork orchestration, and shared
+  command building. Put non-trivial agent-specific discovery or integration code
+  in `src/agent/<agent>/` (for example `src/agent/muse/`), not in the registry.
 - `src/integration.rs`: optional agent-native hooks for precise session and
   lifecycle reports. Hooks augment detection; they do not replace it.
 - `src/cli.rs`, `src/api/`, and `src/app/dispatch.rs`: parsing/help, public UHP

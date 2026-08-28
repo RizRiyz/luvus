@@ -875,6 +875,20 @@ fn draw_content(
                         toggle(app.config.layout.agent_title, t),
                         t,
                     )),
+                    GeneralRow::SoundStyle => {
+                        let r = slider_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor == i,
+                            cat.set_sound_style,
+                            app.sound_style_label().to_string(),
+                            t,
+                            &mut arrows,
+                        );
+                        ctls.push((i, r));
+                    }
                     GeneralRow::SoundDone => ctls.push(ctl_row(
                         f,
                         area,
@@ -895,13 +909,26 @@ fn draw_content(
                         toggle(n.sound_on_blocked, t),
                         t,
                     )),
-                    GeneralRow::TestSound => ctls.push(ctl_row(
+                    GeneralRow::TestDoneSound => ctls.push(ctl_row(
                         f,
                         area,
                         y,
                         i,
                         cursor,
-                        cat.set_test_sound,
+                        cat.set_test_done_sound,
+                        Line::from(Span::styled(
+                            format!("[ ♪ {} ]", cat.act_play),
+                            Style::new().fg(t.accent).bold(),
+                        )),
+                        t,
+                    )),
+                    GeneralRow::TestBlockedSound => ctls.push(ctl_row(
+                        f,
+                        area,
+                        y,
+                        i,
+                        cursor,
+                        cat.set_test_blocked_sound,
                         Line::from(Span::styled(
                             format!("[ ♪ {} ]", cat.act_play),
                             Style::new().fg(t.accent).bold(),

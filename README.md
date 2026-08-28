@@ -30,7 +30,8 @@
   working, done, or idle state with session titles, tokens, cost, context use,
   and optional sound alerts.
 - **Agent workflows:** Start, name, message, inspect, wait for, resume, and send
-  keys to agents. Fork Claude, Grok, Codex, and Pi sessions with their context intact.
+  keys to agents. Fork Claude, Grok, Codex, Pi, and OMP sessions with their
+  context intact.
 - **Files and code:** Browse a Git-aware file tree, inspect files and changes,
   reveal paths, and open files in a pane, tab, preview, or external editor.
 - **Git and GitHub:** View status, branches, commits, contributors, pull
@@ -93,6 +94,8 @@ Keyboard → Keyboard Shortcuts → Input Sources** to free `Ctrl+Space`.
 | Kimi | ✓ | ✓ | ✓ |
 | Grok | ✓ | ✓ | ✓ |
 | Pi | ✓ | ✓ | No |
+| Oh My Pi (omp) | ✓ | ✓ | ✓ |
+| Muse Code | ✓ | ✓ | No |
 | Fx | ✓ | No | No |
 | Cursor | ✓ | resume command | No |
 | Gemini · Aider · Amp · Droid · Qwen · Kiro | ✓ | No | No |

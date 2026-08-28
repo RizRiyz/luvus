@@ -131,9 +131,11 @@ pub enum GeneralRow {
     NewPaneToWorkspaceRoot,
     /// Show each agent's live session title in the AGENTS sidebar.
     AgentTitle,
+    SoundStyle,
     SoundDone,
     SoundBlocked,
-    TestSound,
+    TestDoneSound,
+    TestBlockedSound,
 }
 
 /// A selectable row in the Modules tab (docs/13 §3.6): a module, or one of the
@@ -160,9 +162,11 @@ impl App {
             GeneralRow::ResumeFlags,
             GeneralRow::NewPaneToWorkspaceRoot,
             GeneralRow::AgentTitle,
+            GeneralRow::SoundStyle,
             GeneralRow::SoundDone,
             GeneralRow::SoundBlocked,
-            GeneralRow::TestSound,
+            GeneralRow::TestDoneSound,
+            GeneralRow::TestBlockedSound,
         ]
     }
 
@@ -453,13 +457,15 @@ impl App {
                         | Some(LayoutRow::Dock(_))
                         | Some(LayoutRow::Bar(_))
                 ),
-                // Both file choosers only move via their `‹ ›` arrows: a click
-                // on the row body selects it. Missing one here is silent — the
-                // click falls through to `settings_activate`, which steps the
+                // The General-tab choosers only move via their `‹ ›` arrows: a
+                // click on the row body selects it. Missing one here is silent —
+                // the click falls through to `settings_activate`, which steps the
                 // value and persists it, so selecting a row would change it.
                 Some(SettingsTab::General) => matches!(
                     self.general_rows().get(i),
-                    Some(GeneralRow::FileOpen) | Some(GeneralRow::FileClick)
+                    Some(GeneralRow::FileOpen)
+                        | Some(GeneralRow::FileClick)
+                        | Some(GeneralRow::SoundStyle)
                 ),
                 // Number/enum module settings likewise only move via `‹ ›`.
                 Some(SettingsTab::Modules) => self.module_row_is_slider(i),
@@ -565,9 +571,12 @@ impl App {
                 self.apply_language(crate::i18n::LANGS[cursor.min(crate::i18n::LANGS.len() - 1)])
             }
             SettingsTab::Layout => self.activate_layout(cursor),
-            // Enter/click: the Test row rings the chime, everything else steps.
+            // Enter/click: Test rows ring their cue, everything else steps.
             SettingsTab::General => match self.general_rows().get(cursor).copied() {
-                Some(GeneralRow::TestSound) => self.test_sound(),
+                Some(GeneralRow::TestDoneSound) => self.test_sound(crate::sound::SoundCue::Done),
+                Some(GeneralRow::TestBlockedSound) => {
+                    self.test_sound(crate::sound::SoundCue::Blocked)
+                }
                 _ => self.adjust_general(cursor, 1),
             },
             // Enter on a rebindable Keys row starts capturing the next key as its
@@ -1296,6 +1305,7 @@ impl App {
                 self.config.layout.agent_title = !self.config.layout.agent_title;
                 config::save(&self.config);
             }
+            Some(GeneralRow::SoundStyle) => self.cycle_sound_style(delta),
             Some(GeneralRow::SoundDone) => {
                 self.config.notifications.sound_on_done = !self.config.notifications.sound_on_done;
                 config::save(&self.config);
@@ -1305,17 +1315,47 @@ impl App {
                     !self.config.notifications.sound_on_blocked;
                 config::save(&self.config);
             }
-            // The Test row fires on Enter/click only (see `settings_activate`) —
-            // arrows must not ring it, or holding ‹ › would spam the chime.
-            Some(GeneralRow::TestSound) => {}
+            // Test rows fire on Enter/click only (see `settings_activate`) —
+            // arrows must not ring them, or holding ‹ › would spam cues.
+            Some(GeneralRow::TestDoneSound | GeneralRow::TestBlockedSound) => {}
             None => {}
         }
     }
 
-    /// Play the retro chime once so the user can hear it before turning it on.
-    /// Bypasses both sound toggles — it's an explicit manual test.
-    fn test_sound(&mut self) {
-        self.pending_sound = true;
+    fn cycle_sound_style(&mut self, delta: i32) {
+        let current = crate::sound::SoundStyle::from_config(&self.config.notifications.sound_style);
+        let index = crate::sound::STYLES
+            .iter()
+            .position(|style| *style == current)
+            .unwrap_or(0) as i32;
+        let count = crate::sound::STYLES.len() as i32;
+        let next = ((index + delta) % count + count) % count;
+        self.config.notifications.sound_style = crate::sound::STYLES[next as usize].key().into();
+        config::save(&self.config);
+    }
+
+    pub fn sound_style_label(&self) -> &'static str {
+        crate::sound::SoundStyle::from_config(&self.config.notifications.sound_style).label()
+    }
+
+    /// Play one cue so the user can hear the selected style before enabling it.
+    /// Manual tests bypass both event toggles.
+    fn test_sound(&mut self, cue: crate::sound::SoundCue) {
+        self.queue_sound(cue);
+    }
+
+    /// Queue one sound without allowing a completion cue to hide a more urgent
+    /// blocked cue that arrived in the same event-loop interval.
+    pub(crate) fn queue_sound(&mut self, cue: crate::sound::SoundCue) {
+        if self.pending_sound.is_some_and(|signal| {
+            signal.cue == crate::sound::SoundCue::Blocked && cue == crate::sound::SoundCue::Done
+        }) {
+            return;
+        }
+        self.pending_sound = Some(crate::sound::SoundSignal {
+            cue,
+            style: crate::sound::SoundStyle::from_config(&self.config.notifications.sound_style),
+        });
     }
 
     /// Toggle an agent's integration hook: install if absent, uninstall if present.
@@ -1714,8 +1754,8 @@ mod tests {
     }
 
     // The General tab is the two file choosers plus the Notifications section:
-    // the two sound toggles (persisted) and a Test row that rings the chime
-    // immediately, regardless of the toggles.
+    // the selected sound style, two persisted event toggles, and separate test
+    // rows for the completion and attention cues.
     #[test]
     fn general_tab_toggles_sounds_and_tests_the_chime() {
         let _env = crate::persist::test_env("general-tab");
@@ -1725,7 +1765,7 @@ mod tests {
         if let Some(ui) = app.settings.as_mut() {
             ui.tab = SettingsTab::General;
         }
-        assert_eq!(app.settings_rows(SettingsTab::General), 11);
+        assert_eq!(app.settings_rows(SettingsTab::General), 13);
         let rows = app.general_rows();
         assert_eq!(rows[0], GeneralRow::FileOpen, "file-open leads the tab");
         assert_eq!(
@@ -1734,6 +1774,10 @@ mod tests {
             "click behavior sits next to the viewer it qualifies"
         );
 
+        let style = rows
+            .iter()
+            .position(|r| *r == GeneralRow::SoundStyle)
+            .unwrap();
         let done = rows
             .iter()
             .position(|r| *r == GeneralRow::SoundDone)
@@ -1742,22 +1786,50 @@ mod tests {
             .iter()
             .position(|r| *r == GeneralRow::SoundBlocked)
             .unwrap();
-        let test = rows
+        let test_done = rows
             .iter()
-            .position(|r| *r == GeneralRow::TestSound)
+            .position(|r| *r == GeneralRow::TestDoneSound)
+            .unwrap();
+        let test_blocked = rows
+            .iter()
+            .position(|r| *r == GeneralRow::TestBlockedSound)
             .unwrap();
 
+        assert_eq!(app.sound_style_label(), "Retro");
+        app.settings_adjust(style, 1);
+        assert_eq!(app.sound_style_label(), "Soft");
         app.settings_activate(done);
         assert!(app.config.notifications.sound_on_done, "toggles done");
         app.settings_activate(blocked);
         assert!(app.config.notifications.sound_on_blocked, "toggles blocked");
 
-        assert!(!app.pending_sound);
-        // Arrows must NOT ring the chime (only Enter/click does).
-        app.settings_adjust(test, 1);
-        assert!(!app.pending_sound, "‹ › on the Test row does not ring");
-        app.settings_activate(test);
-        assert!(app.pending_sound, "the Test row rings the chime");
+        assert!(app.pending_sound.is_none());
+        // Arrows must NOT ring cues (only Enter/click does).
+        app.settings_adjust(test_done, 1);
+        assert!(
+            app.pending_sound.is_none(),
+            "‹ › on a Test row does not ring"
+        );
+        app.settings_activate(test_done);
+        assert_eq!(
+            app.pending_sound,
+            Some(crate::sound::SoundSignal {
+                cue: crate::sound::SoundCue::Done,
+                style: crate::sound::SoundStyle::Soft,
+            })
+        );
+        app.settings_activate(test_blocked);
+        assert_eq!(
+            app.pending_sound.map(|signal| signal.cue),
+            Some(crate::sound::SoundCue::Blocked),
+            "blocked test replaces a pending done cue"
+        );
+        app.settings_activate(test_done);
+        assert_eq!(
+            app.pending_sound.map(|signal| signal.cue),
+            Some(crate::sound::SoundCue::Blocked),
+            "a done cue cannot hide a pending blocked cue"
+        );
     }
 
     /// The General tab renders the two file choosers, then a `Notify` section
@@ -1804,7 +1876,7 @@ mod tests {
             row_of("Open files with"),
             row_of("Remember CLI option"),
             row_of("Notify"),
-            row_of("Test sound"),
+            row_of("Test blocked sound"),
         );
         assert!(
             fo < res && res < div && div < snd,

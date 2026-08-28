@@ -115,6 +115,23 @@ const KNOWN_AGENTS: &[KnownAgent] = &[
         distinct: &[],
         ambiguous: &["grok"],
     },
+    // Muse's launcher execs a versioned `muse-bin-*` binary, handled by
+    // `match_binary`. The brand itself is an ordinary English word, so only
+    // trust bare `muse` in deliberate command/title evidence.
+    KnownAgent {
+        name: crate::agent::muse::NAME,
+        distinct: crate::agent::muse::DISTINCT_IDENTITIES,
+        ambiguous: crate::agent::muse::AMBIGUOUS_IDENTITIES,
+    },
+    // Oh My Pi (omp) precedes pi in this registry ON PURPOSE: the brand
+    // "oh-my-pi" word-contains pi's ambiguous token, and the first match wins.
+    // omp's brand + npm binary are distinctive, so trust them from pane
+    // output; bare `omp` is believed only from the spawn command or OSC title.
+    KnownAgent {
+        name: crate::agent::omp::NAME,
+        distinct: crate::agent::omp::DISTINCT_IDENTITIES,
+        ambiguous: crate::agent::omp::AMBIGUOUS_IDENTITIES,
+    },
     // Pi (pi.dev): the npm binary is distinctive, but the bare brand name is an
     // ordinary word (and a substring of "api"/"pip"…), so believe it only from
     // the spawn command or OSC title — never incidental output.
@@ -140,6 +157,7 @@ struct AgentIdent {
     name: String,
     distinct: Vec<String>,
     ambiguous: Vec<String>,
+    binary_matcher: Option<fn(&str) -> bool>,
 }
 
 impl AgentIdent {
@@ -157,6 +175,8 @@ fn builtin_agents() -> Vec<AgentIdent> {
             name: a.name.to_string(),
             distinct: a.distinct.iter().map(|s| s.to_string()).collect(),
             ambiguous: a.ambiguous.iter().map(|s| s.to_string()).collect(),
+            binary_matcher: (a.name == crate::agent::muse::NAME)
+                .then_some(crate::agent::muse::is_versioned_binary as fn(&str) -> bool),
         })
         .collect()
 }
@@ -602,6 +622,54 @@ fn builtin_rules() -> Vec<Rule> {
             Region::Screen,
             vec![any(&["send a message to interrupt"])],
         ),
+        // Muse question, trust, and approval overlays. These paired controls
+        // outrank its generic `esc to interrupt` working hint, including the
+        // multi-select question UI that deliberately retains that phrase.
+        per(
+            "muse",
+            State::Blocked,
+            325,
+            Region::Screen,
+            vec![all(&["enter to select", "tab for an optional note"])],
+        ),
+        per(
+            "muse",
+            State::Blocked,
+            325,
+            Region::Screen,
+            vec![all(&["enter to toggle", "esc to interrupt"])],
+        ),
+        per(
+            "muse",
+            State::Blocked,
+            325,
+            Region::Screen,
+            vec![all(&["do you trust this workspace?", "trust and continue"])],
+        ),
+        per(
+            "muse",
+            State::Blocked,
+            325,
+            Region::Screen,
+            vec![all(&[
+                "allow this stage once",
+                "always allow in this workspace",
+            ])],
+        ),
+        per(
+            "muse",
+            State::Blocked,
+            325,
+            Region::Screen,
+            vec![all(&["allow once", "allow for this session"])],
+        ),
+        per(
+            "muse",
+            State::Blocked,
+            325,
+            Region::Screen,
+            vec![all(&["yes, proceed", "yes, don't ask again this session"])],
+        ),
     ]
 }
 
@@ -722,6 +790,7 @@ impl ManifestFile {
                     name: name.clone(),
                     distinct: Vec::new(),
                     ambiguous: Vec::new(),
+                    binary_matcher: None,
                 });
                 agents.last_mut().expect("just pushed")
             }
@@ -729,6 +798,7 @@ impl ManifestFile {
         if id.replace {
             entry.distinct.clear();
             entry.ambiguous.clear();
+            entry.binary_matcher = None;
         }
         entry.distinct.extend(lc(&id.distinct));
         entry.ambiguous.extend(lc(&id.ambiguous));
@@ -1083,6 +1153,13 @@ impl Manifests {
 
     /// The agent whose patterns name exactly this binary.
     fn match_binary(&self, base: &str) -> Option<String> {
+        if let Some(agent) = self
+            .agents
+            .iter()
+            .find(|agent| agent.binary_matcher.is_some_and(|matcher| matcher(base)))
+        {
+            return Some(agent.name.clone());
+        }
         self.agents
             .iter()
             .find(|a| a.all().any(|p| p == base))
@@ -1310,6 +1387,94 @@ mod tests {
             &m,
         );
         assert_eq!(incidental.agent, "zsh", "screen prose must not name fx");
+    }
+
+    #[test]
+    fn muse_identity_accepts_native_binaries_without_trusting_prose() {
+        let m = Manifests::builtin();
+        assert_eq!(
+            m.agent_in_processes(&[
+                "/Users/me/.local/bin/muse-bin-0.2.1-R1215.1 --provider meta".into()
+            ]),
+            Some("muse".into())
+        );
+        assert_eq!(
+            m.agent_in_processes(&["/Users/me/.local/bin/muse --provider echo".into()]),
+            Some("muse".into())
+        );
+        assert_eq!(
+            m.agent_in_processes(&["/usr/local/bin/muse-bin-helper".into()]),
+            None,
+            "a similarly named helper is not Muse Code"
+        );
+
+        let incidental = classify(
+            Some("zsh"),
+            "the museum uses a muse as its example",
+            true,
+            false,
+            "zsh",
+            "",
+            &[],
+            &m,
+        );
+        assert_eq!(
+            incidental.agent, "zsh",
+            "bare muse is never trusted from pane output"
+        );
+    }
+
+    #[test]
+    fn muse_identity_replace_disables_the_versioned_binary_matcher() {
+        let mut m = Manifests::builtin();
+        toml::from_str::<ManifestFile>(
+            r#"
+            agent = "muse"
+            [identity]
+            distinct = ["custom-muse"]
+            replace = true
+        "#,
+        )
+        .unwrap()
+        .apply_identity(&mut m.agents);
+
+        assert_eq!(
+            m.agent_in_processes(&["muse-bin-0.2.1-R1215.1".into()]),
+            None
+        );
+        assert_eq!(
+            m.agent_in_processes(&["custom-muse".into()]),
+            Some("muse".into())
+        );
+    }
+
+    #[test]
+    fn muse_native_interactions_override_the_working_hint() {
+        let classify_muse = |bottom: &str| {
+            classify(
+                Some("Muse Code"),
+                bottom,
+                true,
+                false,
+                "zsh",
+                "muse",
+                &["muse-bin-0.2.1-R1215.1".into()],
+                &Manifests::builtin(),
+            )
+            .state
+        };
+        assert_eq!(
+            classify_muse("Which files?\nEnter to toggle · Esc to interrupt"),
+            State::Blocked
+        );
+        assert_eq!(
+            classify_muse("Do you trust this workspace?\nTrust and continue"),
+            State::Blocked
+        );
+        assert_eq!(
+            classify_muse("◆ Working (2s · esc to interrupt)"),
+            State::Working
+        );
     }
 
     #[test]
@@ -1991,6 +2156,33 @@ mod tests {
             named(Some("zsh"), "pi-coding-agent starting\n", "zsh"),
             "pi",
             "the npm binary is distinctive enough to trust from output"
+        );
+        // omp: the brand + npm binary are distinctive; bare "omp" is ambiguous
+        // (ordinary prose can contain it) and is trusted only from the spawn
+        // command or OSC title.
+        assert_eq!(named(Some("zsh"), "", "omp"), "omp", "command names it");
+        assert_eq!(named(Some("omp"), "", "zsh"), "omp", "title names it");
+        assert_eq!(
+            named(Some("zsh"), "oh-my-pi session restored\n", "zsh"),
+            "omp",
+            "the brand string is distinctive enough to trust from output"
+        );
+        // Registry order matters: "oh-my-pi" word-contains pi's ambiguous
+        // token, so omp must be consulted before pi or this pane reads as pi.
+        assert_eq!(
+            named(Some("zsh"), "", "oh-my-pi"),
+            "omp",
+            "an oh-my-pi command/title must not degrade to pi"
+        );
+        assert_eq!(
+            named(Some("oh-my-pi"), "", "zsh"),
+            "omp",
+            "an oh-my-pi title must not degrade to pi"
+        );
+        assert_eq!(
+            named(Some("zsh"), "compiles with omp flags\n", "zsh"),
+            "zsh",
+            "the word omp in output must not name the agent"
         );
         assert_eq!(named(Some("amp"), "", "zsh"), "amp", "title names it");
         assert_eq!(named(Some("zsh"), "", "droid"), "droid", "command names it");

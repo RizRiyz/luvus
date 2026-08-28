@@ -37,6 +37,9 @@ name = "arrayvec"
 version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f02882884d3e1bc524fb12c79f107f6ad0e1cfd498c536ffb494301740995dfe"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "atomic"
@@ -809,8 +812,9 @@ dependencies = [
 
 [[package]]
 name = "luvus-alacritty-terminal"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
+ "arrayvec",
  "base64",
  "bitflags 2.13.0",
  "home",

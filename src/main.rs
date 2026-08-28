@@ -30,6 +30,7 @@ mod platform;
 mod search;
 mod session;
 mod skill;
+mod sound;
 mod terminal;
 mod theme;
 mod ui;
@@ -200,71 +201,140 @@ pub(crate) fn emit_clipboard(text: &str) {
     let _ = out.flush();
 }
 
-/// Play a short retro "done" jingle when an agent finishes. Runs client-side,
-/// like `emit_notification`. The WAV is synthesized once and cached in the temp
-/// dir, then played with the platform's audio tool in a detached thread so it
-/// never blocks the event loop. A silent no-op if no player is available.
-pub(crate) fn emit_sound() {
-    std::thread::spawn(|| {
-        if let Some(path) = ensure_done_jingle() {
+/// Play a synthesized notification cue. Playback stays client-side so remote
+/// sessions ring where the user is sitting, not on the server host.
+pub(crate) fn emit_sound(signal: sound::SoundSignal) {
+    std::thread::spawn(move || {
+        if let Some(path) = ensure_sound(signal) {
             play_sound_file(&path);
         }
     });
 }
 
-/// Synthesize the jingle WAV to `<tmp>/luvus-done.wav` on first use; return it.
-fn ensure_done_jingle() -> Option<std::path::PathBuf> {
-    let path = std::env::temp_dir().join("luvus-done.wav");
-    if !path.exists() {
-        std::fs::write(&path, synth_done_wav()).ok()?;
-    }
-    Some(path)
-}
-
-/// A tiny 8-bit-style "level up" flourish: four ascending square-wave notes
-/// (C-E-G-C), the last held a beat longer, with short fades so edges don't click.
-fn synth_done_wav() -> Vec<u8> {
-    const SR: u32 = 22_050;
-    let notes = [523.25f32, 659.25, 783.99, 1046.5]; // C5 E5 G5 C6
-    let amp = 0.22f32;
-    let mut samples: Vec<i16> = Vec::new();
-    for (i, &freq) in notes.iter().enumerate() {
-        let base = SR * 90 / 1000; // 90 ms
-        let n = if i + 1 == notes.len() { base * 2 } else { base };
-        let fade = (SR / 200).max(1); // ~5 ms
-        for s in 0..n {
-            let phase = (s as f32 * freq / SR as f32) % 1.0;
-            let sq = if phase < 0.5 { amp } else { -amp };
-            let up = s.min(fade) as f32 / fade as f32;
-            let down = n.saturating_sub(s).min(fade) as f32 / fade as f32;
-            let env = up.min(down);
-            samples.push((sq * env * i16::MAX as f32) as i16);
+/// Synthesize a cue once per machine and reuse its small WAV file thereafter.
+fn ensure_sound(signal: sound::SoundSignal) -> Option<std::path::PathBuf> {
+    let path = sound_cache_dir()?.join(format!(
+        "luvus-sound-v1-{}-{}.wav",
+        signal.style.key(),
+        match signal.cue {
+            sound::SoundCue::Done => "done",
+            sound::SoundCue::Blocked => "blocked",
         }
+    ));
+    let wav = sound::synth_wav(signal);
+    if publish_sound_cache(&path, &wav) {
+        Some(path)
+    } else {
+        None
     }
-    wav_bytes(&samples, SR)
 }
 
-/// Wrap 16-bit mono PCM in a minimal WAV container.
-fn wav_bytes(samples: &[i16], sr: u32) -> Vec<u8> {
-    let data_len = (samples.len() * 2) as u32;
-    let mut v = Vec::with_capacity(44 + data_len as usize);
-    v.extend_from_slice(b"RIFF");
-    v.extend_from_slice(&(36 + data_len).to_le_bytes());
-    v.extend_from_slice(b"WAVE");
-    v.extend_from_slice(b"fmt ");
-    v.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
-    v.extend_from_slice(&1u16.to_le_bytes()); // format = PCM
-    v.extend_from_slice(&1u16.to_le_bytes()); // channels = mono
-    v.extend_from_slice(&sr.to_le_bytes()); // sample rate
-    v.extend_from_slice(&(sr * 2).to_le_bytes()); // byte rate
-    v.extend_from_slice(&2u16.to_le_bytes()); // block align
-    v.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
-    v.extend_from_slice(b"data");
-    v.extend_from_slice(&data_len.to_le_bytes());
-    for s in samples {
-        v.extend_from_slice(&s.to_le_bytes());
+/// Return the shared, application-owned directory for synthesized cues.
+///
+/// The user-specific name lets attached clients reuse the cache without
+/// trusting a predictable file placed directly in a system-wide temp folder.
+fn sound_cache_dir() -> Option<std::path::PathBuf> {
+    #[cfg(unix)]
+    let name = format!("luvus-sound-cache-{}", unsafe { libc::geteuid() });
+    #[cfg(not(unix))]
+    let name = "luvus-sound-cache".to_string();
+
+    let path = std::env::temp_dir().join(name);
+    ensure_private_sound_cache_dir(&path).then_some(path)
+}
+
+/// Create the cache directory privately and reject hostile pre-existing paths.
+fn ensure_private_sound_cache_dir(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+        let created = std::fs::DirBuilder::new().mode(0o700).create(path);
+        if created.is_err_and(|error| error.kind() != std::io::ErrorKind::AlreadyExists) {
+            return false;
+        }
+        let Ok(mut metadata) = std::fs::symlink_metadata(path) else {
+            return false;
+        };
+        if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
+            return false;
+        }
+        if metadata.permissions().mode() & 0o077 != 0 {
+            if std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).is_err() {
+                return false;
+            }
+            let Ok(updated) = std::fs::symlink_metadata(path) else {
+                return false;
+            };
+            metadata = updated;
+        }
+        metadata.file_type().is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.permissions().mode() & 0o077 == 0
     }
-    v
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        let created = std::fs::create_dir(path);
+        if created.is_err_and(|error| error.kind() != std::io::ErrorKind::AlreadyExists) {
+            return false;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(path) else {
+            return false;
+        };
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_type().is_dir()
+            && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let created = std::fs::create_dir(path);
+        if created.is_err_and(|error| error.kind() != std::io::ErrorKind::AlreadyExists) {
+            return false;
+        }
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+    }
+}
+
+/// Publish a complete WAV atomically. Every process writes a unique staging
+/// file, then renames it into place. Concurrent clients can replace one complete
+/// copy with another on Unix; on Windows the loser validates and reuses the
+/// winner. A partial file is never exposed at the playback path.
+fn publish_sound_cache(path: &Path, wav: &[u8]) -> bool {
+    if std::fs::read(path).is_ok_and(|cached| cached == wav) {
+        return true;
+    }
+
+    static STAGING_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = STAGING_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let staging = path.with_file_name(format!(".{name}.{}.{}.tmp", std::process::id(), id));
+
+    let wrote = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)?;
+        file.write_all(wav)
+    })();
+    if wrote.is_err() {
+        let _ = std::fs::remove_file(&staging);
+        return false;
+    }
+
+    if std::fs::rename(&staging, path).is_ok() {
+        return true;
+    }
+
+    // Windows does not replace an existing destination. Another client may
+    // have won the race, so accept only the exact bytes we intended to publish.
+    let published = std::fs::read(path).is_ok_and(|cached| cached == wav);
+    let _ = std::fs::remove_file(&staging);
+    published
 }
 
 /// Play a WAV with the platform's audio tool (blocking — called in a thread).
@@ -1017,9 +1087,8 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
         for msg in app.pending_notify.drain(..) {
             emit_notification(&msg);
         }
-        if app.pending_sound {
-            app.pending_sound = false;
-            emit_sound();
+        if let Some(signal) = app.pending_sound.take() {
+            emit_sound(signal);
         }
         // Advance the working spinner ~10x/s (the loop redraws every frame).
         if last_spin.elapsed() >= Duration::from_millis(100)
@@ -1135,17 +1204,86 @@ mod tests {
         ])));
     }
 
-    // The synthesized "done" jingle is a well-formed 16-bit mono WAV.
     #[test]
-    fn done_jingle_is_valid_wav() {
-        let w = synth_done_wav();
-        assert_eq!(&w[0..4], b"RIFF");
-        assert_eq!(&w[8..12], b"WAVE");
-        assert_eq!(&w[12..16], b"fmt ");
-        assert_eq!(&w[36..40], b"data");
-        let data_len = u32::from_le_bytes(w[40..44].try_into().unwrap()) as usize;
-        assert_eq!(w.len(), 44 + data_len, "header data length matches payload");
-        assert!(data_len > 0, "non-empty audio");
+    fn concurrent_sound_cache_publication_never_exposes_partial_wav() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("sound-cache-test-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = Arc::new(dir.join("cue.wav"));
+        let wav = Arc::new(crate::sound::synth_wav(crate::sound::SoundSignal {
+            cue: crate::sound::SoundCue::Blocked,
+            style: crate::sound::SoundStyle::Retro,
+        }));
+        let writers_done = Arc::new(AtomicBool::new(false));
+
+        let reader_path = Arc::clone(&path);
+        let reader_wav = Arc::clone(&wav);
+        let reader_done = Arc::clone(&writers_done);
+        let reader = std::thread::spawn(move || {
+            while !reader_done.load(Ordering::Acquire) {
+                if let Ok(bytes) = std::fs::read(reader_path.as_ref()) {
+                    assert_eq!(bytes, *reader_wav, "published WAV is always complete");
+                }
+                std::thread::yield_now();
+            }
+        });
+
+        let writers: Vec<_> = (0..8)
+            .map(|_| {
+                let path = Arc::clone(&path);
+                let wav = Arc::clone(&wav);
+                std::thread::spawn(move || assert!(publish_sound_cache(&path, &wav)))
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        writers_done.store(true, Ordering::Release);
+        reader.join().unwrap();
+
+        assert_eq!(std::fs::read(path.as_ref()).unwrap(), *wav);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_file(path.as_ref()).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn sound_cache_uses_a_private_application_directory() {
+        let dir = sound_cache_dir().expect("private sound cache");
+        assert_eq!(dir.parent(), Some(std::env::temp_dir().as_path()));
+        assert_ne!(dir, std::env::temp_dir());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+            let metadata = std::fs::symlink_metadata(&dir).expect("sound cache metadata");
+            assert!(metadata.file_type().is_dir());
+            assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+            assert_eq!(metadata.permissions().mode() & 0o077, 0);
+        }
+    }
+
+    #[test]
+    fn sound_cache_rejects_a_non_directory_path() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("sound-cache-file-{}-{nonce}", std::process::id()));
+        std::fs::write(&path, b"not a directory").unwrap();
+        assert!(!ensure_private_sound_cache_dir(&path));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

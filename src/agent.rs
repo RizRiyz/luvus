@@ -9,6 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+pub(crate) mod muse;
+pub(crate) mod omp;
 mod usage;
 pub use usage::{session_mtime, session_usage};
 
@@ -99,6 +101,21 @@ static SOURCES: &[SessionSource] = &[
         fork: Some(|q| format!("codex fork {q}\r")),
     },
     SessionSource {
+        name: muse::NAME,
+        discover: Some(Discovery {
+            base: muse::sessions_base,
+            recent: muse::recent,
+            latest: muse::latest,
+            list: Some(muse::list),
+        }),
+        resume: |q| format!("muse resume {q}\r"),
+        // Muse's `/fork` is available only inside the already-running TUI, and
+        // Muse refuses to resume that live UUID in a sibling. Luvus cannot keep
+        // the original pane running while creating a branch until Muse exposes
+        // an external fork command or flag.
+        fork: None,
+    },
+    SessionSource {
         name: "kimi",
         discover: Some(Discovery {
             base: kimi_base,
@@ -132,6 +149,22 @@ static SOURCES: &[SessionSource] = &[
         resume: |q| format!("pi --session {q}\r"),
         // Pi's session model is a branching tree; `--fork` forks by id (docs/23).
         fork: Some(|q| format!("pi --fork {q}\r")),
+    },
+    SessionSource {
+        // Oh My Pi (omp) — pi's end-user packaging. Sessions share pi's file
+        // layout (header line carries `id` + `cwd`) and `PI_CODING_AGENT_SESSION_DIR`
+        // override. omp resumes with `--resume` (not `--session` like pi) and
+        // forks with `--fork <session>` — both accept an id prefix or a path.
+        // Extension-reported ids arrive through the authoritative agent API.
+        name: omp::NAME,
+        discover: Some(Discovery {
+            base: omp::sessions_base,
+            recent: omp::recent,
+            latest: omp::latest,
+            list: Some(pi_list),
+        }),
+        resume: |q| format!("omp --resume {q}\r"),
+        fork: Some(|q| format!("omp --fork {q}\r")),
     },
     SessionSource {
         name: "gemini",
@@ -251,13 +284,15 @@ fn filter_launch_flags(agent: &str, launch: &[String]) -> Vec<String> {
     const STANDALONE: &[&str] = &["--continue", "--fork-session", "--print", "-p"];
 
     let mut i = 0;
-    // Codex selects a session with positional `resume <id>` / `fork <id>`
-    // subcommands rather than flags, so drop either when it leads the captured
-    // argv. A restored fork must resume its new id, not fork the parent again.
-    if agent == "codex"
+    // Codex and Muse select sessions with positional subcommands rather than
+    // flags. Drop them when they lead captured argv so a restored pane gets
+    // exactly one fresh session selector. A restored Codex fork must resume its
+    // new id, not fork the parent again.
+    if (agent == "codex"
         && launch
             .first()
-            .is_some_and(|s| matches!(s.as_str(), "resume" | "fork"))
+            .is_some_and(|s| matches!(s.as_str(), "resume" | "fork")))
+        || (agent == muse::NAME && launch.first().is_some_and(|s| s == "resume"))
     {
         i = 1;
         if launch.get(1).is_some_and(|v| !v.starts_with('-')) {
@@ -1456,6 +1491,11 @@ mod tests {
         assert!(resume_command("codex", "c1")
             .unwrap()
             .contains("codex resume"));
+        assert_eq!(
+            resume_command("muse", "7de3d84e-31f9-4437-b2f8-0b56db788042").as_deref(),
+            Some("muse resume '7de3d84e-31f9-4437-b2f8-0b56db788042'\r")
+        );
+        assert!(is_resumable("muse"));
         assert!(resume_command("kimi", "k1")
             .unwrap()
             .contains("kimi --resume"));
@@ -1768,6 +1808,10 @@ mod tests {
             f("codex", &["fork", "sess_9", "--model", "o3"]),
             vec!["--model", "o3"]
         );
+        assert_eq!(
+            f("muse", &["resume", "muse-id", "--reasoning-effort", "high"]),
+            vec!["--reasoning-effort", "high"]
+        );
         // A kept flag keeps its value.
         assert_eq!(
             f("claude", &["--permission-mode", "bypassPermissions"]),
@@ -1867,6 +1911,10 @@ mod tests {
         let grok = fork_command("grok", "g1").unwrap();
         assert!(grok.contains("grok --resume") && grok.contains("--fork-session"));
         assert!(can_fork("claude") && can_fork("codex") && can_fork("pi") && can_fork("grok"));
+        assert!(
+            !can_fork("muse"),
+            "Muse has no external native fork entrypoint"
+        );
         // Resume-capable, but no native fork (the copy-then-resume tier is future).
         assert!(!can_fork("copilot"));
         assert!(!can_fork("cursor"));
@@ -1927,6 +1975,64 @@ mod tests {
                 .unwrap()
                 .session_id,
             "cccc"
+        );
+    }
+
+    #[test]
+    fn omp_discovers_pi_layout_sessions_and_resumes_with_omp_flag() {
+        // omp ships pi's session layout: <base>/<encoded-cwd>/<uuid>.jsonl with
+        // a self-describing header. Discovery matches by cwd; the resume command
+        // uses `omp --resume` (not pi's `--session`), and omp forks a saved
+        // session with `--fork <session>` (id prefix or path), like pi.
+        let base = tmp("omp");
+        let app = base.join("-work-app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("dddd.jsonl"),
+            "{\"type\":\"session\",\"id\":\"dddd\",\"cwd\":\"/work/app\"}\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            omp::latest(&base, Path::new("/work/app")).as_deref(),
+            Some("dddd")
+        );
+        let recent = omp::recent(&base, 10);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].agent, "omp");
+        assert_eq!(recent[0].session_id, "dddd");
+
+        let cmd = resume_command("omp", "dddd").unwrap();
+        assert!(cmd.contains("omp --resume"), "uses omp's flag: {cmd}");
+        assert!(!cmd.contains("--session"), "pi's flag must not leak");
+        assert!(is_resumable("omp"));
+        assert!(can_fork("omp"), "omp forks saved sessions with --fork");
+        let fork = fork_command("omp", "dddd").unwrap();
+        assert!(fork.contains("omp --fork"), "uses omp's flag: {fork}");
+    }
+
+    #[test]
+    fn omp_reads_sessions_with_a_title_slot_before_the_header() {
+        // Current omp builds prepend a fixed-width 256-byte `type:"title"`
+        // slot line before the session header. The parser must skip it (no
+        // id/cwd keys) and still find the header within the 5-line scan.
+        let base = tmp("omp-title-slot");
+        let app = base.join("-work-app");
+        fs::create_dir_all(&app).unwrap();
+        let title_slot = format!(
+            "{:<255}\n",
+            "{\"type\":\"title\",\"v\":1,\"title\":\"x\",\"pad\":\"\"}"
+        );
+        assert_eq!(title_slot.len(), 256, "the physical slot is 256 bytes");
+        fs::write(
+            app.join("eeee.jsonl"),
+            format!("{title_slot}{{\"type\":\"session\",\"id\":\"eeee\",\"cwd\":\"/work/app\"}}\n"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            omp::latest(&base, Path::new("/work/app")).as_deref(),
+            Some("eeee")
         );
     }
 

@@ -242,7 +242,7 @@ where
                 r?;
             }
             Ok(ServerMessage::Notify(msg)) => crate::emit_notification(&msg),
-            Ok(ServerMessage::Sound) => crate::emit_sound(),
+            Ok(ServerMessage::Sound(signal)) => crate::emit_sound(signal),
             Ok(ServerMessage::Clipboard(text)) => crate::emit_clipboard(&text),
             Ok(ServerMessage::OpenUrl(url)) => crate::platform::open_url(&url),
             Ok(ServerMessage::SwitchSession { name }) => break ClientExit::SwitchSession(name),
