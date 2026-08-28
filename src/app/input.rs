@@ -102,8 +102,12 @@ type CellSpan = (u16, u16, u16);
 /// the copied text, so either cell of `你` selects the same complete word. Char
 /// indices are the columns, matching how [`crate::links::link_at`] and the grid
 /// renderer address cells.
-fn word_at_grid(rows: &[String], col: u16, row: u16) -> Option<(String, Vec<CellSpan>)> {
-    let line = rows.get(row as usize)?;
+fn word_at_grid(
+    rows: &crate::terminal::vt::AlignedRows,
+    col: u16,
+    row: u16,
+) -> Option<(String, Vec<CellSpan>)> {
+    let line = rows.rows().get(row as usize)?;
     let chars: Vec<char> = line.chars().collect();
     let idx = col as usize;
     if idx >= chars.len() || chars[idx].is_whitespace() {
@@ -117,11 +121,14 @@ fn word_at_grid(rows: &[String], col: u16, row: u16) -> Option<(String, Vec<Cell
     while hi < chars.len() && !chars[hi].is_whitespace() {
         hi += 1;
     }
-    let text: String = chars[lo..hi]
-        .iter()
-        .copied()
-        .filter(|c| *c != crate::terminal::vt::ALIGNED_WIDE_CELL)
-        .collect();
+    let mut text = String::new();
+    for (offset, character) in chars[lo..hi].iter().copied().enumerate() {
+        if character == crate::terminal::vt::ALIGNED_WIDE_CELL {
+            continue;
+        }
+        text.push(character);
+        text.extend(rows.zero_width_at(row, (lo + offset) as u16));
+    }
     if text.is_empty() {
         return None;
     }
@@ -2429,7 +2436,7 @@ impl App {
             engine.visible_rows_aligned()
         };
         let (gcol, grow) = (col - content.x, row - content.y);
-        let (text, spans) = match crate::links::link_at(&rows, gcol, grow) {
+        let (text, spans) = match crate::links::link_at(rows.rows(), gcol, grow) {
             Some(link) => {
                 let text = match link.hit {
                     crate::links::Hit::Url(u) => u,
@@ -2520,7 +2527,7 @@ impl App {
             // column the underline lands on (or which cells Ctrl-click opens).
             engine.visible_rows_aligned()
         };
-        let link = crate::links::link_at(&rows, col - content.x, row - content.y)?;
+        let link = crate::links::link_at(rows.rows(), col - content.x, row - content.y)?;
         let target = match &link.hit {
             crate::links::Hit::Url(u) => {
                 crate::platform::is_openable_url(u).then(|| LinkTarget::Url(u.clone()))?
@@ -4288,7 +4295,8 @@ mod link_click_tests {
     /// with the single span it covers. Used when a cell isn't a path or URL.
     #[test]
     fn word_at_grid_takes_the_whitespace_word_under_the_cell() {
-        let rows = vec!["  foo(bar) baz  ".to_string()];
+        let rows =
+            crate::terminal::vt::AlignedRows::from_rows(vec!["  foo(bar) baz  ".to_string()]);
         // Anywhere inside the token grabs the whole whitespace-delimited run,
         // punctuation included, and reports its exact span.
         for col in 2..=9 {
@@ -4313,7 +4321,9 @@ mod link_click_tests {
     #[test]
     fn word_at_grid_keeps_wide_glyph_cells_in_one_word() {
         let spacer = crate::terminal::vt::ALIGNED_WIDE_CELL;
-        let rows = vec![format!("你{spacer}好{spacer} code 编{spacer}码{spacer}42")];
+        let rows = crate::terminal::vt::AlignedRows::from_rows(vec![format!(
+            "你{spacer}好{spacer} code 编{spacer}码{spacer}42"
+        )]);
 
         for col in 0..4 {
             assert_eq!(
@@ -4670,6 +4680,42 @@ mod link_click_tests {
             (sel.anchor, sel.cursor),
             ((at.0 - 1, at.1), (at.0 + 2, at.1))
         );
+    }
+
+    /// Zero-width grapheme components live on the base terminal cell. Copying
+    /// must retain them without letting them shift cell-coordinate lookup.
+    #[test]
+    fn a_double_click_preserves_complete_graphemes() {
+        let _env = crate::persist::test_env("double-click-copy-graphemes");
+        for (shown, expected) in [
+            ("go 👩‍💻 next", "👩‍💻"),
+            ("go 🖥️ next", "🖥️"),
+            ("go e\u{301}lan next", "e\u{301}lan"),
+        ] {
+            // Keep the click clear of the pane-resize target at the left edge.
+            let (mut app, _t, at) = fixture_showing(shown, 3);
+            app.handle_event(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                at,
+                KeyModifiers::NONE,
+            ));
+            app.handle_event(mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                at,
+                KeyModifiers::NONE,
+            ));
+            app.handle_event(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                at,
+                KeyModifiers::NONE,
+            ));
+
+            assert_eq!(
+                app.pending_clipboard.as_deref(),
+                Some(expected),
+                "{shown:?}"
+            );
+        }
     }
 
     /// The wide-character case for Ctrl-hover/Ctrl-click link resolution, which

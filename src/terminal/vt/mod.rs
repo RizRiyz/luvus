@@ -17,6 +17,56 @@ use crate::terminal::pty::InputAction;
 /// a wide glyph without being confused with an actual space between words.
 pub(crate) const ALIGNED_WIDE_CELL: char = '\0';
 
+/// Visible terminal text indexed one character per grid cell, plus the sparse
+/// zero-width components attached to base cells. Keeping the latter separate
+/// preserves column lookup without dropping combining marks, variation
+/// selectors, or ZWJ emoji from copied text.
+pub struct AlignedRows {
+    rows: Vec<String>,
+    zero_width: Vec<(u16, u16, Vec<char>)>,
+}
+
+impl AlignedRows {
+    pub(crate) fn new(row_count: usize) -> Self {
+        Self {
+            rows: vec![String::new(); row_count],
+            zero_width: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_rows(rows: Vec<String>) -> Self {
+        Self {
+            rows,
+            zero_width: Vec::new(),
+        }
+    }
+
+    pub(crate) fn push_cell(
+        &mut self,
+        row: u16,
+        col: u16,
+        character: char,
+        zero_width: Option<&[char]>,
+    ) {
+        self.rows[row as usize].push(character);
+        if let Some(chars) = zero_width.filter(|chars| !chars.is_empty()) {
+            self.zero_width.push((row, col, chars.to_vec()));
+        }
+    }
+
+    pub(crate) fn rows(&self) -> &[String] {
+        &self.rows
+    }
+
+    pub(crate) fn zero_width_at(&self, row: u16, col: u16) -> &[char] {
+        self.zero_width
+            .iter()
+            .find(|(r, c, _)| *r == row && *c == col)
+            .map_or(&[], |(_, _, chars)| chars)
+    }
+}
+
 /// Which terminal engine backs a pane.
 ///
 /// One variant today. It exists so that the choice of engine is a named
@@ -172,7 +222,7 @@ pub trait VtEngine: Send {
     /// the distinction between a continuation and an actual space. Use this
     /// (never `visible_rows`) when a screen column must address text — e.g. the
     /// token under a double-click, or the link under a `Ctrl`-hover.
-    fn visible_rows_aligned(&self) -> Vec<String>;
+    fn visible_rows_aligned(&self) -> AlignedRows;
 
     /// Bounded public capture for harnesses. Implementations serialize only
     /// normalized grid text and SGR styles; raw child control sequences never
