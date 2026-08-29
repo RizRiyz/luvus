@@ -77,15 +77,16 @@ pub(super) fn draw_settings(
 
     // Width must fit the whole tab bar — translated labels (esp. CJK) can be much
     // wider than English, so size to the tabs instead of a fixed cap. The tabs
-    // are ` {icon} {label} ` pills; the loop starts at inner.x+1 (1 left margin),
-    // and the modal adds 2 border columns. Keep a little breathing room beyond
-    // the toolbar so wide controls (notably Luvus Bar placement) do not crowd
-    // the border. Both dimensions remain capped to the current viewport.
+    // are `[X] {label}` pills separated by ` · `. Add only the two border
+    // columns so the toolbar defines the desktop modal width; this keeps
+    // General and Language close to the left and right edges without crowding
+    // adjacent tabs. Both dimensions remain capped to the current viewport.
     let tabs_w: u16 = SettingsTab::ALL
         .iter()
-        .map(|st| display_width(&format!(" {} {} ", st.icon(), st.label(app.catalog))) as u16)
-        .sum();
-    let w = (tabs_w + 12).max(54).min(area.width);
+        .map(|st| display_width(&format!("{} {}", st.icon(), st.label(app.catalog))) as u16)
+        .sum::<u16>()
+        + (SettingsTab::ALL.len().saturating_sub(1) as u16 * 3);
+    let w = (tabs_w + 2).max(54).min(area.width);
     let h = area.height.saturating_sub(2).clamp(16, 30).min(area.height);
     let modal = if app.compact {
         super::mobile::sheets::full_screen(area)
@@ -189,9 +190,30 @@ pub(super) fn draw_settings(
             tabs.push((st, rect));
         }
     } else {
-        let mut x = inner.x + 1;
-        for st in SettingsTab::ALL {
-            let label = format!(" {} {} ", st.icon(), st.label(app.catalog));
+        let mut x = inner.x;
+        let labels_width = SettingsTab::ALL
+            .iter()
+            .map(|st| display_width(&format!("{} {}", st.icon(), st.label(app.catalog))) as u16)
+            .sum::<u16>();
+        let gaps = SettingsTab::ALL.len().saturating_sub(1) as u16;
+        let separator = if labels_width.saturating_add(gaps.saturating_mul(3)) <= inner.width {
+            " · "
+        } else if labels_width.saturating_add(gaps) <= inner.width {
+            "·"
+        } else {
+            ""
+        };
+        let separator_width = display_width(separator) as u16;
+        for (index, st) in SettingsTab::ALL.into_iter().enumerate() {
+            if index > 0 {
+                let rect = Rect::new(x, ty, separator_width, 1);
+                f.render_widget(
+                    Paragraph::new(Span::styled(separator, Style::new().fg(t.overlay0))),
+                    rect,
+                );
+                x = x.saturating_add(separator_width);
+            }
+            let label = format!("{} {}", st.icon(), st.label(app.catalog));
             let cw = display_width(&label) as u16;
             if x + cw > inner.right() {
                 break;
@@ -204,7 +226,7 @@ pub(super) fn draw_settings(
             let rect = Rect::new(x, ty, cw, 1);
             f.render_widget(Paragraph::new(Span::styled(label, style)), rect);
             tabs.push((st, rect));
-            x += cw;
+            x = x.saturating_add(cw);
         }
     }
     let tabs_bottom = inner.y + 2 + tab_rows;
@@ -1696,6 +1718,44 @@ fn fill_bg(f: &mut RenderTarget, rect: Rect, color: ratatui::style::Color) {
 mod tests {
     use super::{display_width, keep_visible_scroll, slider_row, Rect, RenderTarget, Theme};
     use ratatui::buffer::Buffer;
+
+    #[test]
+    fn ascii_tab_markers_are_separated_and_remain_visible_at_80_columns() {
+        use crate::app::SettingsTab;
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("settings-ascii-tabs-80");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 30, tx).unwrap();
+        app.open_settings();
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        assert!(!app.compact);
+        assert_eq!(app.settings_tab_rects.len(), SettingsTab::ALL.len());
+        let narrow_buffer = terminal.backend().buffer();
+        for pair in app.settings_tab_rects.windows(2) {
+            let separator_x = pair[0].1.right();
+            assert_eq!(pair[1].1.x.saturating_sub(separator_x), 1);
+            assert_eq!(narrow_buffer[(separator_x, pair[0].1.y)].symbol(), "·");
+        }
+        assert!(app
+            .settings_tab_rects
+            .iter()
+            .any(|(tab, _)| *tab == SettingsTab::Language));
+
+        let mut wide = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        wide.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let wide_buffer = wide.backend().buffer();
+        for pair in app.settings_tab_rects.windows(2) {
+            let separator_x = pair[0].1.right();
+            assert_eq!(pair[1].1.x.saturating_sub(separator_x), 3);
+            assert_eq!(wide_buffer[(separator_x + 1, pair[0].1.y)].symbol(), "·");
+        }
+    }
 
     #[test]
     fn layout_scroll_moves_only_when_selection_leaves_the_viewport() {

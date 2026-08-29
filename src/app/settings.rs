@@ -36,13 +36,13 @@ impl SettingsTab {
 
     pub fn icon(self) -> &'static str {
         match self {
-            SettingsTab::General => "◆",
-            SettingsTab::Theme => "◑",
-            SettingsTab::Layout => "▣",
-            SettingsTab::Keys => "⌨",
-            SettingsTab::Modules => "❏",
-            SettingsTab::Integrations => "☆",
-            SettingsTab::Language => "⊕",
+            SettingsTab::General => "[G]",
+            SettingsTab::Theme => "[T]",
+            SettingsTab::Layout => "[L]",
+            SettingsTab::Keys => "[K]",
+            SettingsTab::Modules => "[M]",
+            SettingsTab::Integrations => "[A]",
+            SettingsTab::Language => "[L]",
         }
     }
 
@@ -2008,15 +2008,22 @@ mod tests {
     }
 
     #[test]
-    fn settings_tab_icons_have_consistent_terminal_width() {
-        assert_eq!(SettingsTab::General.icon(), "◆");
-        assert_eq!(SettingsTab::Layout.icon(), "▣");
-        assert_eq!(SettingsTab::Integrations.icon(), "☆");
-        for tab in SettingsTab::ALL {
+    fn settings_tab_markers_have_consistent_terminal_width() {
+        let expected = [
+            (SettingsTab::General, "[G]"),
+            (SettingsTab::Theme, "[T]"),
+            (SettingsTab::Layout, "[L]"),
+            (SettingsTab::Keys, "[K]"),
+            (SettingsTab::Modules, "[M]"),
+            (SettingsTab::Integrations, "[A]"),
+            (SettingsTab::Language, "[L]"),
+        ];
+        for (tab, marker) in expected {
+            assert_eq!(tab.icon(), marker);
             assert_eq!(
                 unicode_width::UnicodeWidthStr::width(tab.icon()),
-                1,
-                "{tab:?} icon must occupy one terminal column"
+                3,
+                "{tab:?} marker must occupy three terminal columns"
             );
         }
     }
