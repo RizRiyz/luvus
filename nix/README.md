@@ -41,7 +41,7 @@ Edit `maintainers/maintainer-list.nix` in your nixpkgs fork and add an entry
 
 ```nix
 rizriyz = {
-  email = "ariestiyansyah.rizky@gmail.com";
+  email = "2667489+RizRiyz@users.noreply.github.com";
   github = "RizRiyz";
   githubId = 2667489;
   name = "Riz";
