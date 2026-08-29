@@ -562,6 +562,20 @@ impl App {
                     InsertPath::NotUtf8 => self.show_toast("path is not valid UTF-8"),
                 }
             }
+            FileMenuItem::OpenAsNewWorkspace => {
+                // Same focus-or-create rule as `workspace.open`: an already-open
+                // cwd is focused; otherwise spawn a new workspace there.
+                match self
+                    .workspaces
+                    .iter()
+                    .position(|w| crate::platform::same_path(&w.cwd, &menu.path))
+                {
+                    Some(i) => self.active_ws = i,
+                    None => {
+                        let _ = self.create_workspace_at(menu.path);
+                    }
+                }
+            }
             FileMenuItem::Delete => self.file_delete = Some(menu.path),
             FileMenuItem::Divider => {}
         }
@@ -3350,5 +3364,105 @@ mod tests {
             let insert = items.iter().position(|i| *i == FileMenuItem::InsertPath);
             assert!(copy < insert, "it sits with Copy Path, just below it");
         }
+    }
+
+    // ── Open as New Workspace ────────────────────────────────────────────────
+
+    #[test]
+    fn open_as_new_workspace_is_offered_for_folders_only() {
+        let file = FileMenu {
+            path: PathBuf::from("/tmp/x.rs"),
+            is_dir: false,
+            anchor: (0, 0),
+            items: Vec::new(),
+            editors: Vec::new(),
+        };
+        let file_items = file.build_items();
+        assert!(
+            !file_items.contains(&FileMenuItem::OpenAsNewWorkspace),
+            "files do not get Open as New Workspace"
+        );
+
+        let folder = FileMenu {
+            path: PathBuf::from("/tmp"),
+            is_dir: true,
+            anchor: (0, 0),
+            items: Vec::new(),
+            editors: Vec::new(),
+        };
+        let folder_items = folder.build_items();
+        assert!(
+            folder_items.contains(&FileMenuItem::OpenAsNewWorkspace),
+            "folders get Open as New Workspace"
+        );
+        let insert = folder_items
+            .iter()
+            .position(|i| *i == FileMenuItem::InsertPath);
+        let open_ws = folder_items
+            .iter()
+            .position(|i| *i == FileMenuItem::OpenAsNewWorkspace);
+        assert!(
+            insert < open_ws,
+            "Open as New Workspace sits below Insert Path"
+        );
+    }
+
+    #[test]
+    fn open_as_new_workspace_creates_a_workspace_at_the_folder() {
+        let _env = crate::persist::test_env("files-open-as-ws");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let before = app.workspaces.len();
+        let dir = std::env::temp_dir().join("luvus-open-as-ws-new");
+        let _ = std::fs::create_dir_all(&dir);
+
+        app.file_menu = Some(FileMenu {
+            path: dir.clone(),
+            is_dir: true,
+            anchor: (0, 0),
+            items: Vec::new(),
+            editors: Vec::new(),
+        });
+        app.file_menu_action_pub(FileMenuItem::OpenAsNewWorkspace);
+
+        assert_eq!(
+            app.workspaces.len(),
+            before + 1,
+            "a new workspace was added"
+        );
+        assert!(
+            crate::platform::same_path(&app.workspaces[app.active_ws].cwd, &dir),
+            "the new workspace is focused at the clicked folder"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_as_new_workspace_focuses_an_already_open_workspace() {
+        let _env = crate::persist::test_env("files-open-as-ws-focus");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let dir = std::env::temp_dir().join("luvus-open-as-ws-focus");
+        let _ = std::fs::create_dir_all(&dir);
+        assert!(app.create_workspace_at(dir.clone()), "seed workspace");
+        let seeded = app.active_ws;
+        let count = app.workspaces.len();
+
+        // Focus something else so the action must move focus back.
+        app.active_ws = 0;
+        assert_ne!(app.active_ws, seeded);
+
+        app.file_menu = Some(FileMenu {
+            path: dir.clone(),
+            is_dir: true,
+            anchor: (0, 0),
+            items: Vec::new(),
+            editors: Vec::new(),
+        });
+        app.file_menu_action_pub(FileMenuItem::OpenAsNewWorkspace);
+
+        assert_eq!(app.workspaces.len(), count, "no duplicate workspace");
+        assert_eq!(app.active_ws, seeded, "existing workspace is focused");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

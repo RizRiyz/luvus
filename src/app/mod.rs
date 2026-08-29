@@ -613,6 +613,8 @@ pub enum FileMenuItem {
     /// Type the path into the focused pane's prompt, without submitting it
     /// (docs/38 FILE-6). Offered for folders too, exactly like `CopyPath`.
     InsertPath,
+    /// Open this folder as a workspace (folders only), or focus it if already open.
+    OpenAsNewWorkspace,
     Divider,
     Delete,
 }
@@ -633,9 +635,11 @@ impl FileMenu {
             FileMenuItem::Rename,
             FileMenuItem::CopyPath,
             FileMenuItem::InsertPath,
-            FileMenuItem::Divider,
-            FileMenuItem::Delete,
         ]);
+        if self.is_dir {
+            v.push(FileMenuItem::OpenAsNewWorkspace);
+        }
+        v.extend([FileMenuItem::Divider, FileMenuItem::Delete]);
         v
     }
 }
