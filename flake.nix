@@ -76,7 +76,7 @@
           meta = with pkgs.lib; {
             description = "Mission control for your AI coding agents";
             homepage = "https://luvus.dev";
-            license = licenses.agpl3Plus;
+            license = licenses.asl20;
             mainProgram = "luvus";
             platforms = platforms.unix;
           };

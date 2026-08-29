@@ -67,7 +67,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
     description = "Mission control for your AI coding agents";
     homepage = "https://luvus.dev";
     changelog = "https://github.com/RizRiyz/luvus/releases/tag/v${finalAttrs.version}";
-    license = lib.licenses.agpl3Plus;
+    license = lib.licenses.asl20;
     mainProgram = "luvus";
     maintainers = with lib.maintainers; [ rizriyz ];
     platforms = lib.platforms.unix;

@@ -7,7 +7,7 @@ edition = "2021"
 # with a cryptic `edition2024` error instead of a clear "requires a newer Rust".
 rust-version = "1.88"
 description = "Mission control for your AI coding agents"
-authors = ["Riz <rizflagz@gmail.com>"]
+authors = ["Riz <riz@skyrizz.com>"]
 license = "Apache-2.0"
 readme = "README.md"
 homepage = "https://github.com/RizRiyz/luvus"
