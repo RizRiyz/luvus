@@ -3374,7 +3374,7 @@ mod tests {
         }
     }
 
-    // ── Open as New Workspace ────────────────────────────────────────────────
+    // ── Open as Workspace ────────────────────────────────────────────────────
 
     #[test]
     fn open_as_new_workspace_is_offered_for_folders_only() {
@@ -3388,7 +3388,7 @@ mod tests {
         let file_items = file.build_items();
         assert!(
             !file_items.contains(&FileMenuItem::OpenAsNewWorkspace),
-            "files do not get Open as New Workspace"
+            "files do not get Open as Workspace"
         );
 
         let folder = FileMenu {
@@ -3401,7 +3401,7 @@ mod tests {
         let folder_items = folder.build_items();
         assert!(
             folder_items.contains(&FileMenuItem::OpenAsNewWorkspace),
-            "folders get Open as New Workspace"
+            "folders get Open as Workspace"
         );
         let insert = folder_items
             .iter()
@@ -3411,7 +3411,7 @@ mod tests {
             .position(|i| *i == FileMenuItem::OpenAsNewWorkspace);
         assert!(
             insert < open_ws,
-            "Open as New Workspace sits below Insert Path"
+            "Open as Workspace sits below Insert Path"
         );
     }
 

@@ -634,7 +634,7 @@ fn file_label(it: FileMenuItem, editors: &[(String, String)]) -> String {
         FileMenuItem::Rename => "Rename".to_string(),
         FileMenuItem::CopyPath => "Copy Path".to_string(),
         FileMenuItem::InsertPath => "Insert Path".to_string(),
-        FileMenuItem::OpenAsNewWorkspace => "Open as New Workspace".to_string(),
+        FileMenuItem::OpenAsNewWorkspace => "Open as Workspace".to_string(),
         FileMenuItem::Divider => String::new(),
         FileMenuItem::Delete => "Delete".to_string(),
     }
