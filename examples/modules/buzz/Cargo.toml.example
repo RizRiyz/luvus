@@ -3,7 +3,7 @@ name = "luvus-buzz"
 version = "0.1.0"
 edition = "2021"
 description = "A NIP-29 nostr chat client for Buzz relays, as a luvus module (docs/39)"
-license = "AGPL-3.0-or-later"
+license = "Apache-2.0"
 
 [[bin]]
 name = "luvus-buzz"

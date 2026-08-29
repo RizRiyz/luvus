@@ -3,6 +3,9 @@
 Thanks for helping make Luvus better. Bug fixes, documentation, tests, and new
 features are all welcome.
 
+Unless explicitly stated otherwise, contributions submitted for inclusion in
+Luvus are provided under the Apache License, Version 2.0.
+
 ## Before you start
 
 Small fixes can go directly to a pull request. For a large UI, architecture, or

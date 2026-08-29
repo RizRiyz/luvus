@@ -8,7 +8,7 @@
   },
   "homepage": "https://luvus.dev/docs/",
   "repository": "https://github.com/RizRiyz/luvus",
-  "license": "AGPL-3.0-or-later",
+  "license": "Apache-2.0",
   "keywords": [
     "luvus",
     "terminal",

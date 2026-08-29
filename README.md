@@ -9,7 +9,7 @@
 [![crates.io](https://img.shields.io/crates/v/luvus.svg)](https://crates.io/crates/luvus)
 [![ci](https://github.com/RizRiyz/luvus/actions/workflows/ci.yml/badge.svg)](https://github.com/RizRiyz/luvus/actions/workflows/ci.yml)
 [![docs](https://img.shields.io/badge/docs-luvus.dev-c6ff1a.svg)](https://luvus.dev/docs/)
-![license](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)
+![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![platforms](https://img.shields.io/badge/platforms-macOS%20·%20Linux%20·%20Windows-lightgrey.svg)
 
 **[Website](https://luvus.dev)** · **[Documentation](https://luvus.dev/docs/)** · **[Releases](https://github.com/RizRiyz/luvus/releases)**
@@ -113,4 +113,4 @@ Report vulnerabilities through [SECURITY.md](SECURITY.md).
 
 ## License
 
-[GNU AGPL v3 or later](LICENSE).
+[Apache License 2.0](LICENSE).
