@@ -12,7 +12,10 @@ use alacritty_terminal::vte::ansi::{Color as VtColor, Processor};
 
 use ratatui::style::{Color, Modifier};
 
-use super::{CodexComposerRegion, Cursor, HistoryMetrics, RenderCell, RetainedRowLayout, VtEngine};
+use super::{
+    AlignedRows, CodexComposerRegion, Cursor, HistoryMetrics, RenderCell, RetainedRowLayout,
+    VtEngine, ALIGNED_WIDE_CELL,
+};
 use crate::terminal::backend::{CaptureMode, CaptureResult};
 use crate::terminal::pty::InputAction;
 
@@ -466,6 +469,37 @@ impl VtEngine for AlacrittyEngine {
             }
             let c = indexed.cell.c;
             lines[r as usize].push(if c == '\0' { ' ' } else { c });
+        }
+        lines
+    }
+
+    fn visible_rows_aligned(&self) -> AlignedRows {
+        // Identical to `visible_rows`, except a wide-char spacer cell is kept as
+        // a non-text continuation marker instead of skipped. An actual blank must
+        // remain distinguishable so word lookup does not split a CJK/emoji word
+        // between the glyph and its second terminal cell.
+        let grid = self.term.grid();
+        let rows = grid.screen_lines();
+        let offset = grid.display_offset() as i32;
+        let mut lines = AlignedRows::new(rows);
+        for indexed in grid.display_iter() {
+            let r = indexed.point.line.0 + offset;
+            if r < 0 || r as usize >= rows {
+                continue;
+            }
+            let c = if indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                ALIGNED_WIDE_CELL
+            } else if indexed.cell.c == '\0' {
+                ' '
+            } else {
+                indexed.cell.c
+            };
+            let zero_width = if indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                None
+            } else {
+                indexed.cell.zerowidth()
+            };
+            lines.push_cell(r as u16, indexed.point.column.0 as u16, c, zero_width);
         }
         lines
     }

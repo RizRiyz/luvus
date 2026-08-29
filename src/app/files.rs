@@ -40,6 +40,25 @@ pub enum OpenTarget {
     Tab,
 }
 
+/// What an `Insert Path` did.
+///
+/// The outcome is returned rather than only toasted so a caller — and the tests
+/// for it — can see the exact text that reached the pane and which pane took
+/// it, without reaching into the PTY.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum InsertPath {
+    /// The path was handed to `target`'s paste path, as exactly this text.
+    Inserted { target: PaneId, text: String },
+    /// Nothing to insert into: the focused leaf is a native view, or the tab
+    /// has no pane at all.
+    NoPane,
+    /// The path holds a terminal control character and cannot be pasted safely.
+    ControlCharacter,
+    /// The path is not valid UTF-8, so the text that would reach the pane is not
+    /// the path that was clicked.
+    NotUtf8,
+}
+
 impl App {
     /// Keep the FILES dock honest, off the render path. Called from `detect_tick`:
     /// re-roots the tree to the active node, then schedules a worker read for any
@@ -536,8 +555,59 @@ impl App {
                 self.pending_clipboard = Some(menu.path.to_string_lossy().into_owned());
                 self.show_toast("copied path");
             }
+            FileMenuItem::InsertPath => {
+                match self.insert_path(&menu.path) {
+                    InsertPath::Inserted { .. } => {}
+                    // Both refusals are silent-looking otherwise: the menu closes
+                    // and nothing appears in the prompt.
+                    InsertPath::NoPane => self.show_toast("no pane to insert into"),
+                    InsertPath::ControlCharacter => {
+                        self.show_toast("path contains a control character")
+                    }
+                    InsertPath::NotUtf8 => self.show_toast("path is not valid UTF-8"),
+                }
+            }
             FileMenuItem::Delete => self.file_delete = Some(menu.path),
             FileMenuItem::Divider => {}
+        }
+    }
+
+    /// Type `path` into the focused pane's prompt, leaving it unsubmitted.
+    ///
+    /// The path is absolute, exactly as `Copy Path` gives it, so it stays right
+    /// even when the pane has since changed its working directory. It arrives
+    /// through [`App::paste_into_focused_pane`] rather than a write at the pane,
+    /// which is what keeps bracketed paste, scroll position and activity
+    /// tracking the same as any other paste — and no `\r` follows it, because
+    /// composing the rest of the command line is the user's job.
+    ///
+    /// The target is whatever the active tab already had focused: opening the
+    /// FILES dock and its context menu never moves pane focus, so the pane the
+    /// user was typing in is still the one that receives this.
+    ///
+    /// A path holding a control character is refused rather than trimmed.
+    /// Besides `\n` and `\r` submitting a prompt, Escape and other controls can
+    /// alter terminal input or terminate bracketed-paste mode. These characters
+    /// are legal in Unix filenames, but no truncation of the path is a better
+    /// answer than inserting unsafe or incorrect text.
+    ///
+    /// A path that is not valid UTF-8 is refused for the same reason. Unix
+    /// paths are bytes, not text, so `to_string_lossy` would replace the
+    /// invalid ones with U+FFFD and hand the pane a path that reads plausibly
+    /// and does not exist — a wrong path is worse than no path.
+    pub(crate) fn insert_path(&mut self, path: &Path) -> InsertPath {
+        let Some(text) = path.to_str() else {
+            return InsertPath::NotUtf8;
+        };
+        if text.chars().any(char::is_control) {
+            return InsertPath::ControlCharacter;
+        }
+        match self.paste_into_focused_pane(text) {
+            Some(target) => InsertPath::Inserted {
+                target,
+                text: text.to_owned(),
+            },
+            None => InsertPath::NoPane,
         }
     }
 
@@ -3079,5 +3149,214 @@ mod tests {
         assert!(!file.exists(), "confirmed delete removes it");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── Insert Path (docs/38 FILE-6) ─────────────────────────────────────────
+
+    /// Build a FILES menu for `path` without going through the tree, the way
+    /// the other menu tests here do.
+    fn insert_menu(path: &Path) -> FileMenu {
+        FileMenu {
+            path: path.to_path_buf(),
+            is_dir: false,
+            anchor: (0, 0),
+            items: Vec::new(),
+            editors: Vec::new(),
+        }
+    }
+
+    /// `Insert Path` types into the pane the user was already in, and inserts
+    /// the absolute path *verbatim* — spaces intact, and with nothing appended.
+    ///
+    /// The missing trailing `\r` is the point: the path lands in the prompt for
+    /// the user to finish the command around. Anything that submitted it would
+    /// run a half-written command line.
+    #[test]
+    fn insert_path_types_the_path_into_the_focused_pane_without_submitting_it() {
+        let _env = crate::persist::test_env("files-insert-path");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+
+        // Two panes, so "the focused one" is a real choice rather than the only
+        // pane there is.
+        app.split(Axis::Col);
+        assert_eq!(app.layout().len(), 2, "two panes to choose between");
+        let focused = app.layout().focus;
+
+        // A name with spaces: the shell would need it quoted, which is the
+        // user's business — the insert must not mangle or requote it.
+        let path = std::env::temp_dir().join("luvus insert/my notes.md");
+        let expected = path.to_string_lossy().into_owned();
+        assert!(
+            expected.contains(' '),
+            "the fixture is the interesting case"
+        );
+
+        assert_eq!(
+            app.insert_path(&path),
+            InsertPath::Inserted {
+                target: focused,
+                text: expected.clone(),
+            },
+            "the focused pane got the absolute path, spaces and all"
+        );
+    }
+
+    /// Opening the FILES dock and its context menu must not move pane focus, so
+    /// the pane `Insert Path` targets is still the one the user was typing in.
+    ///
+    /// This is the whole reason the action is worth having: reaching for the
+    /// file tree to name a file would otherwise cost you the prompt you were
+    /// naming it for.
+    #[test]
+    fn opening_the_files_menu_does_not_change_the_insert_target() {
+        let _env = crate::persist::test_env("files-insert-target");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.split(Axis::Col);
+        let typing_in = app.layout().focus;
+
+        // Everything the user does to reach the action.
+        app.toggle_files_dock();
+        app.file_menu = Some(insert_menu(&std::env::temp_dir().join("target.rs")));
+        assert_eq!(
+            app.layout().focus,
+            typing_in,
+            "the dock and the menu left pane focus where it was"
+        );
+
+        let path = std::env::temp_dir().join("target.rs");
+        assert!(
+            matches!(
+                app.insert_path(&path),
+                InsertPath::Inserted { target, .. } if target == typing_in
+            ),
+            "the path went to the pane that had focus before the menu opened"
+        );
+    }
+
+    /// Unix filenames may legally hold terminal controls. Newlines can submit
+    /// the prompt, while Escape can terminate bracketed paste and make the
+    /// remaining bytes act as input. Refuse the whole path rather than trim it:
+    /// a silently shortened path is a wrong path.
+    #[test]
+    fn insert_path_refuses_terminal_control_characters() {
+        let _env = crate::persist::test_env("files-insert-control");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+
+        for bad in [
+            "two\nlines.txt",
+            "carriage\rreturn.txt",
+            "tab\tname.txt",
+            "escape\u{1b}[201~name.txt",
+            "delete\u{7f}name.txt",
+        ] {
+            let path = std::env::temp_dir().join(bad);
+            assert_eq!(
+                app.insert_path(&path),
+                InsertPath::ControlCharacter,
+                "{bad:?} must not reach the terminal"
+            );
+        }
+
+        // And a path with no control character still inserts, so the guard is
+        // not simply refusing everything.
+        let good = std::env::temp_dir().join("ordinary.txt");
+        assert!(matches!(
+            app.insert_path(&good),
+            InsertPath::Inserted { .. }
+        ));
+    }
+
+    /// A Unix path is bytes, not text. `to_string_lossy` would turn an invalid
+    /// byte into U+FFFD and insert a path that reads plausibly and does not
+    /// exist — the same "a wrong path is worse than no path" argument that
+    /// refuses control characters rather than trimming them.
+    #[cfg(unix)]
+    #[test]
+    fn insert_path_refuses_a_path_that_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let _env = crate::persist::test_env("files-insert-not-utf8");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+
+        let name = std::ffi::OsStr::from_bytes(b"not\xffutf8.txt");
+        let path = std::env::temp_dir().join(name);
+        assert_eq!(
+            app.insert_path(&path),
+            InsertPath::NotUtf8,
+            "a lossy conversion would have inserted a path that does not exist"
+        );
+    }
+
+    /// A native read-only view is not a terminal: there is no prompt to insert
+    /// into, so the action says so instead of quietly doing nothing.
+    #[test]
+    fn insert_path_reports_a_focused_leaf_that_is_not_a_pane() {
+        let _env = crate::persist::test_env("files-insert-no-pane");
+        let dir = std::env::temp_dir().join(format!("luvus-ip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("readme.md");
+        std::fs::write(&file, b"hello\n").unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        // Focus a native file view rather than a terminal.
+        app.open_file_view(file.clone(), OpenTarget::Tab);
+        assert!(
+            app.views.contains_key(&app.layout().focus),
+            "the focused leaf is a native view, not a pane"
+        );
+
+        assert_eq!(
+            app.insert_path(&file),
+            InsertPath::NoPane,
+            "a view has no prompt to insert into"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The menu row runs the action: picking `Insert Path` for a path that has
+    /// to be refused produces the refusal, which nothing else in the menu does.
+    #[test]
+    fn the_insert_path_row_runs_the_action() {
+        let _env = crate::persist::test_env("files-insert-row");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+
+        app.file_menu = Some(insert_menu(&std::env::temp_dir().join("two\nlines.txt")));
+        app.file_menu_action_pub(FileMenuItem::InsertPath);
+        assert_eq!(
+            app.toast.as_ref().map(|(text, _)| text.as_str()),
+            Some("path contains a control character"),
+            "the row reached insert_path and reported its refusal"
+        );
+    }
+
+    /// The row is offered for folders too — a directory path is as useful to
+    /// type as a file's — matching `Copy Path` rather than the open actions.
+    #[test]
+    fn insert_path_is_offered_for_files_and_folders() {
+        for is_dir in [false, true] {
+            let menu = FileMenu {
+                path: PathBuf::from("/tmp/x"),
+                is_dir,
+                anchor: (0, 0),
+                items: Vec::new(),
+                editors: Vec::new(),
+            };
+            let items = menu.build_items();
+            assert!(
+                items.contains(&FileMenuItem::InsertPath),
+                "Insert Path offered (is_dir={is_dir})"
+            );
+            let copy = items.iter().position(|i| *i == FileMenuItem::CopyPath);
+            let insert = items.iter().position(|i| *i == FileMenuItem::InsertPath);
+            assert!(copy < insert, "it sits with Copy Path, just below it");
+        }
     }
 }

@@ -12,6 +12,61 @@ use ratatui::style::{Color, Modifier};
 
 use crate::terminal::pty::InputAction;
 
+/// Internal continuation marker used by [`VtEngine::visible_rows_aligned`].
+/// A terminal never renders NUL as text, so it can represent the second cell of
+/// a wide glyph without being confused with an actual space between words.
+pub(crate) const ALIGNED_WIDE_CELL: char = '\0';
+
+/// Visible terminal text indexed one character per grid cell, plus the sparse
+/// zero-width components attached to base cells. Keeping the latter separate
+/// preserves column lookup without dropping combining marks, variation
+/// selectors, or ZWJ emoji from copied text.
+pub struct AlignedRows {
+    rows: Vec<String>,
+    zero_width: Vec<(u16, u16, Vec<char>)>,
+}
+
+impl AlignedRows {
+    pub(crate) fn new(row_count: usize) -> Self {
+        Self {
+            rows: vec![String::new(); row_count],
+            zero_width: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_rows(rows: Vec<String>) -> Self {
+        Self {
+            rows,
+            zero_width: Vec::new(),
+        }
+    }
+
+    pub(crate) fn push_cell(
+        &mut self,
+        row: u16,
+        col: u16,
+        character: char,
+        zero_width: Option<&[char]>,
+    ) {
+        self.rows[row as usize].push(character);
+        if let Some(chars) = zero_width.filter(|chars| !chars.is_empty()) {
+            self.zero_width.push((row, col, chars.to_vec()));
+        }
+    }
+
+    pub(crate) fn rows(&self) -> &[String] {
+        &self.rows
+    }
+
+    pub(crate) fn zero_width_at(&self, row: u16, col: u16) -> &[char] {
+        self.zero_width
+            .iter()
+            .find(|(r, c, _)| *r == row && *c == col)
+            .map_or(&[], |(_, _, chars)| chars)
+    }
+}
+
 /// Which terminal engine backs a pane.
 ///
 /// One variant today. It exists so that the choice of engine is a named
@@ -160,6 +215,14 @@ pub trait VtEngine: Send {
     /// Every visible row as normalized plain text. Wide-character spacer cells
     /// are omitted, so callers must not use string indexes as terminal columns.
     fn visible_rows(&self) -> Vec<String>;
+
+    /// Like [`Self::visible_rows`], but every terminal column contributes exactly
+    /// one `char`. A wide glyph's continuation cell is represented by
+    /// [`ALIGNED_WIDE_CELL`], so callers can preserve both cell coordinates and
+    /// the distinction between a continuation and an actual space. Use this
+    /// (never `visible_rows`) when a screen column must address text — e.g. the
+    /// token under a double-click, or the link under a `Ctrl`-hover.
+    fn visible_rows_aligned(&self) -> AlignedRows;
 
     /// Bounded public capture for harnesses. Implementations serialize only
     /// normalized grid text and SGR styles; raw child control sequences never
