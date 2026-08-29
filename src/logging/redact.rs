@@ -488,12 +488,12 @@ pub enum EventKind {
     ClientResize,
     ClientFrameError,
     ClientRenderFailed,
-    LogOverflow,
     LogWriteRecovered,
     UhpConnectionOpen,
     UhpConnectionClose,
     UhpRequestStart,
     UhpRequestComplete,
+    UhpRequestFailed,
     UhpRequestRejected,
     UhpSubscriptionOpen,
     UhpSubscriptionClose,
@@ -540,12 +540,12 @@ impl EventKind {
             Self::ClientResize => "client.resize",
             Self::ClientFrameError => "client.frame_error",
             Self::ClientRenderFailed => "client.render_failed",
-            Self::LogOverflow => "log.overflow",
             Self::LogWriteRecovered => "log.write_recovered",
             Self::UhpConnectionOpen => "uhp.connection.open",
             Self::UhpConnectionClose => "uhp.connection.close",
             Self::UhpRequestStart => "uhp.request.start",
             Self::UhpRequestComplete => "uhp.request.complete",
+            Self::UhpRequestFailed => "uhp.request.failed",
             Self::UhpRequestRejected => "uhp.request.rejected",
             Self::UhpSubscriptionOpen => "uhp.subscription.open",
             Self::UhpSubscriptionClose => "uhp.subscription.close",
@@ -563,8 +563,8 @@ impl EventKind {
             | Self::WorkerFailed
             | Self::ClientDisconnect
             | Self::ClientFrameError
-            | Self::LogOverflow
             | Self::LogWriteRecovered
+            | Self::UhpRequestFailed
             | Self::UhpRequestRejected => Level::Warn,
             Self::PersistSave
             | Self::ServerClientResize
@@ -574,7 +574,8 @@ impl EventKind {
             | Self::ClientResize
             | Self::UhpConnectionOpen
             | Self::UhpConnectionClose
-            | Self::UhpRequestStart => Level::Debug,
+            | Self::UhpRequestStart
+            | Self::UhpRequestComplete => Level::Debug,
             _ => Level::Info,
         }
     }
@@ -591,7 +592,7 @@ impl EventKind {
             | Self::ClientResize
             | Self::ClientFrameError
             | Self::ClientRenderFailed => Some(LoggerKind::Client),
-            Self::LogOverflow | Self::LogWriteRecovered => None,
+            Self::LogWriteRecovered => None,
             _ => Some(LoggerKind::Server),
         }
     }
@@ -650,10 +651,9 @@ impl EventKind {
             E::ClientDisconnect => matches!(key, F::Reason),
             E::ClientResize => matches!(key, F::Cols | F::Rows),
             E::ClientFrameError => matches!(key, F::ErrorCode),
-            E::LogOverflow => matches!(key, F::Dropped),
             E::LogWriteRecovered => matches!(key, F::ErrorCode | F::Dropped),
             E::UhpRequestStart => matches!(key, F::RequestId | F::Method | F::IdOmitted),
-            E::UhpRequestComplete => matches!(
+            E::UhpRequestComplete | E::UhpRequestFailed => matches!(
                 key,
                 F::RequestId | F::Method | F::Outcome | F::ErrorCode | F::DurationMs | F::IdOmitted
             ),
@@ -695,5 +695,8 @@ mod tests {
         assert!(!EventKind::PaneOpen.allows(FieldKey::RequestId));
         assert!(EventKind::UhpRequestComplete.allows(FieldKey::DurationMs));
         assert!(!EventKind::UhpRequestComplete.allows(FieldKey::PaneId));
+        assert_eq!(EventKind::UhpRequestComplete.level(), Level::Debug);
+        assert_eq!(EventKind::UhpRequestFailed.level(), Level::Warn);
+        assert!(EventKind::UhpRequestFailed.allows(FieldKey::ErrorCode));
     }
 }

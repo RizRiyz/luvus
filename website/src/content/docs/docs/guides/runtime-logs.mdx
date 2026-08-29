@@ -3,10 +3,8 @@ title: Runtime Logs
 description: Diagnose Luvus server, client, pane, agent, and UHP failures with private structured logs.
 ---
 
-Luvus can record bounded structured diagnostics for long-lived server and
-display client processes. Logging is local only. Nothing is uploaded, and
-logging is disabled by default so normal processes reserve no logging thread or
-queue.
+Luvus records bounded structured diagnostics for long-lived server and display
+client processes. Logging is local only. Nothing is uploaded.
 
 ## Read the logs
 
@@ -23,9 +21,10 @@ its nearest existing parent is writable.
 Each line is one JSON record. `server.log` and `client.log` rotate at 3 MiB and
 keep one archived file, which caps both streams at 12 MiB per session.
 
-## Enable logging
+## Choose a level
 
-Set `LUVUS_LOG` before starting the relevant process:
+Logging uses the `info` level by default. Set `LUVUS_LOG` before starting the
+relevant process to change or disable it:
 
 ```sh
 LUVUS_LOG=info luvus server restart
@@ -33,11 +32,11 @@ LUVUS_LOG=debug luvus server restart
 LUVUS_LOG=off luvus server restart
 ```
 
-Supported values are `debug`, `info`, `warn`, `error`, and `off`. An unset,
-empty, `off`, or unrecognized value starts no writer thread and creates no log
-directory. Explicitly enabled logging uses a small bounded background queue so
-filesystem writes never block the application loop. A running server keeps the
-level it had at startup, so restart it after changing the variable.
+Supported values are `debug`, `info`, `warn`, `error`, and `off`. Unset, empty,
+and unrecognized values use `info`. Logging writes directly through the bounded
+rotating file writer and starts no logging thread or record queue. `off` also
+avoids creating the log directory. A running server keeps the level it had at
+startup, so restart it after changing the variable.
 
 ## Privacy
 

@@ -53,12 +53,12 @@ pane was running.
 
 ## Where can I find runtime diagnostics?
 
-Luvus can keep private structured diagnostics in the selected session
-directory. Logging is disabled by default; start the relevant process with
-`LUVUS_LOG=info` to enable it. The default session then writes
+Luvus keeps private structured diagnostics in the selected session directory at
+the `info` level by default. The default session writes
 `~/.luvus/logs/server.log` and `~/.luvus/logs/client.log`. Read recent records
 with ordinary tools such as `tail -n 200 ~/.luvus/logs/server.log`. Named
-sessions keep the same files under `~/.luvus/sessions/<name>/logs/`.
+sessions keep the same files under `~/.luvus/sessions/<name>/logs/`. Set
+`LUVUS_LOG=off` before starting a process only when you need to disable logging.
 
 Logs never include pane output, prompts, keystrokes, file contents, command
 arguments, or UHP request bodies. They can still describe your local runtime,

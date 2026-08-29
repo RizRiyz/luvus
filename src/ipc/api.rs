@@ -792,10 +792,12 @@ fn finish_request_log(response: &str) {
             .min(u128::from(u64::MAX)) as u64,
     );
     count += 1;
-    crate::logging::event(
-        crate::logging::EventKind::UhpRequestComplete,
-        &fields[..count],
-    );
+    let event = if outcome == crate::logging::Outcome::Error {
+        crate::logging::EventKind::UhpRequestFailed
+    } else {
+        crate::logging::EventKind::UhpRequestComplete
+    };
+    crate::logging::event(event, &fields[..count]);
 }
 
 fn request_id_method_fields(request: RequestLog, fields: &mut [crate::logging::Field]) -> usize {

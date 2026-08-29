@@ -73,11 +73,8 @@ fn configured_level_value(value: Option<&str>) -> Option<Level> {
         "error" => Some(Level::Error),
         "warn" => Some(Level::Warn),
         "debug" => Some(Level::Debug),
-        "info" => Some(Level::Info),
-        // Logging is opt-in so normal server and client processes reserve no
-        // queue or writer thread. Unknown values fail closed for the same
-        // reason instead of silently enabling background work.
-        _ => None,
+        "" | "info" => Some(Level::Info),
+        _ => Some(Level::Info),
     }
 }
 
@@ -86,9 +83,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unset_level_disables_logging() {
-        assert_eq!(configured_level_value(None), None);
-        assert_eq!(configured_level_value(Some("")), None);
+    fn unset_level_uses_info_logging() {
+        assert_eq!(configured_level_value(None), Some(Level::Info));
+        assert_eq!(configured_level_value(Some("")), Some(Level::Info));
         assert_eq!(configured_level_value(Some("off")), None);
     }
 
@@ -99,7 +96,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_level_disables_logging() {
-        assert_eq!(configured_level_value(Some("surprise")), None);
+    fn unknown_level_uses_info_logging() {
+        assert_eq!(configured_level_value(Some("surprise")), Some(Level::Info));
     }
 }
