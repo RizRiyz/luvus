@@ -386,6 +386,7 @@ pub fn run() -> Result<()> {
     let mut next_activity = 1u64;
     let mut last_render_attempt = Instant::now();
     let mut last_save = Instant::now();
+    let mut immediate_save_attempted = false;
     // Un-rendered activity waiting for the frame cap to expire — drives a trailing
     // render so a change that lands mid-interval isn't stuck until the next event.
     let mut render_request = RenderRequest::default();
@@ -479,13 +480,20 @@ pub fn run() -> Result<()> {
             );
             break;
         }
-        // Closing the last project keeps the client attached and replaces the
-        // project with a neutral home terminal. Persist immediately rather than
-        // waiting out the debounce, so a crash cannot resurrect the closed project.
-        if app.persist_session_now {
-            app.persist_session_now = false;
-            persist::save(&app);
-            app.session_dirty = false;
+        if !app.persist_session_now {
+            immediate_save_attempted = false;
+        }
+        // Closing the final project bypasses the debounce once. Failed writes
+        // retain both flags and retry at the normal cadence instead of hot-looping.
+        let immediate_save_due = app.persist_session_now && !immediate_save_attempted;
+        let debounced_save_due = app.session_dirty && last_save.elapsed() > Duration::from_secs(2);
+        if immediate_save_due || debounced_save_due {
+            immediate_save_attempted = app.persist_session_now;
+            if persist::save(&app) {
+                app.persist_session_now = false;
+                app.session_dirty = false;
+                immediate_save_attempted = false;
+            }
             last_save = Instant::now();
         }
         if app.detach_requested {
@@ -510,12 +518,6 @@ pub fn run() -> Result<()> {
             } else {
                 app.show_toast("no attached client to switch".to_string());
             }
-        }
-
-        if app.session_dirty && last_save.elapsed() > Duration::from_secs(2) {
-            persist::save(&app);
-            app.session_dirty = false;
-            last_save = Instant::now();
         }
 
         // A state transition here (e.g. a silent agent reaching Done) has no PtyData

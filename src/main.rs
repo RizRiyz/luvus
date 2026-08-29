@@ -1048,6 +1048,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     terminal.draw(|f| ui::render(f, &mut app))?;
     let mut last_draw = Instant::now();
     let mut last_save = Instant::now();
+    let mut immediate_save_attempted = false;
     let mut last_spin = Instant::now();
 
     loop {
@@ -1071,20 +1072,20 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
             break;
         }
 
-        // Closing the final project replaces it with a neutral home terminal.
-        // Match the server path and persist that structural change immediately,
-        // so a local-mode crash cannot restore the project the user just closed.
-        if app.persist_session_now {
-            app.persist_session_now = false;
-            persist::save(&app);
-            app.session_dirty = false;
-            last_save = Instant::now();
+        if !app.persist_session_now {
+            immediate_save_attempted = false;
         }
-
-        // Debounced session save.
-        if app.session_dirty && last_save.elapsed() > Duration::from_secs(2) {
-            persist::save(&app);
-            app.session_dirty = false;
+        // Closing the final project bypasses the debounce once. Failed writes
+        // retain both flags and retry at the normal cadence instead of hot-looping.
+        let immediate_save_due = app.persist_session_now && !immediate_save_attempted;
+        let debounced_save_due = app.session_dirty && last_save.elapsed() > Duration::from_secs(2);
+        if immediate_save_due || debounced_save_due {
+            immediate_save_attempted = app.persist_session_now;
+            if persist::save(&app) {
+                app.persist_session_now = false;
+                app.session_dirty = false;
+                immediate_save_attempted = false;
+            }
             last_save = Instant::now();
         }
 
