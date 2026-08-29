@@ -1530,6 +1530,7 @@ impl App {
                         self.link_press = Some(LinkPress {
                             target: h.target,
                             at: (m.column, m.row),
+                            beside: m.modifiers.contains(KeyModifiers::SHIFT),
                         });
                         return;
                     }
@@ -1648,7 +1649,11 @@ impl App {
                 }
                 if let Some(p) = self.link_press.take() {
                     if (m.column, m.row) == p.at {
-                        self.activate_link(p.target);
+                        if p.beside {
+                            self.activate_link_in(p.target, crate::app::files::OpenTarget::Pane);
+                        } else {
+                            self.activate_link(p.target);
+                        }
                     }
                     return;
                 }
@@ -2842,11 +2847,23 @@ impl App {
     }
 
     /// Act on a resolved link (docs/58): a URL goes to the client's browser, a
-    /// file opens in luvus itself.
+    /// file opens in luvus itself — where `File click behavior` says (docs/38),
+    /// exactly as a click on its FILES row would. That is a reused preview
+    /// pane beside the focus by default, so a path an agent printed lands
+    /// next to the conversation rather than in a tab that hides it.
     pub fn activate_link(&mut self, target: LinkTarget) {
+        let place = self.file_click_target();
+        self.activate_link_in(target, place);
+    }
+
+    /// [`activate_link`](Self::activate_link) with the placement the gesture
+    /// asked for: `Ctrl`+`Shift`+click is the tree's `Shift`+click, a
+    /// permanent pane beside the focus. A URL has no placement and goes to the
+    /// browser regardless.
+    pub fn activate_link_in(&mut self, target: LinkTarget, place: crate::app::files::OpenTarget) {
         match target {
             LinkTarget::Url(url) => self.open_url(url),
-            LinkTarget::File { path, line } => self.open_file_at(path, line),
+            LinkTarget::File { path, line } => self.open_file_link(path, line, place),
         }
     }
 
@@ -4470,15 +4487,47 @@ mod link_click_tests {
         (app, term, (content.x + at, content.y))
     }
 
-    /// A path an agent printed opens **in luvus**, in a new tab, not at the OS.
-    /// Tests run from the repo root, so `Cargo.toml` is a real relative path from
-    /// the pane's working directory.
-    #[test]
-    fn ctrl_click_on_a_file_path_opens_it_in_a_tab() {
-        let _env = crate::persist::test_env("link-file");
+    /// `Ctrl`+click a path, then return the view it landed on. Tests run from
+    /// the repo root, so `Cargo.toml` is a real relative path from the pane's
+    /// working directory.
+    fn click_cargo_toml(mods: KeyModifiers) -> (App, crate::ids::PaneId, usize) {
         let (mut app, _t, at) = fixture_showing("edit Cargo.toml now", 7);
         let tabs = app.ws().tabs.len();
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), at, mods));
+        app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), at, mods));
+        assert!(
+            app.pending_open_url.is_none(),
+            "a file never goes to the browser"
+        );
+        let id = app.layout().focus;
+        match app.views.get(&id) {
+            Some(crate::app::ViewKind::File(v)) => {
+                assert!(v.path.ends_with("Cargo.toml"), "showing {:?}", v.path)
+            }
+            _ => panic!("the focus is a file view"),
+        }
+        (app, id, tabs)
+    }
 
+    /// A path an agent printed opens **in luvus**, not at the OS — and where
+    /// `File click behavior` says, which by default is the preview pane beside
+    /// the pane that printed it, so the agent stays on screen.
+    #[test]
+    fn ctrl_click_on_a_file_path_previews_it_beside_the_pane() {
+        let _env = crate::persist::test_env("link-file");
+        let (app, id, tabs) = click_cargo_toml(KeyModifiers::CONTROL);
+        assert_eq!(app.ws().tabs.len(), tabs, "no new tab");
+        assert!(app.preview_views.contains(&id), "it is the preview pane");
+    }
+
+    /// `Open in tab` is the other click behavior, and the only placement that
+    /// can reach a configured editor: the tab path is unchanged for it.
+    #[test]
+    fn ctrl_click_on_a_file_path_opens_a_tab_when_that_is_the_click_behavior() {
+        let _env = crate::persist::test_env("link-file-tab");
+        let (mut app, _t, at) = fixture_showing("edit Cargo.toml now", 7);
+        app.config.layout.file_click = crate::config::FILE_CLICK_TAB.to_string();
+        let tabs = app.ws().tabs.len();
         app.handle_event(mouse(
             MouseEventKind::Down(MouseButton::Left),
             at,
@@ -4489,19 +4538,27 @@ mod link_click_tests {
             at,
             KeyModifiers::CONTROL,
         ));
-
-        assert!(
-            app.pending_open_url.is_none(),
-            "a file never goes to the browser"
-        );
         assert_eq!(app.ws().tabs.len(), tabs + 1, "opened in a new tab");
         let id = app.layout().focus;
-        match app.views.get(&id) {
-            Some(crate::app::ViewKind::File(v)) => {
-                assert!(v.path.ends_with("Cargo.toml"), "showing {:?}", v.path)
-            }
-            _ => panic!("the new tab holds a file view"),
-        }
+        assert!(
+            matches!(app.views.get(&id), Some(crate::app::ViewKind::File(v)) if v.path.ends_with("Cargo.toml")),
+            "the new tab holds the file"
+        );
+        assert!(!app.preview_views.contains(&id), "a tab is permanent");
+    }
+
+    /// `Ctrl`+`Shift`+click is the tree's `Shift`+click: a permanent pane
+    /// beside the focus, whatever the click behavior is set to.
+    #[test]
+    fn ctrl_shift_click_on_a_file_path_opens_a_permanent_pane_beside() {
+        let _env = crate::persist::test_env("link-file-beside");
+        let (app, id, tabs) = click_cargo_toml(KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        assert_eq!(app.ws().tabs.len(), tabs, "no new tab");
+        assert!(!app.preview_views.contains(&id), "not the recycled preview");
+        assert!(
+            app.layout().leaves().len() >= 2,
+            "split beside the pane that printed the path"
+        );
     }
 
     /// `src/main.rs:42` is one reference: the whole thing underlines, the path

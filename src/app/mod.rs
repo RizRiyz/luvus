@@ -1094,9 +1094,10 @@ impl PaneStatus {
 pub enum LinkTarget {
     /// Hand to the client's browser.
     Url(String),
-    /// Open in luvus's own viewer or editor in a tab (docs/38), jumping to
-    /// `line` when the reference carried one. Always a tab: `File click
-    /// behavior` governs the FILES tree, not path activation.
+    /// Open in luvus itself (docs/38), jumping to `line` when the reference
+    /// carried one. Where it lands is `File click behavior` — the same choice
+    /// a click on the file's FILES row makes — and only the tab placement can
+    /// reach a configured editor.
     File { path: PathBuf, line: Option<u32> },
 }
 
@@ -1123,6 +1124,11 @@ pub struct LinkPress {
     pub target: LinkTarget,
     /// Screen cell of the press.
     pub at: (u16, u16),
+    /// `Shift` was down at the press: a file opens as a permanent pane beside
+    /// the focus, the way `Shift`+click does on a FILES row, instead of where
+    /// `File click behavior` would put it. Read at the press, not the release,
+    /// because the press is the gesture the user made.
+    pub beside: bool,
 }
 
 /// A drag text-selection inside a pane. Screen coordinates keep native file

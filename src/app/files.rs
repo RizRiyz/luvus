@@ -271,12 +271,14 @@ impl App {
     }
 
     /// What a plain left click on a FILES row does, from `layout.file_click`
-    /// (docs/38). `Preview` is the default: one reused native read-only pane,
-    /// VS Code style. `Tab` is what a click did before this setting existed
-    /// and the *only* mode that consults `layout.file_open`, so it is also the
-    /// only mode that can launch an editor PTY. An unrecognized value — a config
-    /// touched by a newer Luvus — reads back as the default rather than leaving
-    /// a click doing nothing.
+    /// (docs/38) — and a `Ctrl`+click on a path printed in a pane (docs/58),
+    /// which is the same "open this file" with a different pointer. `Preview`
+    /// is the default: one reused native read-only pane, VS Code style. `Tab`
+    /// is what a click did before this setting existed and the *only* mode
+    /// that consults `layout.file_open`, so it is also the only mode that can
+    /// launch an editor PTY. An unrecognized value — a config touched by a
+    /// newer Luvus — reads back as the default rather than leaving a click
+    /// doing nothing.
     pub fn file_click_target(&self) -> OpenTarget {
         match self.config.layout.file_click.trim() {
             crate::config::FILE_CLICK_TAB => OpenTarget::Tab,
@@ -308,9 +310,10 @@ impl App {
 
     /// Open `path` in a new **tab** (docs/38), through the configured viewer:
     /// read-only or a terminal editor. This is the "open in tab" click
-    /// behavior, the fuzzy finder's action, and what `Ctrl`+clicking a path
-    /// printed in a pane always does (docs/58) — a *preview* click never comes
-    /// through here, which is why it can never reach an editor.
+    /// behavior, the fuzzy finder's action, and the tab half of `Ctrl`+clicking
+    /// a path printed in a pane (docs/58, [`open_file_link`](Self::open_file_link))
+    /// — a *preview* never comes through here, which is why it can never reach
+    /// an editor.
     ///
     /// `line` scrolls the built-in viewer to that line. It survives the async read
     /// because `FileView::apply` keeps `scroll` and clamps it to the file's length.
@@ -330,6 +333,34 @@ impl App {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Open a path activated from a pane (docs/58) at `target`, jumping to
+    /// `line`. `Tab` is [`open_file_at`](Self::open_file_at): the configured
+    /// viewer, editor included. `Preview` and `Pane` mirror the FILES gestures
+    /// they share a name with and stay in the native viewer, so a `Ctrl`+click
+    /// under the default click behavior lands beside the pane that printed the
+    /// path instead of in a tab that hides it.
+    ///
+    /// The line lands on whichever view `open_file_view` left focused — the one
+    /// it opened, the preview it recycled, or the permanent view it deferred
+    /// to — checked against `path` so a reused leaf that is still loading
+    /// something else is never scrolled.
+    pub fn open_file_link(&mut self, path: PathBuf, line: Option<u32>, target: OpenTarget) {
+        if target == OpenTarget::Tab {
+            self.open_file_at(path, line);
+            return;
+        }
+        self.open_file_view(path.clone(), target);
+        let Some(l) = line else {
+            return;
+        };
+        let id = self.layout().focus;
+        if let Some(crate::app::ViewKind::File(v)) = self.views.get_mut(&id) {
+            if v.path == path {
+                v.scroll = l.saturating_sub(1) as usize;
             }
         }
     }
