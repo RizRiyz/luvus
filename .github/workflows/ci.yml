@@ -112,7 +112,7 @@ jobs:
         shell: pwsh
         run: |
           cargo test --locked platform::windows::tests
-          cargo test --locked app::cwd_test
+          cargo test --locked app::cwd::tests
           cargo test --locked platform::tests::no_window_keeps_the_command_working
           cargo test --locked ipc::transport::windows_
           cargo test --locked app::backend::tests

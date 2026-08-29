@@ -508,7 +508,7 @@ impl App {
                     .map(|((id, _), ev)| (id, ev))
                     .collect();
                 let workspace_candidates =
-                    super::workspace_candidates_from_scan(&pane_results, &tabs, &homes);
+                    super::cwd::workspace_candidates_from_scan(&pane_results, &tabs, &homes);
                 let branches = workspaces
                     .into_iter()
                     .map(|(id, cwd)| (id, super::git_branch(&cwd)))
