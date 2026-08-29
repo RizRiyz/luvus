@@ -15,8 +15,9 @@ display it. The client is disposable. The server is durable.
   lives**. Every shell and agent keeps running exactly where it was.
 - `luvus` again → a new client attaches to the same live session. Nothing
   restarts and no command reruns, you are just looking at it again.
-- Close every workspace → the server stays up with a fresh one. Nothing you do
-  in the UI can kill the session by accident.
+- Close every project workspace → the client stays attached and immediately
+  opens one neutral terminal at your home directory. It uses the normal terminal
+  surface, tabs, panes, and sidebar without a separate landing screen.
 - `luvus server stop` → the only way to actually end everything (the session
   snapshot is kept).
 - `luvus server status` → what's running, and whether a newer binary is
@@ -50,15 +51,20 @@ known sessions without starting any server or background manager.
 ## 2. Workspace → Tab → Pane
 
 ```
-Session
-└── Workspace   one per project folder (fixed cwd, shows its git branch)
+Session         normally contains one or more workspaces
+└── Workspace   one per project folder (fixed project root, shows its git branch)
     └── Tab     a layout of panes (or a special tab: git, orchestration)
         └── Pane   a real terminal running a shell or an agent
 ```
 
+- After the **final project closes**, Luvus creates a neutral workspace and real
+  terminal rooted at your home directory. You can immediately type, create tabs
+  or splits, change directory, or browse to another project.
 - **Workspaces** are the sidebar's top list. `Ctrl+Space N` opens the folder
   picker. Running `luvus` inside a folder adds it automatically. A workspace's
-  cwd is fixed at creation, so `cd`-ing inside a pane never moves it.
+  project `cwd` stays fixed, while its displayed terminal path follows the
+  focused pane's live cwd. With several splits, focusing a different pane shows
+  that pane's path, and every pane keeps its own working directory.
 - **Tabs** hold split layouts. Two special tabs exist: the
   [git tab](/docs/guides/git/) and the
   [orchestration board](/docs/guides/orchestration/).

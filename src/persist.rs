@@ -897,9 +897,9 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
     }
 }
 
-/// Save the app's session atomically. An *empty* session clears the snapshot:
-/// the user deliberately closed everything, and a leftover file would resurrect
-/// those panes (re-running agent resume commands) on the next start.
+/// Save the app's session atomically. A truly empty session can only remain after
+/// restore or shell startup failure; clear its stale snapshot so the next start
+/// cannot resurrect panes the user already closed.
 pub fn save(app: &App) {
     let snap = snapshot(app);
     if snap.workspaces.is_empty() {
@@ -1159,23 +1159,23 @@ mod tests {
     // dir must be owner-only (0700) and each bound socket 0600 — regardless of
     // the process umask (see `ensure_config_dir` / `transport::bind`).
     #[test]
-    fn empty_session_save_clears_the_snapshot() {
-        let _env = test_env("empty-save");
+    fn closing_the_final_project_saves_the_home_terminal_replacement() {
+        let _env = test_env("home-replacement-save");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         save(&app);
         assert!(session_path().exists(), "a live session snapshots");
-        // Close the only pane — the session is now deliberately empty, and the
-        // snapshot must go with it, or the next start would resurrect panes the
-        // user closed (re-running agent resume commands).
+        // Close the only pane. The project must not come back, but Luvus remains
+        // usable through one neutral terminal rooted at home.
         let id = app.layout().focus;
         app.handle_event(crate::event::AppEvent::PtyExit(id));
-        assert!(app.workspaces.is_empty());
+        let home = crate::platform::home_dir().expect("test host has a home directory");
+        assert_eq!(app.workspaces.len(), 1);
+        assert!(crate::platform::same_path(&app.workspaces[0].cwd, &home));
         save(&app);
-        assert!(
-            !session_path().exists(),
-            "an empty session clears the snapshot"
-        );
+        let saved = load().expect("the replacement terminal is persisted");
+        assert_eq!(saved.workspaces.len(), 1);
+        assert!(crate::platform::same_path(&saved.workspaces[0].cwd, &home));
     }
 
     #[test]

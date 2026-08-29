@@ -1506,9 +1506,8 @@ pub struct App {
     pub zoomed: bool,
     pub should_quit: bool,
     /// True when this `App` is owned by the background server. A server session
-    /// outlives its windows: closing the last workspace resets to a fresh one
-    /// instead of quitting — only `server stop` ends it. The single-process
-    /// `--local` run leaves this false and quits like a normal terminal app.
+    /// outlives its windows. Closing the last project replaces it with a neutral
+    /// terminal rooted at `$HOME`; only `server stop` ends the server.
     pub server_mode: bool,
     pub spinner: u64,
     /// Structure changed since the last save; the loop persists when set.
@@ -1575,11 +1574,10 @@ pub struct App {
     /// finder. The server consumes this once and sends a logical handoff only
     /// to that client.
     pub pending_session_switch: Option<String>,
-    /// The last node was closed, ending the session (docs/43 §3.3). *Every*
-    /// client detaches, so the window closes, while the server stays up with no
-    /// nodes — distinct from `detach_requested` (one client leaves, session
-    /// continues) and from `should_quit` (the server itself exits).
-    pub end_session: bool,
+    /// Persist structural state immediately after the last project workspace is
+    /// replaced by the neutral home terminal. This prevents a crash inside the
+    /// normal debounce window from restoring the project the user closed.
+    pub persist_session_now: bool,
     /// Force the next frame to be a **full** repaint (not a diff), so a terminal
     /// whose screen was damaged outside luvus's knowledge — a window move/resize,
     /// regaining focus, another program's output — repaints cleanly. The render
@@ -2053,7 +2051,7 @@ impl App {
             last_cursor: None,
             detach_requested: false,
             pending_session_switch: None,
-            end_session: false,
+            persist_session_now: false,
             force_redraw: false,
             pending_notify: Vec::new(),
             pending_sound: None,
@@ -2605,7 +2603,7 @@ impl App {
             last_cursor: None,
             detach_requested: false,
             pending_session_switch: None,
-            end_session: false,
+            persist_session_now: false,
             force_redraw: false,
             pending_notify: Vec::new(),
             pending_sound: None,
@@ -3052,6 +3050,20 @@ impl App {
         &self.workspaces[self.active_ws]
     }
 
+    /// Exact cwd of the pane currently selected in a workspace. The workspace's
+    /// project root remains `Workspace::cwd`; this display value follows `cd`
+    /// and pane focus so the sidebar describes the terminal the user can type in.
+    pub fn workspace_terminal_cwd(&self, index: usize) -> Option<&std::path::Path> {
+        let workspace = self.workspaces.get(index)?;
+        workspace
+            .tabs
+            .get(workspace.active_tab)
+            .map(|tab| tab.layout.focus)
+            .and_then(|pane| self.panes.get(&pane))
+            .map(|pane| pane.cwd.as_path())
+            .or(Some(workspace.cwd.as_path()))
+    }
+
     pub fn layout(&self) -> &TileLayout {
         let ws = self.ws();
         &ws.tabs[ws.active_tab].layout
@@ -3492,6 +3504,7 @@ impl App {
             active_tab: 0,
         });
         self.active_ws = self.workspaces.len() - 1;
+        self.session_dirty = true;
         let ws = self.active_ws;
         self.emit_event(
             "workspace.created",
@@ -3502,6 +3515,20 @@ impl App {
             &[crate::logging::Field::WorkspaceIndex(ws as u64)],
         );
         true
+    }
+
+    /// Restore the workspace hierarchy when an exceptional empty state reaches
+    /// an action that needs a terminal. Normal close paths create this neutral
+    /// home terminal immediately; this guard also covers restore/spawn failures.
+    pub(crate) fn ensure_workspace_for_terminal(&mut self) -> bool {
+        if !self.workspaces.is_empty() {
+            return true;
+        }
+        let Some(home) = crate::platform::home_dir().filter(|path| path.is_dir()) else {
+            self.show_toast(self.catalog.home_unavailable);
+            return false;
+        };
+        self.create_workspace_at(home)
     }
 
     /// The order the WORKSPACES sidebar draws nodes in: each linked worktree is
@@ -4940,7 +4967,7 @@ impl App {
                 .iter()
                 .position(|w| crate::platform::same_path(&w.cwd, &s.cwd))
         } else {
-            Some(self.active_ws)
+            (!self.workspaces.is_empty()).then_some(self.active_ws)
         };
         if let Some(wi) = target {
             self.active_ws = wi;
@@ -5403,30 +5430,15 @@ impl App {
         }
     }
 
-    /// The last node just closed, so the **session** is over (docs/43 §3.3).
-    ///
-    /// This used to reset to a fresh node at `std::env::current_dir()` — the
-    /// *server's* cwd, i.e. the folder it was first launched from. Closing every
-    /// node therefore resurrected the folder you closed first, the window never
-    /// went away, and the snapshot kept that folder so it came back after a
-    /// restart too. It also made `persist::save`'s empty-snapshot branch — which
-    /// exists precisely because "the user deliberately closed everything" must
-    /// not resurrect anything — unreachable in server mode.
-    ///
-    /// Now the *window* ends and the *server* survives, which is what
-    /// `server_mode` was for: clients detach, no node is recreated, and the empty
-    /// snapshot clears `session.json`. `server stop` still ends the server, and a
-    /// later `luvus` attaches and opens its launch folder fresh. `--local` has no
-    /// server to outlive, so it quits like a normal terminal app.
+    /// Keep the client usable after its final project closes by immediately
+    /// creating a neutral terminal at `$HOME`. It uses the ordinary workspace,
+    /// tab, pane, and PTY paths, so there is no separate Home UI or terminal mode.
     fn all_workspaces_closed(&mut self) {
         self.session_dirty = true;
+        self.persist_session_now = true;
         self.fail_pending_files_api("no active workspace while FILES was loading");
         self.fail_pending_diff_api("no active workspace while DIFF was refreshing");
-        if self.server_mode {
-            self.end_session = true;
-        } else {
-            self.should_quit = true;
-        }
+        self.ensure_workspace_for_terminal();
     }
 
     /// Close a workspace and all of its panes.
@@ -5456,11 +5468,6 @@ impl App {
         }
         self.clear_workspace_transients(&closed_workspace_id);
         self.workspaces.remove(index);
-        if self.workspaces.is_empty() {
-            self.all_workspaces_closed();
-        } else if self.active_ws >= self.workspaces.len() {
-            self.active_ws = self.workspaces.len() - 1;
-        }
         self.session_dirty = true;
         self.emit_event(
             "workspace.closed",
@@ -5470,6 +5477,11 @@ impl App {
             crate::logging::EventKind::WorkspaceClose,
             &[crate::logging::Field::WorkspaceIndex(index as u64)],
         );
+        if self.workspaces.is_empty() {
+            self.all_workspaces_closed();
+        } else if self.active_ws >= self.workspaces.len() {
+            self.active_ws = self.workspaces.len() - 1;
+        }
     }
 
     /// Dismiss deferred UI actions whose stable target is being removed.
@@ -5667,6 +5679,22 @@ mod tests {
     use std::sync::mpsc;
 
     use crate::persist::TEST_ENV_LOCK as ENV_GUARD;
+
+    /// Exercise guards for a restore/spawn failure that leaves no layout. Normal
+    /// user close paths immediately create a neutral home terminal instead.
+    fn force_empty_session(app: &mut App) {
+        let panes: Vec<PaneId> = app
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.tabs.iter())
+            .flat_map(|tab| tab.layout.leaves())
+            .collect();
+        for pane in panes {
+            app.drop_leaf_runtime(pane);
+        }
+        app.workspaces.clear();
+        app.active_ws = 0;
+    }
 
     /// The new-pane cwd resolver hands back the chain of directories that still
     /// exist, in preference order, and never a directory it has already found
@@ -6205,10 +6233,10 @@ mod tests {
     /// `std::env::current_dir()`, which in the server is the folder it was
     /// launched from, i.e. projectA.
     ///
-    /// The server still outlives its windows (that part was always intended);
-    /// what ends now is the *session*.
+    /// The server and attached client now remain usable with a neutral terminal
+    /// at `$HOME`, while the replacement snapshot is persisted immediately.
     #[test]
-    fn closing_the_last_node_ends_the_session_without_resurrecting_one() {
+    fn closing_the_last_workspace_opens_a_home_terminal_without_resurrecting_one() {
         let _env = crate::persist::test_env("server-outlives");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
@@ -6226,28 +6254,29 @@ mod tests {
         assert_eq!(app.workspaces.len(), 1, "the other node stays open");
         app.close_workspace(0);
 
+        let home = crate::platform::home_dir().expect("the test host has a home directory");
+        assert_eq!(app.workspaces.len(), 1, "a neutral workspace remains");
         assert!(
-            app.workspaces.is_empty(),
-            "no node is resurrected — least of all the server's launch folder"
+            crate::platform::same_path(&app.workspaces[0].cwd, &home),
+            "the replacement is rooted at home, not a project or server launch folder"
+        );
+        assert_eq!(app.layout().len(), 1, "the user gets one real terminal");
+        assert!(
+            app.panes.contains_key(&app.layout().focus),
+            "the replacement layout owns a live pane"
         );
         assert!(
             !app.should_quit,
-            "the server itself still outlives its windows; `server stop` ends it"
+            "the attached client remains connected; `server stop` ends the server"
         );
         assert!(
-            app.end_session,
-            "every client is told to detach, so the window actually closes"
+            app.persist_session_now,
+            "the replacement snapshot is persisted without waiting for the debounce"
         );
 
-        // The server keeps ticking after the session ends, with no clients
-        // attached. `detect_tick` reaches `layout()`, so an unguarded empty
-        // session panics the whole server here — which is exactly what happened,
-        // and what no assertion above would have caught.
+        // The server keeps ticking while clients remain attached to the home terminal.
         for _ in 0..3 {
-            assert!(
-                !app.detect_tick(Instant::now()),
-                "an empty session has nothing to detect"
-            );
+            app.detect_tick(Instant::now());
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -6262,7 +6291,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         app.server_mode = true;
-        app.close_workspace(0);
+        force_empty_session(&mut app);
         assert!(app.workspaces.is_empty());
 
         let call = |app: &mut App, method: &str, params: serde_json::Value| {
@@ -6280,7 +6309,6 @@ mod tests {
             "workspace.rename",
             "workspace.pin",
             "tab.list",
-            "tab.new",
             "tab.move",
             "tab.swap",
             "tab.close",
@@ -6305,6 +6333,23 @@ mod tests {
             "listing nodes with none open is not an error: {res}"
         );
 
+        let res = call(&mut app, "tab.new", serde_json::json!({}));
+        assert!(
+            res.get("error").is_none(),
+            "a tab command from an empty session creates a neutral workspace: {res}"
+        );
+        assert_eq!(app.workspaces.len(), 1);
+        assert_eq!(app.ws().tabs.len(), 1);
+        force_empty_session(&mut app);
+
+        let res = call(&mut app, "pane.split", serde_json::json!({}));
+        assert!(
+            res.get("error").is_none(),
+            "a split command from an empty session creates its anchor first: {res}"
+        );
+        assert_eq!(app.layout().len(), 2);
+        force_empty_session(&mut app);
+
         let dir = std::env::temp_dir().join("luvus-recover-4b1c9f");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let res = call(
@@ -6320,9 +6365,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The same empty session must render. A client can still be attached for the
-    /// frame or two before it detaches, and `luvus attach` / `--remote` can attach
-    /// before any folder is opened — every draw fn below `render` assumes a node.
+    /// A restore or replacement-shell failure may leave no workspace. Rendering
+    /// stays safe and does not substitute a landing screen for the terminal.
     #[test]
     fn an_empty_session_still_renders() {
         let _env = crate::persist::test_env("render-no-node");
@@ -6331,8 +6375,9 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         app.server_mode = true;
-        app.close_workspace(0);
+        force_empty_session(&mut app);
         assert!(app.workspaces.is_empty());
+        app.pane_rects.push((PaneId(999), Rect::new(1, 1, 2, 2)));
 
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
@@ -6344,27 +6389,69 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(
-            text.contains("no folders open"),
-            "the empty session says so instead of drawing a broken frame"
+            !text.contains("No workspace open") && !text.contains("Open Workspace"),
+            "an empty session does not replace Luvus with a landing card"
         );
+        assert!(app.pane_rects.is_empty(), "stale terminal hits are cleared");
+        assert!(app.new_ws_rect.is_none(), "no synthetic action is rendered");
     }
 
     #[test]
-    fn closing_last_pane_quits_and_ignores_further_events() {
+    fn closing_last_pane_opens_a_home_terminal_and_accepts_new_tab() {
         let _env = crate::persist::test_env("close-last-pane");
-        // Closing the last pane empties `workspaces` and sets `should_quit`; the
-        // server loop drains the rest of the event batch before checking that
-        // flag, so late events must be no-ops, not panics on an empty Vec.
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let id = app.layout().focus;
         app.handle_event(AppEvent::PtyExit(id)); // the only pane's shell exits
-        assert!(app.should_quit, "closing the last pane quits the session");
-        assert!(app.workspaces.is_empty());
-        // Late events in the same batch must not panic.
+        assert!(
+            !app.should_quit,
+            "closing the last pane keeps the client open"
+        );
+        assert_eq!(app.workspaces.len(), 1);
+        assert_ne!(app.layout().focus, id, "the dead pane is replaced");
+        assert!(app.panes.contains_key(&app.layout().focus));
         app.handle_event(key(' ', KeyModifiers::CONTROL));
         app.handle_event(key('c', KeyModifiers::NONE));
+        assert_eq!(
+            app.ws().tabs.len(),
+            2,
+            "new tab works immediately in the neutral workspace"
+        );
+        // A stale exit from the old PTY remains harmless after re-entry.
         app.handle_event(AppEvent::PtyExit(id));
+    }
+
+    #[test]
+    fn workspace_terminal_cwd_follows_the_focused_pane() {
+        let _env = crate::persist::test_env("workspace-focused-pane-cwd");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let root = app.layout().focus;
+        app.split(Axis::Col);
+        let second = app.layout().focus;
+        let root_cwd = app.ws().cwd.join("root-pane");
+        let second_cwd = app.ws().cwd.join("focused-pane");
+        app.rename_workspace(0, "My project").unwrap();
+        app.panes.get_mut(&root).unwrap().cwd = root_cwd.clone();
+        app.panes.get_mut(&second).unwrap().cwd = second_cwd;
+
+        app.layout_mut().focus = second;
+        assert_eq!(
+            app.workspace_terminal_cwd(0),
+            app.panes.get(&second).map(|pane| pane.cwd.as_path()),
+            "the sidebar follows the terminal the user can type in"
+        );
+        assert_eq!(
+            app.workspaces[0].name, "My project",
+            "live pane paths never overwrite a custom workspace label"
+        );
+
+        app.layout_mut().focus = root;
+        assert_eq!(
+            app.workspace_terminal_cwd(0),
+            Some(root_cwd.as_path()),
+            "moving focus changes the displayed terminal path"
+        );
     }
 
     #[test]
@@ -9078,6 +9165,27 @@ mod tests {
         assert_eq!(s.agent, "claude");
         assert_eq!(s.agent_session.as_ref().unwrap().session_id, "abc");
         assert!(app.resumable.is_empty(), "session dropped from the list");
+    }
+
+    #[test]
+    fn resume_session_from_empty_creates_its_workspace() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.config.layout.resume_in_new_workspace = false;
+        force_empty_session(&mut app);
+        assert!(app.workspaces.is_empty());
+
+        app.resumable = vec![crate::agent::SessionInfo {
+            agent: "claude".into(),
+            session_id: "empty-session-resume".into(),
+            cwd: std::env::current_dir().expect("repository directory"),
+            updated: std::time::SystemTime::now(),
+        }];
+        app.resume_session(0);
+
+        assert_eq!(app.workspaces.len(), 1);
+        assert_eq!(app.ws().tabs.len(), 1);
+        assert!(app.resumable.is_empty());
     }
 
     #[test]

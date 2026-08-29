@@ -438,10 +438,9 @@ impl App {
             other => other,
         };
         // Control-API requests and parked `wait.output` replies must be answered
-        // even with no workspace open. A server that has closed its last node
-        // stays alive (docs/43 §3.3), and the methods that reopen one are the
-        // only way back; dropping the reply channel here would leave the caller
-        // reading EOF instead of a `workspace.open` / `server.stop` answer.
+        // even if restore or shell startup left no workspace. Normal close paths
+        // immediately create a neutral home terminal; this guard keeps the
+        // exceptional recovery path from dropping replies or indexing a layout.
         if self.workspaces.is_empty() {
             match ev {
                 AppEvent::ThemeReloaded {
@@ -506,18 +505,16 @@ impl App {
                     );
                     return true;
                 }
-                // The worker may finish after the last workspace closes. Drop
-                // its stale result, but release the guard so CWD tracking can
-                // start again if another workspace is opened.
+                // A worker may finish after the previous workspace closes while
+                // replacement shell startup fails. Drop its stale result, but
+                // release the guard so CWD tracking can recover later.
                 AppEvent::CwdScanned { .. } => {
                     self.cwd_scan_inflight = false;
                     return false;
                 }
-                // Closing the last workspace empties `workspaces` and sets
-                // `should_quit`; the loop drains the rest of the event batch
-                // before it checks that flag, so ignore everything else here
-                // once there's nothing left to act on (`layout()` would
-                // otherwise index an empty `workspaces`).
+                // Late pane and worker events may arrive after the final project
+                // closes. If replacement startup failed, ignore them rather than
+                // indexing a layout that does not exist.
                 _ => return false,
             }
         }
@@ -3567,15 +3564,15 @@ mod tests {
         );
     }
 
-    // A server that has closed its last node keeps running (docs/43 §3.3), so
-    // control-API requests routed through the event channel must still be
-    // answered — otherwise the reply channel drops and the CLI reads EOF.
+    // A server that has closed its last project keeps running with a neutral
+    // home terminal, so control-API requests routed through the event channel
+    // must still be answered rather than dropping the CLI reply channel.
     #[test]
-    fn api_requests_are_answered_with_no_workspace_open() {
+    fn api_requests_are_answered_after_the_last_project_closes() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = crate::app::App::new(80, 24, tx).unwrap();
         app.close_workspace(0);
-        assert!(app.workspaces.is_empty(), "the only node is gone");
+        assert_eq!(app.workspaces.len(), 1, "the home terminal replaced it");
         let (reply, rx) = std::sync::mpsc::channel();
         let req = crate::ipc::api::ApiRequest {
             id: "ping".into(),
@@ -3597,7 +3594,7 @@ mod tests {
         let mut app = crate::app::App::new(80, 24, tx).unwrap();
         app.cwd_scan_inflight = true;
         app.close_workspace(0);
-        assert!(app.workspaces.is_empty(), "the only workspace is gone");
+        assert_eq!(app.workspaces.len(), 1, "the home terminal replaced it");
 
         let dirty = app.handle_event(AppEvent::CwdScanned {
             panes: Vec::new(),
@@ -3605,7 +3602,7 @@ mod tests {
             workspace_candidates: Vec::new(),
         });
 
-        assert!(!dirty, "discarding an invisible scan needs no repaint");
+        assert!(!dirty, "an empty scan needs no repaint");
         assert!(
             !app.cwd_scan_inflight,
             "a reopened workspace must be allowed to start another scan"

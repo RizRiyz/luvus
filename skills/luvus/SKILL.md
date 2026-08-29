@@ -275,6 +275,13 @@ luvus workspace pin <workspace-index>
 luvus workspace unpin <workspace-index>
 ```
 
+Closing the final project does not stop the client or leave it without a shell.
+Luvus immediately creates a neutral workspace and terminal at the user's home
+directory. Its displayed path follows the focused pane's live cwd. An empty
+`workspace list` is therefore an exceptional restore or spawn failure, not proof
+that the server is offline. Use `workspace open <path>` when the user named a
+specific project.
+
 From a managed pane, use `LUVUS_PANE_ID` as the caller or split anchor. From an
 external terminal, select an explicit pane returned by live state.
 

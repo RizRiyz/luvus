@@ -1113,15 +1113,15 @@ static HELP: &[Translation] = &[
         "현재 작업 공간의 탭 나열"
     ),
     tr!(
-        "new tab",
-        "nueva pestaña",
-        "nova aba",
-        "nouvel onglet",
-        "neuer Tab",
-        "tab baru",
-        "新建标签页",
-        "新しいタブ",
-        "새 탭"
+        "new tab (creates a workspace if none is open)",
+        "nueva pestaña (crea un espacio de trabajo si no hay ninguno abierto)",
+        "nova aba (cria um espaço de trabalho se nenhum estiver aberto)",
+        "nouvel onglet (crée un espace de travail si aucun n'est ouvert)",
+        "neuer Tab (erstellt einen Arbeitsbereich, wenn keiner geöffnet ist)",
+        "tab baru (membuat ruang kerja jika belum ada yang terbuka)",
+        "新建标签页（没有打开的工作区时创建一个）",
+        "新しいタブ（ワークスペースがない場合は作成）",
+        "새 탭 (열린 작업 공간이 없으면 생성)"
     ),
     tr!(
         "focus tab n (1-based)",
@@ -1201,15 +1201,15 @@ static HELP: &[Translation] = &[
         "현재 탭의 패널과 읽기 전용 기록 지표 나열"
     ),
     tr!(
-        "split a pane (default: side by side)",
-        "dividir un panel (predeterminado: lado a lado)",
-        "dividir um painel (padrão: lado a lado)",
-        "diviser un volet (par défaut : côte à côte)",
-        "Bereich teilen (Standard: nebeneinander)",
-        "bagi panel (bawaan: berdampingan)",
-        "拆分窗格（默认：左右并排）",
-        "ペインを分割（既定：横並び）",
-        "패널 분할 (기본값: 좌우 분할)"
+        "split a pane (side by side, creates a workspace if empty)",
+        "dividir un panel (lado a lado, crea un espacio de trabajo si está vacío)",
+        "dividir um painel (lado a lado, cria um espaço de trabalho se estiver vazio)",
+        "diviser un volet (côte à côte, crée un espace de travail si vide)",
+        "Bereich teilen (nebeneinander, erstellt bei Leerstand einen Arbeitsbereich)",
+        "bagi panel (berdampingan, membuat ruang kerja jika kosong)",
+        "拆分窗格（左右并排，空状态时创建工作区）",
+        "ペインを分割（横並び、空の場合はワークスペースを作成）",
+        "패널 분할 (좌우 분할, 비어 있으면 작업 공간 생성)"
     ),
     tr!(
         "focus a pane (jumps to its workspace/tab)",

@@ -359,12 +359,21 @@ on a parent or linked worktree floats that complete worktree group while
 preserving its internal order.
 
 `workspace.list` remains in API-index order. Each row includes `workspace_id`,
-`workspace`, `name`, `cwd`, `pinned`, `display_position`, `active`, and `tabs`.
-Both `workspace` and `display_position` are 0-based; callers can therefore
-target a current position or use the stable ID and separately verify where it
-appears in the sidebar.
+`workspace`, `name`, `cwd`, `terminal_cwd`, `pinned`, `display_position`,
+`active`, and `tabs`. `workspace.get` exposes the same two paths. `cwd` is the
+stable project root. `terminal_cwd` follows the focused pane of the workspace's
+active tab and changes when focus moves to another split. Both
+`workspace` and `display_position` are 0-based; callers can therefore target a
+current position or use the stable ID and separately verify where it appears in
+the sidebar.
 Missing or malformed parameters return `invalid_request`, while an out-of-range
 workspace returns `not_found` without changing state.
+
+After the final project workspace closes, the server and client remain available
+and Luvus immediately creates a neutral workspace with one terminal rooted at
+the user's home directory. Normal tab and pane methods keep working. If a restore
+or shell failure leaves the server truly empty, layout-scoped methods return
+`no_session`; `workspace.open`, `tab.new`, and `pane.split` remain recovery paths.
 
 ## Moving panes and tabs
 

@@ -78,6 +78,13 @@ A **workspace** is one project folder, fixed at its `cwd` (see
 [Core Concepts](/docs/getting-started/concepts/#2-workspace--tab--pane)). They
 live in the sidebar's top list.
 
+Closing the final workspace leaves the client attached with the normal Luvus
+chrome instead of closing the app or showing a separate landing screen. Luvus
+immediately replaces it with a neutral workspace and real terminal rooted at
+your home directory. You can type, change directory, create tabs or splits, and
+open the folder picker normally. The sidebar path follows the focused pane, so
+split terminals with different working directories remain unambiguous.
+
 - **Open one:** the `+` button above the list, or `Ctrl+Space N`, opens a
   **folder picker**. Browse with the arrows / wheel, use the **Home** row to jump
   home, or press `g` (also clickable in the footer) to type an absolute, relative,
@@ -121,7 +128,11 @@ luvus workspace unpin 2
 ```
 
 `workspace list` reports both the stable API index and `display_position`, so a
-pin never changes which workspace a later command targets.
+pin never changes which workspace a later command targets. It also reports two
+paths. `cwd` is the stable project root. `terminal_cwd` is the exact live path
+of the focused pane in the active tab. Changing focus updates `terminal_cwd`, so
+split panes with different directories report whichever terminal is currently
+selected. The stable `cwd` and a custom workspace name remain unchanged.
 
 Mission Control is also available without a mouse. Press `Ctrl+Space m`, choose
 it from the desktop switcher with `Ctrl+Space M`, or open it through automation:

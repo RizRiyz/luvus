@@ -1009,11 +1009,9 @@ impl App {
             return self.handle_terminal_backend(req);
         }
         // No node open: most methods reach `layout()`, which would index an empty
-        // `workspaces`. This was written when an empty session only ever existed
-        // for the moment before the app quit; since docs/43 §3.3 a server *stays*
-        // empty after its last node closes, so the methods that open one — the
-        // only way back — must get through, or the server is a brick that only
-        // `server stop` can clear.
+        // `workspaces`. Normal close paths immediately create a neutral home
+        // terminal, but restore or shell startup can still fail. Methods that
+        // recover or inspect that exceptional state must get through.
         // Only methods that are safe with no node: they either take an explicit
         // path or touch no node at all. Notably absent is `workspace.new`, which
         // derives its folder from the focused pane and would fall back to the
@@ -1034,6 +1032,8 @@ impl App {
             "workspace.list",
             "node.list",
             "worktree.open",
+            "tab.new",
+            "pane.split",
             "ui.bar.list",
             "ui.bar.push",
             "ui.bar.move",
@@ -1280,6 +1280,12 @@ impl App {
                 }))
             }
             "pane.split" => {
+                if self.workspaces.is_empty() && !self.ensure_workspace_for_terminal() {
+                    return Err((
+                        "spawn_failed".to_string(),
+                        "could not create a terminal in the home directory".to_string(),
+                    ));
+                }
                 let base = self.resolve_pane(p).unwrap_or_else(|| self.layout().focus);
                 self.layout_mut().focus = base;
                 let dir = p
@@ -1483,11 +1489,17 @@ impl App {
                     .iter()
                     .enumerate()
                     .map(|(i, w)| {
+                        let terminal_cwd = self
+                            .workspace_terminal_cwd(i)
+                            .unwrap_or(&w.cwd)
+                            .display()
+                            .to_string();
                         json!({
                             "workspace": i.to_string(),
                             "workspace_id": w.id,
                             "name": w.name,
                             "cwd": w.cwd.display().to_string(),
+                            "terminal_cwd": terminal_cwd,
                             "pinned": w.pinned,
                             "display_position": display_positions[i].to_string(),
                             "active": i == active,
@@ -1754,7 +1766,16 @@ impl App {
                 self.socket_tab(workspace, tab)
             }
             "tab.new" => {
-                self.new_tab();
+                if self.workspaces.is_empty() {
+                    if !self.ensure_workspace_for_terminal() {
+                        return Err((
+                            "spawn_failed".to_string(),
+                            "could not create a terminal in the home directory".to_string(),
+                        ));
+                    }
+                } else {
+                    self.new_tab();
+                }
                 Ok(json!({
                     "type":"tab",
                     "tab": (self.ws().active_tab + 1).to_string()
@@ -4900,10 +4921,16 @@ impl App {
             .workspaces
             .get(index)
             .ok_or_else(|| workspace_update_error(index, WorkspaceUpdateError::NotFound))?;
+        let terminal_cwd = self
+            .workspace_terminal_cwd(index)
+            .unwrap_or(&workspace.cwd)
+            .display()
+            .to_string();
         Ok(json!({
             "type":"workspace", "workspace":index.to_string(), "workspace_id":workspace.id,
             "name":workspace.name,
             "cwd":workspace.cwd.display().to_string(), "branch":workspace.branch,
+            "terminal_cwd":terminal_cwd,
             "ahead":workspace.git_ahead_behind.map(|value| value.0),
             "behind":workspace.git_ahead_behind.map(|value| value.1),
             "pinned":workspace.pinned, "active":index == self.active_ws,
@@ -6859,11 +6886,16 @@ command = ["true"]
         assert_eq!(rows[0]["workspace"], "0", "API order stays stable");
         assert_eq!(rows[1]["name"], "Luvus website");
         assert_eq!(rows[1]["cwd"], a.display().to_string());
+        assert_eq!(rows[1]["terminal_cwd"], a.display().to_string());
         assert_eq!(rows[1]["pinned"], false);
         assert_eq!(rows[1]["display_position"], "2");
         assert_eq!(rows[2]["workspace"], "2");
         assert_eq!(rows[2]["pinned"], true);
         assert_eq!(rows[2]["display_position"], "0");
+        let fetched = app
+            .dispatch("workspace.get", &json!({"workspace": 1}))
+            .expect("workspace get");
+        assert_eq!(fetched["terminal_cwd"], a.display().to_string());
 
         let unpinned = app
             .dispatch("workspace.pin", &json!({"workspace": "2", "pinned": false}))

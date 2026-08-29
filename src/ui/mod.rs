@@ -418,20 +418,24 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         return;
     }
 
-    // No nodes at all (docs/43 §3.3): the last one was closed, so the session is
-    // over and every client has been told to detach. A client can still be
-    // attached for the frame or two before it goes (or attach fresh via
-    // `luvus attach` / `--remote` before opening a folder), and every draw fn
-    // below assumes an active node — `app.ws()` indexes `workspaces[active_ws]`.
-    // One guard here covers the whole tree rather than each call site.
+    // Restore or shell startup can fail before a workspace exists. Keep this
+    // guard before every renderer that indexes `app.ws()`. Normal close paths
+    // immediately create a real home terminal and never use this surface.
     if app.workspaces.is_empty() {
-        let msg = "no folders open — run `luvus` in a folder";
-        let y = area.y + area.height / 2;
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(msg, Style::new().fg(t.overlay1))))
-                .alignment(ratatui::layout::Alignment::Center),
-            Rect::new(area.x, y, area.width, 1),
-        );
+        f.render_widget(Block::new().style(Style::new().bg(t.mantle)), area);
+        app.pane_rects.clear();
+        app.pane_content_rects.clear();
+        app.pane_title_rects.clear();
+        app.tab_rects.clear();
+        app.tab_close_rects.clear();
+        app.ws_rects.clear();
+        app.agent_rects.clear();
+        app.session_rects.clear();
+        app.new_ws_rect = None;
+        app.last_cursor = None;
+        if let Some((text, _)) = &app.toast {
+            draw_toast(f, area, text, &t);
+        }
         return;
     }
 

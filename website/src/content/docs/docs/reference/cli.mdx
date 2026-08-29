@@ -72,7 +72,7 @@ workspaces:
 
 tabs:
   tab list                   list tabs in the current workspace
-  tab new                    new tab
+  tab new                    new tab (creates a workspace if none is open)
   tab focus <n>              focus tab n (1-based)
   tab move <from> <to>       move a tab to an exact position (1-based)
   tab move left|right        move the active tab one position (--tab N targets one)
@@ -82,7 +82,7 @@ tabs:
 
 panes / agents:
   pane list                  list panes and read-only history metrics in the current tab
-  pane split [<id>] [--down] [--no-focus]   split a pane (default: side by side)
+  pane split [<id>] [--down] [--no-focus]   split a pane (side by side, creates a workspace if empty)
   pane focus <id>            focus a pane (jumps to its workspace/tab)
   pane move [<id>] (--tab <n> | --new-tab)  move a pane within its workspace
   pane run [<id>] <cmd...>   run a command in a pane

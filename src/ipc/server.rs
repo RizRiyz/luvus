@@ -479,23 +479,11 @@ pub fn run() -> Result<()> {
             );
             break;
         }
-        // The last node closed (docs/43 §3.3): the *session* is over, so every
-        // window goes away — not just the foreground one, which would leave other
-        // clients staring at a session with nothing in it. The server stays up
-        // with no nodes; `server stop` is still what ends it.
-        if app.end_session {
-            app.end_session = false;
-            // Detach is a reliable control message. It does not compete with the
-            // one-frame backpressure slot, so a busy or remote client cannot
-            // lose it and cannot block this loop.
-            for (_, client) in clients.drain() {
-                let _ = client.send_control(ServerMessage::Detach);
-            }
-            foreground = None;
-            // Persist immediately rather than waiting out the 2s debounce: the
-            // snapshot is now empty, which *removes* `session.json`, and a kill
-            // inside that window would otherwise leave the closed nodes on disk
-            // to be restored on the next start.
+        // Closing the last project keeps the client attached and replaces the
+        // project with a neutral home terminal. Persist immediately rather than
+        // waiting out the debounce, so a crash cannot resurrect the closed project.
+        if app.persist_session_now {
+            app.persist_session_now = false;
             persist::save(&app);
             app.session_dirty = false;
             last_save = Instant::now();
@@ -1356,11 +1344,10 @@ mod tests {
         );
     }
 
-    /// Session detach is carried by the same reliable control path. Preserve the
-    /// earlier guarantee that closing the last node cannot strand a client just
-    /// because its writer already has a frame waiting.
+    /// Explicit client detach is carried by the same reliable control path and
+    /// cannot be lost behind a queued frame.
     #[test]
-    fn ending_a_session_delivers_detach_behind_a_queued_frame() {
+    fn explicit_detach_is_delivered_behind_a_queued_frame() {
         let (messages, rx) = mpsc::channel();
         let client = ClientSender {
             messages,

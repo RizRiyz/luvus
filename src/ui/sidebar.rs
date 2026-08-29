@@ -369,6 +369,7 @@ fn draw_workspaces_dock(
         ws_rects.push((i, Rect::new(area.x, y, area.width, 2)));
         let st = rollup(app, i);
         let ws = &app.workspaces[i];
+        let terminal_cwd = app.workspace_terminal_cwd(i).unwrap_or(&ws.cwd);
         let name_style = if active {
             Style::new().fg(t.accent).bold()
         } else {
@@ -421,7 +422,7 @@ fn draw_workspaces_dock(
                 format!(
                     "{}{}",
                     " ".repeat(pad),
-                    short_path(&ws.cwd, cw.saturating_sub(pad as u16))
+                    short_path(terminal_cwd, cw.saturating_sub(pad as u16))
                 ),
                 Style::new().fg(if active { t.subtext0 } else { t.overlay0 }),
             )),

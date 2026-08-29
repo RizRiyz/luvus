@@ -113,13 +113,15 @@ Reason about targets in this order:
 
 1. A session is one independent server namespace. Named sessions have separate
    processes, panes, and state.
-2. A workspace represents a project directory and owns tabs.
-3. A tab is an ordered layout inside one workspace.
-4. A pane is a real terminal and PTY owned by the server.
-5. An agent is a recognized process or resumable native session associated
+2. Closing the final project keeps the session usable by replacing it with a
+   neutral workspace and terminal rooted at the user's home directory.
+3. A workspace represents a project directory and owns tabs.
+4. A tab is an ordered layout inside one workspace.
+5. A pane is a real terminal and PTY owned by the server.
+6. An agent is a recognized process or resumable native session associated
    with a pane.
-6. A task coordinates dependencies, leases, worktrees, workers, and gates.
-7. A module is an explicitly installed extension using declared actions,
+7. A task coordinates dependencies, leases, worktrees, workers, and gates.
+8. A module is an explicitly installed extension using declared actions,
    panes, docks, events, settings, or Luvus Bar widgets.
 
 Tab positions are 1-based. Workspace indexes shown by the CLI are 0-based.
@@ -242,6 +244,10 @@ luvus agent start reviewer --kind codex --anchor <pane-id> --timeout 60
 luvus agent prompt reviewer "Review the current diff" --wait --timeout 600
 luvus wait agent-status <pane-id> --status done --timeout 600
 ```
+
+The neutral home workspace supports ordinary tabs and panes, and its displayed
+path follows the focused pane's live cwd. Use `workspace open <path>` when the
+user named a specific project.
 
 `agent prompt` submits one complete prompt and can wait semantically. Prefer it
 to separate text and Enter operations. A timeout does not prove that an agent
