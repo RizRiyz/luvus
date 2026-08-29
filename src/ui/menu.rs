@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::app::{
-    AgentMenuItem, DiffMenuItem, FileMenuItem, MenuScroll, ModuleMenuAction, PaneMenuItem, PopupId,
-    TabMenuItem, WsMenuItem,
+    AgentMenuItem, DiffMenuItem, FileMenuItem, MenuScroll, ModuleMenuAction, OrchMenuItem,
+    PaneMenuItem, PopupId, TabMenuItem, WsMenuItem,
 };
 use crate::i18n::Catalog;
 use ratatui::widgets::{Borders, Clear};
@@ -624,6 +624,58 @@ pub(super) fn draw_diff_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
         },
     );
     if let Some(menu) = app.diff_menu.as_mut() {
+        menu.items = items.into_iter().zip(rects).collect();
+    }
+}
+
+pub(super) fn draw_orch_menu(
+    f: &mut RenderTarget,
+    area: Rect,
+    app: &mut App,
+    cat: &Catalog,
+    t: &Theme,
+) {
+    let Some(menu) = app.orch_menu.as_ref() else {
+        return;
+    };
+    let anchor = menu.anchor;
+    let task = menu.task.clone();
+    let items = app.orch_menu_items(&task);
+    let rows: Vec<MenuRow> = items
+        .iter()
+        .map(|item| MenuRow {
+            text: match item {
+                OrchMenuItem::Start => cap_first(cat.board_start),
+                OrchMenuItem::Jump => cap_first(cat.scroll_jump),
+                OrchMenuItem::Details => cap_first(cat.board_details),
+                OrchMenuItem::Done => cap_first(cat.task_done),
+                OrchMenuItem::Merge => cap_first(cat.act_merge),
+                OrchMenuItem::Release => cap_first(cat.board_release),
+                OrchMenuItem::CopyId => format!("{} ID", cap_first(cat.act_copy)),
+                OrchMenuItem::CopyWorktree => {
+                    format!("{} {}", cap_first(cat.act_copy), cat.board_f_paths)
+                }
+                OrchMenuItem::Divider => String::new(),
+                OrchMenuItem::Delete => cap_first(cat.act_delete),
+            },
+            divider: matches!(item, OrchMenuItem::Divider),
+            destructive: matches!(item, OrchMenuItem::Delete),
+        })
+        .collect();
+    let rects = render_popup(
+        f,
+        area,
+        anchor,
+        &rows,
+        t,
+        PopupCtx {
+            hover: app.hover,
+            mobile: app.compact,
+            id: PopupId::Orch,
+            scroll: &mut app.menu_scroll,
+        },
+    );
+    if let Some(menu) = app.orch_menu.as_mut() {
         menu.items = items.into_iter().zip(rects).collect();
     }
 }

@@ -237,6 +237,17 @@ pub enum AppEvent {
         code: Option<i32>,
         out: String,
     },
+    /// A task branch finished integrating in the dedicated background
+    /// worktree. Git runs off-loop; the app owner validates and commits the
+    /// resulting task transition, event, and optional API reply.
+    TaskMergeFinished {
+        task: String,
+        branch: String,
+        previous: crate::orch::TaskStatus,
+        integration_branch: String,
+        result: Result<crate::git::local::MergeOutcome, String>,
+        reply: Option<(String, Sender<String>)>,
+    },
     /// The background update check found a newer release than this build (the
     /// version string, e.g. `"0.9.3"`). Shows the indicator by the version number.
     UpdateAvailable(String),

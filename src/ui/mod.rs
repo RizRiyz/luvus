@@ -162,6 +162,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     let orch_scroll = app.orch_scroll;
     let orch_detail_scroll = app.orch_detail_scroll;
     let orch_area = app.orch_area;
+    let orch_hits = std::mem::take(&mut app.orch_hits);
     let mission_scroll = app.mission_scroll;
     let mission_area = app.mission_area;
     let mission_refresh_rect = app.mission_refresh_rect;
@@ -239,6 +240,10 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
         .diff_menu
         .as_mut()
         .map(|menu| std::mem::take(&mut menu.items));
+    let orch_menu_items = app
+        .orch_menu
+        .as_mut()
+        .map(|menu| std::mem::take(&mut menu.items));
     let dock_menu_rects = app
         .dock_menu
         .as_mut()
@@ -293,6 +298,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     app.orch_scroll = orch_scroll;
     app.orch_detail_scroll = orch_detail_scroll;
     app.orch_area = orch_area;
+    app.orch_hits = orch_hits;
     app.mission_scroll = mission_scroll;
     app.mission_area = mission_area;
     app.mission_refresh_rect = mission_refresh_rect;
@@ -360,6 +366,9 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     if let (Some(items), Some(menu)) = (diff_menu_items, app.diff_menu.as_mut()) {
         menu.items = items;
     }
+    if let (Some(items), Some(menu)) = (orch_menu_items, app.orch_menu.as_mut()) {
+        menu.items = items;
+    }
     if let (Some(rects), Some(menu)) = (dock_menu_rects, app.dock_menu.as_mut()) {
         menu.rects = rects;
     }
@@ -406,6 +415,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.bar.overflow_hits.clear();
     app.menu_scroll.begin_frame();
     app.mission_row_rects.clear();
+    app.orch_hits.clear();
     app.mobile_pane_prev_rect = None;
     app.mobile_pane_next_rect = None;
 
@@ -617,32 +627,19 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     let compact = app.compact;
     let cursor = if app.active_is_orch() {
         app.orch_area = pane_area;
-        // Each task's live worker state (detection) rides along on its row.
-        let live: Vec<Option<board::RowLive>> = app
-            .orch
-            .tasks
-            .iter()
-            .map(|task| {
-                task.assignee
-                    .map(crate::ids::PaneId)
-                    .and_then(|pid| app.status.get(&pid))
-                    .map(|st| board::RowLive {
-                        agent: st.agent.clone(),
-                        state: st.state,
-                    })
-            })
-            .collect();
-        app.orch_scroll = board::render(
+        let rendered = board::render(
             f,
             pane_area,
             &app.orch,
-            &live,
             app.orch_scroll,
             app.orch_cursor,
             compact,
+            app.hover,
             cat,
             &t,
         );
+        app.orch_scroll = rendered.scroll;
+        app.orch_hits = rendered.hits;
         None
     } else if app.active_is_mission() {
         // Mission Control (docs/54): rows are precomputed from `App` first (so the
@@ -817,6 +814,9 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     if app.diff_menu.is_some() {
         menu::draw_diff_menu(f, area, app, &t);
     }
+    if app.orch_menu.is_some() {
+        menu::draw_orch_menu(f, area, app, cat, &t);
+    }
     // A module dock row's own context menu (docs/52).
     if app.dock_menu.is_some() {
         menu::draw_dock_menu(f, area, app, &t);
@@ -861,11 +861,11 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     }
     // The board's new-task form (docs/22 ORCH-7).
     if let Some(form) = &app.orch_form {
-        board::draw_form(f, area, form, cat, &t);
+        app.orch_hits = board::draw_form(f, area, form, cat, &t);
     }
     // The board's start-worker picker and task detail overlay.
     if let Some(start) = &app.orch_start {
-        board::draw_start(f, area, start, cat, &t);
+        app.orch_hits = board::draw_start(f, area, start, cat, &t);
     }
     if let Some(id) = &app.orch_detail {
         let clamped = app
@@ -874,8 +874,9 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
             .iter()
             .find(|task| &task.id == id)
             .map(|task| board::draw_detail(f, area, task, app.orch_detail_scroll, cat, &t));
-        if let Some(s) = clamped {
-            app.orch_detail_scroll = s;
+        if let Some(rendered) = clamped {
+            app.orch_detail_scroll = rendered.scroll;
+            app.orch_hits = rendered.hits;
         }
     }
     // Mission Control's row-detail overlay and inline answer input (docs/54).
@@ -925,6 +926,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         || app.agent_menu.is_some()
         || app.file_menu.is_some()
         || app.diff_menu.is_some()
+        || app.orch_menu.is_some()
         || app.dock_menu.is_some()
         || app.file_prompt.is_some()
         || app.file_delete.is_some()
@@ -1023,6 +1025,30 @@ pub(super) fn hint_line_with_offsets(
 pub(crate) fn display_width(s: &str) -> usize {
     use unicode_width::UnicodeWidthStr;
     s.width()
+}
+
+/// Shared dashboard panel chrome used by Mission Control and ORCH. Keeping the
+/// border, title, and surface treatment in one place prevents full-tab views
+/// from drifting into separate visual systems.
+pub(super) fn dashboard_block(
+    title: impl Into<String>,
+    t: &Theme,
+    focus: bool,
+) -> ratatui::widgets::Block<'static> {
+    use ratatui::widgets::{Block, BorderType, Borders};
+
+    let border = if focus { t.border_focus } else { t.surface1 };
+    Block::new()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Style::new().fg(border).bg(t.mantle))
+        .title(Span::styled(
+            format!(" {} ", title.into()),
+            Style::new()
+                .fg(if focus { t.accent } else { t.overlay1 })
+                .bold(),
+        ))
+        .style(Style::new().bg(t.mantle))
 }
 
 /// Truncate `s` to at most `max` display columns, ending in a `…` when it does not

@@ -295,6 +295,9 @@ impl App {
             let _ = req.reply.send(response);
             return true;
         }
+        if req.method == "task.merge" {
+            return self.handle_task_merge_request(req);
+        }
         let Some(req) = self.prepare_files_api(req) else {
             return true;
         };
@@ -303,6 +306,55 @@ impl App {
         };
         let response = self.handle_api(&req);
         let _ = req.reply.send(response);
+        true
+    }
+
+    /// Park `task.merge` until its off-loop Git job returns. This preserves the
+    /// ordinary one-request/one-response API while keeping repository work away
+    /// from the single app owner.
+    fn handle_task_merge_request(&mut self, mut req: crate::ipc::api::ApiRequest) -> bool {
+        if self.workspaces.is_empty() {
+            let _ = req.reply.send(
+                json!({"id":req.id,"error":{"code":"no_session","message":"no active session"}})
+                    .to_string(),
+            );
+            return true;
+        }
+        let expected_revision = req
+            .params
+            .as_object_mut()
+            .and_then(|params| params.remove("if_revision"));
+        if let Some(expected) = expected_revision {
+            let actual = crate::ipc::api::current_sequence(&self.events);
+            if expected.as_u64() != Some(actual) {
+                let _ = req.reply.send(
+                    json!({"id":req.id,"error":{"code":"revision_conflict",
+                        "message":"socket state changed before this mutation",
+                        "expected":expected,"actual":actual}})
+                    .to_string(),
+                );
+                return true;
+            }
+        }
+        let Some(id) = req
+            .params
+            .get("id")
+            .and_then(|value| value.as_str())
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+        else {
+            let _ = req.reply.send(
+                json!({"id":req.id,"error":{"code":"invalid_request","message":"id is required"}})
+                    .to_string(),
+            );
+            return true;
+        };
+        let error_reply = req.reply.clone();
+        let request_id = req.id.clone();
+        if let Err((code, message)) = self.start_task_merge(&id, Some((req.id, req.reply))) {
+            let _ = error_reply
+                .send(json!({"id":request_id,"error":{"code":code,"message":message}}).to_string());
+        }
         true
     }
 
@@ -811,6 +863,17 @@ impl App {
                 self.task_gate_finished(&task, code, out);
                 true
             }
+            AppEvent::TaskMergeFinished {
+                task,
+                branch,
+                previous,
+                integration_branch,
+                result,
+                reply,
+            } => {
+                self.task_merge_finished(task, branch, previous, integration_branch, result, reply);
+                true
+            }
             AppEvent::UpdateAvailable(version) => {
                 let changed = self.update_available.as_deref() != Some(version.as_str());
                 self.update_available = Some(version);
@@ -1031,6 +1094,20 @@ impl App {
                 .map(|(_, rect)| *rect)
                 .find(|rect| hit(*rect));
         }
+        if let Some(menu) = &self.orch_menu {
+            return menu
+                .items
+                .iter()
+                .map(|(_, rect)| *rect)
+                .find(|rect| hit(*rect));
+        }
+        if self.orch_form.is_some() || self.orch_start.is_some() || self.orch_detail.is_some() {
+            return self
+                .orch_hits
+                .iter()
+                .map(|(_, rect)| *rect)
+                .find(|rect| hit(*rect));
+        }
         if let Some(menu) = &self.dock_menu {
             return first(&menu.rects);
         }
@@ -1231,13 +1308,25 @@ impl App {
             }
             return;
         }
-        // The board's start-worker picker / task detail own the mouse while
-        // open: a click dismisses them, the wheel scrolls the detail.
-        if self.orch_start.is_some() || self.orch_detail.is_some() {
+        // ORCH overlays own the mouse. Visible controls act through the same
+        // board methods as keyboard input; clicks elsewhere never fall through
+        // to the dashboard behind the modal.
+        if self.orch_form.is_some() || self.orch_start.is_some() || self.orch_detail.is_some() {
             match m.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
-                    self.orch_start = None;
-                    self.orch_detail = None;
+                    let hit = self
+                        .orch_hits
+                        .iter()
+                        .find(|(_, rect)| {
+                            m.column >= rect.x
+                                && m.column < rect.right()
+                                && m.row >= rect.y
+                                && m.row < rect.bottom()
+                        })
+                        .map(|(hit, _)| hit.clone());
+                    if let Some(hit) = hit {
+                        self.orch_activate_hit(hit);
+                    }
                 }
                 MouseEventKind::ScrollUp if self.orch_detail.is_some() => {
                     self.orch_detail_scroll = self.orch_detail_scroll.saturating_sub(2)
@@ -1343,6 +1432,12 @@ impl App {
         if self.diff_menu.is_some() {
             if let MouseEventKind::Down(_) = m.kind {
                 self.diff_menu_click(m.column, m.row);
+            }
+            return;
+        }
+        if self.orch_menu.is_some() {
+            if let MouseEventKind::Down(_) = m.kind {
+                self.orch_menu_click(m.column, m.row);
             }
             return;
         }
@@ -1470,6 +1565,15 @@ impl App {
                 self.open_diff_menu(*row, c, r);
             } else if let Some((i, _)) = self.file_tree_rects.iter().find(|(_, rect)| hit(*rect)) {
                 self.open_file_menu(*i, c, r); // FILES-dock row → new/rename/delete (docs/38)
+            } else if let Some((task, _)) =
+                self.orch_hits
+                    .iter()
+                    .find_map(|(target, rect)| match target {
+                        OrchHit::Task(task) if hit(*rect) => Some((task.clone(), *rect)),
+                        _ => None,
+                    })
+            {
+                self.open_orch_menu(&task, c, r);
             } else if let Some((dock, row_i, _)) = self
                 .module_dock_rects
                 .iter()
@@ -2153,14 +2257,28 @@ impl App {
                 return;
             }
         }
-        // Clicking a task row on the board selects it (docs/22, ORCH-7).
+        // ORCH controls use renderer-owned stable geometry. A double click is
+        // the mouse equivalent of Enter and jumps to the task's worker pane.
         if self.active_is_orch() {
-            let body_top = self.orch_area.y + 2; // header + separator
-            if hit(self.orch_area) && m.row >= body_top {
-                let idx = self.orch_scroll + (m.row - body_top) as usize;
-                if idx < self.orch.tasks.len() {
-                    self.orch_cursor = idx;
+            let target = self
+                .orch_hits
+                .iter()
+                .find(|(_, rect)| hit(*rect))
+                .map(|(target, _)| target.clone());
+            if let Some(OrchHit::Task(id)) = target {
+                let now = Instant::now();
+                let double = self.orch_last_click.take().is_some_and(|(previous, when)| {
+                    previous == id && now.duration_since(when) <= DOUBLE_CLICK
+                });
+                if double {
+                    self.orch_jump_to_task(&id);
+                } else {
+                    self.orch_select_task(&id);
+                    self.orch_last_click = Some((id, now));
                 }
+            } else if let Some(target) = target {
+                self.orch_last_click = None;
+                self.orch_activate_hit(target);
             }
             return;
         }
@@ -3132,6 +3250,12 @@ impl App {
             }
             return true;
         }
+        if self.orch_menu.is_some() {
+            if key.code == KeyCode::Esc {
+                self.orch_menu = None;
+            }
+            return true;
+        }
         if self.dock_menu.is_some() {
             if key.code == KeyCode::Esc {
                 self.dock_menu = None;
@@ -3639,6 +3763,62 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("an empty server still answers its control API");
         assert!(resp.contains("pong"), "got a real pong, not EOF: {resp}");
+    }
+
+    #[test]
+    fn task_merge_api_parks_until_background_git_finishes() {
+        let _env = crate::persist::test_env("task-merge-api");
+        let (tx, events) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        app.orch
+            .add_task("merge".into(), vec![], vec![], None)
+            .unwrap();
+        app.orch
+            .set_status("t1", crate::orch::TaskStatus::Done)
+            .unwrap();
+        let missing = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/nonexistent-orch-merge-repository");
+        app.orch.bind_worktree(
+            "t1",
+            Some(missing.display().to_string()),
+            Some("luvus/t1".into()),
+        );
+        let (reply, response) = std::sync::mpsc::channel();
+
+        app.handle_event(AppEvent::Api(crate::ipc::api::ApiRequest {
+            id: "merge-api".into(),
+            method: "task.merge".into(),
+            params: json!({"id":"t1"}),
+            reply,
+        }));
+
+        assert_eq!(
+            app.orch.task("t1").unwrap().status,
+            crate::orch::TaskStatus::Merging
+        );
+        assert!(response.try_recv().is_err(), "the API reply is parked");
+        let event = (0..20)
+            .find_map(|_| {
+                events
+                    .recv_timeout(std::time::Duration::from_millis(250))
+                    .ok()
+                    .filter(|event| matches!(event, AppEvent::TaskMergeFinished { .. }))
+            })
+            .expect("the background Git probe reports completion");
+        app.handle_event(event);
+
+        let response: serde_json::Value = serde_json::from_str(
+            &response
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("the parked request receives the merge failure"),
+        )
+        .unwrap();
+        assert_eq!(response["error"]["code"], "merge_error");
+        assert_eq!(
+            app.orch.task("t1").unwrap().status,
+            crate::orch::TaskStatus::Done,
+            "an infrastructure failure restores the safe pre-merge state"
+        );
     }
 
     #[test]
@@ -4449,6 +4629,109 @@ mod link_click_tests {
         )));
         assert!(app.tab_menu.is_some());
         assert!(app.tab_rename.is_none());
+    }
+
+    #[test]
+    fn wide_orchestration_double_click_jumps_to_the_worker() {
+        let _env = crate::persist::test_env("orch-mouse-actions");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(180, 32, tx).unwrap();
+        app.orch
+            .add_task("mouse task".into(), vec![], vec![], None)
+            .unwrap();
+        let worker = *app.panes.keys().next().unwrap();
+        app.orch.claim("t1", worker.0).unwrap();
+        app.open_orch_board();
+        let mut term = Terminal::new(TestBackend::new(180, 32)).unwrap();
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let rendered: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("SELECTED TASK · t1"));
+        let row = app
+            .orch_hits
+            .iter()
+            .find_map(|(hit, rect)| matches!(hit, OrchHit::Task(id) if id == "t1").then_some(*rect))
+            .expect("task row is clickable");
+        let at = (row.x + 1, row.y);
+
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            at,
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            app.orch_menu.as_ref().map(|menu| menu.task.as_str()),
+            Some("t1")
+        );
+        assert!(app
+            .orch_menu_items("t1")
+            .contains(&crate::app::OrchMenuItem::Details));
+        app.orch_menu = None;
+
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        assert!(!app.active_is_orch());
+        assert_eq!(app.layout().focus, worker);
+    }
+
+    #[test]
+    fn narrow_orchestration_double_click_also_jumps_to_the_worker() {
+        let _env = crate::persist::test_env("orch-narrow-details");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 28, tx).unwrap();
+        app.orch
+            .add_task("narrow task".into(), vec![], vec![], None)
+            .unwrap();
+        let worker = *app.panes.keys().next().unwrap();
+        app.orch.claim("t1", worker.0).unwrap();
+        app.open_orch_board();
+        let mut term = Terminal::new(TestBackend::new(80, 28)).unwrap();
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let row = app
+            .orch_hits
+            .iter()
+            .find_map(|(hit, rect)| matches!(hit, OrchHit::Task(id) if id == "t1").then_some(*rect))
+            .expect("task row is clickable");
+        let at = (row.x + 1, row.y);
+
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+
+        assert!(!app.active_is_orch());
+        assert_eq!(app.layout().focus, worker);
     }
 
     #[test]

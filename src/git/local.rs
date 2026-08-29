@@ -425,7 +425,7 @@ pub fn commit_show(cwd: &Path, sha: &str) -> Result<CommitShow, String> {
 #[derive(Debug, PartialEq)]
 pub enum MergeOutcome {
     /// Merged cleanly (a merge commit now sits on the integration branch).
-    Merged,
+    Merged { commit: String },
     /// The listed files clashed; the merge was aborted — nothing committed.
     Conflict(Vec<String>),
 }
@@ -504,14 +504,18 @@ pub fn integrate_branch(
     topic: &str,
 ) -> Result<MergeOutcome, String> {
     let integ_path = ensure_worktree(repo, integ_dir, integ_branch, base)?;
-    let (ok, _out, err) = run_status(&integ_path, &["merge", "--no-ff", "--no-edit", topic])?;
+    let (ok, _out, err) = run_status(&integ_path, &["merge", "--no-ff", "--no-edit", "--", topic])?;
     if ok {
-        return Ok(MergeOutcome::Merged);
+        let commit = run(&integ_path, &["rev-parse", "HEAD"])?;
+        return Ok(MergeOutcome::Merged {
+            commit: commit.trim().to_string(),
+        });
     }
     // Collect the conflicting files, then abort so nothing is left half-merged.
     let conflicts: Vec<String> = run(&integ_path, &["diff", "--name-only", "--diff-filter=U"])
         .unwrap_or_default()
         .lines()
+        .take(256)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
@@ -882,7 +886,13 @@ detached
         let integ_dir = base_dir.join("integ");
         // feat1 integrates cleanly.
         let r1 = integrate_branch(&repo, &integ_dir, "luvus/integration", "main", "feat1").unwrap();
-        assert_eq!(r1, MergeOutcome::Merged);
+        let MergeOutcome::Merged { commit } = r1 else {
+            panic!("expected a clean merge")
+        };
+        assert!(
+            commit.len() >= 40 && commit.chars().all(|ch| ch.is_ascii_hexdigit()),
+            "integration commit is reported"
+        );
         // The user's checkout is untouched (still main, X == base).
         assert_eq!(std::fs::read_to_string(repo.join("X")).unwrap(), "base\n");
 

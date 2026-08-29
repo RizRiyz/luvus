@@ -977,6 +977,50 @@ pub struct OrchStart {
     pub cursor: usize,
 }
 
+/// A clickable control rendered by the orchestration board or one of its
+/// overlays. Geometry is attachment-local and rebuilt from visible rows each
+/// frame, so hit testing never derives a task index from stale screen math.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum OrchHit {
+    Task(String),
+    Worker(String),
+    NewTask,
+    FormField(usize),
+    FormCreate,
+    FormCancel,
+    StartChoice(usize),
+    StartCommit,
+    StartCancel,
+    DetailClose,
+}
+
+/// ORCH shows the selected task beside the fleet at this viewport size.
+pub(crate) const ORCH_INLINE_DETAIL_MIN_WIDTH: u16 = 104;
+pub(crate) const ORCH_INLINE_DETAIL_MIN_HEIGHT: u16 = 12;
+
+/// A right-click menu for one exact orchestration task. The stable task id is
+/// snapshotted when the menu opens, so list or cursor changes cannot retarget an
+/// action before the user clicks it.
+pub struct OrchMenu {
+    pub task: String,
+    pub anchor: (u16, u16),
+    pub items: Vec<(OrchMenuItem, Rect)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OrchMenuItem {
+    Start,
+    Jump,
+    Details,
+    Done,
+    Merge,
+    Release,
+    CopyId,
+    CopyWorktree,
+    Divider,
+    Delete,
+}
+
 pub struct Workspace {
     /// Stable public identity across display reordering and restarts.
     pub id: String,
@@ -1326,6 +1370,7 @@ pub enum PopupId {
     Diff,
     File,
     Dock,
+    Orch,
 }
 
 /// Scroll state for context menus taller than the space they are drawn in.
@@ -1556,6 +1601,13 @@ pub struct App {
     pub orch_last_agent: usize,
     /// The board's content rect, for mouse-wheel hit-testing.
     pub orch_area: Rect,
+    /// Visible board and overlay controls, rebuilt by the active client's
+    /// renderer. The list is bounded by viewport height.
+    pub orch_hits: Vec<(OrchHit, Rect)>,
+    /// Task context menu opened from a visible board row.
+    pub orch_menu: Option<OrchMenu>,
+    /// The first task click in the board's double-click gesture.
+    pub orch_last_click: Option<(String, Instant)>,
     /// Mission Control (docs/54): scroll + selected row of the active mission tab,
     /// its content rect (mouse-wheel hit-testing), the rows currently displayed
     /// (so keyboard activation maps back to a pane or session), and the async
@@ -2064,6 +2116,9 @@ impl App {
             orch_detail_scroll: 0,
             orch_last_agent: 0,
             orch_area: Rect::ZERO,
+            orch_hits: Vec::new(),
+            orch_menu: None,
+            orch_last_click: None,
             mission_scroll: 0,
             mission_cursor: 0,
             mission_scope: crate::mission::MissionScope::Workspace,
@@ -2645,6 +2700,9 @@ impl App {
             orch_detail_scroll: 0,
             orch_last_agent: 0,
             orch_area: Rect::ZERO,
+            orch_hits: Vec::new(),
+            orch_menu: None,
+            orch_last_click: None,
             mission_scroll: 0,
             mission_cursor: 0,
             mission_scope: crate::mission::MissionScope::Workspace,

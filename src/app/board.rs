@@ -6,6 +6,7 @@
 //! whole flow is drivable from the UI, not only the `luvus task …` CLI.
 
 use super::*;
+use crate::orch::TaskStatus;
 
 impl App {
     /// Open (or focus, if already open) the orchestration board in the active
@@ -55,6 +56,17 @@ impl App {
             return Err((
                 "already_claimed".to_string(),
                 format!("{id} is already started/claimed"),
+            ));
+        }
+        if matches!(
+            task.status,
+            crate::orch::TaskStatus::Done
+                | crate::orch::TaskStatus::Merging
+                | crate::orch::TaskStatus::Merged
+        ) {
+            return Err((
+                "task_complete".to_string(),
+                format!("{id} is already {}", task.status.as_str()),
             ));
         }
         if !self.orch.ready(id) {
@@ -247,13 +259,14 @@ impl App {
         }
     }
 
-    /// ORCH-6: integrate a finished task's branch into `luvus/integration`, in an
-    /// **isolated integration worktree** (never the user's checkout). A clean merge
-    /// lands on the integration branch; a conflict aborts, blocks the task, and
-    /// reports the clashing files so its agent can resolve them in its own worktree.
-    /// Serialized by the single-writer loop — one integration at a time.
-    pub fn merge_task(&mut self, id: &str) -> Result<serde_json::Value, (String, String)> {
-        use crate::orch::TaskStatus;
+    /// Begin ORCH-6 integration without running Git on the app loop. The durable
+    /// `merging` transition reserves the shared integration branch, while the
+    /// result returns through `AppEvent::TaskMergeFinished` for one-writer apply.
+    pub fn start_task_merge(
+        &mut self,
+        id: &str,
+        reply: Option<(String, std::sync::mpsc::Sender<String>)>,
+    ) -> Result<(), (String, String)> {
         let task = self
             .orch
             .task(id)
@@ -265,74 +278,163 @@ impl App {
                 format!("{id} has no branch — start a worker first with `task start`"),
             )
         })?;
-        if !matches!(task.status, TaskStatus::Done | TaskStatus::Blocked) {
-            return Err((
-                "not_done".to_string(),
-                format!("{id} isn't done yet (status: {})", task.status.as_str()),
-            ));
-        }
-        // Operate on the task's own worktree repo (any worktree resolves the repo).
+        // Operate on the task's own worktree repo (any worktree resolves the
+        // repository). The active workspace is only a legacy fallback for an
+        // old task record that has a branch but no persisted worktree.
         let repo = task
             .worktree
             .as_ref()
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| self.ws().cwd.clone());
-        if !crate::git::local::is_repo(&repo) {
-            return Err((
-                "not_a_repo".to_string(),
-                "the task's repository is no longer available".to_string(),
-            ));
-        }
-        let base = crate::git::local::default_branch(&repo);
-        let repo_name = crate::git::local::worktrees(&repo)
-            .ok()
-            .and_then(|wts| {
-                wts.into_iter()
-                    .find(|w| w.is_main)
-                    .map(|w| ws_name(&w.path))
-            })
-            .unwrap_or_else(|| ws_name(&repo));
-        let integ_dir = crate::persist::config_dir()
-            .join("worktrees")
-            .join(&repo_name)
-            .join("__integration");
+            .or_else(|| self.workspaces.get(self.active_ws).map(|ws| ws.cwd.clone()))
+            .ok_or_else(|| {
+                (
+                    "not_a_repo".to_string(),
+                    "the task's repository is no longer available".to_string(),
+                )
+            })?;
+        let previous = self
+            .orch
+            .begin_merge(id)
+            .map_err(|reject| (reject.code.to_string(), reject.message))?;
         let integ_branch = "luvus/integration";
+        self.orch.save();
+        self.emit_event(
+            "task.merge_started",
+            serde_json::json!({ "id": id, "branch": branch, "into": integ_branch }),
+        );
+        let job = TaskMergeJob {
+            task: id.to_string(),
+            branch: branch.clone(),
+            previous,
+            repo,
+            integration_root: crate::persist::config_dir().join("worktrees"),
+            integration_branch: integ_branch.to_string(),
+            reply,
+            app_tx: self.app_tx.clone(),
+        };
+        if let Err(message) = spawn_task_merge(job) {
+            let _ = self.orch.finish_merge(id, previous);
+            self.orch.save();
+            self.emit_event(
+                "task.merge_failed",
+                serde_json::json!({ "id": id, "branch": branch, "message": message }),
+            );
+            return Err(("merge_unavailable".to_string(), message));
+        }
+        Ok(())
+    }
 
-        let outcome =
-            crate::git::local::integrate_branch(&repo, &integ_dir, integ_branch, &base, &branch)
-                .map_err(|e| ("merge_error".to_string(), e))?;
-        match outcome {
-            crate::git::local::MergeOutcome::Merged => {
-                let _ = self
-                    .orch
-                    .add_note(id, format!("merged {branch} → {integ_branch}"));
-                self.orch.save();
-                self.emit_event(
-                    "task.merged",
-                    serde_json::json!({ "id": id, "branch": branch, "into": integ_branch }),
-                );
-                Ok(serde_json::json!({
-                    "type": "merge",
-                    "outcome": "merged",
-                    "task": id,
-                    "branch": branch,
-                    "into": integ_branch,
-                }))
+    /// Apply the result of one background integration job. The task must still
+    /// own the `merging` reservation, so stale completions cannot retarget state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn task_merge_finished(
+        &mut self,
+        id: String,
+        branch: String,
+        previous: TaskStatus,
+        integration_branch: String,
+        result: Result<crate::git::local::MergeOutcome, String>,
+        reply: Option<(String, std::sync::mpsc::Sender<String>)>,
+    ) {
+        use crate::git::local::MergeOutcome;
+        use serde_json::json;
+
+        let response = match result {
+            Ok(MergeOutcome::Merged { commit }) => {
+                match self.orch.finish_merge(&id, TaskStatus::Merged) {
+                    Ok(_) => {
+                        let short = commit.get(..12).unwrap_or(&commit);
+                        let _ = self.orch.add_note(
+                            &id,
+                            format!("merged {branch} into {integration_branch} at {short}"),
+                        );
+                        self.orch.save();
+                        self.emit_event(
+                            "task.merged",
+                            json!({ "id": id, "branch": branch, "into": integration_branch,
+                                "commit": commit }),
+                        );
+                        Ok(json!({
+                            "type": "merge",
+                            "outcome": "merged",
+                            "task": id,
+                            "branch": branch,
+                            "into": integration_branch,
+                            "commit": commit,
+                        }))
+                    }
+                    Err(reject) => Err((reject.code.to_string(), reject.message)),
+                }
             }
-            crate::git::local::MergeOutcome::Conflict(files) => {
-                let _ = self.orch.set_status(id, TaskStatus::Blocked);
-                self.orch.save();
-                self.emit_event(
-                    "task.merge_conflict",
-                    serde_json::json!({ "id": id, "branch": branch, "files": files.clone() }),
-                );
-                Ok(serde_json::json!({
-                    "type": "merge",
-                    "outcome": "conflict",
-                    "task": id,
-                    "branch": branch,
-                    "files": files,
-                }))
+            Ok(MergeOutcome::Conflict(files)) => {
+                match self.orch.finish_merge(&id, TaskStatus::Blocked) {
+                    Ok(_) => {
+                        let _ = self
+                            .orch
+                            .add_output(&id, format!("merge conflict: {}", files.join(", ")));
+                        self.orch.save();
+                        self.emit_event(
+                            "task.merge_conflict",
+                            json!({ "id": id, "branch": branch, "files": files.clone() }),
+                        );
+                        Ok(json!({
+                            "type": "merge",
+                            "outcome": "conflict",
+                            "task": id,
+                            "branch": branch,
+                            "files": files,
+                        }))
+                    }
+                    Err(reject) => Err((reject.code.to_string(), reject.message)),
+                }
+            }
+            Err(message) => {
+                let restored = if previous == TaskStatus::Blocked {
+                    TaskStatus::Blocked
+                } else {
+                    TaskStatus::Done
+                };
+                match self.orch.finish_merge(&id, restored) {
+                    Ok(_) => {
+                        let _ = self
+                            .orch
+                            .add_output(&id, format!("merge failed: {message}"));
+                        self.orch.save();
+                        self.emit_event(
+                            "task.merge_failed",
+                            json!({ "id": id, "branch": branch, "message": message }),
+                        );
+                        Err(("merge_error".to_string(), message))
+                    }
+                    Err(reject) => Err((reject.code.to_string(), reject.message)),
+                }
+            }
+        };
+
+        if let Some((request_id, sender)) = reply {
+            let revision = crate::ipc::api::current_sequence(&self.events);
+            let envelope = match response {
+                Ok(mut value) => {
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert("revision".to_string(), json!(revision));
+                    }
+                    json!({ "id": request_id, "result": value })
+                }
+                Err((code, message)) => {
+                    json!({ "id": request_id, "error": { "code": code, "message": message } })
+                }
+            };
+            let _ = sender.send(envelope.to_string());
+        } else {
+            match response {
+                Ok(value) => {
+                    let outcome = value
+                        .get("outcome")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("done");
+                    self.show_toast(format!("{id}: merge {outcome}"));
+                }
+                Err((_, message)) => self.show_toast(message),
             }
         }
     }
@@ -347,6 +449,15 @@ impl App {
             .task(id)
             .cloned()
             .ok_or_else(|| ("not_found".to_string(), format!("no such task: {id}")))?;
+        if matches!(
+            task.status,
+            crate::orch::TaskStatus::Merging | crate::orch::TaskStatus::Merged
+        ) {
+            return Err((
+                "task_complete".to_string(),
+                format!("{id} is already {}", task.status.as_str()),
+            ));
+        }
         // ORCH-5 compaction gate: a context-saturated worker must compact (or hand
         // off to a fresh agent) before its work is accepted, so a confused agent
         // doesn't finalize sloppy output.
@@ -561,6 +672,154 @@ impl App {
         self.orch.tasks.get(self.orch_cursor).map(|t| t.id.clone())
     }
 
+    /// Select a task by its stable id. Mouse rows and menus use this rather than
+    /// retaining a mutable list index across frames.
+    pub fn orch_select_task(&mut self, id: &str) -> bool {
+        let Some(index) = self.orch.tasks.iter().position(|task| task.id == id) else {
+            return false;
+        };
+        self.orch_cursor = index;
+        true
+    }
+
+    pub fn orch_jump_to_task(&mut self, id: &str) {
+        if self.orch_select_task(id) {
+            self.orch_action_jump();
+        }
+    }
+
+    /// Activate one rendered ORCH control. Task-row double-click timing remains
+    /// in the input layer; everything else routes through the existing board
+    /// actions here.
+    pub fn orch_activate_hit(&mut self, hit: crate::app::OrchHit) {
+        match hit {
+            crate::app::OrchHit::Worker(id) => {
+                if self.orch_select_task(&id) {
+                    self.orch_action_jump();
+                }
+            }
+            crate::app::OrchHit::NewTask => self.open_orch_form(),
+            crate::app::OrchHit::FormField(field) => {
+                if let Some(form) = self.orch_form.as_mut() {
+                    form.field = field.min(crate::app::OrchForm::FIELDS - 1);
+                }
+            }
+            crate::app::OrchHit::FormCreate => self.submit_orch_form(),
+            crate::app::OrchHit::FormCancel => self.orch_form = None,
+            crate::app::OrchHit::StartChoice(cursor) => {
+                if let Some(start) = self.orch_start.as_mut() {
+                    start.cursor = cursor.min(agent_choices().len().saturating_sub(1));
+                }
+            }
+            crate::app::OrchHit::StartCommit => {
+                self.handle_orch_start_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            }
+            crate::app::OrchHit::StartCancel => self.orch_start = None,
+            crate::app::OrchHit::DetailClose => self.orch_detail = None,
+            crate::app::OrchHit::Task(_) => {}
+        }
+    }
+
+    pub fn open_orch_menu(&mut self, id: &str, col: u16, row: u16) {
+        if self.orch_select_task(id) {
+            self.orch_menu = Some(crate::app::OrchMenu {
+                task: id.to_string(),
+                anchor: (col, row),
+                items: Vec::new(),
+            });
+        }
+    }
+
+    pub fn orch_menu_items(&self, id: &str) -> Vec<crate::app::OrchMenuItem> {
+        use crate::app::OrchMenuItem as Item;
+        use crate::orch::TaskStatus;
+
+        let Some(task) = self.orch.task(id) else {
+            return Vec::new();
+        };
+        let mut items = Vec::new();
+        if task.assignee.is_some() {
+            items.push(Item::Jump);
+        } else if !matches!(
+            task.status,
+            TaskStatus::Done | TaskStatus::Merging | TaskStatus::Merged
+        ) {
+            items.push(Item::Start);
+        }
+        items.push(Item::Details);
+        match task.status {
+            TaskStatus::Queued => {}
+            TaskStatus::Claimed | TaskStatus::Running | TaskStatus::Review | TaskStatus::Failed => {
+                items.extend([Item::Done, Item::Release]);
+            }
+            TaskStatus::Blocked => items.extend([Item::Merge, Item::Release]),
+            TaskStatus::Done => items.push(Item::Merge),
+            TaskStatus::Merging | TaskStatus::Merged => {}
+        }
+        items.extend([Item::Divider, Item::CopyId]);
+        if task.worktree.is_some() {
+            items.push(Item::CopyWorktree);
+        }
+        if !matches!(
+            task.status,
+            TaskStatus::Claimed | TaskStatus::Running | TaskStatus::Merging
+        ) {
+            items.extend([Item::Divider, Item::Delete]);
+        }
+        items
+    }
+
+    pub fn orch_menu_click(&mut self, col: u16, row: u16) {
+        let item = self.orch_menu.as_ref().and_then(|menu| {
+            menu.items
+                .iter()
+                .find(|(item, rect)| {
+                    !matches!(item, crate::app::OrchMenuItem::Divider)
+                        && col >= rect.x
+                        && col < rect.right()
+                        && row >= rect.y
+                        && row < rect.bottom()
+                })
+                .map(|(item, _)| *item)
+        });
+        match item {
+            Some(item) => self.orch_menu_action(item),
+            None => self.orch_menu = None,
+        }
+    }
+
+    pub fn orch_menu_action(&mut self, item: crate::app::OrchMenuItem) {
+        use crate::app::OrchMenuItem as Item;
+
+        let Some(id) = self.orch_menu.as_ref().map(|menu| menu.task.clone()) else {
+            return;
+        };
+        self.orch_menu = None;
+        if !self.orch_select_task(&id) {
+            return;
+        }
+        match item {
+            Item::Start => self.orch_action_start(),
+            Item::Jump => self.orch_action_jump(),
+            Item::Details => self.orch_action_detail(),
+            Item::Done => self.orch_action_done(),
+            Item::Merge => self.orch_action_merge(),
+            Item::Release => self.orch_action_release(),
+            Item::CopyId => {
+                self.pending_clipboard = Some(id);
+                self.show_toast(self.catalog.copied);
+            }
+            Item::CopyWorktree => {
+                if let Some(path) = self.orch.task(&id).and_then(|task| task.worktree.clone()) {
+                    self.pending_clipboard = Some(path);
+                    self.show_toast(self.catalog.copied);
+                }
+            }
+            Item::Delete => self.orch_action_delete(),
+            Item::Divider => {}
+        }
+    }
+
     /// Board `s`: open the **start-worker picker** for the selected task, after
     /// pre-flight checks so the picker never opens for an unstartable task.
     fn orch_action_start(&mut self) {
@@ -682,11 +941,8 @@ impl App {
         let Some(id) = self.orch_selected_id() else {
             return;
         };
-        match self.merge_task(&id) {
-            Ok(v) => {
-                let outcome = v.get("outcome").and_then(|o| o.as_str()).unwrap_or("done");
-                self.show_toast(format!("{id}: merge {outcome}"));
-            }
+        match self.start_task_merge(&id, None) {
+            Ok(()) => self.show_toast(format!("{id}: merging…")),
             Err((_, msg)) => self.show_toast(msg),
         }
     }
@@ -796,6 +1052,60 @@ fn shell_quote(s: &str) -> String {
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
     }
+}
+
+struct TaskMergeJob {
+    task: String,
+    branch: String,
+    previous: crate::orch::TaskStatus,
+    repo: std::path::PathBuf,
+    integration_root: std::path::PathBuf,
+    integration_branch: String,
+    reply: Option<(String, std::sync::mpsc::Sender<String>)>,
+    app_tx: std::sync::mpsc::Sender<crate::event::AppEvent>,
+}
+
+/// Resolve repository metadata and run the merge gate away from the app owner.
+/// `begin_merge` permits only one job, so two workers never mutate the shared
+/// integration worktree concurrently.
+fn spawn_task_merge(job: TaskMergeJob) -> Result<(), String> {
+    std::thread::Builder::new()
+        .name("luvus-task-merge".to_string())
+        .spawn(move || {
+            let result = (|| {
+                if !crate::git::local::is_repo(&job.repo) {
+                    return Err("the task's repository is no longer available".to_string());
+                }
+                let base = crate::git::local::default_branch(&job.repo);
+                let repo_name = crate::git::local::worktrees(&job.repo)
+                    .ok()
+                    .and_then(|worktrees| {
+                        worktrees
+                            .into_iter()
+                            .find(|worktree| worktree.is_main)
+                            .map(|worktree| ws_name(&worktree.path))
+                    })
+                    .unwrap_or_else(|| ws_name(&job.repo));
+                let integration_dir = job.integration_root.join(repo_name).join("__integration");
+                crate::git::local::integrate_branch(
+                    &job.repo,
+                    &integration_dir,
+                    &job.integration_branch,
+                    &base,
+                    &job.branch,
+                )
+            })();
+            let _ = job.app_tx.send(crate::event::AppEvent::TaskMergeFinished {
+                task: job.task,
+                branch: job.branch,
+                previous: job.previous,
+                integration_branch: job.integration_branch,
+                result,
+                reply: job.reply,
+            });
+        })
+        .map(|_| ())
+        .map_err(|error| format!("cannot start merge worker: {error}"))
 }
 
 /// Run a task's `gate` shell command async and report the result back to the loop
@@ -1367,6 +1677,151 @@ mod tests {
         app.handle_orch_form_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.orch_form.as_ref().is_some_and(|f| f.error.is_some()));
         assert!(app.orch.tasks.is_empty());
+    }
+
+    #[test]
+    fn task_menu_is_state_aware_and_keeps_its_original_task() {
+        let _env = crate::persist::test_env("orch-menu");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.orch
+            .add_task("first".into(), vec![], vec![], None)
+            .unwrap();
+        app.orch
+            .add_task("second".into(), vec![], vec![], None)
+            .unwrap();
+
+        let queued = app.orch_menu_items("t1");
+        assert!(queued.contains(&crate::app::OrchMenuItem::Start));
+        assert!(queued.contains(&crate::app::OrchMenuItem::Details));
+        assert!(queued.contains(&crate::app::OrchMenuItem::Delete));
+        assert!(!queued.contains(&crate::app::OrchMenuItem::Done));
+
+        app.open_orch_menu("t1", 4, 4);
+        app.orch_cursor = 1;
+        app.orch_menu_action(crate::app::OrchMenuItem::CopyId);
+        assert_eq!(app.pending_clipboard.as_deref(), Some("t1"));
+        assert_eq!(app.orch_cursor, 0, "the menu stayed bound to t1");
+    }
+
+    #[test]
+    fn integration_result_persists_a_terminal_state_and_exact_commit() {
+        let _env = crate::persist::test_env("orch-merge-result");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.orch
+            .add_task("merge me".into(), vec![], vec![], None)
+            .unwrap();
+        app.orch
+            .set_status("t1", crate::orch::TaskStatus::Done)
+            .unwrap();
+        app.orch.begin_merge("t1").unwrap();
+        let commit = "a".repeat(40);
+
+        app.task_merge_finished(
+            "t1".into(),
+            "luvus/t1".into(),
+            crate::orch::TaskStatus::Done,
+            "luvus/integration".into(),
+            Ok(crate::git::local::MergeOutcome::Merged {
+                commit: commit.clone(),
+            }),
+            None,
+        );
+
+        let task = app.orch.task("t1").unwrap();
+        assert_eq!(task.status, crate::orch::TaskStatus::Merged);
+        assert!(task
+            .notes
+            .last()
+            .is_some_and(|note| note.contains(&commit[..12])));
+        let menu = app.orch_menu_items("t1");
+        assert!(!menu.contains(&crate::app::OrchMenuItem::Merge));
+        assert!(!menu.contains(&crate::app::OrchMenuItem::Release));
+        assert!(menu.contains(&crate::app::OrchMenuItem::Delete));
+    }
+
+    #[test]
+    fn integration_conflict_blocks_and_reports_files_to_api() {
+        let _env = crate::persist::test_env("orch-merge-conflict");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.orch
+            .add_task("conflict".into(), vec![], vec![], None)
+            .unwrap();
+        app.orch
+            .set_status("t1", crate::orch::TaskStatus::Done)
+            .unwrap();
+        app.orch.begin_merge("t1").unwrap();
+        let (reply, response) = std::sync::mpsc::channel();
+
+        app.task_merge_finished(
+            "t1".into(),
+            "luvus/t1".into(),
+            crate::orch::TaskStatus::Done,
+            "luvus/integration".into(),
+            Ok(crate::git::local::MergeOutcome::Conflict(vec![
+                "src/auth.rs".into(),
+            ])),
+            Some(("merge-1".into(), reply)),
+        );
+
+        assert_eq!(
+            app.orch.task("t1").unwrap().status,
+            crate::orch::TaskStatus::Blocked
+        );
+        assert!(app
+            .orch
+            .task("t1")
+            .unwrap()
+            .outputs
+            .last()
+            .is_some_and(|output| output.contains("src/auth.rs")));
+        let response: serde_json::Value = serde_json::from_str(&response.recv().unwrap()).unwrap();
+        assert_eq!(response["result"]["outcome"], "conflict");
+        assert_eq!(response["result"]["files"][0], "src/auth.rs");
+    }
+
+    #[test]
+    fn board_render_exposes_only_visible_stable_controls() {
+        let _env = crate::persist::test_env("orch-hit-geometry");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 32, tx).unwrap();
+        app.orch
+            .add_task("first".into(), vec![], vec![], None)
+            .unwrap();
+        app.open_orch_board();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 32)).unwrap();
+
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        assert!(app
+            .orch_hits
+            .iter()
+            .any(|(hit, _)| matches!(hit, crate::app::OrchHit::NewTask)));
+        assert!(app
+            .orch_hits
+            .iter()
+            .any(|(hit, _)| matches!(hit, crate::app::OrchHit::Task(id) if id == "t1")));
+
+        app.open_orch_form();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        assert!(app
+            .orch_hits
+            .iter()
+            .any(|(hit, _)| matches!(hit, crate::app::OrchHit::FormField(0))));
+        assert!(app
+            .orch_hits
+            .iter()
+            .any(|(hit, _)| matches!(hit, crate::app::OrchHit::FormCreate)));
+        assert!(!app
+            .orch_hits
+            .iter()
+            .any(|(hit, _)| matches!(hit, crate::app::OrchHit::Task(_))));
     }
 
     #[test]

@@ -124,6 +124,12 @@ Reason about targets in this order:
 8. A module is an explicitly installed extension using declared actions,
    panes, docks, events, settings, or Luvus Bar widgets.
 
+For orchestration, `task merge` serializes the merge through the isolated
+`luvus/integration` worktree and returns only after the task becomes `merged`,
+`blocked` by a conflict, or the operation fails. Do not retry a merged task.
+`task release` requeues active work and releases its path leases, but it does
+not stop the worker pane or discard its worktree.
+
 Tab positions are 1-based. Workspace indexes shown by the CLI are 0-based.
 Pane IDs and agent names are discovery results. Never convert between these
 identifiers by assumption.

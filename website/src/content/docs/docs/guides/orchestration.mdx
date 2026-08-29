@@ -26,14 +26,32 @@ isolated worker for it, `d` to finish (runs its quality gate), `m` to merge.
 | **Merge gate** | Integrates a finished branch into `luvus/integration` inside a dedicated worktree, never your working checkout. A conflict blocks the task instead of corrupting anything. |
 
 Task lifecycle: `queued` → `claimed`/`running` → `done` (gate passed) or
-`review` (gate failed, so fix and retry) → merged, or `blocked` on a merge
-conflict. The ledger lives in `~/.luvus/orch.json`, separate from your session.
+`review` (gate failed, so fix and retry) → `merging` → `merged`, or `blocked`
+on a merge conflict. Only one task integrates at a time. An interrupted
+integration safely returns to `done` after restart. The ledger lives in
+`~/.luvus/orch.json`, separate from your session.
 
 ## The board
 
 Open the `◇ orch` tab with **`Ctrl+Space o`**. It shows every task (status ·
 id · title · dependencies · worker pane and branch once started) and the active
-leases, live. Navigate with `j`/`k`, the wheel, or click a row.
+leases, live. Navigate with `j`/`k`, the wheel, or click a row. On a wide
+terminal, the selected task's branch, paths, gate, output, and notes stay visible
+in a detail panel.
+
+Mouse controls follow the same validated actions as the keyboard and CLI:
+
+- click a task to select it;
+- select a task to inspect it in the wide details panel;
+- double click a task to jump to its worker pane, the same as `Enter`;
+- use `o` or **Details** in the context menu for longer output and note history;
+- click its worker label to jump to the worker pane;
+- right click a task for the actions valid in its current state;
+- click **New task** to open the form, then click fields and form actions;
+- click an agent in the start-worker picker, then click **start**.
+
+The task menu stays bound to the task that opened it, even if the board changes
+before an action is chosen.
 
 | Key | Action |
 |-----|--------|
@@ -42,8 +60,8 @@ leases, live. Navigate with `j`/`k`, the wheel, or click a row.
 | `d` | **done**: runs its quality gate (pass → done, fail → held at review) |
 | `m` | **merge** into `luvus/integration` |
 | `⏎` | **jump** to its worker pane |
-| `x` | **release** it back to the queue |
-| `q` | close the board |
+| `x` | **requeue** an active task and release its path leases |
+| `q` | close the board without stopping tasks or workers |
 
 ## A worked example
 
@@ -59,9 +77,10 @@ Say you want an auth module and an API layer that depends on it:
    (`cargo test auth`) runs in the background. Pass and `t1` is **done**.
    Fail and it's held at **review** with the output saved on the task.
 5. `t2` is now claimable (its dependency is done), so select it, `s`, repeat.
-6. Select a done task, `m`, and the branch merges into `luvus/integration` in an
-   isolated worktree. A conflict marks the task **blocked** rather than
-   half-merging anything.
+6. Select a done task, `m`, and the branch merges into `luvus/integration`
+   in an isolated worktree. The task moves through **merging** to **merged** and
+   records the exact integration commit. A conflict aborts Git and marks the
+   task **blocked** rather than leaving a half-merge.
 
 Your own checkout on `main` was never touched at any point.
 
@@ -79,7 +98,7 @@ luvus task list · get t1 · update t1 --status running --note "learning: …"
 luvus task start t1 --agent "claude"
 luvus task next --start --agent "claude"   # claim + start the next ready task
 
-# finish + integrate
+# finish + merge
 luvus task heartbeat t1 --context 0.6      # context gate: >0.85 blocks `done`
 luvus task done t1                          # runs the quality gate
 luvus task merge t1
@@ -96,8 +115,9 @@ Inside a luvus pane, commands default to the calling pane via
 
 Events on the bus: `task.added` · `task.claimed` · `task.started` ·
 `task.ready` · `task.gate_running` · `task.gate_passed` · `task.gate_failed` ·
-`task.needs_compaction` · `task.done` · `task.merged` · `task.merge_conflict` ·
-`task.released` · `lease.acquired` · `lease.released`.
+`task.needs_compaction` · `task.done` · `task.merge_started` · `task.merged` ·
+`task.merge_conflict` · `task.merge_failed` · `task.released` ·
+`lease.acquired` · `lease.released`.
 
 ## The safety model
 

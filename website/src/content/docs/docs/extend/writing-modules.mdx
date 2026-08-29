@@ -322,7 +322,7 @@ Your command runs with `LUVUS_MODULE_EVENT` (the name) and
 | Tabs | `tab.created` · `tab.closed` |
 | Panes | `pane.created` · `pane.closed` · `pane.agent_status_changed` |
 | Agents | `agent.hook` |
-| Orchestration | `task.added` · `task.claimed` · `task.started` · `task.updated` · `task.ready` · `task.done` · `task.released` · `task.deleted` · `task.merged` · `task.merge_conflict` · `task.needs_compaction` · `task.gate_running` · `task.gate_passed` · `task.gate_failed` |
+| Orchestration | `task.added` · `task.claimed` · `task.started` · `task.updated` · `task.ready` · `task.done` · `task.released` · `task.deleted` · `task.merge_started` · `task.merged` · `task.merge_conflict` · `task.merge_failed` · `task.needs_compaction` · `task.gate_running` · `task.gate_passed` · `task.gate_failed` |
 | Leases | `lease.acquired` · `lease.released` |
 
 `pane.agent_status_changed` is the highest-value hook -- notify when `status`

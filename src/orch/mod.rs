@@ -25,6 +25,8 @@ pub enum TaskStatus {
     Blocked,
     Review,
     Done,
+    Merging,
+    Merged,
     Failed,
 }
 
@@ -37,6 +39,8 @@ impl TaskStatus {
             TaskStatus::Blocked => "blocked",
             TaskStatus::Review => "review",
             TaskStatus::Done => "done",
+            TaskStatus::Merging => "merging",
+            TaskStatus::Merged => "merged",
             TaskStatus::Failed => "failed",
         }
     }
@@ -48,6 +52,8 @@ impl TaskStatus {
             "blocked" => TaskStatus::Blocked,
             "review" => TaskStatus::Review,
             "done" => TaskStatus::Done,
+            "merging" => TaskStatus::Merging,
+            "merged" => TaskStatus::Merged,
             "failed" => TaskStatus::Failed,
             _ => return None,
         })
@@ -186,12 +192,18 @@ impl OrchState {
         self.tasks.iter().find(|t| t.id == id)
     }
 
-    /// A task is *ready* to claim when every dependency is `Done`.
+    /// A task is *ready* to claim when every dependency has completed. A merged
+    /// dependency remains complete; integration must never re-block its children.
     pub fn ready(&self, id: &str) -> bool {
         match self.task(id) {
             Some(t) => t.deps.iter().all(|d| {
                 self.task(d)
-                    .map(|dt| dt.status == TaskStatus::Done)
+                    .map(|dt| {
+                        matches!(
+                            dt.status,
+                            TaskStatus::Done | TaskStatus::Merging | TaskStatus::Merged
+                        )
+                    })
                     .unwrap_or(false)
             }),
             None => false,
@@ -239,15 +251,23 @@ impl OrchState {
     /// Claim a task for `pane`. Rejected if it doesn't exist, is already owned,
     /// or has unmet dependencies. Race-free: two claims are two loop events.
     pub fn claim(&mut self, id: &str, pane: u32) -> OrchResult<Task> {
+        let task = self
+            .task(id)
+            .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        if matches!(
+            task.status,
+            TaskStatus::Done | TaskStatus::Merging | TaskStatus::Merged
+        ) {
+            return Err(Reject::new(
+                "task_complete",
+                format!("{id} is already {}", task.status.as_str()),
+            ));
+        }
         if !self.ready(id) {
-            // Distinguish "no such task" from "deps unmet" for a clearer message.
-            return match self.task(id) {
-                None => Err(Reject::new("not_found", format!("no such task: {id}"))),
-                Some(_) => Err(Reject::new(
-                    "deps_unmet",
-                    format!("{id} has dependencies that aren't done yet"),
-                )),
-            };
+            return Err(Reject::new(
+                "deps_unmet",
+                format!("{id} has dependencies that aren't done yet"),
+            ));
         }
         let now = unix_now();
         let t = self.tasks.iter_mut().find(|t| t.id == id).unwrap();
@@ -275,6 +295,70 @@ impl OrchState {
         t.status = status;
         t.updated = now;
         Ok(t.clone())
+    }
+
+    /// Reserve the shared integration branch for one task. The actual Git work
+    /// runs off-loop; this transition prevents duplicate and concurrent merges.
+    pub fn begin_merge(&mut self, id: &str) -> OrchResult<TaskStatus> {
+        if self
+            .tasks
+            .iter()
+            .any(|task| task.status == TaskStatus::Merging)
+        {
+            return Err(Reject::new(
+                "merge_busy",
+                "another task is already being integrated",
+            ));
+        }
+        let task = self
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+            .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        let previous = task.status;
+        if previous == TaskStatus::Merged {
+            return Err(Reject::new(
+                "already_merged",
+                format!("{id} is already integrated"),
+            ));
+        }
+        if !matches!(previous, TaskStatus::Done | TaskStatus::Blocked) {
+            return Err(Reject::new(
+                "not_done",
+                format!("{id} cannot be integrated while {}", previous.as_str()),
+            ));
+        }
+        task.status = TaskStatus::Merging;
+        task.updated = unix_now();
+        Ok(previous)
+    }
+
+    /// Finish or roll back an integration transition. Only the matching
+    /// in-flight task may move out of `merging`.
+    pub fn finish_merge(&mut self, id: &str, status: TaskStatus) -> OrchResult<Task> {
+        if !matches!(
+            status,
+            TaskStatus::Done | TaskStatus::Blocked | TaskStatus::Merged
+        ) {
+            return Err(Reject::new(
+                "bad_status",
+                "an integration can finish as done, blocked, or merged",
+            ));
+        }
+        let task = self
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+            .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        if task.status != TaskStatus::Merging {
+            return Err(Reject::new(
+                "merge_stale",
+                format!("{id} is no longer being integrated"),
+            ));
+        }
+        task.status = status;
+        task.updated = unix_now();
+        Ok(task.clone())
     }
 
     pub fn add_output(&mut self, id: &str, output: String) -> OrchResult<()> {
@@ -320,7 +404,10 @@ impl OrchState {
             .position(|t| t.id == id)
             .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
         let status = self.tasks[idx].status;
-        if matches!(status, TaskStatus::Claimed | TaskStatus::Running) {
+        if matches!(
+            status,
+            TaskStatus::Claimed | TaskStatus::Running | TaskStatus::Merging
+        ) {
             return Err(Reject::new(
                 "task_active",
                 format!("{id} is {} — release or finish it first", status.as_str()),
@@ -342,6 +429,19 @@ impl OrchState {
             .iter_mut()
             .find(|t| t.id == id)
             .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        if !matches!(
+            t.status,
+            TaskStatus::Claimed
+                | TaskStatus::Running
+                | TaskStatus::Blocked
+                | TaskStatus::Review
+                | TaskStatus::Failed
+        ) {
+            return Err(Reject::new(
+                "not_releasable",
+                format!("{id} cannot be requeued while {}", t.status.as_str()),
+            ));
+        }
         t.assignee = None;
         t.status = TaskStatus::Queued;
         t.updated = now;
@@ -424,7 +524,14 @@ impl OrchState {
 
     pub fn load() -> OrchState {
         match std::fs::read_to_string(orch_path()) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+            Ok(s) => {
+                let mut state: OrchState = serde_json::from_str(&s).unwrap_or_default();
+                // A process exit can interrupt a background Git job after the
+                // durable `merging` reservation was written. No job survives a
+                // server restart, so recover to the last safe, mergeable state.
+                state.recover_interrupted_merges();
+                state
+            }
             Err(_) => OrchState::default(),
         }
     }
@@ -442,6 +549,14 @@ impl OrchState {
         let tmp = path.with_extension("json.tmp");
         if std::fs::write(&tmp, json).is_ok() {
             let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+
+    fn recover_interrupted_merges(&mut self) {
+        for task in &mut self.tasks {
+            if task.status == TaskStatus::Merging {
+                task.status = TaskStatus::Done;
+            }
         }
     }
 }
@@ -559,6 +674,43 @@ mod tests {
 
         s.set_status("t1", TaskStatus::Done).unwrap();
         assert_eq!(s.task("t1").unwrap().status, TaskStatus::Done);
+    }
+
+    #[test]
+    fn integration_lifecycle_is_serial_and_terminal() {
+        let mut state = OrchState::default();
+        state.add_task("base".into(), vec![], vec![], None).unwrap();
+        state
+            .add_task("dependent".into(), vec![], vec!["t1".into()], None)
+            .unwrap();
+        state.set_status("t1", TaskStatus::Done).unwrap();
+
+        assert_eq!(state.begin_merge("t1").unwrap(), TaskStatus::Done);
+        assert_eq!(state.task("t1").unwrap().status, TaskStatus::Merging);
+        assert!(
+            state.ready("t2"),
+            "integration does not re-block dependents"
+        );
+        assert_eq!(state.begin_merge("t1").unwrap_err().code, "merge_busy");
+
+        state.finish_merge("t1", TaskStatus::Merged).unwrap();
+        assert_eq!(state.task("t1").unwrap().status, TaskStatus::Merged);
+        assert!(state.ready("t2"));
+        assert_eq!(state.begin_merge("t1").unwrap_err().code, "already_merged");
+        assert_eq!(state.release_task("t1").unwrap_err().code, "not_releasable");
+        assert_eq!(state.claim("t1", 7).unwrap_err().code, "task_complete");
+    }
+
+    #[test]
+    fn interrupted_integration_recovers_to_done() {
+        let mut state = OrchState::default();
+        state.add_task("work".into(), vec![], vec![], None).unwrap();
+        state.set_status("t1", TaskStatus::Done).unwrap();
+        state.begin_merge("t1").unwrap();
+
+        state.recover_interrupted_merges();
+
+        assert_eq!(state.task("t1").unwrap().status, TaskStatus::Done);
     }
 
     #[test]

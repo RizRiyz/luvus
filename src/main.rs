@@ -2311,16 +2311,18 @@ mod tests {
             text.push_str(cell.symbol());
         }
         assert!(text.contains("ORCHESTRATION"), "board header missing");
+        assert!(text.contains("STATUS"), "task table header missing");
+        assert!(text.contains("▌"), "selected task marker missing");
         assert!(text.contains("Wire the auth module"), "task title missing");
         assert!(text.contains("claimed"), "task status missing");
         assert!(text.contains("LEASES"), "leases section missing");
         assert!(text.contains("◇ orch"), "board tab label missing");
     }
 
-    /// The board's UX layer renders: a Running worker row with its live agent
-    /// state, the start-worker picker, and the task detail overlay.
+    /// The board's UX layer renders: a Running worker row without duplicating
+    /// live agent state, the start-worker picker, and the task detail overlay.
     #[test]
-    fn renders_board_live_state_picker_and_detail() {
+    fn renders_board_worker_binding_picker_and_detail() {
         let _env = crate::persist::test_env("renders-board-live");
         let (tx, _rx) = mpsc::channel::<AppEvent>();
         let mut app = App::new(80, 24, tx).expect("spawn pane");
@@ -2339,37 +2341,54 @@ mod tests {
             .unwrap();
         app.orch
             .bind_worktree("t1", Some("/tmp/wt".into()), Some("luvus/t1".into()));
-        // The worker pane's live detection state rides on the row.
+        // Live agent state belongs to the agent surfaces, not the task's Pane
+        // column. Seed it here to prove the board does not duplicate it.
         if let Some(st) = app.status.get_mut(&pane) {
             st.agent = "claude".into();
             st.state = crate::ui::theme::State::Working;
         }
         app.open_orch_board();
 
-        let render_text = |app: &mut App| {
+        let render_lines = |app: &mut App| {
             let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
             terminal.draw(|f| ui::render(f, app)).unwrap();
             let buf = terminal.backend().buffer().clone();
-            buf.content().iter().map(|c| c.symbol()).collect::<String>()
+            buf.content()
+                .chunks(110)
+                .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+                .collect::<Vec<_>>()
         };
 
-        let text = render_text(&mut app);
-        assert!(text.contains("running"), "started worker shows running");
-        assert!(text.contains("luvus/t1"), "worker branch shown");
-        assert!(text.contains("working"), "live agent state shown");
+        let lines = render_lines(&mut app);
+        let worker_row = lines
+            .iter()
+            .find(|line| line.contains("luvus/t1"))
+            .expect("worker branch shown");
+        assert!(
+            worker_row.contains("running"),
+            "started worker shows running"
+        );
+        assert!(
+            !worker_row.contains("working"),
+            "live agent state stays out of Pane"
+        );
+        assert!(
+            !worker_row.contains("claude"),
+            "agent name stays out of Pane"
+        );
 
         // The start-worker picker draws over the board.
         app.orch_start = Some(crate::app::OrchStart {
             task: "t1".into(),
             cursor: 0,
         });
-        let text = render_text(&mut app);
+        let text = render_lines(&mut app).join("\n");
         assert!(text.contains("claude"), "picker lists agents");
         app.orch_start = None;
 
         // The detail overlay shows the task's binding.
         app.orch_detail = Some("t1".into());
-        let text = render_text(&mut app);
+        let text = render_lines(&mut app).join("\n");
         assert!(text.contains("/tmp/wt"), "detail shows the worktree");
     }
 

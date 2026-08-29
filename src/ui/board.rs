@@ -1,15 +1,14 @@
 //! The orchestration board dashboard (docs/22, ORCH-7): a header with task
 //! counts, an interactive list of tasks (status dot · id · state · title · deps ·
-//! assignee), the active path leases, and the new-task form. Pure ratatui, themed
-//! with the existing palette and **localized** through the i18n catalog (docs/21)
-//! — the same shape as the git tab (`ui/git.rs`). Rendered from the shared
-//! `OrchState`.
+//! assignee), the active path leases, and the new-task form. Pure ratatui,
+//! localized through the i18n catalog (docs/21), and built from the same panel
+//! chrome as Mission Control. Rendered from the shared `OrchState`.
 
 use super::*;
 use crate::app::OrchForm;
 use crate::i18n::Catalog;
 use crate::orch::{OrchState, Task, TaskStatus};
-use ratatui::widgets::{Borders, Clear};
+use ratatui::widgets::{Borders, Clear, Wrap};
 
 /// A task's status, localized for display (the English `TaskStatus::as_str` stays
 /// the wire/JSON form; this is the human-facing label, docs/21).
@@ -21,6 +20,8 @@ fn status_label(s: TaskStatus, cat: &Catalog) -> &'static str {
         TaskStatus::Blocked => cat.task_blocked,
         TaskStatus::Review => cat.task_review,
         TaskStatus::Done => cat.task_done,
+        TaskStatus::Merging => cat.task_merging,
+        TaskStatus::Merged => cat.task_merged,
         TaskStatus::Failed => cat.task_failed,
     }
 }
@@ -34,6 +35,8 @@ fn status_color(s: TaskStatus, t: &Theme) -> Color {
         TaskStatus::Blocked => t.coral,
         TaskStatus::Review => t.amber,
         TaskStatus::Done => t.green,
+        TaskStatus::Merging => t.accent,
+        TaskStatus::Merged => t.green,
         TaskStatus::Failed => t.coral,
     }
 }
@@ -42,173 +45,233 @@ fn status_dot(s: TaskStatus) -> &'static str {
     match s {
         TaskStatus::Queued => "○",
         TaskStatus::Done => "●",
+        TaskStatus::Merged => "◆",
         TaskStatus::Failed => "✗",
         TaskStatus::Blocked => "⏸",
         _ => "◐",
     }
 }
 
-/// Live detection state of a task's worker pane (from `App.status`), shown on
-/// its board row so the board reflects what the agent is *actually* doing.
-pub struct RowLive {
-    pub agent: String,
-    pub state: State,
+#[derive(Default)]
+pub(super) struct BoardRender {
+    pub scroll: usize,
+    pub hits: Vec<(crate::app::OrchHit, Rect)>,
 }
 
-/// Renders the board; returns the (clamped) scroll offset to write back so `G` /
-/// wheel settle at the content's end. `live` has one entry per task: the
-/// detection state of its worker pane, when it has a live one.
+/// Renders the board and returns its clamped scroll plus visible hit geometry.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render(
     f: &mut RenderTarget,
     area: Rect,
     orch: &OrchState,
-    live: &[Option<RowLive>],
     scroll: usize,
     cursor: usize,
     compact: bool,
+    hover: Option<(u16, u16)>,
     cat: &Catalog,
     t: &Theme,
-) -> usize {
+) -> BoardRender {
     if area.height < 4 || area.width < 16 {
-        return 0;
+        return BoardRender::default();
     }
-    // Header: title + status counts.
-    let mut counts = [0usize; 7];
+    fill_bg(f, area, t.mantle);
+    let mut hits = Vec::new();
+    // Match the established full-tab dashboard header: identity and action on
+    // the first row, fleet signal below it, then a quiet separator.
+    let mut counts = [0usize; 9];
     for task in &orch.tasks {
         counts[status_index(task.status)] += 1;
     }
-    let header = Line::from(vec![
-        Span::styled(
-            format!(" {} ", cat.board_title),
-            Style::new().fg(t.accent).bold(),
-        ),
-        Span::styled(
-            format!(
-                "{} {} · {} · {} · {} · {}",
-                orch.tasks.len(),
-                cat.board_tasks,
-                fmt_count(cat.task_queued, counts[0]),
-                fmt_count(cat.task_running, counts[2] + counts[1]),
-                fmt_count(cat.task_blocked, counts[3]),
-                fmt_count(cat.task_done, counts[5]),
-            ),
-            Style::new().fg(t.subtext0),
-        ),
-    ]);
-    f.render_widget(
-        Paragraph::new(header),
-        Rect::new(area.x, area.y, area.width, 1),
+    let action_text = format!(" + {} ", cat.board_new_task.to_uppercase());
+    let action_w = (super::display_width(&action_text) as u16).min(area.width);
+    let action = Rect::new(
+        area.right().saturating_sub(action_w.saturating_add(1)),
+        area.y,
+        action_w,
+        1,
     );
-    hline(f, area.x, area.y + 1, area.width, t);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" ◎ ", Style::new().fg(t.accent).bold()),
+            Span::styled(cat.board_title, Style::new().fg(t.text).bold()),
+            Span::styled(
+                format!("  //  {}", cat.board_tasks.to_uppercase()),
+                Style::new().fg(t.overlay1),
+            ),
+        ])),
+        Rect::new(
+            area.x,
+            area.y,
+            area.width.saturating_sub(action_w.saturating_add(2)),
+            1,
+        ),
+    );
+    let action_hot = row_is_hovered(action, hover);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            action_text,
+            Style::new()
+                .fg(if action_hot { t.base } else { t.accent })
+                .bg(if action_hot { t.accent } else { t.mantle })
+                .bold(),
+        )),
+        action,
+    );
+    hits.push((crate::app::OrchHit::NewTask, action));
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("   {}  ", cat.col_status.to_uppercase()),
+                Style::new().fg(t.overlay0),
+            ),
+            Span::styled(
+                fmt_count(cat.task_queued, counts[0]),
+                Style::new().fg(t.overlay1),
+            ),
+            Span::styled("  ·  ", Style::new().fg(t.surface1)),
+            Span::styled(
+                fmt_count(cat.task_running, counts[2] + counts[1] + counts[6]),
+                Style::new().fg(if counts[2] + counts[1] + counts[6] > 0 {
+                    t.mint
+                } else {
+                    t.overlay1
+                }),
+            ),
+            Span::styled("  ·  ", Style::new().fg(t.surface1)),
+            Span::styled(
+                fmt_count(cat.task_blocked, counts[3]),
+                Style::new().fg(if counts[3] > 0 { t.coral } else { t.overlay1 }),
+            ),
+            Span::styled("  ·  ", Style::new().fg(t.surface1)),
+            Span::styled(
+                fmt_count(cat.task_done, counts[5] + counts[7]),
+                Style::new().fg(if counts[5] + counts[7] > 0 {
+                    t.green
+                } else {
+                    t.overlay1
+                }),
+            ),
+        ])),
+        Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
+    );
+    hline(f, area.x + 1, area.y + 2, area.width.saturating_sub(2), t);
 
-    // Footer hints + separator — dropped on a phone (docs/18), where the two
-    // reclaimed rows go to the task list. Desktop renders it exactly as before.
-    let footer_h: u16 = if compact { 0 } else { 2 };
-    if !compact {
-        let footer_y = area.bottom().saturating_sub(1);
-        hline(f, area.x, footer_y.saturating_sub(1), area.width, t);
-        f.render_widget(
-            Paragraph::new(super::hint_line(
-                &[
-                    ("a", cat.act_new),
-                    ("s", cat.board_start),
-                    ("d", cat.task_done),
-                    ("m", cat.act_merge),
-                    ("⏎", cat.pane),
-                    ("o", cat.board_details),
-                    ("x", cat.board_release),
-                    ("D", cat.act_delete),
-                    ("q", cat.act_close),
-                ],
-                t,
-            )),
-            Rect::new(area.x, footer_y, area.width, 1),
-        );
-    }
-
-    // Body between the header+separator and the footer (when present).
+    let footer_h = u16::from(!compact && area.height >= 10);
+    let body_y = area.y.saturating_add(3);
     let body = Rect::new(
-        area.x + 1,
-        area.y + 2,
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2 + footer_h),
+        area.x,
+        body_y,
+        area.width,
+        area.bottom().saturating_sub(body_y + footer_h),
     );
     if body.height == 0 {
-        return 0;
+        return BoardRender { scroll: 0, hits };
     }
+
+    let wide = !compact
+        && body.width >= crate::app::ORCH_INLINE_DETAIL_MIN_WIDTH
+        && area.height >= crate::app::ORCH_INLINE_DETAIL_MIN_HEIGHT;
+    if footer_h > 0 {
+        let mut hints = vec![
+            ("a", cat.act_new),
+            ("s", cat.board_start),
+            ("d", cat.task_done),
+            ("m", cat.act_merge),
+            ("⏎", cat.pane),
+            ("o", cat.board_details),
+        ];
+        hints.extend([
+            ("x", cat.board_release),
+            ("D", cat.act_delete),
+            ("q", cat.act_close),
+        ]);
+        f.render_widget(
+            Paragraph::new(super::hint_line(&hints, t)),
+            Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+        );
+    }
+
+    // A wide board keeps the task fleet visible while exposing the selected
+    // task's useful context. Narrow clients keep the full body for task rows.
+    let (left, detail) = if wide {
+        let left_w = ((u32::from(body.width) * 64 / 100) as u16).max(56);
+        (
+            Rect::new(body.x, body.y, left_w, body.height),
+            Some(Rect::new(
+                body.x.saturating_add(left_w),
+                body.y,
+                body.width.saturating_sub(left_w),
+                body.height,
+            )),
+        )
+    } else {
+        (body, None)
+    };
+
+    let lease_h = if compact || left.height < 10 {
+        0
+    } else {
+        ((orch.leases.len() as u16).saturating_add(3))
+            .clamp(3, 6)
+            .min(left.height / 3)
+    };
+    let task_area = Rect::new(
+        left.x,
+        left.y,
+        left.width,
+        left.height.saturating_sub(lease_h),
+    );
+    let lease_area = (lease_h > 0).then(|| {
+        Rect::new(
+            left.x,
+            left.bottom().saturating_sub(lease_h),
+            left.width,
+            lease_h,
+        )
+    });
+
+    let task_block = super::dashboard_block(
+        format!("{} {:02}", cat.board_tasks.to_uppercase(), orch.tasks.len()),
+        t,
+        true,
+    );
+    let task_inner = task_block.inner(task_area);
+    f.render_widget(task_block, task_area);
 
     if orch.tasks.is_empty() {
-        // A tiny built-in tutorial: what the board is for and the four keys
-        // that drive the whole flow, composed from existing catalog labels.
-        let key =
-            |k: &'static str| Span::styled(format!(" {k} "), Style::new().fg(t.accent).bold());
-        let txt = |s: String| Span::styled(s, Style::new().fg(t.subtext0));
-        f.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled(
-                    format!("  {}", cat.board_empty),
-                    Style::new().fg(t.text),
-                )),
-                Line::from(""),
-                Line::from(vec![
-                    Span::raw("  "),
-                    key("a"),
-                    txt(format!("{} · ", cat.act_new)),
-                    key("s"),
-                    txt(format!("{} · ", cat.board_start)),
-                    key("d"),
-                    txt(format!("{} ({}) · ", cat.task_done, cat.board_f_gate)),
-                    key("m"),
-                    txt(cat.act_merge.to_string()),
-                ]),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "  CLI: luvus task add \"…\" --paths src/x/** --gate \"cargo test\"",
-                    Style::new().fg(t.overlay0),
-                )),
-            ]),
-            body,
-        );
-        return 0;
+        draw_empty(f, task_inner, cat, t);
+        if let Some(leases) = lease_area {
+            draw_leases(f, leases, orch, cat, t);
+        }
+        return BoardRender { scroll: 0, hits };
     }
 
-    let mut lines: Vec<Line> = Vec::new();
-    for (i, task) in orch.tasks.iter().enumerate() {
-        lines.push(task_line(
-            task,
-            live.get(i).and_then(|l| l.as_ref()),
-            body.width as usize,
+    // Render a real table header on desktop. Compact clients keep every row for
+    // tasks and rely on the same column alignment without spending a line on
+    // labels.
+    let columns = task_columns(task_inner.width as usize, cat);
+    let header_h = u16::from(!compact && task_inner.height > 1);
+    if header_h > 0 {
+        draw_task_header(
+            f,
+            Rect::new(task_inner.x, task_inner.y, task_inner.width, 1),
+            &columns,
             cat,
             t,
-        ));
+        );
     }
-    // Leases section.
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        format!("{} ({})", cat.board_leases, orch.leases.len()),
-        Style::new().fg(t.subtext1).bold(),
-    )));
-    if orch.leases.is_empty() {
-        lines.push(Line::from(Span::styled(
-            format!("  {}", cat.board_none),
-            Style::new().fg(t.overlay0),
-        )));
-    } else {
-        for l in &orch.leases {
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {:<4}", l.id), Style::new().fg(t.subtext0)),
-                Span::styled(format!("pane {:<3} ", l.pane), Style::new().fg(t.overlay1)),
-                Span::styled(format!("{:<5}", l.task), Style::new().fg(t.mint)),
-                Span::styled(l.paths.join(" "), Style::new().fg(t.text)),
-            ]));
-        }
-    }
+    let rows_area = Rect::new(
+        task_inner.x,
+        task_inner.y.saturating_add(header_h),
+        task_inner.width,
+        task_inner.height.saturating_sub(header_h),
+    );
 
-    // Render row-by-row so the selected task row gets a full-width highlight.
-    // The cursor indexes tasks (rows `0..task_count`); scroll follows it.
+    // Render row-by-row so selected and hovered task rows get a restrained
+    // full-width tint and the selected row gets an explicit accent marker.
+    // Only visible rows become hit targets.
     let task_count = orch.tasks.len();
-    let vis = body.height as usize;
+    let vis = rows_area.height as usize;
     let cursor = cursor.min(task_count.saturating_sub(1));
     let mut scroll = scroll;
     if cursor < scroll {
@@ -216,15 +279,283 @@ pub(super) fn render(
     } else if cursor >= scroll + vis {
         scroll = cursor + 1 - vis;
     }
-    scroll = scroll.min(lines.len().saturating_sub(vis));
-    for (row, i) in (scroll..lines.len().min(scroll + vis)).enumerate() {
-        let rect = Rect::new(body.x, body.y + row as u16, body.width, 1);
-        if i == cursor && i < task_count {
-            fill_bg(f, rect, t.surface1);
+    scroll = scroll.min(task_count.saturating_sub(vis));
+    for (row, i) in (scroll..task_count.min(scroll + vis)).enumerate() {
+        let rect = Rect::new(rows_area.x, rows_area.y + row as u16, rows_area.width, 1);
+        let hot = row_is_hovered(rect, hover);
+        let selected = i == cursor;
+        if selected || hot {
+            fill_bg(f, rect, t.surface0);
         }
-        f.render_widget(Paragraph::new(lines[i].clone()), rect);
+        let task = &orch.tasks[i];
+        let rendered = task_line(task, &columns, selected, cat, t);
+        f.render_widget(Paragraph::new(rendered.line), rect);
+        if let Some(col) = rendered.worker_col {
+            let worker = Rect::new(
+                rect.x.saturating_add(col as u16),
+                rect.y,
+                rect.width.saturating_sub(col as u16),
+                1,
+            );
+            if worker.width > 0 {
+                hits.push((crate::app::OrchHit::Worker(task.id.clone()), worker));
+            }
+        }
+        hits.push((crate::app::OrchHit::Task(task.id.clone()), rect));
     }
-    scroll
+    if let Some(leases) = lease_area {
+        draw_leases(f, leases, orch, cat, t);
+    }
+    if let (Some(detail), Some(task)) = (detail, orch.tasks.get(cursor)) {
+        draw_summary(f, detail, task, cat, t);
+    }
+
+    BoardRender { scroll, hits }
+}
+
+fn row_is_hovered(row: Rect, hover: Option<(u16, u16)>) -> bool {
+    hover.is_some_and(|(column, pointer_row)| {
+        column >= row.x
+            && column < row.right()
+            && pointer_row >= row.y
+            && pointer_row < row.bottom()
+    })
+}
+
+#[derive(Clone, Copy)]
+struct TaskColumns {
+    marker: usize,
+    id: usize,
+    status: usize,
+    title: usize,
+    deps: usize,
+    worker: usize,
+}
+
+impl TaskColumns {
+    fn worker_col(self) -> Option<usize> {
+        (self.worker > 0).then(|| self.marker + self.id + self.status + self.title + self.deps)
+    }
+}
+
+fn task_columns(width: usize, cat: &Catalog) -> TaskColumns {
+    let marker = 2;
+    let id = 5;
+    let status_label_w = [
+        cat.col_status,
+        cat.task_queued,
+        cat.task_claimed,
+        cat.task_running,
+        cat.task_blocked,
+        cat.task_review,
+        cat.task_done,
+        cat.task_merging,
+        cat.task_merged,
+        cat.task_failed,
+    ]
+    .into_iter()
+    .map(super::display_width)
+    .max()
+    .unwrap_or(6);
+    let status = (status_label_w + 3).clamp(9, 15);
+    let deps = if width >= 92 { 12 } else { 0 };
+    let worker = if width >= 112 {
+        34
+    } else if width >= 78 {
+        26
+    } else if width >= 62 {
+        20
+    } else {
+        0
+    };
+    let fixed = marker + id + status + deps + worker;
+    let title = width.saturating_sub(fixed).max(4);
+    TaskColumns {
+        marker,
+        id,
+        status,
+        title,
+        deps,
+        worker,
+    }
+}
+
+fn draw_task_header(
+    f: &mut RenderTarget,
+    area: Rect,
+    columns: &TaskColumns,
+    cat: &Catalog,
+    t: &Theme,
+) {
+    let mut spans = vec![
+        Span::raw(" ".repeat(columns.marker)),
+        Span::styled(pad("ID", columns.id), Style::new().fg(t.overlay1).bold()),
+        Span::styled(
+            pad(&cat.col_status.to_uppercase(), columns.status),
+            Style::new().fg(t.overlay1).bold(),
+        ),
+        Span::styled(
+            pad(&cat.board_tasks.to_uppercase(), columns.title),
+            Style::new().fg(t.overlay1).bold(),
+        ),
+    ];
+    if columns.deps > 0 {
+        spans.push(Span::styled(
+            pad(&cat.board_f_deps.to_uppercase(), columns.deps),
+            Style::new().fg(t.overlay1).bold(),
+        ));
+    }
+    if columns.worker > 0 {
+        spans.push(Span::styled(
+            pad(&cat.pane.to_uppercase(), columns.worker),
+            Style::new().fg(t.overlay1).bold(),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn draw_empty(f: &mut RenderTarget, area: Rect, cat: &Catalog, t: &Theme) {
+    if area.height == 0 {
+        return;
+    }
+    let key = |key: &'static str| {
+        Span::styled(
+            format!(" {key} "),
+            Style::new().fg(t.base).bg(t.accent).bold(),
+        )
+    };
+    let text = |value: String| Span::styled(value, Style::new().fg(t.subtext0));
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("  {}", cat.board_empty),
+            Style::new().fg(t.text).bold(),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            key("a"),
+            text(format!(" {}  ·  ", cat.act_new)),
+            key("s"),
+            text(format!(" {}  ·  ", cat.board_start)),
+            key("d"),
+            text(format!(" {}  ·  ", cat.task_done)),
+            key("m"),
+            text(format!(" {}", cat.act_merge)),
+        ]),
+    ];
+    if area.height >= 5 {
+        lines.extend([
+            Line::from(""),
+            Line::from(Span::styled(
+                "  luvus task add \"…\" --paths src/x/** --gate \"cargo test\"",
+                Style::new().fg(t.overlay0),
+            )),
+        ]);
+    }
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_leases(f: &mut RenderTarget, area: Rect, orch: &OrchState, cat: &Catalog, t: &Theme) {
+    if area.height < 2 || area.width < 4 {
+        return;
+    }
+    let block = super::dashboard_block(
+        format!("{} {:02}", cat.board_leases, orch.leases.len()),
+        t,
+        false,
+    );
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if orch.leases.is_empty() {
+        if inner.height > 0 {
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!(" {}", cat.board_none),
+                    Style::new().fg(t.overlay0),
+                )),
+                Rect::new(inner.x, inner.y, inner.width, 1),
+            );
+        }
+        return;
+    }
+    for (row, lease) in orch.leases.iter().take(inner.height as usize).enumerate() {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(format!(" {:<4}", lease.id), Style::new().fg(t.subtext0)),
+                Span::styled(format!("{}  ", lease.task), Style::new().fg(t.mint)),
+                Span::styled(lease.paths.join(" "), Style::new().fg(t.text)),
+            ])),
+            Rect::new(inner.x, inner.y + row as u16, inner.width, 1),
+        );
+    }
+}
+
+fn draw_summary(f: &mut RenderTarget, area: Rect, task: &Task, cat: &Catalog, t: &Theme) {
+    let block = super::dashboard_block(
+        format!("{} · {}", cat.board_selected_task.to_uppercase(), task.id),
+        t,
+        false,
+    );
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let sc = status_color(task.status, t);
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(format!(" {} ", task.id), Style::new().fg(t.subtext1).bold()),
+            Span::styled(status_label(task.status, cat), Style::new().fg(sc)),
+        ]),
+        Line::from(Span::styled(
+            format!(" {}", task.title),
+            Style::new().fg(t.text).bold(),
+        )),
+        Line::from(""),
+    ];
+    let mut add = |label: &str, value: String| {
+        if !value.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {label:<9}"), Style::new().fg(t.subtext0)),
+                Span::styled(value, Style::new().fg(t.text)),
+            ]));
+        }
+    };
+    add(
+        "pane",
+        task.assignee
+            .map(|pane| pane.to_string())
+            .unwrap_or_default(),
+    );
+    add("branch", task.branch.clone().unwrap_or_default());
+    add("worktree", task.worktree.clone().unwrap_or_default());
+    add(cat.board_f_paths, task.paths.join(" "));
+    add(cat.board_f_deps, task.deps.join(" "));
+    add(cat.board_f_gate, task.gate.clone().unwrap_or_default());
+    if let Some(output) = task.outputs.last() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" {}", cat.board_outputs),
+            Style::new().fg(t.subtext1).bold(),
+        )));
+        lines.extend(output.lines().take(3).map(|line| {
+            Line::from(Span::styled(
+                format!("  {line}"),
+                Style::new().fg(t.subtext0),
+            ))
+        }));
+    }
+    if let Some(note) = task.notes.last() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" {}", cat.board_notes),
+            Style::new().fg(t.subtext1).bold(),
+        )));
+        lines.extend(note.lines().take(2).map(|line| {
+            Line::from(Span::styled(
+                format!("  {line}"),
+                Style::new().fg(t.subtext0),
+            ))
+        }));
+    }
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
 fn fill_bg(f: &mut RenderTarget, rect: Rect, color: Color) {
@@ -245,7 +576,8 @@ pub(super) fn draw_form(
     form: &OrchForm,
     cat: &Catalog,
     t: &Theme,
-) {
+) -> Vec<(crate::app::OrchHit, Rect)> {
+    let mut hits = Vec::with_capacity(6);
     dim_backdrop(f, area, t);
     let w = area.width.saturating_sub(6).clamp(44, 76).min(area.width);
     let modal = centered_rect(area, w, 10);
@@ -290,14 +622,16 @@ pub(super) fn draw_form(
         } else {
             Span::styled(vals[i].clone(), Style::new().fg(t.text))
         };
+        let field_rect = Rect::new(inner.x, inner.y + 2 + i as u16, inner.width, 1);
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(format!(" {label:<6}: "), label_style),
                 body,
                 Span::styled(if active { "▏" } else { "" }, Style::new().fg(t.accent)),
             ])),
-            Rect::new(inner.x, inner.y + 2 + i as u16, inner.width, 1),
+            field_rect,
         );
+        hits.push((crate::app::OrchHit::FormField(i), field_rect));
     }
 
     let bottom = inner.bottom().saturating_sub(1);
@@ -318,7 +652,22 @@ pub(super) fn draw_form(
             )),
             Rect::new(inner.x, bottom, inner.width, 1),
         );
+        let left_w = inner.width / 2;
+        hits.push((
+            crate::app::OrchHit::FormCreate,
+            Rect::new(inner.x, bottom, left_w, 1),
+        ));
+        hits.push((
+            crate::app::OrchHit::FormCancel,
+            Rect::new(
+                inner.x + left_w,
+                bottom,
+                inner.width.saturating_sub(left_w),
+                1,
+            ),
+        ));
     }
+    hits
 }
 
 fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
@@ -336,79 +685,129 @@ fn dim_backdrop(f: &mut RenderTarget, area: Rect, t: &Theme) {
     }
 }
 
+struct TaskRow<'a> {
+    line: Line<'a>,
+    worker_col: Option<usize>,
+}
+
 fn task_line<'a>(
     task: &'a Task,
-    live: Option<&'a RowLive>,
-    body_w: usize,
+    columns: &TaskColumns,
+    selected: bool,
     cat: &Catalog,
     t: &Theme,
-) -> Line<'a> {
+) -> TaskRow<'a> {
     let sc = status_color(task.status, t);
     let deps = if task.deps.is_empty() {
         String::new()
     } else {
-        format!("⟶{}", task.deps.join(","))
+        task.deps.join(",")
     };
-    // The worker column (built first so the title yields it space): pane +
-    // branch when bound, the live agent's detection state when it has one, and
-    // a "no pane" hint for a detached worktree.
-    let mut tail: Vec<Span> = Vec::new();
-    match (task.assignee, &task.branch) {
-        (Some(p), b) => {
-            let mut s = format!("pane {p}");
-            if let Some(b) = b {
-                s.push_str(&format!(" · {b}"));
-            }
-            tail.push(Span::styled(s, Style::new().fg(t.subtext0)));
-            if let Some(l) = live {
-                tail.push(Span::styled(
-                    format!(" · {} ", l.agent),
-                    Style::new().fg(t.subtext0),
-                ));
-                tail.push(Span::styled(
-                    format!("{}{}", l.state.dot(), l.state.label()),
-                    Style::new().fg(l.state.color(t)),
-                ));
-            }
-        }
-        (None, Some(b)) if task.worktree.is_some() => {
-            tail.push(Span::styled(
-                format!("{b} · {}", cat.board_no_pane),
-                Style::new().fg(t.overlay1),
-            ));
-        }
-        _ => {}
-    }
-    // Flag a context-saturated worker (ORCH-5): it must compact before finishing.
-    if task
-        .context
-        .is_some_and(|c| c > crate::orch::COMPACTION_THRESHOLD)
-    {
-        tail.push(Span::styled(
-            format!(" ⚠{}", cat.board_compact),
-            Style::new().fg(t.amber),
-        ));
-    }
-    // Fixed columns: dot(2) + id(4) + status(9) + deps(10); the title takes
-    // what's left after the worker column so it's never clipped off-screen.
-    let tail_w: usize = tail.iter().map(|s| super::display_width(&s.content)).sum();
-    let deps_w = super::display_width(&deps).max(10);
-    let title_w = body_w.saturating_sub(2 + 4 + 9 + deps_w + tail_w).max(8);
     let mut spans = vec![
-        Span::styled(format!("{} ", status_dot(task.status)), Style::new().fg(sc)),
         Span::styled(
-            format!("{:<4}", task.id),
+            if selected { "▌ " } else { "  " },
+            Style::new().fg(t.accent),
+        ),
+        Span::styled(
+            pad(&task.id, columns.id),
             Style::new().fg(t.subtext1).bold(),
         ),
         Span::styled(
-            format!("{:<9}", status_label(task.status, cat)),
+            pad(
+                &format!(
+                    "{} {}",
+                    status_dot(task.status),
+                    status_label(task.status, cat)
+                ),
+                columns.status,
+            ),
             Style::new().fg(sc),
         ),
-        Span::styled(pad(&task.title, title_w), Style::new().fg(t.text)),
-        Span::styled(pad(&deps, deps_w), Style::new().fg(t.overlay1)),
+        Span::styled(pad(&task.title, columns.title), Style::new().fg(t.text)),
     ];
-    spans.extend(tail);
-    Line::from(spans)
+    if columns.deps > 0 {
+        spans.push(Span::styled(
+            pad(&deps, columns.deps),
+            Style::new().fg(t.overlay1),
+        ));
+    }
+    if columns.worker > 0 {
+        spans.extend(worker_spans(task, columns.worker, cat, t));
+    }
+    TaskRow {
+        line: Line::from(spans),
+        worker_col: columns.worker_col(),
+    }
+}
+
+fn worker_spans<'a>(task: &'a Task, width: usize, cat: &Catalog, t: &Theme) -> Vec<Span<'a>> {
+    match task.assignee {
+        Some(pane) => {
+            let pane = (format!("pane {pane}"), t.subtext0);
+            let branch = task
+                .branch
+                .as_ref()
+                .map(|branch| (branch.clone(), t.subtext0));
+            let mut candidates = vec![[Some(pane.clone()), branch.clone()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()];
+            if let Some(branch) = branch {
+                candidates.push(vec![branch]);
+            }
+            candidates.push(vec![pane]);
+            fit_worker_parts(candidates, width, t)
+        }
+        None if task.worktree.is_some() => {
+            let no_pane = (cat.board_no_pane.to_string(), t.overlay1);
+            let branch = task
+                .branch
+                .as_ref()
+                .map(|branch| (branch.clone(), t.subtext0));
+            let mut candidates = vec![[Some(no_pane.clone()), branch.clone()]
+                .into_iter()
+                .flatten()
+                .collect()];
+            if let Some(branch) = branch {
+                candidates.push(vec![branch]);
+            }
+            candidates.push(vec![no_pane]);
+            fit_worker_parts(candidates, width, t)
+        }
+        None => vec![Span::raw(" ".repeat(width))],
+    }
+}
+
+fn fit_worker_parts<'a>(
+    candidates: Vec<Vec<(String, Color)>>,
+    width: usize,
+    t: &Theme,
+) -> Vec<Span<'a>> {
+    let parts = candidates
+        .into_iter()
+        .find(|parts| worker_parts_width(parts) <= width)
+        .unwrap_or_default();
+    let mut spans = Vec::new();
+    for (index, (text, color)) in parts.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" · ", Style::new().fg(t.overlay0)));
+        }
+        spans.push(Span::styled(text, Style::new().fg(color)));
+    }
+    let used = spans
+        .iter()
+        .map(|span| super::display_width(&span.content))
+        .sum::<usize>();
+    spans.push(Span::raw(" ".repeat(width.saturating_sub(used))));
+    spans
+}
+
+fn worker_parts_width(parts: &[(String, Color)]) -> usize {
+    parts
+        .iter()
+        .map(|(text, _)| super::display_width(text))
+        .sum::<usize>()
+        + parts.len().saturating_sub(1) * 3
 }
 
 /// The **start-worker picker** (board `s`): choose which agent to launch in the
@@ -419,7 +818,8 @@ pub(super) fn draw_start(
     start: &crate::app::OrchStart,
     cat: &Catalog,
     t: &Theme,
-) {
+) -> Vec<(crate::app::OrchHit, Rect)> {
+    let mut hits = Vec::with_capacity(crate::app::agent_choices().len() + 2);
     dim_backdrop(f, area, t);
     let choices = crate::app::agent_choices();
     let h = (choices.len() as u16) + 4;
@@ -462,6 +862,7 @@ pub(super) fn draw_start(
             )),
             rect,
         );
+        hits.push((crate::app::OrchHit::StartChoice(i), rect));
     }
     f.render_widget(
         Paragraph::new(super::hint_line(
@@ -470,12 +871,33 @@ pub(super) fn draw_start(
         )),
         Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
     );
+    let bottom = inner.bottom().saturating_sub(1);
+    let left_w = inner.width / 2;
+    hits.push((
+        crate::app::OrchHit::StartCommit,
+        Rect::new(inner.x, bottom, left_w, 1),
+    ));
+    hits.push((
+        crate::app::OrchHit::StartCancel,
+        Rect::new(
+            inner.x + left_w,
+            bottom,
+            inner.width.saturating_sub(left_w),
+            1,
+        ),
+    ));
+    hits
 }
 
 /// The **task detail overlay** (board `o`): everything about one task — branch,
 /// worktree, paths, gate, and the captured gate output + notes (the things you
 /// need when a gate fails). `j/k`/wheel scroll, `esc`/`o` close. Returns the
 /// clamped scroll to write back.
+pub(super) struct DetailRender {
+    pub scroll: usize,
+    pub hits: Vec<(crate::app::OrchHit, Rect)>,
+}
+
 pub(super) fn draw_detail(
     f: &mut RenderTarget,
     area: Rect,
@@ -483,7 +905,7 @@ pub(super) fn draw_detail(
     scroll: usize,
     cat: &Catalog,
     t: &Theme,
-) -> usize {
+) -> DetailRender {
     dim_backdrop(f, area, t);
     let w = area.width.saturating_sub(6).clamp(44, 78).min(area.width);
     let h = area.height.saturating_sub(4).clamp(8, 24).min(area.height);
@@ -495,6 +917,12 @@ pub(super) fn draw_detail(
         .style(Style::new().bg(t.surface0));
     let inner = block.inner(modal);
     f.render_widget(block, modal);
+
+    let close = Rect::new(modal.right().saturating_sub(3), modal.y, 2, 1);
+    f.render_widget(
+        Paragraph::new(Span::styled("×", Style::new().fg(t.subtext0).bold())),
+        close,
+    );
 
     let sc = status_color(task.status, t);
     let mut lines: Vec<Line> = vec![
@@ -584,7 +1012,10 @@ pub(super) fn draw_detail(
         )),
         Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
     );
-    scroll
+    DetailRender {
+        scroll,
+        hits: vec![(crate::app::OrchHit::DetailClose, close)],
+    }
 }
 
 fn fmt_count(label: &str, n: usize) -> String {
@@ -599,7 +1030,9 @@ fn status_index(s: TaskStatus) -> usize {
         TaskStatus::Blocked => 3,
         TaskStatus::Review => 4,
         TaskStatus::Done => 5,
-        TaskStatus::Failed => 6,
+        TaskStatus::Merging => 6,
+        TaskStatus::Merged => 7,
+        TaskStatus::Failed => 8,
     }
 }
 

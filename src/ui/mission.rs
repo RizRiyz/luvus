@@ -67,19 +67,7 @@ fn short_model(m: &str) -> Cow<'static, str> {
 }
 
 fn deck_block(title: &str, t: &Theme, focus: bool) -> ratatui::widgets::Block<'static> {
-    use ratatui::widgets::{Block, BorderType, Borders};
-    let border = if focus { t.border_focus } else { t.surface1 };
-    Block::new()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(Style::new().fg(border).bg(t.mantle))
-        .title(Span::styled(
-            format!(" {title} "),
-            Style::new()
-                .fg(if focus { t.accent } else { t.overlay1 })
-                .bold(),
-        ))
-        .style(Style::new().bg(t.mantle))
+    super::dashboard_block(title, t, focus)
 }
 
 fn pad_right(text: &str, width: usize) -> String {

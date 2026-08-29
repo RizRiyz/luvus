@@ -3820,6 +3820,26 @@ impl App {
                     let st = crate::orch::TaskStatus::parse(s).ok_or_else(|| {
                         ("bad_request".to_string(), format!("unknown status: {s}"))
                     })?;
+                    if matches!(
+                        st,
+                        crate::orch::TaskStatus::Merging | crate::orch::TaskStatus::Merged
+                    ) {
+                        return Err((
+                            "protected_status".to_string(),
+                            format!("{s} is set only by task.merge"),
+                        ));
+                    }
+                    if let Some(current) = self.orch.task(&id).map(|task| task.status) {
+                        if matches!(
+                            current,
+                            crate::orch::TaskStatus::Merging | crate::orch::TaskStatus::Merged
+                        ) {
+                            return Err((
+                                "task_complete".to_string(),
+                                format!("{id} is already {}", current.as_str()),
+                            ));
+                        }
+                    }
                     self.orch.set_status(&id, st).map_err(orch_err)?;
                 }
                 if let Some(o) = p.get("output").and_then(|v| v.as_str()) {
@@ -3844,9 +3864,13 @@ impl App {
                 Ok(json!({ "type": "task", "task": task, "gate_running": gate_running }))
             }
             "task.merge" => {
-                // ORCH-6: integrate the task's branch via the isolated merge gate.
-                let id = req_str(p, "id")?.to_string();
-                self.merge_task(&id)
+                // Socket requests are parked by `handle_task_merge_request` so
+                // Git never runs on the app loop. Reaching direct dispatch is a
+                // programmer error, not a second synchronous implementation.
+                Err((
+                    "async_required".to_string(),
+                    "task.merge must run through the control API".to_string(),
+                ))
             }
             "task.next" => {
                 // ORCH-4 scheduler: hand out the next ready task. `--start` spawns
