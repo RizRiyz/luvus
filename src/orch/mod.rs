@@ -120,6 +120,10 @@ pub struct OrchState {
     next_task: u64,
     #[serde(default)]
     next_lease: u64,
+    /// Fixed when the ledger is loaded so later ambient session changes cannot
+    /// redirect a save. `None` keeps explicitly in-memory state off disk.
+    #[serde(skip)]
+    persist_path: Option<PathBuf>,
 }
 
 /// Why a mutation was rejected — carried to the API as a `(code, message)` error.
@@ -523,23 +527,39 @@ impl OrchState {
     // ── persistence (separate file; never touches session.json) ────────────
 
     pub fn load() -> OrchState {
-        match std::fs::read_to_string(orch_path()) {
-            Ok(s) => {
-                let mut state: OrchState = serde_json::from_str(&s).unwrap_or_default();
-                // A process exit can interrupt a background Git job after the
-                // durable `merging` reservation was written. No job survives a
-                // server restart, so recover to the last safe, mergeable state.
-                state.recover_interrupted_merges();
-                state
-            }
-            Err(_) => OrchState::default(),
+        #[cfg(test)]
+        {
+            // Unit tests construct Apps concurrently while `test_env` changes
+            // process-global environment variables. Keep those incidental
+            // ledgers in memory; persistence tests opt into `load_from` with a
+            // path owned and cleaned up by `test_env`.
+            OrchState::default()
         }
+        #[cfg(not(test))]
+        {
+            Self::load_from(orch_path())
+        }
+    }
+
+    fn load_from(path: PathBuf) -> OrchState {
+        let mut state = match std::fs::read_to_string(&path) {
+            Ok(s) => serde_json::from_str::<OrchState>(&s).unwrap_or_default(),
+            Err(_) => OrchState::default(),
+        };
+        state.persist_path = Some(path);
+        // A process exit can interrupt a background Git job after the durable
+        // `merging` reservation was written. No job survives a server restart,
+        // so recover to the last safe, mergeable state.
+        state.recover_interrupted_merges();
+        state
     }
 
     /// Atomic save (temp + rename), best-effort — a failed write never breaks
     /// the app; the ledger is a convenience layer, not core session state.
     pub fn save(&self) {
-        let path = orch_path();
+        let Some(path) = self.persist_path.as_ref() else {
+            return;
+        };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
@@ -548,7 +568,7 @@ impl OrchState {
         };
         let tmp = path.with_extension("json.tmp");
         if std::fs::write(&tmp, json).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
+            let _ = std::fs::rename(&tmp, path);
         }
     }
 
@@ -711,6 +731,54 @@ mod tests {
         state.recover_interrupted_merges();
 
         assert_eq!(state.task("t1").unwrap().status, TaskStatus::Done);
+    }
+
+    #[test]
+    fn explicit_path_roundtrips_and_recovers_an_interrupted_merge() {
+        let _env = crate::persist::test_env("orch-path-roundtrip");
+        let path = orch_path();
+        let mut state = OrchState::load_from(path.clone());
+        state.add_task("work".into(), vec![], vec![], None).unwrap();
+        state.set_status("t1", TaskStatus::Done).unwrap();
+        state.begin_merge("t1").unwrap();
+        state.save();
+
+        let restored = OrchState::load_from(path);
+        assert_eq!(restored.tasks.len(), 1);
+        assert_eq!(restored.tasks[0].title, "work");
+        assert_eq!(restored.tasks[0].status, TaskStatus::Done);
+    }
+
+    #[test]
+    fn save_stays_on_the_path_captured_at_load() {
+        let _env = crate::persist::test_env("orch-captured-path");
+        let ambient = orch_path();
+        let pinned = ambient.parent().unwrap().join("pinned/orch.json");
+        let mut state = OrchState::load_from(pinned.clone());
+        state
+            .add_task("stays".into(), vec![], vec![], None)
+            .unwrap();
+        state.save();
+
+        assert!(pinned.exists());
+        assert!(!ambient.exists(), "save must not follow the ambient path");
+    }
+
+    #[test]
+    fn test_load_and_default_state_remain_in_memory() {
+        let _env = crate::persist::test_env("orch-in-memory-load");
+        let mut first = OrchState::load();
+        first
+            .add_task("does not leak".into(), vec![], vec![], None)
+            .unwrap();
+        first.save();
+
+        assert!(first.persist_path.is_none());
+        assert!(OrchState::load().tasks.is_empty());
+        assert!(
+            !orch_path().exists(),
+            "in-memory state must not write a ledger"
+        );
     }
 
     #[test]
