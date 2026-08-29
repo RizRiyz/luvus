@@ -1071,6 +1071,16 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
             break;
         }
 
+        // Closing the final project replaces it with a neutral home terminal.
+        // Match the server path and persist that structural change immediately,
+        // so a local-mode crash cannot restore the project the user just closed.
+        if app.persist_session_now {
+            app.persist_session_now = false;
+            persist::save(&app);
+            app.session_dirty = false;
+            last_save = Instant::now();
+        }
+
         // Debounced session save.
         if app.session_dirty && last_save.elapsed() > Duration::from_secs(2) {
             persist::save(&app);

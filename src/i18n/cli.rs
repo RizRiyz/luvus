@@ -1201,15 +1201,15 @@ static HELP: &[Translation] = &[
         "현재 탭의 패널과 읽기 전용 기록 지표 나열"
     ),
     tr!(
-        "split a pane (side by side, creates a workspace if empty)",
-        "dividir un panel (lado a lado, crea un espacio de trabajo si está vacío)",
-        "dividir um painel (lado a lado, cria um espaço de trabalho se estiver vazio)",
-        "diviser un volet (côte à côte, crée un espace de travail si vide)",
-        "Bereich teilen (nebeneinander, erstellt bei Leerstand einen Arbeitsbereich)",
-        "bagi panel (berdampingan, membuat ruang kerja jika kosong)",
-        "拆分窗格（左右并排，空状态时创建工作区）",
-        "ペインを分割（横並び、空の場合はワークスペースを作成）",
-        "패널 분할 (좌우 분할, 비어 있으면 작업 공간 생성)"
+        "split a pane (default: side by side, creates a workspace if empty)",
+        "dividir un panel (predeterminado: lado a lado, crea un espacio de trabajo si está vacío)",
+        "dividir um painel (padrão: lado a lado, cria um espaço de trabalho se estiver vazio)",
+        "diviser un volet (par défaut : côte à côte, crée un espace de travail si vide)",
+        "Bereich teilen (Standard: nebeneinander, erstellt bei Leerstand einen Arbeitsbereich)",
+        "bagi panel (bawaan: berdampingan, membuat ruang kerja jika kosong)",
+        "拆分窗格（默认：左右并排，空状态时创建工作区）",
+        "ペインを分割（既定：横並び、空の場合はワークスペースを作成）",
+        "패널 분할 (기본값: 좌우 분할, 비어 있으면 작업 공간 생성)"
     ),
     tr!(
         "focus a pane (jumps to its workspace/tab)",
