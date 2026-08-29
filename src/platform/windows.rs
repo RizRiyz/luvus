@@ -216,6 +216,10 @@ struct ProcessSnapshot {
     command_lines: HashMap<u32, String>,
 }
 
+type ProcessTrees = HashMap<u32, Vec<(u32, u16)>>;
+type ProcessCommands = HashMap<u32, Vec<String>>;
+type PaneProcessSnapshot = (ProcessTrees, Option<ProcessCommands>);
+
 impl ProcessSnapshot {
     fn capture() -> Option<Self> {
         // SAFETY: ToolHelp owns the returned snapshot handle; the guard closes it.
@@ -307,10 +311,7 @@ pub(super) fn pane_process_snapshot(
     roots: &[u32],
     include_trees: bool,
     include_commands: bool,
-) -> Option<(
-    HashMap<u32, Vec<(u32, u16)>>,
-    Option<HashMap<u32, Vec<String>>>,
-)> {
+) -> Option<PaneProcessSnapshot> {
     let mut snapshot = ProcessSnapshot::capture()?;
     let mut trees = HashMap::new();
     let mut commands = include_commands.then(HashMap::new);
