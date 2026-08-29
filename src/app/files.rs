@@ -3409,10 +3409,7 @@ mod tests {
         let open_ws = folder_items
             .iter()
             .position(|i| *i == FileMenuItem::OpenAsNewWorkspace);
-        assert!(
-            insert < open_ws,
-            "Open as Workspace sits below Insert Path"
-        );
+        assert!(insert < open_ws, "Open as Workspace sits below Insert Path");
     }
 
     #[test]

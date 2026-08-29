@@ -9848,13 +9848,26 @@ mod tests {
         use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use ratatui::{backend::TestBackend, Terminal};
         let _env = crate::persist::test_env("cmd-inspect");
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
 
         // Titles (and borders) only render on split panes, so split first — the
         // single-pane case is covered by the pane context menu instead.
         app.split(Axis::Col);
         let id = app.layout().focus;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(!remaining.is_zero(), "the split pane never became ready");
+            match rx.recv_timeout(remaining) {
+                Ok(AppEvent::PtyReady { id: ready, .. }) if ready == id => break,
+                Ok(AppEvent::PtyExit(exited)) if exited == id => {
+                    panic!("the split pane exited before becoming ready")
+                }
+                Ok(_) => {}
+                Err(error) => panic!("the split pane never became ready: {error}"),
+            }
+        }
         // Render once so the title strips are registered as click targets.
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
