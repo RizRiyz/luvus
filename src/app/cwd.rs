@@ -494,7 +494,9 @@ fn git_root_infos_from_roots<'a>(
 mod tests {
     use super::*;
     use crate::app::WsRename;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    #[cfg(unix)]
+    use std::time::Instant;
 
     // Live `cd` through Windows PowerShell does not reliably update the PEB
     // directory this reader uses. Windows coverage is process_cwd_matches_this_process
