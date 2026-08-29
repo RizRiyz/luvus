@@ -96,7 +96,7 @@ Keyboard → Keyboard Shortcuts → Input Sources** to free `Ctrl+Space`.
 | Pi | ✓ | ✓ | No |
 | Oh My Pi (omp) | ✓ | ✓ | ✓ |
 | Muse Code | ✓ | ✓ | No |
-| Fx | ✓ | No | No |
+| Fx | ✓ | ✓ | No |
 | Cursor | ✓ | resume command | No |
 | Gemini · Aider · Amp · Droid · Qwen · Kiro | ✓ | No | No |
 
@@ -107,7 +107,9 @@ the complete CLI and API reference.
 ## Development
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests, and pull request
-requirements. Report vulnerabilities through [SECURITY.md](SECURITY.md).
+requirements. Native agent contributors should also read
+[Adding Agent Support](https://luvus.dev/docs/extend/adding-agent-support/).
+Report vulnerabilities through [SECURITY.md](SECURITY.md).
 
 ## License
 

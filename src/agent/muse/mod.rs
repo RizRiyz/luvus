@@ -10,11 +10,37 @@ use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use super::types::{AgentDescriptor, DiscoveryOperations, IdentityDescriptor, SessionOperations};
 use super::SessionInfo;
 
 pub const NAME: &str = "muse";
 pub const DISTINCT_IDENTITIES: &[&str] = &["muse-code", "muse-cli", "muse code"];
 pub const AMBIGUOUS_IDENTITIES: &[&str] = &["muse"];
+
+pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
+    id: NAME,
+    aliases: &[],
+    identity: IdentityDescriptor {
+        distinct: DISTINCT_IDENTITIES,
+        ambiguous: AMBIGUOUS_IDENTITIES,
+        binary_matcher: Some(is_versioned_binary),
+        interpreter_packages: &[],
+        overlap_priority: 0,
+    },
+    sessions: Some(SessionOperations {
+        discovery: Some(DiscoveryOperations {
+            base: sessions_base,
+            recent,
+            latest,
+            list: Some(list),
+        }),
+        resume: |session| format!("muse resume {session}\r"),
+        // Muse's /fork is internal to its live TUI and cannot safely create a
+        // sibling session from an external Luvus command.
+        fork: None,
+    }),
+    integration: None,
+};
 
 /// Muse's launcher execs a release-specific binary such as
 /// `muse-bin-0.2.1-R1215.1`. Require a digit immediately after the prefix so

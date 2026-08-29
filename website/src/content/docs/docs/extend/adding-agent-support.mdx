@@ -1,0 +1,261 @@
+---
+title: Adding Agent Support
+description: Add detection, sessions, resume, fork, usage, and optional integrations through Luvus's modular agent adapters.
+---
+
+Luvus has two ways to learn an agent. Choose the smaller one that provides the
+behavior you need:
+
+| Goal | Implementation |
+|---|---|
+| Recognize an agent and classify its visible state | declarative detection manifest |
+| Ship offline detection in every Luvus binary | built-in adapter identity plus state rules |
+| Discover native sessions or resume/fork them | built-in adapter session operations |
+| Read persisted token and cost counters | reviewed native usage reader |
+| Receive exact session or lifecycle events | optional built-in integration |
+| Add an external workflow or UI without private native-store access | module or UHP client |
+
+A manifest-defined agent is intentionally **detection-only**. A name in a TOML
+file must never grant filesystem parsing, command execution, configuration
+mutation, skill installation, resume, or fork behavior. Those capabilities
+require reviewed Rust code.
+
+## Detection-only support
+
+For a new or fast-moving CLI, start with
+[`~/.luvus/manifests/<agent>.toml`](/docs/guides/agents/#custom-detection-rules).
+It can declare:
+
+- `distinct` identity strings trusted in process, title, or screen evidence;
+- `ambiguous` names trusted only in deliberate command/title evidence;
+- prioritized screen or title rules for `working`, `blocked`, and `idle`.
+
+This route needs no dependency or Luvus release. If a rule should ship as a
+managed update, add a validated declarative manifest to the published manifest
+feed. Manifests remain data: they cannot select functions, arbitrary paths, or
+commands.
+
+Use a built-in adapter when Luvus needs a stable offline default or native
+capabilities beyond detection.
+
+## Adapter layout
+
+Every compiled-in agent owns a directory, even when its only native capability
+is identity:
+
+```text
+src/agent/
+  myagent/
+    mod.rs             descriptor assembly and small agent-owned behavior
+    sessions.rs        optional bounded native-store discovery
+    integration.rs     optional hook/plugin/extension behavior
+    assets/            optional embedded Luvus-owned assets
+  registry.rs          immutable descriptor registry
+  types.rs             shared descriptor operation types
+  shared/              mechanisms already shared by two or more adapters
+src/agent.rs            stable session/resume/fork/usage facade
+src/detect.rs           generic identity, manifest, state, and authority engine
+src/integration.rs      shared safe-editing and integration facade
+```
+
+Do not create empty placeholder modules. Keep upstream-specific paths, formats,
+event names, commands, and assets in the owning agent folder. Move a helper to
+`src/agent/shared/` only after two current adapters use the same proven format.
+
+Add the module declaration to `src/agent.rs`, then register its descriptor once
+in `src/agent/registry.rs`. Callers should consume the registry or stable
+facades; they should not add another `if agent == "myagent"` in UI, IPC,
+Settings, CLI, or dispatch code.
+
+## Build the descriptor
+
+An adapter's `mod.rs` assembles immutable metadata and optional operations:
+
+```rust
+use super::types::{AgentDescriptor, IdentityDescriptor};
+
+pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
+    id: "myagent",
+    aliases: &["my-agent"],
+    identity: IdentityDescriptor {
+        distinct: &["myagent-cli"],
+        ambiguous: &["myagent"],
+        binary_matcher: None,
+        interpreter_packages: &["@vendor/myagent-cli"],
+        overlap_priority: 0,
+    },
+    sessions: None,
+    integration: None,
+};
+```
+
+The canonical `id` is lowercase, stable, and used in session records, API
+responses, persistence, documentation, and integration reports. `aliases`
+normalize accepted user input to that canonical ID; they do not create another
+agent.
+
+### Identity evidence
+
+Identity must be conservative because process evidence outranks text:
+
+- `distinct`: unmistakable executable or brand strings. These may be trusted
+  even in screen output.
+- `ambiguous`: short or ordinary words such as `pi`, `amp`, or `cursor`. These
+  are trusted only in a launch command or the agent's own terminal title.
+- `binary_matcher`: a small pure function for executable families that cannot
+  be represented by fixed strings, such as a versioned binary name.
+- `interpreter_packages`: exact package identities for CLIs executed by Node,
+  Bun, or another supported interpreter. Preserve the complete scope.
+- `overlap_priority`: an explicit tie-breaker for a reviewed collision, not a
+  general ranking system.
+
+Package scope is part of identity. For example,
+`@oh-my-pi/pi-coding-agent` is OMP while
+`@earendil-works/pi-coding-agent` is Pi. Matching only the shared basename
+would silently assign a real process to the wrong adapter. Test both `/` and
+Windows `\` path forms; never hardcode a home directory, username, or global
+package-manager root.
+
+Keep `binary_matcher` deterministic and allocation-free. Detection already
+receives an off-loop process snapshot; an adapter must not start a new process
+scan, read the filesystem, or perform network work during identity lookup.
+
+### State rules
+
+`src/detect.rs` remains the generic state and authority engine. Built-in
+screen/title rules currently live in its built-in rule set; managed and user
+manifests merge afterward. Keep rule priority explicit and require positive
+evidence for `working`. Output activity or the agent's welcome screen alone is
+not proof that it is generating.
+
+An optional integration may later lease authoritative state through UHP, but
+native process/screen detection must still work when that integration is not
+installed.
+
+## Add native sessions only when they are stable
+
+Add `sessions.rs` and `SessionOperations` only when the upstream agent exposes
+a stable native store and an exact resume command. Discovery must:
+
+- stay offline and bounded by depth, record size, and result count;
+- obtain session identity from structured metadata, never transcript prose;
+- match canonical project paths across macOS, Linux, and Windows;
+- avoid following untrusted paths or reading secrets unnecessarily;
+- return newest-first deterministic results;
+- support several panes in one directory without assigning one session twice.
+
+Declare only operations that exist externally and preserve conversation
+identity. A TUI-only `/fork` command is not an external fork API. Leave
+`sessions.fork` as `None` instead of approximating it with a new session,
+another pane, or a second resume of the live session.
+
+Resume and fork builders must treat session IDs as data and preserve arguments
+exactly. Add fixtures for hostile-looking IDs and platform path variants rather
+than interpolating them into a shell program.
+
+## Optional integrations
+
+An integration is appropriate only when the upstream agent documents a hook,
+plugin, or extension surface that can report exact session identity or
+lifecycle events. Keep its implementation beside the adapter and expose it
+through `IntegrationOperations`.
+
+Installation and removal must be:
+
+- optional—basic recognition cannot depend on them;
+- idempotent—reinstalling creates one Luvus-owned entry;
+- surgical—uninstalling removes only Luvus-owned files or entries;
+- secret-preserving—unrelated keys, comments, hooks, and configuration survive;
+- path-aware—profiles, XDG roots, overrides, npm shims, and Windows behavior are
+  handled without maintainer-specific paths;
+- bounded—hook calls have timeouts and never hold up the agent indefinitely.
+
+If the descriptor has an integration, add it to the presentation-ordered
+integration projection in `src/agent/registry.rs`. The CLI and Settings derive
+support from that projection. Human-facing new text must be added to every
+registered CLI or Settings locale; canonical IDs and command syntax remain
+untranslated.
+
+## Usage and skills are separate capabilities
+
+Mission Control reads only stable counters the agent already persists. Its
+native readers currently live behind `src/agent/usage.rs`. Add a reader only
+with bounded fixtures for the upstream format. Missing counters stay missing;
+never estimate tokens or cost from transcript text.
+
+Agent Skill installation remains owned by `src/skill.rs`, not by the native
+descriptor registry. Add a skill destination only when that agent actually
+supports the relevant skill layout, then update its focused tests and the user
+guidance. Detection must remain independent of both skills and integrations.
+
+## Registration and parity
+
+After creating the adapter:
+
+1. Declare the module in `src/agent.rs`.
+2. Add `&super::myagent::DESCRIPTOR` to `BUILTINS` in
+   `src/agent/registry.rs`.
+3. Add the descriptor to the integration presentation list only if it has an
+   integration.
+4. Add or update built-in state rules in `src/detect.rs` when necessary.
+5. Add a bounded usage reader only if structured persisted counters exist.
+6. Update `README.md`, the supported-agent reference, and the Working with
+   Agents guide. Update the homepage grid when the support belongs in that
+   curated presentation.
+7. If public automation behavior changed, update UHP capabilities/schema
+   fixtures, both bundled Luvus skill copies, and `agent-readme.md`.
+
+Adding another generic agent ID normally does not require a new UHP method or
+schema field: UHP carries canonical agent strings. A new public operation or
+response shape does require CLI/API/UHP/documentation parity.
+
+## Required tests
+
+At minimum, cover:
+
+- unique canonical ID, aliases, and interpreter package identities;
+- native capability projection and stable presentation order;
+- direct executable and interpreter-launched process detection;
+- scoped package collisions and intentional overlap priority;
+- Unix and Windows paths, npm shims, wrappers, and false-positive prose;
+- detection with skills and integrations absent;
+- bounded session fixtures, CWD matching, ordering, resume, and fork when
+  supported;
+- integration install/status/uninstall in a temporary home when supported;
+- unrelated configuration preservation;
+- managed/user manifest precedence, reload, and unknown detection-only agents
+  when identity plumbing changes.
+
+Use focused checks while developing, then run the broad gates:
+
+```sh
+cargo test agent::registry::tests -- --nocapture
+cargo test detect::tests -- --nocapture
+cargo test agent::tests -- --nocapture
+cargo test integration::tests -- --nocapture
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
+cargo test --locked
+cargo build --release --locked
+(cd website && npm run build)
+```
+
+Run real agent and lifecycle checks only in an isolated debug Luvus home and
+named session. Never modify a maintainer's production agent configuration for
+an automated test. Fixture coverage does not certify an operating system: let
+platform CI run and state clearly which live agents and platforms were actually
+exercised.
+
+## Performance boundary
+
+Descriptors are static metadata and adapter lookup is bounded. A new adapter
+must not add a dependency, persistent thread, worker pool, timer, watcher,
+per-pane process scan, periodic filesystem traversal, background network
+request, or render-path allocation. Reuse the existing process snapshot,
+manifest reload, session scan, integration, and Mission Control scheduling
+paths.
+
+The adapter is complete when one directory owns its native knowledge, one
+descriptor states its implemented capabilities, detection works without
+optional installation, public claims match tests, and unsupported capabilities
+remain explicitly absent.

@@ -4647,6 +4647,17 @@ mod tests {
     }
 
     #[test]
+    fn integration_help_tracks_the_native_adapter_registry() {
+        let supported = crate::integration::agent_ids()
+            .collect::<Vec<_>>()
+            .join("|");
+        assert!(
+            DETAILED_USAGE.contains(&format!("integration install|uninstall <{supported}>")),
+            "integration help must preserve registry order and support"
+        );
+    }
+
+    #[test]
     fn agent_docs_are_published_and_linked_from_help() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let readme = std::fs::read_to_string(root.join("website/public/agent-readme.md"));

@@ -27,6 +27,27 @@ and posts results back as events. Single-writer state is why orchestration's
 task claims and path leases are race-free *by construction*, with no locks to
 get wrong.
 
+## Modular agent adapters
+
+Every compiled-in agent owns one immutable descriptor under
+`src/agent/<agent>/`. The descriptor declares conservative identity evidence
+and only the native operations Luvus actually implements: session discovery,
+resume, fork, or an optional integration. The shared registry feeds detection,
+Settings, CLI validation, and the session/integration facades, so those
+surfaces do not maintain competing agent lists.
+
+The generic detector remains separate. It starts from built-in descriptor
+identity, then merges managed and user manifests. A manifest can therefore
+teach Luvus a new detection-only agent without granting trusted filesystem or
+command operations. Optional hooks improve exact session and lifecycle
+reporting, but process/screen detection works without them.
+
+Adapters contain no mutable runtime state and schedule no work. They reuse the
+existing fleet process snapshot and bounded session/usage workers, preserving
+the single-owner event loop and idle performance. See
+[Adding Agent Support](/docs/extend/adding-agent-support/) for the ownership and
+test contract.
+
 ## Frames as diffs
 
 The server doesn't resend the screen. It sends only the cells that changed,

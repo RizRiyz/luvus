@@ -9,11 +9,43 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 
-use super::{pi_latest, pi_recent, SessionInfo};
+use super::types::{
+    AgentDescriptor, DiscoveryOperations, IdentityDescriptor, IntegrationOperations,
+    SessionOperations,
+};
+use super::SessionInfo;
 
 pub(crate) const NAME: &str = "omp";
 pub(crate) const DISTINCT_IDENTITIES: &[&str] = &["oh-my-pi", "omp-coding-agent"];
 pub(crate) const AMBIGUOUS_IDENTITIES: &[&str] = &["omp"];
+
+pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
+    id: NAME,
+    aliases: &[],
+    identity: IdentityDescriptor {
+        distinct: DISTINCT_IDENTITIES,
+        ambiguous: AMBIGUOUS_IDENTITIES,
+        binary_matcher: None,
+        interpreter_packages: &["@oh-my-pi/pi-coding-agent"],
+        overlap_priority: 20,
+    },
+    sessions: Some(SessionOperations {
+        discovery: Some(DiscoveryOperations {
+            base: sessions_base,
+            recent,
+            latest,
+            list: Some(super::shared::pi_store::list),
+        }),
+        resume: |session| format!("omp --resume {session}\r"),
+        fork: Some(|session| format!("omp --fork {session}\r")),
+    }),
+    integration: Some(IntegrationOperations {
+        install: || install_extension().map(|_| ()),
+        uninstall: uninstall_extension,
+        is_installed: extension_installed,
+        legacy_is_installed: legacy_extension_installed,
+    }),
+};
 
 const EXTENSION: &str = include_str!("extension.ts");
 
@@ -150,17 +182,11 @@ pub(super) fn sessions_base() -> PathBuf {
 }
 
 pub(super) fn latest(base: &Path, cwd: &Path) -> Option<String> {
-    pi_latest(base, cwd)
+    super::shared::pi_store::latest(base, cwd)
 }
 
 pub(super) fn recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
-    pi_recent(base, limit)
-        .into_iter()
-        .map(|mut session| {
-            session.agent = NAME.to_string();
-            session
-        })
-        .collect()
+    super::shared::pi_store::recent(base, limit, NAME)
 }
 
 pub(crate) fn extension_dir() -> Result<PathBuf> {

@@ -940,7 +940,7 @@ fn draw_content(
             }
         }
         SettingsTab::Integrations => {
-            for (i, agent) in crate::integration::AGENTS.iter().enumerate() {
+            for (i, agent) in crate::integration::agent_ids().enumerate() {
                 let val = if crate::integration::is_installed(agent) {
                     // Installed → clicking removes luvus's hook (not the agent).
                     Line::from(vec![

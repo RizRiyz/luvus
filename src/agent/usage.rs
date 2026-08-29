@@ -13,7 +13,8 @@ use std::time::{Duration, SystemTime};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
 
-use super::*;
+use super::shared::{chat_store, pi_store};
+use super::{claude, codex, copilot, fx, gemini, grok, kimi, omp, opencode, pi, qwen, registry};
 use crate::mission::{context_frac, estimate_cost, AgentUsage};
 
 /// A single persisted JSONL event can contain an arbitrarily large tool result
@@ -158,17 +159,37 @@ fn modified(path: &Path) -> Option<SystemTime> {
 /// it, while agents without one return `None` rather than guessed counters.
 pub fn session_usage(agent: &str, cwd: &Path, session_id: &str) -> Option<AgentUsage> {
     match canonical(agent) {
-        "claude" => claude_usage(&claude_path(&claude_base(), cwd, session_id)),
-        "codex" => codex_usage(&codex_path(&codex_base(), session_id)?),
-        "copilot" => copilot_usage(&copilot_path(&copilot_base(), session_id)),
-        "opencode" => opencode_usage(&opencode_db_path(&opencode_base()), session_id, cwd),
-        "kimi" => kimi_usage(&kimi_dir(&kimi_base(), session_id)?),
-        "grok" => grok_usage(&grok_dir(&grok_base(), cwd, session_id)?),
-        "pi" => pi_usage(&pi_path(&pi_base(), session_id)?),
-        "omp" => pi_usage(&pi_path(&omp::sessions_base(), session_id)?),
-        "gemini" => gemini_usage(&chat_path(&gemini_base(), session_id)?),
-        "qwen" => gemini_usage(&chat_path(&qwen_base(), session_id)?),
-        "fx" => fx_usage(&fx_dir(&fx_base(), session_id)),
+        "claude" => claude_usage(&claude_path(&claude::sessions::base(), cwd, session_id)),
+        "codex" => codex_usage(&codex::sessions::session_path(
+            &codex::sessions::base(),
+            session_id,
+        )?),
+        "copilot" => copilot_usage(&copilot_path(&copilot::sessions::base(), session_id)),
+        "opencode" => opencode_usage(
+            &opencode_db_path(&opencode::sessions::base()),
+            session_id,
+            cwd,
+        ),
+        "kimi" => kimi_usage(&kimi::sessions::session_dir(
+            &kimi::sessions::base(),
+            session_id,
+        )?),
+        "grok" => grok_usage(&grok::sessions::session_dir(
+            &grok::sessions::base(),
+            cwd,
+            session_id,
+        )?),
+        "pi" => pi_usage(&pi_store::session_path(&pi::sessions::base(), session_id)?),
+        "omp" => pi_usage(&pi_store::session_path(&omp::sessions_base(), session_id)?),
+        "gemini" => gemini_usage(&chat_store::session_path(
+            &gemini::sessions::base(),
+            session_id,
+        )?),
+        "qwen" => gemini_usage(&chat_store::session_path(
+            &qwen::sessions::base(),
+            session_id,
+        )?),
+        "fx" => fx_usage(&fx_dir(&fx::sessions::base(), session_id)),
         // These agents currently expose identity/state but no stable,
         // structured, per-session usage store Luvus can read safely.
         "aider" | "kiro" | "cursor" | "amp" | "droid" => None,
@@ -180,31 +201,30 @@ pub fn session_usage(agent: &str, cwd: &Path, session_id: &str) -> Option<AgentU
 /// uses this as a cheap idle-session cache key before invoking the parser.
 pub fn session_mtime(agent: &str, cwd: &Path, session_id: &str) -> Option<SystemTime> {
     let path = match canonical(agent) {
-        "claude" => claude_path(&claude_base(), cwd, session_id),
-        "codex" => codex_path(&codex_base(), session_id)?,
-        "copilot" => copilot_path(&copilot_base(), session_id),
-        "opencode" => opencode_db_path(&opencode_base()),
-        "kimi" => kimi_dir(&kimi_base(), session_id)?.join("agents/main/wire.jsonl"),
-        "grok" => grok_dir(&grok_base(), cwd, session_id)?.join("updates.jsonl"),
-        "pi" => pi_path(&pi_base(), session_id)?,
-        "omp" => pi_path(&omp::sessions_base(), session_id)?,
-        "gemini" => chat_path(&gemini_base(), session_id)?,
-        "qwen" => chat_path(&qwen_base(), session_id)?,
-        "fx" => fx_dir(&fx_base(), session_id).join("usage-v2.json"),
+        "claude" => claude_path(&claude::sessions::base(), cwd, session_id),
+        "codex" => codex::sessions::session_path(&codex::sessions::base(), session_id)?,
+        "copilot" => copilot_path(&copilot::sessions::base(), session_id),
+        "opencode" => opencode_db_path(&opencode::sessions::base()),
+        "kimi" => kimi::sessions::session_dir(&kimi::sessions::base(), session_id)?
+            .join("agents/main/wire.jsonl"),
+        "grok" => grok::sessions::session_dir(&grok::sessions::base(), cwd, session_id)?
+            .join("updates.jsonl"),
+        "pi" => pi_store::session_path(&pi::sessions::base(), session_id)?,
+        "omp" => pi_store::session_path(&omp::sessions_base(), session_id)?,
+        "gemini" => chat_store::session_path(&gemini::sessions::base(), session_id)?,
+        "qwen" => chat_store::session_path(&qwen::sessions::base(), session_id)?,
+        "fx" => fx_dir(&fx::sessions::base(), session_id).join("usage-v2.json"),
         _ => return None,
     };
     modified(&path)
 }
 
 fn canonical(agent: &str) -> &str {
-    match agent {
-        "cursor-agent" => "cursor",
-        other => other,
-    }
+    registry::find(agent).map_or(agent, |descriptor| descriptor.id)
 }
 
 fn claude_path(base: &Path, cwd: &Path, session_id: &str) -> PathBuf {
-    claude_project_dir(base, cwd).join(format!("{session_id}.jsonl"))
+    claude::sessions::project_dir(base, cwd).join(format!("{session_id}.jsonl"))
 }
 
 fn copilot_path(base: &Path, session_id: &str) -> PathBuf {
@@ -217,100 +237,8 @@ fn opencode_db_path(storage: &Path) -> PathBuf {
     storage.parent().unwrap_or(storage).join("opencode.db")
 }
 
-fn kimi_dir(base: &Path, session_id: &str) -> Option<PathBuf> {
-    kimi_index(base)
-        .into_iter()
-        .find(|e| e.id == session_id)
-        .map(|e| e.session_dir)
-}
-
-fn grok_dir(base: &Path, cwd: &Path, session_id: &str) -> Option<PathBuf> {
-    grok_cwd_dirs(base)
-        .into_iter()
-        .map(|(_, p)| p)
-        .find(|p| grok_decode_cwd(p).as_deref() == Some(cwd))
-        .map(|p| p.join(session_id))
-        .filter(|p| p.is_dir())
-}
-
-fn codex_path(base: &Path, session_id: &str) -> Option<PathBuf> {
-    codex_rollout_files(base).into_iter().find_map(|(_, path)| {
-        let name_matches = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.contains(session_id));
-        if name_matches {
-            return Some(path);
-        }
-        read_codex_session(&path)
-            .is_some_and(|(id, _)| id == session_id)
-            .then_some(path)
-    })
-}
-
-fn pi_path(base: &Path, session_id: &str) -> Option<PathBuf> {
-    pi_session_files(base).into_iter().find_map(|(_, path)| {
-        read_pi_session(&path)
-            .is_some_and(|(id, _)| id == session_id)
-            .then_some(path)
-    })
-}
-
-fn gemini_base() -> PathBuf {
-    std::env::var_os("GEMINI_CLI_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".gemini"))
-}
-
-fn qwen_base() -> PathBuf {
-    std::env::var_os("QWEN_CODE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".qwen"))
-}
-
-fn fx_base() -> PathBuf {
-    std::env::var_os("FX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".fx"))
-}
-
 fn fx_dir(base: &Path, session_id: &str) -> PathBuf {
     base.join("sessions").join(session_id)
-}
-
-/// Gemini and Qwen put the first eight session-id characters in the filename,
-/// then keep the full id in the JSONL header. Filter by the filename first so a
-/// lookup does not parse every chat in a large history.
-fn chat_path(base: &Path, session_id: &str) -> Option<PathBuf> {
-    let needle = session_id.get(..session_id.len().min(8))?;
-    let tmp = base.join("tmp");
-    let projects = std::fs::read_dir(tmp).ok()?;
-    for project in projects.flatten() {
-        let chats = project.path().join("chats");
-        let Ok(files) = std::fs::read_dir(chats) else {
-            continue;
-        };
-        for entry in files.flatten() {
-            let path = entry.path();
-            let candidate = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("session-") && n.contains(needle));
-            if !candidate {
-                continue;
-            }
-            let mut found = false;
-            let _ = for_each_json_line(&path, |v| {
-                if v.get("sessionId").and_then(Value::as_str) == Some(session_id) {
-                    found = true;
-                }
-            });
-            if found {
-                return Some(path);
-            }
-        }
-    }
-    None
 }
 
 fn claude_usage(path: &Path) -> Option<AgentUsage> {

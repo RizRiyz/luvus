@@ -85,6 +85,19 @@ PTYs without requiring an interactive terminal. Test visible changes manually,
 measure performance changes before and after, and test platform-specific code on
 the affected platform when available.
 
+## Adding agent support
+
+Use a detection manifest when an agent only needs identity and live-state
+recognition. Built-in session discovery, resume, fork, usage, or lifecycle
+integration belongs in one modular adapter under `src/agent/<agent>/`; do not
+spread new agent-name branches across the UI, CLI, IPC, or Settings.
+
+The [Adding Agent Support](website/src/content/docs/docs/extend/adding-agent-support.mdx)
+guide covers the descriptor fields, scoped interpreter packages, manifests,
+session and integration boundaries, registry entry, documentation parity, and
+required cross-platform tests. Detection must work without installing a skill
+or hook, and optional integrations must preserve unrelated user configuration.
+
 ## Commits
 
 Use concise Conventional Commit messages:

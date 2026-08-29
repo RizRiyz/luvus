@@ -290,7 +290,7 @@ impl App {
                 KEYS_HEADER_ROWS + crate::app::Cmd::ALL.len() + crate::app::key_reference_rows()
             }
             SettingsTab::Modules => self.module_rows().len(),
-            SettingsTab::Integrations => crate::integration::AGENTS.len(),
+            SettingsTab::Integrations => crate::integration::agent_count(),
             SettingsTab::Language => crate::i18n::LANGS.len(),
         }
     }
@@ -1361,7 +1361,7 @@ impl App {
     /// Toggle an agent's integration hook: install if absent, uninstall if present.
     /// Uninstall removes only luvus's hook — never the agent itself.
     fn install_integration(&mut self, cursor: usize) {
-        if let Some(agent) = crate::integration::AGENTS.get(cursor) {
+        if let Some(agent) = crate::integration::agent_at(cursor) {
             if crate::integration::is_installed(agent) {
                 let _ = crate::integration::uninstall(agent);
             } else {

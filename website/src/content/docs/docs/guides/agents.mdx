@@ -262,6 +262,11 @@ agent = "myagent"
 distinct = ["myagent-cli"]
 ```
 
+This creates detection-only support. It does not grant native session-store
+access, resume, fork, usage, integration, or skill installation. Contributors
+adding those trusted built-in capabilities should use the modular
+[Adding Agent Support](/docs/extend/adding-agent-support/) guide.
+
 ### State rules
 
 A rule matches text on the pane's screen (or its window title) and, when it

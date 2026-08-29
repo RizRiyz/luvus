@@ -101,11 +101,16 @@ boundaries are:
   Git/files/diff, Mission Control, overlays, and hit-test geometry.
 - `src/detect.rs`: agent identity and state evidence. Detection is native Luvus
   behavior and must not depend on an installed agent skill.
-- `src/agent.rs`: native session registry, resume/fork orchestration, and shared
-  command building. Put non-trivial agent-specific discovery or integration code
-  in `src/agent/<agent>/` (for example `src/agent/muse/`), not in the registry.
-- `src/integration.rs`: optional agent-native hooks for precise session and
-  lifecycle reports. Hooks augment detection; they do not replace it.
+- `src/agent.rs`: stable native-session, resume, fork, and usage facade.
+  `src/agent/registry.rs` is the immutable built-in descriptor registry;
+  `src/agent/types.rs` defines its operation records. Every compiled-in agent
+  owns `src/agent/<agent>/`, including detection-only agents. Put non-trivial
+  discovery, integration, and embedded assets in that directory, not in the
+  registry or facade.
+- `src/integration.rs`: shared safe-editing mechanics and the optional
+  agent-integration facade. Agent-specific hooks, plugins, extensions, paths,
+  and lifecycle semantics belong to their adapter. Hooks augment detection;
+  they do not replace it.
 - `src/cli.rs`, `src/api/`, and `src/app/dispatch.rs`: parsing/help, public UHP
   contracts, and validated state mutation for one control surface.
 - `src/config.rs` and `src/persist.rs`: configuration, migration, selected-session
@@ -192,6 +197,73 @@ luvus skill show
 Do not manually copy skills into agent directories as an implementation fix.
 Agent detection and sidebar status must continue to work without skills or
 hooks installed.
+
+## Adding or changing built-in agent support
+
+First choose the smallest correct support level:
+
+- A user or managed detection manifest can add identity and screen-state rules
+  without recompiling Luvus. That agent is detection-only and must not silently
+  gain session parsing, command execution, integrations, or skill installation.
+- Native discovery, resume, fork, usage, or an integration requires reviewed
+  built-in Rust code and an owning `src/agent/<agent>/` adapter.
+- A module or external UHP reporter is preferable when the feature does not
+  need trusted in-process access to an agent's private native store.
+
+For a built-in adapter:
+
+1. Create `src/agent/<agent>/mod.rs` and assemble one immutable
+   `AgentDescriptor`. Keep the canonical `id` lowercase and stable; aliases
+   normalize user input but do not create additional agents.
+2. Declare identity evidence accurately. Put unmistakable executable names in
+   `distinct`, ordinary words in `ambiguous`, versioned executable logic in a
+   narrow `binary_matcher`, and exact interpreter package names—including npm
+   scope—in `interpreter_packages`. Use `overlap_priority` only for a reviewed
+   collision such as OMP versus Pi; never rely accidentally on registry order.
+3. Add `sessions.rs` only when the upstream agent has a stable native store.
+   Keep reads bounded and offline, match canonical CWDs portably, obtain session
+   IDs from structured metadata, and declare only operations the upstream CLI
+   safely exposes. `sessions.fork = None` is the correct value when no external
+   native fork exists.
+4. Add `integration.rs` and assets only for an optional, documented upstream
+   hook/plugin/extension surface. Install and uninstall must be idempotent and
+   surgical, preserve unrelated configuration and secrets, and leave native
+   detection functional when the integration is absent.
+5. Register the descriptor once in `src/agent/registry.rs`. Add it to the
+   presentation-ordered integration projection only when `integration` exists.
+   Do not add agent-name matches to UI, IPC, dispatch, Settings, or CLI code.
+6. Keep generic process/title/screen authority and manifest merging in
+   `src/detect.rs`. Built-in screen-state rules currently live there. Native
+   Mission Control usage readers currently live behind `src/agent/usage.rs`;
+   add one only when stable persisted counters exist, and never estimate token
+   usage from transcript prose.
+
+Required parity work:
+
+- Add registry tests for unique IDs, aliases, interpreter packages, capability
+  projection, presentation order, and every intentional identity overlap.
+- Add detection fixtures for direct binaries, interpreter launchers, scoped
+  packages, wrappers, false-positive prose, and both Unix and Windows path
+  forms. Detection must work with skills and integrations absent.
+- Add bounded session-store fixtures and resume/fork command tests when those
+  operations exist. Add temporary-home install/status/uninstall tests for an
+  integration, proving unrelated user files survive.
+- Exercise managed/user manifest precedence, reload, and a manifest-defined
+  unknown agent whenever identity plumbing changes.
+- Update `README.md`, the supported-agent reference and guide, Settings/CLI
+  integration projections, and the homepage grid when user-visible support
+  changes. If automation behavior changes, also update UHP/schema fixtures,
+  both bundled skill copies, and `website/public/agent-readme.md`.
+- Run focused adapter/detection/integration tests, formatting, strict Clippy,
+  the locked suite, and the locked release build. Use isolated live tests only
+  for third-party agents actually available, and do not claim an untested OS.
+
+Descriptors are static metadata. Adding an adapter must not add a dependency,
+thread, timer, watcher, per-pane scan, network request, or render-path work.
+The contributor-facing walkthrough is
+`website/src/content/docs/docs/extend/adding-agent-support.mdx`; ignored
+`docs/107-modular-agent-adapter-architecture.md` records the migration design,
+not the current public contract.
 
 ## Modules and dependencies
 

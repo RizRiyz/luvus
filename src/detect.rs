@@ -31,133 +31,16 @@ use serde::Deserialize;
 
 use crate::ui::theme::State;
 
-/// One agent luvus can recognise, and how far each identifying string may be
-/// trusted. Splitting the two matters because the haystack for `screen` is
-/// *whatever the pane happens to be printing*, which nobody controls.
-struct KnownAgent {
-    /// Canonical name: what the UI shows and `agent.list` returns.
-    name: &'static str,
-    /// Strings distinctive enough to believe anywhere, pane output included.
-    distinct: &'static [&'static str],
-    /// Strings that are also ordinary words. Believed only where a human or the
-    /// agent itself put them deliberately — the spawned command and the OSC
-    /// title — never from incidental output. Without this, `error: cursor is out
-    /// of bounds` names the pane cursor, and "for example" named it amp.
-    ambiguous: &'static [&'static str],
-}
-
-/// Agents we recognise. `distinct`/`ambiguous` are matched as whole words (see
-/// [`contains_agent_word`]); the canonical `name` is what gets reported.
-const KNOWN_AGENTS: &[KnownAgent] = &[
-    KnownAgent {
-        name: "claude",
-        distinct: &["claude"],
-        ambiguous: &[],
-    },
-    KnownAgent {
-        name: "codex",
-        distinct: &["codex"],
-        ambiguous: &[],
-    },
-    KnownAgent {
-        name: "gemini",
-        distinct: &["gemini"],
-        ambiguous: &[],
-    },
-    KnownAgent {
-        name: "aider",
-        distinct: &["aider"],
-        ambiguous: &[],
-    },
-    KnownAgent {
-        name: "opencode",
-        distinct: &["opencode"],
-        ambiguous: &[],
-    },
-    KnownAgent {
-        name: "copilot",
-        distinct: &["copilot"],
-        ambiguous: &[],
-    },
-    KnownAgent {
-        name: "kimi",
-        distinct: &["kimi"],
-        ambiguous: &[],
-    },
-    KnownAgent {
-        name: "qwen",
-        distinct: &["qwen"],
-        ambiguous: &[],
-    },
-    KnownAgent {
-        name: "kiro",
-        distinct: &["kiro"],
-        ambiguous: &[],
-    },
-    // The CLI binary is distinctive even though the brand name is not.
-    KnownAgent {
-        name: "cursor",
-        distinct: &["cursor-agent"],
-        ambiguous: &["cursor"],
-    },
-    KnownAgent {
-        name: "amp",
-        distinct: &[],
-        ambiguous: &["amp"],
-    },
-    KnownAgent {
-        name: "droid",
-        distinct: &[],
-        ambiguous: &["droid"],
-    },
-    KnownAgent {
-        name: "grok",
-        distinct: &[],
-        ambiguous: &["grok"],
-    },
-    // Muse's launcher execs a versioned `muse-bin-*` binary, handled by
-    // `match_binary`. The brand itself is an ordinary English word, so only
-    // trust bare `muse` in deliberate command/title evidence.
-    KnownAgent {
-        name: crate::agent::muse::NAME,
-        distinct: crate::agent::muse::DISTINCT_IDENTITIES,
-        ambiguous: crate::agent::muse::AMBIGUOUS_IDENTITIES,
-    },
-    // Oh My Pi (omp) precedes pi in this registry ON PURPOSE: the brand
-    // "oh-my-pi" word-contains pi's ambiguous token, and the first match wins.
-    // omp's brand + npm binary are distinctive, so trust them from pane
-    // output; bare `omp` is believed only from the spawn command or OSC title.
-    KnownAgent {
-        name: crate::agent::omp::NAME,
-        distinct: crate::agent::omp::DISTINCT_IDENTITIES,
-        ambiguous: crate::agent::omp::AMBIGUOUS_IDENTITIES,
-    },
-    // Pi (pi.dev): the npm binary is distinctive, but the bare brand name is an
-    // ordinary word (and a substring of "api"/"pip"…), so believe it only from
-    // the spawn command or OSC title — never incidental output.
-    KnownAgent {
-        name: "pi",
-        distinct: &["pi-coding-agent"],
-        ambiguous: &["pi"],
-    },
-    // `fx` is a short, common token in filenames and prose, so never infer it
-    // from arbitrary screen output. Its process name and OSC title are
-    // deliberate identity signals and therefore safe.
-    KnownAgent {
-        name: "fx",
-        distinct: &[],
-        ambiguous: &["fx"],
-    },
-];
-
-/// The runtime form of [`KnownAgent`]: owned, so `~/.luvus/manifests/*.toml` can
-/// refine a built-in agent or teach luvus one it has never heard of.
+/// The runtime identity form is owned so `~/.luvus/manifests/*.toml` can refine
+/// a built-in agent or teach Luvus one it has never heard of.
 #[derive(Clone)]
 struct AgentIdent {
     name: String,
     distinct: Vec<String>,
     ambiguous: Vec<String>,
     binary_matcher: Option<fn(&str) -> bool>,
+    interpreter_packages: Vec<String>,
+    overlap_priority: u8,
 }
 
 impl AgentIdent {
@@ -169,14 +52,30 @@ impl AgentIdent {
 
 /// The built-in registry, in runtime form.
 fn builtin_agents() -> Vec<AgentIdent> {
-    KNOWN_AGENTS
+    crate::agent::registry::descriptors()
         .iter()
-        .map(|a| AgentIdent {
-            name: a.name.to_string(),
-            distinct: a.distinct.iter().map(|s| s.to_string()).collect(),
-            ambiguous: a.ambiguous.iter().map(|s| s.to_string()).collect(),
-            binary_matcher: (a.name == crate::agent::muse::NAME)
-                .then_some(crate::agent::muse::is_versioned_binary as fn(&str) -> bool),
+        .map(|agent| AgentIdent {
+            name: agent.id.to_string(),
+            distinct: agent
+                .identity
+                .distinct
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
+            ambiguous: agent
+                .identity
+                .ambiguous
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
+            binary_matcher: agent.identity.binary_matcher,
+            interpreter_packages: agent
+                .identity
+                .interpreter_packages
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
+            overlap_priority: agent.identity.overlap_priority,
         })
         .collect()
 }
@@ -357,6 +256,15 @@ impl Manifests {
     pub fn is_agent(&self, name: &str) -> bool {
         let low = name.to_lowercase();
         self.agents.iter().any(|a| a.name == low)
+    }
+
+    fn best_agent(&self, matches: impl Fn(&AgentIdent) -> bool) -> Option<&AgentIdent> {
+        self.agents
+            .iter()
+            .enumerate()
+            .filter(|(_, agent)| matches(agent))
+            .max_by_key(|(index, agent)| (agent.overlap_priority, std::cmp::Reverse(*index)))
+            .map(|(_, agent)| agent)
     }
 
     fn evaluate(&self, agent: &str, regions: &Regions) -> Option<RuleMatch> {
@@ -791,6 +699,8 @@ impl ManifestFile {
                     distinct: Vec::new(),
                     ambiguous: Vec::new(),
                     binary_matcher: None,
+                    interpreter_packages: Vec::new(),
+                    overlap_priority: 0,
                 });
                 agents.last_mut().expect("just pushed")
             }
@@ -799,6 +709,7 @@ impl ManifestFile {
             entry.distinct.clear();
             entry.ambiguous.clear();
             entry.binary_matcher = None;
+            entry.interpreter_packages.clear();
         }
         entry.distinct.extend(lc(&id.distinct));
         entry.ambiguous.extend(lc(&id.ambiguous));
@@ -1119,51 +1030,55 @@ impl Manifests {
         tokens
     }
 
-    /// Match an interpreter's script slot by basename or by a distinctive npm
-    /// package root. npm shims commonly execute `cli.js` from a package path
-    /// such as `...\\node_modules\\pi-coding-agent\\dist\\cli.js`.
+    /// Match an interpreter's script slot by basename or by its npm package.
+    /// Scoped package identity is checked before the basename because OMP and
+    /// Pi intentionally ship the same `pi-coding-agent` package name under
+    /// different owners.
     fn match_interpreter_script(&self, token: &str) -> Option<String> {
         self.match_binary(binary_name(token)).or_else(|| {
             let normalized = token.to_lowercase().replace('\\', "/");
             let segments: Vec<&str> = normalized.split('/').collect();
             let script = strip_script_extension(segments.last().copied()?);
 
-            self.agents
-                .iter()
-                .find(|agent| agent.all().any(|pattern| pattern == script))
+            self.best_agent(|agent| agent.all().any(|pattern| pattern == script))
                 .map(|agent| agent.name.clone())
                 .or_else(|| {
                     let node_modules = segments
                         .iter()
                         .rposition(|segment| *segment == "node_modules")?;
                     let package_index = node_modules + 1;
-                    let package = segments.get(package_index).copied()?;
-                    let package = if package.starts_with('@') {
-                        segments.get(package_index + 1).copied()?
+                    let first = segments.get(package_index).copied()?;
+                    let (package, basename) = if first.starts_with('@') {
+                        let basename = segments.get(package_index + 1).copied()?;
+                        (format!("{first}/{basename}"), basename)
                     } else {
-                        package
+                        (first.to_string(), first)
                     };
-                    self.agents
-                        .iter()
-                        .find(|agent| agent.distinct.iter().any(|pattern| pattern == package))
-                        .map(|agent| agent.name.clone())
+                    self.best_agent(|agent| {
+                        agent
+                            .interpreter_packages
+                            .iter()
+                            .any(|pattern| pattern == &package)
+                    })
+                    .or_else(|| {
+                        self.best_agent(|agent| {
+                            agent.distinct.iter().any(|pattern| pattern == basename)
+                        })
+                    })
+                    .map(|agent| agent.name.clone())
                 })
         })
     }
 
     /// The agent whose patterns name exactly this binary.
     fn match_binary(&self, base: &str) -> Option<String> {
-        if let Some(agent) = self
-            .agents
-            .iter()
-            .find(|agent| agent.binary_matcher.is_some_and(|matcher| matcher(base)))
+        if let Some(agent) =
+            self.best_agent(|agent| agent.binary_matcher.is_some_and(|matcher| matcher(base)))
         {
             return Some(agent.name.clone());
         }
-        self.agents
-            .iter()
-            .find(|a| a.all().any(|p| p == base))
-            .map(|a| a.name.clone())
+        self.best_agent(|agent| agent.all().any(|pattern| pattern == base))
+            .map(|agent| agent.name.clone())
     }
 
     /// Name the agent running in a pane, in decreasing order of how deliberate
@@ -1181,23 +1096,22 @@ impl Manifests {
 
         // Deliberate signals: somebody typed this, or the agent published it.
         for (region, source) in [(&cmd, "launch_command"), (&title, "osc_title")] {
-            if let Some(a) = self
-                .agents
-                .iter()
-                .find(|a| a.all().any(|p| contains_agent_word(region, p)))
-            {
+            if let Some(a) = self.best_agent(|agent| {
+                agent
+                    .all()
+                    .any(|pattern| contains_agent_word(region, pattern))
+            }) {
                 return Some((a.name.clone(), source));
             }
         }
         // Incidental signal: pane output. Only names that can't be ordinary words.
-        self.agents
-            .iter()
-            .find(|a| {
-                a.distinct
-                    .iter()
-                    .any(|p| contains_agent_word(low_bottom, p))
-            })
-            .map(|a| (a.name.clone(), "screen_text"))
+        self.best_agent(|agent| {
+            agent
+                .distinct
+                .iter()
+                .any(|pattern| contains_agent_word(low_bottom, pattern))
+        })
+        .map(|agent| (agent.name.clone(), "screen_text"))
     }
 }
 
@@ -1425,6 +1339,18 @@ mod tests {
     }
 
     #[test]
+    fn overlap_priority_keeps_omp_ahead_of_pi_independent_of_registry_order() {
+        let mut manifests = Manifests::builtin();
+        manifests.agents.reverse();
+        assert_eq!(
+            manifests
+                .detect_agent(None, "", "oh-my-pi")
+                .map(|(agent, _)| agent),
+            Some("omp".to_string())
+        );
+    }
+
+    #[test]
     fn muse_identity_replace_disables_the_versioned_binary_matcher() {
         let mut m = Manifests::builtin();
         toml::from_str::<ManifestFile>(
@@ -1641,6 +1567,44 @@ mod tests {
             ]),
             Some("pi".into())
         );
+    }
+
+    #[test]
+    fn scoped_pi_packages_distinguish_omp_from_pi() {
+        let m = Manifests::builtin();
+        let omp_bun = "/Users/me/.bun/bin/bun /Users/me/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js --model anthropic/claude";
+        assert_eq!(
+            m.agent_in_processes(&[omp_bun.into()]),
+            Some("omp".into()),
+            "OMP's scoped package must not degrade to Pi"
+        );
+        assert_eq!(
+            m.launch_args_for(&[omp_bun.into()], "omp"),
+            Some(vec!["--model".into(), "anthropic/claude".into()])
+        );
+        assert!(m.launch_args_for(&[omp_bun.into()], "pi").is_none());
+
+        let omp_windows = r#""C:\Program Files\nodejs\node.exe" C:\Users\me\AppData\Roaming\npm\node_modules\@oh-my-pi\pi-coding-agent\dist\cli.js --yes"#;
+        assert_eq!(
+            m.agent_in_processes(&[omp_windows.into()]),
+            Some("omp".into())
+        );
+
+        let pi_node = "/usr/local/bin/node /Users/me/.nvm/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --provider openai";
+        assert_eq!(m.agent_in_processes(&[pi_node.into()]), Some("pi".into()));
+
+        let detection = classify(
+            Some("zsh"),
+            "",
+            false,
+            false,
+            "zsh",
+            "",
+            &[omp_bun.into()],
+            &m,
+        );
+        assert_eq!(detection.agent, "omp");
+        assert_eq!(detection.identity_source, "process_tree");
     }
 
     #[test]
