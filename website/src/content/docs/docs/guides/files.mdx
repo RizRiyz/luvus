@@ -51,13 +51,14 @@ you clicked.
 | Gesture | What happens |
 |---|---|
 | **Click** | **previews** the file by default, or opens a tab — see [What a click does](#what-a-click-does) |
-| **Shift+click** | always opens the **read-only viewer** in a *permanent* pane beside the focus |
-| **Right-click** | **Open Preview**, read-only in a tab, or any editor you have installed |
+| **Shift+click** | when forwarded by the terminal, opens the **read-only viewer** in a *permanent* pane beside the focus |
+| **Right-click** | **Open in Tab**, or open in any editor you have installed |
 
-Shift+click is the fixed "keep this one open" gesture. It stays read-only
+Shift+click is an optional "keep this one open" shortcut. It stays read-only
 whatever the two settings below say, and unlike a preview it is never reused for
-the next file you click — which is what you want when you are reading a file
-next to a running agent.
+the next file you click. Some terminals reserve Shift-modified mouse input for
+native text selection, so the gesture may not reach Luvus; use **Open in Tab**
+from the right-click menu when you need a permanent view.
 
 ## What a click does
 
@@ -78,9 +79,6 @@ Choose **Open in tab** for the behavior clicks had before this setting existed:
 every plain click opens a tab and follows your **Open files with** choice, which
 means it can launch your terminal editor. Clicking a file that already has a tab
 focuses that tab.
-
-**Open Preview** is on the right-click menu in either mode, so one quick look is
-always available without changing the setting.
 
 ## The read-only viewer
 

@@ -479,8 +479,7 @@ pub(super) fn draw_diff_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
 /// workspace/pane menus — and editor names are proper nouns anyway).
 fn file_label(it: FileMenuItem, editors: &[(String, String)]) -> String {
     match it {
-        FileMenuItem::OpenPreview => "Open Preview".to_string(),
-        FileMenuItem::OpenReadonly => "Open (Read-Only)".to_string(),
+        FileMenuItem::OpenReadonly => "Open in Tab".to_string(),
         FileMenuItem::OpenWith(i) => editors
             .get(i)
             .map(|(_, label)| format!("Open in {label}"))
@@ -569,7 +568,7 @@ mod label_case_tests {
     fn the_title_case_check_rejects_sentence_case() {
         assert_eq!(offending_word("Open Task Board"), None);
         assert_eq!(offending_word("Fork to New Pane"), None);
-        assert_eq!(offending_word("Open (Read-Only)"), None);
+        assert_eq!(offending_word("Open in Tab"), None);
         assert_eq!(offending_word("Move to Tab ▸"), None);
         assert_eq!(offending_word("Open task board").as_deref(), Some("task"));
         assert_eq!(offending_word("Open (read-only)").as_deref(), Some("read"));
@@ -616,7 +615,6 @@ mod label_case_tests {
             rows.push(agent_label(it, cat, none));
         }
         for it in [
-            FileMenuItem::OpenPreview,
             FileMenuItem::OpenReadonly,
             FileMenuItem::OpenWith(0),
             FileMenuItem::NewFile,

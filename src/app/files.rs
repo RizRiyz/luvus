@@ -516,11 +516,6 @@ impl App {
         };
         match item {
             // Open actions target the clicked file (never a folder).
-            // Offered whatever `layout.file_click` says, so the preview is always
-            // one right-click away even for someone who clicks into tabs.
-            FileMenuItem::OpenPreview => {
-                self.open_file_view(menu.path.clone(), OpenTarget::Preview)
-            }
             FileMenuItem::OpenReadonly => self.open_file_view(menu.path.clone(), OpenTarget::Tab),
             FileMenuItem::OpenWith(i) => {
                 if let Some((cmd, _)) = menu.editors.get(i).cloned() {
@@ -1862,12 +1857,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// `Open Preview` is on the FILES context menu whatever the click behavior
-    /// is set to, and it opens the reusable preview rather than a tab.
+    /// The FILES context menu keeps one explicit native read-only tab action,
+    /// independent of the configured plain-click behavior.
     #[test]
-    fn the_files_menu_always_offers_open_preview() {
-        let _env = crate::persist::test_env("file-menu-preview");
-        let (mut app, _rx, root) = click_tree_app("menuprev", &["a.txt"]);
+    fn the_files_menu_opens_read_only_in_a_tab() {
+        let _env = crate::persist::test_env("file-menu-read-only-tab");
+        let (mut app, _rx, root) = click_tree_app("menutab", &["a.txt"]);
 
         for mode in [
             crate::config::FILE_CLICK_PREVIEW,
@@ -1877,19 +1872,16 @@ mod tests {
             let idx = row_index(&mut app, "a.txt");
             app.open_file_menu(idx, 1, 1);
             let items = app.file_menu.as_ref().expect("menu opened").build_items();
-            assert!(
-                items.first() == Some(&FileMenuItem::OpenPreview),
-                "Open Preview leads the file menu in {mode} mode"
-            );
+            assert!(items.first() == Some(&FileMenuItem::OpenReadonly));
         }
 
-        // And it really previews: one reused leaf, no new tab.
         let tabs_before = app.workspaces[app.active_ws].tabs.len();
-        app.file_menu_action_pub(FileMenuItem::OpenPreview);
-        let preview = app.layout().focus;
-        assert_eq!(shown(&app, preview), root.join("a.txt"));
-        assert!(app.preview_views.contains(&preview));
-        assert_eq!(app.workspaces[app.active_ws].tabs.len(), tabs_before);
+        app.file_menu_action_pub(FileMenuItem::OpenReadonly);
+        let opened = app.layout().focus;
+        assert_eq!(shown(&app, opened), root.join("a.txt"));
+        assert!(matches!(app.views.get(&opened), Some(ViewKind::File(_))));
+        assert!(!app.preview_views.contains(&opened));
+        assert_eq!(app.workspaces[app.active_ws].tabs.len(), tabs_before + 1);
 
         let _ = std::fs::remove_dir_all(&root);
     }
