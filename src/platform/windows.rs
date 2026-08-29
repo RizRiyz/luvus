@@ -303,22 +303,33 @@ impl ProcessSnapshot {
     }
 }
 
-pub(super) fn descendant_commands(roots: &[u32]) -> Option<HashMap<u32, Vec<String>>> {
+pub(super) fn pane_process_snapshot(
+    roots: &[u32],
+    include_trees: bool,
+    include_commands: bool,
+) -> Option<(
+    HashMap<u32, Vec<(u32, u16)>>,
+    Option<HashMap<u32, Vec<String>>>,
+)> {
     let mut snapshot = ProcessSnapshot::capture()?;
-    Some(
-        roots
-            .iter()
-            .copied()
-            .map(|root| {
-                let commands = snapshot
-                    .descendants(root)
-                    .into_iter()
-                    .map(|(pid, _)| snapshot.command(pid))
-                    .collect();
-                (root, commands)
-            })
-            .collect(),
-    )
+    let mut trees = HashMap::new();
+    let mut commands = include_commands.then(HashMap::new);
+    for &root in roots {
+        let nodes = snapshot.descendants(root);
+        if let Some(commands) = commands.as_mut() {
+            commands.insert(
+                root,
+                nodes
+                    .iter()
+                    .map(|(pid, _)| snapshot.command(*pid))
+                    .collect(),
+            );
+        }
+        if include_trees {
+            trees.insert(root, nodes);
+        }
+    }
+    Some((trees, commands))
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -400,19 +411,6 @@ fn trim_windows_cwd(path: &str) -> &str {
     }
 }
 
-pub(super) fn descendant_pid_trees(
-    roots: &[u32],
-) -> std::collections::HashMap<u32, Vec<(u32, u16)>> {
-    let Some(snapshot) = ProcessSnapshot::capture() else {
-        return std::collections::HashMap::new();
-    };
-    roots
-        .iter()
-        .copied()
-        .map(|root| (root, snapshot.descendants(root)))
-        .collect()
-}
-
 #[cfg(not(target_arch = "x86_64"))]
 pub(super) fn process_cwd(_pid: u32) -> Option<std::path::PathBuf> {
     None
@@ -479,7 +477,10 @@ mod tests {
             .args(["/C", "ping.exe -n 3 127.0.0.1 > nul"])
             .spawn()
             .expect("spawn cmd");
-        let commands = descendant_commands(&[child.id()]).expect("capture process tree");
+        let commands = pane_process_snapshot(&[child.id()], false, true)
+            .expect("capture process tree")
+            .1
+            .expect("command projection");
         let command = commands
             .get(&child.id())
             .and_then(|commands| commands.first())

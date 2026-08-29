@@ -483,6 +483,15 @@ impl App {
         {
             self.last_cwd_at = now;
             self.cwd_scan_inflight = true;
+            // Agent identity keeps its independent two-second cadence, but
+            // when its deadline lands on this CWD scan both projections share
+            // one OS process-table snapshot.
+            let include_processes = now.duration_since(self.last_proc_at) >= Duration::from_secs(2)
+                && !self.proc_scan_inflight;
+            if include_processes {
+                self.last_proc_at = now;
+                self.proc_scan_inflight = true;
+            }
             let panes: Vec<(PaneId, u32)> = self
                 .panes
                 .iter()
@@ -501,7 +510,8 @@ impl App {
             let tx = self.app_tx.clone();
             std::thread::spawn(move || {
                 let pids: Vec<u32> = panes.iter().map(|(_, pid)| *pid).collect();
-                let evidence = crate::platform::scan_pane_cwds(&pids);
+                let (evidence, processes) =
+                    crate::platform::scan_pane_runtime(&pids, include_processes);
                 let pane_results: Vec<(PaneId, crate::platform::PaneCwdEvidence)> = panes
                     .into_iter()
                     .zip(evidence)
@@ -518,6 +528,9 @@ impl App {
                     branches,
                     workspace_candidates,
                 });
+                if include_processes {
+                    let _ = tx.send(AppEvent::ProcScanned(processes));
+                }
             });
             // Keep the FILES dock rooted at the active node and its open dirs
             // read (docs/38). Off-loop: this only schedules reads, never blocks.

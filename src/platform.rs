@@ -464,45 +464,101 @@ fn ps_command_table() -> Option<PsTable> {
     Some((cmd, children))
 }
 
+type ProcessTrees = std::collections::HashMap<u32, Vec<(u32, u16)>>;
+type ProcessCommands = std::collections::HashMap<u32, Vec<String>>;
+
+/// Capture one bounded platform process table and project every requested pane
+/// root into descendant pid trees and, when requested, command lines. Keeping
+/// both projections behind this boundary lets periodic CWD and agent scans
+/// share the expensive OS snapshot without coupling their app-level cadence.
+#[cfg(unix)]
+fn pane_process_snapshot(
+    roots: &[u32],
+    include_trees: bool,
+    include_commands: bool,
+) -> (ProcessTrees, Option<ProcessCommands>) {
+    use std::collections::{HashMap, HashSet};
+    let Some((commands_by_pid, children)) = ps_table() else {
+        return (HashMap::new(), None);
+    };
+    let trees: ProcessTrees = if include_trees {
+        roots
+            .iter()
+            .copied()
+            .map(|root| {
+                let mut nodes = Vec::new();
+                let mut seen = HashSet::new();
+                let mut stack = vec![(root, 0_u16)];
+                while let Some((pid, depth)) = stack.pop() {
+                    if !seen.insert(pid) || nodes.len() >= 64 {
+                        continue;
+                    }
+                    nodes.push((pid, depth));
+                    if let Some(kids) = children.get(&pid) {
+                        for &child in kids.iter().rev() {
+                            stack.push((child, depth.saturating_add(1)));
+                        }
+                    }
+                }
+                (root, nodes)
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
+    let commands = include_commands.then(|| {
+        roots
+            .iter()
+            .copied()
+            .map(|root| {
+                // Preserve the command projection's established traversal
+                // order independently of the depth-first CWD projection.
+                let mut found = Vec::new();
+                let mut seen = HashSet::new();
+                let mut stack = vec![root];
+                while let Some(pid) = stack.pop() {
+                    if !seen.insert(pid) || found.len() >= 64 {
+                        continue;
+                    }
+                    if let Some(command) = commands_by_pid.get(&pid) {
+                        found.push(command.clone());
+                    }
+                    if let Some(kids) = children.get(&pid) {
+                        stack.extend(kids.iter().copied());
+                    }
+                }
+                (root, found)
+            })
+            .collect()
+    });
+    (trees, commands)
+}
+
+#[cfg(windows)]
+fn pane_process_snapshot(
+    roots: &[u32],
+    include_trees: bool,
+    include_commands: bool,
+) -> (ProcessTrees, Option<ProcessCommands>) {
+    windows::pane_process_snapshot(roots, include_trees, include_commands)
+        .unwrap_or_else(|| (ProcessTrees::new(), None))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn pane_process_snapshot(
+    _roots: &[u32],
+    _include_trees: bool,
+    _include_commands: bool,
+) -> (ProcessTrees, Option<ProcessCommands>) {
+    (ProcessTrees::new(), None)
+}
+
 /// Process identities running under each of `roots` (the root's own included),
 /// from one platform snapshot. This batched form lets agent detection cover
 /// every pane without one process-table operation per pane. `None` means the
 /// platform cannot tell.
-#[cfg(unix)]
-pub fn descendant_commands(roots: &[u32]) -> Option<std::collections::HashMap<u32, Vec<String>>> {
-    use std::collections::{HashMap, HashSet};
-    let (cmd, children) = ps_table()?;
-    let mut out: HashMap<u32, Vec<String>> = HashMap::new();
-    for &root in roots {
-        let mut found = Vec::new();
-        let mut seen = HashSet::new();
-        let mut stack = vec![root];
-        while let Some(pid) = stack.pop() {
-            // Same bounds as `process_tree`: a visited set survives pid reuse,
-            // and the cap stops a pathological tree from being unbounded work.
-            if !seen.insert(pid) || found.len() >= 64 {
-                continue;
-            }
-            if let Some(c) = cmd.get(&pid) {
-                found.push(c.clone());
-            }
-            if let Some(kids) = children.get(&pid) {
-                stack.extend(kids.iter().copied());
-            }
-        }
-        out.insert(root, found);
-    }
-    Some(out)
-}
-
-#[cfg(windows)]
-pub fn descendant_commands(roots: &[u32]) -> Option<std::collections::HashMap<u32, Vec<String>>> {
-    windows::descendant_commands(roots)
-}
-
-#[cfg(not(any(unix, windows)))]
-pub fn descendant_commands(_roots: &[u32]) -> Option<std::collections::HashMap<u32, Vec<String>>> {
-    None
+pub fn descendant_commands(roots: &[u32]) -> Option<ProcessCommands> {
+    pane_process_snapshot(roots, false, true).1
 }
 
 /// Every process running under `root` (inclusive), depth-first, newest branch
@@ -569,57 +625,30 @@ pub struct PaneCwdEvidence {
     pub descendant_git_root: Option<PathBuf>,
 }
 
-/// Resolve every pane root from **one** process-table snapshot. Git-root
-/// probes are cached per directory for this scan. Call off the app loop.
-pub fn scan_pane_cwds(roots: &[u32]) -> Vec<PaneCwdEvidence> {
+/// Resolve CWD evidence and, optionally, process identities from one platform
+/// snapshot. The optional command projection is used only when the independent
+/// agent-detection deadline coincides with this CWD scan.
+pub fn scan_pane_runtime(
+    roots: &[u32],
+    include_commands: bool,
+) -> (Vec<PaneCwdEvidence>, Option<ProcessCommands>) {
     let mut cache = std::collections::HashMap::new();
-    let trees = descendant_pid_trees(roots);
-    roots
+    let (trees, commands) = pane_process_snapshot(roots, true, include_commands);
+    let evidence = roots
         .iter()
         .map(|&root| {
             let nodes = trees.get(&root).map(Vec::as_slice).unwrap_or(&[]);
             evidence_from_tree(root, nodes, &mut cache)
         })
-        .collect()
+        .collect();
+    (evidence, commands)
 }
 
-fn descendant_pid_trees(roots: &[u32]) -> std::collections::HashMap<u32, Vec<(u32, u16)>> {
-    #[cfg(unix)]
-    {
-        use std::collections::{HashMap, HashSet};
-        let Some((_, children)) = ps_table() else {
-            return HashMap::new();
-        };
-        roots
-            .iter()
-            .map(|&root| {
-                let mut out = Vec::new();
-                let mut seen = HashSet::new();
-                let mut stack = vec![(root, 0u16)];
-                while let Some((pid, depth)) = stack.pop() {
-                    if !seen.insert(pid) || out.len() >= 64 {
-                        continue;
-                    }
-                    out.push((pid, depth));
-                    if let Some(kids) = children.get(&pid) {
-                        for &k in kids.iter().rev() {
-                            stack.push((k, depth.saturating_add(1)));
-                        }
-                    }
-                }
-                (root, out)
-            })
-            .collect()
-    }
-    #[cfg(windows)]
-    {
-        windows::descendant_pid_trees(roots)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = roots;
-        std::collections::HashMap::new()
-    }
+/// Resolve every pane root from **one** process-table snapshot. Git-root
+/// probes are cached per directory for this scan. Call off the app loop.
+#[cfg(test)]
+pub fn scan_pane_cwds(roots: &[u32]) -> Vec<PaneCwdEvidence> {
+    scan_pane_runtime(roots, false).0
 }
 
 fn evidence_from_tree(
@@ -851,6 +880,28 @@ mod tests {
         );
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn pane_runtime_scan_projects_cwd_and_commands_from_one_snapshot() {
+        let pid = std::process::id();
+        let (evidence, commands) = super::scan_pane_runtime(&[pid], true);
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].pid, pid);
+        assert!(
+            evidence[0].owner_cwd.is_some(),
+            "the current process cwd is visible"
+        );
+        let commands = commands.expect("the process table is supported");
+        assert!(
+            commands.get(&pid).is_some_and(|items| !items.is_empty()),
+            "the same snapshot includes the root command"
+        );
+
+        let (cwd_only, commands) = super::scan_pane_runtime(&[pid], false);
+        assert_eq!(cwd_only.len(), 1);
+        assert!(commands.is_none(), "command projection is demand-driven");
     }
 
     #[test]
