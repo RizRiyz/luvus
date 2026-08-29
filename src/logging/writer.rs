@@ -49,7 +49,21 @@ impl Record {
 pub(crate) struct Logger {
     role: Role,
     threshold: Option<Level>,
-    io_dropped: [AtomicU64; 2],
+    dropped: DropCounters,
+}
+
+struct DropCounters {
+    encode: [AtomicU64; 2],
+    io: [AtomicU64; 2],
+}
+
+impl DropCounters {
+    fn new() -> Self {
+        Self {
+            encode: array::from_fn(|_| AtomicU64::new(0)),
+            io: array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
 }
 
 impl Logger {
@@ -57,7 +71,7 @@ impl Logger {
         Self {
             role,
             threshold,
-            io_dropped: array::from_fn(|_| AtomicU64::new(0)),
+            dropped: DropCounters::new(),
         }
     }
 
@@ -71,36 +85,65 @@ impl Logger {
         if kind.level() > threshold || !self.role.permits(logger) {
             return;
         }
-        write_record(self.role, Record::new(kind, fields), &self.io_dropped);
+        write_record(self.role, Record::new(kind, fields), &self.dropped);
     }
 
     pub(crate) fn shutdown(&self) {}
 }
 
-fn write_record(role: Role, record: Record, io_dropped: &[AtomicU64; 2]) {
+fn write_record(role: Role, record: Record, dropped: &DropCounters) {
     let kind = record.logger(role);
+    let counter = index(kind);
     let Some(line) = encode(record, kind) else {
-        io_dropped[index(kind)].fetch_add(1, Ordering::Relaxed);
+        dropped.encode[counter].fetch_add(1, Ordering::Relaxed);
         return;
     };
-    let dropped_count = io_dropped[index(kind)].swap(0, Ordering::AcqRel);
-    let mut encoded = Vec::with_capacity(usize::from(dropped_count > 0) + 1);
-    if dropped_count > 0 {
-        let recovered = Record::new(
-            EventKind::LogWriteRecovered,
-            &[
-                Field::ErrorCode(super::SafeId::new("io").expect("static safe id")),
-                Field::Dropped(dropped_count),
-            ],
-        );
-        if let Some(recovered) = encode(recovered, kind) {
-            encoded.push(recovered);
-        }
+    let encode_count = dropped.encode[counter].swap(0, Ordering::AcqRel);
+    let io_count = dropped.io[counter].swap(0, Ordering::AcqRel);
+    let mut encoded =
+        Vec::with_capacity(usize::from(encode_count > 0) + usize::from(io_count > 0) + 1);
+    let encode_recovery = recovery_line(kind, "encode", encode_count);
+    let encode_recovery_pending = encode_recovery.is_some();
+    if let Some(recovery) = encode_recovery {
+        encoded.push(recovery);
+    } else if encode_count > 0 {
+        dropped.encode[counter].fetch_add(encode_count.saturating_add(1), Ordering::Relaxed);
+    }
+    let io_recovery = recovery_line(kind, "io", io_count);
+    let io_recovery_pending = io_recovery.is_some();
+    if let Some(recovery) = io_recovery {
+        encoded.push(recovery);
+    } else if io_count > 0 {
+        dropped.io[counter].fetch_add(io_count, Ordering::Relaxed);
+        dropped.encode[counter].fetch_add(1, Ordering::Relaxed);
     }
     encoded.push(line);
     if rotate::append_records(kind, &encoded).is_err() {
-        io_dropped[index(kind)].fetch_add(dropped_count.saturating_add(1), Ordering::Relaxed);
+        if encode_recovery_pending {
+            dropped.encode[counter].fetch_add(encode_count, Ordering::Relaxed);
+        }
+        if io_recovery_pending {
+            dropped.io[counter].fetch_add(io_count, Ordering::Relaxed);
+        }
+        dropped.io[counter].fetch_add(1, Ordering::Relaxed);
     }
+}
+
+fn recovery_line(kind: LoggerKind, error_code: &'static str, count: u64) -> Option<Vec<u8>> {
+    (count > 0).then(|| {
+        encode(
+            Record::new(
+                EventKind::LogWriteRecovered,
+                &[
+                    Field::ErrorCode(
+                        super::SafeId::new(error_code).expect("static safe identifier"),
+                    ),
+                    Field::Dropped(count),
+                ],
+            ),
+            kind,
+        )
+    })?
 }
 
 fn encode(record: Record, logger: LoggerKind) -> Option<Vec<u8>> {
@@ -216,25 +259,29 @@ mod tests {
         let dir = super::super::path::log_dir();
         std::fs::create_dir_all(dir.parent().expect("log dir has a session parent")).unwrap();
         std::fs::write(&dir, b"not a directory").unwrap();
-        let io_dropped = array::from_fn(|_| AtomicU64::new(0));
+        let dropped = DropCounters::new();
         write_record(
             Role::Server,
             Record::new(EventKind::ServerStart, &[]),
-            &io_dropped,
+            &dropped,
         );
         assert_eq!(
-            io_dropped[index(LoggerKind::Server)].load(Ordering::Relaxed),
+            dropped.io[index(LoggerKind::Server)].load(Ordering::Relaxed),
             1
+        );
+        assert_eq!(
+            dropped.encode[index(LoggerKind::Server)].load(Ordering::Relaxed),
+            0
         );
 
         std::fs::remove_file(&dir).unwrap();
         write_record(
             Role::Server,
             Record::new(EventKind::ServerReady, &[]),
-            &io_dropped,
+            &dropped,
         );
         assert_eq!(
-            io_dropped[index(LoggerKind::Server)].load(Ordering::Relaxed),
+            dropped.io[index(LoggerKind::Server)].load(Ordering::Relaxed),
             0
         );
         let text =
@@ -242,5 +289,25 @@ mod tests {
         assert!(text.contains("\"event\":\"log.write_recovered\""));
         assert!(text.contains("\"error_code\":\"io\""));
         assert!(text.contains("\"dropped\":1"));
+    }
+
+    #[test]
+    fn writer_reports_encode_recovery_separately_from_io() {
+        let _env = crate::persist::test_env("logging-encode-recovery");
+        let dropped = DropCounters::new();
+        dropped.encode[index(LoggerKind::Server)].store(2, Ordering::Relaxed);
+
+        write_record(
+            Role::Server,
+            Record::new(EventKind::ServerReady, &[]),
+            &dropped,
+        );
+
+        let text =
+            std::fs::read_to_string(super::super::path::log_path(LoggerKind::Server)).unwrap();
+        assert!(text.contains("\"event\":\"log.write_recovered\""));
+        assert!(text.contains("\"error_code\":\"encode\""));
+        assert!(text.contains("\"dropped\":2"));
+        assert!(!text.contains("\"error_code\":\"io\""));
     }
 }
