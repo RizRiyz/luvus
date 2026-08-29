@@ -1035,39 +1035,43 @@ impl Manifests {
     /// Pi intentionally ship the same `pi-coding-agent` package name under
     /// different owners.
     fn match_interpreter_script(&self, token: &str) -> Option<String> {
-        self.match_binary(binary_name(token)).or_else(|| {
-            let normalized = token.to_lowercase().replace('\\', "/");
-            let segments: Vec<&str> = normalized.split('/').collect();
-            let script = strip_script_extension(segments.last().copied()?);
+        let normalized = token.to_lowercase().replace('\\', "/");
+        let segments: Vec<&str> = normalized.split('/').collect();
+        let script = strip_script_extension(segments.last().copied()?);
+        let package = segments
+            .iter()
+            .rposition(|segment| *segment == "node_modules")
+            .and_then(|node_modules| {
+                let first = segments.get(node_modules + 1).copied()?;
+                if first.starts_with('@') {
+                    let basename = segments.get(node_modules + 2).copied()?;
+                    Some((format!("{first}/{basename}"), basename))
+                } else {
+                    Some((first.to_string(), first))
+                }
+            });
 
-            self.best_agent(|agent| agent.all().any(|pattern| pattern == script))
-                .map(|agent| agent.name.clone())
-                .or_else(|| {
-                    let node_modules = segments
+        package
+            .as_ref()
+            .and_then(|(package, _)| {
+                self.best_agent(|agent| {
+                    agent
+                        .interpreter_packages
                         .iter()
-                        .rposition(|segment| *segment == "node_modules")?;
-                    let package_index = node_modules + 1;
-                    let first = segments.get(package_index).copied()?;
-                    let (package, basename) = if first.starts_with('@') {
-                        let basename = segments.get(package_index + 1).copied()?;
-                        (format!("{first}/{basename}"), basename)
-                    } else {
-                        (first.to_string(), first)
-                    };
-                    self.best_agent(|agent| {
-                        agent
-                            .interpreter_packages
-                            .iter()
-                            .any(|pattern| pattern == &package)
-                    })
-                    .or_else(|| {
-                        self.best_agent(|agent| {
-                            agent.distinct.iter().any(|pattern| pattern == basename)
-                        })
-                    })
-                    .map(|agent| agent.name.clone())
+                        .any(|pattern| pattern == package)
                 })
-        })
+            })
+            .map(|agent| agent.name.clone())
+            .or_else(|| self.match_binary(binary_name(token)))
+            .or_else(|| {
+                self.best_agent(|agent| agent.all().any(|pattern| pattern == script))
+                    .map(|agent| agent.name.clone())
+            })
+            .or_else(|| {
+                let (_, basename) = package.as_ref()?;
+                self.best_agent(|agent| agent.distinct.iter().any(|pattern| pattern == basename))
+                    .map(|agent| agent.name.clone())
+            })
     }
 
     /// The agent whose patterns name exactly this binary.
@@ -1605,6 +1609,19 @@ mod tests {
         );
         assert_eq!(detection.agent, "omp");
         assert_eq!(detection.identity_source, "process_tree");
+
+        let omp_named_script = "/Users/me/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/bin/pi-coding-agent";
+        assert_eq!(
+            m.agent_in_processes(&[format!("node {omp_named_script}")]),
+            Some("omp".into()),
+            "the scoped package must win over Pi's shared script basename"
+        );
+        let pi_named_script =
+            "/Users/me/.nvm/lib/node_modules/@earendil-works/pi-coding-agent/bin/pi-coding-agent";
+        assert_eq!(
+            m.agent_in_processes(&[format!("node {pi_named_script}")]),
+            Some("pi".into())
+        );
     }
 
     #[test]

@@ -205,8 +205,8 @@ First choose the smallest correct support level:
 - A user or managed detection manifest can add identity and screen-state rules
   without recompiling Luvus. That agent is detection-only and must not silently
   gain session parsing, command execution, integrations, or skill installation.
-- Native discovery, resume, fork, usage, or an integration requires reviewed
-  built-in Rust code and an owning `src/agent/<agent>/` adapter.
+- Native discovery, resume, fork, usage, or an integration requires built-in
+  Rust code that has been reviewed and an owning `src/agent/<agent>/` adapter.
 - A module or external UHP reporter is preferable when the feature does not
   need trusted in-process access to an agent's private native store.
 

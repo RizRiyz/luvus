@@ -108,10 +108,13 @@ pub(crate) fn latest(base: &Path, cwd: &Path) -> Option<String> {
 pub(crate) fn recent(base: &Path, limit: usize, agent: &'static str) -> Vec<SessionInfo> {
     let mut output = Vec::new();
     for (cwd, chats) in project_directories(base) {
-        let Some((updated, path)) = files_in_directory(&chats).into_iter().next() else {
-            continue;
-        };
-        let Some(session_id) = read_session_id(&path) else {
+        let Some((updated, session_id)) =
+            files_in_directory(&chats)
+                .into_iter()
+                .find_map(|(updated, path)| {
+                    read_session_id(&path).map(|session_id| (updated, session_id))
+                })
+        else {
             continue;
         };
         output.push(SessionInfo {
@@ -124,4 +127,53 @@ pub(crate) fn recent(base: &Path, limit: usize, agent: &'static str) -> Vec<Sess
     output.sort_by_key(|session| std::cmp::Reverse(session.updated));
     output.truncate(limit);
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::{self, File, FileTimes};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use super::*;
+
+    #[test]
+    fn recent_skips_a_newer_invalid_session_file() {
+        let base = std::env::temp_dir().join(format!(
+            "luvus-chat-store-invalid-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let project = base.join("tmp/project");
+        let chats = project.join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        let cwd = base.join("workspace");
+        fs::write(
+            project.join(".project_root"),
+            cwd.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        let valid = chats.join("session-valid.jsonl");
+        let invalid = chats.join("session-invalid.jsonl");
+        fs::write(&valid, r#"{"sessionId":"valid-session"}"#).unwrap();
+        fs::write(&invalid, "incomplete").unwrap();
+        File::options()
+            .write(true)
+            .open(&valid)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)))
+            .unwrap();
+        File::options()
+            .write(true)
+            .open(&invalid)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(2)))
+            .unwrap();
+
+        let sessions = recent(&base, 10, "gemini");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "valid-session");
+        assert_eq!(sessions[0].cwd, cwd);
+
+        let _ = fs::remove_dir_all(base);
+    }
 }

@@ -53,16 +53,16 @@ fn strip_luvus(hooks: &mut ArrayOfTables) {
 fn install() -> Result<()> {
     let dir = config_dir();
     fs::create_dir_all(&dir)?;
+    let path = config_path();
+    let mut document: DocumentMut = match fs::read_to_string(&path) {
+        Ok(contents) => contents.parse()?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => DocumentMut::default(),
+        Err(error) => return Err(error.into()),
+    };
     let script = dir.join("luvus-agent-hook.sh");
     fs::write(&script, integration::agent_hook_script("kimi"))?;
     integration::set_executable(&script)?;
     let command = script.to_string_lossy().into_owned();
-
-    let path = config_path();
-    let mut document: DocumentMut = fs::read_to_string(&path)
-        .ok()
-        .and_then(|contents| contents.parse().ok())
-        .unwrap_or_default();
     let hooks = document
         .as_table_mut()
         .entry("hooks")

@@ -115,14 +115,14 @@ pub(crate) type ShellHookSpec = HookSpec;
 pub(crate) fn install_shell_hook_with_spec(agent: &str, spec: ShellHookSpec) -> Result<PathBuf> {
     fs::create_dir_all(&spec.dir)?;
     let script = spec.dir.join("luvus-agent-hook.sh");
-    fs::write(&script, agent_hook_script(agent))?;
-    set_executable(&script)?;
-
     let cfg_path = spec.dir.join(spec.file);
     let mut cfg: Value = match fs::read_to_string(&cfg_path) {
-        Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|_| json!({})),
-        Err(_) => json!({}),
+        Ok(contents) => serde_json::from_str(&contents)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(error) => return Err(error.into()),
     };
+    fs::write(&script, agent_hook_script(agent))?;
+    set_executable(&script)?;
     register_hook(
         &mut cfg,
         spec.event,
@@ -385,8 +385,59 @@ mod tests {
         assert_eq!(count, 1);
         assert!(is_installed("claude"));
 
+        let mut incomplete = settings;
+        incomplete["hooks"].as_object_mut().unwrap().remove("Stop");
+        fs::write(
+            tmp.join("settings.json"),
+            serde_json::to_string_pretty(&incomplete).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !is_installed("claude"),
+            "every required Claude hook must be present"
+        );
+
         std::env::remove_var("CLAUDE_CONFIG_DIR");
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn install_preserves_malformed_user_configs() {
+        let _env = crate::persist::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!(
+            "luvus-malformed-hooks-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let claude = root.join("claude");
+        let kimi = root.join("kimi");
+        fs::create_dir_all(&claude).unwrap();
+        fs::create_dir_all(&kimi).unwrap();
+        let invalid_json = "{ user config";
+        let invalid_toml = "[user\nsecret = 'keep-me'";
+        fs::write(claude.join("settings.json"), invalid_json).unwrap();
+        fs::write(kimi.join("config.toml"), invalid_toml).unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", &claude);
+        std::env::set_var("KIMI_CODE_HOME", &kimi);
+
+        assert!(install("claude").is_err());
+        assert!(install("kimi").is_err());
+        assert_eq!(
+            fs::read_to_string(claude.join("settings.json")).unwrap(),
+            invalid_json
+        );
+        assert_eq!(
+            fs::read_to_string(kimi.join("config.toml")).unwrap(),
+            invalid_toml
+        );
+        assert!(!claude.join("luvus-agent-hook.sh").exists());
+        assert!(!kimi.join("luvus-agent-hook.sh").exists());
+
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        std::env::remove_var("KIMI_CODE_HOME");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

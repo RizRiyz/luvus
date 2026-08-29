@@ -76,9 +76,11 @@ import droidMask from '../assets/icons/droid-mask.png';
 const GITHUB = 'https://github.com/RizRiyz/luvus';
 const X = 'https://x.com/luvusdev';
 
-// Curated public "works with" grid. Runtime recognition is authoritative in
-// `agent::registry`; this presentation list remains independent of detection.
-// `aider` and `droid` use lettermarks because they have no icon in assets/icons.
+// Curated public "works with" grid. Built-in descriptors live in
+// `agent::registry`, while `src/detect.rs` owns runtime identity and state.
+// This presentation list remains independent of both.
+// `droid` ships only a raster logo, so it renders through the CSS mask branch.
+// The `letter` lettermark branch is the fallback for an agent with no asset.
 const AGENTS = [
   { name: 'Claude Code', Icon: IconClaudeCode, hook: true },
   { name: 'Codex', Icon: IconCodex, hook: true },

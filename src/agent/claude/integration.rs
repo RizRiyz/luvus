@@ -49,7 +49,7 @@ fn uninstall() -> Result<()> {
 }
 
 fn is_installed() -> bool {
-    integration::shell_hook_installed(spec(), &[])
+    integration::shell_hook_installed(spec(), &["Notification", "Stop"])
 }
 
 fn legacy_is_installed() -> bool {
