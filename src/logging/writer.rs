@@ -10,8 +10,10 @@ use serde_json::{Map, Value};
 use super::redact::{EventKind, Field, Level, LoggerKind, Role, MAX_FIELDS};
 use super::{rotate, timestamp};
 
-const QUEUE_CAPACITY: usize = 256;
-const WRITER_STACK_BYTES: usize = 256 * 1024;
+// Logging is opt-in. Keep its explicitly enabled footprint small while retaining
+// enough room to absorb short lifecycle and UHP bursts without blocking callers.
+const QUEUE_CAPACITY: usize = 32;
+const WRITER_STACK_BYTES: usize = 128 * 1024;
 const MAX_RECORD_BYTES: usize = 4096;
 const MAX_BATCH: usize = 64;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(100);
@@ -292,6 +294,8 @@ mod tests {
     fn off_starts_no_writer_and_creates_no_directory() {
         let _env = crate::persist::test_env("logging-off");
         let logger = Logger::start(Role::Server, None);
+        assert!(logger.sender.is_none());
+        assert!(logger.handle.lock().unwrap().is_none());
         logger.event(EventKind::ServerStart, &[Field::Role(Role::Server)]);
         logger.shutdown();
         assert!(!super::super::path::log_dir().exists());

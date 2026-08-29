@@ -58,7 +58,12 @@ pub(crate) fn log_dir_writable() -> bool {
 }
 
 fn configured_level() -> Option<Level> {
-    match std::env::var("LUVUS_LOG")
+    let value = std::env::var("LUVUS_LOG").ok();
+    configured_level_value(value.as_deref())
+}
+
+fn configured_level_value(value: Option<&str>) -> Option<Level> {
+    match value
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase()
@@ -68,8 +73,11 @@ fn configured_level() -> Option<Level> {
         "error" => Some(Level::Error),
         "warn" => Some(Level::Warn),
         "debug" => Some(Level::Debug),
-        "" | "info" => Some(Level::Info),
-        _ => Some(Level::Info),
+        "info" => Some(Level::Info),
+        // Logging is opt-in so normal server and client processes reserve no
+        // queue or writer thread. Unknown values fail closed for the same
+        // reason instead of silently enabling background work.
+        _ => None,
     }
 }
 
@@ -78,9 +86,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unknown_level_is_info() {
-        std::env::set_var("LUVUS_LOG", "surprise");
-        assert_eq!(configured_level(), Some(Level::Info));
-        std::env::remove_var("LUVUS_LOG");
+    fn unset_level_disables_logging() {
+        assert_eq!(configured_level_value(None), None);
+        assert_eq!(configured_level_value(Some("")), None);
+        assert_eq!(configured_level_value(Some("off")), None);
+    }
+
+    #[test]
+    fn explicit_info_level_enables_logging() {
+        assert_eq!(configured_level_value(Some("info")), Some(Level::Info));
+        assert_eq!(configured_level_value(Some(" DEBUG ")), Some(Level::Debug));
+    }
+
+    #[test]
+    fn unknown_level_disables_logging() {
+        assert_eq!(configured_level_value(Some("surprise")), None);
     }
 }
