@@ -451,6 +451,37 @@ impl VtEngine for AlacrittyEngine {
         out
     }
 
+    fn detection_text_non_empty(&self, n: u16) -> String {
+        let grid = self.term.grid();
+        let rows = grid.screen_lines();
+        let cols = grid.columns();
+        let mut selected = Vec::with_capacity(usize::from(n).min(rows));
+        for r in (0..rows).rev() {
+            let row = &grid[Line(r as i32)];
+            let mut line = String::with_capacity(cols);
+            for c in 0..cols {
+                let cell = &row[Column(c)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                line.push(if cell.c == '\0' { ' ' } else { cell.c });
+                if let Some(zerowidth) = cell.zerowidth() {
+                    line.extend(zerowidth);
+                }
+            }
+            let line = line.trim_end();
+            if line.is_empty() {
+                continue;
+            }
+            selected.push(line.to_string());
+            if selected.len() == usize::from(n) {
+                break;
+            }
+        }
+        selected.reverse();
+        selected.join("\n")
+    }
+
     fn visible_rows(&self) -> Vec<String> {
         // Same offset shift as `for_each_cell` — these are the rows the user can
         // see, so a selection made while scrolled back must copy the history
@@ -1413,6 +1444,22 @@ mod tests {
                 e.scroll_offset()
             );
         }
+    }
+
+    #[test]
+    fn non_empty_detection_reaches_prompts_above_blank_footer_rows() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(60, 8, tx, budget_for_rows(60, 2_000));
+        engine.advance(b"Hermes needs your approval\r\nEnter to confirm");
+
+        assert!(
+            engine.detection_text(2).trim().is_empty(),
+            "the ordinary two-row window is the blank terminal footer"
+        );
+        assert_eq!(
+            engine.detection_text_non_empty(2),
+            "Hermes needs your approval\nEnter to confirm"
+        );
     }
 
     #[test]

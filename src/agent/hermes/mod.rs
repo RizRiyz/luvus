@@ -7,6 +7,7 @@
 
 use super::types::{AgentDescriptor, DiscoveryOperations, IdentityDescriptor, SessionOperations};
 
+mod integration;
 pub(in crate::agent) mod sessions;
 
 pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
@@ -34,5 +35,5 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         // document an external command that safely forks a stored session.
         fork: None,
     }),
-    integration: None,
+    integration: Some(integration::OPERATIONS),
 };

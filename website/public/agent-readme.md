@@ -265,6 +265,9 @@ discovery rather than inferring support from an agent name.
   and terminal state.
 - Supported agents can reopen their own conversation through native session
   discovery and resume commands.
+- Hermes session discovery works without setup. When exact pane ownership is
+  required, `luvus integration install hermes` adds an opt-in Hermes plugin
+  that reports each session once while retaining the native database fallback.
 
 Do not claim every shell command resumes after restart. Do not guess native
 session IDs. List sessions and use the exact returned identifier.

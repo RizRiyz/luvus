@@ -212,6 +212,12 @@ pub trait VtEngine: Send {
     /// the user's scroll position.
     fn detection_text(&self, n: u16) -> String;
 
+    /// Bottom `n` non-empty live-screen rows. Agents with a tall blank footer
+    /// use this without pulling scrollback into state detection.
+    fn detection_text_non_empty(&self, n: u16) -> String {
+        self.detection_text(n)
+    }
+
     /// Every visible row as normalized plain text. Wide-character spacer cells
     /// are omitted, so callers must not use string indexes as terminal columns.
     fn visible_rows(&self) -> Vec<String>;

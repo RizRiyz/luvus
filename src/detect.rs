@@ -158,6 +158,8 @@ enum Cond {
     All(Vec<String>),
     /// The region contains none of these substrings.
     Not(Vec<String>),
+    /// The region starts with one of these values.
+    StartsWith(Vec<String>),
     /// A line in the region starts with a spinner glyph — a braille cell
     /// (U+2800..=U+28FF, what most CLIs animate) or a moon phase (U+1F311..=
     /// U+1F318, Kimi's background-agent spinner). A running spinner means work.
@@ -170,6 +172,7 @@ impl Cond {
             Cond::Any(subs) => subs.iter().any(|s| low.contains(s)),
             Cond::All(subs) => subs.iter().all(|s| low.contains(s)),
             Cond::Not(subs) => !subs.iter().any(|s| low.contains(s)),
+            Cond::StartsWith(prefixes) => prefixes.iter().any(|prefix| low.starts_with(prefix)),
             Cond::Spinner => low
                 .lines()
                 .any(|l| l.trim_start().chars().next().is_some_and(is_spinner_glyph)),
@@ -302,6 +305,9 @@ fn any(subs: &[&str]) -> Cond {
 fn all(subs: &[&str]) -> Cond {
     Cond::All(subs.iter().map(|s| s.to_lowercase()).collect())
 }
+fn starts_with(prefixes: &[&str]) -> Cond {
+    Cond::StartsWith(prefixes.iter().map(|value| value.to_lowercase()).collect())
+}
 
 /// How much of the live terminal grid must reach the rule engine. Most agents
 /// keep state beside their bottom prompt, but fx can pin its transient activity
@@ -313,6 +319,14 @@ pub(crate) fn screen_rows(known_agent: &str, running: &[String], manifests: &Man
     } else {
         14
     }
+}
+
+pub(crate) fn screen_uses_non_empty_rows(
+    known_agent: &str,
+    running: &[String],
+    manifests: &Manifests,
+) -> bool {
+    known_agent.eq_ignore_ascii_case("hermes") || manifests.process_has_agent(running, "hermes")
 }
 
 /// The compiled-in default rules (generic first, then per-agent).
@@ -538,16 +552,22 @@ fn builtin_rules() -> Vec<Rule> {
             State::Blocked,
             325,
             Region::Title,
-            vec![any(&["⚠"])],
+            vec![starts_with(&["⚠"])],
         ),
         per(
             "hermes",
             State::Working,
             125,
             Region::Title,
-            vec![any(&["⏳"])],
+            vec![starts_with(&["⏳"])],
         ),
-        per("hermes", State::Idle, 210, Region::Title, vec![any(&["✓"])]),
+        per(
+            "hermes",
+            State::Idle,
+            210,
+            Region::Title,
+            vec![starts_with(&["✓"])],
+        ),
         // Require both a Hermes interaction label and its controls. Matching
         // either half alone would turn ordinary transcript prose into a false
         // blocked state.
@@ -572,7 +592,12 @@ fn builtin_rules() -> Vec<Rule> {
             315,
             Region::Screen,
             vec![
-                any(&["hermes needs your", "type your answer", "other (type"]),
+                any(&[
+                    "hermes needs your",
+                    "type your answer",
+                    "other (type",
+                    "ask ",
+                ]),
                 any(&[
                     "enter confirm",
                     "enter to confirm",
@@ -580,6 +605,7 @@ fn builtin_rules() -> Vec<Rule> {
                     "press enter",
                     "↑/↓ select",
                     "↑/↓ to select",
+                    "other (type",
                 ]),
             ],
         ),
@@ -605,8 +631,8 @@ fn builtin_rules() -> Vec<Rule> {
             315,
             Region::Screen,
             vec![
-                any(&["sudo password", "skill setup"]),
-                any(&["password", "press enter", "enter confirm"]),
+                any(&["sudo password", "skill setup", "🔑"]),
+                any(&["password", "press enter", "enter confirm", "for "]),
             ],
         ),
         per(
@@ -614,7 +640,11 @@ fn builtin_rules() -> Vec<Rule> {
             State::Working,
             125,
             Region::Screen,
-            vec![any(&["msg=interrupt", "ctrl+c cancel"])],
+            vec![any(&[
+                "msg=interrupt",
+                "ctrl+c cancel",
+                "ctrl+c to interrupt",
+            ])],
         ),
         // Muse question, trust, and approval overlays. These paired controls
         // outrank its generic `esc to interrupt` working hint, including the
@@ -1480,6 +1510,11 @@ mod tests {
         assert_eq!(detect("⏳ Hermes", ""), State::Working);
         assert_eq!(detect("⚠ Hermes", ""), State::Blocked);
         assert_eq!(
+            detect("Hermes status ✓", ""),
+            State::Idle,
+            "an incidental marker later in the title is not state authority"
+        );
+        assert_eq!(
             detect("✓ Hermes", "Ctrl+C to interrupt"),
             State::Idle,
             "the current title wins over a retained interrupt hint"
@@ -1502,6 +1537,12 @@ mod tests {
             detect("Hermes", "running tool · msg=interrupt"),
             State::Working
         );
+        assert_eq!(
+            detect("Hermes", "Ask repository owner\nOther (type answer)"),
+            State::Blocked
+        );
+        assert_eq!(detect("Hermes", "🔑 API key for provider"), State::Blocked);
+        assert_eq!(detect("Hermes", "Ctrl+C to interrupt"), State::Working);
         assert_eq!(
             detect("Hermes", "documentation about dangerous command approval"),
             State::Idle,

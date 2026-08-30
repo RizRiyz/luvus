@@ -30,6 +30,7 @@ static INTEGRATIONS: &[&AgentDescriptor] = &[
     &super::opencode::DESCRIPTOR,
     &super::kimi::DESCRIPTOR,
     &super::grok::DESCRIPTOR,
+    &super::hermes::DESCRIPTOR,
     &super::omp::DESCRIPTOR,
 ];
 

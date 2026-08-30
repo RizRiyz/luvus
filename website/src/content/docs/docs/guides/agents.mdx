@@ -195,7 +195,7 @@ Screen-based detection needs no setup and works for everything. The optional
 lifecycle events (permission prompt raised, turn ended) into luvus:
 
 ```sh
-luvus integration install claude    # or: copilot · codex · opencode · kimi · grok · omp
+luvus integration install claude    # or: copilot · codex · opencode · kimi · grok · hermes · omp
 ```
 
 or toggle it in **Settings → Integrations**. What it does per agent:
@@ -207,6 +207,10 @@ or toggle it in **Settings → Integrations**. What it does per agent:
   place so your API keys, comments, and own hooks are left untouched.
 - **grok**: installs its own hook file without editing Grok's authentication
   configuration.
+- **hermes**: installs an opt-in plugin under the active `HERMES_HOME`. It
+  reports an exact session id once per session while the read-only SQLite
+  adapter remains the zero-setup fallback. Luvus preserves unrelated YAML
+  settings and removes only its own plugin entry on uninstall.
 - **omp**: installs one managed TypeScript extension in OMP's active agent
   directory. It reports exact session identity and authoritative
   idle/working/blocked/done transitions while preserving Luvus's native

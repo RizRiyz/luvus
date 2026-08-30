@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use rusqlite::{Connection, OpenFlags};
@@ -8,6 +9,29 @@ use super::super::SessionInfo;
 
 const MAX_QUERY_ROWS: usize = 256;
 
+#[derive(Clone, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct DatabaseStamp {
+    database: FileStamp,
+    wal: Option<FileStamp>,
+}
+
+struct RowsCache {
+    path: PathBuf,
+    stamp: DatabaseStamp,
+    rows: Vec<SessionInfo>,
+}
+
+static ROWS_CACHE: OnceLock<Mutex<Option<RowsCache>>> = OnceLock::new();
+
+#[cfg(test)]
+static DATABASE_OPENS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 pub(in crate::agent) fn base() -> PathBuf {
     std::env::var_os("HERMES_HOME")
         .filter(|value| !value.is_empty())
@@ -15,16 +39,36 @@ pub(in crate::agent) fn base() -> PathBuf {
         .unwrap_or_else(|| super::super::home().join(".hermes"))
 }
 
-fn open_database(base: &Path) -> Option<Connection> {
-    let path = base.join("state.db");
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let metadata = path.metadata().ok()?;
+    metadata.is_file().then(|| FileStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+fn database_stamp(path: &Path) -> Option<DatabaseStamp> {
+    Some(DatabaseStamp {
+        database: file_stamp(path)?,
+        // SQLite may keep new rows exclusively in the WAL, leaving the main
+        // database unchanged. Include it so a new Hermes session cannot be
+        // hidden behind a stale cache entry.
+        wal: file_stamp(&path.with_file_name("state.db-wal")),
+    })
+}
+
+fn open_database(path: &Path) -> Option<Connection> {
     if !path.is_file() {
         return None;
     }
-    Connection::open_with_flags(
+    let connection = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .ok()
+    .ok()?;
+    #[cfg(test)]
+    DATABASE_OPENS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Some(connection)
 }
 
 fn session_columns(connection: &Connection) -> Option<HashSet<String>> {
@@ -63,18 +107,14 @@ fn safe_session_id(session_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-fn rows(base: &Path, limit: usize) -> Vec<SessionInfo> {
-    let Some(connection) = open_database(base) else {
-        return Vec::new();
-    };
-    let Some(columns) = session_columns(&connection) else {
-        return Vec::new();
-    };
+fn load_rows(path: &Path) -> Option<Vec<SessionInfo>> {
+    let connection = open_database(path)?;
+    let columns = session_columns(&connection)?;
     if !["id", "source", "cwd", "started_at"]
         .iter()
         .all(|column| columns.contains(*column))
     {
-        return Vec::new();
+        return None;
     }
 
     let timestamp = timestamp_expression(&columns);
@@ -89,30 +129,76 @@ fn rows(base: &Path, limit: usize) -> Vec<SessionInfo> {
          WHERE source = 'cli' AND cwd IS NOT NULL AND TRIM(cwd) <> '' {visibility} \
          ORDER BY activity DESC, started_at DESC, id DESC LIMIT ?1"
     );
-    let Ok(mut statement) = connection.prepare(&sql) else {
-        return Vec::new();
-    };
-    let Ok(found) = statement.query_map([limit.min(MAX_QUERY_ROWS) as i64], |row| {
-        let id: String = row.get(0)?;
-        let cwd: String = row.get(1)?;
-        let timestamp: f64 = row.get(2)?;
-        Ok((id, cwd, timestamp))
-    }) else {
-        return Vec::new();
-    };
-
-    found
-        .filter_map(Result::ok)
-        .filter_map(|(session_id, cwd, timestamp)| {
-            let cwd = PathBuf::from(cwd);
-            (safe_session_id(&session_id) && cwd.is_absolute()).then_some(SessionInfo {
-                agent: "hermes".to_string(),
-                session_id,
-                cwd,
-                updated: system_time(timestamp)?,
-            })
+    let mut statement = connection.prepare(&sql).ok()?;
+    let found = statement
+        .query_map([MAX_QUERY_ROWS as i64], |row| {
+            let id: String = row.get(0)?;
+            let cwd: String = row.get(1)?;
+            let timestamp: f64 = row.get(2)?;
+            Ok((id, cwd, timestamp))
         })
-        .collect()
+        .ok()?;
+
+    Some(
+        found
+            .filter_map(Result::ok)
+            .filter_map(|(session_id, cwd, timestamp)| {
+                let cwd = PathBuf::from(cwd);
+                (safe_session_id(&session_id) && cwd.is_absolute()).then_some(SessionInfo {
+                    agent: "hermes".to_string(),
+                    session_id,
+                    cwd,
+                    updated: system_time(timestamp)?,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn cached_rows(path: &Path, stamp: &DatabaseStamp, limit: usize) -> Option<Vec<SessionInfo>> {
+    let cache = ROWS_CACHE.get_or_init(|| Mutex::new(None)).lock().ok()?;
+    cache
+        .as_ref()
+        .filter(|entry| entry.path == path && &entry.stamp == stamp)
+        .map(|entry| {
+            entry
+                .rows
+                .iter()
+                .take(limit.min(MAX_QUERY_ROWS))
+                .cloned()
+                .collect()
+        })
+}
+
+fn cache_rows(path: &Path, stamp: DatabaseStamp, rows: &[SessionInfo]) {
+    if let Ok(mut cache) = ROWS_CACHE.get_or_init(|| Mutex::new(None)).lock() {
+        *cache = Some(RowsCache {
+            path: path.to_path_buf(),
+            stamp,
+            rows: rows.to_vec(),
+        });
+    }
+}
+
+fn rows(base: &Path, limit: usize) -> Vec<SessionInfo> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let path = base.join("state.db");
+    let Some(stamp) = database_stamp(&path) else {
+        return Vec::new();
+    };
+    if let Some(rows) = cached_rows(&path, &stamp, limit) {
+        return rows;
+    }
+    let Some(mut rows) = load_rows(&path) else {
+        // A busy or partially replaced database is retried on the next bounded
+        // scan instead of turning a transient failure into a sticky cache hit.
+        return Vec::new();
+    };
+    cache_rows(&path, stamp, &rows);
+    rows.truncate(limit.min(MAX_QUERY_ROWS));
+    rows
 }
 
 pub(in crate::agent) fn list(base: &Path, cwd: &Path) -> Vec<String> {
@@ -226,6 +312,7 @@ mod tests {
         );
 
         assert_eq!(list(&root, &app), ["newer", "older"]);
+        let opens = DATABASE_OPENS.load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(latest(&root, &app).as_deref(), Some("newer"));
         let found = recent(&root, 10);
         assert_eq!(found.len(), 2, "one newest session per workspace");
@@ -235,6 +322,11 @@ mod tests {
             recent(&root, usize::MAX).len(),
             2,
             "caller limits larger than the query bound remain safe"
+        );
+        assert_eq!(
+            DATABASE_OPENS.load(std::sync::atomic::Ordering::Relaxed),
+            opens,
+            "an unchanged Hermes database reuses the bounded row cache"
         );
 
         fs::remove_dir_all(root).unwrap();

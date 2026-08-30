@@ -92,6 +92,31 @@ mod socket_api_tests {
     }
 
     #[test]
+    fn settled_working_pane_waits_for_output_instead_of_polling_forever() {
+        let (_env, mut app) = app("settled-working-cadence");
+        let pane = app.layout().focus;
+        let now = Instant::now();
+        app.last_detect_at = now - DETECTION_INTERVAL;
+        app.last_detection_audit_at = now;
+        let status = app.status.get_mut(&pane).unwrap();
+        status.force_detect = false;
+        status.state = State::Working;
+        status.candidate = State::Working;
+        status.last_activity = now - ACTIVITY_WINDOW - QUIET_DWELL - Duration::from_secs(1);
+
+        let considered = app.detection_panes_considered;
+        app.detect_tick(now);
+        assert_eq!(
+            app.detection_panes_considered, considered,
+            "unchanged working panes do not force a permanent 100 ms poll"
+        );
+
+        assert!(app.handle_event(AppEvent::PtyData(pane)));
+        app.detect_tick(now + DETECTION_INTERVAL);
+        assert_eq!(app.detection_panes_considered, considered + 1);
+    }
+
+    #[test]
     fn hidden_pty_title_change_is_a_presentation_invalidation() {
         let (_env, mut app) = app("hidden-title-invalidation");
         let hidden = app.layout().focus;
@@ -652,8 +677,10 @@ impl App {
                     || self.status.get(id).is_some_and(|status| {
                         status.force_detect
                             || status.candidate != status.state
-                            || status.state == State::Working
                             || status.agent_report.is_some()
+                            || (status.state == State::Working
+                                && now.saturating_duration_since(status.last_activity)
+                                    < ACTIVITY_WINDOW + QUIET_DWELL)
                     })
             })
             .collect();
@@ -703,15 +730,31 @@ impl App {
                 .status
                 .get(&id)
                 .and_then(|status| status.agent_report.clone());
-            let detection_rows = detect::screen_rows(
-                self.status
-                    .get(&id)
-                    .map(|status| status.agent.as_str())
-                    .unwrap_or(""),
-                self.proc_commands
-                    .get(&id)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
+            let known_agent = self
+                .status
+                .get(&id)
+                .map(|status| {
+                    if self.manifests.is_agent(&status.agent) {
+                        status.agent.clone()
+                    } else {
+                        status
+                            .agent_session
+                            .as_ref()
+                            .map(|session| session.agent.clone())
+                            .unwrap_or_default()
+                    }
+                })
+                .unwrap_or_default();
+            let running_for_detection = self
+                .proc_commands
+                .get(&id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let detection_rows =
+                detect::screen_rows(&known_agent, running_for_detection, &self.manifests);
+            let non_empty_rows = detect::screen_uses_non_empty_rows(
+                &known_agent,
+                running_for_detection,
                 &self.manifests,
             );
             let (last_generation, force_detect) = self
@@ -728,10 +771,15 @@ impl App {
                     Ok(engine) => {
                         let generation = engine.output_generation();
                         if force_detect || last_generation != Some(generation) {
+                            let text = if non_empty_rows {
+                                engine.detection_text_non_empty(detection_rows)
+                            } else {
+                                engine.detection_text(detection_rows)
+                            };
                             Some((
                                 generation,
                                 engine.title().map(Arc::<str>::from),
-                                Arc::<str>::from(engine.detection_text(detection_rows)),
+                                Arc::<str>::from(text),
                             ))
                         } else {
                             None
@@ -777,20 +825,7 @@ impl App {
             // What this pane is already known to be: the last resolved agent, or
             // the one a hook/disk-discovery bound to it. Keeps identity stable
             // across frames where the agent's UI doesn't show its own name.
-            let known = self
-                .status
-                .get(&id)
-                .map(|s| {
-                    if self.manifests.is_agent(&s.agent) {
-                        s.agent.clone()
-                    } else {
-                        s.agent_session
-                            .as_ref()
-                            .map(|a| a.agent.clone())
-                            .unwrap_or_default()
-                    }
-                })
-                .unwrap_or_default();
+            let known = known_agent;
             // Ground truth for identity, when the last scan could see this pane.
             let running = self
                 .proc_commands

@@ -52,6 +52,11 @@ description: What luvus supports per agent, covering live status, session resume
   file is edited. Named profiles, `PI_CODING_AGENT_DIR`, `PI_CONFIG_DIR`, and
   OMP's XDG session store remain supported.
 
+  Hermes installs `~/.hermes/plugins/luvus-agent-state`, or the equivalent
+  directory under `HERMES_HOME`, and enables only that plugin in
+  `config.yaml`. Its callbacks report each exact CLI session once. Native
+  read-only database discovery continues to work when the plugin is absent.
+
 Hermes CLI sessions are discovered read-only from the active
 `$HERMES_HOME/state.db`, or `~/.hermes/state.db` when `HERMES_HOME` is unset.
 Luvus resumes them with `hermes --resume <id>`. Hermes currently exposes
