@@ -238,8 +238,11 @@ behavior** choice:
   built-in read-only viewer, or your terminal editor if you set one.
 
 **`Ctrl`+`Shift`+click** opens a permanent pane beside the focus instead, the
-same as `Shift`+click on a FILES row. Either way, `path:42` still lands on
-line 42.
+same as `Shift`+click on a FILES row.
+
+`path:42` preserves the requested line in Preview, permanent-pane and built-in
+read-only tab placements. A configured terminal editor opens the file at the
+top, because line-jump arguments differ between editors.
 
 **A path only underlines if the file is really there.** Paths are resolved against
 that pane's working directory, so `src/main.rs` means what it means to the shell

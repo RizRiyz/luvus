@@ -337,17 +337,24 @@ impl App {
         }
     }
 
-    /// Open a path activated from a pane (docs/58) at `target`, jumping to
-    /// `line`. `Tab` is [`open_file_at`](Self::open_file_at): the configured
-    /// viewer, editor included. `Preview` and `Pane` mirror the FILES gestures
-    /// they share a name with and stay in the native viewer, so a `Ctrl`+click
-    /// under the default click behavior lands beside the pane that printed the
-    /// path instead of in a tab that hides it.
+    /// Open a path activated from a pane (docs/58) at `target`. `Tab` is
+    /// [`open_file_at`](Self::open_file_at): the configured viewer, editor
+    /// included. `Preview` and `Pane` mirror the FILES gestures they share a
+    /// name with and stay in the native viewer, so a `Ctrl`+click under the
+    /// default click behavior lands beside the pane that printed the path
+    /// instead of in a tab that hides it.
     ///
-    /// The line lands on whichever view `open_file_view` left focused — the one
-    /// it opened, the preview it recycled, or the permanent view it deferred
-    /// to — checked against `path` so a reused leaf that is still loading
-    /// something else is never scrolled.
+    /// `line` is honored in every placement that ends in a native view. It is
+    /// **not** honored by a configured terminal editor: `open_file_at`
+    /// deliberately does not pass it on, because the flag for starting at a
+    /// line differs per editor and guessing it wrong is worse than not
+    /// jumping. So a `Tab` target preserves the line only when `Open files
+    /// with` is the built-in read-only viewer.
+    ///
+    /// Where it is honored, the line lands on whichever view `open_file_view`
+    /// left focused — the one it opened, the preview it recycled, or the
+    /// permanent view it deferred to — checked against `path` so a reused leaf
+    /// that is still loading something else is never scrolled.
     pub fn open_file_link(&mut self, path: PathBuf, line: Option<u32>, target: OpenTarget) {
         if target == OpenTarget::Tab {
             self.open_file_at(path, line);
