@@ -111,5 +111,12 @@ in-memory, expiring token when a harness needs narrower access:
 Supply the returned secret in `auth`. Use `uhp.token.list` and
 `uhp.token.revoke` to manage it. Never log the secret.
 
+For a provider or client that must work beyond the owner-only local endpoint,
+use `luvus uhp access`. It creates a scoped loopback gateway, emits a versioned
+machine-readable descriptor, and keeps transport outside Luvus core. See
+[Connecting UHP transports and clients](/docs/guides/uhp-access/).
+
 Continue with the [UHP reference](/docs/reference/uhp/) and
-[UHP method reference](/docs/reference/api/).
+[UHP method reference](/docs/reference/api/). For opt-in browser inspection,
+see [Experimental Web Access](/docs/guides/web-access/). That Tailcat/WASM flow
+is a reference adapter, not a UHP requirement.

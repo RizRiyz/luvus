@@ -300,6 +300,38 @@ owner-only Unix socket on macOS and Linux or owner-restricted named pipe on
 Windows. Luvus does not open a public TCP listener. `luvus uhp proxy` is the
 bounded, transport-neutral one-request bridge.
 
+For a persistent third-party transport or client, `luvus uhp access` emits one
+machine-readable descriptor for a scoped loopback gateway and remains in the
+foreground. It does not start Tailcat, WASM, SSH, or any other provider. Forward
+the endpoint only through an authenticated encrypted byte stream, pair once,
+then discover live capabilities. `--control` requires the user's explicit
+authorization and remains limited by the gateway allowlist.
+
+The Tailcat/WASM browser is an optional reference adapter and an explicit
+foreground action:
+
+```sh
+luvus web
+```
+
+It creates a one-use pairing code and a 30-minute read-only UHP token behind an
+encrypted Tailcat tunnel. The web gateway rejects mutations and remote token
+management, never exposes the owner-only local endpoint, and stops without
+stopping panes. Do not persist or relay the displayed address, port, pairing
+code, or token.
+
+Limited control requires a separate explicit host command:
+
+```sh
+luvus web --control
+```
+
+It expires after 15 minutes and permits only `workspace.focus`, `tab.focus`,
+`pane.focus`, `agent.prompt`, and a leased `terminal.backend.control` stream for
+an existing terminal. The stream accepts bounded text and reviewed logical
+keys. It does not expose one-shot raw pane methods or let the browser start,
+close, fork, resume, delete, or elevate authority.
+
 ## Remote use
 
 ```sh

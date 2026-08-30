@@ -1,0 +1,110 @@
+---
+title: Experimental Web Access
+description: Inspect or explicitly control a native Luvus session through scoped UHP and an encrypted Tailcat tunnel.
+---
+
+:::caution[Experimental]
+Web Access is an opt-in preview. Plain `luvus web` is read-only. The separate
+`--control` option can focus existing UI targets, prompt an existing agent, and
+interact with an existing terminal. These actions can run commands or change
+files with the host user's authority.
+:::
+
+Luvus Web is a reference adapter over the transport-neutral
+[`luvus uhp access` boundary](/docs/guides/uhp-access/). A small foreground
+gateway authenticates remote requests, then forwards allowed UHP reads or
+explicitly allowlisted control calls to the selected native Luvus server.
+Tailcat encrypts and relays the
+connection without opening a public TCP port on the host.
+
+## Requirements
+
+- a running Luvus server;
+- the exact reviewed `tailcat` v0.2.0 binary available on `PATH`;
+- a supported browser at the HTTPS connection page;
+- outbound WebSocket access to a Tailcat DERP relay.
+
+Luvus does not download or update Tailcat. The command rejects any other
+Tailcat version so a transport update receives an explicit compatibility and
+security review first.
+
+## Connect
+
+Run this in a normal shell on the Luvus host:
+
+```sh
+luvus web
+```
+
+The foreground command shows a browser URL, Tailcat address, port, and one-use
+pairing code. Enter all three values on the connection page. Keep the command
+running while the browser is connected.
+
+The pairing code:
+
+- contains 60 bits of operating-system randomness;
+- expires after five minutes;
+- works once;
+- stops working after five failed attempts.
+
+Browser authority is an in-memory UHP `read` token that expires after 30
+minutes. Ctrl-C closes the private gateway, terminates the exact Tailcat child,
+and revokes the token. Luvus, its server, panes, PTYs, and agents remain alive.
+
+## What the browser can read
+
+The client discovers live UHP capabilities and displays the named session,
+workspaces, tabs, panes, and detected agents. It subscribes to sequenced events,
+refreshes after changes or an event gap, and can open a bounded, plain-text live
+view of an existing terminal.
+
+The gateway accepts methods advertised as read-only by the running server,
+including `terminal.backend.observe`, while remote token management remains
+blocked. Every request must carry the short-lived token; omitting `auth` never
+inherits the local owner's authority.
+
+## Limited control
+
+Start control mode explicitly:
+
+```sh
+luvus web --control
+```
+
+Its delegated token expires after 15 minutes and grants only the scopes needed
+for a strict gateway allowlist:
+
+- `workspace.focus`;
+- `tab.focus`;
+- `pane.focus`;
+- `agent.prompt` for an already detected agent;
+- `terminal.backend.control` for one existing terminal at a time.
+
+The terminal stream accepts only bounded literal text, text followed by Enter,
+and the reviewed logical-key set exposed by UHP. One stream leases one terminal,
+receives event-driven output without polling, and releases its lease when the
+dialog or connection closes. The page displays **CONTROL ENABLED** while this
+authority is active and warns again before submitting an agent prompt. One-shot
+raw pane input, `pane.run`, creation, closure, deletion, agent start/fork/resume,
+files, Git, token management, and administrative methods remain blocked. Start
+a new foreground command to renew or change authority; a paired browser cannot
+elevate itself.
+
+## Privacy and cleanup
+
+The page stores no address, pairing code, token, path, pane content, or prompt
+in cookies, local storage, a service worker, analytics, or its URL. Disconnect
+and close the host command when finished. Starting `luvus web` again creates a
+new ephemeral Tailcat identity, pairing code, gateway port, and UHP token.
+
+Tailcat's browser transport currently relies on DERP relays. Relay failure does
+not fall back to public TCP, HTTP, SSH, or an unencrypted connection. Native
+Luvus and [`--remote` over SSH](/docs/guides/remote/) remain independent.
+
+For the underlying automation contract, read [Automating with UHP](/docs/guides/uhp/)
+and the [UHP method reference](/docs/reference/api/).
+
+Tailcat and WebAssembly are not required by UHP or normal Luvus. Providers can
+use the published access descriptor and byte-stream contract with another
+secure transport; clients can replace the Tailcat adapter without changing the
+UHP client.

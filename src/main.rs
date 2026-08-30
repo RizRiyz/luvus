@@ -35,6 +35,7 @@ mod terminal;
 mod theme;
 mod ui;
 mod update;
+mod web;
 
 use std::io::{self, Write};
 use std::path::Path;

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="robots" content="noindex,nofollow,noarchive" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' https: wss:; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'" />
+    <title>Luvus Web · Experimental</title>
+    <link rel="stylesheet" href="__STYLES__" />
+    <script defer src="__WASM_EXEC__"></script>
+    <script type="module" src="__APP__"></script>
+  </head>
+  <body>
+    <main>
+      <header class="masthead">
+        <div>
+          <p class="eyebrow">UNIVERSAL HARNESS PROTOCOL 1.0</p>
+          <h1>Luvus Web <span>EXPERIMENTAL</span></h1>
+        </div>
+        <div id="status" class="status" data-kind="loading">
+          <i></i><span id="status-text">Ready to connect</span><small id="expires"></small>
+        </div>
+      </header>
+
+      <section class="connect-panel" aria-labelledby="connect-title">
+        <div>
+          <h2 id="connect-title">Private browser access</h2>
+          <p>Run <code>luvus web</code> on the host, then enter the three values it shows. Credentials remain in this page's memory only.</p>
+        </div>
+        <form id="connect-form" autocomplete="off">
+          <label>Tailcat address<input id="address" name="address" inputmode="text" spellcheck="false" maxlength="12288" required /></label>
+          <label class="port">Port<input id="port" name="port" inputmode="numeric" min="1" max="65535" required /></label>
+          <label>Pairing code<input id="pairing" name="pairing" inputmode="text" spellcheck="false" maxlength="14" placeholder="XXXX-XXXX-XXXX" required /></label>
+          <button id="connect" type="submit">Connect read-only</button>
+        </form>
+      </section>
+
+      <section id="dashboard" class="dashboard" hidden>
+        <div class="toolbar">
+          <p><strong>Live session</strong><span id="authority" class="authority">READ ONLY</span><span id="activity">snapshot synchronized</span></p>
+          <div><button id="refresh" type="button" hidden>Refresh</button><button id="disconnect" class="quiet" type="button" hidden>Disconnect & forget</button></div>
+        </div>
+        <section id="session-card" class="metrics" aria-label="Session summary"></section>
+        <div class="columns">
+          <section><h2>Workspaces</h2><div id="workspaces" class="stack"></div></section>
+          <section><h2>Agents</h2><div id="agents" class="stack"></div></section>
+        </div>
+      </section>
+
+      <dialog id="prompt-dialog">
+        <form id="prompt-form" class="prompt-form">
+          <div>
+            <p class="eyebrow">EXISTING AGENT</p>
+            <h2>Send a prompt</h2>
+            <p id="prompt-target" class="prompt-target"></p>
+          </div>
+          <label>Prompt<textarea id="prompt-text" maxlength="16384" required></textarea></label>
+          <p class="control-warning">This may cause the selected agent to run commands and modify files.</p>
+          <div class="dialog-actions"><button id="prompt-cancel" class="quiet" type="button">Cancel</button><button id="prompt-send" type="submit">Send prompt</button></div>
+        </form>
+      </dialog>
+
+      <dialog id="terminal-dialog" class="terminal-dialog">
+        <section class="terminal-shell">
+          <header class="terminal-header">
+            <div>
+              <p class="eyebrow">UHP TERMINAL STREAM</p>
+              <h2 id="terminal-title">Terminal</h2>
+              <p id="terminal-location" class="terminal-location"></p>
+            </div>
+            <div class="terminal-header-actions">
+              <span id="terminal-mode" class="authority">OBSERVE ONLY</span>
+              <button id="terminal-close" class="quiet" type="button">Close</button>
+            </div>
+          </header>
+          <pre id="terminal-output" class="terminal-output" tabindex="0" aria-label="Live terminal output"></pre>
+          <div class="terminal-meta"><span id="terminal-state">opening stream</span><span>Output is live and is never stored by this page.</span></div>
+          <form id="terminal-input-form" class="terminal-input-form">
+            <label>Terminal input<textarea id="terminal-input" maxlength="65536" rows="2" spellcheck="false" autocomplete="off" placeholder="Type a shell command or agent response"></textarea></label>
+            <div class="terminal-submit-actions">
+              <button id="terminal-type" class="quiet" type="button">Type only</button>
+              <button id="terminal-send" type="submit">Send + Enter</button>
+            </div>
+          </form>
+          <div id="terminal-keys" class="terminal-keys" aria-label="Terminal keys">
+            <button class="quiet" type="button" data-key="escape">Esc</button>
+            <button class="quiet" type="button" data-key="tab">Tab</button>
+            <button class="quiet" type="button" data-key="up">↑</button>
+            <button class="quiet" type="button" data-key="down">↓</button>
+            <button class="quiet" type="button" data-key="left">←</button>
+            <button class="quiet" type="button" data-key="right">→</button>
+            <button class="quiet" type="button" data-key="enter">Enter</button>
+            <button class="danger" type="button" data-key="ctrl-c">Ctrl-C</button>
+          </div>
+        </section>
+      </dialog>
+
+      <footer>Encrypted by Tailcat · Authorized by short-lived UHP credentials · No analytics or persistent storage</footer>
+    </main>
+  </body>
+</html>

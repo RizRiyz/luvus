@@ -1,0 +1,44 @@
+name: web client
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - "protocol/uhp/v1/**"
+      - ".github/workflows/web-client.yml"
+  pull_request:
+    paths:
+      - "web/**"
+      - "protocol/uhp/v1/**"
+      - ".github/workflows/web-client.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: pinned Go/WASM · TypeScript · artifact budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: web/wasm/go.sum
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+      - run: bun install --frozen-lockfile
+        working-directory: web
+      - run: bun run check
+        working-directory: web
+      - run: bun run build
+        working-directory: web
+      - name: Verify generated security and protocol artifacts
+        run: |
+          test -f web/dist/_headers
+          test -f web/dist/manifest.json
+          test -f web/dist/protocol/uhp/v1/schema/request.schema.json
+          test -f web/dist/protocol/uhp/v1/schema/response.schema.json
+          test -f web/dist/protocol/uhp/v1/schema/access/descriptor.schema.json

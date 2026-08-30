@@ -237,6 +237,7 @@ universal harness protocol:
   uhp schema                print the complete installed UHP JSON Schema bundle
   uhp snapshot              print a fenced session snapshot for harness bootstrap
   uhp events                stream sequenced UHP events
+  uhp access [--control]    expose scoped UHP through a private provider endpoint
   uhp proxy                 forward one JSON request from stdin to the selected server
 
 sessions:
@@ -247,6 +248,9 @@ sessions:
 
 remote:
   --remote <host> [ssh args] attach to a luvus session on <host> over plain ssh
+
+web access:
+  web [--control]           start Experimental browser access; opt into limited control
 
 server:
   server status              is the server running, and what version

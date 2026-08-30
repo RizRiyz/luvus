@@ -81,12 +81,16 @@ when their connection or target disappears.
 ## Security
 
 The local endpoint validates same-user ownership and is the default authority
-boundary. UHP never opens a TCP listener. Delegated tokens are memory-only,
-bounded, expiring, and scope restricted.
+boundary. Normal Luvus startup never opens a TCP listener. The explicit,
+foreground `luvus uhp access` command may bind one ephemeral IPv4 loopback
+gateway for a trusted transport provider; it never exposes the owner endpoint.
+Delegated tokens are memory-only, bounded, expiring, and scope restricted.
 
 Terminal and process responses avoid full argument vectors because they can
 contain prompts, credentials, or tokens. Capture, input, messages, and cwd are
 also bounded.
 
-See [Automating with UHP](/docs/guides/uhp/) for a walkthrough and the
+Its machine-readable access descriptor is part of the installed schema bundle.
+See [Connecting UHP transports and clients](/docs/guides/uhp-access/) before
+implementing a provider. See [Automating with UHP](/docs/guides/uhp/) for a walkthrough and the
 [UHP method reference](/docs/reference/api/) for the complete namespaces.

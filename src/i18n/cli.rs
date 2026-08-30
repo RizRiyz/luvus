@@ -133,6 +133,50 @@ macro_rules! tr {
 /// suffix, so canonical syntax at the start of a row is never rewritten.
 static HELP: &[Translation] = &[
     tr!(
+        "web access:",
+        "acceso web:",
+        "acesso web:",
+        "accès web :",
+        "Webzugriff:",
+        "akses web:",
+        "Web 访问：",
+        "Web アクセス：",
+        "웹 액세스:"
+    ),
+    tr!(
+        "Open Experimental read-only browser access through Tailcat",
+        "Abrir acceso experimental de solo lectura en el navegador mediante Tailcat",
+        "Abrir acesso experimental somente leitura no navegador pelo Tailcat",
+        "Ouvrir l'accès expérimental en lecture seule dans le navigateur via Tailcat",
+        "Experimentellen schreibgeschützten Browserzugriff über Tailcat öffnen",
+        "Buka akses browser Eksperimental hanya-baca melalui Tailcat",
+        "通过 Tailcat 打开实验性只读浏览器访问",
+        "Tailcat 経由で実験的な読み取り専用ブラウザアクセスを開く",
+        "Tailcat을 통해 실험적 읽기 전용 브라우저 액세스 열기"
+    ),
+    tr!(
+        "start Experimental browser access; opt into limited control",
+        "iniciar acceso experimental en el navegador; activar control limitado",
+        "iniciar acesso experimental no navegador; ativar controle limitado",
+        "démarrer l'accès expérimental dans le navigateur ; activer le contrôle limité",
+        "experimentellen Browserzugriff starten; begrenzte Steuerung aktivieren",
+        "mulai akses browser Eksperimental; aktifkan kontrol terbatas",
+        "启动实验性浏览器访问；选择启用有限控制",
+        "実験的なブラウザアクセスを開始。限定的な操作を有効化可能",
+        "실험적 브라우저 액세스 시작; 제한된 제어 사용 가능"
+    ),
+    tr!(
+        "expose scoped UHP through a private provider endpoint",
+        "exponer UHP con alcance mediante un endpoint privado para proveedores",
+        "expor UHP com escopo por um endpoint privado para provedores",
+        "exposer UHP avec une portée limitée via un endpoint privé pour fournisseurs",
+        "UHP mit begrenztem Umfang über einen privaten Anbieter-Endpunkt bereitstellen",
+        "ekspos UHP terbatas melalui endpoint penyedia privat",
+        "通过私有提供方端点公开限定范围的 UHP",
+        "スコープを限定した UHP をプライベートなプロバイダー用エンドポイントで公開",
+        "범위가 제한된 UHP를 비공개 공급자 엔드포인트로 노출"
+    ),
+    tr!(
         "Read local structured server and client diagnostics",
         "Leer diagnósticos estructurados locales del servidor y cliente",
         "Ler diagnósticos estruturados locais do servidor e cliente",
@@ -2503,6 +2547,144 @@ static HELP: &[Translation] = &[
 /// Local CLI labels and diagnostics. These are kept out of `HELP` so short
 /// labels such as `name` can never be mistaken for a help-row description.
 static TEXT: &[Translation] = &[
+    tr!(
+        "Could not authorize UHP access.",
+        "No se pudo autorizar el acceso UHP.",
+        "Não foi possível autorizar o acesso UHP.",
+        "Impossible d'autoriser l'accès UHP.",
+        "Der UHP-Zugriff konnte nicht autorisiert werden.",
+        "Akses UHP tidak dapat diotorisasi.",
+        "无法授权 UHP 访问。",
+        "UHP アクセスを承認できませんでした。",
+        "UHP 액세스를 승인할 수 없습니다."
+    ),
+    tr!(
+        "Could not start the private UHP access gateway.",
+        "No se pudo iniciar la puerta de enlace privada de acceso UHP.",
+        "Não foi possível iniciar o gateway privado de acesso UHP.",
+        "Impossible de démarrer la passerelle privée d'accès UHP.",
+        "Das private UHP-Zugriffs-Gateway konnte nicht gestartet werden.",
+        "Gateway akses UHP privat tidak dapat dimulai.",
+        "无法启动私有 UHP 访问网关。",
+        "プライベート UHP アクセスゲートウェイを起動できませんでした。",
+        "비공개 UHP 액세스 게이트웨이를 시작할 수 없습니다."
+    ),
+    tr!(
+        "Could not create a secure pairing code.",
+        "No se pudo crear un código de vinculación seguro.",
+        "Não foi possível criar um código de pareamento seguro.",
+        "Impossible de créer un code de jumelage sécurisé.",
+        "Es konnte kein sicherer Kopplungscode erstellt werden.",
+        "Kode pemasangan aman tidak dapat dibuat.",
+        "无法创建安全配对码。",
+        "安全なペアリングコードを作成できませんでした。",
+        "안전한 페어링 코드를 만들 수 없습니다."
+    ),
+    tr!(
+        "Tailcat v0.2.0 is required on PATH for `luvus web`.",
+        "`luvus web` requiere Tailcat v0.2.0 en PATH.",
+        "`luvus web` requer o Tailcat v0.2.0 no PATH.",
+        "`luvus web` nécessite Tailcat v0.2.0 dans le PATH.",
+        "Für `luvus web` wird Tailcat v0.2.0 im PATH benötigt.",
+        "`luvus web` memerlukan Tailcat v0.2.0 di PATH.",
+        "`luvus web` 需要 PATH 中存在 Tailcat v0.2.0。",
+        "`luvus web` には PATH 上の Tailcat v0.2.0 が必要です。",
+        "`luvus web`에는 PATH의 Tailcat v0.2.0이 필요합니다."
+    ),
+    tr!(
+        "The Tailcat version is unsupported; `luvus web` requires v0.2.0.",
+        "La versión de Tailcat no es compatible; `luvus web` requiere v0.2.0.",
+        "A versão do Tailcat não é suportada; `luvus web` requer v0.2.0.",
+        "La version de Tailcat n'est pas prise en charge ; `luvus web` nécessite v0.2.0.",
+        "Die Tailcat-Version wird nicht unterstützt; `luvus web` benötigt v0.2.0.",
+        "Versi Tailcat tidak didukung; `luvus web` memerlukan v0.2.0.",
+        "不支持此 Tailcat 版本；`luvus web` 需要 v0.2.0。",
+        "この Tailcat バージョンには対応していません。`luvus web` には v0.2.0 が必要です。",
+        "지원하지 않는 Tailcat 버전입니다. `luvus web`에는 v0.2.0이 필요합니다."
+    ),
+    tr!(
+        "Tailcat v0.2.0 could not start; web access stayed closed.",
+        "No se pudo iniciar Tailcat v0.2.0; el acceso web permaneció cerrado.",
+        "O Tailcat v0.2.0 não pôde iniciar; o acesso web permaneceu fechado.",
+        "Tailcat v0.2.0 n'a pas pu démarrer ; l'accès web est resté fermé.",
+        "Tailcat v0.2.0 konnte nicht starten; der Webzugriff blieb geschlossen.",
+        "Tailcat v0.2.0 tidak dapat dimulai; akses web tetap tertutup.",
+        "Tailcat v0.2.0 无法启动；Web 访问保持关闭。",
+        "Tailcat v0.2.0 を起動できなかったため、Web アクセスは閉じたままです。",
+        "Tailcat v0.2.0을 시작할 수 없어 웹 액세스가 닫힌 상태로 유지되었습니다."
+    ),
+    tr!(
+        "Tailcat stopped unexpectedly; web access was closed.",
+        "Tailcat se detuvo inesperadamente; se cerró el acceso web.",
+        "O Tailcat parou inesperadamente; o acesso web foi encerrado.",
+        "Tailcat s'est arrêté de manière inattendue ; l'accès web a été fermé.",
+        "Tailcat wurde unerwartet beendet; der Webzugriff wurde geschlossen.",
+        "Tailcat berhenti secara tak terduga; akses web telah ditutup.",
+        "Tailcat 意外停止；Web 访问已关闭。",
+        "Tailcat が予期せず停止したため、Web アクセスを閉じました。",
+        "Tailcat이 예기치 않게 중지되어 웹 액세스가 종료되었습니다."
+    ),
+    tr!("Luvus Web", "Luvus Web", "Luvus Web", "Luvus Web", "Luvus Web", "Luvus Web", "Luvus Web", "Luvus Web", "Luvus Web"),
+    tr!("Open:", "Abrir:", "Abrir:", "Ouvrir :", "Öffnen:", "Buka:", "打开：", "開く：", "열기:"),
+    tr!("Address:", "Dirección:", "Endereço:", "Adresse :", "Adresse:", "Alamat:", "地址：", "アドレス：", "주소:"),
+    tr!("Port:", "Puerto:", "Porta:", "Port :", "Port:", "Port:", "端口：", "ポート：", "포트:"),
+    tr!("Pair:", "Vincular:", "Parear:", "Jumelage :", "Koppeln:", "Pasangkan:", "配对：", "ペアリング：", "페어링:"),
+    tr!("Access:", "Acceso:", "Acesso:", "Accès :", "Zugriff:", "Akses:", "访问：", "アクセス：", "액세스:"),
+    tr!(
+        "read-only - expires in 30 minutes",
+        "solo lectura - caduca en 30 minutos",
+        "somente leitura - expira em 30 minutos",
+        "lecture seule - expire dans 30 minutes",
+        "schreibgeschützt - läuft in 30 Minuten ab",
+        "hanya-baca - kedaluwarsa dalam 30 menit",
+        "只读 - 30 分钟后过期",
+        "読み取り専用 - 30 分で期限切れ",
+        "읽기 전용 - 30분 후 만료"
+    ),
+    tr!(
+        "CONTROL - expires in 15 minutes",
+        "CONTROL - caduca en 15 minutos",
+        "CONTROLE - expira em 15 minutos",
+        "CONTRÔLE - expire dans 15 minutes",
+        "STEUERUNG - läuft in 15 Minuten ab",
+        "KONTROL - kedaluwarsa dalam 15 menit",
+        "控制 - 15 分钟后过期",
+        "操作 - 15 分で期限切れ",
+        "제어 - 15분 후 만료"
+    ),
+    tr!(
+        "Control can focus workspaces, tabs, and panes, prompt agents, or interact with existing terminals.",
+        "El control puede enfocar espacios de trabajo, pestañas y paneles, enviar instrucciones a agentes o interactuar con terminales existentes.",
+        "O controle pode focar espaços de trabalho, abas e painéis, enviar prompts a agentes ou interagir com terminais existentes.",
+        "Le contrôle peut cibler les espaces de travail, onglets et volets, envoyer des instructions aux agents ou interagir avec les terminaux existants.",
+        "Die Steuerung kann Arbeitsbereiche, Tabs und Bereiche fokussieren, Agenten anweisen oder mit vorhandenen Terminals interagieren.",
+        "Kontrol dapat memfokuskan workspace, tab, dan panel, mengirim prompt ke agen, atau berinteraksi dengan terminal yang ada.",
+        "控制模式可以聚焦工作区、标签页和窗格、向代理发送提示，或与现有终端交互。",
+        "操作モードではワークスペース、タブ、ペインのフォーカス、エージェントへのプロンプト送信、既存のターミナル操作ができます。",
+        "제어 모드에서는 워크스페이스, 탭 및 창에 포커스를 맞추고, 에이전트에 프롬프트를 보내거나 기존 터미널과 상호 작용할 수 있습니다."
+    ),
+    tr!(
+        "Keep this command running. Ctrl-C closes web access; panes stay alive.",
+        "Mantén este comando en ejecución. Ctrl-C cierra el acceso web; los paneles siguen activos.",
+        "Mantenha este comando em execução. Ctrl-C fecha o acesso web; os painéis continuam ativos.",
+        "Laissez cette commande active. Ctrl-C ferme l'accès web ; les volets restent actifs.",
+        "Diesen Befehl weiterlaufen lassen. Strg-C schließt den Webzugriff; Bereiche bleiben aktiv.",
+        "Biarkan perintah ini berjalan. Ctrl-C menutup akses web; panel tetap aktif.",
+        "请保持此命令运行。Ctrl-C 会关闭 Web 访问；窗格仍保持运行。",
+        "このコマンドを実行したままにしてください。Ctrl-C で Web アクセスを閉じても、ペインは動作し続けます。",
+        "이 명령을 계속 실행하세요. Ctrl-C는 웹 액세스만 닫으며 패널은 계속 실행됩니다."
+    ),
+    tr!(
+        "Luvus Web access closed.",
+        "Acceso a Luvus Web cerrado.",
+        "Acesso ao Luvus Web encerrado.",
+        "Accès Luvus Web fermé.",
+        "Luvus-Webzugriff geschlossen.",
+        "Akses Luvus Web ditutup.",
+        "Luvus Web 访问已关闭。",
+        "Luvus Web アクセスを閉じました。",
+        "Luvus Web 액세스가 종료되었습니다."
+    ),
     tr!("name", "nombre", "nome", "nom", "Name", "nama", "名称", "名前",
         "이름"),
     tr!("status", "estado", "status", "état", "Status", "status", "状态", "状態",

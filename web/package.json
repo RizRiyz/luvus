@@ -1,0 +1,12 @@
+{
+  "name": "@luvus/web-client",
+  "private": true,
+  "version": "0.1.0-experimental",
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}

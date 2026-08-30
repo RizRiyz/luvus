@@ -44,6 +44,7 @@ pub fn is_cli(args: &[String]) -> bool {
                 | "update"
                 | "skill"
                 | "session"
+                | "web"
         )
     )
 }
@@ -81,6 +82,7 @@ Commands:
   search       Search across pane scrollback
   events       Stream live status changes
   uhp          Discover and use Universal Harness Protocol 1.0
+  web          Open Experimental read-only browser access through Tailcat
   attach       Open the TUI focused on one pane
   doctor       Check optional external tools
   update       Check for and install a newer Luvus release
@@ -98,7 +100,6 @@ Options:
   --remote <host> [ssh args]             Attach through SSH
   --version, -V                          Print the version
   --help, -h                             Show this help
-
 Help:
   luvus help all                         Complete CLI reference
   luvus help <topic> [command]           Focus on one area or command
@@ -296,6 +297,7 @@ universal harness protocol:
   uhp schema                print the complete installed UHP JSON Schema bundle
   uhp snapshot              print a fenced session snapshot for harness bootstrap
   uhp events                stream sequenced UHP events
+  uhp access [--control]    expose scoped UHP through a private provider endpoint
   uhp proxy                 forward one JSON request from stdin to the selected server
 
 sessions:
@@ -306,6 +308,9 @@ sessions:
 
 remote:
   --remote <host> [ssh args] attach to a luvus session on <host> over plain ssh
+
+web access:
+  web [--control]           start Experimental browser access; opt into limited control
 
 server:
   server status              is the server running, and what version
@@ -392,6 +397,12 @@ fn run_inner(args: &[String]) -> Result<i32> {
         )?;
         return Ok(0);
     }
+    if args.get(1).map(String::as_str) == Some("web") {
+        return crate::web::run_cli(
+            &args[2.min(args.len())..],
+            crate::i18n::cli::Context::configured(),
+        );
+    }
     if args.get(1).map(String::as_str) == Some("skill") {
         return skill_cmd(
             &args[2.min(args.len())..],
@@ -407,6 +418,14 @@ fn run_inner(args: &[String]) -> Result<i32> {
     if args.get(1).map(String::as_str) == Some("theme") {
         return theme_cmd(
             &args[2.min(args.len())..],
+            crate::i18n::cli::Context::configured(),
+        );
+    }
+    if args.get(1).map(String::as_str) == Some("uhp")
+        && args.get(2).map(String::as_str) == Some("access")
+    {
+        return crate::web::run_access_cli(
+            &args[3.min(args.len())..],
             crate::i18n::cli::Context::configured(),
         );
     }
@@ -587,7 +606,7 @@ fn normalize_help_topic(topic: &str) -> Option<&str> {
         "workspace" | "tab" | "pane" | "agent" | "files" | "git" | "mission" | "worktree"
         | "task" | "lease" | "module" | "theme" | "bar" | "ui" | "session" | "server"
         | "integration" | "diff" | "skill" | "wait" | "search" | "events" | "uhp" | "ping"
-        | "doctor" | "update" | "attach" => Some(topic),
+        | "doctor" | "update" | "attach" | "web" => Some(topic),
         "node" => Some("pane"),
         "remote" | "--remote" => Some("remote"),
         _ => None,
@@ -769,12 +788,16 @@ fn write_topic_help_english(
             detailed_section("events:\n", "\nuniversal harness protocol:\n"),
         ),
         "uhp" => (
-            "luvus uhp <capabilities|schema|snapshot|events|proxy>",
+            "luvus uhp <capabilities|schema|snapshot|events|access|proxy>",
             detailed_section("universal harness protocol:\n", "\nsessions:\n"),
         ),
         "remote" => (
             "luvus [--session <name>] --remote <host> [ssh args]",
-            detailed_section("remote:\n", "\nserver:\n"),
+            detailed_section("remote:\n", "\nweb access:\n"),
+        ),
+        "web" => (
+            "luvus [--session <name>] web [--control]",
+            detailed_section("web access:\n", "\nserver:\n"),
         ),
         "server" => (
             "luvus [--session <name>] server <command>",
@@ -2258,7 +2281,7 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
     if noun == "uhp" {
         if !rest.is_empty() {
             return Err(anyhow!(
-                "usage: luvus uhp <capabilities|schema|snapshot|events|proxy>"
+                "usage: luvus uhp <capabilities|schema|snapshot|events|access|proxy>"
             ));
         }
         return match verb {
@@ -2266,7 +2289,7 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             "snapshot" => Ok(("session.snapshot".into(), json!({}))),
             "events" => Ok(("events.subscribe".into(), json!({}))),
             _ => Err(anyhow!(
-                "usage: luvus uhp <capabilities|schema|snapshot|events|proxy>"
+                "usage: luvus uhp <capabilities|schema|snapshot|events|access|proxy>"
             )),
         };
     }
@@ -3684,6 +3707,7 @@ mod tests {
             ("events", "events"),
             ("uhp", "uhp"),
             ("remote", "--remote"),
+            ("web", "web"),
             ("server", "server"),
             ("integration", "integration"),
         ] {
@@ -3927,6 +3951,8 @@ mod tests {
             ("luvus pane split --help", Some(("pane", Some("split")))),
             ("luvus module install -h", Some(("module", Some("install")))),
             ("luvus update --help", Some(("update", None))),
+            ("luvus web --help", Some(("web", None))),
+            ("luvus uhp access --help", Some(("uhp", Some("access")))),
         ] {
             let args = argv(raw);
             assert_eq!(command_help_request(&args), expected, "{raw}");
@@ -3937,6 +3963,21 @@ mod tests {
     fn update_is_a_top_level_local_cli_command() {
         assert!(is_cli(&argv("luvus update")));
         assert!(!help_topic_has_subcommands("update"));
+    }
+
+    #[test]
+    fn web_is_a_top_level_local_cli_command() {
+        assert!(is_cli(&argv("luvus web")));
+        assert!(!help_topic_has_subcommands("web"));
+        assert!(rendered_topic_help("web", None).contains("Experimental browser access"));
+        assert!(rendered_topic_help("web", None).contains("--control"));
+    }
+
+    #[test]
+    fn uhp_help_includes_transport_neutral_access() {
+        let help = rendered_topic_help("uhp", None);
+        assert!(help.contains("uhp access [--control]"));
+        assert!(help.contains("private provider endpoint"));
     }
 
     #[test]

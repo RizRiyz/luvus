@@ -90,6 +90,7 @@ export default defineConfig({
             { label: 'Community Themes', slug: 'docs/guides/themes' },
             { label: 'Scripting luvus', slug: 'docs/guides/scripting' },
             { label: 'Automating with UHP', slug: 'docs/guides/uhp' },
+            { label: 'Experimental Web Access', slug: 'docs/guides/web-access' },
           ],
         },
         {

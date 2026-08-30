@@ -152,6 +152,14 @@ define the live protocol contract. Do not run them before routine CLI actions.
 selected local server. Validate the method and parameters against the installed
 schema before sending it.
 
+`luvus uhp access` is the transport-neutral foreground boundary for an
+explicit remote provider or client. It emits one machine-readable descriptor
+for an authenticated loopback endpoint and creates no public listener. Use
+`--control` only when the user explicitly authorizes the documented limited
+control surface. Keep the command running only for the requested access
+window, and never expose its loopback endpoint without a trusted encrypted
+transport.
+
 For stateful UHP automation:
 
 1. Read capabilities and limits.
