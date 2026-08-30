@@ -62,10 +62,11 @@ pub enum SkillHost {
     Qwen,
     Kiro,
     Omp,
+    Hermes,
 }
 
 impl SkillHost {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Shared,
         Self::Claude,
         Self::Opencode,
@@ -74,6 +75,7 @@ impl SkillHost {
         Self::Qwen,
         Self::Kiro,
         Self::Omp,
+        Self::Hermes,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -86,6 +88,7 @@ impl SkillHost {
             Self::Qwen => "qwen",
             Self::Kiro => "kiro",
             Self::Omp => "omp",
+            Self::Hermes => "hermes",
         }
     }
 
@@ -384,6 +387,7 @@ fn target_dir_at(host: SkillHost, home: &Path, xdg_config: Option<&Path>) -> Pat
         SkillHost::Qwen => home.join(".qwen").join("skills").join("luvus"),
         SkillHost::Kiro => home.join(".kiro").join("skills").join("luvus"),
         SkillHost::Omp => crate::agent::omp::default_skill_dir_at(home),
+        SkillHost::Hermes => home.join(".hermes").join("skills").join("luvus"),
     }
 }
 
@@ -399,6 +403,11 @@ fn target_dir(host: SkillHost) -> Result<PathBuf> {
     }
     if host == SkillHost::Kimi {
         if let Some(config) = std::env::var_os("KIMI_CODE_HOME") {
+            return Ok(PathBuf::from(config).join("skills").join("luvus"));
+        }
+    }
+    if host == SkillHost::Hermes {
+        if let Some(config) = std::env::var_os("HERMES_HOME").filter(|value| !value.is_empty()) {
             return Ok(PathBuf::from(config).join("skills").join("luvus"));
         }
     }
@@ -539,6 +548,7 @@ fn host_commands(host: SkillHost) -> &'static [&'static str] {
         SkillHost::Qwen => &["qwen"],
         SkillHost::Kiro => &["kiro", "kiro-cli"],
         SkillHost::Omp => &["omp"],
+        SkillHost::Hermes => &["hermes"],
     }
 }
 
@@ -578,6 +588,7 @@ fn host_config_dirs(
         SkillHost::Qwen => vec![home.join(".qwen")],
         SkillHost::Kiro => vec![home.join(".kiro")],
         SkillHost::Omp => vec![crate::agent::omp::default_agent_dir_at(home)],
+        SkillHost::Hermes => vec![home.join(".hermes")],
     }
 }
 
@@ -1120,6 +1131,10 @@ mod tests {
         assert_eq!(
             target_dir_at(SkillHost::Kiro, home, None),
             PathBuf::from("/home/tester/.kiro/skills/luvus")
+        );
+        assert_eq!(
+            target_dir_at(SkillHost::Hermes, home, None),
+            PathBuf::from("/home/tester/.hermes/skills/luvus")
         );
         assert_eq!(SkillHost::Shared.state_key(), "codex");
     }

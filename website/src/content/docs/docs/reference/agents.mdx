@@ -11,6 +11,7 @@ description: What luvus supports per agent, covering live status, session resume
 | opencode | ✓ | ✓ | no | ✓ |
 | Kimi Code CLI | ✓ | ✓ | no | ✓ |
 | Grok Build | ✓ | ✓ | ✓ | ✓ |
+| Hermes CLI | ✓ | ✓ | no | no |
 | Pi | ✓ | ✓ | ✓ | no |
 | Oh My Pi (omp) | ✓ | ✓ | ✓ | ✓ |
 | Muse Code | ✓ | ✓ | no | no |
@@ -51,6 +52,12 @@ description: What luvus supports per agent, covering live status, session resume
   file is edited. Named profiles, `PI_CODING_AGENT_DIR`, `PI_CONFIG_DIR`, and
   OMP's XDG session store remain supported.
 
+Hermes CLI sessions are discovered read-only from the active
+`$HERMES_HOME/state.db`, or `~/.hermes/state.db` when `HERMES_HOME` is unset.
+Luvus resumes them with `hermes --resume <id>`. Hermes currently exposes
+branching only from inside its own TUI, so Luvus does not present **Fork to New
+Pane** for Hermes.
+
 Missing your agent? You can add it yourself without waiting for a release: drop
 an `[identity]` block in `~/.luvus/manifests/<agent>.toml` and luvus will
 recognize it, as described in
@@ -69,9 +76,9 @@ Print the release-matched instructions for one conversation with
 The shared `~/.agents/skills/luvus/` destination is understood by Codex,
 GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, and fx. Luvus uses
 dedicated native destinations for Claude Code, OpenCode, Kimi Code CLI, Grok
-Build, Qwen Code, Oh My Pi (omp), and Kiro. Aider does not expose a native
-Agent Skills installation directory, so use `luvus skill show` when an Aider
-conversation needs the instructions.
+Build, Hermes CLI, Qwen Code, Oh My Pi (omp), and Kiro. Aider does not expose a
+native Agent Skills installation directory, so use `luvus skill show` when an
+Aider conversation needs the instructions.
 
 `luvus skill status` reports the bundled release separately from its managed
 filesystem installations. Codex marketplace plugins are managed by Codex and

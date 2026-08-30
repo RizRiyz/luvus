@@ -25,6 +25,7 @@ pub(crate) mod droid;
 pub(crate) mod fx;
 pub(crate) mod gemini;
 pub(crate) mod grok;
+pub(crate) mod hermes;
 pub(crate) mod kimi;
 pub(crate) mod kiro;
 pub(crate) mod muse;
@@ -142,6 +143,15 @@ fn filter_launch_flags(agent: &str, launch: &[String]) -> Vec<String> {
     while i < launch.len() {
         let t = launch[i].as_str();
         let head = t.split('=').next().unwrap_or(t);
+        // Hermes accepts an optional name after continue. Neither the selector
+        // nor its value may survive into an exact-id restore.
+        if agent == "hermes" && matches!(head, "--continue" | "-c") {
+            i += 1;
+            if !t.contains('=') && launch.get(i).is_some_and(|value| !value.starts_with('-')) {
+                i += 1;
+            }
+            continue;
+        }
         if t.contains('=') && TAKES_VALUE.contains(&head) {
             i += 1; // glued form, e.g. --resume=<id>
             continue;
@@ -375,6 +385,11 @@ mod tests {
             resume_command("fx", "f1").as_deref(),
             Some("fx session resume 'f1'\r")
         );
+        assert_eq!(
+            resume_command("hermes-agent", "20260830_120000_a1b2c3").as_deref(),
+            Some("hermes --resume '20260830_120000_a1b2c3'\r")
+        );
+        assert!(is_resumable("hermes"));
         assert!(resume_command("unknown", "x").is_none());
         assert!(resume_command("claude", "").is_none()); // empty id
         assert!(resume_command("claude", "a b").is_none()); // unsafe char
@@ -662,6 +677,11 @@ mod tests {
         assert_eq!(
             f("muse", &["resume", "muse-id", "--reasoning-effort", "high"]),
             vec!["--reasoning-effort", "high"]
+        );
+        assert_eq!(
+            f("hermes", &["--continue", "old title", "--tui"]),
+            vec!["--tui"],
+            "Hermes drops its optional continue title"
         );
         // A kept flag keeps its value.
         assert_eq!(

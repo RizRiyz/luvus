@@ -530,6 +530,92 @@ fn builtin_rules() -> Vec<Rule> {
             Region::Screen,
             vec![any(&["send a message to interrupt"])],
         ),
+        // Hermes publishes compact OSC-title state markers. The explicit idle
+        // marker outranks retained working text from the completed turn, while
+        // visible confirmation panels still outrank both title states.
+        per(
+            "hermes",
+            State::Blocked,
+            325,
+            Region::Title,
+            vec![any(&["⚠"])],
+        ),
+        per(
+            "hermes",
+            State::Working,
+            125,
+            Region::Title,
+            vec![any(&["⏳"])],
+        ),
+        per("hermes", State::Idle, 210, Region::Title, vec![any(&["✓"])]),
+        // Require both a Hermes interaction label and its controls. Matching
+        // either half alone would turn ordinary transcript prose into a false
+        // blocked state.
+        per(
+            "hermes",
+            State::Blocked,
+            315,
+            Region::Screen,
+            vec![
+                any(&["dangerous", "approval", "allow once", "1. allow"]),
+                any(&[
+                    "enter confirm",
+                    "enter to confirm",
+                    "↑/↓ to select",
+                    "show full command",
+                ]),
+            ],
+        ),
+        per(
+            "hermes",
+            State::Blocked,
+            315,
+            Region::Screen,
+            vec![
+                any(&["hermes needs your", "type your answer", "other (type"]),
+                any(&[
+                    "enter confirm",
+                    "enter to confirm",
+                    "enter send",
+                    "press enter",
+                    "↑/↓ select",
+                    "↑/↓ to select",
+                ]),
+            ],
+        ),
+        per(
+            "hermes",
+            State::Blocked,
+            315,
+            Region::Screen,
+            vec![
+                any(&["approve once", "start a new session", "keep going"]),
+                any(&[
+                    "cancel",
+                    "enter to confirm",
+                    "enter confirm",
+                    "type 1/2/3",
+                    "y/n quick",
+                ]),
+            ],
+        ),
+        per(
+            "hermes",
+            State::Blocked,
+            315,
+            Region::Screen,
+            vec![
+                any(&["sudo password", "skill setup"]),
+                any(&["password", "press enter", "enter confirm"]),
+            ],
+        ),
+        per(
+            "hermes",
+            State::Working,
+            125,
+            Region::Screen,
+            vec![any(&["msg=interrupt", "ctrl+c cancel"])],
+        ),
         // Muse question, trust, and approval overlays. These paired controls
         // outrank its generic `esc to interrupt` working hint, including the
         // multi-select question UI that deliberately retains that phrase.
@@ -1339,6 +1425,87 @@ mod tests {
         assert_eq!(
             incidental.agent, "zsh",
             "bare muse is never trusted from pane output"
+        );
+    }
+
+    #[test]
+    fn hermes_identity_accepts_native_and_python_launchers_without_trusting_prose() {
+        let manifests = Manifests::builtin();
+        for command in [
+            "/Users/me/.local/bin/hermes --tui",
+            r"C:\Users\me\.local\bin\hermes.exe --resume 20260830_120000_a1b2c3",
+            "/usr/bin/python3 /Users/me/.local/bin/hermes --tui",
+            "/usr/bin/python3 -m hermes_cli.main --tui",
+        ] {
+            assert_eq!(
+                manifests.agent_in_processes(&[command.to_string()]),
+                Some("hermes".to_string()),
+                "failed to recognize {command}"
+            );
+        }
+
+        let incidental = classify(
+            Some("zsh"),
+            "Hermes was the messenger of the gods",
+            true,
+            false,
+            "zsh",
+            "",
+            &[],
+            &manifests,
+        );
+        assert_eq!(
+            incidental.agent, "zsh",
+            "the ordinary proper name must not identify a shell as Hermes CLI"
+        );
+    }
+
+    #[test]
+    fn hermes_state_requires_visible_interaction_evidence() {
+        let manifests = Manifests::builtin();
+        let detect = |title: &str, screen: &str| {
+            classify(
+                Some(title),
+                screen,
+                false,
+                false,
+                "zsh",
+                "hermes",
+                &["/Users/me/.local/bin/hermes --tui".to_string()],
+                &manifests,
+            )
+            .state
+        };
+
+        assert_eq!(detect("⏳ Hermes", ""), State::Working);
+        assert_eq!(detect("⚠ Hermes", ""), State::Blocked);
+        assert_eq!(
+            detect("✓ Hermes", "Ctrl+C to interrupt"),
+            State::Idle,
+            "the current title wins over a retained interrupt hint"
+        );
+        assert_eq!(
+            detect(
+                "Hermes",
+                "Dangerous command\n1. Allow once\nEnter to confirm"
+            ),
+            State::Blocked
+        );
+        assert_eq!(
+            detect(
+                "Hermes",
+                "Hermes needs your input\nType your answer\nEnter send"
+            ),
+            State::Blocked
+        );
+        assert_eq!(
+            detect("Hermes", "running tool · msg=interrupt"),
+            State::Working
+        );
+        assert_eq!(
+            detect("Hermes", "documentation about dangerous command approval"),
+            State::Idle,
+            "labels without interactive controls are ordinary output"
         );
     }
 

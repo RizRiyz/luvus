@@ -14,6 +14,7 @@ pub(crate) static BUILTINS: &[&AgentDescriptor] = &[
     &super::amp::DESCRIPTOR,
     &super::droid::DESCRIPTOR,
     &super::grok::DESCRIPTOR,
+    &super::hermes::DESCRIPTOR,
     &super::muse::DESCRIPTOR,
     &super::omp::DESCRIPTOR,
     &super::pi::DESCRIPTOR,
@@ -148,6 +149,11 @@ mod tests {
             ("droid", &[][..], &["droid"][..]),
             ("grok", &[][..], &["grok"][..]),
             (
+                "hermes",
+                &["hermes-agent", "hermes-cli", "hermes_cli.main"][..],
+                &["hermes"][..],
+            ),
+            (
                 "muse",
                 &["muse-code", "muse-cli", "muse code"][..],
                 &["muse"][..],
@@ -175,7 +181,7 @@ mod tests {
             resumable,
             [
                 "claude", "codex", "gemini", "opencode", "copilot", "kimi", "qwen", "cursor",
-                "grok", "muse", "omp", "pi", "fx",
+                "grok", "hermes", "muse", "omp", "pi", "fx",
             ]
         );
 
@@ -193,8 +199,8 @@ mod tests {
         assert_eq!(
             discoverable,
             [
-                "claude", "codex", "gemini", "opencode", "copilot", "kimi", "qwen", "grok", "muse",
-                "omp", "pi", "fx",
+                "claude", "codex", "gemini", "opencode", "copilot", "kimi", "qwen", "grok",
+                "hermes", "muse", "omp", "pi", "fx",
             ]
         );
 
