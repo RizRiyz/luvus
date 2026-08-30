@@ -2046,10 +2046,7 @@ impl App {
         // The AGENTS All/Active filter toggle.
         if let Some((val, _)) = self.agents_filter_rects.iter().find(|(_, rect)| hit(*rect)) {
             let val = *val;
-            if self.agents_active_only != val {
-                self.agents_active_only = val;
-                self.agents_scroll = 0;
-            }
+            self.set_agents_filter(val);
             return;
         }
         if let Some((id, _)) = self.agent_rects.iter().find(|(_, rect)| hit(*rect)) {

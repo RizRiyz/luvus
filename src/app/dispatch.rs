@@ -275,6 +275,32 @@ mod socket_api_tests {
             app.config.mission_pricing.get("new-model"),
             Some(&[1.0, 2.0, 0.5])
         );
+
+        app.agents_scroll = 9;
+        let result = app
+            .dispatch(
+                "config.patch",
+                &json!({"patch":{"agents_active_only":true}}),
+            )
+            .unwrap();
+        assert_eq!(result["config"]["agents_active_only"], true);
+        assert!(app.agents_active_only);
+        assert_eq!(app.agents_scroll, 0);
+    }
+
+    #[test]
+    fn config_reload_applies_the_agents_filter_live() {
+        let (_env, mut app) = app("socket-config-agents-reload");
+        app.agents_active_only = true;
+        app.config.agents_active_only = true;
+        app.agents_scroll = 8;
+
+        crate::config::save(&crate::config::Config::default());
+        let result = app.dispatch("server.reload_config", &json!({})).unwrap();
+
+        assert_eq!(result["config"]["agents_active_only"], false);
+        assert!(!app.agents_active_only);
+        assert_eq!(app.agents_scroll, 0);
     }
 
     #[test]
@@ -5121,6 +5147,7 @@ impl App {
         self.sidebars = sidebars;
         self.file_tree.show_hidden = next.layout.files_show_hidden;
         self.file_tree.scroll = 0;
+        self.apply_agents_filter(next.agents_active_only);
         crate::layout::set_gaps(next.layout.col_gap, next.layout.row_gap);
         for pane in self.panes.values() {
             pane.set_history_budget(history_budget);

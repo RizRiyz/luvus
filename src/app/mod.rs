@@ -1953,6 +1953,7 @@ impl App {
 
         let config = crate::config::load();
         let files_show_hidden = config.layout.files_show_hidden;
+        let agents_active_only = config.agents_active_only;
         crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
         let theme_registry = crate::theme::ThemeRegistry::load();
         let theme = theme_registry.theme_or_default(&config.theme);
@@ -2128,7 +2129,7 @@ impl App {
             last_output_wait_scan: Instant::now(),
             workspaces_scroll: 0,
             agents_scroll: 0,
-            agents_active_only: false,
+            agents_active_only,
             workspaces_area: Rect::ZERO,
             agents_area: Rect::ZERO,
             // Rooted at nothing; the first detect tick re-roots it to the active
@@ -2258,6 +2259,7 @@ impl App {
     fn from_snapshot(snap: SessionSnapshot, app_tx: Sender<AppEvent>) -> Option<App> {
         let config = crate::config::load();
         let files_show_hidden = config.layout.files_show_hidden;
+        let agents_active_only = config.agents_active_only;
         let keymap = keys::build_keymap(&config.keybindings);
         let prefix = keys::PrefixSpec::parse(&config.prefix).unwrap_or_default();
         let shell = crate::platform::resolve_shell(&config.shell);
@@ -2708,7 +2710,7 @@ impl App {
             last_output_wait_scan: Instant::now(),
             workspaces_scroll: 0,
             agents_scroll: 0,
-            agents_active_only: false,
+            agents_active_only,
             workspaces_area: Rect::ZERO,
             agents_area: Rect::ZERO,
             // Rooted at nothing; the first detect tick re-roots it to the active
@@ -2868,6 +2870,30 @@ impl App {
         self.config.sidebars = Some(self.sidebars.to_config());
         self.config.sidebar_width = self.sidebars.left.width;
         crate::config::save(&self.config);
+    }
+
+    /// Apply the AGENTS All / Active projection without performing I/O. This is
+    /// shared by direct UI changes and whole-config reloads so every control
+    /// keeps the runtime filter and its scroll position consistent.
+    pub(crate) fn apply_agents_filter(&mut self, active_only: bool) -> bool {
+        if self.agents_active_only == active_only {
+            return false;
+        }
+        self.agents_active_only = active_only;
+        self.agents_scroll = 0;
+        true
+    }
+
+    /// Persist a direct All / Active selection. This is an infrequent user
+    /// interaction, never a render-, detection-, or refresh-path write.
+    pub(crate) fn set_agents_filter(&mut self, active_only: bool) -> bool {
+        let runtime_changed = self.apply_agents_filter(active_only);
+        let config_changed = self.config.agents_active_only != active_only;
+        if config_changed {
+            self.config.agents_active_only = active_only;
+            crate::config::save(&self.config);
+        }
+        runtime_changed || config_changed
     }
 
     /// Every mounted dock in display order: left sidebar top→bottom, then right.
@@ -6028,6 +6054,40 @@ mod tests {
         assert_eq!(restored.layout().len(), 2);
         assert_eq!(restored.workspaces[0].name, "Luvus website");
         assert!(restored.workspaces[0].pinned);
+    }
+
+    #[test]
+    fn agents_filter_config_controls_fresh_and_restored_apps() {
+        let _env = crate::persist::test_env("agents-filter-construction");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let app = App::new(80, 24, tx).unwrap();
+        assert!(
+            !app.agents_active_only,
+            "missing preference defaults to All"
+        );
+        let snapshot = serde_json::to_string(&persist::snapshot(&app)).unwrap();
+
+        let (tx2, _rx2) = std::sync::mpsc::channel();
+        let restored = App::from_snapshot(serde_json::from_str(&snapshot).unwrap(), tx2).unwrap();
+        assert!(
+            !restored.agents_active_only,
+            "snapshot restoration also defaults to All"
+        );
+
+        let mut config = crate::config::load();
+        config.agents_active_only = true;
+        crate::config::save(&config);
+
+        let (tx3, _rx3) = std::sync::mpsc::channel();
+        let fresh = App::new(80, 24, tx3).unwrap();
+        assert!(fresh.agents_active_only, "fresh construction reads Active");
+
+        let (tx4, _rx4) = std::sync::mpsc::channel();
+        let restored = App::from_snapshot(serde_json::from_str(&snapshot).unwrap(), tx4).unwrap();
+        assert!(
+            restored.agents_active_only,
+            "snapshot restoration reads config instead of snapshot state"
+        );
     }
 
     // A saved pane whose cwd no longer exists (deleted project dir) must not

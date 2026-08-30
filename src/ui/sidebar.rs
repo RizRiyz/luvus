@@ -730,6 +730,8 @@ fn header(text: &str, t: &Theme) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use crate::app::App;
+    use crate::event::AppEvent;
+    use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, Terminal};
 
     #[test]
@@ -943,14 +945,57 @@ mod tests {
             "All default shows session history"
         );
 
-        // Active: history is hidden when the user explicitly asks for live
-        // agents only.
-        app.agents_active_only = true;
+        // Clicking Active resets the filtered list and persists the choice.
+        app.agents_scroll = 7;
+        let active = app
+            .agents_filter_rects
+            .iter()
+            .find(|(active, _)| *active)
+            .map(|(_, rect)| *rect)
+            .expect("Active filter target");
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: active.x,
+            row: active.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.agents_active_only);
+        assert_eq!(app.agents_scroll, 0);
+        assert!(crate::config::load().agents_active_only);
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         assert!(
             !buffer_contains(&term, "resume"),
             "Active hides session history"
         );
+
+        // Clicking the selected choice is a true no-op, including its scroll.
+        app.agents_scroll = 5;
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: active.x,
+            row: active.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(app.agents_scroll, 5);
+
+        // All follows the same path and restores resumable history.
+        let all = app
+            .agents_filter_rects
+            .iter()
+            .find(|(active, _)| !*active)
+            .map(|(_, rect)| *rect)
+            .expect("All filter target");
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: all.x,
+            row: all.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(!app.agents_active_only);
+        assert_eq!(app.agents_scroll, 0);
+        assert!(!crate::config::load().agents_active_only);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(buffer_contains(&term, "resume"));
     }
 }
 

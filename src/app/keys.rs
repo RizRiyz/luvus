@@ -680,7 +680,9 @@ impl App {
             Cmd::OpenSettings => self.open_settings(),
             Cmd::ToggleSidebar => self.toggle_all_sides(),
             Cmd::ToggleRightSidebar => self.toggle_side(crate::app::Side::Right),
-            Cmd::ToggleAgents => self.agents_active_only = !self.agents_active_only,
+            Cmd::ToggleAgents => {
+                self.set_agents_filter(!self.agents_active_only);
+            }
             Cmd::ToggleFiles => self.toggle_files_dock(),
             Cmd::Switcher => self.toggle_switcher(),
             Cmd::GlobalSearch => self.toggle_search(),
@@ -1080,6 +1082,26 @@ mod tests {
         assert!(app.tab_rename.is_none());
         app.run_cmd(Cmd::RenameTab);
         assert!(app.tab_rename.is_some(), "rename tab opened the modal");
+    }
+
+    #[test]
+    fn toggle_agents_command_persists_both_filter_choices() {
+        let _env = crate::persist::test_env("toggle-agents-command");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        assert!(!app.agents_active_only);
+
+        app.agents_scroll = 7;
+        app.run_cmd(Cmd::ToggleAgents);
+        assert!(app.agents_active_only);
+        assert_eq!(app.agents_scroll, 0);
+        assert!(crate::config::load().agents_active_only);
+
+        app.agents_scroll = 5;
+        app.run_cmd(Cmd::ToggleAgents);
+        assert!(!app.agents_active_only);
+        assert_eq!(app.agents_scroll, 0);
+        assert!(!crate::config::load().agents_active_only);
     }
 
     #[test]

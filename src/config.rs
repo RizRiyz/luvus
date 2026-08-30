@@ -58,6 +58,11 @@ pub struct Config {
     /// (`--permission-mode bypassPermissions`), so switching it on is deliberate.
     #[serde(default)]
     pub resume_launch_flags: bool,
+    /// Show only live agents in the AGENTS dock. Missing values retain the
+    /// historical All default so resumable sessions never appear lost after an
+    /// upgrade. The visible All / Active control updates this preference.
+    #[serde(default)]
+    pub agents_active_only: bool,
     /// Custom keybindings: command id → key string (overrides the defaults).
     /// An empty value means the command is explicitly unbound.
     #[serde(default)]
@@ -436,6 +441,7 @@ impl Default for Config {
             notifications: NotifyConfig::default(),
             check_updates: true,
             resume_launch_flags: false,
+            agents_active_only: false,
             keybindings: std::collections::HashMap::new(),
             prefix: default_prefix(),
             mission_pricing: std::collections::HashMap::new(),
@@ -617,6 +623,10 @@ mod tests {
         let from_empty: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(from_empty.theme, "quattro-rally");
         assert_eq!(from_empty.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
+        assert!(
+            !from_empty.agents_active_only,
+            "old configs retain the All agents default"
+        );
         assert_eq!(
             from_empty.bars.bottom_right,
             vec![crate::bar::CORE_RUNTIME.to_string()],
@@ -683,6 +693,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(old.notifications.sound_style, crate::sound::STYLE_RETRO);
+    }
+
+    #[test]
+    fn agents_filter_preference_persists_both_choices() {
+        let _env = crate::persist::test_env("config-agents-filter");
+        let mut config = Config::default();
+        assert!(!config.agents_active_only);
+
+        config.agents_active_only = true;
+        save(&config);
+        assert!(load().agents_active_only);
+
+        config.agents_active_only = false;
+        save(&config);
+        assert!(!load().agents_active_only);
     }
 
     #[test]
