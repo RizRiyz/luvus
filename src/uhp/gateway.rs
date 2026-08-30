@@ -17,6 +17,7 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const CANCELLATION_POLL: Duration = Duration::from_millis(250);
 const ACCEPT_ERROR_DELAY: Duration = Duration::from_millis(10);
+const ACCEPT_WAKE_ATTEMPTS: usize = 3;
 const MAX_CONNECTIONS: usize = 16;
 const MAX_REQUESTS_PER_MINUTE: u32 = 120;
 
@@ -122,7 +123,11 @@ impl Gateway {
         if !self.shared.cancelled.swap(true, Ordering::AcqRel) {
             // Wake the blocking accept loop without polling during active UHP
             // access. The loop owns and drains all request workers.
-            let _ = TcpStream::connect(self.address);
+            for _ in 0..ACCEPT_WAKE_ATTEMPTS {
+                if TcpStream::connect(self.address).is_ok() {
+                    break;
+                }
+            }
         }
     }
 
