@@ -322,14 +322,14 @@ fn wrap(spans: Vec<StyledSpan>, width: usize, source_line: Option<usize>) -> Vec
             }
             end = end.max(start + 1).min(cells.len());
             let mut part = cells[start..end].to_vec();
-            while part.last().is_some_and(|cell| cell.ch.is_whitespace()) {
+            while part.last().is_some_and(|cell| cell.ch == ' ') {
                 part.pop();
             }
             let visible_end = start + part.len();
             let mut next_start = end;
             while cells
                 .get(next_start)
-                .is_some_and(|cell| cell.ch.is_whitespace())
+                .is_some_and(|cell| cell.ch == ' ')
             {
                 next_start += 1;
             }

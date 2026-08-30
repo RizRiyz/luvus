@@ -333,7 +333,7 @@ pub(crate) fn selection_text(
             }
         }
         first = false;
-        output.push_str(slice_columns(&row, left, right).trim_end());
+        output.push_str(slice_columns(&row, left, right).trim_end_matches(' '));
     }
     let output = output.trim_end_matches('\n').to_string();
     (!output.is_empty()).then_some(output)
@@ -665,6 +665,17 @@ mod tests {
         assert_eq!(
             selection_text(&view, content, ((0, 0), (9, 1)), false).as_deref(),
             Some("  alpha beta gamma")
+        );
+    }
+
+    #[test]
+    fn preview_selection_preserves_non_ascii_whitespace_at_a_wrap_boundary() {
+        let view = code_preview("alpha\u{a0}beta", 8);
+        let content = Rect::new(0, 0, 8, 3);
+
+        assert_eq!(
+            selection_text(&view, content, ((0, 0), (7, 1)), false).as_deref(),
+            Some("  alpha\u{a0}beta")
         );
     }
 
