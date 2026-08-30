@@ -243,6 +243,9 @@ pub(super) fn render(
         if let Some(leases) = lease_area {
             draw_leases(f, leases, orch, cat, t);
         }
+        if let Some(flow) = detail {
+            draw_flow(f, flow, cat, t);
+        }
         return BoardRender { scroll: 0, hits };
     }
 
@@ -455,6 +458,244 @@ fn draw_empty(f: &mut RenderTarget, area: Rect, cat: &Catalog, t: &Theme) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
+/// Explain the orchestration lifecycle in the detail column while the board is
+/// empty. This uses only terminal text and existing localized catalog labels,
+/// stays out of narrow layouts, and disappears as soon as a selected task can
+/// use the column for real details.
+fn draw_flow(f: &mut RenderTarget, area: Rect, cat: &Catalog, t: &Theme) {
+    if area.height < 3 || area.width < 12 {
+        return;
+    }
+    let block = super::dashboard_block(cat.sec_flow.to_uppercase(), t, false);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height == 0 {
+        return;
+    }
+
+    let border = Style::new().fg(t.overlay0);
+    let connector = Style::new().fg(t.overlay1);
+    let accent = Style::new().fg(t.accent).bold();
+    let text = Style::new().fg(t.text).bold();
+    let muted = Style::new().fg(t.subtext0);
+    let width = inner.width as usize;
+
+    // The full graph has two parallel worker lanes. Its fixed geometry keeps
+    // every branch and join aligned while localized labels are fitted inside
+    // the boxes. Smaller detail columns get the same branching model in a
+    // compact tree rather than falling back to a linear checklist.
+    let mut lines = if width >= 41 && inner.height >= 24 {
+        const GRAPH_W: usize = 41;
+        const NODE_W: usize = 19;
+        const NODE_INNER: usize = NODE_W - 2;
+        const NODE_X: usize = (GRAPH_W - NODE_W) / 2;
+        const LANE_W: usize = 17;
+        const LANE_INNER: usize = LANE_W - 2;
+        const LANE_X: usize = 1;
+        const LANE_GAP: usize = 5;
+        const AXIS: usize = GRAPH_W / 2;
+        const LEFT_AXIS: usize = LANE_X + LANE_W / 2;
+        const RIGHT_AXIS: usize = LANE_X + LANE_W + LANE_GAP + LANE_W / 2;
+
+        let offset = width.saturating_sub(GRAPH_W) / 2;
+        let prefix = |x: usize| Span::raw(" ".repeat(offset + x));
+        let node_border = |top: bool| {
+            let (left, right) = if top { ('┌', '┐') } else { ('└', '┘') };
+            Line::from(vec![
+                prefix(NODE_X),
+                Span::styled(format!("{left}{}{right}", "─".repeat(NODE_INNER)), border),
+            ])
+        };
+        let node_body = |label: &str, style: Style| {
+            Line::from(vec![
+                prefix(NODE_X),
+                Span::styled("│", border),
+                Span::styled(center_fit(&label.to_uppercase(), NODE_INNER), style),
+                Span::styled("│", border),
+            ])
+        };
+        let lanes_border = |top: bool| {
+            let (left, right) = if top { ('┌', '┐') } else { ('└', '┘') };
+            let one = format!("{left}{}{right}", "─".repeat(LANE_INNER));
+            Line::from(vec![
+                prefix(LANE_X),
+                Span::styled(one.clone(), border),
+                Span::raw(" ".repeat(LANE_GAP)),
+                Span::styled(one, border),
+            ])
+        };
+        let lanes_body = |left: &str, right: &str, style: Style| {
+            Line::from(vec![
+                prefix(LANE_X),
+                Span::styled("│", border),
+                Span::styled(center_fit(&left.to_uppercase(), LANE_INNER), style),
+                Span::styled("│", border),
+                Span::raw(" ".repeat(LANE_GAP)),
+                Span::styled("│", border),
+                Span::styled(center_fit(&right.to_uppercase(), LANE_INNER), style),
+                Span::styled("│", border),
+            ])
+        };
+        let axis = |symbol: &'static str, label: String, style: Style| {
+            Line::from(vec![
+                prefix(AXIS),
+                Span::styled(symbol, accent),
+                Span::styled(format!("  {label}"), style),
+            ])
+        };
+        let lease_label = format!("  {}", cat.board_lease);
+        let lease_gap =
+            RIGHT_AXIS.saturating_sub(LEFT_AXIS + 1 + super::display_width(&lease_label));
+        let fail_label = format!("↺ {}  ", cat.task_failed);
+        let fail_x = NODE_X.saturating_sub(super::display_width(&fail_label));
+
+        vec![
+            node_border(true),
+            node_body(cat.board_task_queue, text),
+            node_body("t1   t2   t3", muted),
+            node_border(false),
+            axis("│", cat.act_ready.to_string(), connector),
+            Line::from(vec![
+                prefix(LEFT_AXIS),
+                Span::styled(
+                    format!(
+                        "┌{}┴{}┐",
+                        "─".repeat(AXIS - LEFT_AXIS - 1),
+                        "─".repeat(RIGHT_AXIS - AXIS - 1)
+                    ),
+                    border,
+                ),
+            ]),
+            Line::from(vec![
+                prefix(LEFT_AXIS),
+                Span::styled("▼", accent),
+                Span::raw(" ".repeat(RIGHT_AXIS - LEFT_AXIS - 1)),
+                Span::styled("▼", accent),
+            ]),
+            lanes_border(true),
+            lanes_body(
+                &format!("{} A", cat.board_agent),
+                &format!("{} B", cat.board_agent),
+                text,
+            ),
+            lanes_body(
+                &format!("{} A", cat.board_worktree),
+                &format!("{} B", cat.board_worktree),
+                muted,
+            ),
+            lanes_border(false),
+            Line::from(vec![
+                prefix(LEFT_AXIS),
+                Span::styled("│", border),
+                Span::styled(lease_label.clone(), connector),
+                Span::raw(" ".repeat(lease_gap)),
+                Span::styled("│", border),
+                Span::styled(lease_label, connector),
+            ]),
+            Line::from(vec![
+                prefix(LEFT_AXIS),
+                Span::styled(
+                    format!(
+                        "└{}┬{}┘",
+                        "─".repeat(AXIS - LEFT_AXIS - 1),
+                        "─".repeat(RIGHT_AXIS - AXIS - 1)
+                    ),
+                    border,
+                ),
+            ]),
+            axis("▼", String::new(), connector),
+            node_border(true),
+            Line::from(vec![
+                prefix(fail_x),
+                Span::styled(fail_label, Style::new().fg(t.coral)),
+                Span::styled("│", border),
+                Span::styled(
+                    center_fit(&cat.board_quality_gate.to_uppercase(), NODE_INNER),
+                    text,
+                ),
+                Span::styled("│", border),
+            ]),
+            node_border(false),
+            axis("│", cat.board_pass.to_string(), connector),
+            axis("▼", String::new(), connector),
+            node_border(true),
+            node_body(cat.act_merge, text),
+            node_border(false),
+            axis("▼", String::new(), connector),
+            Line::from(vec![
+                prefix(AXIS.saturating_sub(1)),
+                Span::styled("◆ ", Style::new().fg(t.green).bold()),
+                Span::styled(
+                    cat.task_merged.to_uppercase(),
+                    Style::new().fg(t.green).bold(),
+                ),
+            ]),
+        ]
+    } else {
+        let tree_w = 25.min(width);
+        let offset = width.saturating_sub(tree_w) / 2;
+        let prefix = |depth: usize| Span::raw(" ".repeat(offset + depth));
+        vec![
+            Line::from(vec![
+                prefix(0),
+                Span::styled("┌─ ", border),
+                Span::styled(cat.board_task_queue.to_uppercase(), text),
+            ]),
+            Line::from(vec![
+                prefix(0),
+                Span::styled("├────▶ ", border),
+                Span::styled(format!("{} A", cat.board_agent), accent),
+            ]),
+            Line::from(vec![
+                prefix(0),
+                Span::styled("└────▶ ", border),
+                Span::styled(format!("{} B", cat.board_agent), accent),
+            ]),
+            Line::from(vec![
+                prefix(7),
+                Span::styled("└─ ", border),
+                Span::styled(cat.board_worktree.to_uppercase(), muted),
+            ]),
+            Line::from(vec![
+                prefix(10),
+                Span::styled("└─ ", border),
+                Span::styled(cat.board_quality_gate.to_uppercase(), text),
+                Span::styled(format!("  ↺ {}", cat.task_failed), Style::new().fg(t.coral)),
+            ]),
+            Line::from(vec![
+                prefix(13),
+                Span::styled("└─ ", border),
+                Span::styled(cat.act_merge.to_uppercase(), text),
+            ]),
+            Line::from(vec![
+                prefix(16),
+                Span::styled("└─ ", border),
+                Span::styled(
+                    format!("◆ {}", cat.task_merged.to_uppercase()),
+                    Style::new().fg(t.green).bold(),
+                ),
+            ]),
+        ]
+    };
+    lines.truncate(inner.height as usize);
+    let content = Rect::new(
+        inner.x,
+        inner.y + inner.height.saturating_sub(lines.len() as u16) / 2,
+        inner.width,
+        lines.len() as u16,
+    );
+    f.render_widget(Paragraph::new(lines), content);
+}
+
+fn center_fit(value: &str, width: usize) -> String {
+    let fitted = pad(value, width);
+    let value = fitted.trim_end_matches(' ');
+    let used = super::display_width(value);
+    let left = width.saturating_sub(used) / 2;
+    let right = width.saturating_sub(used + left);
+    format!("{}{value}{}", " ".repeat(left), " ".repeat(right))
+}
+
 fn draw_leases(f: &mut RenderTarget, area: Rect, orch: &OrchState, cat: &Catalog, t: &Theme) {
     if area.height < 2 || area.width < 4 {
         return;
@@ -577,7 +818,7 @@ pub(super) fn draw_form(
     cat: &Catalog,
     t: &Theme,
 ) -> Vec<(crate::app::OrchHit, Rect)> {
-    let mut hits = Vec::with_capacity(6);
+    let mut hits = Vec::with_capacity(7);
     dim_backdrop(f, area, t);
     let w = area.width.saturating_sub(6).clamp(44, 76).min(area.width);
     let modal = centered_rect(area, w, 10);
@@ -667,6 +908,10 @@ pub(super) fn draw_form(
             ),
         ));
     }
+    // Actionable controls are intentionally inserted first. The modal surface
+    // is the fallback hit target, which keeps clicks inside it from behaving
+    // like backdrop clicks.
+    hits.push((crate::app::OrchHit::FormModal, modal));
     hits
 }
 

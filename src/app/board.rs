@@ -706,6 +706,7 @@ impl App {
             }
             crate::app::OrchHit::FormCreate => self.submit_orch_form(),
             crate::app::OrchHit::FormCancel => self.orch_form = None,
+            crate::app::OrchHit::FormModal => {}
             crate::app::OrchHit::StartChoice(cursor) => {
                 if let Some(start) = self.orch_start.as_mut() {
                     start.cursor = cursor.min(agent_choices().len().saturating_sub(1));
@@ -1822,6 +1823,36 @@ mod tests {
             .orch_hits
             .iter()
             .any(|(hit, _)| matches!(hit, crate::app::OrchHit::Task(_))));
+    }
+
+    #[test]
+    fn empty_wide_board_uses_the_detail_column_for_the_flow() {
+        let _env = crate::persist::test_env("orch-empty-flow");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(180, 32, tx).unwrap();
+        app.open_orch_board();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(180, 32)).unwrap();
+
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(rendered.contains("FLOW"));
+        assert!(rendered.contains("TASK QUEUE"));
+        assert!(rendered.contains("AGENT A"));
+        assert!(rendered.contains("AGENT B"));
+        assert!(rendered.contains("WORKTREE A"));
+        assert!(rendered.contains("QUALITY GATE"));
+        assert!(rendered.contains("pass"));
+        assert!(rendered.contains("◆ MERGED"));
     }
 
     #[test]

@@ -988,6 +988,9 @@ pub enum OrchHit {
     FormField(usize),
     FormCreate,
     FormCancel,
+    /// The new-task form surface. Kept behind the form's actionable hit
+    /// targets so clicks inside the modal are consumed without dismissing it.
+    FormModal,
     StartChoice(usize),
     StartCommit,
     StartCancel,

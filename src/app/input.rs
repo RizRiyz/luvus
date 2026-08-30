@@ -1326,6 +1326,10 @@ impl App {
                         .map(|(hit, _)| hit.clone());
                     if let Some(hit) = hit {
                         self.orch_activate_hit(hit);
+                    } else if self.orch_form.is_some() {
+                        // Match Settings and the folder picker: the modal
+                        // surface is inert, while its dimmed backdrop cancels.
+                        self.orch_form = None;
                     }
                 }
                 MouseEventKind::ScrollUp if self.orch_detail.is_some() => {
@@ -4691,6 +4695,43 @@ mod link_click_tests {
         ));
         assert!(!app.active_is_orch());
         assert_eq!(app.layout().focus, worker);
+    }
+
+    #[test]
+    fn new_task_form_stays_open_inside_and_closes_on_its_backdrop() {
+        let _env = crate::persist::test_env("orch-form-backdrop");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 32, tx).unwrap();
+        app.open_orch_board();
+        app.open_orch_form();
+        let mut term = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let modal = app
+            .orch_hits
+            .iter()
+            .find_map(|(hit, rect)| matches!(hit, OrchHit::FormModal).then_some(*rect))
+            .expect("new-task modal surface is published");
+
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            (modal.x, modal.y),
+            KeyModifiers::NONE,
+        ));
+        assert!(
+            app.orch_form.is_some(),
+            "a click inside keeps the form open"
+        );
+
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            (modal.x.saturating_sub(1), modal.y),
+            KeyModifiers::NONE,
+        ));
+        assert!(
+            app.orch_form.is_none(),
+            "a click on the dimmed backdrop closes the form"
+        );
     }
 
     #[test]
