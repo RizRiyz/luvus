@@ -296,6 +296,7 @@ universal harness protocol:
   uhp schema                print the complete installed UHP JSON Schema bundle
   uhp snapshot              print a fenced session snapshot for harness bootstrap
   uhp events                stream sequenced UHP events
+  uhp access [--control]    expose scoped UHP through a private provider endpoint
   uhp proxy                 forward one JSON request from stdin to the selected server
 
 sessions:
@@ -407,6 +408,14 @@ fn run_inner(args: &[String]) -> Result<i32> {
     if args.get(1).map(String::as_str) == Some("theme") {
         return theme_cmd(
             &args[2.min(args.len())..],
+            crate::i18n::cli::Context::configured(),
+        );
+    }
+    if args.get(1).map(String::as_str) == Some("uhp")
+        && args.get(2).map(String::as_str) == Some("access")
+    {
+        return crate::uhp::run_cli(
+            &args[3.min(args.len())..],
             crate::i18n::cli::Context::configured(),
         );
     }
@@ -769,7 +778,7 @@ fn write_topic_help_english(
             detailed_section("events:\n", "\nuniversal harness protocol:\n"),
         ),
         "uhp" => (
-            "luvus uhp <capabilities|schema|snapshot|events|proxy>",
+            "luvus uhp <capabilities|schema|snapshot|events|access|proxy>",
             detailed_section("universal harness protocol:\n", "\nsessions:\n"),
         ),
         "remote" => (
@@ -2258,7 +2267,7 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
     if noun == "uhp" {
         if !rest.is_empty() {
             return Err(anyhow!(
-                "usage: luvus uhp <capabilities|schema|snapshot|events|proxy>"
+                "usage: luvus uhp <capabilities|schema|snapshot|events|access|proxy>"
             ));
         }
         return match verb {
@@ -2266,7 +2275,7 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             "snapshot" => Ok(("session.snapshot".into(), json!({}))),
             "events" => Ok(("events.subscribe".into(), json!({}))),
             _ => Err(anyhow!(
-                "usage: luvus uhp <capabilities|schema|snapshot|events|proxy>"
+                "usage: luvus uhp <capabilities|schema|snapshot|events|access|proxy>"
             )),
         };
     }
@@ -3927,6 +3936,7 @@ mod tests {
             ("luvus pane split --help", Some(("pane", Some("split")))),
             ("luvus module install -h", Some(("module", Some("install")))),
             ("luvus update --help", Some(("update", None))),
+            ("luvus uhp access --help", Some(("uhp", Some("access")))),
         ] {
             let args = argv(raw);
             assert_eq!(command_help_request(&args), expected, "{raw}");
@@ -3937,6 +3947,13 @@ mod tests {
     fn update_is_a_top_level_local_cli_command() {
         assert!(is_cli(&argv("luvus update")));
         assert!(!help_topic_has_subcommands("update"));
+    }
+
+    #[test]
+    fn uhp_help_includes_transport_neutral_access() {
+        let help = rendered_topic_help("uhp", None);
+        assert!(help.contains("uhp access [--control]"));
+        assert!(help.contains("private provider endpoint"));
     }
 
     #[test]

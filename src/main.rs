@@ -33,6 +33,7 @@ mod skill;
 mod sound;
 mod terminal;
 mod theme;
+mod uhp;
 mod ui;
 mod update;
 

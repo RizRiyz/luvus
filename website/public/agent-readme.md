@@ -300,6 +300,13 @@ owner-only Unix socket on macOS and Linux or owner-restricted named pipe on
 Windows. Luvus does not open a public TCP listener. `luvus uhp proxy` is the
 bounded, transport-neutral one-request bridge.
 
+For a persistent third-party transport or client, `luvus uhp access` emits one
+machine-readable descriptor for a scoped loopback gateway and remains in the
+foreground. It does not start or bundle a transport provider. Forward the
+endpoint only through an authenticated encrypted byte stream, pair once, then
+discover live capabilities. `--control` requires the user's explicit
+authorization and remains limited by the gateway allowlist.
+
 ## Remote use
 
 ```sh

@@ -257,7 +257,16 @@ pub fn is_read_only(method: &str) -> bool {
 }
 
 pub fn required_scope(method: &str) -> &'static str {
-    if matches!(method, "uhp.capabilities" | "uhp.stats" | "ping") {
+    if matches!(
+        method,
+        "uhp.capabilities"
+            | "uhp.stats"
+            | "ping"
+            | "session.snapshot"
+            | "events.subscribe"
+            | "events.wait"
+            | "wait.output"
+    ) {
         "read"
     } else if method.starts_with("terminal.backend.") {
         "terminal"
@@ -392,6 +401,8 @@ mod tests {
         assert!(is_idempotent("pane.list"));
         assert!(!is_read_only("mission.open"));
         assert_eq!(required_scope("mission.open"), "workspace");
+        assert_eq!(required_scope("session.snapshot"), "read");
+        assert_eq!(required_scope("events.subscribe"), "read");
         for stream in [
             "events.subscribe",
             "terminal.backend.events.subscribe",

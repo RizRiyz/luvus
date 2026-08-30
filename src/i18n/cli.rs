@@ -133,6 +133,17 @@ macro_rules! tr {
 /// suffix, so canonical syntax at the start of a row is never rewritten.
 static HELP: &[Translation] = &[
     tr!(
+        "expose scoped UHP through a private provider endpoint",
+        "exponer UHP con alcance mediante un endpoint privado para proveedores",
+        "expor UHP com escopo por um endpoint privado para provedores",
+        "exposer UHP avec une portée limitée via un endpoint privé pour fournisseurs",
+        "UHP mit begrenztem Umfang über einen privaten Anbieter-Endpunkt bereitstellen",
+        "ekspos UHP terbatas melalui endpoint penyedia privat",
+        "通过私有提供方端点公开限定范围的 UHP",
+        "スコープを限定した UHP をプライベートなプロバイダー用エンドポイントで公開",
+        "범위가 제한된 UHP를 비공개 공급자 엔드포인트로 노출"
+    ),
+    tr!(
         "Read local structured server and client diagnostics",
         "Leer diagnósticos estructurados locales del servidor y cliente",
         "Ler diagnósticos estruturados locais do servidor e cliente",
@@ -2503,6 +2514,39 @@ static HELP: &[Translation] = &[
 /// Local CLI labels and diagnostics. These are kept out of `HELP` so short
 /// labels such as `name` can never be mistaken for a help-row description.
 static TEXT: &[Translation] = &[
+    tr!(
+        "Could not authorize UHP access.",
+        "No se pudo autorizar el acceso UHP.",
+        "Não foi possível autorizar o acesso UHP.",
+        "Impossible d'autoriser l'accès UHP.",
+        "Der UHP-Zugriff konnte nicht autorisiert werden.",
+        "Akses UHP tidak dapat diotorisasi.",
+        "无法授权 UHP 访问。",
+        "UHP アクセスを承認できませんでした。",
+        "UHP 액세스를 승인할 수 없습니다."
+    ),
+    tr!(
+        "Could not start the private UHP access gateway.",
+        "No se pudo iniciar la puerta de enlace privada de acceso UHP.",
+        "Não foi possível iniciar o gateway privado de acesso UHP.",
+        "Impossible de démarrer la passerelle privée d'accès UHP.",
+        "Das private UHP-Zugriffs-Gateway konnte nicht gestartet werden.",
+        "Gateway akses UHP privat tidak dapat dimulai.",
+        "无法启动私有 UHP 访问网关。",
+        "プライベート UHP アクセスゲートウェイを起動できませんでした。",
+        "비공개 UHP 액세스 게이트웨이를 시작할 수 없습니다."
+    ),
+    tr!(
+        "Could not create a secure pairing code.",
+        "No se pudo crear un código de vinculación seguro.",
+        "Não foi possível criar um código de pareamento seguro.",
+        "Impossible de créer un code de jumelage sécurisé.",
+        "Es konnte kein sicherer Kopplungscode erstellt werden.",
+        "Kode pemasangan aman tidak dapat dibuat.",
+        "无法创建安全配对码。",
+        "安全なペアリングコードを作成できませんでした。",
+        "안전한 페어링 코드를 만들 수 없습니다."
+    ),
     tr!("name", "nombre", "nome", "nom", "Name", "nama", "名称", "名前",
         "이름"),
     tr!("status", "estado", "status", "état", "Status", "status", "状态", "状態",

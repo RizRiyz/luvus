@@ -24,6 +24,13 @@ response. A request has `id`, `method`, and `params`; add `auth` only for an
 explicit delegated token. Keep the inherited or explicitly selected session
 and socket when invoking it.
 
+`luvus uhp access [--control]` instead creates a temporary authenticated
+loopback gateway for a persistent third-party byte-stream provider. Its first
+stdout line is the access descriptor; it never contains the delegated token.
+The client pairs once, then uses the returned token on ordinary UHP frames.
+Keep the loopback endpoint private and require an encrypted, authenticated
+transport.
+
 ## Bootstrap and maintain state
 
 Use this order for a stateful harness:

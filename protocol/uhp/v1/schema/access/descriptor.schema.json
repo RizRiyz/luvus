@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://luvus.dev/protocol/uhp/v1/schema/access/descriptor.schema.json",
+  "title": "Luvus UHP access descriptor",
+  "type": "object",
+  "properties": {
+    "$schema": { "const": "https://luvus.dev/protocol/uhp/v1/schema/access/descriptor.schema.json" },
+    "type": { "const": "luvus_uhp_access" },
+    "protocol": {
+      "type": "object",
+      "properties": {
+        "name": { "const": "luvus-uhp" },
+        "major": { "const": 1 },
+        "minor": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["name", "major", "minor"],
+      "additionalProperties": false
+    },
+    "access": {
+      "type": "object",
+      "properties": { "major": { "const": 1 } },
+      "required": ["major"],
+      "additionalProperties": false
+    },
+    "endpoint": {
+      "type": "object",
+      "properties": {
+        "transport": { "const": "tcp" },
+        "host": { "const": "127.0.0.1" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "framing": { "const": "ndjson" }
+      },
+      "required": ["transport", "host", "port", "framing"],
+      "additionalProperties": false
+    },
+    "pairing": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "one_use_code" },
+        "code": { "type": "string", "pattern": "^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$" },
+        "expires_at": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["type", "code", "expires_at"],
+      "additionalProperties": false
+    },
+    "authority": {
+      "type": "object",
+      "properties": {
+        "mode": { "enum": ["read_only", "control"] },
+        "scopes": {
+          "type": "array",
+          "items": { "enum": ["read", "workspace", "agent", "terminal"] },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "expires_at": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["mode", "scopes", "expires_at"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["$schema", "type", "protocol", "access", "endpoint", "pairing", "authority"],
+  "allOf": [
+    {
+      "if": { "properties": { "authority": { "properties": { "mode": { "const": "read_only" } }, "required": ["mode"] } } },
+      "then": { "properties": { "authority": { "properties": { "scopes": { "const": ["read"] } } } } }
+    },
+    {
+      "if": { "properties": { "authority": { "properties": { "mode": { "const": "control" } }, "required": ["mode"] } } },
+      "then": { "properties": { "authority": { "properties": { "scopes": { "const": ["read", "workspace", "agent", "terminal"] } } } } }
+    }
+  ],
+  "additionalProperties": false
+}

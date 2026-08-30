@@ -6,6 +6,8 @@ This package is the source-controlled Universal Harness Protocol 1.0 contract.
 - `schema/response.schema.json` defines success and error envelopes.
 - `schema/event.schema.json` defines sequenced event frames.
 - `schema/terminal/` contains strict terminal method and stream components.
+- `schema/access/descriptor.schema.json` defines transport-neutral remote
+  bootstrap metadata; `access/README.md` defines provider and pairing behavior.
 - `fixtures/` contains valid and invalid global wire examples.
 - `terminal/fixtures/` exercises terminal identities, input, streams, and errors.
 

@@ -13,6 +13,9 @@ pub fn schema_bundle() -> Value {
     let event = schema(include_str!(
         "../../protocol/uhp/v1/schema/event.schema.json"
     ));
+    let access_descriptor = schema(include_str!(
+        "../../protocol/uhp/v1/schema/access/descriptor.schema.json"
+    ));
     let terminal = crate::terminal::backend::schema_bundle();
     let mut documents = terminal["documents"]
         .as_object()
@@ -30,6 +33,10 @@ pub fn schema_bundle() -> Value {
         "https://luvus.dev/protocol/uhp/v1/event.schema.json".into(),
         event.clone(),
     );
+    documents.insert(
+        "https://luvus.dev/protocol/uhp/v1/schema/access/descriptor.schema.json".into(),
+        access_descriptor.clone(),
+    );
     json!({
         "protocol":{
             "name":super::PROTOCOL_NAME,
@@ -39,6 +46,7 @@ pub fn schema_bundle() -> Value {
         "request":request,
         "response":response,
         "event":event,
+        "access":{"descriptor":access_descriptor},
         "terminal":terminal,
         "documents":documents,
     })
@@ -71,7 +79,11 @@ mod tests {
         assert!(bundle.get("profiles").is_none());
         assert!(bundle["terminal"]["methods"]["observe"].is_object());
         assert!(bundle["terminal"]["methods"]["control"].is_object());
+        assert_eq!(bundle["access"]["descriptor"]["type"], "object");
         let documents = bundle["documents"].as_object().unwrap();
+        assert!(documents.contains_key(
+            "https://luvus.dev/protocol/uhp/v1/schema/access/descriptor.schema.json"
+        ));
         for branch in bundle["request"]["allOf"].as_array().unwrap() {
             let Some(reference) = branch["then"]["properties"]["params"]["$ref"].as_str() else {
                 continue;
