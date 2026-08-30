@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::files::view_text_w;
+use unicode_width::UnicodeWidthChar;
 
 /// Keep the command overlay useful when a just-spawned child has not appeared
 /// in the platform process snapshot yet. The OS tree remains authoritative for
@@ -159,24 +160,6 @@ fn finish_selected_text(mut out: String) -> Option<String> {
     (!out.trim().is_empty()).then_some(out)
 }
 
-/// Drop the one blank cell which can sit between a pane edge and uniformly
-/// aligned prose. This is deliberately narrow: code with its usual two- or
-/// four-space indentation is retained exactly as selected.
-fn strip_uniform_single_cell_margin(text: String) -> String {
-    let mut saw_text = false;
-    let uniform_margin = text.lines().filter(|line| !line.is_empty()).all(|line| {
-        saw_text = true;
-        line.starts_with(' ') && !line.starts_with("  ")
-    });
-    if !saw_text || !uniform_margin {
-        return text;
-    }
-    text.lines()
-        .map(|line| line.strip_prefix(' ').unwrap_or(line))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// A second left click within this of the first, on the same cell (±1), is a
 /// double-click. Terminals emit no native double-click, so luvus times it.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -184,6 +167,54 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// A run of grid cells on one row: `(row, start_col, end_col)`, `end_col`
 /// exclusive — the same shape as [`crate::links::Link::spans`].
 type CellSpan = (u16, u16, u16);
+
+/// Convert rendered native-view rows to the same cell-aligned representation
+/// used by terminal token lookup. This runs only on a double-click, never on a
+/// frame, and keeps wide and zero-width characters from shifting the clicked
+/// cell away from its word.
+fn align_plain_rows(rows: Vec<String>) -> crate::terminal::vt::AlignedRows {
+    let mut aligned = crate::terminal::vt::AlignedRows::new(rows.len());
+    for (row, line) in rows.into_iter().enumerate() {
+        let mut column = 0u16;
+        let mut base: Option<(char, usize, Vec<char>)> = None;
+        let flush = |base: &mut Option<(char, usize, Vec<char>)>,
+                     aligned: &mut crate::terminal::vt::AlignedRows,
+                     column: &mut u16| {
+            let Some((character, width, zero_width)) = base.take() else {
+                return;
+            };
+            aligned.push_cell(
+                row as u16,
+                *column,
+                character,
+                (!zero_width.is_empty()).then_some(zero_width.as_slice()),
+            );
+            for offset in 1..width {
+                aligned.push_cell(
+                    row as u16,
+                    column.saturating_add(offset as u16),
+                    crate::terminal::vt::ALIGNED_WIDE_CELL,
+                    None,
+                );
+            }
+            *column = column.saturating_add(width as u16);
+        };
+
+        for character in line.chars() {
+            let width = character.width().unwrap_or(0);
+            if width == 0 {
+                if let Some((_, _, zero_width)) = base.as_mut() {
+                    zero_width.push(character);
+                }
+                continue;
+            }
+            flush(&mut base, &mut aligned, &mut column);
+            base = Some((character, width, Vec::new()));
+        }
+        flush(&mut base, &mut aligned, &mut column);
+    }
+    aligned
+}
 
 /// The whitespace-delimited word covering grid cell (`col`, `row`), and the one
 /// span it occupies. `None` on a whitespace or out-of-range cell. Wide-cell
@@ -2553,22 +2584,12 @@ impl App {
         let Some(copy) = self.copy_mode.take() else {
             return;
         };
-        let is_codex = self
-            .status
-            .get(&copy.pane)
-            .is_some_and(|status| status.agent == "codex");
         let text = self
             .panes
             .get(&copy.pane)
             .and_then(|pane| pane.retained_selection_text(copy.ordered()))
             .and_then(finish_selected_text);
-        if let Some(text) = text.map(|text| {
-            if is_codex {
-                strip_uniform_single_cell_margin(text)
-            } else {
-                text
-            }
-        }) {
+        if let Some(text) = text {
             self.pending_clipboard = Some(text);
             let msg = self.catalog.copied;
             self.show_toast(msg);
@@ -2846,46 +2867,27 @@ impl App {
         }
         if let Some(selection) = sel.retained {
             let range = selection.ordered();
-            let text = self
+            return self
                 .panes
                 .get(&sel.pane)?
                 .retained_selection_text(range)
-                .and_then(finish_selected_text)?;
-            let is_codex = self
-                .status
-                .get(&sel.pane)
-                .is_some_and(|status| status.agent == "codex");
-            return Some(if range.0 .1 == 0 || is_codex {
-                strip_uniform_single_cell_margin(text)
-            } else {
-                text
-            });
+                .and_then(finish_selected_text);
         }
         let ((sx, sy), (ex, ey)) = sel.ordered();
         let (cx, cy) = (sel.content.x, sel.content.y);
-        let text = self.panes.get(&sel.pane)?.visible_selection_text((
-            (
-                (sy as usize).saturating_sub(cy as usize),
-                (sx as usize).saturating_sub(cx as usize),
-            ),
-            (
-                (ey as usize).saturating_sub(cy as usize),
-                (ex as usize).saturating_sub(cx as usize),
-            ),
-        ))?;
-        // A drag may begin in the single blank pane cell before uniformly
-        // aligned prose. Codex also emits that one-cell transcript gutter even
-        // when the drag starts on its first visible character. It remains
-        // visibly selected, but is padding rather than useful clipboard text.
-        let is_codex = self
-            .status
-            .get(&sel.pane)
-            .is_some_and(|status| status.agent == "codex");
-        Some(if sx == cx || is_codex {
-            strip_uniform_single_cell_margin(text)
-        } else {
-            text
-        })
+        self.panes
+            .get(&sel.pane)?
+            .visible_selection_text((
+                (
+                    (sy as usize).saturating_sub(cy as usize),
+                    (sx as usize).saturating_sub(cx as usize),
+                ),
+                (
+                    (ey as usize).saturating_sub(cy as usize),
+                    (ex as usize).saturating_sub(cx as usize),
+                ),
+            ))
+            .and_then(finish_selected_text)
     }
 
     /// Copy the path, URL, or word under screen cell (`col`, `row`) to the
@@ -2901,16 +2903,33 @@ impl App {
         let Some((pane, content)) = self.pane_content_at(col, row) else {
             return false;
         };
-        let rows = {
-            let Some(p) = self.panes.get(&pane) else {
-                return false;
-            };
-            let Ok(engine) = p.engine.lock() else {
-                return false;
-            };
-            // Cell-aligned rows: a wide glyph before the token would otherwise
-            // shift `gcol` off the intended character (and its highlight).
-            engine.visible_rows_aligned()
+        let rows = match self.views.get(&pane) {
+            Some(crate::app::ViewKind::File(view)) => {
+                let Some(rows) = crate::files::token_rows(view, content, self.compact) else {
+                    return false;
+                };
+                align_plain_rows(rows)
+            }
+            Some(crate::app::ViewKind::Preview(view)) => {
+                let Some(rows) = super::preview::token_rows(view, content, self.compact) else {
+                    return false;
+                };
+                align_plain_rows(rows)
+            }
+            // DIFF owns its source-cell clicks for review and note selection.
+            // Do not route it through generic word copying.
+            Some(crate::app::ViewKind::Diff(_)) => return false,
+            None => {
+                let Some(p) = self.panes.get(&pane) else {
+                    return false;
+                };
+                let Ok(engine) = p.engine.lock() else {
+                    return false;
+                };
+                // Cell-aligned rows: a wide glyph before the token would otherwise
+                // shift `gcol` off the intended character (and its highlight).
+                engine.visible_rows_aligned()
+            }
         };
         let (gcol, grow) = (col - content.x, row - content.y);
         let (text, spans) = match copy_link_at_grid(&rows, gcol, grow) {
@@ -4925,6 +4944,24 @@ mod link_click_tests {
         (app, term, (content.x + at, content.y))
     }
 
+    fn double_click(app: &mut App, at: (u16, u16)) {
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+    }
+
     /// `Ctrl`+click a path, then return the view it landed on. Tests run from
     /// the repo root, so `Cargo.toml` is a real relative path from the pane's
     /// working directory.
@@ -5195,25 +5232,7 @@ mod link_click_tests {
     }
 
     #[test]
-    fn mouse_copy_drops_a_uniform_one_cell_pane_margin() {
-        assert_eq!(
-            strip_uniform_single_cell_margin(
-                " Hello, rain on a windowpane\n Hello, wind with a traveling name\n Hello, all things we almost miss"
-                    .into()
-            ),
-            "Hello, rain on a windowpane\nHello, wind with a traveling name\nHello, all things we almost miss"
-        );
-        assert_eq!(
-            strip_uniform_single_cell_margin(
-                "    let preserved = true;\n    run(preserved);".into()
-            ),
-            "    let preserved = true;\n    run(preserved);",
-            "normal code indentation must stay intact"
-        );
-    }
-
-    #[test]
-    fn mouse_drag_copy_drops_the_pane_edge_margin_from_terminal_text() {
+    fn mouse_drag_copy_preserves_selected_terminal_cells() {
         let _env = crate::persist::test_env("mouse-copy-pane-margin");
         let source = " Morning arrives without ceremony,\r\n a thin gold line on the edge of the glass.\r\n The kettle speaks in its private language,";
         let (mut app, mut term, _) = fixture_showing(source, 0);
@@ -5253,7 +5272,7 @@ mod link_click_tests {
         assert_eq!(
             app.selection_text().as_deref(),
             Some(
-                "Morning arrives without ceremony,\na thin gold line on the edge of the glass.\nThe kettle speaks in its private language,"
+                " Morning arrives without ceremony,\n a thin gold line on the edge of the glass.\n The kettle speaks in its private language,"
             )
         );
         app.handle_event(mouse(
@@ -5265,7 +5284,7 @@ mod link_click_tests {
         assert_eq!(
             app.pending_clipboard.as_deref(),
             Some(
-                "Morning arrives without ceremony,\na thin gold line on the edge of the glass.\nThe kettle speaks in its private language,"
+                " Morning arrives without ceremony,\n a thin gold line on the edge of the glass.\n The kettle speaks in its private language,"
             )
         );
     }
@@ -5463,6 +5482,97 @@ mod link_click_tests {
             "the second press copies the whitespace word"
         );
         assert!(app.selection.is_some(), "and highlights it");
+    }
+
+    #[test]
+    fn a_double_click_copies_a_word_from_a_native_file_view() {
+        let _env = crate::persist::test_env("double-click-file-view");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let pane = app.layout().focus;
+        let mut view = crate::files::FileView::new(PathBuf::from("sample.txt"));
+        view.wrap = false;
+        view.apply(crate::files::FileLoad::Text(vec![
+            "你好 file-view world".into()
+        ]));
+        app.panes.remove(&pane);
+        app.views.insert(pane, crate::app::ViewKind::File(view));
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("file content rect");
+        let text_x = content.x + crate::files::gutter_width(1) + 1;
+
+        // Two wide glyphs occupy four cells before the separating space.
+        double_click(&mut app, (text_x + 6, content.y));
+
+        assert_eq!(app.pending_clipboard.as_deref(), Some("file-view"));
+        assert!(
+            app.selection.is_some(),
+            "the copied file word is highlighted"
+        );
+    }
+
+    #[test]
+    fn a_double_click_copies_a_word_from_a_document_preview() {
+        use crate::files::preview::{
+            layout, Block, DocumentView, LayoutKey, PreviewDocument, PreviewKind, PreviewLoad,
+        };
+
+        let _env = crate::persist::test_env("double-click-document-preview");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let pane = app.layout().focus;
+        let source = Arc::<str>::from("hello rendered-preview world");
+        let document = Arc::new(PreviewDocument::new(
+            Arc::clone(&source),
+            vec![Block::Code {
+                language: None,
+                text: source.to_string(),
+                range: 0..source.len(),
+            }],
+        ));
+        let mut view = DocumentView::new(PathBuf::from("README.md"), PreviewKind::Markdown);
+        view.apply(PreviewLoad::Ready(Arc::clone(&document)));
+        app.panes.remove(&pane);
+        app.views.insert(pane, crate::app::ViewKind::Preview(view));
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("preview content rect");
+        let key = LayoutKey {
+            width: content.width,
+            ascii: false,
+        };
+        if let Some(crate::app::ViewKind::Preview(view)) = app.views.get_mut(&pane) {
+            view.apply_layout(key, Arc::new(layout::build(document, key)));
+        }
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        // Code preview rows have a two-cell presentation indent.
+        double_click(&mut app, (content.x + 2 + 7, content.y));
+
+        assert_eq!(app.pending_clipboard.as_deref(), Some("rendered-preview"));
+        assert!(
+            app.selection.is_some(),
+            "the copied preview word is highlighted"
+        );
     }
 
     /// The wide-character case for copying: a CJK glyph before a token shifts every
@@ -5791,20 +5901,16 @@ mod link_click_tests {
     }
 
     #[test]
-    fn codex_copy_drops_its_one_cell_transcript_gutter_on_one_row() {
-        let _env = crate::persist::test_env("codex-copy-gutter");
+    fn mouse_copy_is_independent_of_detected_agent() {
+        let _env = crate::persist::test_env("mouse-copy-agent-independent");
         let (mut app, _term, _) = fixture_showing("  hello", 0);
         let pane = app.layout().focus;
-        app.status.get_mut(&pane).expect("pane status").agent = "codex".into();
         let content = app
             .pane_content_rects
             .iter()
             .find(|(id, _)| *id == pane)
             .map(|(_, rect)| *rect)
             .expect("pane content rect");
-        // The drag starts one cell inside the pane and selects one row, so this
-        // verifies Codex gutter cleanup without relying on rectangular
-        // multiline selection.
         app.selection = Some(crate::app::Selection {
             pane,
             content,
@@ -5815,6 +5921,9 @@ mod link_click_tests {
             dragging: false,
         });
 
-        assert_eq!(app.selection_text().as_deref(), Some("hello"));
+        let shell = app.selection_text();
+        app.status.get_mut(&pane).expect("pane status").agent = "codex".into();
+        assert_eq!(app.selection_text(), shell);
+        assert_eq!(shell.as_deref(), Some(" hello"));
     }
 }

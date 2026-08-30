@@ -42,6 +42,11 @@ pub struct StyledSpan {
 pub struct StyledRow {
     pub spans: Vec<StyledSpan>,
     pub source_line: Option<usize>,
+    /// `Some(n)` when this row visually continues the previous logical row,
+    /// where `n` spaces were hidden at the wrap boundary. `None` means a real
+    /// rendered-row boundary. Kept numeric so every cached row stays bounded
+    /// and allocation-free.
+    pub soft_wrap_spaces: Option<u16>,
 }
 
 impl StyledRow {
@@ -57,6 +62,7 @@ impl StyledRow {
                 link: None,
             }],
             source_line,
+            soft_wrap_spaces: None,
         }
     }
 }
@@ -285,10 +291,12 @@ fn wrap(spans: Vec<StyledSpan>, width: usize, source_line: Option<usize>) -> Vec
             out.push(StyledRow {
                 spans: Vec::new(),
                 source_line,
+                soft_wrap_spaces: None,
             });
             continue;
         }
         let mut start = 0usize;
+        let mut soft_wrap_spaces = None;
         while start < cells.len() && out.len() < MAX_LAYOUT_ROWS {
             let mut used = 0usize;
             let mut end = start;
@@ -317,17 +325,33 @@ fn wrap(spans: Vec<StyledSpan>, width: usize, source_line: Option<usize>) -> Vec
             while part.last().is_some_and(|cell| cell.ch.is_whitespace()) {
                 part.pop();
             }
-            start = end;
-            while cells.get(start).is_some_and(|cell| cell.ch.is_whitespace()) {
-                start += 1;
+            let visible_end = start + part.len();
+            let mut next_start = end;
+            while cells
+                .get(next_start)
+                .is_some_and(|cell| cell.ch.is_whitespace())
+            {
+                next_start += 1;
             }
-            out.push(cells_to_row(part, source_line));
+            out.push(cells_to_row(part, source_line, soft_wrap_spaces));
+            soft_wrap_spaces = Some(
+                cells[visible_end..next_start]
+                    .iter()
+                    .map(|cell| cell.ch.width().unwrap_or(0))
+                    .sum::<usize>()
+                    .min(u16::MAX as usize) as u16,
+            );
+            start = next_start;
         }
     }
     out
 }
 
-fn cells_to_row(cells: Vec<Cell>, source_line: Option<usize>) -> StyledRow {
+fn cells_to_row(
+    cells: Vec<Cell>,
+    source_line: Option<usize>,
+    soft_wrap_spaces: Option<u16>,
+) -> StyledRow {
     let mut spans: Vec<StyledSpan> = Vec::new();
     for cell in cells {
         if let Some(last) = spans
@@ -343,7 +367,11 @@ fn cells_to_row(cells: Vec<Cell>, source_line: Option<usize>) -> StyledRow {
             });
         }
     }
-    StyledRow { spans, source_line }
+    StyledRow {
+        spans,
+        source_line,
+        soft_wrap_spaces,
+    }
 }
 
 fn render_table(
@@ -440,6 +468,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|row| row.plain_text().width() <= 10));
         assert_eq!(rows[1].spans.last().unwrap().role, TextRole::Strong);
+        assert_eq!(rows[1].soft_wrap_spaces, Some(1));
     }
 
     #[test]

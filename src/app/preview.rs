@@ -311,9 +311,11 @@ pub(crate) fn selection_text(
     let start_y = sy.clamp(content.y, body_bottom);
     let end_y = ey.clamp(content.y, body_bottom);
     let mut output = String::new();
+    let mut first = true;
     for screen_y in start_y..=end_y {
         let row_index = view.scroll + usize::from(screen_y.saturating_sub(content.y));
-        let row = layout.rows.get(row_index)?.plain_text();
+        let rendered = layout.rows.get(row_index)?;
+        let row = rendered.plain_text();
         let left = if screen_y == start_y {
             usize::from(sx.saturating_sub(content.x))
         } else {
@@ -324,13 +326,39 @@ pub(crate) fn selection_text(
         } else {
             usize::from(content.width)
         };
-        if !output.is_empty() {
-            output.push('\n');
+        if !first {
+            match rendered.soft_wrap_spaces {
+                Some(spaces) => output.push_str(&" ".repeat(spaces as usize)),
+                None => output.push('\n'),
+            }
         }
+        first = false;
         output.push_str(slice_columns(&row, left, right).trim_end());
     }
     let output = output.trim_end_matches('\n').to_string();
     (!output.is_empty()).then_some(output)
+}
+
+/// Return only the currently rendered document body for double-click token
+/// lookup. A preview has no terminal grid, so this provides the same cell-row
+/// projection without including its status footer.
+pub(crate) fn token_rows(view: &DocumentView, content: Rect, mobile: bool) -> Option<Vec<String>> {
+    let key = LayoutKey {
+        width: content.width.max(1),
+        ascii: false,
+    };
+    let layout = view.layout(key)?;
+    let show_footer = !mobile || view.search.is_some();
+    let body_rows = content.height.saturating_sub(u16::from(show_footer)) as usize;
+    Some(
+        layout
+            .rows
+            .iter()
+            .skip(view.scroll)
+            .take(body_rows)
+            .map(|row| row.plain_text())
+            .collect(),
+    )
 }
 
 fn slice_columns(text: &str, start: usize, end: usize) -> String {
@@ -604,6 +632,50 @@ mod tests {
         assert_eq!(
             selection_text(&view, content, ((0, 2), (9, 2)), false).as_deref(),
             Some("  b")
+        );
+    }
+
+    fn code_preview(text: &str, width: u16) -> DocumentView {
+        let document = Arc::new(crate::files::preview::PreviewDocument::new(
+            Arc::<str>::from(text),
+            vec![crate::files::preview::Block::Code {
+                language: None,
+                text: text.into(),
+                range: 0..text.len(),
+            }],
+        ));
+        let mut view = DocumentView::new(PathBuf::from("sample.md"), PreviewKind::Markdown);
+        view.apply(PreviewLoad::Ready(Arc::clone(&document)));
+        let key = LayoutKey {
+            width,
+            ascii: false,
+        };
+        view.apply_layout(
+            key,
+            Arc::new(crate::files::preview::layout::build(document, key)),
+        );
+        view
+    }
+
+    #[test]
+    fn wrapped_preview_selection_joins_visual_rows_without_a_newline() {
+        let view = code_preview("alpha beta gamma", 10);
+        let content = Rect::new(0, 0, 10, 3);
+
+        assert_eq!(
+            selection_text(&view, content, ((0, 0), (9, 1)), false).as_deref(),
+            Some("  alpha beta gamma")
+        );
+    }
+
+    #[test]
+    fn preview_selection_preserves_real_document_line_breaks() {
+        let view = code_preview("alpha\nbeta", 10);
+        let content = Rect::new(0, 0, 10, 3);
+
+        assert_eq!(
+            selection_text(&view, content, ((0, 0), (9, 1)), false).as_deref(),
+            Some("  alpha\n  beta")
         );
     }
 }

@@ -99,7 +99,11 @@ file an agent is editing stays current in front of you.
 | `y` or `c` | copy the whole file |
 | `q` / `Esc` | close |
 
-Dragging across the text selects and copies it, the same as in any pane.
+Dragging across the text selects and copies it, the same as in any pane. Visual
+wraps rejoin into their original source line while real file line breaks remain.
+Double-click a word, path, or URL to copy and highlight that token. This works
+whether the read-only file viewer is opened as the reused preview, a permanent
+pane, or a tab.
 
 ## Opening in vim, nano, or your editor
 
@@ -156,9 +160,12 @@ bounded layout cache.
 | Ctrl/Cmd+click a link | open an HTTP(S) URL or an existing linked file |
 | `q` / `Esc` | close (or clear an active search first) |
 
-Dragging copies the rendered terminal text. Reopening the same file and preview
-kind focuses the existing preview in that placement rather than creating a
-duplicate. Open the file normally whenever you want its raw source or editor.
+Dragging copies the rendered terminal text without turning visual wraps into
+newlines. Real document line breaks remain. Double-clicking copies and
+highlights the rendered word, path, or URL under the pointer. Reopening the same
+file and preview kind focuses the existing preview in that placement rather
+than creating a duplicate. Open the file normally whenever you want its raw
+source or editor.
 
 ## What this is not
 

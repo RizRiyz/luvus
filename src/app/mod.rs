@@ -11852,11 +11852,10 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_copy_trims_a_codex_transcript_gutter() {
+    fn keyboard_copy_preserves_selected_transcript_indentation() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(40, 8, tx).unwrap();
         let pane = app.layout().focus;
-        app.status.get_mut(&pane).expect("pane status").agent = "codex".into();
         app.panes
             .get(&pane)
             .expect("pane")
@@ -11874,7 +11873,7 @@ mod tests {
 
         app.finish_copy_mode();
 
-        assert_eq!(app.pending_clipboard.as_deref(), Some("Hello\nworld"));
+        assert_eq!(app.pending_clipboard.as_deref(), Some(" Hello\n world"));
     }
 
     #[test]
