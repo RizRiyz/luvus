@@ -126,7 +126,7 @@ fn load_rows(path: &Path) -> Option<Vec<SessionInfo>> {
     let sql = format!(
         "SELECT id, cwd, {timestamp} AS activity \
          FROM sessions \
-         WHERE source = 'cli' AND cwd IS NOT NULL AND TRIM(cwd) <> '' {visibility} \
+         WHERE source IN ('cli', 'tui') AND cwd IS NOT NULL AND TRIM(cwd) <> '' {visibility} \
          ORDER BY activity DESC, started_at DESC, id DESC LIMIT ?1"
     );
     let mut statement = connection.prepare(&sql).ok()?;
@@ -285,12 +285,13 @@ mod tests {
     }
 
     #[test]
-    fn discovers_only_visible_cli_sessions_by_workspace() {
+    fn discovers_only_visible_terminal_sessions_by_workspace() {
         let _env = crate::persist::test_env("hermes-session-scoped");
         let root = fixture("scoped");
         let app = workspace("app");
         let api = workspace("api");
         insert(&root, "older", "cli", &app.to_string_lossy(), 10.0, false);
+        insert(&root, "tui", "tui", &app.to_string_lossy(), 25.0, false);
         insert(&root, "newer", "cli", &app.to_string_lossy(), 30.0, false);
         insert(&root, "api", "cli", &api.to_string_lossy(), 20.0, false);
         insert(
@@ -311,7 +312,7 @@ mod tests {
             false,
         );
 
-        assert_eq!(list(&root, &app), ["newer", "older"]);
+        assert_eq!(list(&root, &app), ["newer", "tui", "older"]);
         let opens = DATABASE_OPENS.load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(latest(&root, &app).as_deref(), Some("newer"));
         let found = recent(&root, 10);

@@ -215,12 +215,27 @@ fn top_level_plugins(lines: &[String]) -> Option<usize> {
     })
 }
 
-fn nested_key(lines: &[String], plugins: usize, key: &str) -> Option<usize> {
+fn child_indent(lines: &[String], parent: usize, parent_indent: usize) -> usize {
+    let end = block_end(lines, parent, parent_indent);
+    (parent + 1..end)
+        .filter_map(|index| {
+            meaningful(&lines[index])
+                .then(|| leading_spaces(&lines[index]))
+                .flatten()
+                .filter(|indent| *indent > parent_indent)
+        })
+        .min()
+        .unwrap_or(parent_indent + 2)
+}
+
+fn nested_key(lines: &[String], plugins: usize, key: &str) -> Option<(usize, usize)> {
+    let plugins_indent = child_indent(lines, plugins, 0);
     let end = block_end(lines, plugins, 0);
     let expected = format!("{key}:");
-    (plugins + 1..end).find(|index| {
-        leading_spaces(&lines[*index]) == Some(2)
-            && lines[*index].trim_start().starts_with(&expected)
+    (plugins + 1..end).find_map(|index| {
+        (leading_spaces(&lines[index]) == Some(plugins_indent)
+            && lines[index].trim_start().starts_with(&expected))
+        .then_some((index, plugins_indent))
     })
 }
 
@@ -228,7 +243,7 @@ fn remove_from_nested_list(lines: &mut Vec<String>, key: &str) -> Result<()> {
     let Some(plugins) = top_level_plugins(lines) else {
         return Ok(());
     };
-    let Some(section) = nested_key(lines, plugins, key) else {
+    let Some((section, section_indent)) = nested_key(lines, plugins, key) else {
         return Ok(());
     };
     let value = lines[section]
@@ -241,11 +256,12 @@ fn remove_from_nested_list(lines: &mut Vec<String>, key: &str) -> Result<()> {
             "cannot safely edit inline Hermes plugins.{key}; use a YAML list"
         ));
     }
-    let end = block_end(lines, section, 2);
-    remove_list_item(lines, section + 1, end, 4);
-    let end = block_end(lines, section, 2);
-    if !(section + 1..end).any(|index| list_item(&lines[index], 4).is_some()) {
-        lines[section] = format!("  {key}: []");
+    let item_indent = child_indent(lines, section, section_indent);
+    let end = block_end(lines, section, section_indent);
+    remove_list_item(lines, section + 1, end, item_indent);
+    let end = block_end(lines, section, section_indent);
+    if !(section + 1..end).any(|index| list_item(&lines[index], item_indent).is_some()) {
+        lines[section] = format!("{}{key}: []", " ".repeat(section_indent));
     }
     Ok(())
 }
@@ -260,15 +276,18 @@ fn remove_list_item(lines: &mut Vec<String>, start: usize, end: usize, indent: u
 
 fn add_to_nested_list(lines: &mut Vec<String>, key: &str) -> Result<()> {
     let plugins = top_level_plugins(lines).expect("plugins section exists");
-    if let Some(section) = nested_key(lines, plugins, key) {
+    if let Some((section, section_indent)) = nested_key(lines, plugins, key) {
         let value = lines[section]
             .trim_start()
             .strip_prefix(&format!("{key}:"))
             .unwrap_or_default()
             .trim();
         if value == "[]" {
-            lines[section] = format!("  {key}:");
-            lines.insert(section + 1, format!("    - {PLUGIN_NAME}"));
+            lines[section] = format!("{}{key}:", " ".repeat(section_indent));
+            lines.insert(
+                section + 1,
+                format!("{}- {PLUGIN_NAME}", " ".repeat(section_indent + 2)),
+            );
             return Ok(());
         }
         if !value.is_empty() {
@@ -276,18 +295,23 @@ fn add_to_nested_list(lines: &mut Vec<String>, key: &str) -> Result<()> {
                 "cannot safely edit inline Hermes plugins.{key}; use a YAML list"
             ));
         }
-        let end = block_end(lines, section, 2);
-        if (section + 1..end)
-            .any(|index| list_item(&lines[index], 4).is_some_and(|item| item_is(item, PLUGIN_NAME)))
-        {
+        let item_indent = child_indent(lines, section, section_indent);
+        let end = block_end(lines, section, section_indent);
+        if (section + 1..end).any(|index| {
+            list_item(&lines[index], item_indent).is_some_and(|item| item_is(item, PLUGIN_NAME))
+        }) {
             return Ok(());
         }
-        lines.insert(end, format!("    - {PLUGIN_NAME}"));
+        lines.insert(end, format!("{}- {PLUGIN_NAME}", " ".repeat(item_indent)));
         return Ok(());
     }
 
-    lines.insert(plugins + 1, format!("  {key}:"));
-    lines.insert(plugins + 2, format!("    - {PLUGIN_NAME}"));
+    let section_indent = child_indent(lines, plugins, 0);
+    lines.insert(plugins + 1, format!("{}{key}:", " ".repeat(section_indent)));
+    lines.insert(
+        plugins + 2,
+        format!("{}- {PLUGIN_NAME}", " ".repeat(section_indent + 2)),
+    );
     Ok(())
 }
 
@@ -329,12 +353,15 @@ fn enable_plugin(content: &str) -> Result<String> {
                 );
             } else if declaration == "plugins:" {
                 let end = block_end(&lines, index, 0);
-                let flat = (index + 1..end).any(|line| list_item(&lines[line], 2).is_some());
+                let item_indent = child_indent(&lines, index, 0);
+                let flat =
+                    (index + 1..end).any(|line| list_item(&lines[line], item_indent).is_some());
                 if flat {
                     if !(index + 1..end).any(|line| {
-                        list_item(&lines[line], 2).is_some_and(|item| item_is(item, PLUGIN_NAME))
+                        list_item(&lines[line], item_indent)
+                            .is_some_and(|item| item_is(item, PLUGIN_NAME))
                     }) {
-                        lines.insert(end, format!("  - {PLUGIN_NAME}"));
+                        lines.insert(end, format!("{}- {PLUGIN_NAME}", " ".repeat(item_indent)));
                     }
                 } else {
                     remove_from_nested_list(&mut lines, "disabled")?;
@@ -369,9 +396,10 @@ fn disable_plugin(content: &str) -> Result<String> {
         ));
     }
     let end = block_end(&lines, plugins, 0);
-    let flat = (plugins + 1..end).any(|line| list_item(&lines[line], 2).is_some());
+    let item_indent = child_indent(&lines, plugins, 0);
+    let flat = (plugins + 1..end).any(|line| list_item(&lines[line], item_indent).is_some());
     if flat {
-        remove_list_item(&mut lines, plugins + 1, end, 2);
+        remove_list_item(&mut lines, plugins + 1, end, item_indent);
     } else {
         remove_from_nested_list(&mut lines, "enabled")?;
         remove_from_nested_list(&mut lines, "disabled")?;
@@ -385,22 +413,28 @@ fn plugin_enabled(content: &str) -> bool {
         return false;
     };
     let end = block_end(&lines, plugins, 0);
-    if (plugins + 1..end)
-        .any(|index| list_item(&lines[index], 2).is_some_and(|item| item_is(item, PLUGIN_NAME)))
-    {
+    let plugins_indent = child_indent(&lines, plugins, 0);
+    if (plugins + 1..end).any(|index| {
+        list_item(&lines[index], plugins_indent).is_some_and(|item| item_is(item, PLUGIN_NAME))
+    }) {
         return true;
     }
-    let Some(enabled) = nested_key(&lines, plugins, "enabled") else {
+    let Some((enabled, enabled_indent)) = nested_key(&lines, plugins, "enabled") else {
         return false;
     };
-    let end = block_end(&lines, enabled, 2);
-    let active = (enabled + 1..end)
-        .any(|index| list_item(&lines[index], 4).is_some_and(|item| item_is(item, PLUGIN_NAME)));
-    let disabled = nested_key(&lines, plugins, "disabled").is_some_and(|disabled| {
-        let end = block_end(&lines, disabled, 2);
-        (disabled + 1..end)
-            .any(|index| list_item(&lines[index], 4).is_some_and(|item| item_is(item, PLUGIN_NAME)))
+    let enabled_item_indent = child_indent(&lines, enabled, enabled_indent);
+    let end = block_end(&lines, enabled, enabled_indent);
+    let active = (enabled + 1..end).any(|index| {
+        list_item(&lines[index], enabled_item_indent).is_some_and(|item| item_is(item, PLUGIN_NAME))
     });
+    let disabled =
+        nested_key(&lines, plugins, "disabled").is_some_and(|(disabled, disabled_indent)| {
+            let item_indent = child_indent(&lines, disabled, disabled_indent);
+            let end = block_end(&lines, disabled, disabled_indent);
+            (disabled + 1..end).any(|index| {
+                list_item(&lines[index], item_indent).is_some_and(|item| item_is(item, PLUGIN_NAME))
+            })
+        });
     active && !disabled
 }
 
@@ -439,6 +473,21 @@ mod tests {
         let input = "plugins:\n  enabled: [mine]\n";
         assert!(enable_plugin(input).is_err());
         assert_eq!(input, "plugins:\n  enabled: [mine]\n");
+    }
+
+    #[test]
+    fn config_edit_preserves_four_space_nested_indentation() {
+        let input = "plugins:\n    enabled:\n        - mine\n    disabled:\n        - luvus-agent-state\n        - theirs\ngateway:\n    enabled: true\n";
+        let enabled = enable_plugin(input).unwrap();
+        assert!(enabled.contains("    enabled:\n        - mine\n        - luvus-agent-state\n"));
+        assert!(enabled.contains("    disabled:\n        - theirs\n"));
+        assert!(!enabled.contains("\n  enabled:"));
+        assert!(plugin_enabled(&enabled));
+
+        let removed = disable_plugin(&enabled).unwrap();
+        assert!(!removed.contains(PLUGIN_NAME));
+        assert!(removed.contains("    enabled:\n        - mine\n"));
+        assert!(removed.contains("    disabled:\n        - theirs\n"));
     }
 
     #[test]

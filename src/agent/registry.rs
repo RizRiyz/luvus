@@ -223,7 +223,7 @@ mod tests {
                 .iter()
                 .map(|descriptor| descriptor.id)
                 .collect::<Vec<_>>(),
-            ["claude", "copilot", "codex", "opencode", "kimi", "grok", "omp"]
+            ["claude", "copilot", "codex", "opencode", "kimi", "grok", "hermes", "omp",]
         );
     }
 }
