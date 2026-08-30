@@ -557,6 +557,27 @@ impl App {
                     );
                     return true;
                 }
+                // Integration belongs to the server-owned task ledger, not a
+                // workspace. Settle it even if replacement-pane startup left
+                // the server temporarily without a workspace.
+                AppEvent::TaskMergeFinished {
+                    task,
+                    branch,
+                    previous,
+                    integration_branch,
+                    result,
+                    reply,
+                } => {
+                    self.task_merge_finished(
+                        task,
+                        branch,
+                        previous,
+                        integration_branch,
+                        result,
+                        reply,
+                    );
+                    return true;
+                }
                 // A worker may finish after the previous workspace closes while
                 // replacement shell startup fails. Drop its stale result, but
                 // release the guard so CWD tracking can recover later.
@@ -3767,6 +3788,46 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("an empty server still answers its control API");
         assert!(resp.contains("pong"), "got a real pong, not EOF: {resp}");
+    }
+
+    #[test]
+    fn merge_completion_settles_without_a_workspace() {
+        let _env = crate::persist::test_env("merge-completion-no-workspace");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        app.orch
+            .add_task("merge".into(), vec![], vec![], None)
+            .unwrap();
+        app.orch
+            .set_status("t1", crate::orch::TaskStatus::Done)
+            .unwrap();
+        app.orch.begin_merge("t1").unwrap();
+        app.workspaces.clear();
+        let (reply, response) = std::sync::mpsc::channel();
+
+        let dirty = app.handle_event(AppEvent::TaskMergeFinished {
+            task: "t1".into(),
+            branch: "luvus/t1".into(),
+            previous: crate::orch::TaskStatus::Done,
+            integration_branch: "luvus/integration".into(),
+            result: Ok(crate::git::local::MergeOutcome::Merged {
+                commit: "a".repeat(40),
+            }),
+            reply: Some(("merge-no-workspace".into(), reply)),
+        });
+
+        assert!(dirty);
+        assert_eq!(
+            app.orch.task("t1").unwrap().status,
+            crate::orch::TaskStatus::Merged
+        );
+        let response: serde_json::Value = serde_json::from_str(
+            &response
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("the parked merge request is settled"),
+        )
+        .unwrap();
+        assert_eq!(response["result"]["outcome"], "merged");
     }
 
     #[test]

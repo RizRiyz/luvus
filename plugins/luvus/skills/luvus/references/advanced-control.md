@@ -37,7 +37,8 @@ remains compatible with older Luvus releases.
 - Inspect task and lease ownership, dependencies, gates, assignees, and path
   leases before claiming, starting, updating, completing, releasing, deleting,
   or merging. A merge is serialized through `luvus/integration`; wait for the
-  returned `merged` or `conflict` outcome instead of retrying blindly. Release
+  returned `merged` or `conflict` outcome instead of retrying blindly.
+  Branch-backed dependencies unblock only after they are merged. Release
   requeues the task and releases leases without stopping its worker pane.
 - Inspect module metadata, actions, settings, and logs before changing module
   state. Installation, uninstallation, and consequential setting changes need

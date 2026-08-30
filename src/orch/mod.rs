@@ -126,6 +126,10 @@ pub struct OrchState {
     next_task: u64,
     #[serde(default)]
     next_lease: u64,
+    /// Durable rollback targets for in-flight integration reservations. Kept
+    /// outside `Task` so internal recovery metadata is not exposed by task APIs.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    merge_previous: std::collections::BTreeMap<TaskId, TaskStatus>,
     /// Fixed when the ledger is loaded so later ambient session changes cannot
     /// redirect a save. `None` keeps explicitly in-memory state off disk.
     #[serde(skip)]
@@ -203,17 +207,16 @@ impl OrchState {
         self.tasks.iter().find(|t| t.id == id)
     }
 
-    /// A task is *ready* to claim when every dependency has completed. A merged
-    /// dependency remains complete; integration must never re-block its children.
+    /// A task is *ready* to claim when every dependency is available in the
+    /// shared integration history. Tasks without a worker branch need no merge,
+    /// while branch-backed work must finish integration before children start.
     pub fn ready(&self, id: &str) -> bool {
         match self.task(id) {
             Some(t) => t.deps.iter().all(|d| {
                 self.task(d)
                     .map(|dt| {
-                        matches!(
-                            dt.status,
-                            TaskStatus::Done | TaskStatus::Merging | TaskStatus::Merged
-                        )
+                        dt.status == TaskStatus::Merged
+                            || (dt.status == TaskStatus::Done && dt.branch.is_none())
                     })
                     .unwrap_or(false)
             }),
@@ -305,7 +308,10 @@ impl OrchState {
             .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
         t.status = status;
         t.updated = now;
-        Ok(t.clone())
+        let task = t.clone();
+        // Only `begin_merge` may create a durable integration reservation.
+        self.merge_previous.remove(id);
+        Ok(task)
     }
 
     /// Reserve the shared integration branch for one task. The actual Git work
@@ -341,6 +347,7 @@ impl OrchState {
         }
         task.status = TaskStatus::Merging;
         task.updated = unix_now();
+        self.merge_previous.insert(id.to_string(), previous);
         Ok(previous)
     }
 
@@ -369,7 +376,9 @@ impl OrchState {
         }
         task.status = status;
         task.updated = unix_now();
-        Ok(task.clone())
+        let task = task.clone();
+        self.merge_previous.remove(id);
+        Ok(task)
     }
 
     pub fn add_output(&mut self, id: &str, output: String) -> OrchResult<()> {
@@ -425,6 +434,7 @@ impl OrchState {
             ));
         }
         let task = self.tasks.remove(idx);
+        self.merge_previous.remove(id);
         self.leases.retain(|l| l.task != id);
         for t in &mut self.tasks {
             t.deps.retain(|d| d != id);
@@ -707,9 +717,15 @@ impl OrchState {
     fn recover_interrupted_merges(&mut self) {
         for task in &mut self.tasks {
             if task.status == TaskStatus::Merging {
-                task.status = TaskStatus::Done;
+                task.status = self
+                    .merge_previous
+                    .remove(&task.id)
+                    .filter(|status| matches!(status, TaskStatus::Done | TaskStatus::Blocked))
+                    .unwrap_or(TaskStatus::Done);
+                task.updated = unix_now();
             }
         }
+        self.merge_previous.clear();
     }
 }
 
@@ -909,18 +925,24 @@ mod tests {
         state
             .add_task("dependent".into(), vec![], vec!["t1".into()], None)
             .unwrap();
+        state.bind_worktree("t1", Some("/repo/worktree".into()), Some("luvus/t1".into()));
         state.set_status("t1", TaskStatus::Done).unwrap();
 
+        assert!(
+            !state.ready("t2"),
+            "branch-backed dependencies wait for integration"
+        );
         assert_eq!(state.begin_merge("t1").unwrap(), TaskStatus::Done);
         assert_eq!(state.task("t1").unwrap().status, TaskStatus::Merging);
         assert!(
-            state.ready("t2"),
-            "integration does not re-block dependents"
+            !state.ready("t2"),
+            "an in-flight integration is not yet available to dependents"
         );
         assert_eq!(state.begin_merge("t1").unwrap_err().code, "merge_busy");
 
         state.finish_merge("t1", TaskStatus::Merged).unwrap();
         assert_eq!(state.task("t1").unwrap().status, TaskStatus::Merged);
+        assert!(state.merge_previous.is_empty());
         assert!(state.ready("t2"));
         assert_eq!(state.begin_merge("t1").unwrap_err().code, "already_merged");
         assert_eq!(state.release_task("t1").unwrap_err().code, "not_releasable");
@@ -937,6 +959,25 @@ mod tests {
         state.recover_interrupted_merges();
 
         assert_eq!(state.task("t1").unwrap().status, TaskStatus::Done);
+        assert!(state.merge_previous.is_empty());
+    }
+
+    #[test]
+    fn interrupted_integration_restores_blocked_and_old_ledgers_fall_back_to_done() {
+        let mut state = OrchState::default();
+        state.add_task("work".into(), vec![], vec![], None).unwrap();
+        state.set_status("t1", TaskStatus::Blocked).unwrap();
+        state.begin_merge("t1").unwrap();
+        state.recover_interrupted_merges();
+        assert_eq!(state.task("t1").unwrap().status, TaskStatus::Blocked);
+
+        state.set_status("t1", TaskStatus::Merging).unwrap();
+        state.recover_interrupted_merges();
+        assert_eq!(
+            state.task("t1").unwrap().status,
+            TaskStatus::Done,
+            "old ledgers without rollback metadata retain the safe fallback"
+        );
     }
 
     #[test]
@@ -945,14 +986,14 @@ mod tests {
         let path = orch_path();
         let mut state = OrchState::load_from(path.clone());
         state.add_task("work".into(), vec![], vec![], None).unwrap();
-        state.set_status("t1", TaskStatus::Done).unwrap();
+        state.set_status("t1", TaskStatus::Blocked).unwrap();
         state.begin_merge("t1").unwrap();
         state.save();
 
         let restored = OrchState::load_from(path);
         assert_eq!(restored.tasks.len(), 1);
         assert_eq!(restored.tasks[0].title, "work");
-        assert_eq!(restored.tasks[0].status, TaskStatus::Done);
+        assert_eq!(restored.tasks[0].status, TaskStatus::Blocked);
     }
 
     #[test]

@@ -25,11 +25,14 @@ isolated worker for it, `d` to finish (runs its quality gate), `m` to merge.
 | **Quality gate** | A command (e.g. `cargo test`) that runs when a task is marked done. It must pass before the task can merge. |
 | **Merge gate** | Integrates a finished branch into `luvus/integration` inside a dedicated worktree, never your working checkout. A conflict blocks the task instead of corrupting anything. |
 
-Task lifecycle: `queued` → `claimed`/`running` → `done` (gate passed) or
-`review` (gate failed, so fix and retry) → `merging` → `merged`, or `blocked`
-on a merge conflict. Only one task integrates at a time. An interrupted
-integration safely returns to `done` after restart. The ledger lives in
-`~/.luvus/orch.json`, separate from your session.
+Task lifecycle: `queued` → `claimed`/`running` → `done` when the gate passes.
+A failed gate enters `review`; fixing the work and retrying the gate returns it
+to `done`. Only `done` or a merge-conflict `blocked` task can enter `merging`,
+then finish as `merged` or return to `blocked` on conflict. Only one task
+integrates at a time. An interrupted integration restores its prior `done` or
+`blocked` state after restart. Branch-backed dependents wait for `merged`, so
+they never start before their dependency is available in the integration
+history. The ledger lives in `~/.luvus/orch.json`, separate from your session.
 
 `task start` validates the task's path lease before it creates a branch,
 worktree, or pane. If another task already holds an overlapping path, the start

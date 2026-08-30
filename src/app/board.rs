@@ -401,6 +401,7 @@ impl App {
             Ok(MergeOutcome::Merged { commit }) => {
                 match self.orch.finish_merge(&id, TaskStatus::Merged) {
                     Ok(_) => {
+                        let ready = self.orch.newly_ready(&id);
                         let short = commit.get(..12).unwrap_or(&commit);
                         let _ = self.orch.add_note(
                             &id,
@@ -412,6 +413,9 @@ impl App {
                             json!({ "id": id, "branch": branch, "into": integration_branch,
                                 "commit": commit }),
                         );
+                        for ready_id in ready {
+                            self.emit_event("task.ready", json!({ "id": ready_id }));
+                        }
                         Ok(json!({
                             "type": "merge",
                             "outcome": "merged",
@@ -1907,8 +1911,14 @@ mod tests {
             .add_task("merge me".into(), vec![], vec![], None)
             .unwrap();
         app.orch
+            .add_task("dependent".into(), vec![], vec!["t1".into()], None)
+            .unwrap();
+        app.orch
+            .bind_worktree("t1", Some("/repo/worktree".into()), Some("luvus/t1".into()));
+        app.orch
             .set_status("t1", crate::orch::TaskStatus::Done)
             .unwrap();
+        assert!(!app.orch.ready("t2"));
         app.orch.begin_merge("t1").unwrap();
         let commit = "a".repeat(40);
 
@@ -1925,6 +1935,7 @@ mod tests {
 
         let task = app.orch.task("t1").unwrap();
         assert_eq!(task.status, crate::orch::TaskStatus::Merged);
+        assert!(app.orch.ready("t2"));
         assert!(task
             .notes
             .last()
