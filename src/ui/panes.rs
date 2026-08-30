@@ -36,6 +36,17 @@ pub(super) fn draw_pane_titles(
                     crate::diff::DIFF_GLYPH,
                     format!("DIFF · {}", v.key.display_path()),
                 ),
+                crate::app::ViewKind::Preview(v) => (
+                    "◇",
+                    format!(
+                        "{} · {}",
+                        v.kind.label(),
+                        v.path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    ),
+                ),
             };
             let path_fg = if focused { t.accent } else { t.subtext0 };
             // Plain terminal glyphs only: files use a square, DIFF uses its
@@ -160,6 +171,7 @@ struct PaneRenderContext<'a> {
     app: &'a App,
     diff_source_rects: &'a mut Vec<(PaneId, usize, crate::diff::DiffSide, Rect)>,
     diff_note_rects: &'a mut Vec<(PaneId, String, Rect)>,
+    preview_link_rects: &'a mut Vec<(PaneId, String, Rect)>,
 }
 
 pub(super) fn draw_panes(
@@ -173,11 +185,13 @@ pub(super) fn draw_panes(
     let mut cursor = None;
     let mut diff_source_rects = Vec::new();
     let mut diff_note_rects = Vec::new();
+    let mut preview_link_rects = Vec::new();
     {
         let mut context = PaneRenderContext {
             app,
             diff_source_rects: &mut diff_source_rects,
             diff_note_rects: &mut diff_note_rects,
+            preview_link_rects: &mut preview_link_rects,
         };
         for (id, rect) in rects {
             if let Some(c) = draw_one_pane(f, *rect, *id, *id == focus, bordered, &mut context, t) {
@@ -187,6 +201,7 @@ pub(super) fn draw_panes(
     }
     app.diff_source_rects = diff_source_rects;
     app.diff_note_rects = diff_note_rects;
+    app.preview_link_rects = preview_link_rects;
     cursor
 }
 
@@ -224,6 +239,14 @@ fn draw_one_pane(
                 },
                 t,
             ),
+            crate::app::ViewKind::Preview(v) => {
+                let sel = app.selection.filter(|selection| selection.pane == id);
+                context.preview_link_rects.extend(
+                    super::preview::draw(f, content, v, sel.as_ref(), app.compact, t)
+                        .into_iter()
+                        .map(|(target, rect)| (id, target, rect)),
+                );
+            }
         }
         return None; // views own no terminal cursor
     }

@@ -509,6 +509,8 @@ fn pane_label(it: PaneMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> S
         PaneMenuItem::OpenFile => cat.menu_open_file.to_string(),
         PaneMenuItem::RunningCmd => cat.menu_running_cmd.to_string(),
         PaneMenuItem::RenamePane => cat.menu_rename.to_string(),
+        PaneMenuItem::OpenMarkdownPreview => cat.menu_markdown_preview.to_string(),
+        PaneMenuItem::OpenMermaidPreview => cat.menu_mermaid_preview.to_string(),
         // A trailing ▸ marks the row that opens the tabs submenu.
         PaneMenuItem::MoveToTab => format!("{} ▸", cat.menu_move_to_tab),
         PaneMenuItem::Divider => String::new(),
@@ -545,7 +547,13 @@ fn cap_first(s: &str) -> String {
     }
 }
 
-pub(super) fn draw_file_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) {
+pub(super) fn draw_file_menu(
+    f: &mut RenderTarget,
+    area: Rect,
+    app: &mut App,
+    cat: &Catalog,
+    t: &Theme,
+) {
     let Some(menu) = app.file_menu.as_ref() else {
         return;
     };
@@ -555,7 +563,7 @@ pub(super) fn draw_file_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
     let rows: Vec<MenuRow> = items
         .iter()
         .map(|it| MenuRow {
-            text: file_label(*it, &editors),
+            text: file_label(*it, &editors, cat),
             divider: matches!(it, FileMenuItem::Divider),
             destructive: matches!(it, FileMenuItem::Delete),
         })
@@ -622,13 +630,15 @@ pub(super) fn draw_diff_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
 
 /// FILES-menu labels are plain English (this menu is not localized — unlike the
 /// workspace/pane menus — and editor names are proper nouns anyway).
-fn file_label(it: FileMenuItem, editors: &[(String, String)]) -> String {
+fn file_label(it: FileMenuItem, editors: &[(String, String)], cat: &Catalog) -> String {
     match it {
         FileMenuItem::OpenReadonly => "Open in Tab".to_string(),
         FileMenuItem::OpenWith(i) => editors
             .get(i)
             .map(|(_, label)| format!("Open in {label}"))
             .unwrap_or_default(),
+        FileMenuItem::OpenMarkdownPreview => cat.menu_markdown_preview.to_string(),
+        FileMenuItem::OpenMermaidPreview => cat.menu_mermaid_preview.to_string(),
         FileMenuItem::NewFile => "New File".to_string(),
         FileMenuItem::NewFolder => "New Folder".to_string(),
         FileMenuItem::Rename => "Rename".to_string(),
@@ -775,6 +785,8 @@ mod label_case_tests {
         for it in [
             FileMenuItem::OpenReadonly,
             FileMenuItem::OpenWith(0),
+            FileMenuItem::OpenMarkdownPreview,
+            FileMenuItem::OpenMermaidPreview,
             FileMenuItem::NewFile,
             FileMenuItem::NewFolder,
             FileMenuItem::Rename,
@@ -783,7 +795,7 @@ mod label_case_tests {
             FileMenuItem::OpenAsNewWorkspace,
             FileMenuItem::Delete,
         ] {
-            rows.push(file_label(it, &editors));
+            rows.push(file_label(it, &editors, cat));
         }
 
         let bad: Vec<String> = rows

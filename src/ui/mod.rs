@@ -103,6 +103,7 @@ mod mission;
 mod mobile;
 mod panes;
 mod picker;
+mod preview;
 mod search;
 mod settings;
 mod sidebar;
@@ -187,6 +188,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     let diff_row_rects = std::mem::take(&mut app.diff_row_rects);
     let diff_source_rects = std::mem::take(&mut app.diff_source_rects);
     let diff_note_rects = std::mem::take(&mut app.diff_note_rects);
+    let preview_link_rects = std::mem::take(&mut app.preview_link_rects);
     let module_dock_rects = std::mem::take(&mut app.module_dock_rects);
     let picker_rects = std::mem::take(&mut app.picker_rects);
     let settings_tab_rects = std::mem::take(&mut app.settings_tab_rects);
@@ -312,6 +314,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     app.diff_row_rects = diff_row_rects;
     app.diff_source_rects = diff_source_rects;
     app.diff_note_rects = diff_note_rects;
+    app.preview_link_rects = preview_link_rects;
     app.module_dock_rects = module_dock_rects;
     app.picker_rects = picker_rects;
     app.settings_tab_rects = settings_tab_rects;
@@ -671,6 +674,15 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         git_section_rects = git::render(f, pane_area, g, compact, cat, &t);
         None
     } else {
+        let preview_rects: Vec<(PaneId, Rect)> = rects
+            .iter()
+            .filter_map(|(id, rect)| {
+                pane_content(*rect, bordered, app.compact).map(|content| (*id, content))
+            })
+            .collect();
+        if resize_panes {
+            app.ensure_preview_layouts(&preview_rects);
+        }
         let cursor = panes::draw_panes(f, &rects, bordered, app, &t);
         // Draw all pane borders in one overlay pass (manual cell-by-cell), then
         // the dot+path+close titles ON each top border row.
@@ -800,7 +812,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     }
     // The FILES-dock context menu + its create/rename/delete modals (docs/38).
     if app.file_menu.is_some() {
-        menu::draw_file_menu(f, area, app, &t);
+        menu::draw_file_menu(f, area, app, cat, &t);
     }
     if app.diff_menu.is_some() {
         menu::draw_diff_menu(f, area, app, &t);

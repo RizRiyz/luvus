@@ -228,20 +228,36 @@ impl App {
         if self.views.is_empty() {
             return;
         }
-        let mut stale = Vec::new();
+        let mut stale_files = Vec::new();
+        let mut stale_previews = Vec::new();
         for (id, view) in self.views.iter() {
-            if let ViewKind::File(v) = view {
-                let disk = std::fs::metadata(&v.path).and_then(|m| m.modified()).ok();
-                if disk.is_some() && disk != v.mtime {
-                    stale.push((*id, v.path.clone(), disk));
+            match view {
+                ViewKind::File(v) => {
+                    let disk = std::fs::metadata(&v.path).and_then(|m| m.modified()).ok();
+                    if disk.is_some() && disk != v.mtime {
+                        stale_files.push((*id, v.path.clone(), disk));
+                    }
                 }
+                ViewKind::Preview(v) => {
+                    let disk = std::fs::metadata(&v.path).and_then(|m| m.modified()).ok();
+                    if disk.is_some() && disk != v.mtime {
+                        stale_previews.push((*id, v.path.clone(), disk));
+                    }
+                }
+                ViewKind::Diff(_) => {}
             }
         }
-        for (id, path, mtime) in stale {
+        for (id, path, mtime) in stale_files {
             if let Some(ViewKind::File(v)) = self.views.get_mut(&id) {
                 v.mtime = mtime; // record now so we don't reschedule until it changes again
             }
             self.schedule_file_read(id, path);
+        }
+        for (id, path, mtime) in stale_previews {
+            if let Some(ViewKind::Preview(v)) = self.views.get_mut(&id) {
+                v.mtime = mtime;
+            }
+            self.schedule_preview_read(id, path);
         }
     }
 
@@ -522,6 +538,14 @@ impl App {
                     self.open_file_in_editor(menu.path.clone(), &cmd);
                 }
             }
+            FileMenuItem::OpenMarkdownPreview => self.open_document_preview_tab(
+                menu.path.clone(),
+                crate::files::preview::PreviewKind::Markdown,
+            ),
+            FileMenuItem::OpenMermaidPreview => self.open_document_preview_tab(
+                menu.path.clone(),
+                crate::files::preview::PreviewKind::Mermaid,
+            ),
             FileMenuItem::NewFile => {
                 self.file_prompt = prompt(FilePromptKind::NewFile, dir, None, String::new())
             }
@@ -964,6 +988,9 @@ impl App {
                 _ => None,
             },
             Some(ViewKind::Diff(_)) => None,
+            Some(ViewKind::Preview(view)) => {
+                view.document().map(|document| document.source.to_string())
+            }
             None => return,
         };
         match text {
@@ -1158,6 +1185,53 @@ mod tests {
             ditems.contains(&FileMenuItem::NewFile),
             "folder still has CRUD"
         );
+    }
+
+    #[test]
+    fn file_menu_offers_only_the_matching_explicit_document_preview() {
+        let markdown = FileMenu {
+            path: PathBuf::from("README.MarkDown"),
+            is_dir: false,
+            anchor: (0, 0),
+            items: Vec::new(),
+            editors: Vec::new(),
+        }
+        .build_items();
+        assert!(markdown.contains(&FileMenuItem::OpenMarkdownPreview));
+        assert!(!markdown.contains(&FileMenuItem::OpenMermaidPreview));
+        assert!(
+            markdown
+                .iter()
+                .position(|item| *item == FileMenuItem::OpenMarkdownPreview)
+                < markdown
+                    .iter()
+                    .position(|item| *item == FileMenuItem::Divider),
+            "preview stays with the open actions"
+        );
+
+        let mermaid = FileMenu {
+            path: PathBuf::from("flow.MERMAID"),
+            is_dir: false,
+            anchor: (0, 0),
+            items: Vec::new(),
+            editors: Vec::new(),
+        }
+        .build_items();
+        assert!(mermaid.contains(&FileMenuItem::OpenMermaidPreview));
+        assert!(!mermaid.contains(&FileMenuItem::OpenMarkdownPreview));
+
+        let mdx = FileMenu {
+            path: PathBuf::from("component.mdx"),
+            is_dir: false,
+            anchor: (0, 0),
+            items: Vec::new(),
+            editors: Vec::new(),
+        }
+        .build_items();
+        assert!(!mdx.iter().any(|item| matches!(
+            item,
+            FileMenuItem::OpenMarkdownPreview | FileMenuItem::OpenMermaidPreview
+        )));
     }
 
     /// Opening a file with an editor spawns a real PTY pane (not a native view
@@ -2407,7 +2481,7 @@ mod tests {
         assert_eq!(
             app.views.get(&vid).and_then(|view| match view {
                 ViewKind::File(view) => Some(view.line_count()),
-                ViewKind::Diff(_) => None,
+                ViewKind::Diff(_) | ViewKind::Preview(_) => None,
             }),
             Some(1),
             "initial content is one line"
@@ -2629,7 +2703,7 @@ mod tests {
             .values()
             .filter_map(|view| match view {
                 ViewKind::File(view) => Some(view.path.clone()),
-                ViewKind::Diff(_) => None,
+                ViewKind::Diff(_) | ViewKind::Preview(_) => None,
             })
             .collect();
         assert_eq!(paths, vec![file], "the file view was rebuilt on restore");

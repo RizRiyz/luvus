@@ -1,6 +1,6 @@
 ---
 title: Browsing & Opening Files
-description: A file tree in the sidebar, a fast read-only viewer, and opening any file straight into vim, nano, or your own $EDITOR.
+description: Browse files, open a real terminal editor, and explicitly preview Markdown and Mermaid as native terminal documents.
 ---
 
 An agent edits files and you want to *see* them, without leaving luvus and
@@ -52,7 +52,7 @@ you clicked.
 |---|---|
 | **Click** | **previews** the file by default, or opens a tab — see [What a click does](#what-a-click-does) |
 | **Shift+click** | when forwarded by the terminal, opens the **read-only viewer** in a *permanent* pane beside the focus |
-| **Right-click** | **Open in Tab**, or open in any editor you have installed |
+| **Right-click** | **Open in Tab**, open in an installed editor, or explicitly preview Markdown/Mermaid |
 
 Shift+click is an optional "keep this one open" shortcut. It stays read-only
 whatever the two settings below say, and unlike a preview it is never reused for
@@ -120,9 +120,45 @@ file, right-click that file and pick from the menu.
 If you set an editor and later uninstall it, luvus falls back to the read-only
 viewer rather than doing nothing.
 
+## Markdown and Mermaid previews
+
+Markdown never overrides your file settings. A normal click, **Open in Tab**,
+or editor action still behaves exactly as described above. For `.md` and
+`.markdown`, right-click the file and choose **Open Markdown Preview** to open a
+dedicated native preview tab. Right-click a tracked source/editor pane for that
+file and the same action appears immediately below **Rename**; from there it
+opens a sibling preview pane without replacing or stopping the editor.
+
+Standalone `.mermaid` files use **Open Mermaid Preview** in the same places.
+Fenced `mermaid` blocks inside Markdown and standalone Mermaid previews share
+one bounded renderer. Flowcharts/graphs and sequence diagrams render as
+deterministic Unicode terminal text; unsupported or malformed syntax shows its
+original source instead of hiding content. `.mdx` and `.mmd` are not treated as
+preview formats.
+
+Previews are offline and terminal-native: they do not use a browser, execute
+HTML or Mermaid directives, load linked assets, or make network requests.
+Parsing and width-specific layout run only after an explicit preview action and
+off the app loop. Closing the last preview releases its parsed document and
+bounded layout cache.
+
+| Key | Preview action |
+|---|---|
+| `j` / `k`, `↓` / `↑` | rendered row down / up |
+| `d` / `u`, Space / PageUp | half page or page navigation |
+| `g` / `G` | top / bottom |
+| `/`, then `n` / `N` | search rendered text |
+| `y` or `c` | copy the canonical raw source |
+| Ctrl/Cmd+click a link | open an HTTP(S) URL or an existing linked file |
+| `q` / `Esc` | close (or clear an active search first) |
+
+Dragging copies the rendered terminal text. Reopening the same file and preview
+kind focuses the existing preview in that placement rather than creating a
+duplicate. Open the file normally whenever you want its raw source or editor.
+
 ## What this is not
 
-The file viewer does not do syntax coloring. To review staged and working-tree
+The source file viewer does not do syntax coloring. To review staged and working-tree
 patches with split or stack layouts and local notes, switch the dock to
 [DIFF](/docs/guides/diff/). Use the [git tab](/docs/guides/git/) for branches,
 commits, pull requests, issues, and commit flow. To edit, open the file in an

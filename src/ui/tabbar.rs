@@ -303,6 +303,10 @@ fn file_tab_name(tab: &crate::app::Tab, app: &App) -> Option<String> {
             crate::diff::DIFF_GLYPH,
             v.key.display_path()
         )),
+        Some(crate::app::ViewKind::Preview(v)) => {
+            let name = v.path.file_name()?.to_string_lossy().into_owned();
+            Some(format!("◇ {name}"))
+        }
         None => {
             let name = app
                 .editor_files

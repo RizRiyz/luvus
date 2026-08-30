@@ -98,6 +98,17 @@ pub struct PaneSnap {
     /// A native DIFF view specification. Patch content is always re-fetched.
     #[serde(default)]
     pub diff: Option<DiffSnap>,
+    /// An explicit derived document preview. Source is always re-read.
+    #[serde(default)]
+    pub preview: Option<PreviewSnap>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PreviewSnap {
+    pub path: PathBuf,
+    pub kind: crate::files::preview::PreviewKind,
+    #[serde(default)]
+    pub scroll: usize,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -833,8 +844,8 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                     // A file-view leaf (docs/38 FILE-3) is saved by its path and
                     // rebuilt on restore; it has no PTY.
                     if let Some(view) = app.views.get(&id) {
-                        let (file, diff) = match view {
-                            crate::app::ViewKind::File(v) => (Some(v.path.clone()), None),
+                        let (file, diff, preview) = match view {
+                            crate::app::ViewKind::File(v) => (Some(v.path.clone()), None, None),
                             crate::app::ViewKind::Diff(v) => {
                                 let status = app
                                     .diff
@@ -860,8 +871,18 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                                         context_lines: v.context_lines,
                                         show_line_numbers: v.show_line_numbers,
                                     }),
+                                    None,
                                 )
                             }
+                            crate::app::ViewKind::Preview(v) => (
+                                None,
+                                None,
+                                Some(PreviewSnap {
+                                    path: v.path.clone(),
+                                    kind: v.kind,
+                                    scroll: v.scroll,
+                                }),
+                            ),
                         };
                         return Some((
                             id.0,
@@ -875,6 +896,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                                 module: None,
                                 file,
                                 diff,
+                                preview,
                             },
                         ));
                     }
@@ -928,6 +950,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                                 module,
                                 file: None,
                                 diff: None,
+                                preview: None,
                             },
                         )
                     })

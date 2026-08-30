@@ -35,6 +35,7 @@ mod keys;
 mod mission;
 mod modules;
 mod picker;
+mod preview;
 mod search;
 mod settings;
 mod switcher;
@@ -123,6 +124,7 @@ impl DockKind {
 pub enum ViewKind {
     File(crate::files::FileView),
     Diff(Box<crate::diff::DiffView>),
+    Preview(crate::files::preview::DocumentView),
 }
 
 /// Which sidebar a dock lives in (docs/29).
@@ -606,6 +608,9 @@ pub enum FileMenuItem {
     OpenReadonly,
     /// Open with editor `editors[i]` (files only).
     OpenWith(usize),
+    /// Explicit derived previews; normal open behavior remains unchanged.
+    OpenMarkdownPreview,
+    OpenMermaidPreview,
     NewFile,
     NewFolder,
     Rename,
@@ -627,6 +632,15 @@ impl FileMenu {
         if !self.is_dir {
             v.push(FileMenuItem::OpenReadonly);
             v.extend((0..self.editors.len()).map(FileMenuItem::OpenWith));
+            match crate::files::preview::PreviewKind::for_path(&self.path) {
+                Some(crate::files::preview::PreviewKind::Markdown) => {
+                    v.push(FileMenuItem::OpenMarkdownPreview)
+                }
+                Some(crate::files::preview::PreviewKind::Mermaid) => {
+                    v.push(FileMenuItem::OpenMermaidPreview)
+                }
+                None => {}
+            }
             v.push(FileMenuItem::Divider);
         }
         v.extend([
@@ -706,6 +720,9 @@ pub struct PaneMenu {
     /// Whether this pane runs a fork-capable agent, snapshotted at open. Gates
     /// whether the "Fork to new pane" row is shown (docs/23).
     pub can_fork: bool,
+    /// Exact tracked file + derived-preview kind snapshotted at menu open.
+    /// Already-rendered previews and untracked shell/editor panes leave this empty.
+    pub document_preview: Option<(PathBuf, crate::files::preview::PreviewKind)>,
 }
 
 /// Where "Move to tab" sends the pane: an existing tab (by index) or a fresh one.
@@ -806,6 +823,8 @@ pub enum PaneMenuItem {
     MoveToTab,
     /// "Rename" this pane (sets its live name, shown on the title strip).
     RenamePane,
+    OpenMarkdownPreview,
+    OpenMermaidPreview,
     Divider,
     Close,
     /// The `i`-th module action declaring `contexts = ["pane"]` (docs/13 §3.8).
@@ -823,6 +842,8 @@ impl PaneMenuItem {
         PaneMenuItem::OpenFile,
         PaneMenuItem::RunningCmd,
         PaneMenuItem::RenamePane,
+        PaneMenuItem::OpenMarkdownPreview,
+        PaneMenuItem::OpenMermaidPreview,
         PaneMenuItem::MoveToTab,
         PaneMenuItem::Divider,
         PaneMenuItem::Close,
@@ -1723,6 +1744,8 @@ pub struct App {
     /// Visible saved-note cards inside native DIFF panes. A left click opens
     /// that exact note in the inline editor.
     pub diff_note_rects: Vec<(PaneId, String, Rect)>,
+    /// Clickable links rendered by native document previews. Rebuilt per frame.
+    pub preview_link_rects: Vec<(PaneId, String, Rect)>,
     /// Pane currently owning a mouse drag that selects an annotation range.
     pub diff_note_drag: Option<PaneId>,
     pub diff: crate::diff::DiffState,
@@ -2126,6 +2149,7 @@ impl App {
             diff_row_rects: Vec::new(),
             diff_source_rects: Vec::new(),
             diff_note_rects: Vec::new(),
+            preview_link_rects: Vec::new(),
             diff_note_drag: None,
             diff: crate::diff::DiffState::default(),
             diff_agent_picker: None,
@@ -2318,6 +2342,32 @@ impl App {
                             let _ = tx.send(crate::event::AppEvent::FileRead {
                                 id,
                                 path: p,
+                                token: 1,
+                                load,
+                            });
+                        });
+                        remap.insert(*raw, id);
+                        continue;
+                    }
+                    // Explicit document previews restore as native views and
+                    // re-parse from current source on one transient worker.
+                    if let Some(preview) = &ps.preview {
+                        let mut view = crate::files::preview::DocumentView::new(
+                            preview.path.clone(),
+                            preview.kind,
+                        );
+                        view.read_token = 1;
+                        view.scroll = preview.scroll;
+                        views.insert(id, ViewKind::Preview(view));
+                        let tx = app_tx.clone();
+                        let path = preview.path.clone();
+                        let kind = preview.kind;
+                        std::thread::spawn(move || {
+                            let load = crate::files::preview::read(&path, kind);
+                            let _ = tx.send(crate::event::AppEvent::PreviewRead {
+                                id,
+                                path,
+                                kind,
                                 token: 1,
                                 load,
                             });
@@ -2679,6 +2729,7 @@ impl App {
             diff_row_rects: Vec::new(),
             diff_source_rects: Vec::new(),
             diff_note_rects: Vec::new(),
+            preview_link_rects: Vec::new(),
             diff_note_drag: None,
             diff: crate::diff::DiffState::default(),
             diff_agent_picker: None,
@@ -3959,6 +4010,10 @@ impl App {
             .as_ref()
             .is_some_and(|m| !m.move_targets.is_empty());
         let can_fork = self.pane_menu.as_ref().is_some_and(|m| m.can_fork);
+        let document_preview = self
+            .pane_menu
+            .as_ref()
+            .and_then(|menu| menu.document_preview.as_ref().map(|(_, kind)| *kind));
         let (has_url, has_file) = match self.pane_menu.as_ref().and_then(|m| m.link.as_ref()) {
             Some(LinkTarget::Url(_)) => (true, false),
             Some(LinkTarget::File { .. }) => (false, true),
@@ -3971,6 +4026,14 @@ impl App {
             .filter(|it| can_fork || *it != PaneMenuItem::ForkPane)
             .filter(|it| has_url || *it != PaneMenuItem::OpenLink)
             .filter(|it| has_file || *it != PaneMenuItem::OpenFile)
+            .filter(|it| {
+                *it != PaneMenuItem::OpenMarkdownPreview
+                    || document_preview == Some(crate::files::preview::PreviewKind::Markdown)
+            })
+            .filter(|it| {
+                *it != PaneMenuItem::OpenMermaidPreview
+                    || document_preview == Some(crate::files::preview::PreviewKind::Mermaid)
+            })
             .collect();
         let extras = self
             .pane_menu
@@ -4258,6 +4321,15 @@ impl App {
         let move_targets = self.pane_move_targets();
         let can_fork = self.can_fork_pane(pane);
         let link = self.link_at_screen(col, row).map(|h| h.target);
+        let document_preview = match self.views.get(&pane) {
+            Some(ViewKind::File(view)) => crate::files::preview::PreviewKind::for_path(&view.path)
+                .map(|kind| (view.path.clone(), kind)),
+            Some(ViewKind::Preview(_) | ViewKind::Diff(_)) => None,
+            None => self.editor_files.get(&pane).and_then(|editor| {
+                crate::files::preview::PreviewKind::for_path(&editor.path)
+                    .map(|kind| (editor.path.clone(), kind))
+            }),
+        };
         self.pane_menu = Some(PaneMenu {
             pane,
             anchor: (col, row),
@@ -4268,6 +4340,7 @@ impl App {
             tab_rects: Vec::new(),
             can_fork,
             link,
+            document_preview,
         });
     }
 
@@ -4601,11 +4674,14 @@ impl App {
 
     /// Run a pane context-menu action on its target pane, then close the menu.
     pub fn pane_menu_action(&mut self, item: PaneMenuItem) {
-        let Some((pane, actions, link)) = self
-            .pane_menu
-            .as_ref()
-            .map(|m| (m.pane, m.module_actions.clone(), m.link.clone()))
-        else {
+        let Some((pane, actions, link, document_preview)) = self.pane_menu.as_ref().map(|m| {
+            (
+                m.pane,
+                m.module_actions.clone(),
+                m.link.clone(),
+                m.document_preview.clone(),
+            )
+        }) else {
             return;
         };
         self.pane_menu = None;
@@ -4632,6 +4708,11 @@ impl App {
             }
             PaneMenuItem::RunningCmd => self.open_cmd_inspect(pane),
             PaneMenuItem::RenamePane => self.open_pane_rename(pane),
+            PaneMenuItem::OpenMarkdownPreview | PaneMenuItem::OpenMermaidPreview => {
+                if let Some((path, kind)) = document_preview {
+                    self.open_document_preview_pane(path, kind);
+                }
+            }
             // Handled in `pane_menu_click` (opens a submenu, keeps the menu open);
             // reachable here only via a direct call — treat as a no-op.
             PaneMenuItem::MoveToTab => {}

@@ -187,6 +187,24 @@ pub enum AppEvent {
         token: u64,
         changes: Vec<crate::git::local::ChangeSpan>,
     },
+    /// An explicit Markdown/Mermaid preview finished reading and parsing.
+    /// Token + path + kind make stale results harmless when a view changes.
+    PreviewRead {
+        id: PaneId,
+        path: std::path::PathBuf,
+        kind: crate::files::preview::PreviewKind,
+        token: u64,
+        load: crate::files::preview::PreviewLoad,
+    },
+    /// A width-specific immutable preview layout finished off the app loop.
+    PreviewLayout {
+        id: PaneId,
+        path: std::path::PathBuf,
+        kind: crate::files::preview::PreviewKind,
+        token: u64,
+        key: crate::files::preview::LayoutKey,
+        layout: std::sync::Arc<crate::files::preview::PreviewLayout>,
+    },
     /// The periodic process scan finished: command lines running under each
     /// pane's child pid, from one `ps`. `None` means the platform cannot tell
     /// (Windows) or `ps` failed — detection then falls back to text heuristics

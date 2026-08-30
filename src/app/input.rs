@@ -788,6 +788,21 @@ impl App {
                     _ => false,
                 }
             }
+            AppEvent::PreviewRead {
+                id,
+                path,
+                kind,
+                token,
+                load,
+            } => self.apply_preview_read(id, path, kind, token, load),
+            AppEvent::PreviewLayout {
+                id,
+                path,
+                kind,
+                token,
+                key,
+                layout,
+            } => self.apply_preview_layout(id, path, kind, token, key, layout),
             AppEvent::GitData { view, payload } => {
                 self.git_data(view, payload);
                 true
@@ -1493,6 +1508,28 @@ impl App {
         // ── pane text selection: drag to select, release auto-copies (OSC 52) ──
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // Native document links are exact rendered rectangles and only
+                // activate through an explicit Ctrl/Cmd click. Claim that
+                // gesture before resize or terminal forwarding can reinterpret
+                // it; ordinary clicks remain text selection.
+                if m.modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+                {
+                    let preview_link = self
+                        .preview_link_rects
+                        .iter()
+                        .find(|(_, _, rect)| {
+                            m.column >= rect.x
+                                && m.column < rect.right()
+                                && m.row >= rect.y
+                                && m.row < rect.bottom()
+                        })
+                        .map(|(pane, target, _)| (*pane, target.clone()));
+                    if let Some((pane, target)) = preview_link {
+                        self.activate_preview_link(pane, target);
+                        return;
+                    }
+                }
                 // A sidebar-edge drag (docs/29) claims the press first: its seam is
                 // the sidebar's own `│` column (never a pane), and its neighbour is
                 // only grabbed when it isn't pane content, so this can't swallow a
@@ -1829,6 +1866,13 @@ impl App {
                                 v.selected = v.scroll;
                             }
                         }
+                    }
+                    Some(crate::app::ViewKind::Preview(v)) => {
+                        let key = crate::files::preview::LayoutKey {
+                            width: rect.width.max(1),
+                            ascii: false,
+                        };
+                        v.scroll_by(scroll, viewport, key);
                     }
                     None => {}
                 }
@@ -2652,6 +2696,9 @@ impl App {
         if let Some(crate::app::ViewKind::File(v)) = self.views.get(&sel.pane) {
             return crate::files::selection_text(v, sel.content, sel.ordered());
         }
+        if let Some(crate::app::ViewKind::Preview(view)) = self.views.get(&sel.pane) {
+            return super::preview::selection_text(view, sel.content, sel.ordered(), self.compact);
+        }
         if let Some(selection) = sel.retained {
             let range = selection.ordered();
             let text = self
@@ -3219,6 +3266,9 @@ impl App {
                 match self.views.get(&focus) {
                     Some(crate::app::ViewKind::File(_)) => return self.handle_file_key(focus, key),
                     Some(crate::app::ViewKind::Diff(_)) => return self.handle_diff_key(focus, key),
+                    Some(crate::app::ViewKind::Preview(_)) => {
+                        return self.handle_preview_key(focus, key)
+                    }
                     None => {}
                 }
                 // `Shift+↑` / `Shift+PageUp` enter keyboard scroll mode (no prefix,
