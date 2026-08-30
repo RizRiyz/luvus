@@ -264,10 +264,20 @@ pub fn parse(source: &str) -> Vec<Block> {
                 }
             }
             Event::Code(code) => {
-                ensure_text_active(&mut active, quote_depth, range.start);
-                if let Some(active) = active.as_mut() {
+                let code = code.into_string();
+                if let Some(table) = table.as_mut() {
+                    table.current_cell.push(Inline {
+                        text: code,
+                        role: InlineRole::Code,
+                        link: links.last().cloned(),
+                    });
+                } else {
+                    ensure_text_active(&mut active, quote_depth, range.start);
+                    let Some(active) = active.as_mut() else {
+                        continue;
+                    };
                     active.content.push(Inline {
-                        text: code.into_string(),
+                        text: code,
                         role: InlineRole::Code,
                         link: links.last().cloned(),
                     });
@@ -447,5 +457,23 @@ mod tests {
             panic!("html remains a paragraph");
         };
         assert_eq!(content[0].text, "<script>alert(1)</script>");
+    }
+
+    #[test]
+    fn inline_code_remains_inside_its_table_cell() {
+        let blocks = parse("| Value |\n|---|\n| `code` |\n");
+        let table = blocks
+            .iter()
+            .find_map(|block| match block {
+                Block::Table { rows, .. } => Some(rows),
+                _ => None,
+            })
+            .expect("table block");
+
+        assert_eq!(table[0][0][0].text, "code");
+        assert_eq!(table[0][0][0].role, InlineRole::Code);
+        assert!(!blocks
+            .iter()
+            .any(|block| matches!(block, Block::Paragraph { .. })));
     }
 }

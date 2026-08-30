@@ -336,10 +336,7 @@ fn draw_box(
     canvas.put(x, y + 2, bottom_left);
     canvas.hline(x + 1, x + width.saturating_sub(2), y + 2, glyphs.horizontal);
     canvas.put(x + width.saturating_sub(1), y + 2, bottom_right);
-    let label: String = display_label(node, ascii)
-        .chars()
-        .take(width.saturating_sub(4))
-        .collect();
+    let label = clip(&display_label(node, ascii), width.saturating_sub(4));
     let offset = width.saturating_sub(label.width()) / 2;
     canvas.write(x + offset, y + 1, &label);
 }
@@ -526,5 +523,15 @@ mod tests {
         assert!(rendered.contains("launch"));
         assert!(rendered.contains('›'));
         assert!(rendered.contains('◇'));
+    }
+
+    #[test]
+    fn wide_node_labels_do_not_overwrite_box_borders() {
+        let graph = parse("flowchart LR\n A[你好你好你好你好你好你好]").unwrap();
+        let rendered = render(&graph, 24, false);
+
+        assert_eq!(rendered[2].chars().next(), Some('│'));
+        assert_eq!(rendered[2].chars().last(), Some('│'));
+        assert!(rendered.iter().all(|line| line.width() <= 24));
     }
 }

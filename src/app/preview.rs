@@ -241,7 +241,7 @@ impl App {
     /// reopen through normal file behavior and never read during rendering.
     pub(crate) fn activate_preview_link(&mut self, pane: PaneId, target: String) {
         if target.starts_with("https://") || target.starts_with("http://") {
-            self.pending_open_url = Some(target);
+            self.open_url(target);
             return;
         }
         if target.starts_with('#') {
@@ -251,23 +251,42 @@ impl App {
         let Some(ViewKind::Preview(view)) = self.views.get(&pane) else {
             return;
         };
+        let preview_path = view.path.clone();
+        let Some(workspace_root) = self
+            .workspace_of_pane(pane)
+            .map(|workspace| workspace.cwd.clone())
+        else {
+            return;
+        };
         let target = target.split('#').next().unwrap_or_default();
         if target.is_empty() {
             return;
         }
         let candidate = PathBuf::from(target);
-        let path = if candidate.is_absolute() {
-            candidate
-        } else {
-            view.path
-                .parent()
-                .unwrap_or_else(|| Path::new(""))
-                .join(candidate)
+        if candidate.is_absolute() {
+            self.show_toast("preview links must be relative to the workspace");
+            return;
+        }
+        let unresolved = preview_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(candidate);
+        let Ok(root) = workspace_root.canonicalize() else {
+            self.show_toast("workspace path is unavailable");
+            return;
         };
+        let Ok(path) = unresolved.canonicalize() else {
+            self.show_toast("linked file does not exist");
+            return;
+        };
+        if !path.starts_with(&root) {
+            self.show_toast("preview link is outside the workspace");
+            return;
+        }
         if path.is_file() {
             self.open_file_at(path, None);
         } else {
-            self.show_toast("linked file does not exist");
+            self.show_toast("preview link is not a file");
         }
     }
 }
@@ -454,6 +473,7 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(100, 30, tx).unwrap();
+        app.workspaces[app.active_ws].cwd = root.clone();
         app.open_document_preview_tab(readme.clone(), PreviewKind::Markdown);
         let preview_id = app.layout().focus;
         let load = preview::read(&readme, PreviewKind::Markdown);
@@ -507,12 +527,52 @@ mod tests {
                 _ => None,
             })
             .collect();
+        let guide = guide.canonicalize().unwrap();
         assert!(
             opened.contains(&guide),
             "modified click opened {opened:?}, expected {guide:?}"
         );
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn preview_links_use_shared_url_validation_and_stay_in_workspace() {
+        let _env = crate::persist::test_env("document-preview-link-boundary");
+        let temp = std::env::temp_dir();
+        let root = temp.join(format!("luvus-preview-root-{}", std::process::id()));
+        let outside = temp.join(format!("luvus-preview-outside-{}.md", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&outside);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("README.md"), "# Home\n").unwrap();
+        std::fs::write(&outside, "# Outside\n").unwrap();
+
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.workspaces[app.active_ws].cwd = root.clone();
+        app.open_document_preview_tab(root.join("README.md"), PreviewKind::Markdown);
+        let pane = app.layout().focus;
+
+        app.activate_preview_link(pane, "http://".into());
+        assert!(app.pending_open_url.is_none());
+        app.activate_preview_link(pane, "https://example.com/docs".into());
+        assert_eq!(
+            app.pending_open_url.as_deref(),
+            Some("https://example.com/docs")
+        );
+
+        app.activate_preview_link(
+            pane,
+            format!("../{}", outside.file_name().unwrap().to_string_lossy()),
+        );
+        assert!(!app.views.values().any(|view| matches!(
+            view,
+            ViewKind::File(file) if file.path == outside
+        )));
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_file(outside);
     }
 
     #[test]

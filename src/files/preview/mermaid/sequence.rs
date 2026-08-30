@@ -188,7 +188,10 @@ pub fn render(sequence: &Sequence, width: usize, ascii: bool) -> Vec<String> {
     }
     let glyphs = Glyphs::for_ascii(ascii);
     let height = 3 + sequence.events.len() * 2 + 1;
-    let mut canvas = Canvas::new(required, height);
+    // Extra room preserves message labels in a wide pane, but keep the canvas
+    // bounded by the largest supported label rather than an arbitrary client width.
+    let canvas_width = width.min(required.saturating_add(MAX_LABEL));
+    let mut canvas = Canvas::new(canvas_width, height);
     let centers: Vec<usize> = (0..sequence.participants.len())
         .map(|index| index * slot + slot / 2)
         .collect();
@@ -276,5 +279,14 @@ mod tests {
         let sequence = parse("sequenceDiagram\n participant A as Alice\n A->>B: Hello").unwrap();
         let rendered = render(&sequence, 20, false);
         assert_eq!(rendered, vec!["Alice → B · Hello"]);
+    }
+
+    #[test]
+    fn wide_panes_keep_long_message_labels_visible() {
+        let label = "message label that needs the available pane width";
+        let sequence = parse(&format!("sequenceDiagram\n A->>B: {label}")).unwrap();
+        let rendered = render(&sequence, 80, false).join("\n");
+
+        assert!(rendered.contains(label));
     }
 }

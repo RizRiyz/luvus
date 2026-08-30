@@ -407,6 +407,9 @@ fn render_table(
         ));
     }
     for row in body {
+        if out.len() >= MAX_LAYOUT_ROWS {
+            return;
+        }
         emit(row, TextRole::Normal, out);
     }
 }
@@ -464,5 +467,25 @@ mod tests {
             .rows
             .iter()
             .all(|row| !row.plain_text().contains('#')));
+    }
+
+    #[test]
+    fn table_emission_stops_at_the_layout_row_limit() {
+        let mut rows = vec![StyledRow::default(); MAX_LAYOUT_ROWS - 1];
+        let body = vec![
+            vec![vec![Inline::plain("first")]],
+            vec![vec![Inline::plain("second")]],
+        ];
+
+        render_table(&mut rows, &[], &body, 20, Some(1), false);
+
+        assert_eq!(rows.len(), MAX_LAYOUT_ROWS);
+        assert_eq!(
+            rows.last()
+                .map(StyledRow::plain_text)
+                .as_deref()
+                .map(str::trim_end),
+            Some("first")
+        );
     }
 }

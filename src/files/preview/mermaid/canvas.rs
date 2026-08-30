@@ -36,7 +36,9 @@ impl Canvas {
             }
             self.put(x, y, ch);
             for continuation in 1..width {
-                self.put(x + continuation, y, ' ');
+                // A terminal renders this column as part of the wide glyph.
+                // Keep it reserved in geometry but omit it from the final string.
+                self.put(x + continuation, y, '\0');
             }
             x += width;
         }
@@ -57,7 +59,29 @@ impl Canvas {
     pub fn into_lines(self) -> Vec<String> {
         self.cells
             .into_iter()
-            .map(|row| row.into_iter().collect::<String>().trim_end().to_string())
+            .map(|row| {
+                row.into_iter()
+                    .filter(|ch| *ch != '\0')
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn wide_glyph_continuations_do_not_add_output_columns() {
+        let mut canvas = Canvas::new(4, 1);
+        canvas.write(0, 0, "你好");
+
+        let line = canvas.into_lines().remove(0);
+        assert_eq!(line, "你好");
+        assert_eq!(line.width(), 4);
     }
 }

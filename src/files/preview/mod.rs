@@ -10,6 +10,7 @@ mod markdown;
 pub mod mermaid;
 
 use std::collections::{HashSet, VecDeque};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -301,10 +302,17 @@ pub fn read(path: &Path, kind: PreviewKind) -> PreviewLoad {
     if metadata.len() > SIZE_CAP {
         return PreviewLoad::TooLarge(metadata.len());
     }
-    let bytes = match std::fs::read(path) {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) => return PreviewLoad::Error(error.to_string()),
+    };
+    let bytes = match read_at_most_cap_plus_one(file, metadata.len()) {
         Ok(bytes) => bytes,
         Err(error) => return PreviewLoad::Error(error.to_string()),
     };
+    if bytes.len() as u64 > SIZE_CAP {
+        return PreviewLoad::TooLarge(metadata.len().max(bytes.len() as u64));
+    }
     if bytes.iter().take(SNIFF).any(|byte| *byte == 0) {
         return PreviewLoad::Binary(metadata.len());
     }
@@ -327,6 +335,14 @@ pub fn read(path: &Path, kind: PreviewKind) -> PreviewLoad {
         }],
     };
     PreviewLoad::Ready(Arc::new(PreviewDocument::new(source, blocks)))
+}
+
+fn read_at_most_cap_plus_one(reader: impl Read, capacity_hint: u64) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(capacity_hint.min(SIZE_CAP) as usize);
+    reader
+        .take(SIZE_CAP.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -417,5 +433,13 @@ mod tests {
                     <= usize::from(width)
             }));
         }
+    }
+
+    #[test]
+    fn bounded_reader_never_consumes_more_than_cap_plus_one() {
+        let input = vec![b'x'; SIZE_CAP as usize + 128];
+        let bytes = read_at_most_cap_plus_one(std::io::Cursor::new(input), 0).unwrap();
+
+        assert_eq!(bytes.len() as u64, SIZE_CAP + 1);
     }
 }
