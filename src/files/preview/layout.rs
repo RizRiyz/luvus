@@ -76,9 +76,27 @@ pub fn build(document: Arc<PreviewDocument>, key: LayoutKey) -> PreviewLayout {
         let source_line = Some(document.source_line_for(block.range().start));
         match block {
             Block::Heading { level, content, .. } => {
-                let marker = "#".repeat(usize::from(*level));
-                let spans = prefixed(marker + " ", TextRole::Heading(*level), content);
-                rows.extend(wrap(spans, width, source_line));
+                let heading_rows = wrap(heading_spans(*level, content), width, source_line);
+                let rule_width = heading_rows
+                    .iter()
+                    .map(|row| row.plain_text().width())
+                    .max()
+                    .unwrap_or_default()
+                    .min(width);
+                rows.extend(heading_rows);
+                if *level <= 2 && rule_width > 0 {
+                    let rule = match (*level, key.ascii) {
+                        (1, true) => '=',
+                        (1, false) => '═',
+                        (_, true) => '-',
+                        (_, false) => '─',
+                    };
+                    rows.push(StyledRow::single(
+                        rule.to_string().repeat(rule_width),
+                        TextRole::Heading(*level),
+                        source_line,
+                    ));
+                }
             }
             Block::Paragraph { content, .. } => {
                 rows.extend(wrap(inline_spans(content), width, source_line));
@@ -210,6 +228,18 @@ fn inline_spans(inlines: &[Inline]) -> Vec<StyledSpan> {
                 InlineRole::Muted => TextRole::Muted,
             },
             link: inline.link.clone(),
+        })
+        .collect()
+}
+
+fn heading_spans(level: u8, inlines: &[Inline]) -> Vec<StyledSpan> {
+    inline_spans(inlines)
+        .into_iter()
+        .map(|mut span| {
+            if !matches!(span.role, TextRole::Code | TextRole::Link) {
+                span.role = TextRole::Heading(level);
+            }
+            span
         })
         .collect()
 }
@@ -407,5 +437,32 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|row| row.plain_text().width() <= 10));
         assert_eq!(rows[1].spans.last().unwrap().role, TextRole::Strong);
+    }
+
+    #[test]
+    fn headings_hide_markdown_markers_and_keep_visual_hierarchy() {
+        let document = Arc::new(PreviewDocument::new(
+            Arc::<str>::from("# Project"),
+            vec![Block::Heading {
+                level: 1,
+                content: vec![Inline::plain("Project")],
+                range: 0..9,
+            }],
+        ));
+        let layout = build(
+            document,
+            LayoutKey {
+                width: 40,
+                ascii: false,
+            },
+        );
+
+        assert_eq!(layout.rows[0].plain_text(), "Project");
+        assert_eq!(layout.rows[0].spans[0].role, TextRole::Heading(1));
+        assert_eq!(layout.rows[1].plain_text(), "═══════");
+        assert!(layout
+            .rows
+            .iter()
+            .all(|row| !row.plain_text().contains('#')));
     }
 }
