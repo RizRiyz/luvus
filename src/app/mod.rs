@@ -9288,6 +9288,44 @@ mod tests {
     }
 
     #[test]
+    fn task_update_rejects_all_fields_after_merge_starts() {
+        let _env = crate::persist::test_env("orch-update-complete");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.orch
+            .add_task("work".into(), vec![], vec![], None)
+            .unwrap();
+
+        let call = |app: &mut App, params: Value| {
+            let (reply, _r) = mpsc::channel();
+            let resp = app.handle_api(&ApiRequest {
+                id: "1".into(),
+                method: "task.update".into(),
+                params,
+                reply,
+            });
+            serde_json::from_str::<Value>(&resp).unwrap()
+        };
+
+        app.orch
+            .set_status("t1", crate::orch::TaskStatus::Merging)
+            .unwrap();
+        let response = call(&mut app, json!({"id":"t1", "output":"late output"}));
+        assert_eq!(response["error"]["code"], "task_complete");
+
+        app.orch
+            .set_status("t1", crate::orch::TaskStatus::Merged)
+            .unwrap();
+        let response = call(&mut app, json!({"id":"t1", "note":"late note"}));
+        assert_eq!(response["error"]["code"], "task_complete");
+        assert!(app.orch.task("t1").unwrap().outputs.is_empty());
+        assert!(app.orch.task("t1").unwrap().notes.is_empty());
+
+        let response = call(&mut app, json!({"id":"t1", "status":"merged"}));
+        assert_eq!(response["error"]["code"], "protected_status");
+    }
+
+    #[test]
     fn workspace_open_focuses_existing_or_creates_new() {
         // `luvus` attaching from a new folder → `workspace.open` adds it; from a
         // folder that's already a workspace → it just focuses it (no duplicate).

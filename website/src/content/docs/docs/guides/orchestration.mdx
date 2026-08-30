@@ -87,11 +87,12 @@ Say you want an auth module and an API layer that depends on it:
 4. When the work looks finished: back to the board, `d`. The gate
    (`cargo test auth`) runs in the background. Pass and `t1` is **done**.
    Fail and it's held at **review** with the output saved on the task.
-5. `t2` is now claimable (its dependency is done), so select it, `s`, repeat.
-6. Select a done task, `m`, and the branch merges into `luvus/integration`
-   in an isolated worktree. The task moves through **merging** to **merged** and
+5. Select `t1`, press `m`, and its branch merges into `luvus/integration` in an
+   isolated worktree. The task moves through **merging** to **merged** and
    records the exact integration commit. A conflict aborts Git and marks the
    task **blocked** rather than leaving a half-merge.
+6. Once `t1` is **merged**, `t2` becomes claimable. Select it, press `s`, and
+   repeat.
 
 Your own checkout on `main` was never touched at any point.
 

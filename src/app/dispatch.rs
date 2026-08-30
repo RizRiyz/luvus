@@ -3816,7 +3816,7 @@ impl App {
             }
             "task.update" => {
                 let id = req_str(p, "id")?.to_string();
-                if let Some(s) = p.get("status").and_then(|v| v.as_str()) {
+                let status = if let Some(s) = p.get("status").and_then(|v| v.as_str()) {
                     let st = crate::orch::TaskStatus::parse(s).ok_or_else(|| {
                         ("bad_request".to_string(), format!("unknown status: {s}"))
                     })?;
@@ -3829,17 +3829,22 @@ impl App {
                             format!("{s} is set only by task.merge"),
                         ));
                     }
-                    if let Some(current) = self.orch.task(&id).map(|task| task.status) {
-                        if matches!(
-                            current,
-                            crate::orch::TaskStatus::Merging | crate::orch::TaskStatus::Merged
-                        ) {
-                            return Err((
-                                "task_complete".to_string(),
-                                format!("{id} is already {}", current.as_str()),
-                            ));
-                        }
+                    Some(st)
+                } else {
+                    None
+                };
+                if let Some(current) = self.orch.task(&id).map(|task| task.status) {
+                    if matches!(
+                        current,
+                        crate::orch::TaskStatus::Merging | crate::orch::TaskStatus::Merged
+                    ) {
+                        return Err((
+                            "task_complete".to_string(),
+                            format!("{id} is already {}", current.as_str()),
+                        ));
                     }
+                }
+                if let Some(st) = status {
                     self.orch.set_status(&id, st).map_err(orch_err)?;
                 }
                 if let Some(o) = p.get("output").and_then(|v| v.as_str()) {

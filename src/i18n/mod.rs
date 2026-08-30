@@ -2550,7 +2550,7 @@ static ZH: Catalog = Catalog {
     board_start: "启动",
     board_release: "重新排队",
     board_next_field: "下一字段",
-    board_start_with: "启动 worker 使用",
+    board_start_with: "使用以下方式启动 worker",
     board_shell_only: "仅 shell（无智能体）",
     board_details: "详情",
     board_selected_task: "已选任务",
