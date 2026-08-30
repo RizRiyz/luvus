@@ -327,10 +327,7 @@ fn wrap(spans: Vec<StyledSpan>, width: usize, source_line: Option<usize>) -> Vec
             }
             let visible_end = start + part.len();
             let mut next_start = end;
-            while cells
-                .get(next_start)
-                .is_some_and(|cell| cell.ch == ' ')
-            {
+            while cells.get(next_start).is_some_and(|cell| cell.ch == ' ') {
                 next_start += 1;
             }
             out.push(cells_to_row(part, source_line, soft_wrap_spaces));
