@@ -148,9 +148,15 @@ jobs:
   # output and builds the package, so a broken derivation fails CI instead of
   # only surfacing when a Nix user tries to install. Reproducible once flake.lock
   # is committed; until then it resolves nixos-unstable fresh each run.
+  # Both platforms: the macOS leg catches Darwin-only link failures (for
+  # example the system-sqlite link in Cargo.toml) that Ubuntu cannot see.
   nix:
-    name: nix flake
-    runs-on: ubuntu-latest
+    name: nix flake (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest ]
     steps:
       - uses: actions/checkout@v5
       - uses: cachix/install-nix-action@v30

@@ -62,6 +62,18 @@
 
           nativeBuildInputs = [ pkgs.makeWrapper ];
 
+          # On macOS, Cargo.toml deliberately links the SYSTEM sqlite
+          # (/usr/lib/libsqlite3.dylib) instead of bundling it, so the crate
+          # passes `-lsqlite3` at the final link. The Nix build sandbox has no
+          # /usr/lib, so the link fails with `ld: library not found for
+          # -lsqlite3`. Provide nixpkgs' sqlite on Darwin: the link resolves, and
+          # the dylib lands in the runtime closure — more hermetic than the
+          # release binary, which depends on an impure /usr/lib path. Linux keeps
+          # rusqlite's bundled engine and needs nothing extra.
+          buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+            pkgs.sqlite
+          ];
+
           # The suite spawns real PTYs, `ps`, and child processes, and reads
           # $HOME — all awkward inside the Nix build sandbox. CI runs the full
           # suite on every push (see .github/workflows/ci.yml); the package build
