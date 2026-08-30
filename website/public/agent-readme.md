@@ -129,6 +129,8 @@ For orchestration, `task merge` serializes the merge through the isolated
 `blocked` by a conflict, or the operation fails. Do not retry a merged task.
 `task release` requeues active work and releases its path leases, but it does
 not stop the worker pane or discard its worktree.
+`task start` checks path leases before creating a branch, worktree, or pane. If
+it returns `lease_conflict`, resolve or release the named holder before retrying.
 
 Tab positions are 1-based. Workspace indexes shown by the CLI are 0-based.
 Pane IDs and agent names are discovery results. Never convert between these

@@ -3928,7 +3928,7 @@ impl App {
                 Ok(json!({ "type": "task", "task": task_json(&task), "released_leases": released }))
             }
             "lease.acquire" => {
-                let task = opt_str(p, "task").unwrap_or_default();
+                let task = req_str(p, "task")?.to_string();
                 let pane = self.orch_pane(p)?;
                 let lease = self
                     .orch

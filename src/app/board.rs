@@ -75,6 +75,13 @@ impl App {
                 format!("{id} has dependencies that aren't done yet"),
             ));
         }
+        // Refuse conflicting work before creating or reopening a worktree. A
+        // failed start must not leave behind a pane, branch, or partial claim.
+        if !task.paths.is_empty() {
+            self.orch
+                .ensure_task_paths_available(id, &task.paths)
+                .map_err(|r| (r.code.to_string(), r.message))?;
+        }
         // The branch this worker runs on: an explicit `--branch`, else the one
         // recorded on the task, else `luvus/<id>`.
         let branch = branch
@@ -148,22 +155,26 @@ impl App {
         };
         let pane = self.layout().focus;
 
-        // Claim + record the binding + lease the declared paths for the worker.
+        // Claim + lease + record the binding for the worker.
         // A started worker is *running* — claimed is reserved for the CLI's
         // claim-without-start, so the board never shows live work as waiting.
         self.orch
             .claim(id, pane.0)
             .map_err(|r| (r.code.to_string(), r.message))?;
+        if !task.paths.is_empty() {
+            if let Err(reject) = self.orch.bind_task_paths(id, pane.0, &task.paths) {
+                // The preflight above makes this unreachable during ordinary
+                // single-writer operation, but keep a failed acquisition from
+                // exposing a running task without its promised lease.
+                let _ = self.orch.release_task(id);
+                self.orch.release_task_leases(id);
+                self.orch.save();
+                return Err((reject.code.to_string(), reject.message));
+            }
+        }
         let _ = self.orch.set_status(id, crate::orch::TaskStatus::Running);
         self.orch
             .bind_worktree(id, Some(path.display().to_string()), Some(branch.clone()));
-        if !task.paths.is_empty() {
-            // Best-effort — the worker owns a brand-new worktree, so a lease here
-            // only ever conflicts if another worker already reserved these paths.
-            let _ = self
-                .orch
-                .acquire_lease(pane.0, id.to_string(), task.paths.clone());
-        }
         if let Some(cmd) = agent {
             if let Some(p) = self.panes.get(&pane) {
                 p.send(agent_launch_line(&cmd, &task).as_bytes());
@@ -219,6 +230,53 @@ impl App {
                             t.status = TaskStatus::Queued;
                             requeued.push(t.id.clone());
                         }
+                        changed = true;
+                    }
+                }
+            }
+        }
+        changed |= self.orch.reconcile_leases();
+        // Older releases could leave a running worktree task without its
+        // declared lease. Rebuild missing leases for live workers. If two old
+        // tasks already overlap, keep the existing holder and visibly block the
+        // unprotected task instead of silently claiming both are safe.
+        let live_workers: Vec<(String, u32, Vec<String>)> = self
+            .orch
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.worktree.is_some()
+                    && matches!(
+                        task.status,
+                        TaskStatus::Running
+                            | TaskStatus::Blocked
+                            | TaskStatus::Review
+                            | TaskStatus::Failed
+                    )
+            })
+            .filter_map(|task| {
+                task.assignee
+                    .filter(|_| !task.paths.is_empty())
+                    .map(|pane| (task.id.clone(), pane, task.paths.clone()))
+            })
+            .collect();
+        for (id, pane, paths) in live_workers {
+            match self.orch.bind_task_paths(&id, pane, &paths) {
+                Ok(lease_changed) => changed |= lease_changed,
+                Err(reject) => {
+                    let message = format!("path lease recovery failed: {}", reject.message);
+                    let already_reported =
+                        self.orch.task(&id).and_then(|task| task.outputs.last()) == Some(&message);
+                    if !already_reported {
+                        let _ = self.orch.add_output(&id, message);
+                        changed = true;
+                    }
+                    if self
+                        .orch
+                        .task(&id)
+                        .is_some_and(|task| task.status == TaskStatus::Running)
+                    {
+                        let _ = self.orch.set_status(&id, TaskStatus::Blocked);
                         changed = true;
                     }
                 }
@@ -1271,6 +1329,43 @@ mod tests {
     }
 
     #[test]
+    fn task_start_rejects_a_lease_conflict_before_spawning() {
+        let _env = crate::persist::test_env("orch-start-conflict");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.orch
+            .add_task("owner".into(), vec!["src/**".into()], vec![], None)
+            .unwrap();
+        app.orch
+            .add_task(
+                "conflict".into(),
+                vec!["src/auth/token.rs".into()],
+                vec![],
+                None,
+            )
+            .unwrap();
+        app.orch
+            .acquire_lease(pane.0, "t1".into(), vec!["src/**".into()])
+            .unwrap();
+        let panes_before = app.panes.len();
+        let workspaces_before = app.workspaces.len();
+
+        let err = app.task_start("t2", None, None).unwrap_err();
+
+        assert_eq!(err.0, "lease_conflict");
+        assert_eq!(app.panes.len(), panes_before, "no worker pane was spawned");
+        assert_eq!(
+            app.workspaces.len(),
+            workspaces_before,
+            "no worktree workspace was created"
+        );
+        let task = app.orch.task("t2").unwrap();
+        assert_eq!(task.status, crate::orch::TaskStatus::Queued);
+        assert_eq!(task.assignee, None);
+    }
+
+    #[test]
     fn start_picker_opens_moves_and_cancels() {
         let _env = crate::persist::test_env("orchpick");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -1436,6 +1531,9 @@ mod tests {
             .unwrap();
         app.orch
             .bind_worktree("t1", Some(live_cwd), Some("luvus/t1".into()));
+        app.orch
+            .acquire_lease(9999, "t1".into(), vec!["src/a/**".into()])
+            .unwrap();
         // t2: worktree-backed but its folder has no pane → detached, stays Running.
         app.orch.add_task("b".into(), vec![], vec![], None).unwrap();
         app.orch.claim("t2", 9998).unwrap();
@@ -1447,9 +1545,23 @@ mod tests {
             Some("/nonexistent/worktree".into()),
             Some("luvus/t2".into()),
         );
+        app.orch
+            .acquire_lease(9998, "t2".into(), vec!["src/b/**".into()])
+            .unwrap();
         // t3: a pure claim (no worktree) by a dead pane → back to the queue.
         app.orch.add_task("c".into(), vec![], vec![], None).unwrap();
         app.orch.claim("t3", 9997).unwrap();
+        app.orch
+            .acquire_lease(9997, "t3".into(), vec!["src/c/**".into()])
+            .unwrap();
+        // A malformed persisted lease for a missing task is also discarded.
+        app.orch.leases.push(crate::orch::Lease {
+            id: "orphan".into(),
+            pane: 9996,
+            task: "missing".into(),
+            paths: vec!["src/orphan/**".into()],
+            acquired: 0,
+        });
 
         app.orch_reconcile();
 
@@ -1462,6 +1574,87 @@ mod tests {
         let t3 = app.orch.task("t3").unwrap();
         assert_eq!(t3.assignee, None);
         assert_eq!(t3.status, crate::orch::TaskStatus::Queued, "requeued");
+        assert_eq!(app.orch.leases.len(), 1, "only the live task keeps a lease");
+        assert_eq!(app.orch.leases[0].task, "t1");
+        assert_eq!(
+            app.orch.leases[0].pane, live.0,
+            "the lease follows the task's restored pane id"
+        );
+    }
+
+    #[test]
+    fn reconcile_restores_a_missing_worker_lease() {
+        let _env = crate::persist::test_env("orch-lease-restore");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let live = *app.panes.keys().next().unwrap();
+        let live_cwd = app.panes[&live].cwd.display().to_string();
+        app.orch
+            .add_task("work".into(), vec!["src/**".into()], vec![], None)
+            .unwrap();
+        app.orch.claim("t1", 9999).unwrap();
+        app.orch
+            .set_status("t1", crate::orch::TaskStatus::Running)
+            .unwrap();
+        app.orch
+            .bind_worktree("t1", Some(live_cwd), Some("luvus/t1".into()));
+
+        app.orch_reconcile();
+
+        assert_eq!(app.orch.leases.len(), 1);
+        assert_eq!(app.orch.leases[0].task, "t1");
+        assert_eq!(app.orch.leases[0].pane, live.0);
+        assert_eq!(app.orch.leases[0].paths, vec!["src/**"]);
+    }
+
+    #[test]
+    fn reconcile_blocks_an_unprotected_legacy_overlap() {
+        let _env = crate::persist::test_env("orch-lease-overlap");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let live = *app.panes.keys().next().unwrap();
+        let live_cwd = app.panes[&live].cwd.display().to_string();
+        for (title, path, stale_pane) in
+            [("owner", "src/**", 9999), ("overlap", "src/lib.rs", 9998)]
+        {
+            let task = app
+                .orch
+                .add_task(title.into(), vec![path.into()], vec![], None)
+                .unwrap();
+            app.orch.claim(&task.id, stale_pane).unwrap();
+            app.orch
+                .set_status(&task.id, crate::orch::TaskStatus::Running)
+                .unwrap();
+            app.orch.bind_worktree(
+                &task.id,
+                Some(live_cwd.clone()),
+                Some(format!("luvus/{}", task.id)),
+            );
+        }
+        app.orch
+            .acquire_lease(9999, "t1".into(), vec!["src/**".into()])
+            .unwrap();
+
+        app.orch_reconcile();
+
+        assert_eq!(
+            app.orch.leases.len(),
+            1,
+            "the first holder remains exclusive"
+        );
+        let blocked = app.orch.task("t2").unwrap();
+        assert_eq!(blocked.status, crate::orch::TaskStatus::Blocked);
+        assert!(blocked
+            .outputs
+            .last()
+            .is_some_and(|line| line.contains("path lease recovery failed")));
+
+        app.orch_reconcile();
+        assert_eq!(
+            app.orch.task("t2").unwrap().outputs.len(),
+            1,
+            "repeated startup reconciliation does not duplicate the failure"
+        );
     }
 
     #[test]

@@ -102,6 +102,12 @@ pub const MAX_TASK_LOG: usize = 100;
 /// …and each entry is truncated to this many bytes (a runaway agent piping a
 /// build log into `task update --output` can't balloon the ledger).
 pub const MAX_LOG_ENTRY: usize = 4 * 1024;
+/// Maximum active path leases kept in memory and persisted to `orch.json`.
+pub const MAX_LEASES: usize = 1024;
+/// Maximum number of path patterns accepted for one task or lease.
+pub const MAX_LEASE_PATHS: usize = 64;
+/// Maximum UTF-8 byte length of one path pattern.
+pub const MAX_LEASE_PATH_BYTES: usize = 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Lease {
@@ -165,6 +171,7 @@ impl OrchState {
                 format!("ledger is at its {MAX_TASKS}-task cap — prune finished tasks"),
             ));
         }
+        let paths = validate_paths(paths, true)?;
         for d in &deps {
             if !self.tasks.iter().any(|t| &t.id == d) {
                 return Err(Reject::new("unknown_dep", format!("no such task: {d}")));
@@ -454,29 +461,154 @@ impl OrchState {
 
     // ── ORCH-2: path leases ────────────────────────────────────────────────
 
-    /// Acquire a lease on `paths` for `pane`/`task`. Granted iff no *other*
-    /// pane's active lease overlaps; otherwise the conflicting holder is named.
+    /// Check whether a task's declared paths can be leased before starting any
+    /// worktree or pane. Existing leases for the same task are restart state,
+    /// not a conflict; leases owned by any other task are exclusive even when
+    /// both tasks happen to name the same pane.
+    pub fn ensure_task_paths_available(&self, task: &str, paths: &[String]) -> OrchResult<()> {
+        if self.task(task).is_none() {
+            return Err(Reject::new("not_found", format!("no such task: {task}")));
+        }
+        let paths = validate_paths(paths.to_vec(), false)?;
+        let needs_lease = paths.iter().any(|path| {
+            !self
+                .leases
+                .iter()
+                .filter(|lease| lease.task == task)
+                .flat_map(|lease| &lease.paths)
+                .any(|held| normalize_path(held) == *path)
+        });
+        if needs_lease && self.leases.len() >= MAX_LEASES {
+            return Err(Reject::new(
+                "lease_limit",
+                format!("ledger is at its {MAX_LEASES}-lease cap"),
+            ));
+        }
+        if let Some(holder) = self
+            .leases
+            .iter()
+            .find(|lease| lease.task != task && leases_overlap(&lease.paths, &paths))
+        {
+            return Err(lease_conflict(holder));
+        }
+        Ok(())
+    }
+
+    /// Bind all existing leases for a task to its worker and add one lease for
+    /// any declared paths that were not already reserved explicitly.
+    pub fn bind_task_paths(&mut self, task: &str, pane: u32, paths: &[String]) -> OrchResult<bool> {
+        self.ensure_task_paths_available(task, paths)?;
+        let mut changed = false;
+        for lease in self.leases.iter_mut().filter(|lease| lease.task == task) {
+            changed |= lease.pane != pane;
+            lease.pane = pane;
+        }
+        let paths = validate_paths(paths.to_vec(), false)?;
+        let missing: Vec<String> = paths
+            .into_iter()
+            .filter(|path| {
+                !self
+                    .leases
+                    .iter()
+                    .filter(|lease| lease.task == task)
+                    .flat_map(|lease| &lease.paths)
+                    .any(|held| normalize_path(held) == *path)
+            })
+            .collect();
+        if !missing.is_empty() {
+            self.acquire_lease(pane, task.to_string(), missing)?;
+            changed = true;
+        }
+        Ok(changed)
+    }
+
+    /// Keep leases only for active tasks with a live pane and rebind persisted
+    /// pane ids after restart. Returns whether any lease changed or was removed.
+    pub fn reconcile_leases(&mut self) -> bool {
+        let bindings: std::collections::HashMap<&str, u32> = self
+            .tasks
+            .iter()
+            .filter(|task| task_holds_leases(task.status))
+            .filter_map(|task| task.assignee.map(|pane| (task.id.as_str(), pane)))
+            .collect();
+        let previous = std::mem::take(&mut self.leases);
+        let previous_len = previous.len();
+        let mut changed = false;
+        let mut leases: Vec<Lease> = Vec::with_capacity(previous_len.min(MAX_LEASES));
+        for mut lease in previous {
+            let Some(&pane) = bindings.get(lease.task.as_str()) else {
+                changed = true;
+                continue;
+            };
+            if lease.pane != pane {
+                lease.pane = pane;
+                changed = true;
+            }
+            let original_paths = std::mem::take(&mut lease.paths);
+            let Ok(paths) = validate_paths(original_paths.clone(), false) else {
+                changed = true;
+                continue;
+            };
+            if paths != original_paths {
+                changed = true;
+            }
+            lease.paths = paths;
+            if leases.len() >= MAX_LEASES
+                || leases.iter().any(|held| {
+                    held.task != lease.task && leases_overlap(&held.paths, &lease.paths)
+                })
+            {
+                changed = true;
+                continue;
+            }
+            leases.push(lease);
+        }
+        changed |= leases.len() != previous_len;
+        self.leases = leases;
+        changed
+    }
+
+    /// Acquire a lease on `paths` for `pane`/`task`. Granted iff no other
+    /// task's active lease overlaps; otherwise the conflicting holder is named.
     pub fn acquire_lease(
         &mut self,
         pane: u32,
         task: TaskId,
         paths: Vec<String>,
     ) -> OrchResult<Lease> {
-        if paths.is_empty() {
-            return Err(Reject::new("bad_request", "at least one path is required"));
+        let Some(task_state) = self.task(&task) else {
+            return Err(Reject::new("not_found", format!("no such task: {task}")));
+        };
+        if matches!(
+            task_state.status,
+            TaskStatus::Done | TaskStatus::Merging | TaskStatus::Merged
+        ) {
+            return Err(Reject::new(
+                "task_complete",
+                format!("{task} is already {}", task_state.status.as_str()),
+            ));
         }
+        if let Some(owner) = task_state.assignee {
+            if owner != pane {
+                return Err(Reject::new(
+                    "lease_owner",
+                    format!("{task} is assigned to pane {owner}, not pane {pane}"),
+                ));
+            }
+        }
+        if self.leases.len() >= MAX_LEASES {
+            return Err(Reject::new(
+                "lease_limit",
+                format!("ledger is at its {MAX_LEASES}-lease cap"),
+            ));
+        }
+        let paths = validate_paths(paths, false)?;
         if let Some(holder) = self
             .leases
             .iter()
-            .find(|l| l.pane != pane && leases_overlap(&l.paths, &paths))
+            .find(|lease| lease.task != task && leases_overlap(&lease.paths, &paths))
         {
-            return Err(Reject::new(
-                "lease_conflict",
-                format!(
-                    "paths overlap lease {} held by pane {} (task {})",
-                    holder.id, holder.pane, holder.task
-                ),
-            ));
+            return Err(lease_conflict(holder));
         }
         self.next_lease += 1;
         let lease = Lease {
@@ -616,24 +748,98 @@ fn leases_overlap(a: &[String], b: &[String]) -> bool {
     a.iter().any(|pa| b.iter().any(|pb| paths_overlap(pa, pb)))
 }
 
-/// Directory-prefix overlap between two path patterns. Trailing glob segments
-/// (`/**`, `/*`, `/`) are stripped to their containing directory, then two paths
-/// overlap when one is a path-segment prefix of the other:
+fn lease_conflict(holder: &Lease) -> Reject {
+    Reject::new(
+        "lease_conflict",
+        format!(
+            "paths overlap lease {} held by pane {} (task {})",
+            holder.id, holder.pane, holder.task
+        ),
+    )
+}
+
+fn task_holds_leases(status: TaskStatus) -> bool {
+    matches!(
+        status,
+        TaskStatus::Claimed
+            | TaskStatus::Running
+            | TaskStatus::Blocked
+            | TaskStatus::Review
+            | TaskStatus::Failed
+    )
+}
+
+fn validate_paths(paths: Vec<String>, allow_empty: bool) -> OrchResult<Vec<String>> {
+    if paths.is_empty() && !allow_empty {
+        return Err(Reject::new("bad_request", "at least one path is required"));
+    }
+    if paths.len() > MAX_LEASE_PATHS {
+        return Err(Reject::new(
+            "path_limit",
+            format!("at most {MAX_LEASE_PATHS} paths are allowed"),
+        ));
+    }
+    let mut normalized = Vec::with_capacity(paths.len());
+    for path in paths {
+        let path = normalize_path(&path);
+        if path.is_empty() {
+            return Err(Reject::new("bad_request", "paths cannot be blank"));
+        }
+        if path.len() > MAX_LEASE_PATH_BYTES {
+            return Err(Reject::new(
+                "path_limit",
+                format!("each path must be at most {MAX_LEASE_PATH_BYTES} bytes"),
+            ));
+        }
+        if !normalized.contains(&path) {
+            normalized.push(path);
+        }
+    }
+    Ok(normalized)
+}
+
+/// Conservative directory-prefix overlap between two path patterns. Everything
+/// from the first glob metacharacter is reduced to its containing directory,
+/// then two paths overlap when one is a path-segment prefix of the other:
 /// `src/auth/**` vs `src/auth/token.rs` → overlap; `src/auth/**` vs `src/api/**`
 /// → no overlap; `src/a` vs `src/ab` → no overlap (segment boundary respected).
 fn paths_overlap(a: &str, b: &str) -> bool {
     let a = glob_prefix(a);
     let b = glob_prefix(b);
-    a == b || b.starts_with(&format!("{a}/")) || a.starts_with(&format!("{b}/"))
+    a.is_empty()
+        || b.is_empty()
+        || a == b
+        || b.starts_with(&format!("{a}/"))
+        || a.starts_with(&format!("{b}/"))
 }
 
 fn glob_prefix(p: &str) -> String {
-    let p = p.trim().trim_end_matches('/');
-    let p = p
-        .strip_suffix("/**")
-        .or_else(|| p.strip_suffix("/*"))
-        .unwrap_or(p);
-    p.trim_end_matches('/').to_string()
+    let path = normalize_path(p);
+    let Some(glob) = path.find(['*', '?', '[', '{']) else {
+        return path.trim_end_matches('/').to_string();
+    };
+    let literal = &path[..glob];
+    if literal.ends_with('/') {
+        literal.trim_end_matches('/').to_string()
+    } else {
+        literal
+            .rsplit_once('/')
+            .map_or_else(String::new, |(parent, _)| parent.to_string())
+    }
+}
+
+fn normalize_path(path: &str) -> String {
+    let mut path = path.trim().replace('\\', "/");
+    while let Some(stripped) = path.strip_prefix("./") {
+        path = stripped.to_string();
+    }
+    while path.contains("//") {
+        path = path.replace("//", "/");
+    }
+    if cfg!(windows) {
+        path.make_ascii_lowercase();
+    }
+    path
 }
 
 #[cfg(test)]
@@ -885,6 +1091,8 @@ mod tests {
     #[test]
     fn non_overlapping_leases_both_granted() {
         let mut s = OrchState::default();
+        s.add_task("auth".into(), vec![], vec![], None).unwrap();
+        s.add_task("api".into(), vec![], vec![], None).unwrap();
         assert!(s
             .acquire_lease(1, "t1".into(), vec!["src/auth/**".into()])
             .is_ok());
@@ -896,6 +1104,8 @@ mod tests {
     #[test]
     fn overlapping_lease_denied_with_holder() {
         let mut s = OrchState::default();
+        s.add_task("auth".into(), vec![], vec![], None).unwrap();
+        s.add_task("token".into(), vec![], vec![], None).unwrap();
         s.acquire_lease(1, "t1".into(), vec!["src/auth/**".into()])
             .unwrap();
         let err = s
@@ -907,8 +1117,9 @@ mod tests {
 
     #[test]
     fn same_pane_can_extend_its_own_leases() {
-        // A pane re-leasing overlapping paths isn't a conflict with itself.
+        // A task re-leasing overlapping paths isn't a conflict with itself.
         let mut s = OrchState::default();
+        s.add_task("auth".into(), vec![], vec![], None).unwrap();
         s.acquire_lease(1, "t1".into(), vec!["src/auth/**".into()])
             .unwrap();
         assert!(s
@@ -919,6 +1130,9 @@ mod tests {
     #[test]
     fn pane_death_releases_leases() {
         let mut s = OrchState::default();
+        s.add_task("auth".into(), vec![], vec![], None).unwrap();
+        s.add_task("replacement".into(), vec![], vec![], None)
+            .unwrap();
         s.acquire_lease(1, "t1".into(), vec!["src/auth/**".into()])
             .unwrap();
         let released = s.release_pane_leases(1);
@@ -930,6 +1144,139 @@ mod tests {
     }
 
     #[test]
+    fn leases_are_task_exclusive_and_require_a_real_task() {
+        let mut s = OrchState::default();
+        s.add_task("first".into(), vec![], vec![], None).unwrap();
+        s.add_task("second".into(), vec![], vec![], None).unwrap();
+        s.acquire_lease(7, "t1".into(), vec!["src/**".into()])
+            .unwrap();
+
+        let same_pane = s
+            .acquire_lease(7, "t2".into(), vec!["src/lib.rs".into()])
+            .unwrap_err();
+        assert_eq!(same_pane.code, "lease_conflict");
+        assert_eq!(
+            s.acquire_lease(8, "missing".into(), vec!["docs/**".into()])
+                .unwrap_err()
+                .code,
+            "not_found"
+        );
+
+        s.claim("t2", 9).unwrap();
+        assert_eq!(
+            s.acquire_lease(8, "t2".into(), vec!["docs/**".into()])
+                .unwrap_err()
+                .code,
+            "lease_owner"
+        );
+
+        s.set_status("t2", TaskStatus::Done).unwrap();
+        assert_eq!(
+            s.acquire_lease(9, "t2".into(), vec!["docs/**".into()])
+                .unwrap_err()
+                .code,
+            "task_complete"
+        );
+    }
+
+    #[test]
+    fn lease_input_and_count_are_bounded() {
+        let mut s = OrchState::default();
+        s.add_task("work".into(), vec![], vec![], None).unwrap();
+
+        assert_eq!(
+            s.acquire_lease(1, "t1".into(), vec![" ".into()])
+                .unwrap_err()
+                .code,
+            "bad_request"
+        );
+        assert_eq!(
+            s.acquire_lease(
+                1,
+                "t1".into(),
+                (0..=MAX_LEASE_PATHS).map(|i| format!("src/{i}")).collect(),
+            )
+            .unwrap_err()
+            .code,
+            "path_limit"
+        );
+        assert_eq!(
+            s.acquire_lease(1, "t1".into(), vec!["x".repeat(MAX_LEASE_PATH_BYTES + 1)],)
+                .unwrap_err()
+                .code,
+            "path_limit"
+        );
+
+        for i in 0..MAX_LEASES {
+            s.acquire_lease(1, "t1".into(), vec![format!("src/{i}")])
+                .unwrap();
+        }
+        assert_eq!(
+            s.acquire_lease(1, "t1".into(), vec!["one-more".into()])
+                .unwrap_err()
+                .code,
+            "lease_limit"
+        );
+    }
+
+    #[test]
+    fn reconciliation_drops_stale_invalid_and_conflicting_leases() {
+        let mut s = OrchState::default();
+        s.add_task("first".into(), vec![], vec![], None).unwrap();
+        s.add_task("second".into(), vec![], vec![], None).unwrap();
+        s.claim("t1", 1).unwrap();
+        s.claim("t2", 2).unwrap();
+        s.acquire_lease(1, "t1".into(), vec!["src/**".into()])
+            .unwrap();
+        // Simulate unsafe state persisted by an older release.
+        s.leases.push(Lease {
+            id: "old-conflict".into(),
+            pane: 999,
+            task: "t2".into(),
+            paths: vec!["src/lib.rs".into()],
+            acquired: 0,
+        });
+        s.leases.push(Lease {
+            id: "old-invalid".into(),
+            pane: 1,
+            task: "t1".into(),
+            paths: vec![" ".into()],
+            acquired: 0,
+        });
+
+        assert!(s.reconcile_leases());
+        assert_eq!(s.leases.len(), 1);
+        assert_eq!(s.leases[0].id, "l1");
+        assert_eq!(s.leases[0].pane, 1);
+    }
+
+    #[test]
+    fn binding_a_task_keeps_explicit_and_declared_paths() {
+        let mut s = OrchState::default();
+        let task = s
+            .add_task("work".into(), vec!["src/**".into()], vec![], None)
+            .unwrap();
+        s.acquire_lease(7, task.id.clone(), vec!["docs/**".into()])
+            .unwrap();
+        s.claim(&task.id, 9).unwrap();
+
+        s.bind_task_paths(&task.id, 9, &task.paths).unwrap();
+
+        assert_eq!(s.leases.len(), 2);
+        assert!(s.leases.iter().all(|lease| lease.pane == 9));
+        assert!(s
+            .leases
+            .iter()
+            .flat_map(|lease| &lease.paths)
+            .any(|path| path == "docs/**"));
+        assert!(s
+            .leases
+            .iter()
+            .flat_map(|lease| &lease.paths)
+            .any(|path| path == "src/**"));
+    }
+
+    #[test]
     fn overlap_rules() {
         assert!(paths_overlap("src/auth/**", "src/auth/token.rs"));
         assert!(paths_overlap("src/auth", "src/auth/**"));
@@ -937,5 +1284,9 @@ mod tests {
         assert!(!paths_overlap("src/auth/**", "src/api/**"));
         assert!(!paths_overlap("src/a", "src/ab")); // segment boundary
         assert!(paths_overlap("src", "src/anything/deep"));
+        assert!(paths_overlap("src/**/token.rs", "src/api/client.rs"));
+        assert!(paths_overlap("src/*.rs", "src/bin/main.rs"));
+        assert!(paths_overlap("*.rs", "docs/readme.md"));
+        assert!(paths_overlap(r"src\auth\**", "src/auth/token.rs"));
     }
 }

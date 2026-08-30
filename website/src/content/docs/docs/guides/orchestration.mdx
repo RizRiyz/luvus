@@ -31,6 +31,14 @@ on a merge conflict. Only one task integrates at a time. An interrupted
 integration safely returns to `done` after restart. The ledger lives in
 `~/.luvus/orch.json`, separate from your session.
 
+`task start` validates the task's path lease before it creates a branch,
+worktree, or pane. If another task already holds an overlapping path, the start
+returns `lease_conflict` and leaves the queued task untouched. After a server
+restart, leases follow workers that were restored to new pane IDs; leases with
+no live task owner are discarded so stale reservations cannot block the queue.
+If older persisted state contains two already-running workers with overlapping
+paths, Luvus keeps the existing holder and marks the unprotected task blocked.
+
 ## The board
 
 Open the `◇ orch` tab with **`Ctrl+Space o`**. It shows every task (status ·
@@ -140,6 +148,7 @@ Events on the bus: `task.added` · `task.claimed` · `task.started` ·
 |---|---|
 | `s` → *not a git repo* | The board needs a workspace that's a git repository (workers are worktrees). |
 | `s` → *deps not done* | A dependency task isn't `done` yet. |
+| `s` → *lease conflict* | Another task owns an overlapping path. Finish or release that task before retrying. No worker was created. |
 | `d` → *needs compaction* | The worker's context is over 85%, so compact (e.g. `/compact`), then retry. |
 | Stuck at `review` | The gate failed. `luvus task get <id>` shows the output. Fix and `d` again. |
 | `blocked` after `m` | Merge conflict. Resolve in the task's worktree, then `m` again. |

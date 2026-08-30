@@ -2257,15 +2257,26 @@ static HELP: &[Translation] = &[
         "작업 제거 (활성 작업은 먼저 해제/완료 필요)"
     ),
     tr!(
-        "reserve file paths (denied if they overlap)",
-        "reservar rutas de archivos (se rechaza si se solapan)",
-        "reservar caminhos de arquivos (negado se houver sobreposição)",
-        "réserver des chemins (refus en cas de chevauchement)",
-        "Dateipfade reservieren (bei Überschneidung abgelehnt)",
-        "sewa path berkas (ditolak jika tumpang tindih)",
-        "预留文件路径（重叠时拒绝）",
-        "ファイルパスを予約（重複時は拒否）",
-        "파일 경로 임대 (겹치면 거부됨)"
+        "reserve paths for an unfinished task",
+        "reservar rutas para una tarea sin terminar",
+        "reservar caminhos para uma tarefa não concluída",
+        "réserver des chemins pour une tâche non terminée",
+        "Pfade für eine nicht abgeschlossene Aufgabe reservieren",
+        "pesan path untuk tugas yang belum selesai",
+        "为未完成的任务预留路径",
+        "未完了のタスク用にパスを予約",
+        "완료되지 않은 작업의 경로 예약"
+    ),
+    tr!(
+        "(denied if they overlap another task)",
+        "(se rechaza si se solapan con otra tarea)",
+        "(negado se houver sobreposição com outra tarefa)",
+        "(refusé en cas de chevauchement avec une autre tâche)",
+        "(abgelehnt bei Überschneidung mit einer anderen Aufgabe)",
+        "(ditolak jika tumpang tindih dengan tugas lain)",
+        "（与其他任务重叠时拒绝）",
+        "（別のタスクと重複する場合は拒否）",
+        "(다른 작업과 겹치면 거부됨)"
     ),
     tr!(
         "release a lease",

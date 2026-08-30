@@ -9220,6 +9220,13 @@ mod tests {
             serde_json::from_str(&resp).unwrap()
         }
 
+        let r = call(
+            &mut app,
+            "lease.acquire",
+            json!({"paths":["src/**"],"pane":a.0.to_string()}),
+        );
+        assert_eq!(r["error"]["code"], "invalid_request");
+
         // Two tasks; t2 depends on t1.
         let r = call(
             &mut app,

@@ -225,7 +225,8 @@ orchestration (multiple agents on one project, docs/22):
                              (isolated worktree, conflicts block the task)
   task release <id>          return a claimed task to the queue
   task delete <id>           remove a task (release/finish an active one first)
-  lease acquire <glob>... --task <id>   reserve file paths (denied if they overlap)
+  lease acquire <glob>... --task <id>   reserve paths for an unfinished task
+                             (denied if they overlap another task)
   lease release <id>         release a lease
   lease list                 list active path leases
 

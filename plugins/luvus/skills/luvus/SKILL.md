@@ -359,7 +359,9 @@ surface:
   leases before claiming, starting, updating, completing, releasing, deleting,
   or merging. `task merge` is serialized into
   `luvus/integration`: wait for its response, treat `merged` as terminal, and
-  resolve a reported conflict before retrying. `task release` requeues an
+  resolve a reported conflict before retrying. `task start` checks leases before
+  creating a branch, worktree, or pane, so resolve a returned `lease_conflict`
+  before retrying. `task release` requeues an
   active task and releases its path leases; it does not stop the worker pane.
 - Inspect module metadata, actions, settings, and logs before changing module
   state. Installation, uninstallation, and consequential setting changes need
