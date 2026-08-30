@@ -11,7 +11,6 @@ pub(super) const OPERATIONS: IntegrationOperations = IntegrationOperations {
     install,
     uninstall,
     is_installed,
-    legacy_is_installed,
 };
 
 const HOOK_EVENTS: &[(&str, Option<&str>)] = &[
@@ -117,8 +116,4 @@ fn is_installed() -> bool {
                 .map(|hooks| hooks.iter().any(entry_is_luvus))
         })
         .unwrap_or(false)
-}
-
-fn legacy_is_installed() -> bool {
-    is_installed() && config_dir().join("bohay-agent-hook.sh").is_file()
 }

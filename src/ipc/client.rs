@@ -280,10 +280,7 @@ fn switch_session_process(name: &str) -> Result<()> {
     let args = switched_args(&raw, name);
     let exe = std::env::current_exe()?;
     let mut command = std::process::Command::new(exe);
-    command
-        .args(args)
-        .env_remove("LUVUS_SOCKET_PATH")
-        .env_remove("BOHAY_SOCKET_PATH");
+    command.args(args).env_remove("LUVUS_SOCKET_PATH");
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

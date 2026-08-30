@@ -62,11 +62,6 @@ def main():
             "LUVUS_SESSION",
             "LUVUS_ENV",
             "LUVUS_PANE_ID",
-            "BOHAY_SOCKET_PATH",
-            "BOHAY_SESSION",
-            "BOHAY_ENV",
-            "BOHAY_PANE_ID",
-            "BOHAY_HOME",
         ):
             environment.pop(key, None)
         server = subprocess.Popen(

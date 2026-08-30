@@ -98,10 +98,7 @@ with `module log`.
 | `description` |  | One-line summary. |
 | `platforms` |  | e.g. `["macos", "linux"]`. Omit for all. `[]` is an error. |
 
-The canonical filename is `luvus-module.toml`. During the 0.11.x migration
-window, Luvus also loads `bohay-module.toml` and accepts `min_bohay_version` as
-an alias. If both files exist, `luvus-module.toml` wins and Luvus warns when
-their contents differ. New modules should use only the Luvus names.
+The manifest filename is `luvus-module.toml`.
 
 Every entry below (`build`, `startup`, `actions`, `events`, `panes`) also
 accepts its own `platforms` list, which overrides the top-level one. That's how

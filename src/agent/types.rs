@@ -39,7 +39,6 @@ pub(crate) struct IntegrationOperations {
     pub install: fn() -> Result<()>,
     pub uninstall: fn() -> Result<()>,
     pub is_installed: fn() -> bool,
-    pub legacy_is_installed: fn() -> bool,
 }
 
 #[derive(Clone, Copy)]

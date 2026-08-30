@@ -206,7 +206,7 @@ fn run_build(dir: &Path, argv: &[String]) -> Result<()> {
     cmd.args(args).current_dir(dir);
     cmd.env_clear();
     for (k, v) in std::env::vars() {
-        if !k.starts_with("LUVUS_") && !k.starts_with("BOHAY_") {
+        if !k.starts_with("LUVUS_") {
             cmd.env(k, v);
         }
     }
@@ -246,7 +246,6 @@ fn short(sha: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::module::manifest::LEGACY_MANIFEST_FILE;
 
     #[test]
     fn parse_owner_repo_and_paths() {
@@ -272,13 +271,13 @@ mod tests {
             std::env::temp_dir().join(format!("luvus-manifest-switch-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
-        let legacy_path = root.join(LEGACY_MANIFEST_FILE);
-        let before = b"legacy manifest";
-        fs::write(&legacy_path, before).unwrap();
-        assert_eq!(ModuleManifest::path(&root), legacy_path);
+        let manifest_path = root.join(MANIFEST_FILE);
+        let before = b"module manifest";
+        fs::write(&manifest_path, before).unwrap();
+        assert_eq!(ModuleManifest::path(&root), manifest_path);
 
-        fs::write(root.join(MANIFEST_FILE), "replacement manifest").unwrap();
-        let error = verify_manifest_unchanged(&root, &legacy_path, before)
+        fs::write(&manifest_path, "replacement manifest").unwrap();
+        let error = verify_manifest_unchanged(&root, &manifest_path, before)
             .unwrap_err()
             .to_string();
         assert!(error.contains("manifest changed during build"), "{error}");

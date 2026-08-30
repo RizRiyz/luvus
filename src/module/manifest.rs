@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const MANIFEST_FILE: &str = "luvus-module.toml";
-pub const LEGACY_MANIFEST_FILE: &str = "bohay-module.toml";
 const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -17,7 +16,6 @@ pub struct ModuleManifest {
     pub id: String,
     pub name: String,
     pub version: String,
-    #[serde(alias = "min_bohay_version")]
     pub min_luvus_version: String,
     #[serde(default)]
     pub description: Option<String>,
@@ -189,19 +187,7 @@ pub const KNOWN_CONTEXTS: &[&str] = &["pane", "workspace", "node", "agent", "tab
 
 impl ModuleManifest {
     pub fn path(root: &Path) -> std::path::PathBuf {
-        let current = root.join(MANIFEST_FILE);
-        if current.is_file() {
-            let legacy = root.join(LEGACY_MANIFEST_FILE);
-            if legacy.is_file() && std::fs::read(&current).ok() != std::fs::read(&legacy).ok() {
-                eprintln!(
-                    "warning: both {MANIFEST_FILE} and {LEGACY_MANIFEST_FILE} exist in {}; using {MANIFEST_FILE}",
-                    root.display()
-                );
-            }
-            current
-        } else {
-            root.join(LEGACY_MANIFEST_FILE)
-        }
+        root.join(MANIFEST_FILE)
     }
 
     /// Read + validate the manifest at `<root>/luvus-module.toml`.
@@ -515,27 +501,6 @@ fn version_gt(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn loads_a_legacy_manifest_and_version_field() {
-        let root =
-            std::env::temp_dir().join(format!("luvus-legacy-manifest-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(
-            root.join(LEGACY_MANIFEST_FILE),
-            r#"id = "you.legacy"
-name = "Legacy"
-version = "1.0.0"
-min_bohay_version = "0.8.3"
-"#,
-        )
-        .unwrap();
-        let manifest = ModuleManifest::load(&root).unwrap();
-        assert_eq!(manifest.min_luvus_version, "0.8.3");
-        assert_eq!(ModuleManifest::path(&root), root.join(LEGACY_MANIFEST_FILE));
-        let _ = std::fs::remove_dir_all(root);
-    }
 
     fn base() -> ModuleManifest {
         ModuleManifest {

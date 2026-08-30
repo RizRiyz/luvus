@@ -92,7 +92,7 @@ pub fn home_dir() -> Option<PathBuf> {
 /// (`pwsh.exe`, then `powershell.exe`), since `COMSPEC` is always `cmd.exe`
 /// regardless of the shell you launched from and so can't reveal PowerShell.
 pub fn resolve_shell(choice: &str) -> String {
-    if let Some(s) = crate::compat::inherited("LUVUS_SHELL", "BOHAY_SHELL") {
+    if let Some(s) = std::env::var_os("LUVUS_SHELL") {
         if !s.is_empty() {
             return s.to_string_lossy().into_owned();
         }

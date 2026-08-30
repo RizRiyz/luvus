@@ -9,11 +9,10 @@ pub(super) const OPERATIONS: IntegrationOperations = IntegrationOperations {
     install,
     uninstall,
     is_installed,
-    legacy_is_installed,
 };
 
 fn config_dir() -> PathBuf {
-    crate::compat::inherited("LUVUS_COPILOT_DIR", "BOHAY_COPILOT_DIR")
+    std::env::var_os("LUVUS_COPILOT_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| integration::home().join(".copilot"))
 }
@@ -37,8 +36,4 @@ fn uninstall() -> Result<()> {
 
 fn is_installed() -> bool {
     integration::shell_hook_installed(spec(), &[])
-}
-
-fn legacy_is_installed() -> bool {
-    integration::legacy_shell_hook_installed(spec())
 }

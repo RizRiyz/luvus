@@ -178,36 +178,6 @@ luvus server restart   # your session is saved and restored
 Development binaries under `target/debug` or `target/release` are never
 overwritten by `luvus update`. Rebuild those from source instead.
 
-### Moving from Bohay 0.10.2 to Luvus 0.11.0
-
-Luvus is the new name and binary for Bohay. Install Luvus, then run the
-migration from a normal terminal outside Bohay so the script can safely stop
-the old server and its panes:
-
-```sh
-curl -fsSL https://luvus.dev/install.sh | sh
-curl -fsSL https://luvus.dev/migrate.sh | sh
-luvus
-```
-
-The script stops default and named Luvus/Bohay servers, preserves an existing
-`~/.luvus/` directory as a timestamped backup, then lets Luvus copy durable
-state from `~/.bohay/`. It carries over settings, session snapshots, named
-sessions, manifests, module configuration, and orchestration data. It
-deliberately skips sockets, locks, the old managed skill cache, and
-`worktrees/`. Existing worktree paths still work because the Bohay directory is
-never moved or deleted.
-
-Migration is copy-only and supports the default homes. It refuses to run inside
-a Bohay/Luvus pane or when `LUVUS_HOME` or `BOHAY_HOME` is explicitly set. If a
-Bohay server is still reachable, the previous Luvus state is restored and the
-script exits without discarding data. Keep `~/.bohay/` until you have verified
-your workspaces and agents, then archive or remove it yourself.
-
-During the 0.11.x transition, Luvus accepts the old `BOHAY_*` input variables
-when the matching `LUVUS_*` variable is absent. Panes and modules receive both
-variable families so existing automation continues working while it migrates.
-
 ## Where luvus keeps its state
 
 Everything lives in **`~/.luvus/`** (override with `$LUVUS_HOME`): your

@@ -18,9 +18,7 @@ SERVER_LOG="$TEST_ROOT/server.log"
 SERVER_PID=
 FAKE="$(cd "$(dirname "$0")/fake-idf" && pwd)"
 R() {
-  env -u LUVUS_SOCKET_PATH -u BOHAY_SOCKET_PATH \
-    -u LUVUS_PANE_ID -u BOHAY_PANE_ID \
-    -u LUVUS_SESSION -u BOHAY_SESSION \
+  env -u LUVUS_SOCKET_PATH -u LUVUS_PANE_ID -u LUVUS_SESSION \
     LUVUS_HOME="$HOME_DIR" IDF_FAKE_LOG="$LOG" IDF_FAKE_FAIL="$FAIL_FLAG" "$@"
 }
 ok() { printf '  \033[32mPASS\033[0m %s\n' "$1"; }
@@ -43,9 +41,7 @@ mkdir -p "$HOME_DIR" "$PROJECT" "$STATE"
 : > "$LOG"
 (
   cd "$PROJECT"
-  exec env -u LUVUS_SOCKET_PATH -u BOHAY_SOCKET_PATH \
-    -u LUVUS_PANE_ID -u BOHAY_PANE_ID \
-    -u LUVUS_SESSION -u BOHAY_SESSION \
+  exec env -u LUVUS_SOCKET_PATH -u LUVUS_PANE_ID -u LUVUS_SESSION \
     LUVUS_HOME="$HOME_DIR" IDF_FAKE_LOG="$LOG" IDF_FAKE_FAIL="$FAIL_FLAG" \
     "$BIN" server
 ) >"$SERVER_LOG" 2>&1 &

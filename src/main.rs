@@ -8,7 +8,6 @@ mod app;
 mod bar;
 mod changelog;
 mod cli;
-mod compat;
 mod config;
 mod detect;
 mod diff;
@@ -66,7 +65,6 @@ fn main() -> Result<()> {
     // waits aren't quantized to Windows' ~15.6ms default (the cause of laggy
     // typing in panes there). No-op on Unix; restored when `main` returns.
     let _timer = platform::high_res_timer();
-    compat::normalize_legacy_environment();
     let raw_args: Vec<String> = std::env::args().collect();
     let args = session::configure_from_args(&raw_args).map_err(anyhow::Error::msg)?;
     match args.get(1).map(String::as_str) {
@@ -90,13 +88,8 @@ fn main() -> Result<()> {
         std::process::exit(cli::run(&args)?);
     }
 
-    // Migration belongs to commands that use the runtime, not informational
-    // output. In particular, `luvus --version` must stay side-effect-free and
-    // must never contaminate stdout/stderr used by installers and scripts.
-    persist::migrate_legacy_state()?;
-    integration::migrate_legacy_integrations();
     // One-time local cleanup of the old default-on skill installation. This
-    // never downloads or installs a skill; it only removes Luvus/Bohay-managed
+    // never downloads or installs a skill; it only removes legacy managed
     // global pointers and exact known auto-installed files.
     let _ = skill::migrate_legacy_installation();
     match args.get(1).map(String::as_str) {
@@ -684,7 +677,6 @@ fn spawn_server() -> Result<()> {
         // The selector was already resolved into LUVUS_SESSION. A parent pane's
         // injected API socket must not leak into a newly spawned server.
         .env_remove("LUVUS_SOCKET_PATH")
-        .env_remove("BOHAY_SOCKET_PATH")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

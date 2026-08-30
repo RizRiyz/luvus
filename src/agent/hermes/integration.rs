@@ -9,7 +9,6 @@ pub(super) const OPERATIONS: IntegrationOperations = IntegrationOperations {
     install,
     uninstall,
     is_installed,
-    legacy_is_installed,
 };
 
 const PLUGIN_NAME: &str = "luvus-agent-state";
@@ -161,10 +160,6 @@ fn is_installed() -> bool {
     fs::read_to_string(config_path())
         .ok()
         .is_some_and(|contents| plugin_enabled(&contents))
-}
-
-fn legacy_is_installed() -> bool {
-    false
 }
 
 fn leading_spaces(line: &str) -> Option<usize> {

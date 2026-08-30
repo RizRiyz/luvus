@@ -43,7 +43,6 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         install: || install_extension().map(|_| ()),
         uninstall: uninstall_extension,
         is_installed: extension_installed,
-        legacy_is_installed: legacy_extension_installed,
     }),
 };
 
@@ -226,18 +225,6 @@ pub(crate) fn uninstall_extension() -> Result<()> {
 
 pub(crate) fn extension_installed() -> bool {
     extension_path().is_ok_and(|path| path.is_file())
-}
-
-pub(crate) fn legacy_extension_installed() -> bool {
-    let Ok(home) = home() else {
-        return false;
-    };
-    let Ok(dir) = extension_dir() else {
-        return false;
-    };
-    home.join(".omp").join("hooks").join("luvus.ts").is_file()
-        || dir.join("bohay.ts").is_file()
-        || dir.join("bohay.js").is_file()
 }
 
 #[cfg(test)]

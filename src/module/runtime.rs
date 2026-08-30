@@ -96,9 +96,8 @@ fn base_env(module: &InstalledModule, ctx: &Value) -> Vec<(String, String)> {
     env
 }
 
-/// Build the complete module environment, then add 0.10 aliases. Applying the
-/// bridge last is important: entrypoint, dock, row, action, and event variables
-/// are supplied by the caller and must receive aliases too.
+/// Build the complete module environment, including variables supplied by the
+/// selected entrypoint, dock, row, action, or event.
 pub fn env(
     module: &InstalledModule,
     ctx: &Value,
@@ -112,7 +111,7 @@ fn complete_env(
     extra: Vec<(String, String)>,
 ) -> Vec<(String, String)> {
     base.extend(extra);
-    crate::compat::with_legacy_aliases(base)
+    base
 }
 
 /// Spawn `argv` in `root` on a detached thread; when it exits, send
@@ -199,7 +198,7 @@ mod tests {
     use super::complete_env;
 
     #[test]
-    fn complete_environment_aliases_late_module_variables() {
+    fn complete_environment_keeps_canonical_module_variables() {
         let env = complete_env(
             vec![("LUVUS_MODULE_ID".into(), "example.test".into())],
             vec![
@@ -209,10 +208,10 @@ mod tests {
             ],
         );
         for (key, value) in [
-            ("BOHAY_MODULE_ID", "example.test"),
-            ("BOHAY_MODULE_ENTRYPOINT_ID", "monitor"),
-            ("BOHAY_MODULE_DOCK_ID", "boards"),
-            ("BOHAY_MODULE_ACTION_ID", "flash"),
+            ("LUVUS_MODULE_ID", "example.test"),
+            ("LUVUS_MODULE_ENTRYPOINT_ID", "monitor"),
+            ("LUVUS_MODULE_DOCK_ID", "boards"),
+            ("LUVUS_MODULE_ACTION_ID", "flash"),
         ] {
             assert!(
                 env.contains(&(key.to_string(), value.to_string())),

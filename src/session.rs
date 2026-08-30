@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 pub const SESSION_ENV_VAR: &str = "LUVUS_SESSION";
-pub const LEGACY_SESSION_ENV_VAR: &str = "BOHAY_SESSION";
 pub const DEFAULT_SESSION_NAME: &str = "default";
 
 const MAX_SESSION_NAME_LEN: usize = 64;
@@ -102,11 +101,10 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
     }
 
     EXPLICIT_SESSION_REQUESTED.store(false, Ordering::Relaxed);
-    let inherited_socket = crate::compat::inherited("LUVUS_SOCKET_PATH", "BOHAY_SOCKET_PATH")
-        .is_some_and(|v| !v.is_empty());
+    let inherited_socket = std::env::var_os("LUVUS_SOCKET_PATH").is_some_and(|v| !v.is_empty());
     if !inherited_socket {
-        if let Some(name) = crate::compat::inherited(SESSION_ENV_VAR, LEGACY_SESSION_ENV_VAR)
-            .and_then(|value| value.into_string().ok())
+        if let Some(name) =
+            std::env::var_os(SESSION_ENV_VAR).and_then(|value| value.into_string().ok())
         {
             match normalize_name(&name)? {
                 Some(name) => std::env::set_var(SESSION_ENV_VAR, name),
@@ -121,11 +119,9 @@ fn apply_explicit_name(name: &str) -> Result<(), String> {
     match normalize_name(name)? {
         Some(name) => {
             std::env::set_var(SESSION_ENV_VAR, name);
-            std::env::remove_var(LEGACY_SESSION_ENV_VAR);
         }
         None => {
             std::env::remove_var(SESSION_ENV_VAR);
-            std::env::remove_var(LEGACY_SESSION_ENV_VAR);
         }
     }
     EXPLICIT_SESSION_REQUESTED.store(true, Ordering::Relaxed);
@@ -137,7 +133,7 @@ pub fn explicit_session_requested() -> bool {
 }
 
 pub fn active_name() -> Option<String> {
-    crate::compat::inherited(SESSION_ENV_VAR, LEGACY_SESSION_ENV_VAR)
+    std::env::var_os(SESSION_ENV_VAR)
         .and_then(|value| value.into_string().ok())
         .filter(|name| name != DEFAULT_SESSION_NAME)
         .filter(|name| validate_name(name).is_ok())
@@ -204,12 +200,6 @@ pub fn client_socket_path_for(name: Option<&str>) -> PathBuf {
 fn socket_path_for(name: Option<&str>, file_name: &str, role: &str) -> PathBuf {
     let logical = session_dir_for(name).join(file_name);
     socket_alias_path(logical, "luvus", role)
-}
-
-/// Resolve a Bohay 0.10 logical socket path exactly as the old binary did.
-/// Migration uses this to detect a live old server before copying its state.
-pub(crate) fn legacy_socket_path(logical: PathBuf, role: &str) -> PathBuf {
-    socket_alias_path(logical, "bohay", role)
 }
 
 #[cfg(unix)]
@@ -511,15 +501,13 @@ mod tests {
     }
 
     #[test]
-    fn default_selector_preserves_the_legacy_root() {
+    fn default_selector_uses_the_root_session() {
         let _env = crate::persist::test_env("session-default-selector");
-        std::env::set_var(LEGACY_SESSION_ENV_VAR, "old-inherited");
         let cleaned =
             configure_from_args(&argv(&["luvus", "--session=default", "server", "status"]))
                 .unwrap();
         assert_eq!(cleaned, argv(&["luvus", "server", "status"]));
         assert_eq!(active_name(), None);
-        assert!(std::env::var_os(LEGACY_SESSION_ENV_VAR).is_none());
         assert_eq!(active_dir(), crate::persist::config_dir());
         assert!(explicit_session_requested());
     }

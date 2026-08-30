@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "copy-scripts": "cp ../install.sh ../install.ps1 ../migrate.sh public/",
+    "copy-scripts": "cp ../install.sh ../install.ps1 public/",
     "predev": "npm run copy-scripts",
     "prebuild": "npm run copy-scripts",
     "dev": "astro dev",

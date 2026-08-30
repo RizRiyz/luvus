@@ -174,13 +174,6 @@ Disable the skill with `luvus skill disable`. Luvus removes only unchanged
 installations it manages. Modified files and externally managed skills are
 preserved and reported.
 
-When upgrading from Bohay or an earlier Luvus build, version 0.11 performs one
-local, idempotent cleanup: it removes only the old delimited Codex/opencode
-`AGENTS.md` pointer and exact known auto-installed Claude files. Surrounding
-user instructions, modified files, and independently installed plugins are
-preserved. Existing per-agent managed state remains readable and is refreshed
-into the bundled model the next time `luvus skill enable` runs.
-
 Restart your coding agent so it loads the skill, open it in a luvus pane, and
 ask in plain language:
 

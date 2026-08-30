@@ -1093,16 +1093,13 @@ fn task_briefing(task: &crate::orch::Task) -> String {
 }
 
 /// The full line typed into a fresh worker shell to launch `agent` with the
-/// task briefing (and, on Unix, both task-id names during the 0.11 transition).
+/// task briefing, with the task id available to Unix workers.
 fn agent_launch_line(agent: &str, task: &crate::orch::Task) -> String {
     let brief = shell_quote(&task_briefing(task));
     if cfg!(windows) {
         format!("{agent} {brief}")
     } else {
-        format!(
-            "LUVUS_TASK_ID={} BOHAY_TASK_ID={} {agent} {brief}",
-            task.id, task.id
-        )
+        format!("LUVUS_TASK_ID={} {agent} {brief}", task.id)
     }
 }
 
@@ -1740,7 +1737,7 @@ mod tests {
         assert!(line.contains("luvus task done t1"));
         assert!(line.contains("cargo test auth"));
         if !cfg!(windows) {
-            assert!(line.starts_with("LUVUS_TASK_ID=t1 BOHAY_TASK_ID=t1 "));
+            assert!(line.starts_with("LUVUS_TASK_ID=t1 "));
             // The apostrophe in the title survives POSIX single-quoting.
             assert!(line.contains(r"auth'\''s"));
         }

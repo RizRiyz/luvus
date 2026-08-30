@@ -39,9 +39,6 @@ type = "string"
 default = "world"
 ```
 
-Luvus 0.11.x can still load a legacy `bohay-module.toml` with
-`min_bohay_version`, but new modules should use the canonical Luvus names above.
-
 ```sh
 #!/bin/sh
 # greet.sh — everything arrives in the environment, no JSON parsing needed

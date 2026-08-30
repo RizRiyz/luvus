@@ -135,25 +135,6 @@ pub(crate) fn install_shell_hook_with_spec(agent: &str, spec: ShellHookSpec) -> 
     Ok(spec.dir)
 }
 
-/// Upgrade only integrations previously managed by Bohay. This is a release
-/// migration, never a debug/custom-home side effect, and never installs an
-/// integration the user did not already have.
-pub fn migrate_legacy_integrations() {
-    if cfg!(debug_assertions)
-        || std::env::var_os("LUVUS_HOME").is_some()
-        || std::env::var_os("BOHAY_HOME").is_some()
-    {
-        return;
-    }
-    for descriptor in crate::agent::registry::integrations() {
-        if let Some(operations) = descriptor.integration {
-            if (operations.legacy_is_installed)() {
-                let _ = (operations.install)();
-            }
-        }
-    }
-}
-
 pub fn agent_ids() -> impl ExactSizeIterator<Item = &'static str> + DoubleEndedIterator + Clone {
     crate::agent::registry::integrations()
         .iter()
@@ -236,23 +217,6 @@ pub(crate) fn shell_hook_installed(spec: ShellHookSpec, required_events: &[&str]
                 .map(|groups| groups.iter().any(group_mentions_luvus))
                 .unwrap_or(false)
         })
-}
-
-pub(crate) fn legacy_shell_hook_installed(spec: ShellHookSpec) -> bool {
-    let Ok(contents) = fs::read_to_string(spec.dir.join(spec.file)) else {
-        return false;
-    };
-    serde_json::from_str::<Value>(&contents)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("hooks")
-                .and_then(|hooks| hooks.get(spec.event))
-                .and_then(Value::as_array)
-                .map(|groups| groups.iter().any(group_mentions_luvus))
-        })
-        .unwrap_or(false)
-        && spec.dir.join("bohay-agent-hook.sh").is_file()
 }
 
 /// Insert a command hook under `hooks.<event>` pointing at `script` (with an
