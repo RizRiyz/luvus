@@ -530,6 +530,7 @@ impl App {
             &argv,
             &env,
             history_budget_bytes,
+            self.pane_appearance,
         )
         .map_err(|e| format!("cannot spawn module pane: {e}"))?;
         let cmd = pane.command.clone();

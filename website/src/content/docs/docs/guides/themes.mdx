@@ -182,3 +182,11 @@ Normal custom themes are rendered by the server, so every attached client sees
 the same palette. **Terminal** remains special and client-derived. A custom
 palette containing `reset` may also depend on the foreground terminal and is
 reported with a warning unless its appearance is `terminal`.
+
+Programs running inside panes can query that pane background with OSC 11
+(`ESC]11;?`, BEL or ST). Luvus replies with the active theme's mantle color. If
+the Terminal theme keeps that color as `reset`, Luvus uses the last host-terminal
+probe when available and otherwise its bundled fallback palette. DEC private
+mode 2031 is supported: `CSI ? 996 n` queries the current scheme,
+`CSI ? 2031 h/l` subscribes, DECRQM reports set or reset, and a theme change
+sends `CSI ? 997;1n` (dark) or `CSI ? 997;2n` (light) to subscribed panes.

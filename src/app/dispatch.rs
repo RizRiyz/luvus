@@ -304,6 +304,38 @@ mod socket_api_tests {
     }
 
     #[test]
+    fn config_patch_updates_child_appearance_and_notifies_mode_2031() {
+        let (_env, mut app) = app("socket-theme-appearance");
+        let pane_id = app.layout().focus;
+        let (response_tx, response_rx) = std::sync::mpsc::channel();
+        let mut engine = crate::terminal::vt::alacritty::AlacrittyEngine::with_appearance(
+            80,
+            24,
+            response_tx,
+            crate::config::SCROLLBACK_BYTES_DEFAULT,
+            crate::terminal::appearance::PaneAppearance::default(),
+        );
+        crate::terminal::vt::VtEngine::advance(&mut engine, b"\x1b[?2031h");
+        app.panes.get_mut(&pane_id).unwrap().engine =
+            std::sync::Arc::new(std::sync::Mutex::new(engine));
+
+        app.dispatch("config.patch", &json!({"patch":{"theme":"gruvbox-light"}}))
+            .unwrap();
+        let recv_bytes = || match response_rx.recv().unwrap() {
+            crate::terminal::pty::InputAction::Bytes(bytes) => bytes,
+            crate::terminal::pty::InputAction::Submit { .. } => panic!("unexpected submit"),
+        };
+        assert_eq!(recv_bytes(), b"\x1b[?997;2n");
+
+        app.panes[&pane_id]
+            .engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]11;?\x07");
+        assert_eq!(recv_bytes(), b"\x1b]11;rgb:f2f2/e5e5/bcbc\x07");
+    }
+
+    #[test]
     fn workspace_metadata_partial_updates_preserve_the_other_counter() {
         let (_env, mut app) = app("socket-workspace-metadata");
         app.dispatch(
@@ -5133,14 +5165,11 @@ impl App {
                 format!("theme `{}` is not installed", next.theme),
             ));
         }
-        let mut theme = self.theme_registry.theme_or_default(&next.theme);
-        if self.downsample {
-            theme = theme.to_256();
-        }
+        let theme = self.theme_registry.theme_or_default(&next.theme);
         let sidebars = Sidebars::from_config(&next.sidebars());
         let keymap = keys::build_keymap(&next.keybindings);
         let history_budget = next.scrollback_bytes();
-        self.theme = theme;
+        self.set_effective_theme(&next.theme, theme);
         self.catalog = crate::i18n::by_code(&next.language);
         self.prefix = prefix;
         self.keymap = keymap;

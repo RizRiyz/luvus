@@ -77,6 +77,8 @@ bitflags! {
         const REPORT_ALTERNATE_KEYS   = 1 << 20;
         const REPORT_ALL_KEYS_AS_ESC  = 1 << 21;
         const REPORT_ASSOCIATED_TEXT  = 1 << 22;
+        /// DEC private mode 2031: subscribe to dark/light appearance reports.
+        const REPORT_APPEARANCE       = 1 << 23;
         const MOUSE_MODE              = Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_MOTION.bits() | Self::MOUSE_DRAG.bits();
         const KITTY_KEYBOARD_PROTOCOL = Self::DISAMBIGUATE_ESC_CODES.bits()
                                       | Self::REPORT_EVENT_TYPES.bits()
@@ -1432,6 +1434,16 @@ impl<T: EventListener> Handler for Term<T> {
     }
 
     #[inline]
+    fn private_device_status(&mut self, arg: usize) {
+        trace!("Reporting private device status: {arg}");
+        if arg == 996 {
+            self.event_proxy.send_event(Event::ColorSchemeRequest);
+        } else {
+            debug!("unknown private device status query: {arg}");
+        }
+    }
+
+    #[inline]
     fn move_down_and_cr(&mut self, lines: usize) {
         trace!("Moving down and cr: {lines}");
 
@@ -2054,6 +2066,9 @@ impl<T: EventListener> Handler for Term<T> {
             },
             NamedPrivateMode::ReportFocusInOut => self.mode.insert(TermMode::FOCUS_IN_OUT),
             NamedPrivateMode::BracketedPaste => self.mode.insert(TermMode::BRACKETED_PASTE),
+            NamedPrivateMode::ReportColorScheme => {
+                self.mode.insert(TermMode::REPORT_APPEARANCE)
+            },
             // Mouse encodings are mutually exclusive.
             NamedPrivateMode::SgrMouse => {
                 self.mode.remove(TermMode::UTF8_MOUSE);
@@ -2113,6 +2128,9 @@ impl<T: EventListener> Handler for Term<T> {
             },
             NamedPrivateMode::ReportFocusInOut => self.mode.remove(TermMode::FOCUS_IN_OUT),
             NamedPrivateMode::BracketedPaste => self.mode.remove(TermMode::BRACKETED_PASTE),
+            NamedPrivateMode::ReportColorScheme => {
+                self.mode.remove(TermMode::REPORT_APPEARANCE)
+            },
             NamedPrivateMode::SgrMouse => self.mode.remove(TermMode::SGR_MOUSE),
             NamedPrivateMode::Utf8Mouse => self.mode.remove(TermMode::UTF8_MOUSE),
             NamedPrivateMode::AlternateScroll => self.mode.remove(TermMode::ALTERNATE_SCROLL),
@@ -2166,6 +2184,9 @@ impl<T: EventListener> Handler for Term<T> {
                 },
                 NamedPrivateMode::BracketedPaste => {
                     self.mode.contains(TermMode::BRACKETED_PASTE).into()
+                },
+                NamedPrivateMode::ReportColorScheme => {
+                    self.mode.contains(TermMode::REPORT_APPEARANCE).into()
                 },
                 NamedPrivateMode::SyncUpdate => ModeState::Reset,
                 NamedPrivateMode::ColumnMode => ModeState::NotSupported,

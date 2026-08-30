@@ -6,12 +6,6 @@ use ratatui::style::Color;
 
 // ── Theme derivation from terminal colors ───────────────────────────────────
 
-fn luminance(rgb: [u8; 3]) -> f32 {
-    0.2126 * (rgb[0] as f32 / 255.0)
-        + 0.7152 * (rgb[1] as f32 / 255.0)
-        + 0.0722 * (rgb[2] as f32 / 255.0)
-}
-
 fn blend_rgb(a: [u8; 3], b: [u8; 3], t: f32) -> Color {
     let f = |i: usize| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).clamp(0.0, 255.0) as u8;
     Color::Rgb(f(0), f(1), f(2))
@@ -65,7 +59,7 @@ impl Theme {
 
     pub fn from_terminal(c: &TerminalColors) -> Self {
         let (bg, fg) = (c.bg, c.fg);
-        let is_dark = luminance(bg) < luminance(fg);
+        let is_dark = crate::terminal::appearance::ColorScheme::from_terminal_colors(c).is_dark();
         // palette[8] (bright black) is the terminal designer's chosen "dim/elevated"
         // color — blend toward it for surfaces so the tint matches the scheme.
         let dim = c.palette[8];

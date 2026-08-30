@@ -916,15 +916,13 @@ impl App {
     }
 
     pub(crate) fn apply_theme(&mut self, name: &str) {
-        let Some(mut selected) = self.theme_registry.theme(name) else {
+        let Some(selected) = self.theme_registry.theme(name) else {
             return;
         };
         self.config.theme = theme::canonical(name).to_string();
         self.theme_selection_revision = self.theme_selection_revision.wrapping_add(1);
-        if self.downsample {
-            selected = selected.to_256();
-        }
-        self.theme = selected;
+        let theme_id = self.config.theme.clone();
+        self.set_effective_theme(&theme_id, selected);
         self.changelog_rows = None;
         config::save(&self.config);
     }
@@ -934,14 +932,12 @@ impl App {
     /// restoring the file and reloading brings the selection back.
     pub(crate) fn replace_theme_registry(&mut self, registry: crate::theme::ThemeRegistry) -> bool {
         let selected_exists = registry.get(&self.config.theme).is_some();
-        if self.config.theme != "terminal" {
-            let mut selected = registry.theme_or_default(&self.config.theme);
-            if self.downsample {
-                selected = selected.to_256();
-            }
-            self.theme = selected;
-        }
         self.theme_registry = registry;
+        if self.config.theme != "terminal" {
+            let selected = self.theme_registry.theme_or_default(&self.config.theme);
+            let theme_id = self.config.theme.clone();
+            self.set_effective_theme(&theme_id, selected);
+        }
         self.clamp_settings_cursor();
         self.changelog_rows = None;
         selected_exists

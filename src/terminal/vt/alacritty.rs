@@ -8,7 +8,7 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color as VtColor, Processor};
+use alacritty_terminal::vte::ansi::{Color as VtColor, NamedColor, Processor, Rgb};
 
 use ratatui::style::{Color, Modifier};
 
@@ -16,6 +16,7 @@ use super::{
     AlignedRows, CodexComposerRegion, Cursor, HistoryMetrics, RenderCell, RetainedRowLayout,
     VtEngine, ALIGNED_WIDE_CELL,
 };
+use crate::terminal::appearance::PaneAppearance;
 use crate::terminal::backend::{CaptureMode, CaptureResult};
 use crate::terminal::pty::InputAction;
 
@@ -28,6 +29,7 @@ type TitleSlot = Arc<Mutex<Option<String>>>;
 pub struct EventProxy {
     tx: Sender<InputAction>,
     title: TitleSlot,
+    appearance: Arc<Mutex<PaneAppearance>>,
 }
 
 impl EventListener for EventProxy {
@@ -35,6 +37,23 @@ impl EventListener for EventProxy {
         match event {
             Event::PtyWrite(text) => {
                 let _ = self.tx.send(InputAction::Bytes(text.into_bytes()));
+            }
+            Event::ColorRequest(index, format) => {
+                if index == NamedColor::Background as usize {
+                    if let Ok(appearance) = self.appearance.lock() {
+                        let [r, g, b] = appearance.background;
+                        let _ = self
+                            .tx
+                            .send(InputAction::Bytes(format(Rgb { r, g, b }).into_bytes()));
+                    }
+                }
+            }
+            Event::ColorSchemeRequest => {
+                if let Ok(appearance) = self.appearance.lock() {
+                    let _ = self
+                        .tx
+                        .send(InputAction::Bytes(appearance.scheme.dsr().to_vec()));
+                }
             }
             Event::Title(t) => {
                 if let Ok(mut g) = self.title.lock() {
@@ -74,25 +93,46 @@ pub struct AlacrittyEngine {
     term: Term<EventProxy>,
     parser: Processor,
     title: TitleSlot,
+    response_tx: Sender<InputAction>,
+    appearance: Arc<Mutex<PaneAppearance>>,
     history_budget_bytes: usize,
     output_generation: u64,
 }
 
 impl AlacrittyEngine {
+    #[cfg(test)]
     pub fn new(
         cols: u16,
         rows: u16,
         resp_tx: Sender<InputAction>,
         history_budget_bytes: usize,
     ) -> Self {
+        Self::with_appearance(
+            cols,
+            rows,
+            resp_tx,
+            history_budget_bytes,
+            PaneAppearance::default(),
+        )
+    }
+
+    pub(crate) fn with_appearance(
+        cols: u16,
+        rows: u16,
+        resp_tx: Sender<InputAction>,
+        history_budget_bytes: usize,
+        initial_appearance: PaneAppearance,
+    ) -> Self {
         let dims = Dims {
             cols: cols.max(1) as usize,
             rows: rows.max(1) as usize,
         };
         let title: TitleSlot = Arc::new(Mutex::new(None));
+        let appearance = Arc::new(Mutex::new(initial_appearance));
         let proxy = EventProxy {
-            tx: resp_tx,
+            tx: resp_tx.clone(),
             title: title.clone(),
+            appearance: appearance.clone(),
         };
         // Alacritty retains history by rows, not bytes. Derive a conservative
         // capacity from Luvus's per-pane byte budget and current width. The
@@ -107,6 +147,8 @@ impl AlacrittyEngine {
             term,
             parser: Processor::new(),
             title,
+            response_tx: resp_tx,
+            appearance,
             history_budget_bytes,
             output_generation: 0,
         }
@@ -910,6 +952,19 @@ impl VtEngine for AlacrittyEngine {
         self.term.mode().contains(TermMode::BRACKETED_PASTE)
     }
 
+    fn set_appearance(&mut self, next: PaneAppearance) {
+        let changed = self.appearance.lock().is_ok_and(|mut current| {
+            let changed = *current != next;
+            *current = next;
+            changed
+        });
+        if changed && self.term.mode().contains(TermMode::REPORT_APPEARANCE) {
+            let _ = self
+                .response_tx
+                .send(InputAction::Bytes(next.scheme.dsr().to_vec()));
+        }
+    }
+
     fn snapshot_ansi(&self) -> String {
         let grid = self.term.grid();
         let rows = grid.screen_lines();
@@ -1046,6 +1101,8 @@ fn map_flags(fl: Flags) -> Modifier {
 mod tests {
     use super::*;
     use std::sync::mpsc::channel;
+
+    use crate::terminal::appearance::ColorScheme;
 
     fn feed_lines(e: &mut AlacrittyEngine, n: usize) {
         for i in 0..n {
@@ -1722,5 +1779,79 @@ mod tests {
         assert_eq!(reversed.len(), 1, "one reverse caret: {reversed:?}");
         assert_eq!(reversed[0].0, 0);
         assert_eq!(reversed[0].1, 2);
+    }
+
+    fn appearance_engine(
+        background: [u8; 3],
+        scheme: ColorScheme,
+    ) -> (AlacrittyEngine, std::sync::mpsc::Receiver<InputAction>) {
+        let (tx, rx) = channel();
+        let appearance = PaneAppearance { background, scheme };
+        let engine =
+            AlacrittyEngine::with_appearance(40, 5, tx, budget_for_rows(40, 20), appearance);
+        (engine, rx)
+    }
+
+    fn recv_bytes(rx: &std::sync::mpsc::Receiver<InputAction>) -> Vec<u8> {
+        match rx.try_recv() {
+            Ok(InputAction::Bytes(bytes)) => bytes,
+            Ok(InputAction::Submit { .. }) => panic!("expected PTY reply, got submit"),
+            Err(error) => panic!("expected PTY reply: {error}"),
+        }
+    }
+
+    #[test]
+    fn osc11_query_replies_with_theme_background_for_bel_and_st() {
+        let bg = [0x1e, 0x20, 0x30];
+        let (mut engine, rx) = appearance_engine(bg, ColorScheme::Dark);
+        engine.advance(b"\x1b]11;?\x07");
+        let bel = recv_bytes(&rx);
+        assert_eq!(bel, b"\x1b]11;rgb:1e1e/2020/3030\x07");
+        assert_eq!(engine.visible_rows()[0].trim(), "");
+
+        engine.advance(b"\x1b]11;?\x1b\\");
+        let st = recv_bytes(&rx);
+        assert_eq!(st, b"\x1b]11;rgb:1e1e/2020/3030\x1b\\");
+        assert_eq!(engine.visible_rows()[0].trim(), "");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn osc11_set_color_does_not_reply_or_print_the_payload() {
+        let (mut engine, rx) = appearance_engine([0x11, 0x22, 0x33], ColorScheme::Dark);
+        engine.advance(b"\x1b]11;rgb:aa/bb/cc\x07hello");
+        assert!(
+            rx.try_recv().is_err(),
+            "OSC 11 set must not emit a query reply"
+        );
+        assert_eq!(engine.visible_rows()[0].trim_end(), "hello");
+    }
+
+    #[test]
+    fn mode_2031_queries_and_notifications_follow_engine_appearance() {
+        let (mut engine, rx) = appearance_engine([0x1e, 0x20, 0x30], ColorScheme::Dark);
+
+        engine.advance(b"\x1b[?2031$p\x1b[?996n");
+        assert_eq!(recv_bytes(&rx), b"\x1b[?2031;2$y");
+        assert_eq!(recv_bytes(&rx), b"\x1b[?997;1n");
+
+        engine.advance(b"\x1b[?2031h\x1b[?2031$p");
+        assert_eq!(recv_bytes(&rx), b"\x1b[?2031;1$y");
+
+        engine.set_appearance(PaneAppearance {
+            background: [0xf2, 0xe5, 0xbc],
+            scheme: ColorScheme::Light,
+        });
+        assert_eq!(recv_bytes(&rx), b"\x1b[?997;2n");
+        engine.advance(b"\x1b[?996n");
+        assert_eq!(recv_bytes(&rx), b"\x1b[?997;2n");
+
+        engine.advance(b"\x1b[?2031l\x1b[?2031$p");
+        assert_eq!(recv_bytes(&rx), b"\x1b[?2031;2$y");
+        engine.set_appearance(PaneAppearance::default());
+        assert!(rx.try_recv().is_err(), "disabled mode must not notify");
+
+        engine.advance(b"\x1b[?2040$p");
+        assert_eq!(recv_bytes(&rx), b"\x1b[?2040;0$y");
     }
 }

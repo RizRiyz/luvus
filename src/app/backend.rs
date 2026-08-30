@@ -690,6 +690,7 @@ impl App {
         let pane_id = PaneId::alloc();
         let shell = crate::platform::resolve_shell(&self.config.shell);
         let history_budget = self.config.scrollback_bytes();
+        let appearance = self.pane_appearance;
         let app_tx = self.app_tx.clone();
         let event_tx = self.app_tx.clone();
         std::thread::spawn(move || {
@@ -716,6 +717,7 @@ impl App {
                             command,
                             &[],
                             history_budget,
+                            appearance,
                         ),
                         None => crate::terminal::pty::Pane::spawn(
                             pane_id,
@@ -726,6 +728,7 @@ impl App {
                             None,
                             &shell,
                             history_budget,
+                            appearance,
                         ),
                     }
                     .map_err(|_| "PTY or root process failed to start".to_string());

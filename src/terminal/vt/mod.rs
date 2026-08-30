@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use ratatui::style::{Color, Modifier};
 
+use crate::terminal::appearance::PaneAppearance;
 use crate::terminal::pty::InputAction;
 
 /// Internal continuation marker used by [`VtEngine::visible_rows_aligned`].
@@ -89,14 +90,18 @@ pub(crate) fn create_engine(
     rows: u16,
     resp_tx: Sender<InputAction>,
     history_budget_bytes: usize,
+    appearance: PaneAppearance,
 ) -> Arc<Mutex<dyn VtEngine>> {
     match kind {
-        VtEngineKind::Alacritty => Arc::new(Mutex::new(alacritty::AlacrittyEngine::new(
-            cols,
-            rows,
-            resp_tx,
-            history_budget_bytes,
-        ))),
+        VtEngineKind::Alacritty => {
+            Arc::new(Mutex::new(alacritty::AlacrittyEngine::with_appearance(
+                cols,
+                rows,
+                resp_tx,
+                history_budget_bytes,
+                appearance,
+            )))
+        }
     }
 }
 
@@ -341,6 +346,10 @@ pub trait VtEngine: Send {
     /// an attachment, and how vim auto-indents pasted code into a staircase.
     fn bracketed_paste(&self) -> bool;
 
+    /// Update the effective pane appearance. Engines that implement DEC mode
+    /// 2031 notify subscribed children from inside this interface.
+    fn set_appearance(&mut self, _appearance: PaneAppearance) {}
+
     /// Dump the visible screen as ANSI so it can be replayed into a fresh
     /// engine on restore (session persistence). Trailing blanks are trimmed.
     fn snapshot_ansi(&self) -> String;
@@ -354,7 +363,14 @@ mod tests {
     #[test]
     fn factory_builds_a_working_default_engine() {
         let (tx, _rx) = mpsc::channel();
-        let engine = create_engine(VtEngineKind::default(), 20, 3, tx, 64 * 1024);
+        let engine = create_engine(
+            VtEngineKind::default(),
+            20,
+            3,
+            tx,
+            64 * 1024,
+            PaneAppearance::default(),
+        );
         let mut engine = engine.lock().expect("engine lock");
         engine.advance(b"hi");
         assert_eq!(engine.visible_rows()[0].trim_end(), "hi");

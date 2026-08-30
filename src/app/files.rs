@@ -420,6 +420,7 @@ impl App {
             &argv,
             &[],
             history_budget_bytes,
+            self.pane_appearance,
         ) {
             Ok(pane) => {
                 let cmd = pane.command.clone();

@@ -15,6 +15,7 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 
 use crate::event::AppEvent;
 use crate::ids::PaneId;
+use crate::terminal::appearance::PaneAppearance;
 use crate::terminal::backend::TerminalRuntime;
 use crate::terminal::vt::{create_engine, VtEngine, VtEngineKind};
 
@@ -254,6 +255,7 @@ impl Pane {
         initial: Option<&str>,
         shell: &str,
         history_budget_bytes: usize,
+        appearance: PaneAppearance,
     ) -> Result<Pane> {
         let cmd = CommandBuilder::new(shell);
         Self::build(
@@ -267,6 +269,7 @@ impl Pane {
             basename(shell),
             &[],
             history_budget_bytes,
+            appearance,
         )
     }
 
@@ -285,6 +288,7 @@ impl Pane {
         shell: &str,
         argv: &[String],
         history_budget_bytes: usize,
+        appearance: PaneAppearance,
     ) -> Result<Pane> {
         let Some((program, args)) = argv.split_first() else {
             return Err(anyhow::anyhow!("empty shell command"));
@@ -304,6 +308,7 @@ impl Pane {
             basename(shell),
             &[],
             history_budget_bytes,
+            appearance,
         )
     }
 
@@ -319,6 +324,7 @@ impl Pane {
         argv: &[String],
         env: &[(String, String)],
         history_budget_bytes: usize,
+        appearance: PaneAppearance,
     ) -> Result<Pane> {
         let Some((program, args)) = argv.split_first() else {
             return Err(anyhow::anyhow!("empty module command"));
@@ -338,6 +344,7 @@ impl Pane {
             basename(program),
             env,
             history_budget_bytes,
+            appearance,
         )
     }
 
@@ -356,6 +363,7 @@ impl Pane {
         app_tx: Sender<AppEvent>,
         shell: &str,
         history_budget_bytes: usize,
+        appearance: PaneAppearance,
     ) -> Pane {
         let cmd = CommandBuilder::new(shell);
         Self::build_deferred(
@@ -370,6 +378,7 @@ impl Pane {
             basename(shell),
             &[],
             history_budget_bytes,
+            appearance,
         )
     }
 
@@ -388,6 +397,7 @@ impl Pane {
         initial: Option<&str>,
         shell: &str,
         history_budget_bytes: usize,
+        appearance: PaneAppearance,
     ) -> Pane {
         let cmd = CommandBuilder::new(shell);
         Self::build_deferred(
@@ -402,6 +412,7 @@ impl Pane {
             basename(shell),
             &[],
             history_budget_bytes,
+            appearance,
         )
     }
 
@@ -419,6 +430,7 @@ impl Pane {
         shell: &str,
         argv: &[String],
         history_budget_bytes: usize,
+        appearance: PaneAppearance,
     ) -> Result<Pane> {
         let Some((program, args)) = argv.split_first() else {
             return Err(anyhow::anyhow!("empty shell command"));
@@ -439,6 +451,7 @@ impl Pane {
             basename(shell),
             &[],
             history_budget_bytes,
+            appearance,
         ))
     }
 
@@ -454,6 +467,7 @@ impl Pane {
         command: String,
         extra_env: &[(String, String)],
         history_budget_bytes: usize,
+        appearance: PaneAppearance,
     ) -> Result<Pane> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
@@ -486,6 +500,7 @@ impl Pane {
             rows,
             input_tx.clone(),
             history_budget_bytes,
+            appearance,
         );
         // Replay the saved screen so a restored pane shows its prior content.
         if let Some(screen) = initial {
@@ -553,6 +568,7 @@ impl Pane {
         command: String,
         extra_env: &[(String, String)],
         history_budget_bytes: usize,
+        appearance: PaneAppearance,
     ) -> Pane {
         // Everything a caller can observe before the child exists: the engine
         // (pane.read, detection, rendering) and the input queue.
@@ -563,6 +579,7 @@ impl Pane {
             rows,
             input_tx.clone(),
             history_budget_bytes,
+            appearance,
         );
         if let Some(screen) = initial {
             if let Ok(mut engine) = engine.lock() {
@@ -1236,6 +1253,7 @@ mod reap_tests {
             None,
             "/bin/sh",
             500,
+            PaneAppearance::default(),
         )
         .expect("spawn")
     }
@@ -1266,6 +1284,7 @@ mod reap_tests {
             tx,
             "/bin/sh",
             500,
+            PaneAppearance::default(),
         );
         assert_eq!(
             pane.child_pid.load(Ordering::SeqCst),
@@ -1311,6 +1330,7 @@ mod reap_tests {
             Some("RESTORED-SCREEN\r\n"),
             "/bin/sh",
             500,
+            PaneAppearance::default(),
         );
         assert!(
             pane.engine
@@ -1338,6 +1358,7 @@ mod reap_tests {
             None,
             "/bin/sh",
             500,
+            PaneAppearance::default(),
         );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1379,6 +1400,7 @@ mod reap_tests {
             tx,
             "/bin/sh",
             500,
+            PaneAppearance::default(),
         );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1414,6 +1436,7 @@ mod reap_tests {
             tx,
             "/bin/sh",
             500,
+            PaneAppearance::default(),
         );
         // The spawn has not forked yet: this is the racing resize.
         assert!(pane.resize(132, 40));

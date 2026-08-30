@@ -1444,6 +1444,10 @@ pub struct App {
     pub workspaces: Vec<Workspace>,
     pub active_ws: usize,
     pub theme: Theme,
+    /// Appearance reported to programs running inside panes.
+    pane_appearance: crate::terminal::appearance::PaneAppearance,
+    /// Last foreground-client palette used to resolve the virtual Terminal theme.
+    probed_appearance: Option<crate::terminal::appearance::PaneAppearance>,
     /// Built-in, installed, and virtual themes in Settings display order.
     /// Loaded from the shared home-level `themes/` directory; rendering reads
     /// this in-memory snapshot and never touches the filesystem.
@@ -1946,6 +1950,19 @@ pub struct ModuleSettingEdit {
     pub secret: bool,
 }
 
+fn child_appearance(
+    registry: &crate::theme::ThemeRegistry,
+    theme_id: &str,
+    theme: &Theme,
+    probed: Option<crate::terminal::appearance::PaneAppearance>,
+) -> crate::terminal::appearance::PaneAppearance {
+    let declared = registry
+        .get(theme_id)
+        .map(|entry| entry.appearance)
+        .unwrap_or(crate::theme::format::Appearance::Dark);
+    crate::terminal::appearance::PaneAppearance::resolve(theme.mantle, declared, probed)
+}
+
 impl App {
     pub fn new(cols: u16, rows: u16, app_tx: Sender<AppEvent>) -> Result<App> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
@@ -1957,6 +1974,7 @@ impl App {
         crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
         let theme_registry = crate::theme::ThemeRegistry::load();
         let theme = theme_registry.theme_or_default(&config.theme);
+        let pane_appearance = child_appearance(&theme_registry, &config.theme, &theme, None);
         let catalog = crate::i18n::by_code(&config.language);
         let sidebars = Sidebars::from_config(&config.sidebars());
         let shell = crate::platform::resolve_shell(&config.shell);
@@ -1976,6 +1994,7 @@ impl App {
             None,
             &shell,
             config.scrollback_bytes(),
+            pane_appearance,
         )?;
         let command = pane.command.clone();
         let mut panes = HashMap::new();
@@ -2015,6 +2034,8 @@ impl App {
             }],
             active_ws: 0,
             theme,
+            pane_appearance,
+            probed_appearance: None,
             theme_registry,
             catalog,
             config,
@@ -2260,6 +2281,9 @@ impl App {
         let config = crate::config::load();
         let files_show_hidden = config.layout.files_show_hidden;
         let agents_active_only = config.agents_active_only;
+        let theme_registry = crate::theme::ThemeRegistry::load();
+        let theme = theme_registry.theme_or_default(&config.theme);
+        let pane_appearance = child_appearance(&theme_registry, &config.theme, &theme, None);
         let keymap = keys::build_keymap(&config.keybindings);
         let prefix = keys::PrefixSpec::parse(&config.prefix).unwrap_or_default();
         let shell = crate::platform::resolve_shell(&config.shell);
@@ -2447,7 +2471,15 @@ impl App {
                     // A module pane re-runs its entrypoint if the module is still
                     // installed + runnable; otherwise it falls back to a shell.
                     let restored = ps.module.as_ref().and_then(|(mid, ep)| {
-                        restore_module_pane(&modules, mid, ep, id, &app_tx, history_budget_bytes)
+                        restore_module_pane(
+                            &modules,
+                            mid,
+                            ep,
+                            id,
+                            &app_tx,
+                            history_budget_bytes,
+                            pane_appearance,
+                        )
                     });
                     let (pane, module_rec) = match restored {
                         Some((p, rec)) => (p, Some(rec)),
@@ -2479,6 +2511,7 @@ impl App {
                                     &shell,
                                     argv,
                                     history_budget_bytes,
+                                    pane_appearance,
                                 )
                                 .ok(),
                                 None => Some(Pane::spawn_restored(
@@ -2491,6 +2524,7 @@ impl App {
                                     ps.screen.as_deref(),
                                     &shell,
                                     history_budget_bytes,
+                                    pane_appearance,
                                 )),
                             };
                             let Some(pane) = pane else {
@@ -2571,8 +2605,6 @@ impl App {
             .collect();
 
         crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
-        let theme_registry = crate::theme::ThemeRegistry::load();
-        let theme = theme_registry.theme_or_default(&config.theme);
         let catalog = crate::i18n::by_code(&config.language);
         let sidebars = Sidebars::from_config(&config.sidebars());
         let mut bar = crate::bar::BarState::default();
@@ -2596,6 +2628,8 @@ impl App {
             workspaces,
             active_ws,
             theme,
+            pane_appearance,
+            probed_appearance: None,
             theme_registry,
             catalog,
             config,
@@ -2836,10 +2870,32 @@ impl App {
 
     /// Apply colors reported by the terminal displaying the foreground client.
     pub fn apply_terminal_colors(&mut self, colors: &crate::terminal::theme_probe::TerminalColors) {
-        self.theme = crate::ui::theme::Theme::from_terminal(colors);
-        if self.downsample {
-            self.theme = self.theme.to_256();
+        self.probed_appearance =
+            Some(crate::terminal::appearance::PaneAppearance::from_terminal_colors(colors));
+        let derived = crate::ui::theme::Theme::from_terminal(colors);
+        self.set_effective_theme("terminal", derived);
+    }
+
+    /// Install one resolved UI theme and broadcast its pane appearance through
+    /// the VT interface. Keeping both mutations here prevents config, Settings,
+    /// and terminal-probe paths from leaving child query state stale.
+    pub(crate) fn set_effective_theme(&mut self, theme_id: &str, mut theme: Theme) {
+        let appearance = child_appearance(
+            &self.theme_registry,
+            theme_id,
+            &theme,
+            self.probed_appearance,
+        );
+        self.pane_appearance = appearance;
+        for pane in self.panes.values() {
+            if let Ok(mut engine) = pane.engine.lock() {
+                engine.set_appearance(appearance);
+            }
         }
+        if self.downsample {
+            theme = theme.to_256();
+        }
+        self.theme = theme;
     }
 
     /// Set a sidebar's width, clamped to the supported range, and persist.
@@ -3215,6 +3271,7 @@ impl App {
             None,
             &shell,
             history_budget_bytes,
+            self.pane_appearance,
         ) {
             Ok(pane) => {
                 let cmd = pane.command.clone();
@@ -3269,6 +3326,7 @@ impl App {
             self.app_tx.clone(),
             &shell,
             history_budget_bytes,
+            self.pane_appearance,
         );
         let cmd = pane.command.clone();
         self.panes.insert(id, pane);
@@ -3301,6 +3359,7 @@ impl App {
                 &shell,
                 a,
                 history_budget_bytes,
+                self.pane_appearance,
             ),
             None => Pane::spawn(
                 id,
@@ -3311,6 +3370,7 @@ impl App {
                 None,
                 &shell,
                 history_budget_bytes,
+                self.pane_appearance,
             ),
         };
         match spawned {
@@ -5724,6 +5784,7 @@ fn restore_module_pane(
     id: PaneId,
     app_tx: &Sender<AppEvent>,
     history_budget_bytes: usize,
+    appearance: crate::terminal::appearance::PaneAppearance,
 ) -> Option<(Pane, crate::module::ModulePaneRecord)> {
     let m = modules.find(mid).filter(|m| m.is_runnable())?;
     let argv = m
@@ -5747,6 +5808,7 @@ fn restore_module_pane(
         &argv,
         &env,
         history_budget_bytes,
+        appearance,
     )
     .ok()?;
     Some((

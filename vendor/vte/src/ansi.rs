@@ -532,6 +532,9 @@ pub trait Handler {
     /// Report device status.
     fn device_status(&mut self, _: usize) {}
 
+    /// Report private device status.
+    fn private_device_status(&mut self, _: usize) {}
+
     /// Move cursor forward `cols`.
     fn move_forward(&mut self, _col: usize) {}
 
@@ -917,6 +920,7 @@ impl PrivateMode {
             1049 => Self::Named(NamedPrivateMode::SwapScreenAndSetRestoreCursor),
             2004 => Self::Named(NamedPrivateMode::BracketedPaste),
             2026 => Self::Named(NamedPrivateMode::SyncUpdate),
+            2031 => Self::Named(NamedPrivateMode::ReportColorScheme),
             _ => Self::Unknown(mode),
         }
     }
@@ -968,6 +972,8 @@ pub enum NamedPrivateMode {
     BracketedPaste = 2004,
     /// The mode is handled automatically by [`Processor`].
     SyncUpdate = 2026,
+    /// Send unsolicited dark/light color-scheme reports.
+    ReportColorScheme = 2031,
 }
 
 /// Mode for clearing line.
@@ -1702,6 +1708,7 @@ where
                 }
             },
             ('n', []) => handler.device_status(next_param_or(0) as usize),
+            ('n', [b'?']) => handler.private_device_status(next_param_or(0) as usize),
             ('P', []) => handler.delete_chars(next_param_or(1) as usize),
             ('p', [b'$']) => {
                 let mode = next_param_or(0);
