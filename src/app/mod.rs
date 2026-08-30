@@ -1543,8 +1543,9 @@ pub struct App {
     pub mission_cursor: usize,
     /// Current workspace only, or every open workspace.
     pub mission_scope: crate::mission::MissionScope,
-    /// Click targets for the two scope tabs. Agent rows remain keyboard-only.
+    /// Click targets for the two scope tabs and visible agent rows.
     pub mission_scope_rects: Vec<(crate::mission::MissionScope, Rect)>,
+    pub mission_row_rects: Vec<(usize, Rect)>,
     /// Click target for the explicit Mission Control usage refresh action.
     pub mission_refresh_rect: Option<Rect>,
     pub mission_area: Rect,
@@ -2043,6 +2044,7 @@ impl App {
             mission_cursor: 0,
             mission_scope: crate::mission::MissionScope::Workspace,
             mission_scope_rects: Vec::new(),
+            mission_row_rects: Vec::new(),
             mission_refresh_rect: None,
             mission_area: Rect::ZERO,
             mission_rows: Vec::new(),
@@ -2595,6 +2597,7 @@ impl App {
             mission_cursor: 0,
             mission_scope: crate::mission::MissionScope::Workspace,
             mission_scope_rects: Vec::new(),
+            mission_row_rects: Vec::new(),
             mission_refresh_rect: None,
             mission_area: Rect::ZERO,
             mission_rows: Vec::new(),
@@ -10690,6 +10693,24 @@ mod tests {
             assert!(text.contains('█'), "a telemetry bar draws");
         }
 
+        let wide_second_row = app
+            .mission_row_rects
+            .iter()
+            .find_map(|(index, rect)| (*index == 1).then_some(*rect))
+            .expect("wide dashboard exposes the second session row");
+        app.handle_event(crate::event::AppEvent::Mouse(
+            ratatui::crossterm::event::MouseEvent {
+                kind: ratatui::crossterm::event::MouseEventKind::Down(
+                    ratatui::crossterm::event::MouseButton::Left,
+                ),
+                column: wide_second_row.x.saturating_add(1),
+                row: wide_second_row.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        ));
+        assert_eq!(app.mission_cursor, 1, "wide row click selects the session");
+        app.mission_cursor = 0;
+
         // A narrow terminal falls back to a full-width, single-column agent list.
         {
             use ratatui::{backend::TestBackend, Terminal};
@@ -10705,17 +10726,22 @@ mod tests {
             assert!(text.contains("AGENT SESSIONS"), "compact agent panel draws");
         }
 
-        // Plain clicks are intentionally inert: opening a pane is an explicit
-        // keyboard action through Enter, not an accidental dashboard click.
+        // A plain click selects the exact rendered row without activating it.
+        // Enter remains the explicit open/resume action.
         let active_tab = app.ws().active_tab;
-        let cursor = app.mission_cursor;
+        app.mission_cursor = 0;
+        let second_row = app
+            .mission_row_rects
+            .iter()
+            .find_map(|(index, rect)| (*index == 1).then_some(*rect))
+            .expect("second visible session row has a hit target");
         app.handle_event(crate::event::AppEvent::Mouse(
             ratatui::crossterm::event::MouseEvent {
                 kind: ratatui::crossterm::event::MouseEventKind::Down(
                     ratatui::crossterm::event::MouseButton::Left,
                 ),
-                column: app.mission_area.x.saturating_add(2),
-                row: app.mission_area.y.saturating_add(7),
+                column: second_row.x.saturating_add(1),
+                row: second_row.y,
                 modifiers: KeyModifiers::NONE,
             },
         ));
@@ -10725,10 +10751,7 @@ mod tests {
             active_tab,
             "click does not open a pane"
         );
-        assert_eq!(
-            app.mission_cursor, cursor,
-            "click does not change selection"
-        );
+        assert_eq!(app.mission_cursor, 1, "click selects the rendered row");
 
         // The detail overlay opens on `o` and closes on esc. (`render` publishes
         // `mission_rows`, so it's set now.)

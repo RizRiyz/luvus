@@ -257,7 +257,7 @@ impl App {
     }
 
     /// Keyboard activation for the row at `idx`: jump to a live agent's pane, or
-    /// resume a dead session (MC-4). Plain row clicks are intentionally inert.
+    /// resume a dead session (MC-4). Mouse clicks select a row before this action.
     pub fn mission_activate(&mut self, idx: usize) {
         let Some(row) = self.mission_rows.get(idx).map(|r| r.row) else {
             return;

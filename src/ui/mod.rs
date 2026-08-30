@@ -199,6 +199,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     let switcher_scope_rects = std::mem::take(&mut app.switcher_scope_rects);
     let mission_rows = std::mem::take(&mut app.mission_rows);
     let mission_scope_rects = std::mem::take(&mut app.mission_scope_rects);
+    let mission_row_rects = std::mem::take(&mut app.mission_row_rects);
     let bar_hits = std::mem::take(&mut app.bar.hits);
     let bar_overflow_hits = std::mem::take(&mut app.bar.overflow_hits);
     let bar_overflow = app.bar.overflow.clone();
@@ -323,6 +324,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     app.switcher_scope_rects = switcher_scope_rects;
     app.mission_rows = mission_rows;
     app.mission_scope_rects = mission_scope_rects;
+    app.mission_row_rects = mission_row_rects;
     app.bar.hits = bar_hits;
     app.bar.overflow_hits = bar_overflow_hits;
     app.bar.overflow = bar_overflow;
@@ -400,6 +402,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.bar.hits.clear();
     app.bar.overflow_hits.clear();
     app.menu_scroll.begin_frame();
+    app.mission_row_rects.clear();
     app.mobile_pane_prev_rect = None;
     app.mobile_pane_next_rect = None;
 
@@ -661,6 +664,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         app.mission_scroll = rendered.scroll;
         app.mission_scope_rects = rendered.scope_rects;
         app.mission_refresh_rect = rendered.refresh_rect;
+        app.mission_row_rects = rendered.row_rects;
         app.mission_rows = rows;
         None
     } else if let Some(g) = app.active_git_mut() {

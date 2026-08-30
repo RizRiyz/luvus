@@ -583,6 +583,12 @@ fn draw_agent_row(
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+#[derive(Default)]
+struct RosterRender {
+    scroll: usize,
+    row_rects: Vec<(usize, Rect)>,
+}
+
 fn draw_roster(
     f: &mut RenderTarget,
     area: Rect,
@@ -591,12 +597,12 @@ fn draw_roster(
     requested_scroll: usize,
     cat: &Catalog,
     t: &Theme,
-) -> usize {
+) -> RosterRender {
     let block = deck_block("AGENT SESSIONS", t, true);
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height == 0 {
-        return 0;
+        return RosterRender::default();
     }
     let content = Rect::new(
         inner.x.saturating_add(2),
@@ -623,7 +629,7 @@ fn draw_roster(
                 inner.height.saturating_sub(1),
             ),
         );
-        return 0;
+        return RosterRender::default();
     }
     let rows_area = Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 1);
     let visible = rows_area.height.max(1) as usize;
@@ -635,11 +641,13 @@ fn draw_roster(
         scroll = cursor + 1 - visible;
     }
     scroll = scroll.min(rows.len().saturating_sub(visible));
+    let mut row_rects = Vec::with_capacity(visible.min(rows.len()));
     for (slot, idx) in (scroll..rows.len().min(scroll + visible)).enumerate() {
         let rect = Rect::new(rows_area.x, rows_area.y + slot as u16, rows_area.width, 1);
         draw_agent_row(f, rect, &rows[idx], idx + 1, idx == cursor, columns, t);
+        row_rects.push((idx, rect));
     }
-    scroll
+    RosterRender { scroll, row_rects }
 }
 
 fn draw_selected(f: &mut RenderTarget, area: Rect, row: Option<&MissionRowView>, t: &Theme) {
@@ -813,6 +821,7 @@ pub(super) fn render(
             scroll: 0,
             scope_rects: Vec::new(),
             refresh_rect: None,
+            row_rects: Vec::new(),
         };
     }
     fill_bg(f, area, t.mantle);
@@ -868,9 +877,10 @@ pub(super) fn render(
         );
     }
     MissionRender {
-        scroll: rendered,
+        scroll: rendered.scroll,
         scope_rects,
         refresh_rect,
+        row_rects: rendered.row_rects,
     }
 }
 
@@ -878,6 +888,7 @@ pub(super) struct MissionRender {
     pub scroll: usize,
     pub scope_rects: Vec<(MissionScope, Rect)>,
     pub refresh_rect: Option<Rect>,
+    pub row_rects: Vec<(usize, Rect)>,
 }
 
 /// The row-detail overlay (MC-5): a small modal with the selected agent's full

@@ -2123,8 +2123,8 @@ impl App {
             }
             return;
         }
-        // Clicking an agent row in Mission Control jumps straight to that session's
-        // pane (or resumes it), the whole point of the tab (docs/54).
+        // Mission Control mouse controls use geometry published by its renderer,
+        // so responsive rows select the same stable item shown on screen.
         if self.active_is_mission() {
             // A click dismisses an open overlay (detail / answer) rather than
             // acting behind it.
@@ -2139,8 +2139,14 @@ impl App {
                 self.set_mission_scope(*scope);
                 return;
             }
-            // Agent rows are intentionally keyboard-only for now. A plain click
-            // must never jump away from Mission Control unexpectedly.
+            let row = self
+                .mission_row_rects
+                .iter()
+                .find(|(_, rect)| hit(*rect))
+                .map(|(index, _)| *index);
+            if let Some(index) = row.filter(|index| *index < self.mission_rows.len()) {
+                self.mission_cursor = index;
+            }
             return;
         }
         if let Some((id, _)) = self.pane_rects.iter().find(|(_, rect)| hit(*rect)) {
