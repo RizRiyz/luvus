@@ -129,12 +129,16 @@ dedicated native preview tab. Right-click a tracked source/editor pane for that
 file and the same action appears immediately below **Rename**; from there it
 opens a sibling preview pane without replacing or stopping the editor.
 
-Standalone `.mermaid` files use **Open Mermaid Preview** in the same places.
+Standalone `.mermaid` and `.mmd` files use **Open Mermaid Preview** in the same places.
 Fenced `mermaid` blocks inside Markdown and standalone Mermaid previews share
 one bounded renderer. Flowcharts/graphs and sequence diagrams render as
 deterministic Unicode terminal text; unsupported or malformed syntax shows its
-original source instead of hiding content. `.mdx` and `.mmd` are not treated as
-preview formats.
+original source instead of hiding content. `.mdx` is not treated as a preview
+format.
+
+Test fixtures for both preview types live in `examples/preview/`: open
+`README.md` for the Markdown showcase, `workflow.mmd` for a flowchart, and
+`agent-session.mermaid` for a sequence diagram.
 
 Previews are offline and terminal-native: they do not use a browser, execute
 HTML or Mermaid directives, load linked assets, or make network requests.

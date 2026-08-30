@@ -1,0 +1,5 @@
+flowchart LR
+    Files([FILES]) -- explicit preview --> Markdown[Markdown]
+    Markdown -- parse --> Document([Document model])
+    Document -- layout --> Preview{Fits pane?}
+    Preview -- yes --> Terminal([Terminal rows])

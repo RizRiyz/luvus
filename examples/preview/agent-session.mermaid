@@ -1,0 +1,10 @@
+sequenceDiagram
+    actor User
+    participant L as Luvus
+    participant A as Agent
+    User->>L: Open Markdown preview
+    L-->>User: Render terminal document
+    Note over L: Offline and width bounded
+    User->>L: Open Mermaid preview
+    L->>A: Send reviewed context
+    A-->>L: Return result

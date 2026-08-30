@@ -1220,6 +1220,17 @@ mod tests {
         assert!(mermaid.contains(&FileMenuItem::OpenMermaidPreview));
         assert!(!mermaid.contains(&FileMenuItem::OpenMarkdownPreview));
 
+        let short_mermaid = FileMenu {
+            path: PathBuf::from("flow.MmD"),
+            is_dir: false,
+            anchor: (0, 0),
+            items: Vec::new(),
+            editors: Vec::new(),
+        }
+        .build_items();
+        assert!(short_mermaid.contains(&FileMenuItem::OpenMermaidPreview));
+        assert!(!short_mermaid.contains(&FileMenuItem::OpenMarkdownPreview));
+
         let mdx = FileMenu {
             path: PathBuf::from("component.mdx"),
             is_dir: false,

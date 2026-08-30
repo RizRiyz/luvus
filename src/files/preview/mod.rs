@@ -33,7 +33,8 @@ impl PreviewKind {
         let extension = path.extension()?.to_str()?;
         if extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown") {
             Some(Self::Markdown)
-        } else if extension.eq_ignore_ascii_case("mermaid") {
+        } else if extension.eq_ignore_ascii_case("mermaid") || extension.eq_ignore_ascii_case("mmd")
+        {
             Some(Self::Mermaid)
         } else {
             None
@@ -342,8 +343,11 @@ mod tests {
             PreviewKind::for_path(Path::new("flow.MERMAID")),
             Some(PreviewKind::Mermaid)
         );
+        assert_eq!(
+            PreviewKind::for_path(Path::new("flow.MmD")),
+            Some(PreviewKind::Mermaid)
+        );
         assert_eq!(PreviewKind::for_path(Path::new("component.mdx")), None);
-        assert_eq!(PreviewKind::for_path(Path::new("flow.mmd")), None);
     }
 
     #[test]
@@ -378,5 +382,40 @@ mod tests {
             })
             .is_some());
         assert_eq!(view.layouts.len(), layout::LAYOUT_CACHE_CAP);
+    }
+
+    #[test]
+    fn checked_in_preview_examples_remain_parseable_and_width_bounded() {
+        let markdown = include_str!("../../../examples/preview/README.md");
+        let blocks = markdown::parse(markdown);
+        assert!(blocks
+            .iter()
+            .any(|block| matches!(block, Block::Mermaid { .. })));
+        assert!(!blocks
+            .iter()
+            .any(|block| matches!(block, Block::SourceFallback { .. })));
+
+        for source in [
+            include_str!("../../../examples/preview/workflow.mmd"),
+            include_str!("../../../examples/preview/agent-session.mermaid"),
+        ] {
+            assert!(mermaid::parse(source).is_ok());
+        }
+
+        let document = Arc::new(PreviewDocument::new(Arc::<str>::from(markdown), blocks));
+        for width in [40, 100] {
+            let rendered = layout::build(
+                Arc::clone(&document),
+                LayoutKey {
+                    width,
+                    ascii: false,
+                },
+            );
+            assert!(!rendered.rows.is_empty());
+            assert!(rendered.rows.iter().all(|row| {
+                unicode_width::UnicodeWidthStr::width(row.plain_text().as_str())
+                    <= usize::from(width)
+            }));
+        }
     }
 }
