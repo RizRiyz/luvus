@@ -85,7 +85,15 @@ impl AccessSession {
     }
 
     pub(super) fn stop(&mut self) {
-        self.gateway.stop();
+        self.gateway.cancel();
+        self.delegated.revoke();
+        self.gateway.finish_stop();
+    }
+}
+
+impl Drop for AccessSession {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -169,6 +177,7 @@ struct DelegatedToken {
     id: String,
     secret: String,
     expires_at: u64,
+    revoked: bool,
 }
 
 impl DelegatedToken {
@@ -198,14 +207,23 @@ impl DelegatedToken {
             id: id.to_string(),
             secret: secret.to_string(),
             expires_at,
+            revoked: false,
         })
+    }
+
+    fn revoke(&mut self) {
+        if self.revoked {
+            return;
+        }
+        self.revoked = true;
+        let _ = local_request("uhp.token.revoke", json!({"id":self.id}));
+        self.secret.clear();
     }
 }
 
 impl Drop for DelegatedToken {
     fn drop(&mut self) {
-        let _ = local_request("uhp.token.revoke", json!({"id":self.id}));
-        self.secret.clear();
+        self.revoke();
     }
 }
 
@@ -285,7 +303,8 @@ mod shutdown {
 mod shutdown {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use windows_sys::Win32::Foundation::{BOOL, TRUE};
+    use windows_sys::core::BOOL;
+    use windows_sys::Win32::Foundation::TRUE;
     use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
 
     static REQUESTED: AtomicBool = AtomicBool::new(false);

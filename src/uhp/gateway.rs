@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::io::{self, BufReader, Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,12 +15,14 @@ use super::{pairing::Pairing, AccessMode};
 const INITIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const CANCELLATION_POLL: Duration = Duration::from_millis(250);
+const ACCEPT_ERROR_DELAY: Duration = Duration::from_millis(10);
 const MAX_CONNECTIONS: usize = 16;
 const MAX_REQUESTS_PER_MINUTE: u32 = 120;
 
 pub(super) struct Gateway {
     address: SocketAddr,
-    cancelled: Arc<AtomicBool>,
+    shared: Arc<Shared>,
     accept_thread: Option<JoinHandle<()>>,
 }
 
@@ -31,14 +34,24 @@ struct Shared {
     mode: AccessMode,
     cancelled: Arc<AtomicBool>,
     active: AtomicUsize,
+    next_connection_id: AtomicUsize,
+    connections: Mutex<HashMap<usize, TcpStream>>,
     rate: Mutex<RateWindow>,
 }
 
-struct ConnectionPermit<'a>(&'a AtomicUsize);
+struct ConnectionPermit<'a> {
+    shared: &'a Shared,
+    id: usize,
+}
 
 impl Drop for ConnectionPermit<'_> {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        self.shared.active.fetch_sub(1, Ordering::AcqRel);
+        self.shared
+            .connections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.id);
     }
 }
 
@@ -81,6 +94,8 @@ impl Gateway {
             mode,
             cancelled: cancelled.clone(),
             active: AtomicUsize::new(0),
+            next_connection_id: AtomicUsize::new(0),
+            connections: Mutex::new(HashMap::new()),
             rate: Mutex::new(RateWindow {
                 started: Instant::now(),
                 requests: 0,
@@ -94,7 +109,7 @@ impl Gateway {
             .context("cannot start the private UHP access gateway")?;
         Ok(Self {
             address,
-            cancelled,
+            shared,
             accept_thread: Some(accept_thread),
         })
     }
@@ -103,15 +118,23 @@ impl Gateway {
         self.address
     }
 
-    pub(super) fn stop(&mut self) {
-        if self.cancelled.swap(true, Ordering::AcqRel) {
-            return;
+    pub(super) fn cancel(&self) {
+        if !self.shared.cancelled.swap(true, Ordering::AcqRel) {
+            // Wake the blocking accept loop without polling during active UHP
+            // access. The loop owns and drains all request workers.
+            let _ = TcpStream::connect(self.address);
         }
-        // Wake the blocking loop without polling during active UHP access.
-        let _ = TcpStream::connect(self.address);
+    }
+
+    pub(super) fn finish_stop(&mut self) {
         if let Some(thread) = self.accept_thread.take() {
             let _ = thread.join();
         }
+    }
+
+    pub(super) fn stop(&mut self) {
+        self.cancel();
+        self.finish_stop();
     }
 }
 
@@ -122,10 +145,11 @@ impl Drop for Gateway {
 }
 
 fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
+    let mut workers = Vec::new();
     while !shared.cancelled.load(Ordering::Acquire) {
         let Ok((stream, peer)) = listener.accept() else {
             if !shared.cancelled.load(Ordering::Acquire) {
-                thread::yield_now();
+                thread::sleep(ACCEPT_ERROR_DELAY);
             }
             continue;
         };
@@ -143,14 +167,33 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
             let _ = write_gateway_error(stream, Value::Null, "unavailable");
             continue;
         }
+        let connection_id = shared.next_connection_id.fetch_add(1, Ordering::Relaxed);
+        let shutdown_stream = match stream.try_clone() {
+            Ok(stream) => stream,
+            Err(_) => {
+                shared.active.fetch_sub(1, Ordering::AcqRel);
+                let _ = write_gateway_error(stream, Value::Null, "unavailable");
+                continue;
+            }
+        };
+        shared
+            .connections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(connection_id, shutdown_stream);
         let connection_shared = shared.clone();
         let fallback = stream.try_clone().ok();
-        if thread::Builder::new()
+        match thread::Builder::new()
             .name("luvus-uhp-access-request".into())
             .stack_size(256 * 1024)
             .spawn(move || {
-                let _permit = ConnectionPermit(&connection_shared.active);
-                if handle_connection(stream, &connection_shared).is_err() {
+                let _permit = ConnectionPermit {
+                    shared: &connection_shared,
+                    id: connection_id,
+                };
+                if handle_connection(stream, &connection_shared).is_err()
+                    && !connection_shared.cancelled.load(Ordering::Acquire)
+                {
                     if let Some(stream) = fallback {
                         let _ = write_gateway_error(stream, Value::Null, "invalid_request");
                     }
@@ -158,11 +201,44 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
                     // and response contents from the UHP-access log.
                     crate::logging::event(crate::logging::EventKind::UhpRequestRejected, &[]);
                 }
-            })
-            .is_err()
-        {
-            shared.active.fetch_sub(1, Ordering::AcqRel);
+            }) {
+            Ok(worker) => workers.push(worker),
+            Err(_) => {
+                shared.active.fetch_sub(1, Ordering::AcqRel);
+                shared
+                    .connections
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&connection_id);
+            }
         }
+        reap_finished(&mut workers);
+    }
+    shutdown_connections(&shared);
+    for worker in workers {
+        let _ = worker.join();
+    }
+}
+
+fn reap_finished(workers: &mut Vec<JoinHandle<()>>) {
+    let mut index = 0;
+    while index < workers.len() {
+        if workers[index].is_finished() {
+            let worker = workers.swap_remove(index);
+            let _ = worker.join();
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn shutdown_connections(shared: &Shared) {
+    let connections = shared
+        .connections
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for stream in connections.values() {
+        let _ = stream.shutdown(Shutdown::Both);
     }
 }
 
@@ -173,6 +249,9 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) -> Result<()> {
     let frame =
         crate::ipc::api::read_request_frame(&mut reader).context("invalid UHP-access frame")?;
     let value: Value = serde_json::from_str(&frame).context("invalid UHP-access JSON")?;
+    if shared.cancelled.load(Ordering::Acquire) {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "UHP access stopped").into());
+    }
 
     if value.get("type").and_then(Value::as_str) == Some("pair") {
         return handle_pairing(stream, shared, &value);
@@ -202,6 +281,9 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) -> Result<()> {
         write_gateway_error(stream, id, "forbidden")?;
         return Ok(());
     }
+    if shared.cancelled.load(Ordering::Acquire) {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "UHP access stopped").into());
+    }
 
     let mut local = match crate::ipc::transport::connect(&shared.socket_path) {
         Ok(local) => local,
@@ -210,6 +292,9 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) -> Result<()> {
             return Ok(());
         }
     };
+    if shared.cancelled.load(Ordering::Acquire) {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "UHP access stopped").into());
+    }
     writeln!(local, "{frame}")?;
     local.flush()?;
 
@@ -231,12 +316,14 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) -> Result<()> {
     ) {
         stream_events(local, stream, &id, shared)
     } else {
-        let response = match crate::ipc::api::read_response_frame_with_deadline(
-            &mut local,
-            RESPONSE_TIMEOUT,
-        ) {
-            Ok(response) => response,
+        let mut local_reader = LocalFrameReader::new(local)?;
+        let response = match read_local_frame(&mut local_reader, RESPONSE_TIMEOUT, shared) {
+            Ok(Some(response)) => response,
             Err(_) => {
+                write_gateway_error(stream, id, "unavailable")?;
+                return Ok(());
+            }
+            Ok(None) => {
                 write_gateway_error(stream, id, "unavailable")?;
                 return Ok(());
             }
@@ -255,7 +342,8 @@ fn handle_pairing(mut stream: TcpStream, shared: &Shared, value: &Value) -> Resu
             .all(|key| matches!(key.as_str(), "type" | "code"))
     });
     let candidate = value.get("code").and_then(Value::as_str).unwrap_or("");
-    let accepted = valid_shape
+    let accepted = !shared.cancelled.load(Ordering::Acquire)
+        && valid_shape
         && shared
             .pairing
             .lock()
@@ -291,6 +379,69 @@ fn allowed_method(mode: AccessMode, method: &str) -> bool {
             ))
 }
 
+struct TerminalForwarder {
+    active: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl TerminalForwarder {
+    fn spawn(
+        mut local_reader: LocalFrameReader,
+        mut remote: TcpStream,
+        cancelled: Arc<AtomicBool>,
+        expires_at: u64,
+    ) -> Result<Self> {
+        let active = Arc::new(AtomicBool::new(true));
+        let forward_active = Arc::clone(&active);
+        let thread = thread::Builder::new()
+            .name("luvus-uhp-access-terminal".into())
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                while forward_active.load(Ordering::Acquire)
+                    && !cancelled.load(Ordering::Acquire)
+                    && !unix_expired(expires_at)
+                {
+                    match local_reader.read_frame(CANCELLATION_POLL) {
+                        Ok(Some(frame)) => {
+                            if writeln!(remote, "{frame}")
+                                .and_then(|_| remote.flush())
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
+                        Err(_) => break,
+                    }
+                }
+                forward_active.store(false, Ordering::Release);
+            })
+            .context("cannot start terminal output relay")?;
+        Ok(Self {
+            active,
+            thread: Some(thread),
+        })
+    }
+
+    fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+
+    fn stop(&mut self) {
+        self.active.store(false, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for TerminalForwarder {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 fn stream_terminal(
     mut local: crate::ipc::transport::Conn,
     mut remote: TcpStream,
@@ -300,48 +451,26 @@ fn stream_terminal(
     control: bool,
 ) -> Result<()> {
     let mut local_reader = LocalFrameReader::new(local.clone())?;
-    let first = local_reader.read_frame(RESPONSE_TIMEOUT)?.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "terminal stream closed before acknowledgement",
-        )
-    })?;
+    let first =
+        read_local_frame(&mut local_reader, RESPONSE_TIMEOUT, shared)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "terminal stream closed before acknowledgement",
+            )
+        })?;
     validate_response_id(&first, expected_id)?;
     writeln!(remote, "{first}")?;
     remote.flush()?;
 
-    let active = Arc::new(AtomicBool::new(true));
-    let forward_active = Arc::clone(&active);
-    let forward_cancelled = Arc::clone(&shared.cancelled);
-    let expires_at = shared.token_expires_unix;
-    let forwarder = thread::Builder::new()
-        .name("luvus-uhp-access-terminal".into())
-        .stack_size(256 * 1024)
-        .spawn(move || {
-            while forward_active.load(Ordering::Acquire)
-                && !forward_cancelled.load(Ordering::Acquire)
-                && !unix_expired(expires_at)
-            {
-                match local_reader.read_frame(Duration::from_millis(250)) {
-                    Ok(Some(frame)) => {
-                        if writeln!(remote, "{frame}")
-                            .and_then(|_| remote.flush())
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
-                    Err(_) => break,
-                }
-            }
-            forward_active.store(false, Ordering::Release);
-        })
-        .context("cannot start terminal output relay")?;
+    let mut forwarder = TerminalForwarder::spawn(
+        local_reader,
+        remote,
+        Arc::clone(&shared.cancelled),
+        shared.token_expires_unix,
+    )?;
 
     let mut input = RemoteFrameReader::new(remote_reader)?;
-    while active.load(Ordering::Acquire)
+    while forwarder.is_active()
         && !shared.cancelled.load(Ordering::Acquire)
         && !unix_expired(shared.token_expires_unix)
     {
@@ -361,15 +490,10 @@ fn stream_terminal(
             Ok(Some(_)) => break,
             Ok(None) => break,
             Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
-            Err(error) => {
-                active.store(false, Ordering::Release);
-                let _ = forwarder.join();
-                return Err(error.into());
-            }
+            Err(error) => return Err(error.into()),
         }
     }
-    active.store(false, Ordering::Release);
-    let _ = forwarder.join();
+    forwarder.stop();
     Ok(())
 }
 
@@ -465,7 +589,7 @@ fn stream_events(
     shared: &Shared,
 ) -> Result<()> {
     let mut reader = LocalFrameReader::new(local)?;
-    let first = reader.read_frame(RESPONSE_TIMEOUT)?.ok_or_else(|| {
+    let first = read_local_frame(&mut reader, RESPONSE_TIMEOUT, shared)?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::UnexpectedEof,
             "event stream closed before acknowledgement",
@@ -663,6 +787,32 @@ impl LocalFrameReader {
     }
 }
 
+fn read_local_frame(
+    reader: &mut LocalFrameReader,
+    timeout: Duration,
+    shared: &Shared,
+) -> io::Result<Option<String>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if shared.cancelled.load(Ordering::Acquire) || unix_expired(shared.token_expires_unix) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "UHP access stopped",
+            ));
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "local UHP response timed out",
+            ));
+        };
+        match reader.read_frame(remaining.min(CANCELLATION_POLL)) {
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
+            result => return result,
+        }
+    }
+}
+
 fn remote_closed(remote: &TcpStream) -> bool {
     let mut byte = [0_u8; 1];
     match remote.peek(&mut byte) {
@@ -792,12 +942,39 @@ mod tests {
     }
 
     #[test]
+    fn stopping_gateway_drains_a_client_waiting_to_send_its_first_frame() {
+        let pairing = Pairing::new(Duration::from_secs(60)).unwrap();
+        let mut gateway = Gateway::start(
+            PathBuf::from("target/test-state/uhp/no-server.sock"),
+            "luv_tok_stop_test".to_string(),
+            4_000_000_000,
+            pairing,
+            AccessMode::ReadOnly,
+        )
+        .unwrap();
+        let _waiting_client = TcpStream::connect(gateway.address()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while gateway.shared.active.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(gateway.shared.active.load(Ordering::Acquire), 1);
+
+        let started = Instant::now();
+        gateway.stop();
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(gateway.shared.active.load(Ordering::Acquire), 0);
+        assert!(gateway.accept_thread.is_none());
+        assert!(TcpStream::connect(gateway.address()).is_err());
+    }
+
+    #[test]
     fn gateway_pairs_once_and_denies_remote_mutation_before_local_ipc() {
         let pairing = Pairing::new(Duration::from_secs(60)).unwrap();
         let code = pairing.display_code().to_string();
         let token = "luv_tok_test_only".to_string();
         let mut gateway = Gateway::start(
-            PathBuf::from("target/test-state/web/no-server.sock"),
+            PathBuf::from("target/test-state/uhp/no-server.sock"),
             token.clone(),
             4_000_000_000,
             pairing,
@@ -834,7 +1011,7 @@ mod tests {
         let code = pairing.display_code().to_string();
         let token = "luv_tok_control_test".to_string();
         let mut gateway = Gateway::start(
-            PathBuf::from("target/test-state/web/no-control-server.sock"),
+            PathBuf::from("target/test-state/uhp/no-control-server.sock"),
             token.clone(),
             4_000_000_000,
             pairing,
@@ -875,8 +1052,8 @@ mod tests {
 
     #[test]
     fn terminal_control_stream_relays_frames_and_bounded_actions() {
-        let _env = crate::persist::test_env("web-terminal-stream");
-        let socket_path = crate::persist::ensure_config_dir().join("web-terminal.sock");
+        let _env = crate::persist::test_env("uhp-terminal-stream");
+        let socket_path = crate::persist::ensure_config_dir().join("uhp-terminal.sock");
         let listener = crate::ipc::transport::bind(&socket_path).unwrap();
         let local_server = thread::spawn(move || {
             let mut connection = BufReader::new(listener.accept().unwrap());

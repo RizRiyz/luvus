@@ -84,7 +84,7 @@ The local endpoint validates same-user ownership and is the default authority
 boundary. Normal Luvus startup never opens a TCP listener. The explicit,
 foreground `luvus uhp access` command may bind one ephemeral IPv4 loopback
 gateway for a trusted transport provider; it never exposes the owner endpoint.
-Delegated tokens are memory-only, bounded, expiring, and scope restricted.
+Delegated tokens are memory-only, bounded, expiring, and scope-restricted.
 
 Terminal and process responses avoid full argument vectors because they can
 contain prompts, credentials, or tokens. Capture, input, messages, and cwd are
