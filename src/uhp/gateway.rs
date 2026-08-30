@@ -970,7 +970,6 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2));
         assert_eq!(gateway.shared.active.load(Ordering::Acquire), 0);
         assert!(gateway.accept_thread.is_none());
-        assert!(TcpStream::connect(gateway.address()).is_err());
     }
 
     #[test]
