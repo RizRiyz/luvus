@@ -6,6 +6,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,7 @@ pub const DEFAULT_SESSION_NAME: &str = "default";
 const MAX_SESSION_NAME_LEN: usize = 64;
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const START_TIMEOUT: Duration = Duration::from_secs(5);
 
 static EXPLICIT_SESSION_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -313,6 +315,70 @@ pub fn stop_session(name: Option<&str>) -> Result<SessionInfo, String> {
         name.unwrap_or(DEFAULT_SESSION_NAME),
         STOP_TIMEOUT.as_millis()
     ))
+}
+
+/// Start one server namespace without changing the caller's selected session.
+/// The child receives an explicit selector and no inherited socket override,
+/// so a managed pane cannot accidentally route it to another running server.
+pub fn start_session(name: Option<&str>) -> Result<SessionInfo, String> {
+    if let Some(name) = name {
+        validate_name(name)?;
+    }
+    let info = session_info(name);
+    if info.running {
+        return Ok(info);
+    }
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let mut command = Command::new(executable);
+    command
+        .arg("--session")
+        .arg(name.unwrap_or(DEFAULT_SESSION_NAME))
+        .arg("server")
+        .env_remove("LUVUS_SOCKET_PATH")
+        .env_remove(SESSION_ENV_VAR)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    detach_server_command(&mut command);
+    command.spawn().map_err(|error| error.to_string())?;
+
+    let deadline = Instant::now() + START_TIMEOUT;
+    while Instant::now() < deadline {
+        let info = session_info(name);
+        if info.running {
+            return Ok(info);
+        }
+        std::thread::sleep(STOP_POLL_INTERVAL);
+    }
+    Err(format!(
+        "session {} did not start within {}ms",
+        name.unwrap_or(DEFAULT_SESSION_NAME),
+        START_TIMEOUT.as_millis()
+    ))
+}
+
+pub fn restart_session(name: Option<&str>) -> Result<SessionInfo, String> {
+    if session_info(name).running {
+        stop_session(name)?;
+    }
+    start_session(name)
+}
+
+#[cfg(unix)]
+fn detach_server_command(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+}
+
+#[cfg(windows)]
+fn detach_server_command(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(0x0000_0008 | 0x0000_0200);
 }
 
 pub fn delete_session(name: &str) -> Result<SessionInfo, String> {

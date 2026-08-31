@@ -2200,6 +2200,11 @@ fn uhp_proxy() -> Result<i32> {
     let mut input = std::io::BufReader::new(std::io::stdin().lock());
     let request = crate::ipc::api::read_request_frame(&mut input)
         .map_err(|error| anyhow!("invalid request frame: {error}"))?;
+    if let Some(response) = crate::api::host::handle_frame(&request)? {
+        validate_response_id(&request, &response)?;
+        println!("{response}");
+        return Ok(api_response_exit_code(&response));
+    }
     let path = crate::persist::cli_socket_path();
     let mut stream = crate::ipc::transport::connect(&path)
         .map_err(|_| anyhow!("no luvus server running (socket: {})", path.display()))?;

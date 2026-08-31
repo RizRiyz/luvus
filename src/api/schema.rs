@@ -64,10 +64,8 @@ mod tests {
             .unwrap();
         let schema: std::collections::BTreeSet<_> =
             methods.iter().map(|v| v.as_str().unwrap()).collect();
-        let registry: std::collections::BTreeSet<_> = super::super::capabilities::METHODS
-            .iter()
-            .copied()
-            .collect();
+        let registry: std::collections::BTreeSet<_> =
+            super::super::capabilities::all_methods().collect();
         assert_eq!(schema, registry);
     }
 

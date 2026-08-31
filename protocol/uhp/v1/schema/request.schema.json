@@ -13,7 +13,7 @@
       "enum": [
         "uhp.capabilities", "uhp.stats", "uhp.token.create", "uhp.token.list", "uhp.token.revoke",
         "ping", "server.stop", "server.reload_config", "server.agent_manifests", "server.reload_agent_manifests", "config.get", "config.patch",
-        "session.snapshot", "events.subscribe", "events.wait", "wait.output",
+        "host.capabilities", "session.snapshot", "session.list", "session.status", "session.start", "session.stop", "session.restart", "session.delete", "events.subscribe", "events.wait", "wait.output",
         "workspace.list", "workspace.get", "workspace.new", "workspace.open", "workspace.focus", "workspace.rename", "workspace.pin", "workspace.move", "workspace.move_block", "workspace.report_metadata", "workspace.close",
         "node.list", "node.new", "node.open", "node.focus", "node.rename", "node.pin", "node.close",
         "tab.list", "tab.get", "tab.new", "tab.focus", "tab.move", "tab.swap", "tab.rename", "tab.close",
@@ -72,6 +72,17 @@
       },
       "not": { "required": ["workspace", "workspace_id"] }
     },
+    "sessionTargetParams": {
+      "type": "object", "additionalProperties": false, "required": ["name"],
+      "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$" } }
+    },
+    "sessionDeleteParams": {
+      "type": "object", "additionalProperties": false, "required": ["name", "confirm"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$" },
+        "confirm": { "const": true }
+      }
+    },
     "taskStartParams": {
       "type": "object", "additionalProperties": false, "required": ["id"],
       "properties": {
@@ -100,7 +111,7 @@
     }
   },
   "allOf": [
-    { "if": { "properties": { "method": { "enum": ["uhp.capabilities", "uhp.stats", "uhp.token.list"] } } },
+    { "if": { "properties": { "method": { "enum": ["host.capabilities", "uhp.capabilities", "uhp.stats", "uhp.token.list", "session.list"] } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
     { "if": { "properties": { "method": { "const": "uhp.token.create" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/tokenCreateParams" } } } },
@@ -112,6 +123,10 @@
       "then": { "properties": { "params": { "$ref": "#/$defs/eventWaitParams" } } } },
     { "if": { "properties": { "method": { "enum": ["mission.snapshot", "mission.refresh"] } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/missionQueryParams" } } } },
+    { "if": { "properties": { "method": { "enum": ["session.status", "session.start", "session.stop", "session.restart"] } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/sessionTargetParams" } } } },
+    { "if": { "properties": { "method": { "const": "session.delete" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/sessionDeleteParams" } } } },
     { "if": { "properties": { "method": { "const": "task.start" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/taskStartParams" } } } },
     { "if": { "properties": { "method": { "const": "task.next" } } },
