@@ -1215,6 +1215,7 @@ impl App {
         }
     }
 
+    /// Validate and execute one bounded local API method against server-owned state.
     pub(crate) fn dispatch(&mut self, method: &str, p: &Value) -> Result<Value, (String, String)> {
         match method {
             "ping" => Ok(json!({
@@ -1412,10 +1413,9 @@ impl App {
                         "could not create a terminal in the home directory".to_string(),
                     ));
                 }
-                let base = if p.get("pane").is_some() {
-                    self.resolve_pane(p).ok_or_else(not_found)?
-                } else {
-                    self.layout().focus
+                let base = match p.get("pane") {
+                    None | Some(Value::Null) => self.layout().focus,
+                    Some(_) => self.resolve_pane(p).ok_or_else(not_found)?,
                 };
                 let dir = p
                     .get("direction")
@@ -1428,7 +1428,13 @@ impl App {
                 };
                 let focus = p.get("focus").and_then(|v| v.as_bool()) != Some(false);
                 let new = self.split_pane(base, axis, focus).ok_or_else(not_found)?;
-                Ok(json!({"type":"pane","pane": new.0.to_string()}))
+                let (workspace, tab) = self.pane_location(new).ok_or_else(not_found)?;
+                Ok(json!({
+                    "type":"pane",
+                    "pane": new.0.to_string(),
+                    "workspace": workspace.to_string(),
+                    "tab": (tab + 1).to_string(),
+                }))
             }
             "pane.move" => {
                 let id = self.resolve_pane(p).ok_or_else(not_found)?;
@@ -7007,6 +7013,26 @@ command = ["true"]
         assert_eq!(app.agent_name_for(pane), Some("harness-shell"));
     }
 
+    /// An explicit null pane has the same focused-pane semantics as omission.
+    #[test]
+    fn pane_split_null_pane_targets_the_focused_layout_pane() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let base = app.layout().focus;
+
+        let out = app
+            .dispatch("pane.split", &json!({"pane": null, "focus": false}))
+            .expect("an explicit null pane falls back to layout focus");
+        let split = PaneId(out["pane"].as_str().unwrap().parse().unwrap());
+
+        assert_ne!(split, base);
+        assert_eq!(out["workspace"], "0");
+        assert_eq!(out["tab"], "1");
+        assert_eq!(app.pane_location(split), Some((0, 0)));
+        assert_eq!(app.layout().focus, base);
+    }
+
+    /// Background and default splits preserve their established focus behavior.
     #[test]
     fn pane_split_no_focus_keeps_the_caller_focused() {
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -7025,6 +7051,7 @@ command = ["true"]
         assert_eq!(app.layout().focus.0.to_string(), out2["pane"]);
     }
 
+    /// Cross-workspace splits attach once and report their owning workspace and tab.
     #[test]
     fn pane_split_targets_foreign_workspace_without_detaching() {
         let _env = crate::persist::test_env("pane-split-foreign-workspace");
@@ -7056,6 +7083,8 @@ command = ["true"]
             .unwrap();
         let new_pane = PaneId(out["pane"].as_str().unwrap().parse().unwrap());
 
+        assert_eq!(out["workspace"], target_ws.to_string());
+        assert_eq!(out["tab"], (target_tab + 1).to_string());
         assert_eq!(
             app.active_ws, caller_ws,
             "the caller's workspace stays active"

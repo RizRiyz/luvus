@@ -3560,9 +3560,43 @@ impl App {
         }
     }
 
+    /// Split the focused pane and follow the newly attached sibling.
     fn split(&mut self, axis: Axis) {
         let pane = self.layout().focus;
         let _ = self.split_pane(pane, axis, true);
+    }
+
+    /// Spawn and attach a sibling beside `target`, preserving inactive view state
+    /// when the caller requests a background operation.
+    fn spawn_and_attach_new_pane(
+        &mut self,
+        workspace: usize,
+        tab: usize,
+        target: PaneId,
+        axis: Axis,
+        focus: bool,
+        spawn: impl FnOnce(&mut Self) -> Option<PaneId>,
+    ) -> Option<PaneId> {
+        let previous_zoom = self.zoomed;
+        let previous_target_focus = self.workspaces[workspace].tabs[tab].layout.focus;
+        let new_id = spawn(self)?;
+        {
+            let layout = &mut self.workspaces[workspace].tabs[tab].layout;
+            layout.focus = target;
+            layout.split_focused(axis, new_id);
+            if !focus {
+                layout.focus = previous_target_focus;
+            }
+        }
+        if focus {
+            self.active_ws = workspace;
+            self.workspaces[workspace].active_tab = tab;
+            self.scroll_pane = None;
+            self.zoomed = false;
+        } else {
+            self.zoomed = previous_zoom;
+        }
+        Some(new_id)
     }
 
     /// Split beside a pane in the workspace and tab that actually own it.
@@ -3576,26 +3610,9 @@ impl App {
         // worker retries the fallbacks instead of spawning in a dead directory.
         let cwds = self.spawn_cwds_for(wsi, pane);
         let (cwd, fallback_cwds) = cwds.split_first()?;
-        let previous_zoom = self.zoomed;
-        let previous_target_focus = self.workspaces[wsi].tabs[ti].layout.focus;
-        let id = self.spawn_into_deferred(cwd.clone(), fallback_cwds)?;
-        {
-            let layout = &mut self.workspaces[wsi].tabs[ti].layout;
-            layout.focus = pane;
-            layout.split_focused(axis, id);
-            if !focus {
-                layout.focus = previous_target_focus;
-            }
-        }
-        if focus {
-            self.active_ws = wsi;
-            self.workspaces[wsi].active_tab = ti;
-            self.scroll_pane = None;
-            self.zoomed = false;
-        } else {
-            self.zoomed = previous_zoom;
-        }
-        Some(id)
+        self.spawn_and_attach_new_pane(wsi, ti, pane, axis, focus, |app| {
+            app.spawn_into_deferred(cwd.clone(), fallback_cwds)
+        })
     }
 
     /// Fork `pane`'s agent session into a new sibling on its right, preserving
@@ -3647,30 +3664,11 @@ impl App {
         let fork =
             crate::agent::fork_command(&agent, &sid).ok_or(AgentForkError::UnsupportedAgent)?;
 
-        // `spawn_resume_pane` changes the global zoom flag. Capture the complete
-        // view state needed by --no-focus before spawning, then restore it after
-        // inserting the new leaf into the source tab.
-        let previous_zoom = self.zoomed;
-        let previous_source_focus = self.workspaces[wsi].tabs[ti].layout.focus;
         let new_id = self
-            .spawn_resume_pane(cwd, &fork)
+            .spawn_and_attach_new_pane(wsi, ti, pane, Axis::Col, focus, |app| {
+                app.spawn_resume_pane(cwd, &fork)
+            })
             .ok_or(AgentForkError::SpawnFailed)?;
-        {
-            let layout = &mut self.workspaces[wsi].tabs[ti].layout;
-            layout.focus = pane;
-            layout.split_focused(Axis::Col, new_id);
-            if !focus {
-                layout.focus = previous_source_focus;
-            }
-        }
-        if focus {
-            self.active_ws = wsi;
-            self.workspaces[wsi].active_tab = ti;
-            self.scroll_pane = None;
-            self.zoomed = false;
-        } else {
-            self.zoomed = previous_zoom;
-        }
         // Label the new pane as the same agent right away (detection will confirm
         // it, and pick up the fork's fresh session id, on the next tick).
         if let Some(nst) = self.status.get_mut(&new_id) {
