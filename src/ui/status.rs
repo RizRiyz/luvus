@@ -135,7 +135,7 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
         .get(app.active_ws)
         .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
         .and_then(|tab| app.views.get(&tab.layout.focus));
-    if matches!(focused_view, Some(crate::app::ViewKind::File(_))) {
+    if app.mode == Mode::Normal && matches!(focused_view, Some(crate::app::ViewKind::File(_))) {
         left.push(mode_label("FILE", t));
         left.push(Span::raw("  "));
         left.extend(hint("j/k", cat.act_scroll, t));
@@ -452,6 +452,28 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect();
         assert!(text.contains("x close"), "unexpected FILE legend: {text}");
+
+        for (mode, expected) in [
+            (Mode::Resize, app.catalog.mode_resize),
+            (Mode::Prefix, app.catalog.mode_prefix),
+        ] {
+            app.mode = mode;
+            let (line, _) = fixed_guidance(&app, &theme, 120);
+            let text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert!(
+                text.contains(expected),
+                "{mode:?} controls must override the FILE legend: {text}"
+            );
+            assert_eq!(
+                line.spans[1].content.as_ref(),
+                format!(" {expected} "),
+                "{mode:?} must own the leading mode label"
+            );
+        }
     }
 
     #[test]
