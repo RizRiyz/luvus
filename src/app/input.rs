@@ -783,12 +783,27 @@ impl App {
                 branches,
                 workspace_candidates,
             } => self.apply_cwd_scan(panes, branches, workspace_candidates),
-            // Mission Control usage (docs/54, MC-2): swap in the fresh cache; the
-            // mission render blits it. Repaint so a visible mission tab updates.
-            AppEvent::UsageScanned { usage, mtimes } => {
+            // Mission Control usage (docs/54, MC-2): replace a fleet scan or
+            // merge only the keys covered by a workspace scan. Repaint so a
+            // visible mission tab updates.
+            AppEvent::UsageScanned {
+                scope,
+                scanned,
+                usage,
+                mtimes,
+            } => {
                 self.usage_scan_inflight = false;
-                self.agent_usage = usage;
-                self.usage_mtimes = mtimes;
+                if scope == crate::mission::MissionScope::All {
+                    self.agent_usage = usage;
+                    self.usage_mtimes = mtimes;
+                } else {
+                    for key in scanned {
+                        self.agent_usage.remove(&key);
+                        self.usage_mtimes.remove(&key);
+                    }
+                    self.agent_usage.extend(usage);
+                    self.usage_mtimes.extend(mtimes);
+                }
                 // Fleet burn rate: change in total cost since the last scan (docs/54).
                 let total: f64 = self.agent_usage.values().filter_map(|u| u.cost).sum();
                 let now = std::time::Instant::now();

@@ -222,6 +222,8 @@ pub enum AppEvent {
     /// tokens/context/cost keyed by agent + session id, read off-loop from native
     /// agent stores, plus each ledger's mtime so unchanged sessions stay cached.
     UsageScanned {
+        scope: crate::mission::MissionScope,
+        scanned: Vec<crate::mission::UsageKey>,
         usage: std::collections::HashMap<crate::mission::UsageKey, crate::mission::AgentUsage>,
         mtimes: std::collections::HashMap<crate::mission::UsageKey, std::time::SystemTime>,
     },

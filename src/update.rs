@@ -639,26 +639,11 @@ fn parse_version(body: &str) -> Option<String> {
     Some(s.trim_start_matches('v').to_string())
 }
 
-/// True when `latest` is a strictly higher semver than `current`. Both accept an
-/// optional leading `v`; any pre-release/build suffix on a component is ignored.
+/// True when `latest` is a strictly higher semantic version than `current`.
+/// Both accept an optional leading `v`; prerelease ordering follows semver.
 pub fn is_newer(latest: &str, current: &str) -> bool {
-    semver(latest) > semver(current)
-}
-
-fn semver(s: &str) -> (u32, u32, u32) {
-    let s = s.trim().trim_start_matches('v');
-    let mut it = s.split('.').map(|part| {
-        part.split(|c: char| !c.is_ascii_digit())
-            .next()
-            .unwrap_or("")
-            .parse::<u32>()
-            .unwrap_or(0)
-    });
-    (
-        it.next().unwrap_or(0),
-        it.next().unwrap_or(0),
-        it.next().unwrap_or(0),
-    )
+    let parse = |version: &str| semver::Version::parse(version.trim().trim_start_matches('v')).ok();
+    matches!((parse(latest), parse(current)), (Some(latest), Some(current)) if latest > current)
 }
 
 /// Fetch a URL with `curl`, then `wget` — whichever is installed. `None` on any
@@ -699,8 +684,12 @@ mod tests {
         assert!(is_newer("1.0.0", "0.9.9"));
         assert!(!is_newer("0.9.2", "0.9.2"), "same version is not newer");
         assert!(!is_newer("0.9.1", "0.9.2"), "older is not newer");
-        // A pre-release suffix on a component doesn't break the compare.
+        // Prereleases preserve full semantic-version ordering.
         assert!(is_newer("0.9.3-rc1", "0.9.2"));
+        assert!(!is_newer("1.0.0-rc.1", "1.0.0"));
+        assert!(is_newer("1.0.0", "1.0.0-rc.1"));
+        assert!(is_newer("1.0.0-rc.2", "1.0.0-rc.1"));
+        assert!(!is_newer("invalid", "1.0.0"));
     }
 
     /// The whole chain, off the network: fetch, parse, compare, report. A file
@@ -772,6 +761,14 @@ mod tests {
         assert_eq!(status.current, CURRENT);
         assert_eq!(status.latest, "99.0.0");
         assert!(status.available);
+
+        std::fs::write(&path, format!(r#"{{"version":"{CURRENT}-rc.1"}}"#)).unwrap();
+        assert!(
+            !release_status_at(&format!("file://{}", path.display()))
+                .unwrap()
+                .available,
+            "a prerelease of the current stable version is not an update"
+        );
 
         std::fs::write(&path, r#"{"version":"../../bad"}"#).unwrap();
         assert!(release_status_at(&format!("file://{}", path.display())).is_err());

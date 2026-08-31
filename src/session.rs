@@ -340,7 +340,7 @@ pub fn start_session(name: Option<&str>) -> Result<SessionInfo, String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     detach_server_command(&mut command);
-    command.spawn().map_err(|error| error.to_string())?;
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
 
     let deadline = Instant::now() + START_TIMEOUT;
     while Instant::now() < deadline {
@@ -348,13 +348,34 @@ pub fn start_session(name: Option<&str>) -> Result<SessionInfo, String> {
         if info.running {
             return Ok(info);
         }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "session {} server exited before startup with {status}",
+                    name.unwrap_or(DEFAULT_SESSION_NAME)
+                ));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = terminate_and_wait(&mut child);
+                return Err(format!(
+                    "could not inspect session {} startup: {error}",
+                    name.unwrap_or(DEFAULT_SESSION_NAME)
+                ));
+            }
+        }
         std::thread::sleep(STOP_POLL_INTERVAL);
     }
-    Err(format!(
+    let cleanup = terminate_and_wait(&mut child);
+    let mut message = format!(
         "session {} did not start within {}ms",
         name.unwrap_or(DEFAULT_SESSION_NAME),
         START_TIMEOUT.as_millis()
-    ))
+    );
+    if let Err(error) = cleanup {
+        message.push_str(&format!("; could not reap timed-out server: {error}"));
+    }
+    Err(message)
 }
 
 pub fn restart_session(name: Option<&str>) -> Result<SessionInfo, String> {
@@ -362,6 +383,19 @@ pub fn restart_session(name: Option<&str>) -> Result<SessionInfo, String> {
         stop_session(name)?;
     }
     start_session(name)
+}
+
+fn terminate_and_wait(child: &mut std::process::Child) -> Result<(), String> {
+    let kill = child.kill();
+    match child.wait() {
+        Ok(_) => Ok(()),
+        Err(wait_error) => match kill {
+            Ok(()) => Err(wait_error.to_string()),
+            Err(kill_error) => Err(format!(
+                "kill failed: {kill_error}; wait failed: {wait_error}"
+            )),
+        },
+    }
 }
 
 #[cfg(unix)]
@@ -431,6 +465,22 @@ mod tests {
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| part.to_string()).collect()
+    }
+
+    #[test]
+    fn timed_out_server_child_is_terminated_and_reaped() {
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "ping -n 30 127.0.0.1 >NUL"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 30"]);
+            command
+        };
+        let mut child = crate::platform::no_window(&mut command).spawn().unwrap();
+        terminate_and_wait(&mut child).unwrap();
+        assert!(child.try_wait().unwrap().is_some());
     }
 
     #[test]

@@ -10990,6 +10990,115 @@ mod tests {
     }
 
     #[test]
+    fn scoped_mission_usage_refresh_preserves_other_workspace_cache_entries() {
+        let _env = crate::persist::test_env("mission-scoped-cache");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let first = crate::mission::UsageKey::new("codex", "first");
+        let second = crate::mission::UsageKey::new("claude", "second");
+        let first_cwd = app.workspaces[0].cwd.clone();
+        let second_cwd = crate::persist::config_dir().join("second-workspace");
+        app.workspaces.push(Workspace {
+            id: crate::ids::public_id("workspace"),
+            name: "second".into(),
+            cwd: second_cwd.clone(),
+            branch: None,
+            git_ahead_behind: None,
+            worktree: None,
+            tabs: vec![Tab::panes(TileLayout::new(PaneId::alloc()))],
+            active_tab: 0,
+            pinned: false,
+        });
+        app.resumable.extend([
+            crate::agent::SessionInfo {
+                agent: first.agent.clone(),
+                session_id: first.session_id.clone(),
+                cwd: first_cwd,
+                updated: std::time::SystemTime::now(),
+            },
+            crate::agent::SessionInfo {
+                agent: second.agent.clone(),
+                session_id: second.session_id.clone(),
+                cwd: second_cwd,
+                updated: std::time::SystemTime::now(),
+            },
+        ]);
+        let original = std::time::SystemTime::UNIX_EPOCH;
+        let refreshed = original + std::time::Duration::from_secs(1);
+        app.agent_usage.insert(
+            first.clone(),
+            crate::mission::AgentUsage {
+                tokens_in: 1,
+                ..Default::default()
+            },
+        );
+        app.agent_usage.insert(
+            second.clone(),
+            crate::mission::AgentUsage {
+                tokens_in: 2,
+                ..Default::default()
+            },
+        );
+        app.usage_mtimes.insert(first.clone(), original);
+        app.usage_mtimes.insert(second.clone(), original);
+
+        app.handle_event(crate::event::AppEvent::UsageScanned {
+            scope: crate::mission::MissionScope::Workspace,
+            scanned: vec![first.clone()],
+            usage: [(
+                first.clone(),
+                crate::mission::AgentUsage {
+                    tokens_in: 3,
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            mtimes: [(first.clone(), refreshed)].into(),
+        });
+        assert_eq!(app.agent_usage[&first].tokens_in, 3);
+        assert_eq!(app.agent_usage[&second].tokens_in, 2);
+        assert_eq!(app.usage_mtimes[&second], original);
+        let rows = app.build_mission_rows_for(crate::mission::MissionScope::All, 0);
+        assert_eq!(rows.len(), 2);
+        assert!(rows
+            .iter()
+            .any(|row| row.usage.as_ref().is_some_and(|usage| usage.tokens_in == 2)));
+
+        app.handle_event(crate::event::AppEvent::UsageScanned {
+            scope: crate::mission::MissionScope::All,
+            scanned: vec![first.clone()],
+            usage: [(first.clone(), app.agent_usage[&first].clone())].into(),
+            mtimes: [(first.clone(), refreshed)].into(),
+        });
+        assert!(app.agent_usage.contains_key(&first));
+        assert!(!app.agent_usage.contains_key(&second));
+        assert!(!app.usage_mtimes.contains_key(&second));
+    }
+
+    #[test]
+    fn all_workspace_mission_scope_ignores_a_stale_anchor() {
+        let _env = crate::persist::test_env("mission-all-stale-anchor");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "codex".into();
+
+        assert_eq!(
+            app.build_mission_rows_for(crate::mission::MissionScope::All, usize::MAX)
+                .len(),
+            1
+        );
+        app.request_mission_usage_refresh_for(crate::mission::MissionScope::All, usize::MAX);
+        assert_eq!(
+            app.mission_usage_requested,
+            Some(crate::mission::MissionUsageRequest {
+                scope: crate::mission::MissionScope::All,
+                workspace: usize::MAX,
+            })
+        );
+    }
+
+    #[test]
     fn mission_usage_refreshes_when_switching_between_workspace_dashboards() {
         let _env = crate::persist::test_env("mission-workspace-refresh");
         let (tx, _rx) = std::sync::mpsc::channel();

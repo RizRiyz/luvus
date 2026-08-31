@@ -386,8 +386,9 @@ surface:
   serve the user's request.
 - Open Mission Control directly with `luvus mission open [<workspace>]` when
   the user asks for it. The optional workspace index is 0-based; omit it to
-  target the active workspace. For UHP automation, use the workspace-scoped
-  `mission.snapshot` method to inspect data without changing the UI,
+  target the active workspace. For UHP automation, use `mission.snapshot` with
+  workspace scope (the default) or explicit all-workspace scope to inspect
+  data without changing the UI,
   `mission.refresh` for an explicit usage refresh, and `mission.open` only to
   change the visible tab.
 - Agent detection is built into Luvus. `luvus integration install` manages

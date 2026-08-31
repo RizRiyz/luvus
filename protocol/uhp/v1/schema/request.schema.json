@@ -74,12 +74,12 @@
     },
     "sessionTargetParams": {
       "type": "object", "additionalProperties": false, "required": ["name"],
-      "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$" } }
+      "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$", "not": { "enum": [".", ".."] } } }
     },
     "sessionDeleteParams": {
       "type": "object", "additionalProperties": false, "required": ["name", "confirm"],
       "properties": {
-        "name": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$", "not": { "enum": [".", ".."] } },
         "confirm": { "const": true }
       }
     },

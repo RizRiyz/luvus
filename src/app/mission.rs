@@ -160,7 +160,7 @@ impl App {
     /// Queue a usage refresh without changing Mission Control's visible scope.
     /// UHP uses this path so a read-only fleet query never steals UI focus.
     pub fn request_mission_usage_refresh_for(&mut self, scope: MissionScope, workspace: usize) {
-        if workspace < self.workspaces.len() {
+        if scope == MissionScope::All || workspace < self.workspaces.len() {
             self.mission_usage_requested = Some(MissionUsageRequest { scope, workspace });
         }
     }
@@ -188,7 +188,7 @@ impl App {
         workspace_index: usize,
     ) -> std::collections::HashMap<crate::mission::UsageKey, std::path::PathBuf> {
         let mut targets = std::collections::HashMap::new();
-        if self.workspaces.get(workspace_index).is_none() {
+        if scope != MissionScope::All && self.workspaces.get(workspace_index).is_none() {
             return targets;
         }
         let all = scope == MissionScope::All;
@@ -245,7 +245,7 @@ impl App {
         workspace_index: usize,
     ) -> Vec<MissionRowView> {
         let mut rows = Vec::new();
-        if self.workspaces.get(workspace_index).is_none() {
+        if scope != MissionScope::All && self.workspaces.get(workspace_index).is_none() {
             return rows;
         }
         let all = scope == MissionScope::All;

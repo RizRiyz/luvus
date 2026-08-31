@@ -704,6 +704,8 @@ impl App {
                 .expect("usage request checked above");
             self.usage_scan_inflight = true;
             let targets = self.mission_usage_targets_for(request.scope, request.workspace);
+            let scanned = targets.keys().cloned().collect::<Vec<_>>();
+            let scope = request.scope;
             let overrides = self.config.mission_pricing.clone();
             // Previous results let an explicit refresh reuse unchanged transcripts:
             // one stat per idle session, with no read or parse.
@@ -742,7 +744,12 @@ impl App {
                         usage.insert(key, u);
                     }
                 }
-                let _ = tx.send(AppEvent::UsageScanned { usage, mtimes });
+                let _ = tx.send(AppEvent::UsageScanned {
+                    scope,
+                    scanned,
+                    usage,
+                    mtimes,
+                });
             });
         }
         // The per-pane classification below locks each pane's VT engine + scans its
@@ -3723,9 +3730,14 @@ impl App {
             }
             "mission.snapshot" | "mission.refresh" => {
                 reject_api_fields(p, &["scope", "workspace", "workspace_id"])?;
-                let scope = match p.get("scope").and_then(Value::as_str) {
-                    None | Some("workspace") => crate::mission::MissionScope::Workspace,
-                    Some("all") => crate::mission::MissionScope::All,
+                let scope = match p.get("scope") {
+                    None => crate::mission::MissionScope::Workspace,
+                    Some(Value::String(scope)) if scope == "workspace" => {
+                        crate::mission::MissionScope::Workspace
+                    }
+                    Some(Value::String(scope)) if scope == "all" => {
+                        crate::mission::MissionScope::All
+                    }
                     Some(_) => {
                         return Err((
                             "invalid_request".to_string(),
@@ -3734,7 +3746,9 @@ impl App {
                     }
                 };
                 let workspace = self.optional_socket_workspace(p)?.unwrap_or(self.active_ws);
-                if workspace >= self.workspaces.len() {
+                if scope == crate::mission::MissionScope::Workspace
+                    && workspace >= self.workspaces.len()
+                {
                     return Err(workspace_update_error(
                         workspace,
                         WorkspaceUpdateError::NotFound,
@@ -6225,6 +6239,17 @@ mod tests {
             before,
             "refresh queues work without changing the UI"
         );
+
+        let bad_scope = app
+            .dispatch("mission.snapshot", &json!({"scope":null}))
+            .expect_err("a present non-string scope must not use the default");
+        assert_eq!(bad_scope.0, "invalid_request");
+
+        let all = app
+            .dispatch("mission.snapshot", &json!({"scope":"all","workspace":999}))
+            .expect("all-workspace scope does not depend on its anchor index");
+        assert_eq!(all["type"], "mission_snapshot");
+        assert_eq!(all["rows"][0]["kind"], "resumable");
     }
 
     #[test]
