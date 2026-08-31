@@ -24,3 +24,13 @@
 {"id":"24","method":"session.stop","params":{"name":"review"}}
 {"id":"25","method":"session.restart","params":{"name":"review"}}
 {"id":"26","method":"session.delete","params":{"name":"review","confirm":true}}
+{"id":"27","method":"host.info","params":{}}
+{"id":"28","method":"host.doctor","params":{}}
+{"id":"29","method":"host.update.check","params":{}}
+{"id":"30","method":"host.update.install","params":{"confirm":true}}
+{"id":"31","method":"skill.status","params":{}}
+{"id":"32","method":"skill.enable","params":{"confirm":true}}
+{"id":"33","method":"skill.disable","params":{"confirm":true}}
+{"id":"34","method":"integration.status","params":{}}
+{"id":"35","method":"integration.install","params":{"agent":"claude","confirm":true}}
+{"id":"36","method":"integration.uninstall","params":{"agent":"claude","confirm":true}}

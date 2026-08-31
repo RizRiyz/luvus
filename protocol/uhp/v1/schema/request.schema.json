@@ -13,7 +13,7 @@
       "enum": [
         "uhp.capabilities", "uhp.stats", "uhp.token.create", "uhp.token.list", "uhp.token.revoke",
         "ping", "server.stop", "server.reload_config", "server.agent_manifests", "server.reload_agent_manifests", "config.get", "config.patch",
-        "host.capabilities", "session.snapshot", "session.list", "session.status", "session.start", "session.stop", "session.restart", "session.delete", "events.subscribe", "events.wait", "wait.output",
+        "host.capabilities", "host.info", "host.doctor", "host.update.check", "host.update.install", "session.snapshot", "session.list", "session.status", "session.start", "session.stop", "session.restart", "session.delete", "skill.status", "skill.enable", "skill.disable", "integration.status", "integration.install", "integration.uninstall", "events.subscribe", "events.wait", "wait.output",
         "workspace.list", "workspace.get", "workspace.new", "workspace.open", "workspace.focus", "workspace.rename", "workspace.pin", "workspace.move", "workspace.move_block", "workspace.report_metadata", "workspace.close",
         "node.list", "node.new", "node.open", "node.focus", "node.rename", "node.pin", "node.close",
         "tab.list", "tab.get", "tab.new", "tab.focus", "tab.move", "tab.swap", "tab.rename", "tab.close",
@@ -83,6 +83,17 @@
         "confirm": { "const": true }
       }
     },
+    "confirmedParams": {
+      "type": "object", "additionalProperties": false, "required": ["confirm"],
+      "properties": { "confirm": { "const": true } }
+    },
+    "integrationChangeParams": {
+      "type": "object", "additionalProperties": false, "required": ["agent", "confirm"],
+      "properties": {
+        "agent": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9._-]+$" },
+        "confirm": { "const": true }
+      }
+    },
     "taskStartParams": {
       "type": "object", "additionalProperties": false, "required": ["id"],
       "properties": {
@@ -111,7 +122,7 @@
     }
   },
   "allOf": [
-    { "if": { "properties": { "method": { "enum": ["host.capabilities", "uhp.capabilities", "uhp.stats", "uhp.token.list", "session.list"] } } },
+    { "if": { "properties": { "method": { "enum": ["host.capabilities", "host.info", "host.doctor", "host.update.check", "skill.status", "integration.status", "uhp.capabilities", "uhp.stats", "uhp.token.list", "session.list"] } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
     { "if": { "properties": { "method": { "const": "uhp.token.create" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/tokenCreateParams" } } } },
@@ -127,6 +138,10 @@
       "then": { "properties": { "params": { "$ref": "#/$defs/sessionTargetParams" } } } },
     { "if": { "properties": { "method": { "const": "session.delete" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/sessionDeleteParams" } } } },
+    { "if": { "properties": { "method": { "enum": ["host.update.install", "skill.enable", "skill.disable"] } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/confirmedParams" } } } },
+    { "if": { "properties": { "method": { "enum": ["integration.install", "integration.uninstall"] } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/integrationChangeParams" } } } },
     { "if": { "properties": { "method": { "const": "task.start" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/taskStartParams" } } } },
     { "if": { "properties": { "method": { "const": "task.next" } } },

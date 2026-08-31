@@ -187,6 +187,9 @@ pub const METHODS: &[&str] = &[
 
 const READ_ONLY_METHODS: &[&str] = &[
     "host.capabilities",
+    "host.info",
+    "host.doctor",
+    "host.update.check",
     "uhp.capabilities",
     "uhp.stats",
     "uhp.token.list",
@@ -196,6 +199,8 @@ const READ_ONLY_METHODS: &[&str] = &[
     "session.snapshot",
     "session.list",
     "session.status",
+    "skill.status",
+    "integration.status",
     "events.subscribe",
     "events.wait",
     "wait.output",
@@ -267,12 +272,17 @@ pub fn required_scope(method: &str) -> &'static str {
     if matches!(
         method,
         "host.capabilities"
+            | "host.info"
+            | "host.doctor"
+            | "host.update.check"
             | "uhp.capabilities"
             | "uhp.stats"
             | "ping"
             | "session.snapshot"
             | "session.list"
             | "session.status"
+            | "skill.status"
+            | "integration.status"
             | "events.subscribe"
             | "events.wait"
             | "wait.output"
