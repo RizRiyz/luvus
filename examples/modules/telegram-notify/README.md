@@ -66,8 +66,16 @@ The success path needs real credentials, so it is run by hand:
    env -u LUVUS_SOCKET_PATH -u LUVUS_SESSION LUVUS_HOME="$HOME/.luvus-dev" luvus
    ```
 
-2. In that instance: `luvus module link ./examples/modules/telegram-notify`,
-   then enter the real bot token and chat id in Settings -> Modules.
+2. Link the module into that same isolated home. Keep the env prefix -- a
+   bare `luvus module link` reaches your selected server, which may be
+   production:
+
+   ```sh
+   env -u LUVUS_SOCKET_PATH -u LUVUS_SESSION LUVUS_HOME="$HOME/.luvus-dev" \
+       luvus module link ./examples/modules/telegram-notify
+   ```
+
+   Then enter the real bot token and chat id in Settings -> Modules.
 3. Start any agent in a pane and let it go `blocked` or `done` -- a Telegram
    message should arrive. Right-click the agent -> **Send a test message**
    for a second one, regardless of its current status.
