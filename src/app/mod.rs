@@ -1566,8 +1566,10 @@ pub struct App {
     /// Clickable targets in the open folder picker. Specific controls precede
     /// the modal body in hit-test order.
     pub picker_rects: Vec<(PickerHit, Rect)>,
-    /// Whether the keyboard-shortcut cheat-sheet overlay is open (`Ctrl+Space ?`).
+    /// Whether the keyboard-shortcut cheat-sheet overlay is open (`prefix + ?`).
     pub help_open: bool,
+    /// Vertical offset shared by the command and fixed-shortcut columns.
+    pub help_scroll: u16,
     /// Whether the changelog modal is open (click the status-line version number).
     /// Shows every shipped release's notes; captures input while open.
     pub changelog_open: bool,
@@ -2158,6 +2160,7 @@ impl App {
             picker: None,
             picker_rects: Vec::new(),
             help_open: false,
+            help_scroll: 0,
             changelog_open: false,
             changelog_scroll: 0,
             update_available: None,
@@ -2763,6 +2766,7 @@ impl App {
             picker: None,
             picker_rects: Vec::new(),
             help_open: false,
+            help_scroll: 0,
             changelog_open: false,
             changelog_scroll: 0,
             update_available: None,

@@ -1251,10 +1251,13 @@ impl App {
         if let MouseEventKind::Down(_) = m.kind {
             self.menu_scroll.press(m.column, m.row);
         }
-        // Any click dismisses the help overlay.
+        // The shortcut reference scrolls with the wheel; a click dismisses it.
         if self.help_open {
-            if let MouseEventKind::Down(MouseButton::Left) = m.kind {
-                self.help_open = false;
+            match m.kind {
+                MouseEventKind::ScrollUp => self.help_scroll = self.help_scroll.saturating_sub(2),
+                MouseEventKind::ScrollDown => self.help_scroll = self.help_scroll.saturating_add(2),
+                MouseEventKind::Down(MouseButton::Left) => self.help_open = false,
+                _ => {}
             }
             return;
         }
@@ -3223,9 +3226,25 @@ impl App {
             }
             return true;
         }
-        // The help cheat-sheet overlay swallows the next key press and closes.
+        // The help cheat-sheet is a complete, scrollable shortcut reference.
+        // Unknown keys still dismiss it and are swallowed, preserving the old
+        // safety property that closing help cannot act on the focused pane.
         if self.help_open {
-            self.help_open = false;
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.help_scroll = self.help_scroll.saturating_add(1)
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1)
+                }
+                KeyCode::PageDown | KeyCode::Char(' ') => {
+                    self.help_scroll = self.help_scroll.saturating_add(10)
+                }
+                KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(10),
+                KeyCode::Home => self.help_scroll = 0,
+                KeyCode::End => self.help_scroll = u16::MAX,
+                _ => self.help_open = false,
+            }
             return true;
         }
         // The changelog modal captures keys: scroll with the arrows / j/k / page
@@ -3431,6 +3450,7 @@ impl App {
                     }
                     if c == '?' {
                         self.help_open = true;
+                        self.help_scroll = 0;
                         return true;
                     }
                 }

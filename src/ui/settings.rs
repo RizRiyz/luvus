@@ -49,7 +49,7 @@ fn diff_color_label(value: crate::diff::DiffColorMode, app: &App) -> &'static st
     }
 }
 
-fn key_reference_label(section: usize, row: usize, app: &App) -> String {
+pub(super) fn key_reference_label(section: usize, row: usize, app: &App) -> String {
     let cat = app.catalog.settings;
     match (section, row) {
         (0, 5) => cat.key_prefix_twice.replace("{prefix}", cat.keys_prefix),
@@ -1754,6 +1754,46 @@ mod tests {
             let separator_x = pair[0].1.right();
             assert_eq!(pair[1].1.x.saturating_sub(separator_x), 3);
             assert_eq!(wide_buffer[(separator_x + 1, pair[0].1.y)].symbol(), "·");
+        }
+    }
+
+    #[test]
+    fn keys_settings_exposes_diff_and_files_bindings() {
+        use crate::app::{Cmd, SettingsTab, KEYS_HEADER_ROWS};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("settings-diff-files-keys");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(100, 30, tx).unwrap();
+        app.open_settings();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let screen = |terminal: &Terminal<TestBackend>| -> String {
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect()
+        };
+
+        for (cmd, label) in [
+            (Cmd::OpenDiff, "Focus diff review"),
+            (Cmd::ToggleFiles, "Files: focus"),
+        ] {
+            let index = Cmd::ALL
+                .iter()
+                .position(|candidate| *candidate == cmd)
+                .unwrap();
+            let settings = app.settings.as_mut().unwrap();
+            settings.tab = SettingsTab::Keys;
+            settings.cursor = KEYS_HEADER_ROWS + index;
+            terminal
+                .draw(|frame| crate::ui::render(frame, &mut app))
+                .unwrap();
+            let rendered = screen(&terminal);
+            assert!(rendered.contains(label), "{} is visible", cmd.id());
+            assert!(rendered.contains(app.key_for(cmd).as_str()));
         }
     }
 
