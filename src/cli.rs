@@ -273,10 +273,10 @@ orchestration (multiple agents on one project, docs/22):
   task list                  list all tasks + their status/assignee
   task get <id>              show one task
   task claim <id>            claim a task for this pane (deps must be done)
-  task next [--start] [--agent <cmd>]   claim the next ready task (--start spawns
-                             an isolated worker), for an agent loop draining the queue
-  task start <id> [--branch <b>] [--agent <cmd>]   spawn an isolated worker:
-                             a git worktree + pane, auto-claimed and path-leased
+  task next [--start] [--agent <cmd>] [--mode worktree|workspace]
+                             claim the next ready task (--start creates a worker)
+  task start <id> [--branch <b>] [--agent <cmd>] [--mode worktree|workspace]
+                             start a worker (worktree default; workspace shares checkout)
   task heartbeat <id> --context <0..1>   report context usage (blocks done at >85%)
   task update <id> [--status <s>] [--output <o>] [--note <n>]
   task done <id>             mark done + release its leases
@@ -3452,6 +3452,15 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             if let Some(a) = flag(args, "--agent") {
                 obj.insert("agent".into(), json!(a));
             }
+            if let Some(mode) = flag(args, "--mode") {
+                if !matches!(mode.as_str(), "worktree" | "workspace") {
+                    return Err(anyhow!("--mode must be worktree or workspace"));
+                }
+                obj.insert("mode".into(), json!(mode));
+            }
+            if let Some(workspace_id) = flag(args, "--workspace-id") {
+                obj.insert("workspace_id".into(), json!(workspace_id));
+            }
             let pv = pane();
             if !pv.is_null() {
                 obj.insert("pane".into(), pv);
@@ -3478,6 +3487,15 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             }
             if let Some(a) = flag(args, "--agent") {
                 obj.insert("agent".into(), json!(a));
+            }
+            if let Some(mode) = flag(args, "--mode") {
+                if !matches!(mode.as_str(), "worktree" | "workspace") {
+                    return Err(anyhow!("--mode must be worktree or workspace"));
+                }
+                obj.insert("mode".into(), json!(mode));
+            }
+            if let Some(workspace_id) = flag(args, "--workspace-id") {
+                obj.insert("workspace_id".into(), json!(workspace_id));
             }
             ("task.start".into(), Value::Object(obj))
         }
@@ -4432,9 +4450,22 @@ mod tests {
         assert_eq!(p.get("branch").and_then(|v| v.as_str()), Some("feat"));
         assert_eq!(p.get("agent").and_then(|v| v.as_str()), Some("claude"));
 
+        let (m, p) = parse(&argv(
+            "luvus task start t1 --mode workspace --workspace-id workspace-a --agent codex",
+        ))
+        .unwrap();
+        assert_eq!(m, "task.start");
+        assert_eq!(p.get("mode").and_then(|v| v.as_str()), Some("workspace"));
+        assert_eq!(
+            p.get("workspace_id").and_then(|v| v.as_str()),
+            Some("workspace-a")
+        );
+
         let (m, p) = parse(&argv("luvus task next --start --agent claude")).unwrap();
         assert_eq!(m, "task.next");
         assert_eq!(p.get("start").and_then(|v| v.as_bool()), Some(true));
+
+        assert!(parse(&argv("luvus task start t1 --mode unsafe")).is_err());
 
         let (m, p) = parse(&argv("luvus task heartbeat t1 --context 0.7")).unwrap();
         assert_eq!(m, "task.heartbeat");

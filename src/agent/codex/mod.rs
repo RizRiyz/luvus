@@ -8,6 +8,7 @@ pub(super) use sessions::{latest as codex_latest, list as codex_list, recent as 
 pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "codex",
     aliases: &[],
+    launch_command: "codex",
     identity: IdentityDescriptor {
         distinct: &["codex"],
         ambiguous: &[],

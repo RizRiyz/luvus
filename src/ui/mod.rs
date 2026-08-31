@@ -633,6 +633,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
             &app.orch,
             app.orch_scroll,
             app.orch_cursor,
+            app.orch_flow_mode,
             compact,
             app.hover,
             cat,

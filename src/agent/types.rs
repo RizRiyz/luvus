@@ -45,6 +45,8 @@ pub(crate) struct IntegrationOperations {
 pub(crate) struct AgentDescriptor {
     pub id: &'static str,
     pub aliases: &'static [&'static str],
+    /// Canonical executable used to start a fresh interactive session.
+    pub launch_command: &'static str,
     pub identity: IdentityDescriptor,
     pub sessions: Option<SessionOperations>,
     pub integration: Option<IntegrationOperations>,

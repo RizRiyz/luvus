@@ -89,6 +89,16 @@ Parameter shapes mirror the CLI flags (`luvus task add --paths x` →
 `$LUVUS_PANE_ID` when available; a raw API request with no pane uses the
 currently focused pane.
 
+`task.start` and `task.next` with `start: true` accept `mode: "worktree"` or
+`mode: "workspace"`; omitted mode means worktree. Workspace mode may include a
+stable `workspace_id` and creates a dedicated branchless task tab in that
+workspace. `branch` is valid only in worktree mode, and `task.merge` returns
+`merge_unavailable` for a workspace worker.
+
+```json
+{"id":"1","method":"task.start","params":{"id":"t3","mode":"workspace","workspace_id":"workspace_example","agent":"codex"}}
+```
+
 All families belong to the same
 [Universal Harness Protocol](/docs/reference/uhp/). Terminal methods do not
 inherit the focused pane. They require explicit runtime identity and stricter

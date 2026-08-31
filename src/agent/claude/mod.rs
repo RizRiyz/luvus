@@ -8,6 +8,7 @@ pub(super) use sessions::{latest as claude_latest, recent as claude_recent};
 pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "claude",
     aliases: &[],
+    launch_command: "claude",
     identity: IdentityDescriptor {
         distinct: &["claude"],
         ambiguous: &[],

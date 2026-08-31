@@ -13,6 +13,7 @@ pub(in crate::agent) mod sessions;
 pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "hermes",
     aliases: &["hermes-agent"],
+    launch_command: "hermes",
     identity: IdentityDescriptor {
         // `hermes` is an ordinary proper name, so trust it only in deliberate
         // command/title evidence. The launcher and Python module identities are

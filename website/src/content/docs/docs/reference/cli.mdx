@@ -214,10 +214,10 @@ orchestration (multiple agents on one project, docs/22):
   task list                  list all tasks + their status/assignee
   task get <id>              show one task
   task claim <id>            claim a task for this pane (deps must be done)
-  task next [--start] [--agent <cmd>]   claim the next ready task (--start spawns
-                             an isolated worker), for an agent loop draining the queue
-  task start <id> [--branch <b>] [--agent <cmd>]   spawn an isolated worker:
-                             a git worktree + pane, auto-claimed and path-leased
+  task next [--start] [--agent <cmd>] [--mode worktree|workspace]
+                             claim the next ready task (--start creates a worker)
+  task start <id> [--branch <b>] [--agent <cmd>] [--mode worktree|workspace]
+                             start a worker (worktree default; workspace shares checkout)
   task heartbeat <id> --context <0..1>   report context usage (blocks done at >85%)
   task update <id> [--status <s>] [--output <o>] [--note <n>]
   task done <id>             mark done + release its leases

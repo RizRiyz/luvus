@@ -66,6 +66,7 @@ pub(super) fn render(
     orch: &OrchState,
     scroll: usize,
     cursor: usize,
+    flow_mode: crate::orch::TaskWorkerMode,
     compact: bool,
     hover: Option<(u16, u16)>,
     cat: &Catalog,
@@ -176,10 +177,13 @@ pub(super) fn render(
             ("a", cat.act_new),
             ("s", cat.board_start),
             ("d", cat.task_done),
-            ("m", cat.act_merge),
-            ("⏎", cat.pane),
-            ("o", cat.board_details),
         ];
+        if orch.tasks.get(cursor).and_then(|task| task.worker_mode)
+            != Some(crate::orch::TaskWorkerMode::Workspace)
+        {
+            hints.push(("m", cat.act_merge));
+        }
+        hints.extend([("⏎", cat.pane), ("o", cat.board_details)]);
         hints.extend([
             ("x", cat.board_release),
             ("D", cat.act_delete),
@@ -244,7 +248,7 @@ pub(super) fn render(
             draw_leases(f, leases, orch, cat, t);
         }
         if let Some(flow) = detail {
-            draw_flow(f, flow, cat, t);
+            hits.extend(draw_flow(f, flow, flow_mode, cat, t));
         }
         return BoardRender { scroll: 0, hits };
     }
@@ -332,12 +336,14 @@ struct TaskColumns {
     status: usize,
     title: usize,
     deps: usize,
+    mode: usize,
     worker: usize,
 }
 
 impl TaskColumns {
     fn worker_col(self) -> Option<usize> {
-        (self.worker > 0).then(|| self.marker + self.id + self.status + self.title + self.deps)
+        (self.worker > 0)
+            .then(|| self.marker + self.id + self.status + self.title + self.deps + self.mode)
     }
 }
 
@@ -362,6 +368,7 @@ fn task_columns(width: usize, cat: &Catalog) -> TaskColumns {
     .unwrap_or(6);
     let status = (status_label_w + 3).clamp(9, 15);
     let deps = if width >= 92 { 12 } else { 0 };
+    let mode = if width >= 96 { 12 } else { 0 };
     let worker = if width >= 112 {
         34
     } else if width >= 78 {
@@ -371,7 +378,7 @@ fn task_columns(width: usize, cat: &Catalog) -> TaskColumns {
     } else {
         0
     };
-    let fixed = marker + id + status + deps + worker;
+    let fixed = marker + id + status + deps + mode + worker;
     let title = width.saturating_sub(fixed).max(4);
     TaskColumns {
         marker,
@@ -379,6 +386,7 @@ fn task_columns(width: usize, cat: &Catalog) -> TaskColumns {
         status,
         title,
         deps,
+        mode,
         worker,
     }
 }
@@ -405,6 +413,12 @@ fn draw_task_header(
     if columns.deps > 0 {
         spans.push(Span::styled(
             pad(&cat.board_f_deps.to_uppercase(), columns.deps),
+            Style::new().fg(t.overlay1).bold(),
+        ));
+    }
+    if columns.mode > 0 {
+        spans.push(Span::styled(
+            pad(&cat.board_run_in.to_uppercase(), columns.mode),
             Style::new().fg(t.overlay1).bold(),
         ));
     }
@@ -462,15 +476,290 @@ fn draw_empty(f: &mut RenderTarget, area: Rect, cat: &Catalog, t: &Theme) {
 /// empty. This uses only terminal text and existing localized catalog labels,
 /// stays out of narrow layouts, and disappears as soon as a selected task can
 /// use the column for real details.
-fn draw_flow(f: &mut RenderTarget, area: Rect, cat: &Catalog, t: &Theme) {
+fn draw_flow(
+    f: &mut RenderTarget,
+    area: Rect,
+    mode: crate::orch::TaskWorkerMode,
+    cat: &Catalog,
+    t: &Theme,
+) -> Vec<(crate::app::OrchHit, Rect)> {
     if area.height < 3 || area.width < 12 {
-        return;
+        return Vec::new();
     }
     let block = super::dashboard_block(cat.sec_flow.to_uppercase(), t, false);
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height == 0 {
-        return;
+        return Vec::new();
+    }
+
+    let worktree_label = cat.board_worktree.to_uppercase();
+    let workspace_label = cat.board_workspace.to_uppercase();
+    let worktree_w = (super::display_width(&worktree_label) + 2) as u16;
+    let workspace_w = (super::display_width(&workspace_label) + 2) as u16;
+    let worktree_rect = Rect::new(inner.x, inner.y, worktree_w.min(inner.width), 1);
+    let workspace_rect = Rect::new(
+        worktree_rect.right().saturating_add(1),
+        inner.y,
+        workspace_w.min(inner.right().saturating_sub(worktree_rect.right() + 1)),
+        1,
+    );
+    let mode_tab = |label: String, selected: bool| {
+        Span::styled(
+            format!(" {label} "),
+            if selected {
+                Style::new().fg(t.base).bg(t.accent).bold()
+            } else {
+                Style::new().fg(t.subtext0)
+            },
+        )
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            mode_tab(
+                worktree_label,
+                mode == crate::orch::TaskWorkerMode::Worktree,
+            ),
+            Span::raw(" "),
+            mode_tab(
+                workspace_label,
+                mode == crate::orch::TaskWorkerMode::Workspace,
+            ),
+        ])),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    let hits = vec![
+        (
+            crate::app::OrchHit::FlowMode(crate::orch::TaskWorkerMode::Worktree),
+            worktree_rect,
+        ),
+        (
+            crate::app::OrchHit::FlowMode(crate::orch::TaskWorkerMode::Workspace),
+            workspace_rect,
+        ),
+    ];
+    let inner = Rect::new(
+        inner.x,
+        inner.y.saturating_add(1),
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
+    if mode == crate::orch::TaskWorkerMode::Workspace {
+        let border = Style::new().fg(t.overlay0);
+        let connector = Style::new().fg(t.overlay1);
+        let accent = Style::new().fg(t.accent).bold();
+        let text = Style::new().fg(t.text).bold();
+        let muted = Style::new().fg(t.subtext0);
+        let width = inner.width as usize;
+        let mut lines = if width >= 41 && inner.height >= 23 {
+            const GRAPH_W: usize = 41;
+            const NODE_W: usize = 19;
+            const NODE_INNER: usize = NODE_W - 2;
+            const NODE_X: usize = (GRAPH_W - NODE_W) / 2;
+            const LANE_W: usize = 17;
+            const LANE_INNER: usize = LANE_W - 2;
+            const LANE_X: usize = 1;
+            const LANE_GAP: usize = 5;
+            const AXIS: usize = GRAPH_W / 2;
+            const LEFT_AXIS: usize = LANE_X + LANE_W / 2;
+            const RIGHT_AXIS: usize = LANE_X + LANE_W + LANE_GAP + LANE_W / 2;
+
+            let offset = width.saturating_sub(GRAPH_W) / 2;
+            let prefix = |x: usize| Span::raw(" ".repeat(offset + x));
+            let node_border = |top: bool| {
+                let (left, right) = if top { ('┌', '┐') } else { ('└', '┘') };
+                Line::from(vec![
+                    prefix(NODE_X),
+                    Span::styled(format!("{left}{}{right}", "─".repeat(NODE_INNER)), border),
+                ])
+            };
+            let node_body = |label: &str, style: Style| {
+                Line::from(vec![
+                    prefix(NODE_X),
+                    Span::styled("│", border),
+                    Span::styled(center_fit(&label.to_uppercase(), NODE_INNER), style),
+                    Span::styled("│", border),
+                ])
+            };
+            let lanes_border = |top: bool| {
+                let (left, right) = if top { ('┌', '┐') } else { ('└', '┘') };
+                let one = format!("{left}{}{right}", "─".repeat(LANE_INNER));
+                Line::from(vec![
+                    prefix(LANE_X),
+                    Span::styled(one.clone(), border),
+                    Span::raw(" ".repeat(LANE_GAP)),
+                    Span::styled(one, border),
+                ])
+            };
+            let lanes_body = |left: &str, right: &str, style: Style| {
+                Line::from(vec![
+                    prefix(LANE_X),
+                    Span::styled("│", border),
+                    Span::styled(center_fit(&left.to_uppercase(), LANE_INNER), style),
+                    Span::styled("│", border),
+                    Span::raw(" ".repeat(LANE_GAP)),
+                    Span::styled("│", border),
+                    Span::styled(center_fit(&right.to_uppercase(), LANE_INNER), style),
+                    Span::styled("│", border),
+                ])
+            };
+            let axis = |symbol: &'static str, label: String, style: Style| {
+                Line::from(vec![
+                    prefix(AXIS),
+                    Span::styled(symbol, accent),
+                    Span::styled(format!("  {label}"), style),
+                ])
+            };
+            let lease_label = format!("  {}", cat.board_lease);
+            let lease_gap =
+                RIGHT_AXIS.saturating_sub(LEFT_AXIS + 1 + super::display_width(&lease_label));
+            let fail_label = format!("↺ {}  ", cat.task_failed);
+            let fail_x = NODE_X.saturating_sub(super::display_width(&fail_label));
+
+            vec![
+                node_border(true),
+                node_body(cat.board_task_queue, text),
+                node_body("t1   t2   t3", muted),
+                node_border(false),
+                axis("│", cat.act_ready.to_string(), connector),
+                Line::from(vec![
+                    prefix(LEFT_AXIS),
+                    Span::styled(
+                        format!(
+                            "┌{}┴{}┐",
+                            "─".repeat(AXIS - LEFT_AXIS - 1),
+                            "─".repeat(RIGHT_AXIS - AXIS - 1)
+                        ),
+                        border,
+                    ),
+                ]),
+                Line::from(vec![
+                    prefix(LEFT_AXIS),
+                    Span::styled("▼", accent),
+                    Span::raw(" ".repeat(RIGHT_AXIS - LEFT_AXIS - 1)),
+                    Span::styled("▼", accent),
+                ]),
+                lanes_border(true),
+                lanes_body(
+                    &format!("{} A", cat.board_agent),
+                    &format!("{} B", cat.board_agent),
+                    text,
+                ),
+                lanes_body(
+                    &format!("{} A", cat.act_tab),
+                    &format!("{} B", cat.act_tab),
+                    muted,
+                ),
+                lanes_border(false),
+                Line::from(vec![
+                    prefix(LEFT_AXIS),
+                    Span::styled("│", border),
+                    Span::styled(lease_label.clone(), connector),
+                    Span::raw(" ".repeat(lease_gap)),
+                    Span::styled("│", border),
+                    Span::styled(lease_label, connector),
+                ]),
+                Line::from(vec![
+                    prefix(LEFT_AXIS),
+                    Span::styled(
+                        format!(
+                            "└{}┬{}┘",
+                            "─".repeat(AXIS - LEFT_AXIS - 1),
+                            "─".repeat(RIGHT_AXIS - AXIS - 1)
+                        ),
+                        border,
+                    ),
+                ]),
+                node_border(true),
+                node_body(cat.board_shared_checkout, Style::new().fg(t.amber).bold()),
+                node_border(false),
+                axis("│", String::new(), connector),
+                node_border(true),
+                Line::from(vec![
+                    prefix(fail_x),
+                    Span::styled(fail_label, Style::new().fg(t.coral)),
+                    Span::styled("│", border),
+                    Span::styled(
+                        center_fit(&cat.board_quality_gate.to_uppercase(), NODE_INNER),
+                        text,
+                    ),
+                    Span::styled("│", border),
+                ]),
+                node_border(false),
+                axis("│", cat.board_pass.to_string(), connector),
+                axis("▼", String::new(), connector),
+                Line::from(vec![
+                    prefix(AXIS.saturating_sub(1)),
+                    Span::styled("◆ ", Style::new().fg(t.green).bold()),
+                    Span::styled(
+                        cat.task_done.to_uppercase(),
+                        Style::new().fg(t.green).bold(),
+                    ),
+                ]),
+            ]
+        } else {
+            let tree_w = 31.min(width);
+            let offset = width.saturating_sub(tree_w) / 2;
+            let prefix = |depth: usize| Span::raw(" ".repeat(offset + depth));
+            vec![
+                Line::from(vec![
+                    prefix(0),
+                    Span::styled("┌─ ", border),
+                    Span::styled(cat.board_task_queue.to_uppercase(), text),
+                ]),
+                Line::from(vec![
+                    prefix(0),
+                    Span::styled("├────▶ ", border),
+                    Span::styled(format!("{} A", cat.board_agent), accent),
+                ]),
+                Line::from(vec![
+                    prefix(7),
+                    Span::styled("└─ ", border),
+                    Span::styled(format!("{} A · {}", cat.act_tab, cat.board_lease), muted),
+                ]),
+                Line::from(vec![
+                    prefix(0),
+                    Span::styled("└────▶ ", border),
+                    Span::styled(format!("{} B", cat.board_agent), accent),
+                ]),
+                Line::from(vec![
+                    prefix(7),
+                    Span::styled("└─ ", border),
+                    Span::styled(format!("{} B · {}", cat.act_tab, cat.board_lease), muted),
+                ]),
+                Line::from(vec![
+                    prefix(10),
+                    Span::styled("└─ ", border),
+                    Span::styled(
+                        cat.board_shared_checkout.to_uppercase(),
+                        Style::new().fg(t.amber).bold(),
+                    ),
+                ]),
+                Line::from(vec![
+                    prefix(13),
+                    Span::styled("└─ ", border),
+                    Span::styled(cat.board_quality_gate.to_uppercase(), text),
+                    Span::styled(format!("  ↺ {}", cat.task_failed), Style::new().fg(t.coral)),
+                ]),
+                Line::from(vec![
+                    prefix(16),
+                    Span::styled("└─ ◆ ", border),
+                    Span::styled(
+                        cat.task_done.to_uppercase(),
+                        Style::new().fg(t.green).bold(),
+                    ),
+                ]),
+            ]
+        };
+        lines.truncate(inner.height as usize);
+        let content = Rect::new(
+            inner.x,
+            inner.y + inner.height.saturating_sub(lines.len() as u16) / 2,
+            inner.width,
+            lines.len() as u16,
+        );
+        f.render_widget(Paragraph::new(lines), content);
+        return hits;
     }
 
     let border = Style::new().fg(t.overlay0);
@@ -484,7 +773,7 @@ fn draw_flow(f: &mut RenderTarget, area: Rect, cat: &Catalog, t: &Theme) {
     // every branch and join aligned while localized labels are fitted inside
     // the boxes. Smaller detail columns get the same branching model in a
     // compact tree rather than falling back to a linear checklist.
-    let mut lines = if width >= 41 && inner.height >= 24 {
+    let mut lines = if width >= 41 && inner.height >= 23 {
         const GRAPH_W: usize = 41;
         const NODE_W: usize = 19;
         const NODE_INNER: usize = NODE_W - 2;
@@ -603,7 +892,6 @@ fn draw_flow(f: &mut RenderTarget, area: Rect, cat: &Catalog, t: &Theme) {
                     border,
                 ),
             ]),
-            axis("▼", String::new(), connector),
             node_border(true),
             Line::from(vec![
                 prefix(fail_x),
@@ -685,6 +973,7 @@ fn draw_flow(f: &mut RenderTarget, area: Rect, cat: &Catalog, t: &Theme) {
         lines.len() as u16,
     );
     f.render_widget(Paragraph::new(lines), content);
+    hits
 }
 
 fn center_fit(value: &str, width: usize) -> String {
@@ -976,6 +1265,21 @@ fn task_line<'a>(
             Style::new().fg(t.overlay1),
         ));
     }
+    if columns.mode > 0 {
+        let mode = match task.worker_mode.or_else(|| {
+            task.worktree
+                .as_ref()
+                .map(|_| crate::orch::TaskWorkerMode::Worktree)
+        }) {
+            Some(crate::orch::TaskWorkerMode::Worktree) => cat.board_worktree,
+            Some(crate::orch::TaskWorkerMode::Workspace) => cat.board_workspace,
+            None => "",
+        };
+        spans.push(Span::styled(
+            pad(mode, columns.mode),
+            Style::new().fg(t.subtext0),
+        ));
+    }
     if columns.worker > 0 {
         spans.extend(worker_spans(task, columns.worker, cat, t));
     }
@@ -1003,7 +1307,7 @@ fn worker_spans<'a>(task: &'a Task, width: usize, cat: &Catalog, t: &Theme) -> V
             candidates.push(vec![pane]);
             fit_worker_parts(candidates, width, t)
         }
-        None if task.worktree.is_some() => {
+        None if task.worktree.is_some() || task.workspace_worker.is_some() => {
             let no_pane = (cat.board_no_pane.to_string(), t.overlay1);
             let branch = task
                 .branch
@@ -1055,8 +1359,8 @@ fn worker_parts_width(parts: &[(String, Color)]) -> usize {
         + parts.len().saturating_sub(1) * 3
 }
 
-/// The **start-worker picker** (board `s`): choose which agent to launch in the
-/// task's isolated worktree. `⏎` starts, `esc` cancels.
+/// The two-step **start-worker picker** (board `s`): choose worktree/workspace,
+/// then the agent. `⏎` confirms the current step; `esc` cancels.
 pub(super) fn draw_start(
     f: &mut RenderTarget,
     area: Rect,
@@ -1064,10 +1368,16 @@ pub(super) fn draw_start(
     cat: &Catalog,
     t: &Theme,
 ) -> Vec<(crate::app::OrchHit, Rect)> {
-    let mut hits = Vec::with_capacity(crate::app::agent_choices().len() + 2);
+    let mut hits = Vec::with_capacity(crate::app::agent_choices().len() + 4);
     dim_backdrop(f, area, t);
     let choices = crate::app::agent_choices();
-    let h = (choices.len() as u16) + 4;
+    let mode_step = start.step == crate::app::OrchStartStep::Mode;
+    let requested_h = if mode_step {
+        8
+    } else {
+        (choices.len() as u16) + 4
+    };
+    let h = requested_h.min(area.height.saturating_sub(2).max(4));
     let modal = centered_rect(area, 44.min(area.width), h);
     f.render_widget(Clear, modal);
     let block = Block::new()
@@ -1079,43 +1389,124 @@ pub(super) fn draw_start(
 
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!(" {} — {}", cat.board_start_with, start.task),
+            if mode_step {
+                format!(" {} — {}  1/2", cat.board_start_with, start.task)
+            } else {
+                format!(
+                    " {} — {}  2/2 · {}/{}",
+                    cat.board_start_with,
+                    start.task,
+                    start.cursor + 1,
+                    choices.len()
+                )
+            },
             Style::new().fg(t.text).bold(),
         )),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
-    for (i, (label, cmd)) in choices.iter().enumerate() {
-        let selected = i == start.cursor;
-        let name = if cmd.is_some() {
-            (*label).to_string()
-        } else {
-            cat.board_shell_only.to_string()
-        };
-        let style = if selected {
-            Style::new().fg(t.text).bg(t.surface1).bold()
-        } else {
-            Style::new().fg(t.subtext0)
-        };
-        let rect = Rect::new(inner.x, inner.y + 1 + i as u16, inner.width, 1);
-        if selected {
-            fill_bg(f, rect, t.surface1);
-        }
+    if mode_step {
         f.render_widget(
             Paragraph::new(Span::styled(
-                format!("  {} {}", if selected { "▸" } else { " " }, name),
-                style,
+                format!(" {}", cat.board_run_in.to_uppercase()),
+                Style::new().fg(t.overlay1).bold(),
             )),
-            rect,
+            Rect::new(inner.x, inner.y + 1, inner.width, 1),
         );
-        hits.push((crate::app::OrchHit::StartChoice(i), rect));
+        for (i, (mode, label)) in [
+            (crate::orch::TaskWorkerMode::Worktree, cat.board_worktree),
+            (crate::orch::TaskWorkerMode::Workspace, cat.board_workspace),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let selected = mode == start.mode;
+            let rect = Rect::new(inner.x, inner.y + 2 + i as u16, inner.width, 1);
+            if selected {
+                fill_bg(f, rect, t.surface1);
+            }
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("  {} {}", if selected { "▸" } else { " " }, label),
+                    if selected {
+                        Style::new().fg(t.text).bg(t.surface1).bold()
+                    } else {
+                        Style::new().fg(t.subtext0)
+                    },
+                )),
+                rect,
+            );
+            hits.push((crate::app::OrchHit::StartMode(mode), rect));
+        }
+        if start.mode == crate::orch::TaskWorkerMode::Workspace {
+            let warning = if start.shared_workers == 0 {
+                cat.board_shared_checkout.to_string()
+            } else {
+                format!(
+                    "{} · {} {}",
+                    cat.board_shared_checkout, start.shared_workers, cat.active
+                )
+            };
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("  {warning}"),
+                    Style::new().fg(t.amber),
+                )),
+                Rect::new(inner.x, inner.y + 4, inner.width, 1),
+            );
+        }
+        f.render_widget(
+            Paragraph::new(super::hint_line(
+                &[("⏎", cat.act_select), ("esc", cat.act_cancel)],
+                t,
+            )),
+            Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+        );
+    } else {
+        let visible_rows = inner.height.saturating_sub(2) as usize;
+        let first = start.cursor.saturating_add(1).saturating_sub(visible_rows);
+        for (visible, (i, (label, cmd))) in choices
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(visible_rows)
+            .enumerate()
+        {
+            let selected = i == start.cursor;
+            let name = if cmd.is_some() {
+                (*label).to_string()
+            } else {
+                cat.board_shell_only.to_string()
+            };
+            let style = if selected {
+                Style::new().fg(t.text).bg(t.surface1).bold()
+            } else {
+                Style::new().fg(t.subtext0)
+            };
+            let rect = Rect::new(inner.x, inner.y + 1 + visible as u16, inner.width, 1);
+            if selected {
+                fill_bg(f, rect, t.surface1);
+            }
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("  {} {}", if selected { "▸" } else { " " }, name),
+                    style,
+                )),
+                rect,
+            );
+            hits.push((crate::app::OrchHit::StartChoice(i), rect));
+        }
+        f.render_widget(
+            Paragraph::new(super::hint_line(
+                &[
+                    ("⏎", cat.board_start),
+                    ("⌫", cat.act_back),
+                    ("esc", cat.act_cancel),
+                ],
+                t,
+            )),
+            Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+        );
     }
-    f.render_widget(
-        Paragraph::new(super::hint_line(
-            &[("⏎", cat.board_start), ("esc", cat.act_cancel)],
-            t,
-        )),
-        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
-    );
     let bottom = inner.bottom().saturating_sub(1);
     let left_w = inner.width / 2;
     hits.push((
@@ -1192,11 +1583,33 @@ pub(super) fn draw_detail(
             ]));
         }
     };
+    match task.worker_mode.or_else(|| {
+        task.worktree
+            .as_ref()
+            .map(|_| crate::orch::TaskWorkerMode::Worktree)
+    }) {
+        Some(crate::orch::TaskWorkerMode::Worktree) => {
+            kv("mode", cat.board_worktree.to_string(), &mut lines)
+        }
+        Some(crate::orch::TaskWorkerMode::Workspace) => {
+            kv("mode", cat.board_workspace.to_string(), &mut lines);
+            kv(
+                "isolation",
+                cat.board_shared_checkout.to_string(),
+                &mut lines,
+            );
+        }
+        None => {}
+    }
     if let Some(b) = &task.branch {
         kv("branch", b.clone(), &mut lines);
     }
     if let Some(wt) = &task.worktree {
         kv("worktree", wt.clone(), &mut lines);
+    }
+    if let Some(binding) = &task.workspace_worker {
+        kv("workspace", binding.workspace_id.clone(), &mut lines);
+        kv("directory", binding.root.clone(), &mut lines);
     }
     kv(
         "pane",

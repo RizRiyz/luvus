@@ -8,3 +8,4 @@
 {"id":"1","method":"events.subscribe","params":{"after_sequence":-1}}
 {"id":"unicode-é","method":"uhp.capabilities","params":{}}
 {"id":"unicode-auth","method":"uhp.capabilities","auth":"luv_tok_é","params":{}}
+{"id":"bad-task-mode","method":"task.start","params":{"id":"t1","mode":"workspace","branch":"feat/t1"}}

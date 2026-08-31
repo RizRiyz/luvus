@@ -8,6 +8,7 @@ pub(super) use sessions::{latest as opencode_latest, recent as opencode_recent};
 pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "opencode",
     aliases: &[],
+    launch_command: "opencode",
     identity: IdentityDescriptor {
         distinct: &["opencode"],
         ambiguous: &[],

@@ -3,6 +3,7 @@ use super::types::{AgentDescriptor, IdentityDescriptor, SessionOperations};
 pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "cursor",
     aliases: &["cursor-agent"],
+    launch_command: "cursor-agent",
     identity: IdentityDescriptor {
         distinct: &["cursor-agent"],
         ambiguous: &["cursor"],

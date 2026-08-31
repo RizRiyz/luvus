@@ -972,12 +972,21 @@ pub struct MouseGrab {
 }
 
 /// The board's **start-worker picker**: choose which agent to launch in the
-/// task's isolated worktree (or a plain shell). Opened by `s` on the board.
+/// selected execution mode (or a plain shell). Opened by `s` on the board.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OrchStartStep {
+    Mode,
+    Agent,
+}
+
 pub struct OrchStart {
     /// The task a worker is being started for.
     pub task: String,
     /// Selected row in [`crate::app::board::agent_choices`].
     pub cursor: usize,
+    pub step: OrchStartStep,
+    pub mode: crate::orch::TaskWorkerMode,
+    pub shared_workers: usize,
 }
 
 /// A clickable control rendered by the orchestration board or one of its
@@ -995,6 +1004,8 @@ pub enum OrchHit {
     /// targets so clicks inside the modal are consumed without dismissing it.
     FormModal,
     StartChoice(usize),
+    StartMode(crate::orch::TaskWorkerMode),
+    FlowMode(crate::orch::TaskWorkerMode),
     StartCommit,
     StartCancel,
     DetailClose,
@@ -1620,6 +1631,8 @@ pub struct App {
     pub orch: crate::orch::OrchState,
     /// Scroll offset of the orchestration board tab (docs/22, ORCH-7).
     pub orch_scroll: usize,
+    /// Informational lifecycle selected in the empty-board Flow panel.
+    pub orch_flow_mode: crate::orch::TaskWorkerMode,
     /// Selected task row on the board (for keyboard/mouse actions).
     pub orch_cursor: usize,
     /// The in-TUI new-task form, when open (ORCH-7).
@@ -2161,6 +2174,7 @@ impl App {
             events: api::new_bus(),
             orch: crate::orch::OrchState::load(),
             orch_scroll: 0,
+            orch_flow_mode: crate::orch::TaskWorkerMode::Worktree,
             orch_cursor: 0,
             orch_form: None,
             orch_start: None,
@@ -2759,6 +2773,7 @@ impl App {
             events: api::new_bus(),
             orch: crate::orch::OrchState::load(),
             orch_scroll: 0,
+            orch_flow_mode: crate::orch::TaskWorkerMode::Worktree,
             orch_cursor: 0,
             orch_form: None,
             orch_start: None,
@@ -5607,11 +5622,13 @@ impl App {
         );
     }
 
-    fn close_pane(&mut self, id: PaneId) {
-        self.drop_leaf_runtime(id);
+    /// Release the application-level ownership attached to a pane that is
+    /// being closed. Tab and workspace closes remove several leaves at once,
+    /// so this must remain separate from layout mutation.
+    fn release_leaf_ownership(&mut self, id: PaneId) {
         // Drop any live alias for the dead pane so a name never resolves to a
         // reallocated pane id (agent_names is ephemeral by design).
-        self.agent_names.retain(|_, p| *p != id);
+        self.agent_names.retain(|_, pane| *pane != id);
         // Drop an agent pin for the dead pane (per-session, id-keyed).
         self.pinned_agents.remove(&id);
         // Auto-release any orchestration leases the dead pane held (ORCH-2), so a
@@ -5624,10 +5641,14 @@ impl App {
                 serde_json::json!({ "pane": id.0.to_string(), "leases": released }),
             );
         }
-        // Unbind any task claimed by the dead pane so the board stays truthful:
-        // worktree-backed work stays Running (the branch persists — `s` reopens
-        // it), a pure claim with no worktree goes back to the queue.
+        // Durable worktree/workspace bindings remain available to reopen, but
+        // the task must stop pointing at a pane that no longer exists.
         self.orch_unbind_pane(id.0);
+    }
+
+    fn close_pane(&mut self, id: PaneId) {
+        self.drop_leaf_runtime(id);
+        self.release_leaf_ownership(id);
         self.session_dirty = true;
         if self.layout_mut().remove(id) {
             self.close_active_tab();
@@ -5730,6 +5751,7 @@ impl App {
             .collect();
         for id in ids {
             self.drop_leaf_runtime(id);
+            self.release_leaf_ownership(id);
         }
         self.clear_workspace_transients(&closed_workspace_id);
         self.workspaces.remove(index);
@@ -5775,6 +5797,7 @@ impl App {
         };
         for id in ids {
             self.drop_leaf_runtime(id);
+            self.release_leaf_ownership(id);
         }
         let ws = &mut self.workspaces[self.active_ws];
         ws.tabs.remove(index);

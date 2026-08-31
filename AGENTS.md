@@ -213,7 +213,9 @@ For a built-in adapter:
 
 1. Create `src/agent/<agent>/mod.rs` and assemble one immutable
    `AgentDescriptor`. Keep the canonical `id` lowercase and stable; aliases
-   normalize user input but do not create additional agents.
+   normalize user input but do not create additional agents. Set
+   `launch_command` to the exact executable for a fresh interactive session;
+   do not put flags or shell syntax in this field.
 2. Declare identity evidence accurately. Put unmistakable executable names in
    `distinct`, ordinary words in `ambiguous`, versioned executable logic in a
    narrow `binary_matcher`, and exact interpreter package names—including npm

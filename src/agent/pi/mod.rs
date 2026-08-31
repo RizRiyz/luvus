@@ -7,6 +7,7 @@ pub(super) use sessions::{latest as pi_latest, recent as pi_recent};
 pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "pi",
     aliases: &[],
+    launch_command: "pi",
     identity: IdentityDescriptor {
         distinct: &["pi-coding-agent"],
         ambiguous: &["pi"],

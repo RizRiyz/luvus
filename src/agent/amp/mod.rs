@@ -3,6 +3,7 @@ use super::types::{AgentDescriptor, IdentityDescriptor};
 pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "amp",
     aliases: &[],
+    launch_command: "amp",
     identity: IdentityDescriptor {
         distinct: &[],
         ambiguous: &["amp"],

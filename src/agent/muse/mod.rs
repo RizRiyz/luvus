@@ -20,6 +20,7 @@ pub const AMBIGUOUS_IDENTITIES: &[&str] = &["muse"];
 pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: NAME,
     aliases: &[],
+    launch_command: "muse",
     identity: IdentityDescriptor {
         distinct: DISTINCT_IDENTITIES,
         ambiguous: AMBIGUOUS_IDENTITIES,

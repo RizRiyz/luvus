@@ -8,6 +8,7 @@ pub(super) use sessions::{latest as grok_latest, percent_decode, recent as grok_
 pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "grok",
     aliases: &[],
+    launch_command: "grok",
     identity: IdentityDescriptor {
         distinct: &[],
         ambiguous: &["grok"],

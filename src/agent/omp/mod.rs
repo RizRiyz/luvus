@@ -22,6 +22,7 @@ pub(crate) const AMBIGUOUS_IDENTITIES: &[&str] = &["omp"];
 pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: NAME,
     aliases: &[],
+    launch_command: "omp",
     identity: IdentityDescriptor {
         distinct: DISTINCT_IDENTITIES,
         ambiguous: AMBIGUOUS_IDENTITIES,

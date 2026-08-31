@@ -2374,6 +2374,9 @@ mod tests {
         app.orch_start = Some(crate::app::OrchStart {
             task: "t1".into(),
             cursor: 0,
+            step: crate::app::OrchStartStep::Agent,
+            mode: crate::orch::TaskWorkerMode::Worktree,
+            shared_workers: 0,
         });
         let text = render_lines(&mut app).join("\n");
         assert!(text.contains("claude"), "picker lists agents");

@@ -383,6 +383,39 @@ mod socket_api_tests {
     }
 
     #[test]
+    fn task_start_api_supports_explicit_workspace_mode() {
+        let (_env, mut app) = app("socket-task-workspace");
+        let workspace_id = app.workspaces[0].id.clone();
+        let workspaces_before = app.workspaces.len();
+        let tabs_before = app.workspaces[0].tabs.len();
+        app.orch
+            .add_task("shared".into(), vec![], vec![], None)
+            .unwrap();
+
+        let result = app
+            .dispatch(
+                "task.start",
+                &json!({
+                    "id":"t1",
+                    "mode":"workspace",
+                    "workspace_id":workspace_id
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(result["mode"], "workspace");
+        assert_eq!(result["workspace_id"], workspace_id);
+        assert!(result["worktree"].is_null());
+        assert!(result["branch"].is_null());
+        assert_eq!(app.workspaces.len(), workspaces_before);
+        assert_eq!(app.workspaces[0].tabs.len(), tabs_before + 1);
+        assert_eq!(
+            app.orch.task("t1").unwrap().worker_mode,
+            Some(crate::orch::TaskWorkerMode::Workspace)
+        );
+    }
+
+    #[test]
     fn socket_mutations_support_optimistic_revision_guards() {
         let (_env, mut app) = app("socket-revision-guard");
         let (reply, _) = std::sync::mpsc::channel();
@@ -3834,16 +3867,27 @@ impl App {
                 Ok(json!({ "type": "task", "task": task_json(&task) }))
             }
             "task.start" => {
-                // ORCH-3: spawn an isolated worker (worktree + pane) for the task.
                 let id = req_str(p, "id")?.to_string();
-                let (pane, path) =
-                    self.task_start(&id, opt_str(p, "branch"), opt_str(p, "agent"))?;
+                let mode =
+                    task_worker_mode(p, self.orch.task(&id).and_then(|task| task.worker_mode))?;
+                let started = self.task_start(
+                    &id,
+                    opt_str(p, "branch"),
+                    opt_str(p, "agent"),
+                    mode,
+                    opt_str(p, "workspace_id"),
+                )?;
                 let task = self.orch.task(&id).map(task_json).unwrap_or(Value::Null);
                 Ok(json!({
                     "type": "task",
                     "task": task,
-                    "pane": pane.0.to_string(),
-                    "worktree": path.display().to_string(),
+                    "pane": started.pane.0.to_string(),
+                    "mode": started.mode.as_str(),
+                    "workspace_id": started.workspace_id,
+                    "tab_id": started.tab_id,
+                    "cwd": started.cwd.display().to_string(),
+                    "worktree": started.worktree,
+                    "branch": started.branch,
                 }))
             }
             "task.update" => {
@@ -3910,18 +3954,33 @@ impl App {
                 ))
             }
             "task.next" => {
-                // ORCH-4 scheduler: hand out the next ready task. `--start` spawns
-                // an isolated worker (ORCH-3); otherwise claim it for this pane.
+                // ORCH-4 scheduler: hand out the next ready task. `--start`
+                // spawns the requested worker mode; otherwise claim it here.
                 match self.orch.next_ready() {
                     None => Ok(json!({ "type": "none", "message": "no ready tasks" })),
                     Some(id) => {
                         if p.get("start").and_then(|v| v.as_bool()).unwrap_or(false) {
-                            let (pane, path) = self.task_start(&id, None, opt_str(p, "agent"))?;
+                            let mode = task_worker_mode(
+                                p,
+                                self.orch.task(&id).and_then(|task| task.worker_mode),
+                            )?;
+                            let started = self.task_start(
+                                &id,
+                                None,
+                                opt_str(p, "agent"),
+                                mode,
+                                opt_str(p, "workspace_id"),
+                            )?;
                             let task = self.orch.task(&id).map(task_json).unwrap_or(Value::Null);
                             Ok(json!({
                                 "type": "task", "task": task,
-                                "pane": pane.0.to_string(),
-                                "worktree": path.display().to_string(),
+                                "pane": started.pane.0.to_string(),
+                                "mode": started.mode.as_str(),
+                                "workspace_id": started.workspace_id,
+                                "tab_id": started.tab_id,
+                                "cwd": started.cwd.display().to_string(),
+                                "worktree": started.worktree,
+                                "branch": started.branch,
                             }))
                         } else {
                             let pane = self.orch_pane(p)?;
@@ -5566,6 +5625,25 @@ fn str_array(p: &Value, key: &str) -> Vec<String> {
 /// An orchestration `Reject` → the API `(code, message)` error shape.
 fn orch_err(r: crate::orch::Reject) -> (String, String) {
     (r.code.to_string(), r.message)
+}
+
+fn task_worker_mode(
+    p: &Value,
+    existing: Option<crate::orch::TaskWorkerMode>,
+) -> Result<crate::orch::TaskWorkerMode, (String, String)> {
+    match p.get("mode") {
+        None => Ok(existing.unwrap_or(crate::orch::TaskWorkerMode::Worktree)),
+        Some(Value::String(mode)) => crate::orch::TaskWorkerMode::parse(mode).ok_or_else(|| {
+            (
+                "bad_request".to_string(),
+                "mode must be worktree or workspace".to_string(),
+            )
+        }),
+        Some(_) => Err((
+            "bad_request".to_string(),
+            "mode must be worktree or workspace".to_string(),
+        )),
+    }
 }
 
 /// A `Task` as a JSON value for API results + bus events.

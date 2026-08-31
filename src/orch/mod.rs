@@ -16,6 +16,41 @@ use serde::{Deserialize, Serialize};
 /// Human-friendly, CLI-typeable task id (`t1`, `t2`, …).
 pub type TaskId = String;
 
+/// Where an orchestration worker owns its working files. Worktree remains the
+/// default; workspace mode is an explicit shared-checkout choice.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskWorkerMode {
+    Worktree,
+    Workspace,
+}
+
+impl TaskWorkerMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskWorkerMode::Worktree => "worktree",
+            TaskWorkerMode::Workspace => "workspace",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "worktree" => Some(TaskWorkerMode::Worktree),
+            "workspace" => Some(TaskWorkerMode::Workspace),
+            _ => None,
+        }
+    }
+}
+
+/// Stable location of a branchless worker tab inside an existing workspace.
+/// Pane ids are deliberately absent because they are reallocated on restore.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct WorkspaceWorkerBinding {
+    pub workspace_id: String,
+    pub tab_id: String,
+    pub root: String,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
@@ -81,6 +116,18 @@ pub struct Task {
     /// Branch the worker's worktree is on (ORCH-3), for the eventual merge gate.
     #[serde(default)]
     pub branch: Option<String>,
+    /// Explicit worker execution mode. Legacy worktree records are normalized
+    /// on load; an unstarted/manual-claim task keeps this as `None`.
+    #[serde(
+        default,
+        rename = "mode",
+        alias = "worker_mode",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub worker_mode: Option<TaskWorkerMode>,
+    /// Durable identity for a worker that runs in an existing shared checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_worker: Option<WorkspaceWorkerBinding>,
     /// The worker's last-reported context-window usage, 0..1 (ORCH-5 compaction
     /// gate). Above the threshold, completion is blocked until it compacts.
     #[serde(default)]
@@ -195,6 +242,8 @@ impl OrchState {
             notes: Vec::new(),
             worktree: None,
             branch: None,
+            worker_mode: None,
+            workspace_worker: None,
             context: None,
             created: now,
             updated: now,
@@ -408,6 +457,19 @@ impl OrchState {
         if let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) {
             t.worktree = worktree;
             t.branch = branch;
+            t.worker_mode = t.worktree.as_ref().map(|_| TaskWorkerMode::Worktree);
+            t.workspace_worker = None;
+            t.updated = unix_now();
+        }
+    }
+
+    /// Record a branchless worker tab in an existing shared workspace.
+    pub fn bind_workspace(&mut self, id: &str, binding: WorkspaceWorkerBinding) {
+        if let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) {
+            t.worktree = None;
+            t.branch = None;
+            t.worker_mode = Some(TaskWorkerMode::Workspace);
+            t.workspace_worker = Some(binding);
             t.updated = unix_now();
         }
     }
@@ -689,6 +751,14 @@ impl OrchState {
             Err(_) => OrchState::default(),
         };
         state.persist_path = Some(path);
+        // Older ledgers predate an explicit execution mode. Only a durable
+        // worktree is sufficient evidence to migrate; a branchless claim must
+        // not silently become a shared-workspace worker.
+        for task in &mut state.tasks {
+            if task.worker_mode.is_none() && task.worktree.is_some() {
+                task.worker_mode = Some(TaskWorkerMode::Worktree);
+            }
+        }
         // A process exit can interrupt a background Git job after the durable
         // `merging` reservation was written. No job survives a server restart,
         // so recover to the last safe, mergeable state.
@@ -916,6 +986,39 @@ mod tests {
 
         s.set_status("t1", TaskStatus::Done).unwrap();
         assert_eq!(s.task("t1").unwrap().status, TaskStatus::Done);
+    }
+
+    #[test]
+    fn workspace_worker_binding_is_branchless_and_persistent() {
+        let mut state = OrchState::default();
+        state
+            .add_task("shared".into(), vec![], vec![], None)
+            .unwrap();
+        state.claim("t1", 7).unwrap();
+        state.bind_workspace(
+            "t1",
+            WorkspaceWorkerBinding {
+                workspace_id: "workspace-a".into(),
+                tab_id: "tab-a".into(),
+                root: "/repo".into(),
+            },
+        );
+        let task = state.task("t1").unwrap();
+        assert_eq!(task.worker_mode, Some(TaskWorkerMode::Workspace));
+        assert_eq!(task.worktree, None);
+        assert_eq!(task.branch, None);
+
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"mode\":\"workspace\""));
+        let restored: OrchState = serde_json::from_str(&json).unwrap();
+        let binding = restored
+            .task("t1")
+            .unwrap()
+            .workspace_worker
+            .as_ref()
+            .unwrap();
+        assert_eq!(binding.workspace_id, "workspace-a");
+        assert_eq!(binding.tab_id, "tab-a");
     }
 
     #[test]

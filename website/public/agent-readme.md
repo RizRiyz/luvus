@@ -131,8 +131,12 @@ Branch-backed dependencies unblock only after they are merged into the shared
 integration history.
 `task release` requeues active work and releases its path leases, but it does
 not stop the worker pane or discard its worktree.
-`task start` checks path leases before creating a branch, worktree, or pane. If
-it returns `lease_conflict`, resolve or release the named holder before retrying.
+`task start` checks path leases before creating a worker. Its default
+`mode=worktree` creates an isolated branch and checkout. Explicit
+`mode=workspace` creates a dedicated task tab in an existing shared checkout;
+it has no task branch or merge action. If start returns `lease_conflict`,
+resolve or release the named holder before retrying. Leases coordinate declared
+task paths but do not sandbox a workspace-mode agent.
 
 Tab positions are 1-based. Workspace indexes shown by the CLI are 0-based.
 Pane IDs and agent names are discovery results. Never convert between these

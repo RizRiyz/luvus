@@ -2158,48 +2158,26 @@ static HELP: &[Translation] = &[
         "이 패널에 작업 할당 (의존 작업이 완료되어야 함)"
     ),
     tr!(
-        "claim the next ready task (--start spawns",
-        "asignar la siguiente tarea lista (--start crea",
-        "assumir a próxima tarefa pronta (--start inicia",
-        "réserver la prochaine tâche prête (--start lance",
-        "nächste bereite Aufgabe übernehmen (--start startet",
-        "ambil tugas siap berikutnya (--start menjalankan",
-        "领取下一个就绪任务（--start 启动",
-        "次の実行可能タスクを担当（--start で起動",
-        "준비된 다음 작업 할당 (--start 사용 시"
+        "claim the next ready task (--start creates a worker)",
+        "asignar la siguiente tarea lista (--start crea un trabajador)",
+        "assumir a próxima tarefa pronta (--start cria um worker)",
+        "réserver la prochaine tâche prête (--start crée un worker)",
+        "nächste bereite Aufgabe übernehmen (--start erstellt einen Worker)",
+        "ambil tugas siap berikutnya (--start membuat worker)",
+        "领取下一个就绪任务（--start 创建工作进程）",
+        "次の実行可能タスクを担当（--start でワーカーを作成）",
+        "준비된 다음 작업 할당 (--start로 워커 생성)"
     ),
     tr!(
-        "an isolated worker), for an agent loop draining the queue",
-        "un trabajador aislado), para que un agente vacíe la cola",
-        "um worker isolado), para um agente processar a fila",
-        "un worker isolé), pour qu'un agent vide la file",
-        "einen isolierten Worker), damit ein Agent die Warteschlange abarbeitet",
-        "worker terisolasi), untuk loop agen mengosongkan antrean",
-        "隔离工作进程），供智能体循环清空队列",
-        "分離ワーカー）、エージェントループでキューを処理",
-        "격리된 워커 생성), 큐를 처리하는 에이전트 루프용"
-    ),
-    tr!(
-        "spawn an isolated worker:",
-        "crear un trabajador aislado:",
-        "iniciar um worker isolado:",
-        "lancer un worker isolé :",
-        "isolierten Worker starten:",
-        "jalankan worker terisolasi:",
-        "启动隔离工作进程：",
-        "分離ワーカーを起動：",
-        "격리된 워커 생성:"
-    ),
-    tr!(
-        "a git worktree + pane, auto-claimed and path-leased",
-        "un worktree Git y panel, asignado y con rutas reservadas",
-        "um worktree Git e painel, assumido e com caminhos reservados",
-        "un worktree Git et un volet, réservés automatiquement avec les chemins",
-        "Git-Worktree und Bereich, automatisch übernommen und Pfade reserviert",
-        "worktree Git dan panel, otomatis diambil dan path disewa",
-        "Git 工作树和窗格，自动领取并租用路径",
-        "Git ワークツリーとペイン、自動担当およびパス予約",
-        "git worktree + 패널, 자동 할당 및 경로 임대"
+        "start a worker (worktree default; workspace shares checkout)",
+        "iniciar un trabajador (worktree predeterminado; workspace comparte el checkout)",
+        "iniciar um worker (worktree padrão; workspace compartilha o checkout)",
+        "démarrer un worker (worktree par défaut ; workspace partage le checkout)",
+        "Worker starten (Worktree ist Standard; Workspace teilt den Checkout)",
+        "jalankan worker (default worktree; workspace berbagi checkout)",
+        "启动工作进程（默认 worktree；workspace 共享检出目录）",
+        "ワーカーを起動（既定は worktree、workspace はチェックアウトを共有）",
+        "워커 시작 (기본값 worktree, workspace는 체크아웃 공유)"
     ),
     tr!(
         "report context usage (blocks done at >85%)",

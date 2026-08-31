@@ -7,6 +7,7 @@ pub(super) use sessions::recent as qwen_recent;
 pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "qwen",
     aliases: &[],
+    launch_command: "qwen",
     identity: IdentityDescriptor {
         distinct: &["qwen"],
         ambiguous: &[],

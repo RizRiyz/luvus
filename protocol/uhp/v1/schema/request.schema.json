@@ -62,6 +62,32 @@
         "timeout_s": { "type": "number", "minimum": 0, "maximum": 3600 },
         "after_sequence": { "type": "integer", "minimum": 0 }
       }
+    },
+    "taskStartParams": {
+      "type": "object", "additionalProperties": false, "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "branch": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "agent": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "mode": { "enum": ["worktree", "workspace"] },
+        "workspace_id": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "allOf": [
+        { "if": { "properties": { "mode": { "const": "workspace" } }, "required": ["mode"] },
+          "then": { "not": { "required": ["branch"] } } },
+        { "if": { "properties": { "mode": { "const": "worktree" } }, "required": ["mode"] },
+          "then": { "not": { "required": ["workspace_id"] } } }
+      ]
+    },
+    "taskNextParams": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "start": { "type": "boolean" },
+        "agent": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "pane": { "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "integer", "minimum": 0 }] },
+        "mode": { "enum": ["worktree", "workspace"] },
+        "workspace_id": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
     }
   },
   "allOf": [
@@ -75,6 +101,10 @@
       "then": { "properties": { "params": { "$ref": "#/$defs/subscribeParams" } } } },
     { "if": { "properties": { "method": { "const": "events.wait" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/eventWaitParams" } } } },
+    { "if": { "properties": { "method": { "const": "task.start" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/taskStartParams" } } } },
+    { "if": { "properties": { "method": { "const": "task.next" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/taskNextParams" } } } },
     { "if": { "properties": { "method": { "const": "terminal.backend.inventory" } } },
       "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/inventory.schema.json" } } } },
     { "if": { "properties": { "method": { "const": "terminal.backend.snapshot" } } },

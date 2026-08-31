@@ -82,6 +82,12 @@ mod tests {
                     descriptor.id
                 );
             }
+            assert!(
+                !descriptor.launch_command.is_empty()
+                    && !descriptor.launch_command.chars().any(char::is_whitespace),
+                "invalid launch command for {}",
+                descriptor.id
+            );
         }
     }
 

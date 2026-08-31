@@ -7,6 +7,7 @@ pub(super) use sessions::latest as gemini_latest;
 pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "gemini",
     aliases: &[],
+    launch_command: "gemini",
     identity: IdentityDescriptor {
         distinct: &["gemini"],
         ambiguous: &[],
