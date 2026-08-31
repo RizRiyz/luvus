@@ -248,6 +248,92 @@ mod tests {
         assert_eq!(terminal_data["type"], "object");
     }
 
+    /// The catalog mirrors shared-workspace task bindings and started payloads.
+    #[test]
+    fn general_event_catalog_tracks_task_worker_payloads() {
+        let bundle = schema_bundle();
+        let definitions = &bundle["event_catalog"]["$defs"];
+
+        assert_eq!(
+            definitions["agent_status"]["properties"]["branch"]["type"],
+            json!(["string", "null"])
+        );
+
+        let task = &definitions["task"];
+        let task_required: std::collections::BTreeSet<_> = task["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        assert!(!task_required.contains("mode"));
+        assert!(!task_required.contains("workspace_worker"));
+        assert_eq!(
+            task["properties"]["mode"]["enum"],
+            json!(["worktree", "workspace"])
+        );
+        assert_eq!(
+            task["properties"]["workspace_worker"]["$ref"],
+            "#/$defs/workspace_worker"
+        );
+
+        let workspace_worker = &definitions["workspace_worker"];
+        let workspace_worker_required: std::collections::BTreeSet<_> = workspace_worker["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            workspace_worker_required,
+            ["root", "tab_id", "workspace_id"].into_iter().collect()
+        );
+        assert_eq!(workspace_worker["additionalProperties"], false);
+        assert_eq!(workspace_worker["properties"]["root"]["type"], "string");
+        assert_eq!(workspace_worker["properties"]["tab_id"]["type"], "string");
+        assert_eq!(
+            workspace_worker["properties"]["workspace_id"]["type"],
+            "string"
+        );
+
+        let task_started = &definitions["task_started"];
+        let task_started_required: std::collections::BTreeSet<_> = task_started["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            task_started_required,
+            [
+                "branch",
+                "cwd",
+                "id",
+                "mode",
+                "pane",
+                "tab_id",
+                "workspace_id",
+                "worktree",
+            ]
+            .into_iter()
+            .collect()
+        );
+        assert_eq!(task_started["additionalProperties"], false);
+        assert_eq!(
+            task_started["properties"]["mode"]["enum"],
+            json!(["worktree", "workspace"])
+        );
+        for field in ["workspace_id", "tab_id", "cwd"] {
+            assert_eq!(task_started["properties"][field]["type"], "string");
+        }
+        for field in ["worktree", "branch"] {
+            assert_eq!(
+                task_started["properties"][field]["type"],
+                json!(["string", "null"])
+            );
+        }
+    }
+
     #[test]
     fn published_fixture_manifest_tracks_version_and_line_counts() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("protocol/uhp/v1");

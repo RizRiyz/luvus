@@ -260,7 +260,7 @@
         "agent": { "type": "string" },
         "cwd": { "type": "string" },
         "project": { "type": "string" },
-        "branch": { "type": "string" },
+        "branch": { "type": ["string", "null"] },
         "authority": { "type": ["string", "null"] },
         "state_source": { "type": ["string", "null"] }
       }
@@ -322,9 +322,21 @@
         "notes": { "type": "array", "items": { "type": "string" } },
         "worktree": { "type": ["string", "null"] },
         "branch": { "type": ["string", "null"] },
+        "mode": { "enum": ["worktree", "workspace"] },
+        "workspace_worker": { "$ref": "#/$defs/workspace_worker" },
         "context": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
         "created": { "type": "integer", "minimum": 0 },
         "updated": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "workspace_worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace_id", "tab_id", "root"],
+      "properties": {
+        "workspace_id": { "type": "string" },
+        "tab_id": { "type": "string" },
+        "root": { "type": "string" }
       }
     },
     "task_released": {
@@ -336,12 +348,16 @@
     "task_started": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "pane", "worktree", "branch"],
+      "required": ["id", "pane", "mode", "workspace_id", "tab_id", "cwd", "worktree", "branch"],
       "properties": {
         "id": { "type": "string" },
         "pane": { "type": "string" },
-        "worktree": { "type": "string" },
-        "branch": { "type": "string" }
+        "mode": { "enum": ["worktree", "workspace"] },
+        "workspace_id": { "type": "string" },
+        "tab_id": { "type": "string" },
+        "cwd": { "type": "string" },
+        "worktree": { "type": ["string", "null"] },
+        "branch": { "type": ["string", "null"] }
       }
     },
     "task_needs_compaction": {
