@@ -10,6 +10,7 @@ event sequence, and one version identity: `luvus-uhp` `1.0`.
 ```text
 UHP 1.0
 ├── server, config, and events
+├── host and named-session lifecycle
 ├── workspaces, tabs, panes, and layouts
 ├── agents and orchestration
 ├── terminal inventory, capture, streams, and input
@@ -29,6 +30,12 @@ luvus uhp schema
 luvus uhp capabilities
 luvus uhp snapshot
 luvus uhp events
+```
+
+Host-wide discovery is available even when no session server is running:
+
+```sh
+printf '%s\n' '{"id":"host","method":"host.capabilities","params":{}}' | luvus uhp proxy
 ```
 
 `uhp.capabilities` is the only protocol handshake. It returns the protocol
@@ -89,6 +96,11 @@ Delegated tokens are memory-only, bounded, expiring, and scope-restricted.
 Terminal and process responses avoid full argument vectors because they can
 contain prompts, credentials, or tokens. Capture, input, messages, and cwd are
 also bounded.
+
+Host-profile methods run only in the short-lived `luvus uhp proxy` process.
+They trust the local operating-system account, reject delegated session tokens,
+and are not forwarded through `luvus uhp access`. Destructive or installation
+methods additionally require `confirm:true`.
 
 Its machine-readable access descriptor is part of the installed schema bundle.
 See [Connecting UHP transports and clients](/docs/guides/uhp-access/) before

@@ -4,8 +4,9 @@ description: Connect a script or coding harness to Luvus through Universal Harne
 ---
 
 Universal Harness Protocol, or UHP, is Luvus's single public automation
-contract. It covers workspaces, tabs, panes, agents, terminal streams, files,
-Git, DIFF, worktrees, modules, bars, configuration, and events.
+contract. It covers host sessions, workspaces, tabs, panes, agents, terminal
+streams, files, Git, DIFF, Mission Control, worktrees, modules, bars,
+configuration, and events.
 
 Normal commands such as `luvus pane list` are friendly wrappers over the same
 UHP methods. Unix sockets on macOS and Linux and named pipes on Windows are
@@ -53,6 +54,30 @@ printf '%s\n' '{"id":"snap","method":"session.snapshot","params":{}}' \
 
 `uhp proxy` forwards one bounded request and response. Persistent event and
 terminal streams must connect to the discovered local endpoint.
+
+It also owns the on-demand host profile, which works without a running session:
+
+```sh
+printf '%s\n' '{"id":"host","method":"host.info","params":{}}' | luvus uhp proxy
+printf '%s\n' '{"id":"sessions","method":"session.list","params":{}}' | luvus uhp proxy
+```
+
+Use `host.capabilities` to discover that separate profile. Host mutations such
+as `session.delete`, `skill.enable`, and `integration.install` require
+`confirm:true`, reject delegated session tokens, and are not exposed by
+`luvus uhp access`.
+
+## Mission Control data
+
+`mission.snapshot` returns read-only live and resumable agent rows plus usage
+totals without opening or focusing the dashboard. `mission.refresh` schedules
+one off-render-path usage scan; take another snapshot after the refresh
+completes. Both accept `scope:"workspace"` or `scope:"all"` and an optional
+workspace target.
+
+```json
+{"id":"mission","method":"mission.snapshot","params":{"scope":"all"}}
+```
 
 ## Responses and mutations
 

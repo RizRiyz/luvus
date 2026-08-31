@@ -11,7 +11,9 @@ unusually long custom `LUVUS_HOME` gets a deterministic short socket alias under
 an owner-only directory in the native sticky temporary root (`/private/tmp` on
 macOS and `/tmp` on Linux) to stay within the operating system's path limit.
 Windows discovery exposes the actual `\\.\pipe\...` address instead of asking
-clients to reproduce Luvus's internal mapping.
+clients to reproduce Luvus's internal mapping. Host-wide methods use the
+short-lived stdio profile provided by `luvus uhp proxy`; they do not require a
+running session endpoint.
 
 The resolved logical path is injected into every pane as `$LUVUS_SOCKET_PATH`.
 The selected local endpoint is protected by current-user ownership and is the
@@ -65,6 +67,7 @@ Luvus release number.
 
 | Family | Methods |
 |---|---|
+| host / sessions | `host.capabilities` · `host.info` · `host.doctor` · `host.update.check` · `host.update.install` · `session.list` · `session.status` · `session.start` · `session.stop` · `session.restart` · `session.delete` · `skill.status` · `skill.enable` · `skill.disable` · `integration.status` · `integration.install` · `integration.uninstall` |
 | discovery / config | `uhp.capabilities` · `uhp.stats` · `uhp.token.create` · `uhp.token.list` · `uhp.token.revoke` · `config.get` · `config.patch` · `server.reload_config` · `server.agent_manifests` · `server.reload_agent_manifests` |
 | workspaces | `workspace.list` · `workspace.get` · `workspace.open` · `workspace.focus` · `workspace.rename` · `workspace.pin` · `workspace.move` · `workspace.move_block` · `workspace.report_metadata` · `workspace.close` |
 | tabs | `tab.list` · `tab.get` · `tab.new` · `tab.focus` · `tab.move` · `tab.swap` · `tab.rename` · `tab.close` |
@@ -75,7 +78,7 @@ Luvus release number.
 | search | `search` · `search.capabilities` · `search.query` · `search.activate` |
 | files | `files.tree` · `files.open` · `files.reveal` · `files.refresh` |
 | git | `git.status` · `git.branches` · `git.log` · `git.open` |
-| mission control | `mission.open` |
+| mission control | `mission.snapshot` · `mission.refresh` · `mission.open` |
 | diff | `diff.refresh` · `diff.list` · `diff.open` · `diff.get` · `diff.navigate` · `diff.note.add` · `diff.note.apply` · `diff.note.list` · `diff.note.edit` · `diff.note.resolve` · `diff.note.reopen` · `diff.note.remove` · `diff.note.send` |
 | terminal | `terminal.backend.inventory` · `terminal.backend.snapshot` · `terminal.backend.validate` · `terminal.backend.processes` · `terminal.backend.capture` · `terminal.backend.observe` · `terminal.backend.control` · `terminal.backend.type_literal` · `terminal.backend.submit_text` · `terminal.backend.send_key` · `terminal.backend.set_title` · `terminal.backend.notify` · `terminal.backend.create` · `terminal.backend.close` · `terminal.backend.wait_change` · `terminal.backend.wait_output` · `terminal.backend.events.subscribe` |
 | worktrees | `worktree.list` · `worktree.create` · `worktree.open` · `worktree.remove` |
@@ -104,6 +107,28 @@ All families belong to the same
 inherit the focused pane. They require explicit runtime identity and stricter
 framing, limits, and failure evidence. See the detailed
 [UHP terminal methods](/docs/reference/terminal-backend/) reference.
+
+## Host profile and named sessions
+
+`host.capabilities` discovers the host profile. Unlike session-server methods,
+these calls are handled inside one short-lived `luvus uhp proxy` process, so
+`host.info`, `host.doctor`, and session lifecycle remain available when no
+Luvus server is running. They add no daemon, watcher, or idle polling.
+
+```sh
+printf '%s\n' '{"id":"sessions","method":"session.list","params":{}}' \
+  | luvus uhp proxy
+```
+
+`session.start`, `session.stop`, and `session.restart` target `default` or a
+validated named session. `session.delete` supports named sessions only and
+requires `confirm:true`. Update installation, skill changes, and integration
+changes also require `confirm:true`; status and update checks are read-only.
+
+The local operating-system account is the authority boundary. Host requests
+reject an `auth` token and are not routed through the session socket or remote
+`uhp access` gateway. This prevents a delegated session token from gaining
+package-manager, filesystem-installation, or cross-session process authority.
 
 ## Topology and layout control
 
@@ -336,7 +361,22 @@ output anchors before focusing or opening anything. It is primarily used by
 Luvus during named-session handoff. Invalid or stale targets return a structured
 `invalid_request` error instead of focusing a different object.
 
-## Opening Mission Control
+## Mission Control data and UI
+
+`mission.snapshot` returns the dashboard's live and resumable agent rows,
+states, locations, structured usage counters, and aggregate tokens and cost.
+It deliberately omits native session IDs and blocked-output snippets. It does
+not open Mission Control or change focus.
+
+`mission.refresh` schedules one demand-driven usage scan. It performs no
+continuous polling; call `mission.snapshot` again to read the updated cache.
+Both methods accept `scope:"workspace"` (default) or `scope:"all"`, plus an
+optional zero-based `workspace` or stable `workspace_id`.
+
+```json
+→ {"id":"m1","method":"mission.snapshot","params":{"scope":"all"}}
+← {"id":"m1","result":{"type":"mission_snapshot","scope":"all","refreshing":false,"summary":{"agents":0,"tokens":0,"cost_usd":0.0,"burn_usd_per_hour":0.0},"rows":[]}}
+```
 
 `mission.open` opens Mission Control in the active workspace. Pass a zero-based
 `workspace` index or stable `workspace_id` to open it in another workspace.
@@ -344,6 +384,8 @@ The dashboard is reused when it is already open.
 
 | Method | Params | Result |
 |---|---|---|
+| `mission.snapshot` | `{scope?, workspace?}` or `{scope?, workspace_id?}` | `{type:"mission_snapshot", summary, rows, refreshing}` |
+| `mission.refresh` | `{scope?, workspace?}` or `{scope?, workspace_id?}` | `{type:"mission_refresh", refreshing:true}` |
 | `mission.open` | `{workspace?}` or `{workspace_id?}` | `{type:"ok", mission:true}` |
 
 The CLI equivalent is `luvus mission open [<workspace>]`. This is a write

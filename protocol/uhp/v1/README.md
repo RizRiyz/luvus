@@ -14,6 +14,11 @@ This package is the source-controlled Universal Harness Protocol 1.0 contract.
 The installed binary embeds this package. Print it with `luvus uhp schema` and
 query live methods and limits with `luvus uhp capabilities`.
 
+Session-server methods use the owner-only local endpoint. The separate
+`host.capabilities` profile is handled on demand by `luvus uhp proxy`, including
+named-session lifecycle and confirmed host installation controls. It rejects
+delegated session tokens and is not part of remote `uhp access`.
+
 All requests use the `luvus-uhp` `1.0` identity. Method namespaces organize the
 surface but do not define separate protocols or capability handshakes.
 Optional delegated `auth` tokens contain 1 to 256 printable ASCII bytes.
