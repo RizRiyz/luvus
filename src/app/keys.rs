@@ -935,6 +935,17 @@ mod tests {
         app.handle_event(ch('j'));
         assert!(app.help_open, "navigation keeps the overlay open");
         assert_eq!(app.help_scroll, 1);
+        app.help_scroll_max = 40;
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::End,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.help_scroll, 40);
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.help_scroll, 39, "up moves away from the bottom");
         app.handle_event(ch('x')); // a non-navigation key dismisses it (and is swallowed)
         assert!(!app.help_open, "next key closed the overlay");
         // The swallowed key must not have acted (e.g. closed a pane).

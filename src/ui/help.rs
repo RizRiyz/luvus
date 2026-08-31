@@ -7,7 +7,7 @@ use super::*;
 use crate::app::Cmd;
 use ratatui::widgets::{Borders, Clear};
 
-pub(super) fn draw_help(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme) {
+pub(super) fn draw_help(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) {
     dim_backdrop(f, area, t);
 
     enum HelpRow<'a> {
@@ -81,7 +81,9 @@ pub(super) fn draw_help(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme) 
     let top = inner.y + 2;
     let visible = inner.height.saturating_sub(4) as usize;
     let max_rows = commands.len().max(references.len());
-    let scroll = usize::from(app.help_scroll).min(max_rows.saturating_sub(visible));
+    app.help_scroll_max = max_rows.saturating_sub(visible).min(usize::from(u16::MAX)) as u16;
+    app.help_scroll = app.help_scroll.min(app.help_scroll_max);
+    let scroll = usize::from(app.help_scroll);
     for (column, rows) in [commands.as_slice(), references.as_slice()]
         .into_iter()
         .enumerate()
@@ -95,7 +97,7 @@ pub(super) fn draw_help(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme) 
                     Style::new().fg(t.text).bold(),
                 )),
                 HelpRow::Entry(key, label) => Line::from(vec![
-                    Span::styled(format!("{key:>13} "), Style::new().fg(t.accent).bold()),
+                    Span::styled(aligned_key(key, 13), Style::new().fg(t.accent).bold()),
                     Span::styled(*label, Style::new().fg(t.subtext1)),
                 ]),
             };
@@ -121,6 +123,14 @@ pub(super) fn draw_help(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme) 
         )),
         Rect::new(inner.x, footer_y, inner.width, 1),
     );
+}
+
+/// Right-align a key label by terminal cells rather than Unicode scalar count.
+fn aligned_key(key: &str, cells: usize) -> String {
+    format!(
+        "{}{key} ",
+        " ".repeat(cells.saturating_sub(display_width(key)))
+    )
 }
 
 // ── local render helpers (each modal module keeps its own, as elsewhere) ──
@@ -192,9 +202,18 @@ mod tests {
         // the way past command mode, Git, board, picker, and clipboard keys.
         app.help_scroll = u16::MAX;
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(app.help_scroll, app.help_scroll_max);
         assert!(
             screen(&term).contains("MOUSE"),
             "fixed shortcuts are listed"
         );
+    }
+
+    #[test]
+    fn key_alignment_uses_terminal_cell_width() {
+        let ascii = aligned_key("drag", 13);
+        let wide = aligned_key("拖动", 13);
+        assert_eq!(display_width(&ascii), 14);
+        assert_eq!(display_width(&wide), 14);
     }
 }

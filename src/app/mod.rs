@@ -1570,6 +1570,8 @@ pub struct App {
     pub help_open: bool,
     /// Vertical offset shared by the command and fixed-shortcut columns.
     pub help_scroll: u16,
+    /// Largest valid help offset for the most recently rendered viewport.
+    pub help_scroll_max: u16,
     /// Whether the changelog modal is open (click the status-line version number).
     /// Shows every shipped release's notes; captures input while open.
     pub changelog_open: bool,
@@ -2161,6 +2163,7 @@ impl App {
             picker_rects: Vec::new(),
             help_open: false,
             help_scroll: 0,
+            help_scroll_max: 0,
             changelog_open: false,
             changelog_scroll: 0,
             update_available: None,
@@ -2767,6 +2770,7 @@ impl App {
             picker_rects: Vec::new(),
             help_open: false,
             help_scroll: 0,
+            help_scroll_max: 0,
             changelog_open: false,
             changelog_scroll: 0,
             update_available: None,

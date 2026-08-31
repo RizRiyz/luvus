@@ -1254,8 +1254,12 @@ impl App {
         // The shortcut reference scrolls with the wheel; a click dismisses it.
         if self.help_open {
             match m.kind {
-                MouseEventKind::ScrollUp => self.help_scroll = self.help_scroll.saturating_sub(2),
-                MouseEventKind::ScrollDown => self.help_scroll = self.help_scroll.saturating_add(2),
+                MouseEventKind::ScrollUp => {
+                    self.help_scroll = self.help_scroll.min(self.help_scroll_max).saturating_sub(2)
+                }
+                MouseEventKind::ScrollDown => {
+                    self.help_scroll = self.help_scroll.saturating_add(2).min(self.help_scroll_max)
+                }
                 MouseEventKind::Down(MouseButton::Left) => self.help_open = false,
                 _ => {}
             }
@@ -3235,14 +3239,19 @@ impl App {
                     self.help_scroll = self.help_scroll.saturating_add(1)
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    self.help_scroll = self.help_scroll.saturating_sub(1)
+                    self.help_scroll = self.help_scroll.min(self.help_scroll_max).saturating_sub(1)
                 }
                 KeyCode::PageDown | KeyCode::Char(' ') => {
                     self.help_scroll = self.help_scroll.saturating_add(10)
                 }
-                KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(10),
+                KeyCode::PageUp => {
+                    self.help_scroll = self
+                        .help_scroll
+                        .min(self.help_scroll_max)
+                        .saturating_sub(10)
+                }
                 KeyCode::Home => self.help_scroll = 0,
-                KeyCode::End => self.help_scroll = u16::MAX,
+                KeyCode::End => self.help_scroll = self.help_scroll_max,
                 _ => self.help_open = false,
             }
             return true;
