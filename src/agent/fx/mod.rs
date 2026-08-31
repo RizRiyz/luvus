@@ -8,6 +8,9 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "fx",
     aliases: &[],
     launch_command: "fx",
+    // FX reserves positional text for subcommands. `ask` is its documented
+    // one-request entrypoint; keep permission approval attached to the PTY.
+    task_prompt_args: &["ask", "--prompt-permissions"],
     identity: IdentityDescriptor {
         distinct: &[],
         ambiguous: &["fx"],

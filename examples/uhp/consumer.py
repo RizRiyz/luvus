@@ -330,6 +330,27 @@ def valid_global_request(value, methods):
     if value["method"] == "events.subscribe":
         after = value["params"].get("after_sequence", 0)
         return integer(after) and after >= 0
+    if value["method"] == "task.start":
+        params = value["params"]
+        if not set(params) <= {"id", "branch", "agent", "mode", "workspace_id"}:
+            return False
+        if not bounded_string(params.get("id"), 128, allow_empty=False):
+            return False
+        if "branch" in params and not bounded_string(params["branch"], 255, allow_empty=False):
+            return False
+        if "agent" in params and not bounded_string(params["agent"], 4096, allow_empty=False):
+            return False
+        if "workspace_id" in params and not bounded_string(
+            params["workspace_id"], 128, allow_empty=False
+        ):
+            return False
+        mode = params.get("mode")
+        if mode is not None and mode not in {"worktree", "workspace"}:
+            return False
+        if mode == "workspace" and "branch" in params:
+            return False
+        if mode == "worktree" and "workspace_id" in params:
+            return False
     return True
 
 

@@ -9,6 +9,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "opencode",
     aliases: &[],
     launch_command: "opencode",
+    task_prompt_args: &["--prompt"],
     identity: IdentityDescriptor {
         distinct: &["opencode"],
         ambiguous: &[],

@@ -8,6 +8,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "gemini",
     aliases: &[],
     launch_command: "gemini",
+    task_prompt_args: &["--prompt-interactive"],
     identity: IdentityDescriptor {
         distinct: &["gemini"],
         ambiguous: &[],

@@ -4,6 +4,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "cursor",
     aliases: &["cursor-agent"],
     launch_command: "cursor-agent",
+    task_prompt_args: &[],
     identity: IdentityDescriptor {
         distinct: &["cursor-agent"],
         ambiguous: &["cursor"],

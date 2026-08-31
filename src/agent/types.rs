@@ -47,6 +47,8 @@ pub(crate) struct AgentDescriptor {
     pub aliases: &'static [&'static str],
     /// Canonical executable used to start a fresh interactive session.
     pub launch_command: &'static str,
+    /// Static arguments required before an ORCH task briefing.
+    pub task_prompt_args: &'static [&'static str],
     pub identity: IdentityDescriptor,
     pub sessions: Option<SessionOperations>,
     pub integration: Option<IntegrationOperations>,

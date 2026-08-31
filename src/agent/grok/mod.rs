@@ -9,6 +9,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "grok",
     aliases: &[],
     launch_command: "grok",
+    task_prompt_args: &[],
     identity: IdentityDescriptor {
         distinct: &[],
         ambiguous: &["grok"],

@@ -21,6 +21,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: NAME,
     aliases: &[],
     launch_command: "muse",
+    task_prompt_args: &[],
     identity: IdentityDescriptor {
         distinct: DISTINCT_IDENTITIES,
         ambiguous: AMBIGUOUS_IDENTITIES,

@@ -8,6 +8,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "pi",
     aliases: &[],
     launch_command: "pi",
+    task_prompt_args: &[],
     identity: IdentityDescriptor {
         distinct: &["pi-coding-agent"],
         ambiguous: &["pi"],

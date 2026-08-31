@@ -1378,16 +1378,17 @@ impl App {
     }
 }
 
-/// Agents offered by the board's start-worker picker: (label, launch command).
-/// `None` = plain shell, no agent. The built-in registry owns the canonical
-/// executable, so adding an agent cannot leave this picker stale.
+/// Agents offered by the board's start-worker picker: (label, canonical id).
+/// `None` = plain shell, no agent. The built-in registry owns the executable
+/// and any task-prompt arguments, so adding an agent cannot leave this picker
+/// stale.
 pub fn agent_choices() -> &'static [(&'static str, Option<&'static str>)] {
     static CHOICES: std::sync::OnceLock<Vec<(&'static str, Option<&'static str>)>> =
         std::sync::OnceLock::new();
     CHOICES.get_or_init(|| {
         crate::agent::registry::descriptors()
             .iter()
-            .map(|descriptor| (descriptor.id, Some(descriptor.launch_command)))
+            .map(|descriptor| (descriptor.id, Some(descriptor.id)))
             .chain(std::iter::once(("shell", None)))
             .collect()
     })
@@ -1444,11 +1445,23 @@ fn task_briefing(task: &crate::orch::Task, mode: TaskWorkerMode) -> String {
 /// task briefing, with the task id available to Unix workers.
 fn agent_launch_line(agent: &str, task: &crate::orch::Task, mode: TaskWorkerMode) -> String {
     let brief = shell_quote(&task_briefing(task, mode));
+    let command = agent_task_command(agent);
     if cfg!(windows) {
-        format!("{agent} {brief}")
+        format!("{command} {brief}")
     } else {
-        format!("LUVUS_TASK_ID={} {agent} {brief}", task.id)
+        format!("LUVUS_TASK_ID={} {command} {brief}", task.id)
     }
+}
+
+fn agent_task_command(agent: &str) -> String {
+    crate::agent::registry::find(agent)
+        .map(|descriptor| {
+            std::iter::once(descriptor.launch_command)
+                .chain(descriptor.task_prompt_args.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_else(|| agent.to_string())
 }
 
 /// Quote `s` as one shell argument: POSIX single-quoting on Unix; on Windows
@@ -2265,6 +2278,34 @@ mod tests {
     }
 
     #[test]
+    fn agent_task_commands_follow_each_cli_prompt_contract() {
+        let expected = [
+            ("aider", "aider --message"),
+            ("amp", "amp --execute"),
+            ("claude", "claude"),
+            ("codex", "codex"),
+            ("copilot", "copilot --interactive"),
+            ("cursor", "cursor-agent"),
+            ("droid", "droid"),
+            ("fx", "fx ask --prompt-permissions"),
+            ("gemini", "gemini --prompt-interactive"),
+            ("grok", "grok"),
+            ("hermes", "hermes --oneshot"),
+            ("kimi", "kimi --prompt"),
+            ("kiro", "kiro-cli"),
+            ("muse", "muse"),
+            ("omp", "omp"),
+            ("opencode", "opencode --prompt"),
+            ("pi", "pi"),
+            ("qwen", "qwen --prompt-interactive"),
+        ];
+        assert_eq!(expected.len(), crate::agent::registry::descriptors().len());
+        for (agent, command) in expected {
+            assert_eq!(agent_task_command(agent), command, "{agent}");
+        }
+    }
+
+    #[test]
     fn start_picker_agents_follow_the_builtin_registry() {
         let choices = agent_choices();
         let agents = &choices[..choices.len() - 1];
@@ -2277,8 +2318,8 @@ mod tests {
         );
         assert!(agents.iter().all(|(_, command)| command.is_some()));
         assert_eq!(choices.last(), Some(&("shell", None)));
-        assert!(choices.contains(&("cursor", Some("cursor-agent"))));
-        assert!(choices.contains(&("kiro", Some("kiro-cli"))));
+        assert!(choices.contains(&("cursor", Some("cursor"))));
+        assert!(choices.contains(&("kiro", Some("kiro"))));
     }
 
     #[test]
