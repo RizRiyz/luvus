@@ -264,7 +264,8 @@ impl App {
     /// Give normal-mode keyboard input to the FILES tree. The dock is mounted
     /// on its remembered side and that side is revealed when needed, but this
     /// command does not hide any sidebar. `Ctrl+Space b` remains the visibility
-    /// control; Esc/q return input to the unchanged terminal-pane focus.
+    /// control; Esc/q return input to the unchanged terminal-pane focus, while
+    /// `x` closes the FILES dock.
     pub fn focus_files_tree(&mut self) {
         if self.sidebars.side_of(&DockKind::Files).is_none() {
             let target = self.sidebars.files_side;
@@ -652,6 +653,10 @@ impl App {
         let page = self.file_tree_page() as isize;
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.files_focused = false,
+            KeyCode::Char('x') => {
+                self.files_focused = false;
+                self.unmount_dock(&DockKind::Files);
+            }
             KeyCode::Up | KeyCode::Char('k') => self.move_file_cursor(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_file_cursor(1),
             KeyCode::PageUp => self.move_file_cursor(-page),
@@ -1449,6 +1454,21 @@ mod tests {
 
         app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(!app.files_focused, "q returns input to the pane");
+    }
+
+    #[test]
+    fn files_keyboard_x_closes_the_dock() {
+        let _env = crate::persist::test_env("files-keyboard-close");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        seed_keyboard_tree(&mut app);
+        assert!(app.move_dock(&DockKind::Files, Side::Left));
+        assert!(app.sidebars.side_of(&DockKind::Files).is_some());
+
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+
+        assert!(!app.files_focused);
+        assert_eq!(app.sidebars.side_of(&DockKind::Files), None);
     }
 
     #[test]

@@ -125,8 +125,9 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
         left.push(mode_label("FILES", t));
         left.push(Span::raw("  "));
         left.extend(hint("hjkl", cat.act_move, t));
-        left.extend(hint("Enter", cat.act_open, t));
-        left.extend(hint("a", cat.act_open_menu, t));
+        left.extend(hint("Enter", cat.act_open_menu, t));
+        left.extend(hint("a", cat.act_right_click, t));
+        left.extend(hint("x", cat.act_close, t));
         left.extend(hint("Esc", cat.act_back, t));
         return (Line::from(left), false);
     }
@@ -395,6 +396,32 @@ mod tests {
         );
         assert!(compound_hint(&[String::new(), "v".to_string()], "split", &app.theme).is_empty());
         assert!(compound_hint(&[String::new(), String::new()], "tab", &app.theme).is_empty());
+    }
+
+    #[test]
+    fn files_guidance_names_open_right_click_and_close_actions() {
+        let _env = crate::persist::test_env("bar-status-files");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 24, tx).unwrap();
+        app.files_focused = true;
+        let theme = app.theme.clone();
+
+        let (line, _) = fixed_guidance(&app, &theme, 120);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+
+        assert!(
+            text.contains("Enter open"),
+            "unexpected FILES legend: {text}"
+        );
+        assert!(
+            text.contains("a right click"),
+            "unexpected FILES legend: {text}"
+        );
+        assert!(text.contains("x close"), "unexpected FILES legend: {text}");
     }
 
     #[test]
