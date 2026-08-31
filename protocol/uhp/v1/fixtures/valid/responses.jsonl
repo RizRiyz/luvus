@@ -2,3 +2,4 @@
 {"id":"2","result":{"type":"workspace","workspace":"0","name":"project"}}
 {"id":"3","result":{"type":"pane_neighbor","pane":"7","neighbor":"9"}}
 {"id":"4","error":{"code":"not_found","message":"pane not found"}}
+{"id":"5","result":{"type":"mission_snapshot","scope":"all","workspace":"0","refreshing":false,"summary":{"agents":0,"tokens":0,"cost_usd":0.0,"burn_usd_per_hour":null},"rows":[]}}

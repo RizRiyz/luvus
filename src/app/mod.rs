@@ -1795,7 +1795,7 @@ pub struct App {
     /// Mission Control usage is demand-driven: opening/focusing the dashboard,
     /// changing its scope, or choosing refresh queues one off-loop scan. No
     /// usage reader runs merely because a hidden Mission Control tab exists.
-    mission_usage_requested: bool,
+    mission_usage_requested: Option<crate::mission::MissionUsageRequest>,
     /// Workspace whose Mission Control tab was visible on the previous sync.
     /// `None` also records transitions away from Mission Control.
     mission_active_workspace: Option<usize>,
@@ -2243,7 +2243,7 @@ impl App {
             proc_scan_inflight: false,
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
-            mission_usage_requested: false,
+            mission_usage_requested: None,
             mission_active_workspace: None,
             usage_scan_inflight: false,
             last_proc_at: Instant::now(),
@@ -2848,7 +2848,7 @@ impl App {
             proc_scan_inflight: false,
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
-            mission_usage_requested: false,
+            mission_usage_requested: None,
             mission_active_workspace: None,
             usage_scan_inflight: false,
             last_proc_at: Instant::now(),
@@ -10942,40 +10942,49 @@ mod tests {
         let normal_tab = app.ws().active_tab;
         app.open_mission_control(0);
         let mission_tab = app.ws().active_tab;
-        assert!(app.mission_usage_requested, "opening requests one refresh");
+        assert!(
+            app.mission_usage_requested.is_some(),
+            "opening requests one refresh"
+        );
 
         app.sync_mission_usage_visibility();
-        app.mission_usage_requested = false; // simulate the worker consuming it
+        app.mission_usage_requested = None; // simulate the worker consuming it
         app.sync_mission_usage_visibility();
         assert!(
-            !app.mission_usage_requested,
+            app.mission_usage_requested.is_none(),
             "remaining on Mission Control does not poll"
         );
 
         app.handle_mission_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
-        assert!(app.mission_usage_requested, "r requests a refresh");
+        assert!(
+            app.mission_usage_requested.is_some(),
+            "r requests a refresh"
+        );
 
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         let refresh = app
             .mission_refresh_rect
             .expect("wide dashboard exposes refresh button");
-        app.mission_usage_requested = false;
+        app.mission_usage_requested = None;
         app.handle_event(crate::event::AppEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: refresh.x,
             row: refresh.y,
             modifiers: KeyModifiers::NONE,
         }));
-        assert!(app.mission_usage_requested, "click requests a refresh");
+        assert!(
+            app.mission_usage_requested.is_some(),
+            "click requests a refresh"
+        );
 
-        app.mission_usage_requested = false;
+        app.mission_usage_requested = None;
         app.focus_tab(normal_tab).unwrap();
         app.sync_mission_usage_visibility();
         app.focus_tab(mission_tab).unwrap();
         app.sync_mission_usage_visibility();
         assert!(
-            app.mission_usage_requested,
+            app.mission_usage_requested.is_some(),
             "returning to Mission Control requests one fresh snapshot"
         );
     }
@@ -11001,13 +11010,13 @@ mod tests {
         app.open_mission_control(0);
         app.open_mission_control(1);
         app.sync_mission_usage_visibility();
-        app.mission_usage_requested = false;
+        app.mission_usage_requested = None;
 
         app.active_ws = 0;
         app.sync_mission_usage_visibility();
 
         assert!(
-            app.mission_usage_requested,
+            app.mission_usage_requested.is_some(),
             "switching directly to another workspace dashboard requests fresh usage"
         );
     }

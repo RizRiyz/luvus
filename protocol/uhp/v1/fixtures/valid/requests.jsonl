@@ -15,3 +15,5 @@
 {"id":"15","method":"events.subscribe","params":{"after_sequence":41}}
 {"id":"16","method":"workspace.get","auth":"luv_tok_example","params":{"workspace_id":"workspace_example"}}
 {"id":"17","method":"task.start","params":{"id":"t3","mode":"workspace","workspace_id":"workspace_example","agent":"codex"}}
+{"id":"18","method":"mission.snapshot","params":{"scope":"all"}}
+{"id":"19","method":"mission.refresh","params":{"scope":"workspace","workspace":0}}

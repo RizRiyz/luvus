@@ -697,10 +697,13 @@ impl App {
         // changing scope, or pressing/clicking refresh queues one worker scan;
         // merely retaining a hidden mission tab performs no usage IO.
         self.sync_mission_usage_visibility();
-        if self.mission_usage_requested && !self.usage_scan_inflight {
-            self.mission_usage_requested = false;
+        if self.mission_usage_requested.is_some() && !self.usage_scan_inflight {
+            let request = self
+                .mission_usage_requested
+                .take()
+                .expect("usage request checked above");
             self.usage_scan_inflight = true;
-            let targets = self.mission_usage_targets();
+            let targets = self.mission_usage_targets_for(request.scope, request.workspace);
             let overrides = self.config.mission_pricing.clone();
             // Previous results let an explicit refresh reuse unchanged transcripts:
             // one stat per idle session, with no read or parse.
@@ -3718,6 +3721,37 @@ impl App {
                 self.open_git_tab(i);
                 Ok(json!({"type":"ok","git": self.active_is_git()}))
             }
+            "mission.snapshot" | "mission.refresh" => {
+                reject_api_fields(p, &["scope", "workspace", "workspace_id"])?;
+                let scope = match p.get("scope").and_then(Value::as_str) {
+                    None | Some("workspace") => crate::mission::MissionScope::Workspace,
+                    Some("all") => crate::mission::MissionScope::All,
+                    Some(_) => {
+                        return Err((
+                            "invalid_request".to_string(),
+                            "scope must be workspace or all".to_string(),
+                        ))
+                    }
+                };
+                let workspace = self.optional_socket_workspace(p)?.unwrap_or(self.active_ws);
+                if workspace >= self.workspaces.len() {
+                    return Err(workspace_update_error(
+                        workspace,
+                        WorkspaceUpdateError::NotFound,
+                    ));
+                }
+                if method == "mission.refresh" {
+                    self.request_mission_usage_refresh_for(scope, workspace);
+                    Ok(json!({
+                        "type":"mission_refresh",
+                        "scope":match scope { crate::mission::MissionScope::Workspace => "workspace", crate::mission::MissionScope::All => "all" },
+                        "workspace":workspace.to_string(),
+                        "refreshing":true,
+                    }))
+                } else {
+                    Ok(self.mission_snapshot_value(scope, workspace))
+                }
+            }
             "mission.open" => {
                 let i = self.optional_socket_workspace(p)?.unwrap_or(self.active_ws);
                 if i >= self.workspaces.len() {
@@ -6132,6 +6166,65 @@ mod tests {
             .expect_err("missing workspace must not change the active view");
         assert_eq!(error.0, "not_found");
         assert_eq!((app.active_ws, app.ws().active_tab), before);
+    }
+
+    #[test]
+    fn mission_snapshot_and_refresh_are_read_only_ui_independent_controls() {
+        let _env = crate::persist::test_env("mission-snapshot-api");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let cwd = app.ws().cwd.clone();
+        app.resumable.push(crate::agent::SessionInfo {
+            agent: "codex".into(),
+            session_id: "native-secret-id".into(),
+            cwd,
+            updated: std::time::SystemTime::now(),
+        });
+        app.agent_usage.insert(
+            crate::mission::UsageKey::new("codex", "native-secret-id"),
+            crate::mission::AgentUsage {
+                model: "gpt-5".into(),
+                tokens_in: 120,
+                tokens_out: 30,
+                cache: 10,
+                context: Some(0.25),
+                cost: Some(0.42),
+            },
+        );
+        let before = (app.active_ws, app.ws().active_tab, app.active_is_mission());
+
+        let snapshot = app
+            .dispatch("mission.snapshot", &json!({"scope":"workspace"}))
+            .unwrap();
+        assert_eq!(snapshot["type"], "mission_snapshot");
+        assert_eq!(snapshot["rows"][0]["kind"], "resumable");
+        assert_eq!(snapshot["rows"][0]["usage"]["total_tokens"], 150);
+        assert!(
+            snapshot["rows"][0].get("session_id").is_none(),
+            "read scope does not expose native session identifiers"
+        );
+        assert_eq!(
+            (app.active_ws, app.ws().active_tab, app.active_is_mission()),
+            before,
+            "snapshot does not open or focus Mission Control"
+        );
+
+        let refreshed = app
+            .dispatch("mission.refresh", &json!({"scope":"all"}))
+            .unwrap();
+        assert_eq!(refreshed["type"], "mission_refresh");
+        assert_eq!(
+            app.mission_usage_requested,
+            Some(crate::mission::MissionUsageRequest {
+                scope: crate::mission::MissionScope::All,
+                workspace: 0,
+            })
+        );
+        assert_eq!(
+            (app.active_ws, app.ws().active_tab, app.active_is_mission()),
+            before,
+            "refresh queues work without changing the UI"
+        );
     }
 
     #[test]
