@@ -48,7 +48,10 @@ send() {
       --data-binary "$body" -K - 2>/dev/null)
   curl_rc=$?
   if [ "$curl_rc" -ne 0 ]; then
-    printf 'telegram-notify: send failed (curl exit %s)\n' "$curl_rc" >&2
+    case "$curl_rc" in
+      3) printf 'telegram-notify: send failed (curl exit 3 -- malformed URL; check that bot_token has no stray characters)\n' >&2 ;;
+      *) printf 'telegram-notify: send failed (curl exit %s)\n' "$curl_rc" >&2 ;;
+    esac
     return 1
   fi
   case "$http_code" in
@@ -60,8 +63,13 @@ send() {
   esac
 }
 
-bot_token="${LUVUS_SETTING_BOT_TOKEN:-}"
-chat_id="${LUVUS_SETTING_CHAT_ID:-}"
+# Settings text inputs routinely pick up stray spaces or a trailing newline
+# on paste; a space inside the API URL makes curl reject the whole request
+# (exit 3). Trim surrounding whitespace and embedded newlines before use.
+trim() { printf '%s' "$1" | tr -d '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'; }
+
+bot_token=$(trim "${LUVUS_SETTING_BOT_TOKEN:-}")
+chat_id=$(trim "${LUVUS_SETTING_CHAT_ID:-}")
 notify_on="${LUVUS_SETTING_NOTIFY_ON:-blocked}"
 api_url="https://api.telegram.org/bot${bot_token}/sendMessage"
 test_only=false
@@ -120,6 +128,12 @@ if [ -z "$bot_token" ]; then
   printf 'telegram-notify: bot_token is not set -- add it in Settings > Modules\n' >&2
   exit 1
 fi
+case "$bot_token" in
+  *[[:space:]]*|*\"*|*\'*)
+    printf 'telegram-notify: bot_token still contains a space or quote -- paste the BotFather token again without extra characters\n' >&2
+    exit 1
+    ;;
+esac
 if [ -z "$chat_id" ]; then
   printf 'telegram-notify: chat_id is not set -- add it in Settings > Modules\n' >&2
   exit 1
