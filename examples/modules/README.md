@@ -1,6 +1,6 @@
 # Example modules
 
-Five complete, working luvus modules across three languages, each covering a
+Six complete, working luvus modules across three languages, each covering a
 different part of the extension surface. They are meant to be **copied and
 edited**, not installed as-is.
 
@@ -11,6 +11,7 @@ edited**, not installed as-is.
 | [`scratch-pane`](scratch-pane) | Node | A **pane** entrypoint, `pane` right-click actions, reading the **selection**, **renaming a tab**, the state dir |
 | [`file-tree`](file-tree) | Bash | A **collapsible file tree** dock (per-row `toggle`/`open` actions, on-disk expand state), opening a file into a split **pane** via `pane split` + `pane run` — a no-core-edits prototype of docs/38 |
 | [`ci-bar`](ci-bar) | Bash | A multi-segment **Luvus Bar** widget, compact content, a clickable action, startup restoration, and a transient notification |
+| [`telegram-notify`](telegram-notify) | Bash | An **event hook** on agent status that sends a **Telegram** message (`blocked`/`done`/`both`), a **secret** setting, an `agent` right-click test-send action, redacted failure logging via `luvus module log` |
 
 Nothing here needs a build step or a dependency beyond the language runtime
 itself (`sh`, `python3`, `node`).

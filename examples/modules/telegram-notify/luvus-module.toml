@@ -1,0 +1,41 @@
+id = "example.telegram-notify"
+name = "Telegram Notify"
+version = "0.1.0"
+min_luvus_version = "0.8.3"
+description = "Send a Telegram message when an agent needs you or finishes. Right-click an agent to send a test message."
+platforms = ["macos", "linux"]
+
+# Fires every time a pane's agent state changes. notify.sh reads the payload
+# (LUVUS_MODULE_EVENT_JSON) so the message names the pane that actually
+# changed, not the one in focus.
+[[events]]
+on = "pane.agent_status_changed"
+command = ["sh", "notify.sh"]
+
+# Adds a row to the right-click menu on a live agent in the AGENTS sidebar.
+# Bypasses the notify-on filter entirely -- it always sends.
+[[actions]]
+id = "send-test"
+title = "Send a test message"
+contexts = ["agent"]
+command = ["sh", "notify.sh", "--test"]
+
+# Created via @BotFather; luvus masks secret settings in Settings -> Modules.
+[[settings]]
+key = "bot_token"
+title = "Bot token"
+type = "string"
+secret = true
+
+# The chat to deliver to: a user id, or a negative id for a group chat.
+[[settings]]
+key = "chat_id"
+title = "Chat ID"
+type = "string"
+
+[[settings]]
+key = "notify_on"
+title = "Notify on"
+type = "enum"
+options = ["blocked", "done", "both"]
+default = "blocked"
