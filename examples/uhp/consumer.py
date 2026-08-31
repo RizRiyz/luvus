@@ -345,7 +345,7 @@ def valid_global_request(value, methods):
         ):
             return False
         mode = params.get("mode")
-        if mode is not None and mode not in {"worktree", "workspace"}:
+        if mode is not None and (not isinstance(mode, str) or mode not in {"worktree", "workspace"}):
             return False
         if mode == "workspace" and "branch" in params:
             return False
