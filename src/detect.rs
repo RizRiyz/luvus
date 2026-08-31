@@ -321,12 +321,17 @@ pub(crate) fn screen_rows(known_agent: &str, running: &[String], manifests: &Man
     }
 }
 
+/// Claude and Hermes can place a live approval panel above a tall blank footer.
+/// Keep their most recent non-empty live rows without pulling in scrollback.
 pub(crate) fn screen_uses_non_empty_rows(
     known_agent: &str,
     running: &[String],
     manifests: &Manifests,
 ) -> bool {
-    known_agent.eq_ignore_ascii_case("hermes") || manifests.process_has_agent(running, "hermes")
+    known_agent.eq_ignore_ascii_case("claude")
+        || manifests.process_has_agent(running, "claude")
+        || known_agent.eq_ignore_ascii_case("hermes")
+        || manifests.process_has_agent(running, "hermes")
 }
 
 /// The compiled-in default rules (generic first, then per-agent).
@@ -1352,6 +1357,8 @@ fn contains_agent_word(hay: &str, needle: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal::vt::alacritty::AlacrittyEngine;
+    use crate::terminal::vt::VtEngine;
 
     fn state(bottom: &str, activity: bool, input: bool) -> State {
         classify(
@@ -1365,6 +1372,58 @@ mod tests {
             &Manifests::builtin(),
         )
         .state
+    }
+
+    const CLAUDE_COMMAND_APPROVAL_SCREEN: &str = r#"Bash command
+
+  rtk ls -la
+  List files in current directory with details
+
+This command requires approval
+
+Do you want to proceed?
+  1. Yes
+  2. Yes, and don’t ask again for: rtk ls *
+❯ 3. No"#;
+
+    const CLAUDE_PLAN_APPROVAL_SCREEN: &str = r#"Claude's plan
+
+Implement the requested change and run the focused tests.
+
+Would you like to proceed?
+  1. Yes, clear context and auto-accept edits
+  2. Yes, auto-accept edits
+❯ 3. Yes, manually approve edits
+  4. No, keep planning"#;
+
+    fn detection_from_claude_screen(screen: &str) -> Detection {
+        let manifests = Manifests::builtin();
+        let rows = screen_rows("claude", &[], &manifests);
+        let use_non_empty = screen_uses_non_empty_rows("claude", &[], &manifests);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(80, 30, tx, 1024 * 1024);
+        let terminal_screen = screen.replace('\n', "\r\n");
+        engine.advance(format!("\x1b[2J\x1b[H{terminal_screen}").as_bytes());
+
+        assert!(
+            engine.detection_text(rows).trim().is_empty(),
+            "the approval card is above the ordinary bottom-row window"
+        );
+        let bottom = if use_non_empty {
+            engine.detection_text_non_empty(rows)
+        } else {
+            engine.detection_text(rows)
+        };
+        classify(
+            Some("claude"),
+            &bottom,
+            false,
+            false,
+            "claude",
+            "claude",
+            &[],
+            &manifests,
+        )
     }
 
     fn fx_state(bottom: &str, activity: bool, input: bool) -> State {
@@ -1889,6 +1948,50 @@ mod tests {
         // though it starts with the same ✻ glyph.
         assert_eq!(state("✻ Cogitated for 18s", false, false), State::Idle);
         assert_eq!(state("✻ Worked for 47s", false, false), State::Idle);
+    }
+
+    #[test]
+    fn claude_approval_panels_use_non_empty_screen_rows() {
+        let manifests = Manifests::builtin();
+        assert!(screen_uses_non_empty_rows("claude", &[], &manifests));
+        assert!(screen_uses_non_empty_rows(
+            "",
+            &["/usr/local/bin/claude".to_string()],
+            &manifests
+        ));
+        assert!(!screen_uses_non_empty_rows(
+            "codex",
+            &["/usr/local/bin/codex".to_string()],
+            &manifests
+        ));
+    }
+
+    #[test]
+    fn claude_command_approval_screen_is_blocked() {
+        let detection = detection_from_claude_screen(CLAUDE_COMMAND_APPROVAL_SCREEN);
+        assert_eq!(detection.state, State::Blocked);
+        assert_eq!(detection.state_source, "manifest_rule");
+        assert_eq!(detection.rule_priority, Some(300));
+    }
+
+    #[test]
+    fn claude_plan_approval_screen_is_blocked() {
+        let detection = detection_from_claude_screen(CLAUDE_PLAN_APPROVAL_SCREEN);
+        assert_eq!(detection.state, State::Blocked);
+        assert_eq!(detection.state_source, "manifest_rule");
+        assert_eq!(detection.rule_priority, Some(300));
+    }
+
+    #[test]
+    fn claude_approval_prose_without_controls_is_idle() {
+        assert_eq!(
+            state(
+                "The docs say this command requires approval. Would you like to proceed later?",
+                false,
+                false,
+            ),
+            State::Idle
+        );
     }
 
     #[test]
