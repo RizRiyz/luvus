@@ -196,8 +196,8 @@ fn confirm() -> Result<bool> {
     Ok(matches!(line.trim(), "y" | "Y" | "yes"))
 }
 
-/// Run a build command in `dir` with a scrubbed environment — no `LUVUS_*` and
-/// no socket access, so build steps can't drive luvus.
+/// Run a build command in `dir` with a scrubbed environment and no socket
+/// access, so build steps cannot inherit current or retired control data.
 fn run_build(dir: &Path, argv: &[String]) -> Result<()> {
     let Some((program, args)) = argv.split_first() else {
         bail!("empty build command");
@@ -206,7 +206,7 @@ fn run_build(dir: &Path, argv: &[String]) -> Result<()> {
     cmd.args(args).current_dir(dir);
     cmd.env_clear();
     for (k, v) in std::env::vars() {
-        if !k.starts_with("LUVUS_") {
+        if inherited_build_var_allowed(&k) {
             cmd.env(k, v);
         }
     }
@@ -215,6 +215,10 @@ fn run_build(dir: &Path, argv: &[String]) -> Result<()> {
         bail!("exited with {status}");
     }
     Ok(())
+}
+
+fn inherited_build_var_allowed(key: &str) -> bool {
+    !key.starts_with("LUVUS_") && !key.starts_with("BOHAY_")
 }
 
 fn git(args: &[&str]) -> Result<()> {
@@ -246,6 +250,13 @@ fn short(sha: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_environment_scrubs_current_and_retired_control_data() {
+        assert!(!inherited_build_var_allowed("LUVUS_SOCKET_PATH"));
+        assert!(!inherited_build_var_allowed("BOHAY_SOCKET_PATH"));
+        assert!(inherited_build_var_allowed("PATH"));
+    }
 
     #[test]
     fn parse_owner_repo_and_paths() {
