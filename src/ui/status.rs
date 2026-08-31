@@ -121,6 +121,15 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
             keep -= 1;
         }
     }
+    if app.files_focused {
+        left.push(mode_label("FILES", t));
+        left.push(Span::raw("  "));
+        left.extend(hint("hjkl", cat.act_move, t));
+        left.extend(hint("Enter", cat.act_open, t));
+        left.extend(hint("a", cat.act_open_menu, t));
+        left.extend(hint("Esc", cat.act_back, t));
+        return (Line::from(left), false);
+    }
     if app.mode == Mode::Resize {
         left.push(mode_label(cat.mode_resize, t));
         left.push(Span::styled(

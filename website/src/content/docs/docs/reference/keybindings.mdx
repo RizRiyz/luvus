@@ -17,9 +17,9 @@ the live cheat-sheet. Remap anything, change the prefix, or apply a preset in
 | `z` | zoom pane | `w` / `W` | next / previous workspace |
 | `r` | resize mode (then arrows) | `G` | new worktree |
 | `f` | fork agent session | `g` | git tab |
-| `b` / `B` | toggle left / right sidebar | `o` | orchestration board |
+| `b` / `B` | toggle both / right sidebar | `o` | orchestration board |
 | `a` | agents All/Active | `m` | Mission Control |
-| `e` | toggle FILES dock | `M` | jump palette (tabs / workspaces / agents) |
+| `e` | focus FILES tree | `M` | jump palette (tabs / workspaces / agents) |
 | `/` | global fuzzy finder | `=` | Settings |
 | `q` / `d` | detach | | |
 | `1`–`9` | jump to tab | | |
@@ -79,10 +79,10 @@ Navigation results appear first. File, output, and other running-session
 results arrive in the same list without resetting the selected row. See the
 [Global Fuzzy Finder](/docs/guides/search/) guide for limits and CLI use.
 
-## No-prefix keys and menus
+## Focused modes and menus
 
-`Shift+↑` enters [scroll mode](/docs/guides/scrollback/), and the mouse does
-everything else.
+`Shift+↑` enters [scroll mode](/docs/guides/scrollback/). `Ctrl+Space e` focuses
+the FILES tree, where arrows or `hjkl` browse it and `Esc` returns to the pane.
 
 **Right-click menus** (no key needed): a **tab** to rename it, a **workspace** row
 for its menu (rename / close / worktrees / git / board), a **pane** to split or

@@ -56,6 +56,8 @@ pub enum Cmd {
     ToggleSidebar,
     ToggleRightSidebar,
     ToggleAgents,
+    /// Focus the FILES tree. The historical enum/config id remains stable so
+    /// existing user keymaps keep working after the command's UX is refined.
     ToggleFiles,
     Switcher,
     GlobalSearch,
@@ -683,7 +685,7 @@ impl App {
             Cmd::ToggleAgents => {
                 self.set_agents_filter(!self.agents_active_only);
             }
-            Cmd::ToggleFiles => self.toggle_files_dock(),
+            Cmd::ToggleFiles => self.focus_files_tree(),
             Cmd::Switcher => self.toggle_switcher(),
             Cmd::GlobalSearch => self.toggle_search(),
             Cmd::Detach => self.detach_requested = true,

@@ -132,6 +132,9 @@ impl App {
             return;
         }
         self.files_mode = mode;
+        if mode != FilesMode::Files {
+            self.files_focused = false;
+        }
         if mode == FilesMode::Diff {
             self.refresh_diff_status(true);
         }

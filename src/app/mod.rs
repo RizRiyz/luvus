@@ -580,6 +580,9 @@ pub struct FileMenu {
     pub is_dir: bool,
     pub anchor: (u16, u16),
     pub items: Vec<(FileMenuItem, Rect)>,
+    /// Keyboard-selected item. Mouse-opened menus start with no selection;
+    /// Files-tree keyboard actions select the first actionable row.
+    pub selected: Option<usize>,
     /// Editors offered for this file (snapshot of `App.editors` when the menu
     /// opened), so `OpenWith(i)` resolves stably even if the cache changes. Empty
     /// for a folder (open actions are file-only).
@@ -1389,8 +1392,8 @@ pub enum PopupId {
 /// a menu puts last went silently missing in a short or compact session. The
 /// rows scroll now instead.
 ///
-/// Context menus are mouse-only — there is no keyboard route into one — so the
-/// wheel over the popup is the whole gesture, and this is the state it needs.
+/// Most context menus are mouse-driven; keyboard-enabled menus also use this
+/// state to keep their selected row visible.
 #[derive(Default)]
 pub struct MenuScroll {
     /// Rows scrolled off the top, per popup.
@@ -1419,6 +1422,22 @@ impl MenuScroll {
         self.offsets.insert(id, offset);
         self.frames.push((id, popup, max));
         offset
+    }
+
+    /// Adjust one popup so `selected` remains inside its visible row window.
+    pub fn reveal(&mut self, id: PopupId, selected: usize, window: usize, max: usize) {
+        if window == 0 {
+            return;
+        }
+        let current = self.offsets.get(&id).copied().unwrap_or(0).min(max);
+        let next = if selected < current {
+            selected
+        } else if selected >= current.saturating_add(window) {
+            selected.saturating_add(1).saturating_sub(window)
+        } else {
+            current
+        };
+        self.offsets.insert(id, next.min(max));
     }
 
     /// Scroll the popup under `(column, row)`, if there is one. Returns whether
@@ -1794,6 +1813,9 @@ pub struct App {
     /// The FILES dock (docs/38): the tree model, its scroll region, and the
     /// clickable rect per visible row (`(row index, rect)`), re-set each frame.
     pub file_tree: crate::files::FileTree,
+    /// The FILES tree owns normal-mode keys while this is set. Pane focus stays
+    /// unchanged so Insert Path and returning with Esc target the same pane.
+    pub files_focused: bool,
     /// `files.tree` callers waiting for the off-loop root directory read.
     /// The targeted root prevents a workspace switch from redirecting a reply.
     pending_file_tree_api: Vec<(PathBuf, crate::ipc::api::ApiRequest)>,
@@ -2227,6 +2249,7 @@ impl App {
                 t.show_hidden = files_show_hidden;
                 t
             },
+            files_focused: false,
             pending_file_tree_api: Vec::new(),
             files_area: Rect::ZERO,
             file_tree_rects: Vec::new(),
@@ -2824,6 +2847,7 @@ impl App {
                 t.show_hidden = files_show_hidden;
                 t
             },
+            files_focused: false,
             pending_file_tree_api: Vec::new(),
             files_area: Rect::ZERO,
             file_tree_rects: Vec::new(),

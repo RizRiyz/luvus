@@ -10,10 +10,12 @@ in a real editor.
 
 ## The FILES dock
 
-Press **`Ctrl+Space e`** to show or hide it, or place it from
-**Settings → Layout** like any other dock. It follows the active workspace, so
-switching projects re-roots the tree. Showing it again restores the last side
-you placed it on.
+Press **`Ctrl+Space e`** to show the FILES dock if necessary and focus its tree.
+Use `Esc` or `q` to return to the terminal pane, and `Ctrl+Space b` to hide or
+restore the sidebars. You can place the dock from **Settings → Layout** like any
+other dock. It follows the active workspace, so switching projects re-roots the
+tree while preserving that project's cursor, scroll position, and expanded
+folders.
 
 The global fuzzy finder can search every eligible file name and relative path
 in the workspace even when its folder has never been expanded here. Press
@@ -31,20 +33,33 @@ conflicted, mint for renamed, with a letter badge and a mark on any folder that
 contains changes. Files created outside luvus, by an agent or a command in a
 pane, show up on their own within a couple of seconds.
 
-**Right-click a row** for New File, New Folder, Rename, Copy Path, Insert Path,
-Open as Workspace (folders), and Delete (Delete always asks first).
+**Right-click a row**, or press `a` on the keyboard-selected row, for New File,
+New Folder, Rename, Copy Path, Insert Path, Open as Workspace (folders), and
+Delete (Delete always asks first).
+
+| Key | FILES tree action |
+|---|---|
+| `j` / `k`, `↓` / `↑` | next / previous row |
+| `h` / `←` | collapse a folder, or move to its parent |
+| `l` / `→` | expand a folder, or move to its first child |
+| `Enter` | follow **File click behavior** for the selected row |
+| `Shift+Enter` | open the selected file in a permanent read-only pane |
+| `a` | open the selected row's actions; use arrows or `j` / `k` and `Enter` |
+| `g` / `G`, Home / End | first / last row |
+| PageUp / PageDown | move one visible page |
+| `Esc` / `q` | return input to the terminal pane |
 
 **Insert Path** types the selected file or folder's absolute path into the pane
 you were already working in, without submitting it — so you can name a file in a command or an
-agent prompt without leaving the keyboard to type the path out. Opening the
-FILES dock and its menu does not move focus, so the path lands where you were
-typing. It is inserted only; Luvus never sends Enter, and never adds an `@` or
-any other prefix, so the syntax stays yours. A path is left uninserted if there
-is no focused live terminal pane (for example, when a read-only file view is
-focused), if the absolute path contains a control character such as a line
-break, tab, or Escape — which would submit or alter your terminal input — or if
-it is not valid UTF-8, since the text Luvus could insert would not be the path
-you clicked.
+agent prompt without leaving the keyboard to type the path out. Focusing the
+FILES tree does not replace the underlying terminal-pane focus, so the path
+lands where you were typing. It is inserted only; Luvus never sends Enter, and
+never adds an `@` or any other prefix, so the syntax stays yours. A path is left
+uninserted if there is no focused live terminal pane (for example, when a
+read-only file view is focused), if the absolute path contains a control
+character such as a line break, tab, or Escape — which would submit or alter
+your terminal input — or if it is not valid UTF-8, since the text Luvus could
+insert would not be the path you clicked.
 
 ## Opening a file
 

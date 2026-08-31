@@ -1589,6 +1589,18 @@ impl App {
             }
             return;
         }
+        // Pointer interaction outside the FILES dock returns keyboard input to
+        // the pane or control the user actually clicked. A click inside keeps
+        // the tree focus and its cursor intact.
+        if matches!(m.kind, MouseEventKind::Down(_)) && self.files_focused {
+            let inside_files = m.column >= self.files_area.x
+                && m.column < self.files_area.right()
+                && m.row >= self.files_area.y
+                && m.row < self.files_area.bottom();
+            if !inside_files {
+                self.files_focused = false;
+            }
+        }
         // Bar actions and the read-only overflow popup own their rendered
         // rectangles. This sits below every modal guard: while a modal is open,
         // it owns the screen and a click must never invoke a hidden bar action.
@@ -3300,9 +3312,7 @@ impl App {
             return true;
         }
         if self.file_menu.is_some() {
-            if key.code == KeyCode::Esc {
-                self.file_menu = None;
-            }
+            self.handle_file_menu_key(key);
             return true;
         }
         if self.diff_menu.is_some() {
@@ -3364,6 +3374,18 @@ impl App {
         // it's left (arrows/`hjkl` resize; `Esc`/`Enter`/`q` exit).
         if self.mode == Mode::Resize {
             return self.handle_resize_mode_key(key);
+        }
+        // FILES focus is explicit and separate from terminal-pane focus. The
+        // prefix remains available for global commands; ordinary keys never
+        // leak into the pane until Esc/q returns control to it.
+        if self.files_focused {
+            if self.prefix.matches(&key) {
+                self.files_focused = false;
+                self.mode = Mode::Prefix;
+            } else {
+                self.handle_file_tree_key(key);
+            }
+            return true;
         }
         // A focused dashboard tab (git / orch / mission) captures normal-mode keys
         // (its own j/k/⏎/…); the `Ctrl+Space` prefix still works for global ops.
