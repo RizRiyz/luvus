@@ -2584,7 +2584,7 @@ mod tests {
             "the how-to intro is visible at the top:\n{top}"
         );
         assert!(
-            !top.contains("not rebindable"),
+            !top.contains("Always active"),
             "the always-on reference is below the fold before scrolling:\n{top}"
         );
 
@@ -2595,7 +2595,7 @@ mod tests {
         }
         let mid = screen(&mut app);
         assert!(
-            mid.contains("not rebindable") && mid.contains("focus panes"),
+            mid.contains("Always active") && mid.contains("focus panes"),
             "the always-on reference is reachable by cursor:\n{mid}"
         );
 
