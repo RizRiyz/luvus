@@ -16,8 +16,9 @@ luvus uhp snapshot
 
 Capabilities report the protocol version, method contracts, access mode,
 required scope, idempotence, atomic methods, limits, event sequence, terminal
-features, and server identity rules. The schema defines exact request and
-response fields. Do not infer a method from a newer website or binary.
+features, and server identity rules. The schema defines exact request, response,
+and general event payload fields. Do not infer a method from a newer website or
+binary.
 
 `luvus uhp proxy` accepts one newline-delimited request from stdin and emits one
 response. A request has `id`, `method`, and `params`; add `auth` only for an

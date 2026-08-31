@@ -29,6 +29,9 @@ luvus uhp schema
 luvus uhp snapshot
 ```
 
+The installed schema's `event_catalog.properties` maps general event names to
+their payload field schemas.
+
 The website documents the current release. A development build or older server
 can differ. Report the version and follow its live help for exact behavior.
 

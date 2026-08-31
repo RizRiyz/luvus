@@ -751,19 +751,19 @@ growing server memory. The acknowledgment declares
 before EOF. `luvus events` is exactly this.
 
 ```json
-{"event":"pane.agent_status_changed","sequence":41,"data":{"pane":"4","status":"blocked","agent":"claude"}}
-{"event":"task.gate_passed","sequence":42,"data":{"task":"t1"}}
-{"event":"lease.acquired","sequence":43,"data":{"lease":"L2","task":"t3"}}
+{"event":"pane.agent_status_changed","sequence":41,"data":{"pane":"4","status":"blocked","agent":"claude","cwd":"/work/app","project":"app","branch":"main","authority":"process_tree","state_source":"manifest_rule"}}
+{"event":"task.gate_passed","sequence":42,"data":{"id":"t1"}}
+{"event":"lease.acquired","sequence":43,"data":{"id":"L2","pane":4,"task":"t3","paths":["src/**"],"acquired":1788146509}}
 ```
 
-Event names: `pane.created` · `pane.closed` · `pane.forked` · `pane.moved` · `pane.agent_status_changed` ·
-`agent.hook` · `workspace.created` · `workspace.closed` (a module hook may
-still spell these `node.created` / `node.closed`) · `tab.created` · `tab.closed` · `tab.moved`
-· `task.added` · `task.claimed` · `task.started` · `task.ready` ·
-`task.gate_running` · `task.gate_passed` · `task.gate_failed` ·
-`task.needs_compaction` · `task.done` · `task.merge_started` · `task.merged` ·
-`task.merge_conflict` · `task.merge_failed` · `task.released` · `lease.acquired` ·
-`lease.released`.
+`luvus uhp schema` exposes `event_catalog.properties`: every key is a general
+stream event name and its value is the JSON Schema for that event's `data`
+object. The catalog includes application and terminal lifecycle events plus the
+overflow resync event. The generic event envelope remains forward-compatible
+with future additive names. Register the returned `documents` by `$id` and
+resolve an entry from the catalog document, for example
+`https://luvus.dev/protocol/uhp/v1/event-catalog.schema.json#/properties/pane.agent_status_changed`;
+do not detach a fragment that contains a local `$ref` from its root document.
 
 `terminal.backend.events.subscribe` uses the same stream framing but filters to
 `terminal.*` events. Its acknowledgment includes the current sequence and queue

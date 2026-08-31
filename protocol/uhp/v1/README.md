@@ -5,6 +5,8 @@ This package is the source-controlled Universal Harness Protocol 1.0 contract.
 - `schema/request.schema.json` publishes every callable method.
 - `schema/response.schema.json` defines success and error envelopes.
 - `schema/event.schema.json` defines sequenced event frames.
+- `schema/event-catalog.schema.json` maps general event names to their payload
+  field schemas without rejecting future additive event names.
 - `schema/terminal/` contains strict terminal method and stream components.
 - `schema/access/descriptor.schema.json` defines transport-neutral remote
   bootstrap metadata; `access/README.md` defines provider and pairing behavior.

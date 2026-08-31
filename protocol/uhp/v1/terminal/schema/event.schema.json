@@ -36,6 +36,7 @@
         "event":{"enum":["terminal.created","terminal.moved","terminal.metadata_changed","terminal.output_ready","terminal.exited","terminal.closed"]},
         "sequence":{"type":"integer","minimum":1},
         "data":{
+          "type":"object",
           "properties":{
             "server_generation":{"type":"string","pattern":"^[0-9a-f]{32}$"},
             "terminal_id":{"type":"string","pattern":"^[0-9a-f]{32}$"},

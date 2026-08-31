@@ -35,6 +35,9 @@ luvus uhp events
 version, methods and contracts, server and event identity, bounded limits,
 agent authority sources, authorization scopes, and atomic operations.
 Consumers must use discovery rather than infer support from the Luvus release.
+The installed schema's `event_catalog.properties` maps every current general
+stream event name to the JSON Schema for its `data` payload. Register the
+bundle's `documents` by `$id` before resolving catalog references.
 
 ## Framing
 
