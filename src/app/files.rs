@@ -264,8 +264,7 @@ impl App {
     /// Give normal-mode keyboard input to the FILES tree. The dock is mounted
     /// on its remembered side and that side is revealed when needed, but this
     /// command does not hide any sidebar. `Ctrl+Space b` remains the visibility
-    /// control; Esc/q return input to the unchanged terminal-pane focus, while
-    /// `x` closes the FILES dock.
+    /// control; Esc/q return input to the unchanged terminal-pane focus.
     pub fn focus_files_tree(&mut self) {
         if self.sidebars.side_of(&DockKind::Files).is_none() {
             let target = self.sidebars.files_side;
@@ -653,10 +652,6 @@ impl App {
         let page = self.file_tree_page() as isize;
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.files_focused = false,
-            KeyCode::Char('x') => {
-                self.files_focused = false;
-                self.unmount_dock(&DockKind::Files);
-            }
             KeyCode::Up | KeyCode::Char('k') => self.move_file_cursor(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_file_cursor(1),
             KeyCode::PageUp => self.move_file_cursor(-page),
@@ -1319,7 +1314,7 @@ impl App {
                 self.copy_file_view(id);
                 return true;
             }
-            KeyCode::Char('q') => self.close_pane(id),
+            KeyCode::Char('q') | KeyCode::Char('x') => self.close_pane(id),
             KeyCode::Esc => {
                 // Esc clears a committed search first, else closes the view.
                 if v.search.is_some() {
@@ -1454,21 +1449,6 @@ mod tests {
 
         app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(!app.files_focused, "q returns input to the pane");
-    }
-
-    #[test]
-    fn files_keyboard_x_closes_the_dock() {
-        let _env = crate::persist::test_env("files-keyboard-close");
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let mut app = App::new(80, 24, tx).unwrap();
-        seed_keyboard_tree(&mut app);
-        assert!(app.move_dock(&DockKind::Files, Side::Left));
-        assert!(app.sidebars.side_of(&DockKind::Files).is_some());
-
-        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
-
-        assert!(!app.files_focused);
-        assert_eq!(app.sidebars.side_of(&DockKind::Files), None);
     }
 
     #[test]
@@ -2812,7 +2792,7 @@ mod tests {
     }
 
     /// Opening a file makes a native view leaf that renders the file's contents
-    /// and line numbers in a pane, scrolls, and closes with `q`.
+    /// and line numbers in a pane, scrolls, and closes with `x`.
     #[test]
     fn file_view_pane_renders_scrolls_and_closes() {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -2855,8 +2835,8 @@ mod tests {
             "scrolled to end"
         );
 
-        // `q` closes the view leaf; the tile collapses back to the shell.
-        app.handle_file_key(vid, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        // `x` closes the view leaf; the tile collapses back to the shell.
+        app.handle_file_key(vid, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(!app.views.contains_key(&vid), "view leaf closed");
 
         let _ = std::fs::remove_dir_all(&dir);
