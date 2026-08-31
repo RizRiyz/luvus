@@ -1774,10 +1774,12 @@ impl App {
                     .position(|w| crate::platform::same_path(&w.cwd, &path))
                 {
                     Some(i) => {
+                        self.forget_closed_workspace_path(&path);
                         if focus {
                             self.active_ws = i;
                         }
                     }
+                    None if !focus && self.automatic_workspace_open_is_suppressed(&path) => {}
                     // Report a failed open instead of answering with the
                     // *previously* active node, which read as success and left
                     // the caller (and the user) looking at the wrong folder.

@@ -20,6 +20,10 @@ pub struct SessionSnapshot {
     pub version: u32,
     pub active_ws: usize,
     pub workspaces: Vec<WsSnap>,
+    /// Workspace roots the user explicitly closed. Automatic attach-time CWD
+    /// opening must not resurrect them; an explicit open removes the entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub closed_workspace_paths: Vec<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -775,6 +779,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
         version: SNAPSHOT_VERSION,
         active_ws: app.active_ws,
         workspaces,
+        closed_workspace_paths: app.closed_workspace_paths.clone(),
     }
 }
 
@@ -852,6 +857,17 @@ pub fn load() -> Option<SessionSnapshot> {
 #[cfg(test)]
 mod diff_snap_schema_tests {
     use super::*;
+
+    #[test]
+    fn older_sessions_default_to_no_closed_workspace_paths() {
+        let snapshot: SessionSnapshot = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "active_ws": 0,
+            "workspaces": [],
+        }))
+        .unwrap();
+        assert!(snapshot.closed_workspace_paths.is_empty());
+    }
 
     #[test]
     fn diff_snapshot_display_state_defaults_without_dropping_the_session() {

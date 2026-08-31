@@ -908,6 +908,7 @@ pub struct WsRename {
 /// Cap a custom workspace name (same reasoning as [`TAB_NAME_MAX`]). Shared
 /// with the CLI so local validation and the socket mutation agree.
 pub(crate) const WS_NAME_MAX: usize = 40;
+const MAX_CLOSED_WORKSPACE_PATHS: usize = 128;
 
 /// Why workspace metadata could not be changed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1527,6 +1528,9 @@ pub struct App {
     pub editors: Vec<(String, String)>,
     pub workspaces: Vec<Workspace>,
     pub active_ws: usize,
+    /// Bounded per-session roots the user explicitly removed. The launch-CWD
+    /// attach path consults this before automatically creating a workspace.
+    pub(crate) closed_workspace_paths: Vec<PathBuf>,
     pub theme: Theme,
     /// Appearance reported to programs running inside panes.
     pane_appearance: crate::terminal::appearance::PaneAppearance,
@@ -2129,6 +2133,7 @@ impl App {
                 active_tab: 0,
             }],
             active_ws: 0,
+            closed_workspace_paths: Vec::new(),
             theme,
             pane_appearance,
             probed_appearance: None,
@@ -2696,6 +2701,11 @@ impl App {
             return None;
         }
         let active_ws = snap.active_ws.min(workspaces.len() - 1);
+        let closed_workspace_paths = snap
+            .closed_workspace_paths
+            .into_iter()
+            .take(MAX_CLOSED_WORKSPACE_PATHS)
+            .collect();
         let backend_server_generation = crate::terminal::backend::random_id().ok()?;
         let backend_terminal_index = panes
             .iter()
@@ -2728,6 +2738,7 @@ impl App {
             editors: crate::platform::editor_choices(),
             workspaces,
             active_ws,
+            closed_workspace_paths,
             theme,
             pane_appearance,
             probed_appearance: None,
@@ -3742,6 +3753,7 @@ impl App {
             self.show_toast(format!("couldn't open {} — shell failed to start", name));
             return false;
         };
+        self.forget_closed_workspace_path(&cwd);
         self.workspaces.push(Workspace {
             id: crate::ids::public_id("workspace"),
             name,
@@ -3765,6 +3777,32 @@ impl App {
             &[crate::logging::Field::WorkspaceIndex(ws as u64)],
         );
         true
+    }
+
+    fn automatic_workspace_open_is_suppressed(&self, path: &std::path::Path) -> bool {
+        self.closed_workspace_paths
+            .iter()
+            .any(|closed| crate::platform::same_path(closed, path))
+    }
+
+    fn remember_closed_workspace_path(&mut self, path: PathBuf) {
+        self.closed_workspace_paths
+            .retain(|closed| !crate::platform::same_path(closed, &path));
+        if self.closed_workspace_paths.len() >= MAX_CLOSED_WORKSPACE_PATHS {
+            self.closed_workspace_paths.remove(0);
+        }
+        self.closed_workspace_paths.push(path);
+        self.session_dirty = true;
+        self.persist_session_now = true;
+    }
+
+    fn forget_closed_workspace_path(&mut self, path: &std::path::Path) {
+        let before = self.closed_workspace_paths.len();
+        self.closed_workspace_paths
+            .retain(|closed| !crate::platform::same_path(closed, path));
+        if self.closed_workspace_paths.len() != before {
+            self.session_dirty = true;
+        }
     }
 
     /// Restore the workspace hierarchy when an exceptional empty state reaches
@@ -5686,8 +5724,8 @@ impl App {
         let mut removed = false;
         if self.active_ws < self.workspaces.len() {
             let closed_workspace_id = self.workspaces[self.active_ws].id.clone();
+            let closed_root = self.workspaces[self.active_ws].cwd.clone();
             if self.workspaces.len() > 1 {
-                let closed_root = self.workspaces[self.active_ws].cwd.clone();
                 self.fail_pending_files_api_for_root(
                     &closed_root,
                     "workspace closed while FILES was loading",
@@ -5699,6 +5737,7 @@ impl App {
             }
             self.clear_workspace_transients(&closed_workspace_id);
             self.workspaces.remove(self.active_ws);
+            self.remember_closed_workspace_path(closed_root);
             removed = true;
         }
         if removed {
@@ -5729,12 +5768,22 @@ impl App {
 
     /// Close a workspace and all of its panes.
     fn close_workspace(&mut self, index: usize) {
+        self.close_workspace_with_suppression(index, true);
+    }
+
+    /// CWD rehoming may empty a workspace as an implementation detail. That is
+    /// not a user removal, so launching from its root later may open it again.
+    fn close_workspace_after_rehome(&mut self, index: usize) {
+        self.close_workspace_with_suppression(index, false);
+    }
+
+    fn close_workspace_with_suppression(&mut self, index: usize, suppress_reopen: bool) {
         if index >= self.workspaces.len() {
             return;
         }
         let closed_workspace_id = self.workspaces[index].id.clone();
+        let closed_root = self.workspaces[index].cwd.clone();
         if self.workspaces.len() > 1 {
-            let closed_root = self.workspaces[index].cwd.clone();
             self.fail_pending_files_api_for_root(
                 &closed_root,
                 "workspace closed while FILES was loading",
@@ -5756,6 +5805,9 @@ impl App {
         self.clear_workspace_transients(&closed_workspace_id);
         self.workspaces.remove(index);
         self.session_dirty = true;
+        if suppress_reopen {
+            self.remember_closed_workspace_path(closed_root);
+        }
         self.emit_event(
             "workspace.closed",
             serde_json::json!({"workspace": index.to_string()}),
@@ -9507,6 +9559,68 @@ mod tests {
         // An explicit open (focus:true) still focuses the folder.
         open(&mut app, &first, true);
         assert_eq!(app.ws().cwd, first, "explicit open still focuses");
+    }
+
+    #[test]
+    fn attach_open_does_not_restore_an_explicitly_closed_workspace() {
+        let _env = crate::persist::test_env("closed-launch-workspace");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let launch_cwd = app.ws().cwd.clone();
+        let other = std::env::temp_dir().join(format!(
+            "luvus-closed-launch-workspace-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(app.create_workspace_at(other.clone()));
+
+        app.close_workspace(0);
+        assert_eq!(app.workspaces.len(), 1);
+        assert!(app.automatic_workspace_open_is_suppressed(&launch_cwd));
+        assert!(
+            app.persist_session_now,
+            "an explicit removal is persisted without a debounce race"
+        );
+
+        let snapshot = crate::persist::snapshot(&app);
+        drop(app);
+        let (tx2, _rx2) = std::sync::mpsc::channel();
+        let mut restored = App::from_snapshot(snapshot, tx2).expect("remaining workspace restores");
+
+        let open = |app: &mut App, focus: bool| {
+            let (reply, _r) = mpsc::channel();
+            app.handle_api(&ApiRequest {
+                id: "1".into(),
+                method: "workspace.open".into(),
+                params: json!({
+                    "path": launch_cwd.display().to_string(),
+                    "focus": focus,
+                }),
+                reply,
+            });
+        };
+
+        open(&mut restored, false);
+        assert_eq!(
+            restored.workspaces.len(),
+            1,
+            "automatic attach does not resurrect the removed launch folder"
+        );
+        assert!(restored
+            .workspaces
+            .iter()
+            .all(|workspace| !crate::platform::same_path(&workspace.cwd, &launch_cwd)));
+
+        open(&mut restored, true);
+        assert_eq!(restored.workspaces.len(), 2);
+        assert!(crate::platform::same_path(&restored.ws().cwd, &launch_cwd));
+        assert!(
+            !restored.automatic_workspace_open_is_suppressed(&launch_cwd),
+            "an explicit reopen clears the remembered removal"
+        );
+
+        drop(restored);
+        let _ = std::fs::remove_dir_all(other);
     }
 
     #[test]
