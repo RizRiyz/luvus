@@ -261,32 +261,37 @@ impl App {
         requested_workspace: Option<&str>,
     ) -> Result<TaskStartResult, (String, String)> {
         if let Some(binding) = task.workspace_worker.as_ref() {
-            if let Some((workspace, tab)) =
-                self.workspaces.iter().enumerate().find_map(|(wi, ws)| {
-                    (ws.id == binding.workspace_id).then(|| {
-                        ws.tabs
-                            .iter()
-                            .position(|tab| tab.id == binding.tab_id)
-                            .map(|ti| (wi, ti))
-                    })?
-                })
-            {
-                let pane = self.workspaces[workspace].tabs[tab]
-                    .layout
-                    .leaves()
-                    .into_iter()
-                    .find(|pane| self.panes.contains_key(pane));
-                if let Some(pane) = pane {
-                    self.focus_pane_global(pane);
-                    return Ok(TaskStartResult {
-                        pane,
-                        cwd: self.workspaces[workspace].cwd.clone(),
-                        mode: TaskWorkerMode::Workspace,
-                        workspace_id: self.workspaces[workspace].id.clone(),
-                        tab_id: self.workspaces[workspace].tabs[tab].id.clone(),
-                        worktree: None,
-                        branch: None,
-                    });
+            let binding_matches_request = requested_workspace
+                .map(|requested| requested == binding.workspace_id)
+                .unwrap_or(true);
+            if binding_matches_request {
+                if let Some((workspace, tab)) =
+                    self.workspaces.iter().enumerate().find_map(|(wi, ws)| {
+                        (ws.id == binding.workspace_id).then(|| {
+                            ws.tabs
+                                .iter()
+                                .position(|tab| tab.id == binding.tab_id)
+                                .map(|ti| (wi, ti))
+                        })?
+                    })
+                {
+                    let pane = self.workspaces[workspace].tabs[tab]
+                        .layout
+                        .leaves()
+                        .into_iter()
+                        .find(|pane| self.panes.contains_key(pane));
+                    if let Some(pane) = pane {
+                        self.focus_pane_global(pane);
+                        return Ok(TaskStartResult {
+                            pane,
+                            cwd: self.workspaces[workspace].cwd.clone(),
+                            mode: TaskWorkerMode::Workspace,
+                            workspace_id: self.workspaces[workspace].id.clone(),
+                            tab_id: self.workspaces[workspace].tabs[tab].id.clone(),
+                            worktree: None,
+                            branch: None,
+                        });
+                    }
                 }
             }
         }
@@ -1812,6 +1817,66 @@ mod tests {
             .expect("detached workspace worker reopens");
         assert_ne!(reopened.tab_id, old_tab);
         assert_eq!(app.orch.task("t1").unwrap().assignee, Some(reopened.pane.0));
+    }
+
+    #[test]
+    fn workspace_restart_honors_an_explicit_different_workspace() {
+        let _env = crate::persist::test_env("orch-workspace-retarget");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let first_root = crate::persist::config_dir().join("workspace-one");
+        let second_root = crate::persist::config_dir().join("workspace-two");
+        std::fs::create_dir_all(&first_root).unwrap();
+        std::fs::create_dir_all(&second_root).unwrap();
+        assert!(app.create_workspace_at(first_root));
+        let first_workspace = app.ws().id.clone();
+        assert!(app.create_workspace_at(second_root));
+        let second_workspace = app.ws().id.clone();
+        app.orch
+            .add_task("move shared worker".into(), vec![], vec![], None)
+            .unwrap();
+
+        let first = app
+            .task_start(
+                "t1",
+                None,
+                None,
+                TaskWorkerMode::Workspace,
+                Some(first_workspace.clone()),
+            )
+            .unwrap();
+        app.orch.release_task("t1").unwrap();
+
+        let restarted = app
+            .task_start(
+                "t1",
+                None,
+                None,
+                TaskWorkerMode::Workspace,
+                Some(second_workspace.clone()),
+            )
+            .unwrap();
+
+        assert_eq!(restarted.workspace_id, second_workspace);
+        assert_ne!(restarted.tab_id, first.tab_id);
+        assert_ne!(restarted.pane, first.pane);
+        let binding = app
+            .orch
+            .task("t1")
+            .unwrap()
+            .workspace_worker
+            .as_ref()
+            .unwrap();
+        assert_eq!(binding.workspace_id, restarted.workspace_id);
+        assert_eq!(binding.tab_id, restarted.tab_id);
+        assert!(app
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == first_workspace)
+            .unwrap()
+            .tabs
+            .iter()
+            .any(|tab| tab.id == first.tab_id));
     }
 
     #[test]

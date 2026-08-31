@@ -1405,13 +1405,20 @@ pub(super) fn draw_start(
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
     if mode_step {
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                format!(" {}", cat.board_run_in.to_uppercase()),
-                Style::new().fg(t.overlay1).bold(),
-            )),
-            Rect::new(inner.x, inner.y + 1, inner.width, 1),
-        );
+        let body_bottom = inner.bottom().saturating_sub(1);
+        let body_row = |offset: u16| {
+            let y = inner.y.saturating_add(offset);
+            (y < body_bottom).then_some(Rect::new(inner.x, y, inner.width, 1))
+        };
+        if let Some(rect) = body_row(1) {
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!(" {}", cat.board_run_in.to_uppercase()),
+                    Style::new().fg(t.overlay1).bold(),
+                )),
+                rect,
+            );
+        }
         for (i, (mode, label)) in [
             (crate::orch::TaskWorkerMode::Worktree, cat.board_worktree),
             (crate::orch::TaskWorkerMode::Workspace, cat.board_workspace),
@@ -1420,7 +1427,9 @@ pub(super) fn draw_start(
         .enumerate()
         {
             let selected = mode == start.mode;
-            let rect = Rect::new(inner.x, inner.y + 2 + i as u16, inner.width, 1);
+            let Some(rect) = body_row(2 + i as u16) else {
+                continue;
+            };
             if selected {
                 fill_bg(f, rect, t.surface1);
             }
@@ -1446,13 +1455,15 @@ pub(super) fn draw_start(
                     cat.board_shared_checkout, start.shared_workers, cat.active
                 )
             };
-            f.render_widget(
-                Paragraph::new(Span::styled(
-                    format!("  {warning}"),
-                    Style::new().fg(t.amber),
-                )),
-                Rect::new(inner.x, inner.y + 4, inner.width, 1),
-            );
+            if let Some(rect) = body_row(4) {
+                f.render_widget(
+                    Paragraph::new(Span::styled(
+                        format!("  {warning}"),
+                        Style::new().fg(t.amber),
+                    )),
+                    rect,
+                );
+            }
         }
         f.render_widget(
             Paragraph::new(super::hint_line(
@@ -1724,5 +1735,50 @@ fn pad(s: &str, n: usize) -> String {
         out
     } else {
         format!("{s}{}", " ".repeat(n - w))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_mode_picker_registers_hits_only_inside_its_body() {
+        let start = crate::app::OrchStart {
+            task: "t1".into(),
+            cursor: 0,
+            step: crate::app::OrchStartStep::Mode,
+            mode: crate::orch::TaskWorkerMode::Workspace,
+            shared_workers: 0,
+        };
+        for height in 6..=10 {
+            let area = Rect::new(0, 0, 60, height);
+            let mut buffer = Buffer::empty(area);
+            let mut target = RenderTarget::new(&mut buffer, area);
+            let hits = draw_start(
+                &mut target,
+                area,
+                &start,
+                &crate::i18n::EN,
+                &Theme::quattro_rally(),
+            );
+            let modal_height = 8.min(area.height.saturating_sub(2).max(4));
+            let modal = centered_rect(area, 44.min(area.width), modal_height);
+            let inner = Block::new().borders(Borders::ALL).inner(modal);
+            let footer_y = inner.bottom().saturating_sub(1);
+
+            for (_, rect) in hits
+                .iter()
+                .filter(|(hit, _)| matches!(hit, crate::app::OrchHit::StartMode(_)))
+            {
+                assert!(rect.y >= inner.y, "height {height}: {rect:?}");
+                assert!(rect.bottom() <= footer_y, "height {height}: {rect:?}");
+            }
+            if height == 6 {
+                assert!(hits
+                    .iter()
+                    .all(|(hit, _)| !matches!(hit, crate::app::OrchHit::StartMode(_))));
+            }
+        }
     }
 }
