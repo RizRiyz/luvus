@@ -624,20 +624,76 @@ fn attach_cmd(args: &[String]) -> Result<()> {
 /// socket through plain ssh and attach to it locally. No port-forwarding, no
 /// `~/.ssh/config` edits — keepalive options are passed on argv only.
 fn remote_attach(args: &[String]) -> Result<()> {
-    let mut cmd = remote_ssh_command(args)?;
+    let (result, status) = remote_attach_attempt(remote_ssh_command(args)?);
+    if result
+        .as_ref()
+        .is_err_and(ipc::client::is_handshake_io_error)
+        && status.as_ref().and_then(std::process::ExitStatus::code) == Some(127)
+    {
+        let (fallback_result, fallback_status) =
+            remote_attach_attempt(remote_fallback_ssh_command(args)?);
+        if fallback_result
+            .as_ref()
+            .is_err_and(ipc::client::is_handshake_io_error)
+            && fallback_status
+                .as_ref()
+                .and_then(std::process::ExitStatus::code)
+                == Some(127)
+        {
+            let context = i18n::cli::Context::configured();
+            let host = args.get(2).map_or("", String::as_str);
+            return Err(anyhow!(
+                "{}\n{}",
+                context.render(
+                    "Luvus was not found on the remote host {host}.",
+                    &[("host", host)]
+                ),
+                context.text(
+                    "Install Luvus there or place it in PATH or a standard user installation directory."
+                )
+            ));
+        }
+        return fallback_result;
+    }
+    result
+}
+
+fn remote_attach_attempt(mut cmd: Command) -> (Result<()>, Option<std::process::ExitStatus>) {
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()); // stderr inherited so ssh can prompt for auth
     let mut child = cmd
         .spawn()
-        .map_err(|e| anyhow!("failed to launch ssh: {e}"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow!("no ssh stdout"))?;
-    let stdin = child.stdin.take().ok_or_else(|| anyhow!("no ssh stdin"))?;
+        .map_err(|e| anyhow!("failed to launch ssh: {e}"));
+    let Ok(ref mut child) = child else {
+        return (child.map(|_| ()), None);
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let status = child.wait().ok();
+        return (Err(anyhow!("no ssh stdout")), status);
+    };
+    let Some(stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let status = child.wait().ok();
+        return (Err(anyhow!("no ssh stdin")), status);
+    };
     let result = ipc::client::attach(stdout, stdin);
+    let status = wait_for_remote_child(child);
+    (result, status)
+}
+
+fn wait_for_remote_child(child: &mut std::process::Child) -> Option<std::process::ExitStatus> {
+    // EOF from the SSH stdout normally means the child is already exiting. Give
+    // it a short bounded window to publish its real status before terminating a
+    // bridge that failed or disconnected without cleaning itself up.
+    for _ in 0..10 {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(_) => break,
+        }
+    }
     let _ = child.kill();
-    let _ = child.wait();
-    result
+    child.wait().ok()
 }
 
 /// Build the remote bridge command separately so session propagation stays
@@ -664,6 +720,53 @@ fn remote_ssh_command(args: &[String]) -> Result<Command> {
     }
     cmd.arg("remote-client-bridge").stderr(Stdio::inherit());
     Ok(cmd)
+}
+
+/// Retry path for POSIX remote hosts whose non-interactive SSH PATH omits the
+/// per-user directory selected by the official installer. The ordinary bare
+/// command is always attempted first, preserving existing Windows SSH behavior.
+fn remote_fallback_ssh_command(args: &[String]) -> Result<Command> {
+    let host = args
+        .get(2)
+        .ok_or_else(|| anyhow!("usage: luvus --remote <host> [ssh args]"))?;
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-T")
+        .arg("-o")
+        .arg("ServerAliveInterval=15")
+        .arg("-o")
+        .arg("ServerAliveCountMax=3");
+    for extra in args.iter().skip(3) {
+        cmd.arg(extra);
+    }
+
+    let mut bridge_args = Vec::new();
+    if let Some(name) = session::active_name() {
+        bridge_args.push("--session".to_string());
+        bridge_args.push(name);
+    } else if session::explicit_session_requested() {
+        bridge_args.push("--session".to_string());
+        bridge_args.push(session::DEFAULT_SESSION_NAME.to_string());
+    }
+    bridge_args.push("remote-client-bridge".to_string());
+    let bridge_args = bridge_args
+        .iter()
+        .map(|arg| posix_shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let script = format!(
+        "for luvus_bin in \"$HOME/.local/bin/luvus\" \"$HOME/.cargo/bin/luvus\" \
+         \"$HOME/.nix-profile/bin/luvus\" /usr/local/bin/luvus \
+         /opt/homebrew/bin/luvus /home/linuxbrew/.linuxbrew/bin/luvus; do \
+         if [ -x \"$luvus_bin\" ]; then exec \"$luvus_bin\" {bridge_args}; fi; done; \
+         printf '%s\\n' 'luvus remote: executable not found in common install locations' >&2; \
+         exit 127"
+    );
+    cmd.arg(host).arg(script).stderr(Stdio::inherit());
+    Ok(cmd)
+}
+
+fn posix_shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn server_running(sock: &Path) -> bool {
@@ -1562,6 +1665,55 @@ mod tests {
                 "remote-client-bridge",
             ]
         );
+    }
+
+    #[test]
+    fn remote_bridge_fallback_checks_standard_user_installations() {
+        let _env = crate::persist::test_env("named-session-remote-fallback");
+        let raw = [
+            "luvus",
+            "--session",
+            "api",
+            "--remote",
+            "devbox",
+            "-p",
+            "2222",
+        ]
+        .map(String::from);
+        let args = crate::session::configure_from_args(&raw).unwrap();
+        let command = remote_fallback_ssh_command(&args).unwrap();
+        let actual: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            &actual[..7],
+            [
+                "-T",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=3",
+                "-p",
+                "2222",
+            ]
+        );
+        assert_eq!(actual[7], "devbox");
+        let script = &actual[8];
+        assert!(script.contains("\"$HOME/.local/bin/luvus\""));
+        assert!(script.contains("\"$HOME/.cargo/bin/luvus\""));
+        assert!(script.contains("\"$HOME/.nix-profile/bin/luvus\""));
+        assert!(script.contains("/usr/local/bin/luvus"));
+        assert!(script.contains("/opt/homebrew/bin/luvus"));
+        assert!(script.contains("/home/linuxbrew/.linuxbrew/bin/luvus"));
+        assert!(script.contains("'--session' 'api' 'remote-client-bridge'"));
+        assert!(script.ends_with("exit 127"));
+    }
+
+    #[test]
+    fn remote_bridge_shell_arguments_are_single_quoted() {
+        assert_eq!(posix_shell_quote("plain"), "'plain'");
+        assert_eq!(posix_shell_quote("team's"), "'team'\\''s'");
     }
 
     /// Manual benchmark of the server render hot path (full UI render + in-place

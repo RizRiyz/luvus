@@ -19,6 +19,37 @@ use ratatui::{DefaultTerminal, Terminal};
 use crate::ipc::protocol::{self, ClientMessage, FrameData, FrameDiff, ServerMessage};
 use crate::ipc::transport;
 
+#[derive(Debug)]
+struct HandshakeIoError(std::io::Error);
+
+impl std::fmt::Display for HandshakeIoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "connection failed before the Luvus handshake: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for HandshakeIoError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+pub(crate) fn is_handshake_io_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<HandshakeIoError>().is_some()
+}
+
+fn read_handshake_message<R: Read>(reader: &mut R) -> Result<ServerMessage> {
+    protocol::read_message(reader).map_err(|error| HandshakeIoError(error).into())
+}
+
+fn write_handshake_message<W: Write>(writer: &mut W, message: &ClientMessage) -> Result<()> {
+    protocol::write_message(writer, message).map_err(|error| HandshakeIoError(error).into())
+}
+
 /// Attach to the local server over its Unix socket.
 pub fn run(sock: &Path) -> Result<()> {
     let _logging = crate::logging::init(crate::logging::Role::Client);
@@ -110,7 +141,7 @@ where
 {
     let truecolor = protocol::truecolor_supported();
     let size = terminal.size()?;
-    protocol::write_message(
+    write_handshake_message(
         &mut writer,
         &ClientMessage::Hello {
             version: protocol::PROTOCOL_VERSION,
@@ -120,7 +151,7 @@ where
     )?;
 
     let mut reader = BufReader::new(reader);
-    match protocol::read_message::<_, ServerMessage>(&mut reader)? {
+    match read_handshake_message(&mut reader)? {
         // The one user-facing handshake failure is an old server after an
         // upgrade — tell them the fix, not just the symptom.
         ServerMessage::Welcome { error: Some(e), .. } => {
@@ -148,7 +179,7 @@ where
         }
     }
 
-    let probe_terminal = match protocol::read_message::<_, ServerMessage>(&mut reader)? {
+    let probe_terminal = match read_handshake_message(&mut reader)? {
         ServerMessage::Ready { probe_terminal } => probe_terminal,
         _ => return Err(anyhow!("unexpected handshake negotiation")),
     };
@@ -556,12 +587,61 @@ where
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{copy_and_flush, relay};
+    use super::{
+        copy_and_flush, is_handshake_io_error, read_handshake_message, relay,
+        write_handshake_message,
+    };
+    use crate::ipc::protocol::{ClientMessage, PROTOCOL_VERSION};
     use std::cell::RefCell;
     use std::io::{Cursor, Read, Write};
     use std::os::unix::net::UnixStream;
     use std::rc::Rc;
     use std::thread;
+
+    #[test]
+    fn empty_remote_stream_is_classified_as_a_handshake_failure() {
+        let error = match read_handshake_message(&mut Cursor::new(Vec::<u8>::new())) {
+            Err(error) => error,
+            Ok(_) => panic!("an empty stream must not complete the handshake"),
+        };
+        assert!(is_handshake_io_error(&error));
+        assert_eq!(
+            error.to_string(),
+            "connection failed before the Luvus handshake: failed to fill whole buffer"
+        );
+    }
+
+    #[test]
+    fn closed_remote_input_is_classified_as_a_handshake_failure() {
+        struct ClosedWriter;
+        impl Write for ClosedWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "remote command exited",
+                ))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let error = write_handshake_message(
+            &mut ClosedWriter,
+            &ClientMessage::Hello {
+                version: PROTOCOL_VERSION,
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .unwrap_err();
+        assert!(is_handshake_io_error(&error));
+        assert_eq!(
+            error.to_string(),
+            "connection failed before the Luvus handshake: remote command exited"
+        );
+    }
 
     /// The blit skips wide-char continuation cells (empty symbol) instead of
     /// drawing a space into the glyph's right half — the emoji-glitch fix. The
