@@ -19,8 +19,9 @@ the live cheat-sheet. Remap anything, change the prefix, or apply a preset in
 | `f` | fork agent session | `g` | git tab |
 | `b` / `B` | toggle both / right sidebar | `o` | orchestration board |
 | `a` | agents All/Active | `m` | Mission Control |
-| `e` | focus FILES tree | `M` | jump palette (tabs / workspaces / agents) |
-| `/` | global fuzzy finder | `=` | Settings |
+| `e` | focus FILES tree | `i` | focus DIFF review |
+| `M` | jump palette (tabs / workspaces / agents) | `/` | global fuzzy finder |
+| `=` | Settings | | |
 | `q` / `d` | detach | | |
 | `1`–`9` | jump to tab | | |
 
@@ -82,8 +83,9 @@ results arrive in the same list without resetting the selected row. See the
 ## Focused modes and menus
 
 `Shift+↑` enters [scroll mode](/docs/guides/scrollback/). `Ctrl+Space e` focuses
-the FILES tree, where arrows or `hjkl` browse it and `Esc` returns to the pane.
-After `Enter` opens a file view, `x` closes that view.
+the FILES tree, while `Ctrl+Space i` focuses the DIFF review list. Both accept
+arrows or `j` / `k`, and `Esc` returns to the pane. After `Enter` opens a file
+view, `x` closes that view. An opened DIFF review closes with `q` or `Esc`.
 
 **Right-click menus** (no key needed): a **tab** to rename it, a **workspace** row
 for its menu (rename / close / worktrees / git / board), a **pane** to split or

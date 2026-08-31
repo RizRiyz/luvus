@@ -122,11 +122,15 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
         }
     }
     if app.files_focused {
-        left.push(mode_label("FILES", t));
+        let diff = app.files_mode == crate::diff::FilesMode::Diff;
+        left.push(mode_label(if diff { "DIFF" } else { "FILES" }, t));
         left.push(Span::raw("  "));
-        left.extend(hint("hjkl", cat.act_move, t));
+        left.extend(hint(if diff { "j/k" } else { "hjkl" }, cat.act_move, t));
         left.extend(hint("Enter", cat.act_open_menu, t));
         left.extend(hint("a", cat.act_right_click, t));
+        if diff {
+            left.extend(hint("f", cat.act_filter, t));
+        }
         left.extend(hint("Esc", cat.act_back, t));
         return (Line::from(left), false);
     }
@@ -438,6 +442,20 @@ mod tests {
             !text.contains("x close"),
             "tree legend must not advertise a file-view action: {text}"
         );
+
+        app.files_mode = crate::diff::FilesMode::Diff;
+        let (line, _) = fixed_guidance(&app, &theme, 120);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("DIFF"), "unexpected DIFF legend: {text}");
+        assert!(
+            text.contains("Enter open"),
+            "unexpected DIFF legend: {text}"
+        );
+        assert!(text.contains("f filter"), "unexpected DIFF legend: {text}");
 
         app.files_focused = false;
         let pane = app.layout().focus;

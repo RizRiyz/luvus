@@ -595,6 +595,8 @@ pub struct DiffMenu {
     pub key: crate::diff::DiffKey,
     pub anchor: (u16, u16),
     pub items: Vec<(DiffMenuItem, Rect)>,
+    /// Keyboard-selected item. Mouse-opened menus begin without a selection.
+    pub selected: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -603,6 +605,15 @@ pub enum DiffMenuItem {
     OpenPane,
     OpenTab,
     CopyPath,
+}
+
+impl DiffMenu {
+    pub const ITEMS: [DiffMenuItem; 4] = [
+        DiffMenuItem::OpenPreview,
+        DiffMenuItem::OpenPane,
+        DiffMenuItem::OpenTab,
+        DiffMenuItem::CopyPath,
+    ];
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1813,8 +1824,8 @@ pub struct App {
     /// The FILES dock (docs/38): the tree model, its scroll region, and the
     /// clickable rect per visible row (`(row index, rect)`), re-set each frame.
     pub file_tree: crate::files::FileTree,
-    /// The FILES tree owns normal-mode keys while this is set. Pane focus stays
-    /// unchanged so Insert Path and returning with Esc target the same pane.
+    /// The FILES/DIFF dock owns normal-mode keys while this is set. Pane focus
+    /// stays unchanged so actions and returning with Esc target the same pane.
     pub files_focused: bool,
     /// `files.tree` callers waiting for the off-loop root directory read.
     /// The targeted root prevents a workspace switch from redirecting a reply.

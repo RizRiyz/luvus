@@ -603,12 +603,8 @@ pub(super) fn draw_diff_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
     let Some(menu) = app.diff_menu.as_ref() else {
         return;
     };
-    let items = [
-        DiffMenuItem::OpenPreview,
-        DiffMenuItem::OpenPane,
-        DiffMenuItem::OpenTab,
-        DiffMenuItem::CopyPath,
-    ];
+    let items = crate::app::DiffMenu::ITEMS;
+    let selected = menu.selected;
     let rows: Vec<MenuRow> = items
         .iter()
         .map(|item| MenuRow {
@@ -631,7 +627,7 @@ pub(super) fn draw_diff_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
         t,
         PopupCtx {
             hover: app.hover,
-            selected: None,
+            selected,
             mobile: app.compact,
             id: PopupId::Diff,
             scroll: &mut app.menu_scroll,

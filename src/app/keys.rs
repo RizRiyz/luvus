@@ -50,6 +50,7 @@ pub enum Cmd {
     PrevWorkspace,
     NewWorktree,
     OpenGit,
+    OpenDiff,
     OpenMission,
     OpenBoard,
     OpenSettings,
@@ -90,6 +91,7 @@ impl Cmd {
         Cmd::PrevWorkspace,
         Cmd::NewWorktree,
         Cmd::OpenGit,
+        Cmd::OpenDiff,
         Cmd::OpenMission,
         Cmd::OpenBoard,
         Cmd::OpenSettings,
@@ -128,6 +130,7 @@ impl Cmd {
             Cmd::PrevWorkspace => "prev_node",
             Cmd::NewWorktree => "new_worktree",
             Cmd::OpenGit => "open_git",
+            Cmd::OpenDiff => "open_diff",
             Cmd::OpenMission => "open_mission",
             Cmd::OpenBoard => "open_board",
             Cmd::OpenSettings => "open_settings",
@@ -169,6 +172,7 @@ impl Cmd {
             Cmd::PrevWorkspace => cat.cmd_prev_workspace,
             Cmd::NewWorktree => cat.cmd_new_worktree,
             Cmd::OpenGit => cat.cmd_open_git,
+            Cmd::OpenDiff => cat.cmd_open_diff,
             Cmd::OpenMission => cat.mc_open,
             Cmd::OpenBoard => cat.cmd_open_board,
             Cmd::OpenSettings => cat.cmd_open_settings,
@@ -208,6 +212,7 @@ impl Cmd {
             | Cmd::PrevWorkspace
             | Cmd::NewWorktree => cat.settings.keys_sections[2],
             Cmd::OpenGit
+            | Cmd::OpenDiff
             | Cmd::OpenMission
             | Cmd::OpenBoard
             | Cmd::OpenSettings
@@ -247,6 +252,7 @@ impl Cmd {
             Cmd::PrevWorkspace => "W",
             Cmd::NewWorktree => "G",
             Cmd::OpenGit => "g",
+            Cmd::OpenDiff => "i",
             Cmd::OpenMission => "m",
             Cmd::OpenBoard => "o",
             // `=` opens Settings (`,` now renames the tab, matching tmux). The
@@ -677,6 +683,7 @@ impl App {
             Cmd::PrevWorkspace => self.cycle_workspace(-1),
             Cmd::NewWorktree => self.open_worktree_prompt(),
             Cmd::OpenGit => self.open_git_tab_active(),
+            Cmd::OpenDiff => self.focus_diff_list(),
             Cmd::OpenMission => self.open_mission_control(self.active_ws),
             Cmd::OpenBoard => self.open_orch_board(),
             Cmd::OpenSettings => self.open_settings(),
@@ -743,6 +750,7 @@ mod tests {
         assert_eq!(m.get(","), Some(&Cmd::RenameTab));
         assert_eq!(m.get("="), Some(&Cmd::OpenSettings));
         assert_eq!(m.get("y"), Some(&Cmd::CopyMode));
+        assert_eq!(m.get("i"), Some(&Cmd::OpenDiff));
         assert_eq!(m.get("m"), Some(&Cmd::OpenMission));
         assert_eq!(m.get("M"), Some(&Cmd::Switcher));
         // every command is reachable by its default key

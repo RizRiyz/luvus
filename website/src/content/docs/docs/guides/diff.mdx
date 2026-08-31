@@ -8,16 +8,30 @@ does not run a pager in a pane and never stages, discards, commits, or pushes.
 
 ## Open DIFF
 
-Open the FILES dock with **`Ctrl+Space e`**, then click **DIFF** beside FILES.
-The list follows the active workspace and keeps staged, worktree, untracked,
-and conflicted versions separate. A file changed in both the index and working
-tree appears twice, with the layer shown on each row.
+Press **`Ctrl+Space i`** to reveal the shared FILES/DIFF dock and focus DIFF.
+The command is configurable in **Settings → Keys**. You can also press
+**`Ctrl+Space e`** and click **DIFF** beside FILES. The list follows the active
+workspace and keeps staged, worktree, untracked, and conflicted versions
+separate. A file changed in both the index and working tree appears twice, with
+the layer shown on each row.
 
 Click a row to reuse the native preview. **Shift+click** opens it in a permanent
 pane. Right-click for explicit Preview, Pane, Tab, and Copy Path actions. The
 list begins immediately below the FILES/DIFF selector without repeating the
 workspace or branch. Press `f` in an open DIFF view to cycle **All**,
 **Unviewed**, **Changed**, and **Notes** filters.
+
+| List key | Action |
+|---|---|
+| `j` / `k`, arrows | next or previous changed file |
+| Page Up / Page Down | move by one visible page |
+| `g` / `G`, Home / End | first or last changed file |
+| Enter | open or reuse the native preview |
+| Shift+Enter | open in a permanent pane |
+| `a` | open the selected row actions; use `j` / `k` and Enter |
+| `f` | cycle All, Unviewed, Changed, and Notes filters |
+| `r` | refresh the Git status snapshot |
+| `q` / `Esc` | return keyboard input to the terminal pane |
 
 ```text
 FILES  DIFF

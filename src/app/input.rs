@@ -2248,6 +2248,7 @@ impl App {
             } else {
                 crate::app::files::OpenTarget::Preview
             };
+            self.files_focused = false;
             self.diff_row_activate(row, target);
             return;
         }
@@ -3316,9 +3317,7 @@ impl App {
             return true;
         }
         if self.diff_menu.is_some() {
-            if key.code == KeyCode::Esc {
-                self.diff_menu = None;
-            }
+            self.handle_diff_menu_key(key);
             return true;
         }
         if self.orch_menu.is_some() {
@@ -3375,15 +3374,18 @@ impl App {
         if self.mode == Mode::Resize {
             return self.handle_resize_mode_key(key);
         }
-        // FILES focus is explicit and separate from terminal-pane focus. The
-        // prefix remains available for global commands; ordinary keys never
-        // leak into the pane until Esc/q returns control to it.
+        // FILES/DIFF dock focus is explicit and separate from terminal-pane
+        // focus. The prefix remains available for global commands; ordinary
+        // keys never leak into the pane until Esc/q returns control to it.
         if self.files_focused {
             if self.prefix.matches(&key) {
                 self.files_focused = false;
                 self.mode = Mode::Prefix;
             } else {
-                self.handle_file_tree_key(key);
+                match self.files_mode {
+                    crate::diff::FilesMode::Files => self.handle_file_tree_key(key),
+                    crate::diff::FilesMode::Diff => self.handle_diff_list_key(key),
+                };
             }
             return true;
         }

@@ -3,10 +3,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
-use crate::app::{App, DiffMenu, DiffMenuItem, Tab, ViewKind};
+use crate::app::{App, DiffMenu, DiffMenuItem, DockKind, Tab, ViewKind};
 use crate::diff::{DiffKey, DiffListRow, DiffLoad, DiffView, FilesMode};
 use crate::event::AppEvent;
 use crate::ids::PaneId;
@@ -138,6 +138,36 @@ impl App {
         if mode == FilesMode::Diff {
             self.refresh_diff_status(true);
         }
+    }
+
+    /// Give normal-mode keyboard input to the DIFF list. The shared dock is
+    /// mounted on its remembered side and revealed, while terminal-pane focus
+    /// stays unchanged until a diff is opened.
+    pub fn focus_diff_list(&mut self) {
+        if self.workspaces.is_empty() {
+            self.files_focused = false;
+            return;
+        }
+        if self.sidebars.side_of(&DockKind::Files).is_none() {
+            let target = self.sidebars.files_side;
+            if !self.move_dock(&DockKind::Files, target) {
+                self.files_focused = false;
+                return;
+            }
+        }
+        let Some(side) = self.sidebars.side_of(&DockKind::Files) else {
+            self.files_focused = false;
+            return;
+        };
+        self.sidebars.get_mut(side).visible = true;
+        self.set_files_mode(FilesMode::Diff);
+        self.files_focused = true;
+        self.diff.scroll_detached = false;
+        if self.diff.selected_file().is_none() {
+            self.diff.move_cursor(1);
+        }
+        self.diff.ensure_cursor_visible();
+        self.refresh_diff_status(false);
     }
 
     pub fn refresh_diff_status(&mut self, force: bool) {
@@ -338,7 +368,22 @@ impl App {
             key,
             anchor: (col, screen_row),
             items: Vec::new(),
+            selected: None,
         });
+    }
+
+    fn open_diff_menu_for_keyboard(&mut self) {
+        let row = self.diff.cursor;
+        let anchor = self
+            .diff_row_rects
+            .iter()
+            .find(|(index, _)| *index == row)
+            .map(|(_, rect)| (rect.right().saturating_sub(1), rect.y))
+            .unwrap_or((self.files_area.x, self.files_area.y.saturating_add(1)));
+        self.open_diff_menu(row, anchor.0, anchor.1);
+        if let Some(menu) = self.diff_menu.as_mut() {
+            menu.selected = Some(0);
+        }
     }
 
     pub fn diff_menu_click(&mut self, col: u16, row: u16) {
@@ -361,14 +406,142 @@ impl App {
             return;
         };
         match item {
-            DiffMenuItem::OpenPreview => self.open_diff_view(menu.key, OpenTarget::Preview),
-            DiffMenuItem::OpenPane => self.open_diff_view(menu.key, OpenTarget::Pane),
-            DiffMenuItem::OpenTab => self.open_diff_view(menu.key, OpenTarget::Tab),
+            DiffMenuItem::OpenPreview => {
+                self.files_focused = false;
+                self.open_diff_view(menu.key, OpenTarget::Preview);
+            }
+            DiffMenuItem::OpenPane => {
+                self.files_focused = false;
+                self.open_diff_view(menu.key, OpenTarget::Pane);
+            }
+            DiffMenuItem::OpenTab => {
+                self.files_focused = false;
+                self.open_diff_view(menu.key, OpenTarget::Tab);
+            }
             DiffMenuItem::CopyPath => {
                 self.pending_clipboard = Some(menu.key.display_path().to_string());
                 self.show_toast("path copied".to_string());
             }
         }
+    }
+
+    /// Keyboard navigation for a DIFF row action menu.
+    pub fn handle_diff_menu_key(&mut self, key: KeyEvent) {
+        if self.diff_menu.is_none() {
+            return;
+        }
+        let items = DiffMenu::ITEMS;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.diff_menu = None,
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
+                let current = self.diff_menu.as_ref().and_then(|menu| menu.selected);
+                let next = if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
+                    current
+                        .map(|index| index.checked_sub(1).unwrap_or(items.len() - 1))
+                        .unwrap_or(items.len() - 1)
+                } else {
+                    current.map_or(0, |index| (index + 1) % items.len())
+                };
+                if let Some(menu) = self.diff_menu.as_mut() {
+                    menu.selected = Some(next);
+                }
+            }
+            KeyCode::Enter => {
+                let selected = self.diff_menu.as_ref().and_then(|menu| menu.selected);
+                if let Some(item) = selected.and_then(|index| items.get(index)).copied() {
+                    self.diff_menu_action(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn move_diff_list_cursor(&mut self, delta: isize) {
+        self.diff.scroll_detached = false;
+        self.diff.move_cursor(delta);
+        self.diff.ensure_cursor_visible();
+    }
+
+    fn move_diff_list_page(&mut self, delta: isize) {
+        if self.diff.rows.is_empty() {
+            return;
+        }
+        let target = self
+            .diff
+            .cursor
+            .saturating_add_signed(delta)
+            .min(self.diff.rows.len() - 1);
+        let row = if delta < 0 {
+            self.diff.rows[..=target]
+                .iter()
+                .rposition(|row| matches!(row, DiffListRow::File(_)))
+        } else {
+            self.diff.rows[target..]
+                .iter()
+                .position(|row| matches!(row, DiffListRow::File(_)))
+                .map(|offset| target + offset)
+        };
+        if let Some(row) = row {
+            self.diff.cursor = row;
+            self.diff.scroll_detached = false;
+            self.diff.ensure_cursor_visible();
+        }
+    }
+
+    fn move_diff_list_to_edge(&mut self, last: bool) {
+        let row = if last {
+            self.diff
+                .rows
+                .iter()
+                .rposition(|row| matches!(row, DiffListRow::File(_)))
+        } else {
+            self.diff
+                .rows
+                .iter()
+                .position(|row| matches!(row, DiffListRow::File(_)))
+        };
+        if let Some(row) = row {
+            self.diff.cursor = row;
+            self.diff.scroll_detached = false;
+            self.diff.ensure_cursor_visible();
+        }
+    }
+
+    /// Navigate the DIFF list while the shared FILES/DIFF dock owns keyboard
+    /// focus. Opening a review returns normal keys to the new native view.
+    pub fn handle_diff_list_key(&mut self, key: KeyEvent) -> bool {
+        let page = self.diff.viewport.max(1) as isize;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.files_focused = false,
+            KeyCode::Up | KeyCode::Char('k') => self.move_diff_list_cursor(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_diff_list_cursor(1),
+            KeyCode::PageUp => self.move_diff_list_page(-page),
+            KeyCode::PageDown => self.move_diff_list_page(page),
+            KeyCode::Home | KeyCode::Char('g') => self.move_diff_list_to_edge(false),
+            KeyCode::End | KeyCode::Char('G') => self.move_diff_list_to_edge(true),
+            KeyCode::Char('a') => self.open_diff_menu_for_keyboard(),
+            KeyCode::Char('f') => {
+                self.diff.filter = self.diff.filter.cycle();
+                self.diff.rebuild_rows();
+            }
+            KeyCode::Char('r') => {
+                if !self.workspaces.is_empty() {
+                    self.refresh_diff_status(true);
+                }
+            }
+            KeyCode::Enter if self.diff.selected_file().is_some() => {
+                let target = if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    OpenTarget::Pane
+                } else {
+                    OpenTarget::Preview
+                };
+                let row = self.diff.cursor;
+                self.files_focused = false;
+                self.diff_row_activate(row, target);
+            }
+            _ => {}
+        }
+        true
     }
 
     pub fn diff_row_activate(&mut self, row: usize, target: OpenTarget) {
@@ -2030,6 +2203,95 @@ mod tests {
         app.diff_menu_action(crate::app::DiffMenuItem::OpenPane);
 
         assert_eq!(app.panes.len(), pane_count);
+        assert!(app
+            .views
+            .values()
+            .any(|view| matches!(view, ViewKind::Diff(diff) if diff.key == key)));
+    }
+
+    #[test]
+    fn diff_command_mounts_and_focuses_the_shared_dock() {
+        let _env = crate::persist::test_env("diff-keyboard-focus");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        assert!(app.move_dock(&DockKind::Files, crate::app::Side::Right));
+        app.unmount_dock(&DockKind::Files);
+        app.sidebars.right.visible = false;
+
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('i'),
+            KeyModifiers::NONE,
+        )));
+
+        assert!(app.files_focused);
+        assert_eq!(app.files_mode, FilesMode::Diff);
+        assert_eq!(
+            app.sidebars.side_of(&DockKind::Files),
+            Some(crate::app::Side::Right)
+        );
+        assert!(app.sidebars.right.visible);
+
+        app.workspaces.clear();
+        app.run_cmd(crate::app::Cmd::OpenDiff);
+        assert!(!app.files_focused, "no workspace is a safe no-op");
+    }
+
+    #[test]
+    fn diff_list_keyboard_skips_groups_and_controls_its_action_menu() {
+        let _env = crate::persist::test_env("diff-list-keyboard");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        install_snapshot(&mut app);
+        add_snapshot_file(&mut app, "src/second.rs");
+        app.diff.snapshot.as_mut().unwrap().files[1].key.layer = DiffLayer::Staged;
+        app.diff.rebuild_rows();
+        app.files_mode = FilesMode::Diff;
+        app.files_focused = true;
+        app.diff.viewport = 3;
+
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        let first = app.diff.cursor;
+        assert!(matches!(app.diff.rows[first], DiffListRow::File(_)));
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let second = app.diff.cursor;
+        assert!(second > first + 1, "navigation skipped the group heading");
+        assert!(matches!(app.diff.rows[second], DiffListRow::File(_)));
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(app.diff.cursor, first);
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        assert_eq!(app.diff.cursor, second);
+
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(
+            app.diff_menu.as_ref().and_then(|menu| menu.selected),
+            Some(0)
+        );
+        app.handle_diff_menu_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            app.diff_menu.as_ref().and_then(|menu| menu.selected),
+            Some(1)
+        );
+        app.handle_diff_menu_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.diff_menu.is_none());
+        assert!(app.files_focused);
+    }
+
+    #[test]
+    fn diff_list_enter_opens_the_native_review_and_returns_pane_input() {
+        let _env = crate::persist::test_env("diff-list-enter");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let key = install_snapshot(&mut app);
+        app.files_mode = FilesMode::Diff;
+        app.files_focused = true;
+
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(!app.files_focused);
         assert!(app
             .views
             .values()
