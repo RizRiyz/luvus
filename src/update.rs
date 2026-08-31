@@ -202,7 +202,7 @@ fn install_release(latest: &str, quiet: bool) -> Result<String> {
     match channel {
         InstallChannel::Homebrew => {
             run_package_update("brew", &["upgrade", "luvus"], "Homebrew", quiet)?;
-            verify_path_version(&homebrew_binary_path()?, &latest)?;
+            verify_path_version(&homebrew_binary_path()?, latest)?;
         }
         InstallChannel::Cargo => {
             #[cfg(windows)]
@@ -213,11 +213,11 @@ fn install_release(latest: &str, quiet: bool) -> Result<String> {
             {
                 run_package_update(
                     "cargo",
-                    &["install", "luvus", "--locked", "--version", &latest],
+                    &["install", "luvus", "--locked", "--version", latest],
                     "Cargo",
                     quiet,
                 )?;
-                verify_path_version(&executable, &latest)?;
+                verify_path_version(&executable, latest)?;
             }
         }
         InstallChannel::Direct => {
@@ -226,7 +226,7 @@ fn install_release(latest: &str, quiet: bool) -> Result<String> {
                 "Windows cannot replace the executable while it is running; close Luvus and run `irm https://luvus.dev/install.ps1 | iex`"
             );
             #[cfg(not(windows))]
-            install_direct_release(&latest, &executable)?;
+            install_direct_release(latest, &executable)?;
         }
         InstallChannel::Development => bail!(
             "refusing to overwrite a development binary at {}; rebuild it with `cargo build --release`",
