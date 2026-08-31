@@ -127,8 +127,21 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
         left.extend(hint("hjkl", cat.act_move, t));
         left.extend(hint("Enter", cat.act_open_menu, t));
         left.extend(hint("a", cat.act_right_click, t));
-        left.extend(hint("x", cat.act_close, t));
         left.extend(hint("Esc", cat.act_back, t));
+        return (Line::from(left), false);
+    }
+    let focused_view = app
+        .workspaces
+        .get(app.active_ws)
+        .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
+        .and_then(|tab| app.views.get(&tab.layout.focus));
+    if matches!(focused_view, Some(crate::app::ViewKind::File(_))) {
+        left.push(mode_label("FILE", t));
+        left.push(Span::raw("  "));
+        left.extend(hint("j/k", cat.act_scroll, t));
+        left.extend(hint("/", cat.act_search, t));
+        left.extend(hint("y", cat.act_copy, t));
+        left.extend(hint("x", cat.act_close, t));
         return (Line::from(left), false);
     }
     if app.mode == Mode::Resize {
@@ -399,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn files_guidance_names_open_right_click_and_close_actions() {
+    fn files_guidance_matches_tree_and_opened_view_actions() {
         let _env = crate::persist::test_env("bar-status-files");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 24, tx).unwrap();
@@ -421,7 +434,24 @@ mod tests {
             text.contains("a right click"),
             "unexpected FILES legend: {text}"
         );
-        assert!(text.contains("x close"), "unexpected FILES legend: {text}");
+        assert!(
+            !text.contains("x close"),
+            "tree legend must not advertise a file-view action: {text}"
+        );
+
+        app.files_focused = false;
+        let pane = app.layout().focus;
+        app.views.insert(
+            pane,
+            crate::app::ViewKind::File(crate::files::FileView::new("README.md".into())),
+        );
+        let (line, _) = fixed_guidance(&app, &theme, 120);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("x close"), "unexpected FILE legend: {text}");
     }
 
     #[test]
