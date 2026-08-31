@@ -1412,8 +1412,11 @@ impl App {
                         "could not create a terminal in the home directory".to_string(),
                     ));
                 }
-                let base = self.resolve_pane(p).unwrap_or_else(|| self.layout().focus);
-                self.layout_mut().focus = base;
+                let base = if p.get("pane").is_some() {
+                    self.resolve_pane(p).ok_or_else(not_found)?
+                } else {
+                    self.layout().focus
+                };
                 let dir = p
                     .get("direction")
                     .and_then(|v| v.as_str())
@@ -1423,13 +1426,8 @@ impl App {
                 } else {
                     Axis::Col
                 };
-                self.split(axis);
-                let new = self.layout().focus;
-                // `focus: false` keeps the caller's focus where it was (background
-                // split), instead of moving it to the new pane.
-                if p.get("focus").and_then(|v| v.as_bool()) == Some(false) {
-                    self.layout_mut().focus = base;
-                }
+                let focus = p.get("focus").and_then(|v| v.as_bool()) != Some(false);
+                let new = self.split_pane(base, axis, focus).ok_or_else(not_found)?;
                 Ok(json!({"type":"pane","pane": new.0.to_string()}))
             }
             "pane.move" => {
@@ -7025,6 +7023,108 @@ command = ["true"]
         // Default split still moves focus to the new pane.
         let out2 = app.dispatch("pane.split", &json!({})).unwrap();
         assert_eq!(app.layout().focus.0.to_string(), out2["pane"]);
+    }
+
+    #[test]
+    fn pane_split_targets_foreign_workspace_without_detaching() {
+        let _env = crate::persist::test_env("pane-split-foreign-workspace");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let caller_ws = app.active_ws;
+        let caller_tab = app.workspaces[caller_ws].active_tab;
+        let caller_pane = app.layout().focus;
+
+        let target_root = crate::persist::config_dir().join("target-workspace");
+        let target_cwd = target_root.join("nested-pane-cwd");
+        std::fs::create_dir_all(&target_cwd).unwrap();
+        assert!(app.create_workspace_at(target_root.clone()));
+        let target_ws = app.active_ws;
+        let target_tab = app.workspaces[target_ws].active_tab;
+        let target_pane = app.layout().focus;
+        app.panes.get_mut(&target_pane).unwrap().cwd = target_cwd.clone();
+
+        app.active_ws = caller_ws;
+        app.workspaces[caller_ws].active_tab = caller_tab;
+        app.workspaces[caller_ws].tabs[caller_tab].layout.focus = caller_pane;
+        app.zoomed = true;
+
+        let out = app
+            .dispatch(
+                "pane.split",
+                &json!({"pane": target_pane.0.to_string(), "focus": false}),
+            )
+            .unwrap();
+        let new_pane = PaneId(out["pane"].as_str().unwrap().parse().unwrap());
+
+        assert_eq!(
+            app.active_ws, caller_ws,
+            "the caller's workspace stays active"
+        );
+        assert_eq!(app.workspaces[caller_ws].active_tab, caller_tab);
+        assert_eq!(app.layout().focus, caller_pane, "the caller keeps focus");
+        assert!(app.zoomed, "a background split preserves caller zoom");
+        assert_eq!(app.pane_location(new_pane), Some((target_ws, target_tab)));
+        assert_eq!(
+            app.workspaces[target_ws].tabs[target_tab].layout.focus, target_pane,
+            "the inactive target tab's focus is restored"
+        );
+        assert_eq!(
+            app.panes.get(&new_pane).map(|pane| &pane.cwd),
+            Some(&target_cwd),
+            "a split inherits the target pane's live cwd"
+        );
+        let occurrences = app
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| tab.layout.leaves())
+            .filter(|pane| *pane == new_pane)
+            .count();
+        assert_eq!(occurrences, 1, "every spawned pane has one layout owner");
+
+        app.status.get_mut(&new_pane).unwrap().agent = "claude".into();
+        let agents = app.dispatch("agent.list", &json!({})).unwrap();
+        let new_pane_text = new_pane.0.to_string();
+        let row = agents["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["pane"].as_str() == Some(new_pane_text.as_str()))
+            .expect("the attached pane is visible to agent.list");
+        assert_eq!(row["workspace"], target_ws.to_string());
+        assert_eq!(row["tab"], (target_tab + 1).to_string());
+
+        app.config.layout.new_pane_to_workspace_root = true;
+        let root_out = app
+            .dispatch(
+                "pane.split",
+                &json!({"pane": target_pane.0.to_string(), "focus": false}),
+            )
+            .unwrap();
+        let root_pane = PaneId(root_out["pane"].as_str().unwrap().parse().unwrap());
+        assert_eq!(app.pane_location(root_pane), Some((target_ws, target_tab)));
+        assert_eq!(
+            app.panes.get(&root_pane).map(|pane| &pane.cwd),
+            Some(&target_root),
+            "root-first mode uses the target workspace root, not the caller's"
+        );
+
+        app.config.layout.new_pane_to_workspace_root = false;
+        app.zoomed = true;
+        app.scroll_pane = Some(caller_pane);
+        let focused_out = app
+            .dispatch("pane.split", &json!({"pane": target_pane.0.to_string()}))
+            .unwrap();
+        let focused_pane = PaneId(focused_out["pane"].as_str().unwrap().parse().unwrap());
+        assert_eq!(app.active_ws, target_ws);
+        assert_eq!(app.workspaces[target_ws].active_tab, target_tab);
+        assert_eq!(app.layout().focus, focused_pane);
+        assert_eq!(
+            app.pane_location(focused_pane),
+            Some((target_ws, target_tab))
+        );
+        assert!(!app.zoomed, "a focused split exits zoom");
+        assert_eq!(app.scroll_pane, None, "the new pane starts at live output");
     }
 
     #[test]

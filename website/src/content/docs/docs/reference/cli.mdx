@@ -266,3 +266,9 @@ server:
 (o_o)   https://luvus.dev/agent-readme.md
 /|_|\
 ```
+
+When `pane split <id>` targets a pane outside the current view, the new pane is
+inserted beside that target in the same workspace and tab. It starts in the
+target pane's live working directory; with
+`layout.new_pane_to_workspace_root = true`, it starts at the target workspace
+root instead. `--no-focus` preserves the caller's current view.
