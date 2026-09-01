@@ -125,9 +125,11 @@ without the prefix. For example, this enables direct tab switching:
 ```
 
 Direct shortcuts deliberately take the configured keys away from the focused
-shell or nested TUI. Use semantic chords such as `alt+right`, not terminal byte
-sequences such as `ESC[1;3C`. Supported names include arrows, `home`, `end`,
-`pageup`, `pagedown`, `tab`, `enter`, `esc`, `delete`, `insert`, `space`, and
-`f1`–`f12`; every chord must contain `Ctrl`, `Alt`, or `Shift`, and printable
-characters additionally require `Ctrl` or `Alt`. The configured Luvus prefix
-wins if the same chord appears in both places.
+shell, nested TUI, focused FILES/DIFF dock, or dashboard. They are global in
+normal mode; an open modal, text editor, scroll/copy/resize mode, or the
+configured Luvus prefix still takes precedence. Use semantic chords such as
+`alt+right`, not terminal byte sequences such as `ESC[1;3C`. Supported names
+include arrows, `home`, `end`, `pageup`, `pagedown`, `tab`, `enter`, `esc`,
+`delete`, `insert`, `space`, and `f1`–`f12`; every chord must contain `Ctrl`,
+`Alt`, or `Shift`, and printable characters additionally require `Ctrl` or
+`Alt`.

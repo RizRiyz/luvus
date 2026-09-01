@@ -24,6 +24,27 @@ pub fn is_ctrl_chord(mods: KeyModifiers) -> bool {
     mods.contains(KeyModifiers::CONTROL) && !(cfg!(windows) && mods.contains(KeyModifiers::ALT))
 }
 
+const SHORTCUT_MODIFIERS: KeyModifiers = KeyModifiers::CONTROL
+    .union(KeyModifiers::ALT)
+    .union(KeyModifiers::SHIFT);
+
+/// Ctrl+Space has several equivalent terminal encodings. Prefix and direct
+/// shortcuts must share this compatibility boundary.
+fn matches_ctrl_space_event(key: &KeyEvent) -> bool {
+    let modifiers = key.modifiers & SHORTCUT_MODIFIERS;
+    match key.code {
+        KeyCode::Null => key.modifiers.is_empty() || key.modifiers == KeyModifiers::CONTROL,
+        KeyCode::Char(' ') => modifiers == KeyModifiers::CONTROL,
+        // Some terminals retain the physical Shift used to type `@`; both
+        // Ctrl+@ forms represent NUL/Ctrl+Space.
+        KeyCode::Char('@') => {
+            modifiers == KeyModifiers::CONTROL
+                || modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        }
+        _ => false,
+    }
+}
+
 /// A prefix-mode command — the thing a key triggers after `Ctrl+Space`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cmd {
@@ -341,10 +362,6 @@ impl Default for PrefixSpec {
 }
 
 impl PrefixSpec {
-    const RELEVANT_MODIFIERS: KeyModifiers = KeyModifiers::CONTROL
-        .union(KeyModifiers::ALT)
-        .union(KeyModifiers::SHIFT);
-
     /// Parse canonical specs such as `ctrl+space`, `alt+\`, `shift+f12`, or
     /// plain `f12`. Bare text remains invalid because it would swallow typing.
     pub fn parse(s: &str) -> Option<Self> {
@@ -424,21 +441,9 @@ impl PrefixSpec {
             return false;
         }
         if self.code == KeyCode::Char(' ') && self.modifiers == KeyModifiers::CONTROL {
-            if key.code == KeyCode::Null {
-                return key.modifiers.is_empty() || key.modifiers == KeyModifiers::CONTROL;
-            }
-            let modifiers = key.modifiers & Self::RELEVANT_MODIFIERS;
-            if matches!(key.code, KeyCode::Char(' ')) {
-                return modifiers == KeyModifiers::CONTROL;
-            }
-            // Some terminals spell Ctrl+Space as Ctrl+@ and may retain the
-            // physical Shift needed to type `@`; both encodings are NUL.
-            if matches!(key.code, KeyCode::Char('@')) {
-                return modifiers == KeyModifiers::CONTROL
-                    || modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT);
-            }
+            return matches_ctrl_space_event(key);
         }
-        if key.modifiers & Self::RELEVANT_MODIFIERS != self.modifiers {
+        if key.modifiers & SHORTCUT_MODIFIERS != self.modifiers {
             return false;
         }
         match (self.code, key.code) {
@@ -482,10 +487,6 @@ pub struct DirectKeySpec {
 }
 
 impl DirectKeySpec {
-    const RELEVANT_MODIFIERS: KeyModifiers = KeyModifiers::CONTROL
-        .union(KeyModifiers::ALT)
-        .union(KeyModifiers::SHIFT);
-
     pub fn parse(spec: &str) -> Option<Self> {
         let mut modifiers = KeyModifiers::NONE;
         let mut code = None;
@@ -544,8 +545,13 @@ impl DirectKeySpec {
         if key
             .modifiers
             .intersects(KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META)
-            || key.modifiers & Self::RELEVANT_MODIFIERS != self.modifiers
         {
+            return false;
+        }
+        if self.code == KeyCode::Char(' ') && self.modifiers == KeyModifiers::CONTROL {
+            return matches_ctrl_space_event(key);
+        }
+        if key.modifiers & SHORTCUT_MODIFIERS != self.modifiers {
             return false;
         }
         // A Windows AltGr character is reported as Ctrl+Alt. Never turn typed
@@ -1052,6 +1058,20 @@ mod tests {
         assert_eq!(DirectKeySpec::parse("right"), None);
         assert_eq!(DirectKeySpec::parse("shift+x"), None);
         assert_eq!(DirectKeySpec::parse("\x1b[1;3C"), None);
+
+        let ctrl_space = DirectKeySpec::parse("ctrl+space").unwrap();
+        assert!(ctrl_space.matches(&KeyEvent::new(KeyCode::Null, KeyModifiers::NONE)));
+        assert!(ctrl_space.matches(&KeyEvent::new(KeyCode::Null, KeyModifiers::CONTROL)));
+        assert!(ctrl_space.matches(&KeyEvent::new(KeyCode::Char('@'), KeyModifiers::CONTROL)));
+        assert!(ctrl_space.matches(&KeyEvent::new(
+            KeyCode::Char('@'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )));
+        assert!(!ctrl_space.matches(&KeyEvent::new(KeyCode::Char('@'), KeyModifiers::SHIFT)));
+        assert!(!ctrl_space.matches(&KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL | KeyModifiers::SUPER
+        )));
     }
 
     #[test]
@@ -1138,6 +1158,41 @@ mod tests {
         ))));
         assert_eq!(app.mode, Mode::Prefix);
         assert_eq!(app.ws().active_tab, active);
+    }
+
+    #[test]
+    fn direct_shortcuts_remain_global_over_focused_surfaces() {
+        let _env = crate::persist::test_env("direct-global-surfaces");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.run_cmd(Cmd::NewTab);
+        app.config
+            .direct_keybindings
+            .insert(Cmd::PrevTab.id().into(), "alt+left".into());
+        app.direct_keymap = build_direct_keymap(&app.config.direct_keybindings);
+
+        app.files_focused = true;
+        assert!(app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Left,
+            KeyModifiers::ALT,
+        ))));
+        assert_eq!(
+            app.ws().active_tab,
+            0,
+            "FILES does not consume the shortcut"
+        );
+
+        app.files_focused = false;
+        app.open_mission_control(0);
+        assert!(app.active_is_mission());
+        assert!(app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Left,
+            KeyModifiers::ALT,
+        ))));
+        assert!(
+            !app.active_is_mission(),
+            "dashboard input does not consume the shortcut"
+        );
     }
 
     #[test]
