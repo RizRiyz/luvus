@@ -60,6 +60,8 @@ static CAUSE_VISIBLE_PTY: AtomicU64 = AtomicU64::new(0);
 static CAUSE_BACKGROUND_PTY: AtomicU64 = AtomicU64::new(0);
 static CAUSE_DETECTION: AtomicU64 = AtomicU64::new(0);
 static CAUSE_METADATA: AtomicU64 = AtomicU64::new(0);
+// Retained in diagnostics for consumers that compare snapshots across releases.
+// Working-state indicators are static, so this counter remains zero.
 static CAUSE_ANIMATION: AtomicU64 = AtomicU64::new(0);
 static CAUSE_UI: AtomicU64 = AtomicU64::new(0);
 static CAUSE_API_MAINTENANCE: AtomicU64 = AtomicU64::new(0);
@@ -105,7 +107,6 @@ enum RenderCause {
     VisiblePty,
     Detection,
     Metadata,
-    Animation,
     UserInterface,
     ApiOrMaintenance,
     ForcedRepair,
@@ -123,7 +124,6 @@ impl RenderCause {
             Self::VisiblePty => &CAUSE_VISIBLE_PTY,
             Self::Detection => &CAUSE_DETECTION,
             Self::Metadata => &CAUSE_METADATA,
-            Self::Animation => &CAUSE_ANIMATION,
             Self::UserInterface => &CAUSE_UI,
             Self::ApiOrMaintenance => &CAUSE_API_MAINTENANCE,
             Self::ForcedRepair => &CAUSE_FORCED,
@@ -213,7 +213,6 @@ struct ClientState {
     behind: bool,
     force_full: bool,
     last_activity: u64,
-    animation_mask: ui::AnimationMask,
 }
 
 impl ClientState {
@@ -234,7 +233,6 @@ impl ClientState {
             behind: false,
             force_full: true,
             last_activity,
-            animation_mask: ui::AnimationMask::default(),
         }
     }
 
@@ -393,10 +391,6 @@ pub fn run() -> Result<()> {
     // Un-rendered activity waiting for the frame cap to expire — drives a trailing
     // render so a change that lands mid-interval isn't stuck until the next event.
     let mut render_request = RenderRequest::default();
-    // Advances only a spinner that the renderer reported visible. Its deadline
-    // participates in the wait calculation, so quiet servers pay no timer cost.
-    let mut last_spin = Instant::now();
-    const SPIN_INTERVAL: Duration = Duration::from_millis(100);
     // Fallback re-arm cadence for PTY wake coalescing when frames aren't being
     // rendered (no client attached / nothing dirty): readers may announce new
     // output ~10x/s. While rendering, the render path re-arms at the frame rate.
@@ -414,12 +408,6 @@ pub fn run() -> Result<()> {
             } else {
                 IDLE_INTERVAL
             };
-            if clients
-                .values()
-                .any(|client| client.animation_mask.has_working_spinner())
-            {
-                idle = idle.min(SPIN_INTERVAL.saturating_sub(last_spin.elapsed()));
-            }
             if app.has_pending_pty_output() {
                 idle = idle.min(REARM_INTERVAL.saturating_sub(last_rearm.elapsed()));
             }
@@ -558,17 +546,6 @@ pub fn run() -> Result<()> {
         }
         if app.tick_bar_notifications(now) {
             render_request.record(RenderCause::Metadata);
-        }
-        // Animate the sidebar spinner while any agent is working: advance the
-        // frame and mark dirty so the diff sends only the changed dot cell.
-        if last_spin.elapsed() >= SPIN_INTERVAL
-            && clients
-                .values()
-                .any(|client| client.animation_mask.has_working_spinner())
-        {
-            app.spinner = app.spinner.wrapping_add(1);
-            last_spin = Instant::now();
-            render_request.record(RenderCause::Animation);
         }
         // Fallback re-arm (the render path below re-arms at the frame rate): a
         // flag still set here means un-rendered output → schedule a frame.
@@ -878,20 +855,15 @@ fn render_client(
         client.render_buf.reset();
     }
 
-    let (cursor, cursor_visible, animation_mask) = {
+    let (cursor, cursor_visible) = {
         let mut target = ui::RenderTarget::new(&mut client.render_buf, area);
         if interactive {
             ui::render_into(&mut target, app);
         } else {
             ui::render_projection(&mut target, app);
         }
-        (
-            target.cursor(),
-            target.cursor_visible(),
-            target.animation_mask(),
-        )
+        (target.cursor(), target.cursor_visible())
     };
-    client.animation_mask = animation_mask;
 
     let full = force_all
         || client.force_full
@@ -1411,45 +1383,6 @@ mod tests {
             app.panes[&focus].size(),
             (content.width, content.height),
             "secondary projection must not resize the shared PTY"
-        );
-    }
-
-    #[test]
-    fn animation_mask_tracks_a_spinner_that_is_actually_rendered() {
-        let _env = crate::persist::test_env("rendered-animation-mask");
-        let (app_tx, _app_rx) = mpsc::channel();
-        let mut app = App::new(120, 40, app_tx).expect("app starts");
-        app.server_mode = true;
-        let focus = app.layout().focus;
-        let status = app.status.get_mut(&focus).expect("focused pane status");
-        status.agent = "claude".into();
-        status.state = crate::ui::theme::State::Working;
-
-        let (client, _rx) = display_client(120, 40, 1);
-        let mut clients = HashMap::from([(1, client)]);
-        let mut foreground = Some(1);
-        let mut interactive_size = (120, 40);
-        render_clients(
-            &mut app,
-            &mut clients,
-            &mut foreground,
-            &mut interactive_size,
-            false,
-        );
-        assert!(clients[&1].animation_mask.has_working_spinner());
-
-        app.sidebars.left.visible = false;
-        app.sidebars.right.visible = false;
-        render_clients(
-            &mut app,
-            &mut clients,
-            &mut foreground,
-            &mut interactive_size,
-            false,
-        );
-        assert!(
-            !clients[&1].animation_mask.has_working_spinner(),
-            "a hidden AGENTS dock must not keep scheduling animation frames"
         );
     }
 

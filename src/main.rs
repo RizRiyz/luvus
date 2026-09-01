@@ -1308,8 +1308,6 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     let mut last_draw = Instant::now();
     let mut last_save = Instant::now();
     let mut immediate_save_attempted = false;
-    let mut last_spin = Instant::now();
-
     loop {
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(ev) => {
@@ -1359,13 +1357,6 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
         }
         if let Some(signal) = app.pending_sound.take() {
             emit_sound(signal);
-        }
-        // Advance the working spinner ~10x/s (the loop redraws every frame).
-        if last_spin.elapsed() >= Duration::from_millis(100)
-            && (app.any_working() || app.bar.has_visible_working(&app.config.bars, app.compact))
-        {
-            app.spinner = app.spinner.wrapping_add(1);
-            last_spin = Instant::now();
         }
         if let Some(url) = app.pending_open_url.take() {
             crate::platform::open_url(&url);

@@ -578,31 +578,6 @@ impl BarState {
         changed
     }
 
-    pub fn has_visible_working(&self, config: &crate::config::BarConfig, compact: bool) -> bool {
-        let widgets = self.widgets.iter().filter_map(|(key, widget)| {
-            let visible = if key == CORE_AGENTS {
-                compact
-            } else {
-                config.region_for(key, widget.region).is_some()
-            };
-            visible.then_some(widget)
-        });
-        let notifications = (!compact)
-            .then_some(
-                self.notifications
-                    .iter()
-                    .map(|notification| &notification.widget),
-            )
-            .into_iter()
-            .flatten();
-        widgets
-            .chain(notifications)
-            .flat_map(|widget| widget.content.iter().chain(&widget.compact_content))
-            .any(|segment| {
-                matches!(&segment.kind, BarSegmentKind::State { state, .. } if state == "working")
-            })
-    }
-
     pub fn declaration(&self, canonical: &str) -> Option<&BarDeclaration> {
         self.declarations.get(canonical)
     }
@@ -1189,33 +1164,6 @@ mod tests {
             1,
         );
         assert!(bad.unwrap_err().contains("control"));
-    }
-
-    #[test]
-    fn spinner_work_only_tracks_widgets_visible_in_the_current_chrome() {
-        let mut state = BarState::default();
-        let working = BarWidget::new(
-            BarWidgetKey::new("test", "job"),
-            BarRegion::TopRight,
-            vec![BarSegment {
-                kind: BarSegmentKind::State {
-                    state: "working".into(),
-                    label: None,
-                },
-                tone: BarTone::Normal,
-                action: None,
-                value: None,
-            }],
-            Vec::new(),
-            1,
-        )
-        .unwrap();
-        state.push_widget(working).unwrap();
-
-        let mut config = crate::config::BarConfig::default();
-        assert!(state.has_visible_working(&config, false));
-        config.place("test:job", None);
-        assert!(!state.has_visible_working(&config, false));
     }
 
     #[test]

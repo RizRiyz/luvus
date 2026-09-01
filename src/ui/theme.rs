@@ -783,45 +783,6 @@ impl State {
     }
 }
 
-/// The working spinner's frames: a braille mark rotating around the **middle**
-/// of the cell, so it sits level with the `○`/`●` dots on neighbouring rows.
-///
-/// A braille cell has four dot rows, and which rows a glyph uses decides where it
-/// sits vertically. The classic CLI spinner (`⠋⠙⠹…`) uses dots 1-6 (the upper
-/// three rows) and visibly rides high; the bottom two rows (dots 3/6/7/8) ride
-/// just as visibly low. These frames use dots **2/3/5/6** — rows two and three —
-/// which is the vertical centre of the cell.
-///
-/// Each frame is one edge of that 2x2 dot square, so the mark sweeps clockwise:
-/// left → top → right → bottom. Every frame is exactly two dots, so the spinner
-/// keeps constant weight as it turns (no pulsing).
-///
-/// Glyph choice matters for alignment, so don't swap these casually:
-///
-/// * **Every frame is the same width.** Braille (U+2800..=U+28FF) is East Asian
-///   *Neutral* — exactly one column in every terminal, whatever its
-///   ambiguous-width setting. The old half-circle set (`◐◓◑◒`) mixed classes:
-///   `◐`/`◑` are *Ambiguous* (2 cells wherever a terminal draws ambiguous glyphs
-///   wide) while `◒`/`◓` are Narrow, so the icon changed size every other frame
-///   and drifted against the 1-column slot ratatui reserves for it.
-/// * **Every frame carries the same ink.** All ten are six-dot patterns, so the
-///   spinner never looks like it grows or shrinks as it turns.
-/// * **Font coverage is effectively universal.** Braille is *the* spinner block,
-///   so there is no fallback to another face at a different size.
-///
-/// [`state_glyphs_are_one_column`] guards these properties.
-const FRAMES: [&str; 4] = ["⠆", "⠒", "⠰", "⠤"];
-
-/// Frames in one full revolution. Iterate this instead of hardcoding a count so
-/// changing the animation can't silently desync a caller or a test.
-pub const SPINNER_FRAMES: u64 = FRAMES.len() as u64;
-
-/// One frame of the "working" spinner, advanced by `App.spinner` while an agent
-/// is working — a busy agent shows live motion instead of a static `●`.
-pub fn spinner_frame(n: u64) -> &'static str {
-    FRAMES[(n % SPINNER_FRAMES) as usize]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -830,12 +791,11 @@ mod tests {
     // with `UnicodeWidthStr::width` (== 1 for all of these), so any glyph a
     // terminal draws two cells wide pushes the label right and breaks the column.
     // Requiring `width_cjk == 1` too keeps every icon *unambiguously* narrow, so
-    // the slot is honored even where ambiguous-width glyphs render wide — and
-    // every spinner frame stays exactly the same size as the static dots.
+    // the slot is honored even where ambiguous-width glyphs render wide.
     #[test]
     fn state_glyphs_are_one_column() {
         use unicode_width::UnicodeWidthStr;
-        let mut glyphs: Vec<&str> = [
+        let glyphs: Vec<&str> = [
             State::Blocked,
             State::Working,
             State::Done,
@@ -845,29 +805,11 @@ mod tests {
         .iter()
         .map(|s| s.dot())
         .collect();
-        glyphs.extend((0..SPINNER_FRAMES).map(spinner_frame));
-
         for g in glyphs {
             assert_eq!(g.chars().count(), 1, "{g:?} must be a single glyph");
             assert_eq!(g.width(), 1, "{g:?} must occupy one column");
         }
 
-        // The regression this guards: the spinner animates *in place*, so if its
-        // frames disagree on East Asian width the icon visibly changes size as it
-        // turns (the old `◐◓◑◒` mixed Ambiguous `◐`/`◑` with Narrow `◒`/`◓`).
-        // Every frame must sit in the same width class as every other.
-        let widths: std::collections::HashSet<usize> = (0..SPINNER_FRAMES)
-            .map(|i| spinner_frame(i).width_cjk())
-            .collect();
-        assert_eq!(
-            widths.len(),
-            1,
-            "spinner frames disagree on East Asian width, so the icon changes \
-             size mid-animation: {:?}",
-            (0..SPINNER_FRAMES)
-                .map(|i| (spinner_frame(i), spinner_frame(i).width_cjk()))
-                .collect::<Vec<_>>()
-        );
         // The static dots must likewise agree with each other, so an idle row and
         // a blocked row never sit at different widths.
         assert_eq!(
@@ -875,17 +817,6 @@ mod tests {
             State::Blocked.dot().width_cjk(),
             "the idle and active dots must be the same width class"
         );
-
-        // The four frames must be distinct, or the spinner would stutter…
-        let frames: std::collections::HashSet<&str> =
-            (0..SPINNER_FRAMES).map(spinner_frame).collect();
-        assert_eq!(
-            frames.len() as u64,
-            SPINNER_FRAMES,
-            "spinner frames must all differ"
-        );
-        // …and it must cycle with that period.
-        assert_eq!(spinner_frame(0), spinner_frame(SPINNER_FRAMES));
     }
 
     #[test]

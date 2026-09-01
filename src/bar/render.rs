@@ -9,7 +9,7 @@ use super::{
     BarHit, BarLayout, BarRegion, BarSegment, BarSegmentKind, BarState, BarTone, OverflowHit,
     WidgetCandidate,
 };
-use crate::ui::theme::{spinner_frame, State, Theme};
+use crate::ui::theme::{State, Theme};
 use crate::ui::RenderTarget;
 use std::borrow::Cow;
 
@@ -19,7 +19,6 @@ pub fn draw_region(
     region: BarRegion,
     candidates: &[WidgetCandidate<'_>],
     layout: &BarLayout,
-    spinner: u64,
     t: &Theme,
 ) -> (Vec<BarHit>, Option<OverflowHit>) {
     if area.width == 0 || area.height == 0 || layout.is_empty() {
@@ -47,7 +46,6 @@ pub fn draw_region(
                 f,
                 rect,
                 segment,
-                spinner,
                 candidate.key == super::CORE_RUNTIME && segment_index == 0,
                 t,
             );
@@ -98,7 +96,6 @@ fn draw_segment(
     f: &mut RenderTarget,
     rect: Rect,
     segment: &BarSegment,
-    spinner: u64,
     core_runtime_label: bool,
     t: &Theme,
 ) {
@@ -108,12 +105,7 @@ fn draw_segment(
         }
         BarSegmentKind::State { state, label } => {
             let state = parse_state(state);
-            let glyph = if state == State::Working {
-                f.mark_working_animation();
-                spinner_frame(spinner)
-            } else {
-                state.dot()
-            };
+            let glyph = state.dot();
             let text = label
                 .as_ref()
                 .map(|label| format!("{glyph} {label}"))
@@ -253,6 +245,35 @@ pub fn draw_overflow(f: &mut RenderTarget, area: Rect, state: &mut BarState, t: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::buffer::Buffer;
+
+    #[test]
+    fn working_state_uses_static_filled_marker() {
+        let area = Rect::new(0, 0, 16, 1);
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+        let segment = BarSegment {
+            kind: BarSegmentKind::State {
+                state: "working".into(),
+                label: Some("agent".into()),
+            },
+            tone: BarTone::Normal,
+            action: None,
+            value: None,
+        };
+        draw_segment(
+            &mut target,
+            area,
+            &segment,
+            false,
+            &crate::ui::theme::by_name("quattro-rally"),
+        );
+
+        let rendered = (0..area.width)
+            .map(|x| buffer.cell((x, 0)).map(|cell| cell.symbol()).unwrap_or(" "))
+            .collect::<String>();
+        assert!(rendered.starts_with("● agent"));
+    }
 
     #[test]
     fn top_overflow_reserves_its_anchor_row_without_losing_a_fitting_item() {

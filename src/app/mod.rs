@@ -1646,7 +1646,6 @@ pub struct App {
     /// outlives its windows. Closing the last project replaces it with a neutral
     /// terminal rooted at `$HOME`; only `server stop` ends the server.
     pub server_mode: bool,
-    pub spinner: u64,
     /// Structure changed since the last save; the loop persists when set.
     pub session_dirty: bool,
     pub events: EventBus,
@@ -2206,7 +2205,6 @@ impl App {
             zoomed: false,
             should_quit: false,
             server_mode: false,
-            spinner: 0,
             session_dirty: true,
             events: api::new_bus(),
             orch: crate::orch::OrchState::load(),
@@ -2821,7 +2819,6 @@ impl App {
             zoomed: false,
             should_quit: false,
             server_mode: false,
-            spinner: 0,
             session_dirty: false,
             events: api::new_bus(),
             orch: crate::orch::OrchState::load(),
@@ -3292,14 +3289,6 @@ impl App {
     }
 
     // ── accessors ───────────────────────────────────────────────────────────
-
-    /// True if any pane is currently Working — drives the sidebar spinner and
-    /// how often the loop repaints to animate it.
-    pub fn any_working(&self) -> bool {
-        self.status
-            .values()
-            .any(|s| s.state == crate::ui::theme::State::Working)
-    }
 
     /// Re-arm every pane's PTY wake-coalescing flag (see `Pane.data_pending`),
     /// letting the readers announce fresh output again. Returns whether any
@@ -10427,8 +10416,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    // A working agent shows an animated rotating-circle spinner in the AGENTS
-    // list dot slot (not the static `●`), advancing with `App.spinner`.
     // Clicking a pane's title opens the running-command overlay. The point is
     // that the command comes from the OS, not the screen: an agent's own UI
     // elides long commands and those characters never reach luvus at all.
@@ -10488,10 +10475,10 @@ mod tests {
     }
 
     #[test]
-    fn working_agent_shows_spinner() {
+    fn working_agent_shows_filled_status() {
         use ratatui::{backend::TestBackend, Terminal};
         // Isolate `$LUVUS_HOME`: with the developer's real config a different
-        // dock layout can push the AGENTS rows out of view, so the spinner is
+        // dock layout can push the AGENTS rows out of view, so the status is
         // never drawn and this fails depending on test order.
         let _env = crate::persist::test_env("spinner");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -10502,27 +10489,21 @@ mod tests {
         ps.state = crate::ui::theme::State::Working;
         app.status.insert(pid, ps);
 
-        // Take the frame set from the theme rather than hardcoding glyphs, so
-        // changing the spinner's look never silently breaks this test.
-        let frames: Vec<&str> = (0..crate::ui::theme::SPINNER_FRAMES)
-            .map(crate::ui::theme::spinner_frame)
-            .collect();
-        let frame_at = |app: &mut App, spin: u64| -> String {
-            app.spinner = spin;
-            let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
-            term.draw(|f| crate::ui::render(f, app)).unwrap();
-            let buf = term.backend().buffer().clone();
-            // The dot is the first glyph of the agent row inside the sidebar.
-            (0..buf.area.height)
-                .flat_map(|r| (0..buf.area.width).map(move |c| (c, r)))
-                .filter_map(|(c, r)| buf.cell((c, r)).map(|x| x.symbol().to_string()))
-                .find(|s| frames.contains(&s.as_str()))
-                .unwrap_or_default()
-        };
-        let f0 = frame_at(&mut app, 0);
-        let f1 = frame_at(&mut app, 1);
-        assert!(!f0.is_empty(), "a working agent shows a spinner glyph");
-        assert_ne!(f0, f1, "the spinner advances with app.spinner");
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        let rows = (0..buf.area.height)
+            .map(|r| {
+                (0..buf.area.width)
+                    .map(|c| buf.cell((c, r)).map(|cell| cell.symbol()).unwrap_or(" "))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("● working") && row.contains("claude")),
+            "a working agent shows a static filled status marker"
+        );
     }
 
     // An agent that finishes a working stretch (Working → Idle) queues the

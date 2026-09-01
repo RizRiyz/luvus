@@ -72,7 +72,6 @@ pub(super) fn draw_status(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
             crate::bar::BarRegion::BottomRight,
             &candidates,
             &layout,
-            app.spinner,
             t,
         );
         (hits, overflow, visible)

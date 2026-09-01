@@ -599,14 +599,9 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                     Style::new().fg(t.subtext1)
                 };
                 agent_rects.push((id, Rect::new(area.x, y, area.width, 2)));
-                // A working agent gets a live rotating-circle spinner in the dot
-                // slot; every other state keeps its static dot.
-                let dot = if st == State::Working {
-                    f.mark_working_animation();
-                    crate::ui::theme::spinner_frame(app.spinner)
-                } else {
-                    st.dot()
-                };
+                // Working stays visually prominent without scheduling animation
+                // frames while the agent is busy.
+                let dot = st.dot();
                 let label = format!(" {}  ", st.label());
                 let prefix_w = crate::ui::display_width(dot) + crate::ui::display_width(&label);
                 let agent = crate::ui::truncate(&agent, (cw as usize).saturating_sub(prefix_w));
@@ -821,9 +816,7 @@ mod tests {
     }
 
     // The state icon sits in a fixed one-column slot, so the text after it must
-    // start at the same column no matter which state is shown — and, for a
-    // working agent, at every frame of the spinner. Otherwise the row visibly
-    // shifts as the icon animates.
+    // start at the same column no matter which state is shown.
     /// The fg colour of the first cell of the row containing `needle`.
     fn fg_of_row(term: &Terminal<TestBackend>, needle: &str) -> Option<ratatui::style::Color> {
         let buf = term.backend().buffer();
@@ -926,22 +919,13 @@ mod tests {
         app.status.get_mut(&id).unwrap().agent = "claude".into();
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
 
-        // Where the label lands for each static state.
+        // Where the label lands for each state.
         let mut columns = Vec::new();
-        for st in [State::Idle, State::Blocked, State::Done] {
+        for st in [State::Idle, State::Blocked, State::Working, State::Done] {
             app.status.get_mut(&id).unwrap().state = st;
             term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
             let cols = label_columns(&term, st.label());
             assert!(!cols.is_empty(), "the {st:?} row should be drawn");
-            columns.extend(cols);
-        }
-        // …and for every frame of the working spinner.
-        app.status.get_mut(&id).unwrap().state = State::Working;
-        for frame in 0..crate::ui::theme::SPINNER_FRAMES {
-            app.spinner = frame;
-            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
-            let cols = label_columns(&term, State::Working.label());
-            assert!(!cols.is_empty(), "the working row should be drawn");
             columns.extend(cols);
         }
 

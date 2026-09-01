@@ -27,21 +27,6 @@ pub struct RenderTarget<'a> {
     area: Rect,
     cursor: Option<(u16, u16)>,
     cursor_visible: bool,
-    animation_mask: AnimationMask,
-}
-
-/// Allocation-free record of animated surfaces that were actually drawn into a
-/// client projection. The server uses this instead of global agent state, which
-/// avoids repainting when every working indicator is clipped or hidden.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct AnimationMask(u8);
-
-impl AnimationMask {
-    const WORKING_SPINNER: u8 = 1 << 0;
-
-    pub fn has_working_spinner(self) -> bool {
-        self.0 & Self::WORKING_SPINNER != 0
-    }
 }
 
 impl<'a> RenderTarget<'a> {
@@ -52,7 +37,6 @@ impl<'a> RenderTarget<'a> {
             area,
             cursor: None,
             cursor_visible: false,
-            animation_mask: AnimationMask::default(),
         }
     }
     pub fn area(&self) -> Rect {
@@ -78,15 +62,6 @@ impl<'a> RenderTarget<'a> {
     }
     pub fn cursor_visible(&self) -> bool {
         self.cursor_visible
-    }
-
-    /// Mark that this projection contains a live working-state spinner.
-    pub fn mark_working_animation(&mut self) {
-        self.animation_mask.0 |= AnimationMask::WORKING_SPINNER;
-    }
-
-    pub fn animation_mask(&self) -> AnimationMask {
-        self.animation_mask
     }
 }
 
@@ -122,7 +97,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
             area,
             cursor: None,
             cursor_visible: false,
-            animation_mask: AnimationMask::default(),
         };
         render_into(&mut target, app);
         (target.cursor, target.cursor_visible)

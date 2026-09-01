@@ -92,7 +92,6 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
             crate::bar::BarRegion::TopRight,
             &candidates,
             &layout,
-            app.spinner,
             t,
         );
         (hits, overflow, width)
