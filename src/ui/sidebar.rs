@@ -89,7 +89,8 @@ fn draw_scrollbar(
 /// divider between each. Reduces to the legacy 50/50 split for two docks (the
 /// divider is taken from the remainder, so `slot0 = body.height / n`).
 /// Returns `(slots, divider_rows)`.
-fn dock_slots(body: Rect, n: usize) -> (Vec<Rect>, Vec<u16>) {
+fn dock_slots(body: Rect, weights: &[u16]) -> (Vec<Rect>, Vec<u16>) {
+    let n = weights.len();
     let mut slots = Vec::with_capacity(n);
     let mut dividers = Vec::new();
     if n == 0 {
@@ -99,8 +100,15 @@ fn dock_slots(body: Rect, n: usize) -> (Vec<Rect>, Vec<u16>) {
     let mut y = body.y;
     for i in 0..n {
         let remaining = bottom.saturating_sub(y);
-        let docks_left = (n - i) as u16;
-        let h = remaining / docks_left;
+        // Share of what is left, by weight. With equal weights this reduces
+        // exactly to the former `remaining / docks_left`, so an unresized
+        // sidebar lays out to the cell as it always did.
+        let weight_left: u32 = weights[i..].iter().map(|w| u32::from(*w)).sum();
+        let h = if weight_left == 0 {
+            0
+        } else {
+            (u32::from(remaining) * u32::from(weights[i]) / weight_left) as u16
+        };
         slots.push(Rect::new(body.x, y, body.width, h));
         y += h;
         if i + 1 < n {
@@ -182,9 +190,13 @@ pub(super) fn draw_sidebar(
         area.bottom().saturating_sub(body_top),
     );
     let docks = app.sidebars.get(side).docks.clone();
-    let (slots, dividers) = dock_slots(body, docks.len());
-    for &dy in &dividers {
+    let (slots, dividers) = dock_slots(body, &app.sidebars.get(side).dock_weights());
+    // Publish the rules so a press can grab one. Recomputed every frame, so a
+    // sidebar that stops being drawn leaves no stale drag target behind.
+    app.dock_dividers.retain(|(s, _, _)| *s != side);
+    for (i, &dy) in dividers.iter().enumerate() {
         draw_dock_divider(f, body, dy, t);
+        app.dock_dividers.push((side, i, dy));
     }
 
     let mut ws_rects = Vec::new();
@@ -759,6 +771,36 @@ fn header(text: &str, t: &Theme) -> Line<'static> {
 
 #[cfg(test)]
 mod tests {
+    /// Equal weights must lay out exactly as the former `remaining / docks_left`
+    /// did, to the cell: every sidebar that has never been resized keeps the
+    /// geometry it had before weights existed.
+    #[test]
+    fn equal_weights_reproduce_the_former_even_split() {
+        let body = ratatui::layout::Rect::new(0, 0, 20, 30);
+        let (slots, dividers) = super::dock_slots(body, &[1, 1, 1]);
+        assert_eq!(
+            slots.iter().map(|s| s.height).collect::<Vec<_>>(),
+            vec![10, 9, 9]
+        );
+        assert_eq!(dividers, vec![10, 20]);
+        // Every row is accounted for: slots plus one row per divider.
+        let used: u16 = slots.iter().map(|s| s.height).sum::<u16>() + dividers.len() as u16;
+        assert_eq!(used, body.height);
+    }
+
+    /// A weighted split hands out the sidebar in proportion, and still spends
+    /// every row.
+    #[test]
+    fn weights_split_the_sidebar_in_proportion() {
+        let body = ratatui::layout::Rect::new(0, 0, 20, 31);
+        let (slots, dividers) = super::dock_slots(body, &[2, 1]);
+        assert_eq!(slots[0].height, 20, "twice the weight, twice the rows");
+        assert_eq!(slots[1].height, 10);
+        assert_eq!(dividers.len(), 1);
+        let used: u16 = slots.iter().map(|s| s.height).sum::<u16>() + dividers.len() as u16;
+        assert_eq!(used, body.height, "no row is lost to rounding");
+    }
+
     use crate::app::App;
     use crate::event::AppEvent;
     use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};

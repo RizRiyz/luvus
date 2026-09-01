@@ -329,6 +329,12 @@ pub struct SideConfig {
     pub width: u16,
     #[serde(default)]
     pub docks: Vec<String>,
+    /// Relative height share of each dock on this side, parallel to `docks`.
+    /// Empty — the default, and what every config written before dock resizing
+    /// existed contains — means an equal split, so an older config keeps the
+    /// layout it already had.
+    #[serde(default)]
+    pub dock_weights: Vec<u16>,
 }
 
 impl SideConfig {
@@ -338,6 +344,7 @@ impl SideConfig {
             visible: true,
             width: SIDEBAR_WIDTH_DEFAULT,
             docks: vec!["workspaces".into(), "agents".into()],
+            dock_weights: Vec::new(),
         }
     }
     /// The default right sidebar: off and empty.
@@ -346,6 +353,7 @@ impl SideConfig {
             visible: false,
             width: SIDEBAR_WIDTH_DEFAULT,
             docks: Vec::new(),
+            dock_weights: Vec::new(),
         }
     }
 }

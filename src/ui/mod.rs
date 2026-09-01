@@ -494,6 +494,9 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // never fire (docs/29).
     app.left_seam = sidebar_left.map(|a| Rect::new(a.right().saturating_sub(1), a.y, 1, a.height));
     app.right_seam = sidebar_right.map(|a| Rect::new(a.x, a.y, 1, a.height));
+    // Same contract for the horizontal rules between stacked docks: cleared
+    // here, refilled by `draw_sidebar` for whichever sidebars actually draw.
+    app.dock_dividers.clear();
 
     let mobile_layout = app.compact.then(|| mobile::compute_layout(content));
     let (tabbar, pane_area) = if let Some(layout) = mobile_layout {

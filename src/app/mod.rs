@@ -219,6 +219,10 @@ pub struct SideState {
     pub visible: bool,
     pub width: u16,
     pub docks: Vec<DockKind>,
+    /// Relative height share per mounted dock, parallel to `docks`. Empty, or
+    /// stale after a dock was added or removed, means an equal split — see
+    /// [`SideState::dock_weights`].
+    pub weights: Vec<u16>,
 }
 
 impl SideState {
@@ -228,10 +232,13 @@ impl SideState {
         // more than `MAX_DOCKS_PER_SIDE` here keeps the first few; the overflow
         // falls to "off" (unmounted, still in the registry to re-place).
         docks.truncate(MAX_DOCKS_PER_SIDE);
+        let mut weights = c.dock_weights.clone();
+        weights.truncate(docks.len());
         SideState {
             visible: c.visible,
             width: c.width.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX),
             docks,
+            weights,
         }
     }
     fn to_config(&self) -> crate::config::SideConfig {
@@ -239,6 +246,19 @@ impl SideState {
             visible: self.visible,
             width: self.width,
             docks: self.docks.iter().map(|d| d.id().to_string()).collect(),
+            dock_weights: self.weights.clone(),
+        }
+    }
+    /// Height shares for the mounted docks, always exactly `docks.len()` long.
+    ///
+    /// Anything unusable — never set, gone stale because a dock was mounted or
+    /// removed since, or containing a zero that would collapse a dock to
+    /// nothing — falls back to an equal split rather than to a broken layout.
+    pub fn dock_weights(&self) -> Vec<u16> {
+        if self.weights.len() == self.docks.len() && self.weights.iter().all(|w| *w > 0) {
+            self.weights.clone()
+        } else {
+            vec![1; self.docks.len()]
         }
     }
     /// True if this sidebar should occupy screen space (shown and non-empty).
@@ -1294,6 +1314,11 @@ const RESIZE_GRAB_TOL: u16 = 2;
 /// reaching into the sidebar body (where dock rows own the width).
 const SIDEBAR_GRAB_TOL: u16 = 2;
 
+/// Rows a dock keeps no matter how far its divider is dragged: enough for the
+/// header plus one line of content, so a dock can be made small but never
+/// squeezed into nothing the user then cannot grab back.
+const MIN_DOCK_HEIGHT: u16 = 3;
+
 impl Selection {
     /// (start, end) terminal cells in reading order (top-left → bottom-right).
     pub(crate) fn ordered(&self) -> ((u16, u16), (u16, u16)) {
@@ -1987,6 +2012,14 @@ pub struct App {
     /// `sidebar_seam_at`.
     pub left_seam: Option<Rect>,
     pub right_seam: Option<Rect>,
+    /// The horizontal rule between two stacked docks: `(side, index, row)`,
+    /// where `index` is the divider's position in that sidebar (the boundary
+    /// between dock `index` and `index + 1`). Rebuilt every frame like the
+    /// seams above, so a hidden sidebar leaves nothing here and its drag can
+    /// never fire.
+    pub dock_dividers: Vec<(Side, usize, u16)>,
+    /// The dock divider currently being dragged, as `(side, index)`.
+    pub dock_resize: Option<(Side, usize)>,
     /// The full content area (frame minus the status bar), stored so an in-flight
     /// sidebar drag can turn a cursor column into a width off the correct edge.
     pub last_main_area: Rect,
@@ -2363,6 +2396,8 @@ impl App {
             hover_sidebar: None,
             left_seam: None,
             right_seam: None,
+            dock_dividers: Vec::new(),
+            dock_resize: None,
             last_main_area: Rect::ZERO,
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
@@ -2977,6 +3012,8 @@ impl App {
             hover_sidebar: None,
             left_seam: None,
             right_seam: None,
+            dock_dividers: Vec::new(),
+            dock_resize: None,
             last_main_area: Rect::ZERO,
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
@@ -5629,6 +5666,110 @@ impl App {
 
     /// Start dragging a sidebar's edge to resize it (docs/29). Returns whether a
     /// drag began, so the mouse handler can claim the press before selection.
+    /// The dock divider under `(c, r)`, if any.
+    ///
+    /// Exact row, deliberately: unlike a pane divider — which sits in a gap
+    /// between borders and can afford [`RESIZE_GRAB_TOL`] slack — this rule has
+    /// dock rows immediately above and below it, and any tolerance at all would
+    /// swallow clicks meant for a file or an agent. The target is still a
+    /// full-width row, so it stays easy to hit.
+    pub fn dock_divider_at(&self, c: u16, r: u16) -> Option<(Side, usize)> {
+        self.dock_dividers
+            .iter()
+            .find(|(side, _, dy)| {
+                let within = match side {
+                    Side::Left => self.left_seam.is_some_and(|s| c <= s.x),
+                    Side::Right => self.right_seam.is_some_and(|s| c >= s.x),
+                };
+                within && r == *dy
+            })
+            .map(|(side, index, _)| (*side, *index))
+    }
+
+    pub fn begin_dock_resize(&mut self, c: u16, r: u16) -> bool {
+        match self.dock_divider_at(c, r) {
+            Some(target) => {
+                self.dock_resize = Some(target);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drive the active dock resize from the cursor row: the dragged divider
+    /// moves to `r`, and the two docks it separates absorb the change. Every
+    /// other dock on that side keeps its height.
+    ///
+    /// Like the sidebar-width drag this updates live but does **not** persist;
+    /// `save_sidebars` runs once on release, keeping the disk write off the
+    /// drag path.
+    pub fn update_dock_resize(&mut self, _c: u16, r: u16) {
+        let Some((side, index)) = self.dock_resize else {
+            return;
+        };
+        // Rebuild the current pixel heights from the rendered dividers, so the
+        // drag works from what the user can see rather than from weights that
+        // may have been normalised differently.
+        let dividers: Vec<u16> = self
+            .dock_dividers
+            .iter()
+            .filter(|(s, _, _)| *s == side)
+            .map(|(_, _, dy)| *dy)
+            .collect();
+        let state = self.sidebars.get(side);
+        let n = state.docks.len();
+        if n < 2 || index >= dividers.len() {
+            return;
+        }
+        let mut heights = self.dock_heights(side);
+        if heights.len() != n {
+            return;
+        }
+        // The pair either side of this divider trade rows; the total they own
+        // is fixed, so nothing below shifts.
+        let pair = heights[index].saturating_add(heights[index + 1]);
+        let top = dividers[index];
+        let start = top.saturating_sub(heights[index]);
+        let want = r.saturating_sub(start);
+        let max = pair.saturating_sub(MIN_DOCK_HEIGHT);
+        let first = want.clamp(MIN_DOCK_HEIGHT, max.max(MIN_DOCK_HEIGHT));
+        heights[index] = first;
+        heights[index + 1] = pair.saturating_sub(first);
+        self.sidebars.get_mut(side).weights = heights;
+    }
+
+    /// The rendered height of each dock on `side`, derived from the dividers.
+    fn dock_heights(&self, side: Side) -> Vec<u16> {
+        let dividers: Vec<u16> = self
+            .dock_dividers
+            .iter()
+            .filter(|(s, _, _)| *s == side)
+            .map(|(_, _, dy)| *dy)
+            .collect();
+        let n = self.sidebars.get(side).docks.len();
+        let seam = match side {
+            Side::Left => self.left_seam,
+            Side::Right => self.right_seam,
+        };
+        let Some(seam) = seam else {
+            return Vec::new();
+        };
+        let mut heights = Vec::with_capacity(n);
+        let mut y = seam.y;
+        for i in 0..n {
+            let end = dividers.get(i).copied().unwrap_or(seam.bottom());
+            heights.push(end.saturating_sub(y));
+            y = end.saturating_add(1);
+        }
+        heights
+    }
+
+    pub fn end_dock_resize(&mut self) {
+        if self.dock_resize.take().is_some() {
+            self.save_sidebars();
+        }
+    }
+
     pub fn begin_sidebar_resize(&mut self, c: u16, r: u16) -> bool {
         match self.sidebar_seam_at(c, r) {
             Some(side) => {
@@ -8802,6 +8943,72 @@ mod tests {
     /// built-in *or* a user module dock — leaves in the app's click geometry, one
     /// frame where that dock isn't drawn (its sidebar hidden) must zero it, so no
     /// stale rect can fire under a widened pane area or a relocated dock. This is
+    /// Weights are only trusted when they still describe the mounted docks.
+    /// A dock added or removed since, or a zero that would collapse one to
+    /// nothing, falls back to an even split rather than to a broken sidebar.
+    #[test]
+    fn stale_or_degenerate_dock_weights_fall_back_to_an_even_split() {
+        let mut side = SideState {
+            visible: true,
+            width: 30,
+            docks: vec![DockKind::Workspaces, DockKind::Agents],
+            weights: vec![3, 1],
+        };
+        assert_eq!(side.dock_weights(), vec![3, 1], "a matching set is used");
+
+        side.docks.push(DockKind::Files);
+        assert_eq!(
+            side.dock_weights(),
+            vec![1, 1, 1],
+            "a dock was mounted since; the stale pair is discarded"
+        );
+
+        side.weights = vec![1, 0, 1];
+        assert_eq!(
+            side.dock_weights(),
+            vec![1, 1, 1],
+            "a zero would collapse a dock to nothing"
+        );
+    }
+
+    /// Dragging a divider moves the boundary between the two docks it separates
+    /// and leaves the rest of the sidebar alone. Neither side can be squeezed
+    /// past `MIN_DOCK_HEIGHT`, so a dock can always be grabbed back.
+    #[test]
+    fn dragging_a_dock_divider_trades_rows_between_its_pair_only() {
+        let _env = crate::persist::test_env("dock-divider-drag");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 40, tx).unwrap();
+
+        app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents];
+        app.sidebars.left.weights = Vec::new();
+        // Stand in for a frame: a 30-row sidebar split evenly, so the rule
+        // between the two docks sits at row 15.
+        app.left_seam = Some(Rect::new(29, 0, 1, 30));
+        app.dock_dividers = vec![(Side::Left, 0, 15)];
+
+        app.dock_resize = Some((Side::Left, 0));
+        app.update_dock_resize(10, 22);
+        let weights = app.sidebars.left.weights.clone();
+        assert_eq!(weights.len(), 2);
+        assert!(
+            weights[0] > weights[1],
+            "dragging down grows the upper dock: {weights:?}"
+        );
+        assert_eq!(
+            weights[0] + weights[1],
+            29,
+            "the pair's combined rows are conserved"
+        );
+
+        // Far past the top: the upper dock stops at the floor instead of vanishing.
+        app.update_dock_resize(10, 0);
+        assert_eq!(
+            app.sidebars.left.weights[0], MIN_DOCK_HEIGHT,
+            "the upper dock keeps its floor"
+        );
+    }
+
     /// the invariant the WORKSPACES-vs-FILES bug violated; it now covers every
     /// dock geometry field at once, so a future dock can't reintroduce it.
     #[test]
@@ -10833,11 +11040,13 @@ mod tests {
                     "files".into(),
                     "mod:y".into(),
                 ],
+                dock_weights: Vec::new(),
             },
             right: crate::config::SideConfig {
                 visible: false,
                 width: 26,
                 docks: Vec::new(),
+                dock_weights: Vec::new(),
             },
             files_side: None,
         };

@@ -282,7 +282,10 @@ pub enum AppEvent {
     /// only validates and swaps the resulting live configuration.
     ConfigReloaded {
         id: String,
-        config: crate::config::Config,
+        /// Boxed: the whole config is by far the largest thing any event
+        /// carries, and every other `AppEvent` in the channel would otherwise
+        /// be padded to its size.
+        config: Box<crate::config::Config>,
         reply: Sender<String>,
     },
     /// Agent manifest IO and parsing completed on the socket worker.
