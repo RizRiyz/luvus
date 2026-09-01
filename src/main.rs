@@ -44,6 +44,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
+#[cfg(windows)]
+use ratatui::crossterm::event::poll as poll_event;
 use ratatui::crossterm::event::{
     read as read_event, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture,
     EnableBracketedPaste, EnableFocusChange, EnableMouseCapture, Event, KeyboardEnhancementFlags,
@@ -1412,23 +1414,68 @@ fn remove_unbound_socket(path: &Path) -> std::io::Result<()> {
 }
 
 fn input_loop(tx: Sender<AppEvent>, pending: Vec<Event>) {
-    for event in pending {
-        let Some(event) = app_event(event) else {
-            continue;
-        };
-        if tx.send(event).is_err() {
-            return;
+    #[cfg(windows)]
+    {
+        let mut decoder = crate::terminal::host_input::HostInputDecoder::default();
+        for event in pending {
+            if !send_decoded_input(&tx, decoder.push(event)) {
+                return;
+            }
+        }
+        loop {
+            if let Some(timeout) = decoder.wait_timeout() {
+                match poll_event(timeout) {
+                    Ok(false) => {
+                        if !send_decoded_input(&tx, decoder.flush_expired()) {
+                            break;
+                        }
+                        continue;
+                    }
+                    Ok(true) => {}
+                    Err(_) => break,
+                }
+            }
+            let Ok(event) = read_event() else {
+                break;
+            };
+            if !send_decoded_input(&tx, decoder.push(event)) {
+                break;
+            }
+        }
+        return;
+    }
+
+    #[cfg(not(windows))]
+    {
+        for event in pending {
+            if !send_input_event(&tx, event) {
+                return;
+            }
+        }
+        while let Ok(event) = read_event() {
+            if !send_input_event(&tx, event) {
+                break;
+            }
         }
     }
-    while let Ok(event) = read_event() {
-        let sent = match app_event(event) {
-            Some(event) => tx.send(event),
-            None => Ok(()),
-        };
-        if sent.is_err() {
-            break;
+}
+
+fn send_input_event(tx: &Sender<AppEvent>, event: Event) -> bool {
+    app_event(event).is_none_or(|event| tx.send(event).is_ok())
+}
+
+#[cfg(windows)]
+fn send_decoded_input(
+    tx: &Sender<AppEvent>,
+    decoded: crate::terminal::host_input::DecodedEvents,
+) -> bool {
+    let mut connected = true;
+    decoded.for_each(|event| {
+        if connected {
+            connected = send_input_event(tx, event);
         }
-    }
+    });
+    connected
 }
 
 fn app_event(event: Event) -> Option<AppEvent> {

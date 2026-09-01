@@ -8,6 +8,8 @@ use std::thread;
 use anyhow::{anyhow, Result};
 use ratatui::backend::Backend;
 use ratatui::buffer::Cell;
+#[cfg(windows)]
+use ratatui::crossterm::event::poll as poll_event;
 use ratatui::crossterm::event::{
     read as read_event, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture,
     EnableBracketedPaste, EnableFocusChange, EnableMouseCapture, Event,
@@ -345,23 +347,68 @@ fn switched_args(raw: &[String], name: &str) -> Vec<String> {
 }
 
 fn input_loop<W: Write>(mut writer: W, pending: Vec<Event>) {
-    for event in pending {
-        let Some(msg) = event_message(event) else {
-            continue;
-        };
-        if protocol::write_message(&mut writer, &msg).is_err() {
-            return;
+    #[cfg(windows)]
+    {
+        let mut decoder = crate::terminal::host_input::HostInputDecoder::default();
+        for event in pending {
+            if !write_decoded_input(&mut writer, decoder.push(event)) {
+                return;
+            }
+        }
+        loop {
+            if let Some(timeout) = decoder.wait_timeout() {
+                match poll_event(timeout) {
+                    Ok(false) => {
+                        if !write_decoded_input(&mut writer, decoder.flush_expired()) {
+                            break;
+                        }
+                        continue;
+                    }
+                    Ok(true) => {}
+                    Err(_) => break,
+                }
+            }
+            let Ok(event) = read_event() else {
+                break;
+            };
+            if !write_decoded_input(&mut writer, decoder.push(event)) {
+                break;
+            }
+        }
+        return;
+    }
+
+    #[cfg(not(windows))]
+    {
+        for event in pending {
+            if !write_input_event(&mut writer, event) {
+                return;
+            }
+        }
+        while let Ok(event) = read_event() {
+            if !write_input_event(&mut writer, event) {
+                break;
+            }
         }
     }
-    while let Ok(event) = read_event() {
-        let msg = match event_message(event) {
-            Some(msg) => msg,
-            None => continue,
-        };
-        if protocol::write_message(&mut writer, &msg).is_err() {
-            break;
+}
+
+fn write_input_event(writer: &mut impl Write, event: Event) -> bool {
+    event_message(event).is_none_or(|message| protocol::write_message(writer, &message).is_ok())
+}
+
+#[cfg(windows)]
+fn write_decoded_input(
+    writer: &mut impl Write,
+    decoded: crate::terminal::host_input::DecodedEvents,
+) -> bool {
+    let mut connected = true;
+    decoded.for_each(|event| {
+        if connected {
+            connected = write_input_event(writer, event);
         }
-    }
+    });
+    connected
 }
 
 fn event_message(event: Event) -> Option<ClientMessage> {
