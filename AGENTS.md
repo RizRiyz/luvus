@@ -30,9 +30,14 @@ several roles:
   state, persistence, modules, orchestration, API dispatch, and rendering.
 - CLI commands send bounded JSON requests to the selected server and exit.
 - Named sessions are independent server namespaces selected with
-  `--session <name>` or `session attach <name>`.
+  `--session <name>`, `session attach <name>`, or the on-demand desktop/mobile
+  session switcher. Switching starts the target if needed without detaching
+  other clients.
 - `--local` is a monolithic development escape hatch.
 - `--remote <host>` attaches through an SSH byte bridge.
+- `uhp access` starts a temporary loopback NDJSON gateway for independent
+  transport providers. It is read-only by default; control is explicit,
+  scoped, paired, and time-bounded.
 
 There are two local endpoints per server:
 
@@ -86,7 +91,10 @@ boundaries are:
 - `src/layout.rs`: pure binary space-partition pane geometry. Layout leaves store
   IDs; live panes and native views remain flat in `App`.
 - `src/terminal/pty.rs`: portable PTY creation, reader/writer/reaper lifecycle,
-  environment propagation, and cancellation.
+  environment propagation, and cancellation. `src/terminal/host_input.rs`
+  narrowly reconstructs Windows console bracketed paste before dispatch.
+- `src/terminal/appearance.rs` and `src/terminal/theme_probe.rs`: child terminal
+  appearance negotiation and terminal-theme probing.
 - `src/terminal/vt/`: the `VtEngine` boundary and current Alacritty adapter.
   `vendor/vte/` and `vendor/alacritty_terminal/` are intentional local patched
   crates published under Luvus package names.
@@ -97,7 +105,8 @@ boundaries are:
 - `src/ipc/api.rs` and `src/ipc/transport.rs`: bounded local API handling plus
   Unix-socket and Windows-named-pipe transport.
 - `src/ui/`: Ratatui rendering, panes, sidebars, docks, tab bar, settings,
-  Git/files/diff, Mission Control, overlays, and hit-test geometry.
+  Git/files/diff, document previews, Mission Control, session overlays, and
+  hit-test geometry.
 - `src/detect.rs`: agent identity and state evidence. Detection is native Luvus
   behavior and must not depend on an installed agent skill.
 - `src/agent.rs`: stable native-session, resume, fork, and usage facade.
@@ -113,16 +122,23 @@ boundaries are:
 - `src/cli.rs`, `src/api/`, and `src/app/dispatch.rs`: parsing/help, public UHP
   contracts, and validated state mutation for one control surface.
 - `src/config.rs` and `src/persist.rs`: configuration, migration, selected-session
-  paths, snapshots, and restore.
+  paths, snapshots, and restore. Named-session discovery and switching live in
+  `src/session.rs` and `src/app/session_menu.rs`.
 - `src/git/`, `src/diff/`, and `src/files/`: GitHub/local Git data, semantic diff
-  review and notes, and file browsing.
+  review and notes, file browsing, and bounded Markdown/Mermaid parsing and
+  layout under `src/files/preview/`; app/UI preview ownership stays in
+  `src/app/preview.rs` and `src/ui/preview.rs`.
 - `src/module/`: manifest-driven extensions that run out of process and call the
   same local API as other clients.
 - `src/bar/`: Top and Bottom Luvus Bar declarations and rendering.
 - `src/mission/`: usage and pricing data for Mission Control.
 - `src/orch/` and `src/app/board.rs`: tasks, leases, quality gates, worktrees,
-  and multi-agent orchestration.
+  and multi-agent orchestration. Worktree mode is isolated; workspace mode
+  intentionally shares the existing checkout.
 - `src/logging/`: bounded, private, redacted, rotating runtime logs.
+- `src/uhp/`: the foreground, transport-neutral UHP access gateway, one-use
+  pairing, delegated authority, and shutdown cleanup. It does not own a public
+  transport or run when `uhp access` is absent.
 - `src/platform.rs` and `src/platform/windows.rs`: operating-system boundaries.
 
 The main concurrency invariant is one mutable `App` owner. Background threads
@@ -151,13 +167,34 @@ lock scopes short and never hold it across unrelated slow work.
 - User configuration and snapshots must remain forward-tolerant through serde
   defaults and conservative migrations. Never hardcode a maintainer's home
   path, username, agent installation, or terminal.
+- `direct_keybindings` is separate from prefix `keybindings`, empty by default,
+  and stores semantic chords such as `alt+right`, never raw escape bytes. Direct
+  shortcuts are global in normal mode; overlays, modal text input,
+  scroll/copy/resize modes, and the configured prefix retain precedence.
+- Named-session listing and startup are user-triggered background work. Fence
+  results by generation so a closed or replaced selector cannot apply stale
+  discovery or launch results; do not add idle session polling.
+- File, DIFF, Markdown, and Mermaid views are native layout leaves, not hidden
+  PTYs. Keep reads/layout off-loop, generation-checked, bounded, reusable, and
+  independent of the configured file editor.
+- UHP access binds loopback only and reveals no owner socket or delegated token
+  in its descriptor. Pairing is one-use, authority expires, shutdown revokes it,
+  and the external provider owns secure transport exposure while Luvus owns
+  pairing and delegated authority.
+- Cross-workspace operations must mutate the resolved destination workspace and
+  tab, never whichever node happens to be active. Preserve explicit workspace
+  closures across reattach instead of recreating the launch directory.
+- Selection text preserves indentation and hard line breaks, joins soft wraps,
+  and uses terminal display cells for wide characters across panes and native
+  file/preview views.
 
 ## CLI API UHP and documentation parity
 
 `luvus help all` is the command inventory. Major surfaces include workspaces,
 tabs, panes, agents, files, Git, semantic diff notes, Mission Control,
 worktrees, tasks, leases, modules, bars, UI docks, themes, sessions, skills,
-integrations, search, waits, logs, and UHP.
+integrations, document previews, direct shortcuts, search, waits, logs, and UHP
+access.
 
 When adding or changing a user-visible control:
 
@@ -165,8 +202,10 @@ When adding or changing a user-visible control:
 2. Update API dispatch and response/error behavior.
 3. Update UHP capabilities and schema when the control is public automation.
 4. Add parser and dispatch tests, including indexing and pass-through arguments.
-5. Update the relevant files under `website/src/content/docs/docs/reference/`
-   and any affected guide.
+5. Update the relevant public documentation. UHP overview, examples, access,
+   methods, terminal, and conformance pages live together under
+   `website/src/content/docs/docs/uhp/`; other product references remain under
+   `website/src/content/docs/docs/reference/` and the affected guides.
 6. Update the bundled agent guidance when an automation workflow changed:
    `skills/luvus/`, `plugins/luvus/skills/luvus/`, and
    `website/public/agent-readme.md`.
@@ -174,7 +213,9 @@ When adding or changing a user-visible control:
 Human-facing CLI text is localized in `src/i18n/cli.rs`. Settings text is in
 `src/i18n/settings.rs`. Command names, flags, JSON fields, UHP methods, paths,
 and literal user data stay canonical. Do not ship a partial translation for a
-registered language.
+registered language. `LUVUS_*`, `.luvus`/`.luvus-dev`, and
+`luvus-module.toml` are the current namespaces; do not restore removed Bohay
+compatibility implicitly.
 
 ## Agent skills and integrations
 
@@ -279,7 +320,8 @@ access to `App`.
 New dependencies require a concrete benefit and review of maintenance,
 licensing, supply-chain exposure, binary size, compile time, and cross-platform
 support. Prefer existing core dependencies and owner-maintained upstream crates.
-Do not replace the patched terminal crates casually.
+Do not replace the patched terminal crates casually. Luvus is Apache-2.0;
+preserve notices and accept only compatible code and assets.
 
 ## Performance expectations
 
@@ -309,6 +351,10 @@ Luvus should remain fast and memory-efficient with many panes and agents:
 - Windows child processes launched by detached Luvus must not flash console or
   PowerShell windows. Reuse the no-window process helpers.
 - Preserve Windows modifier, AltGr, IME, path, named-pipe, and npm-shim behavior.
+- Treat Crossterm key events as the input contract. Keep Windows-only ambiguous
+  sequence reconstruction in `host_input`; do not teach app commands raw ANSI
+  strings. Preserve multiline paste, Alt+Backspace, Ctrl+Slash, distinct
+  Ctrl+Shift letters, and AltGr text in nested applications.
 - Preserve Unix socket ownership and permissions, signal/process lifecycle, and
   long-socket-path handling.
 - A platform-specific fix needs tests on that platform when available and must
@@ -344,7 +390,7 @@ flake evaluation/build.
 - `.github/` contains CI, release automation, issue templates, and the PR body
   template.
 - `docs/` and `CLAUDE.md` are intentionally ignored local maintainer material.
-- `changelog/<version>.md` is embedded by the binary and feeds release content.
+- `changelog/v<version>.md` is embedded by the binary and feeds release content.
 - `community/themes/` contains reviewed community themes.
 - `protocol/uhp/v1/` is the versioned public automation contract.
 
