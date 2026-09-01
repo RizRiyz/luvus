@@ -5728,6 +5728,12 @@ impl App {
         // The pair either side of this divider trade rows; the total they own
         // is fixed, so nothing below shifts.
         let pair = heights[index].saturating_add(heights[index + 1]);
+        // Below twice the floor there is no split that keeps both docks at it,
+        // and clamping only the first would push the second under. Refuse the
+        // drag instead of breaking the invariant.
+        if pair < MIN_DOCK_HEIGHT.saturating_mul(2) {
+            return;
+        }
         let top = dividers[index];
         let start = top.saturating_sub(heights[index]);
         let want = r.saturating_sub(start);
@@ -9006,6 +9012,36 @@ mod tests {
         assert_eq!(
             app.sidebars.left.weights[0], MIN_DOCK_HEIGHT,
             "the upper dock keeps its floor"
+        );
+        // ...and the other one never falls under it either.
+        assert!(
+            app.sidebars.left.weights[1] >= MIN_DOCK_HEIGHT,
+            "the lower dock keeps its floor too: {:?}",
+            app.sidebars.left.weights
+        );
+    }
+
+    /// A pair with fewer rows than two floors cannot be split without pushing
+    /// one dock under the minimum, so the drag must decline rather than
+    /// produce a dock the user can no longer grab.
+    #[test]
+    fn a_pair_too_small_for_two_floors_refuses_the_drag() {
+        let _env = crate::persist::test_env("dock-divider-too-small");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 40, tx).unwrap();
+
+        app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents];
+        app.sidebars.left.weights = Vec::new();
+        // Five rows for two docks: 2 * MIN_DOCK_HEIGHT would need six.
+        app.left_seam = Some(Rect::new(29, 0, 1, 5));
+        app.dock_dividers = vec![(Side::Left, 0, 2)];
+
+        app.dock_resize = Some((Side::Left, 0));
+        app.update_dock_resize(10, 4);
+        assert!(
+            app.sidebars.left.weights.is_empty(),
+            "no split was written: {:?}",
+            app.sidebars.left.weights
         );
     }
 

@@ -104,11 +104,9 @@ fn dock_slots(body: Rect, weights: &[u16]) -> (Vec<Rect>, Vec<u16>) {
         // exactly to the former `remaining / docks_left`, so an unresized
         // sidebar lays out to the cell as it always did.
         let weight_left: u32 = weights[i..].iter().map(|w| u32::from(*w)).sum();
-        let h = if weight_left == 0 {
-            0
-        } else {
-            (u32::from(remaining) * u32::from(weights[i]) / weight_left) as u16
-        };
+        let h = (u32::from(remaining) * u32::from(weights[i]))
+            .checked_div(weight_left)
+            .unwrap_or(0) as u16;
         slots.push(Rect::new(body.x, y, body.width, h));
         y += h;
         if i + 1 < n {
