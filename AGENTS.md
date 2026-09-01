@@ -37,7 +37,9 @@ several roles:
 - `--remote <host>` attaches through an SSH byte bridge.
 - `uhp access` starts a temporary loopback NDJSON gateway for independent
   transport providers. It is read-only by default; control is explicit,
-  scoped, paired, and time-bounded.
+  scoped, and paired. Finite authority advertises `authority.expires_at`;
+  `--no-expiry` is process-bound and advertises
+  `authority.expires_on_close:true`. Shutdown revokes authority in either mode.
 
 There are two local endpoints per server:
 
@@ -177,10 +179,12 @@ lock scopes short and never hold it across unrelated slow work.
 - File, DIFF, Markdown, and Mermaid views are native layout leaves, not hidden
   PTYs. Keep reads/layout off-loop, generation-checked, bounded, reusable, and
   independent of the configured file editor.
-- UHP access binds loopback only and reveals no owner socket or delegated token
-  in its descriptor. Pairing is one-use, authority expires, shutdown revokes it,
-  and the external provider owns secure transport exposure while Luvus owns
-  pairing and delegated authority.
+- UHP access binds loopback only and reveals no owner socket or upstream token
+  in its descriptor. Pairing is one-use. Finite authority uses
+  `authority.expires_at`; process-bound authority uses
+  `authority.expires_on_close:true`. Shutdown revokes both modes. The external
+  provider owns secure transport exposure while Luvus owns pairing and scoped
+  upstream authority.
 - Cross-workspace operations must mutate the resolved destination workspace and
   tab, never whichever node happens to be active. Preserve explicit workspace
   closures across reattach instead of recreating the launch directory.
@@ -202,8 +206,9 @@ When adding or changing a user-visible control:
 2. Update API dispatch and response/error behavior.
 3. Update UHP capabilities and schema when the control is public automation.
 4. Add parser and dispatch tests, including indexing and pass-through arguments.
-5. Update the relevant public documentation. UHP overview, examples, access,
-   methods, terminal, and conformance pages live together under
+5. Update the relevant public documentation. UHP `index.mdx`,
+   `getting-started.mdx`, `examples.mdx`, `remote-access.mdx`, `methods.mdx`,
+   `terminal.mdx`, and `conformance.mdx` live together under
    `website/src/content/docs/docs/uhp/`; other product references remain under
    `website/src/content/docs/docs/reference/` and the affected guides.
 6. Update the bundled agent guidance when an automation workflow changed:
