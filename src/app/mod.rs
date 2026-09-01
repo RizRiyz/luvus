@@ -5818,6 +5818,10 @@ impl App {
             removed = true;
         }
         if removed {
+            self.emit_event(
+                "workspace.closed",
+                serde_json::json!({"workspace": workspace_index.to_string()}),
+            );
             crate::logging::event(
                 crate::logging::EventKind::WorkspaceClose,
                 &[crate::logging::Field::WorkspaceIndex(

@@ -1000,6 +1000,19 @@ pub fn current_sequence(bus: &EventBus) -> u64 {
     bus.0.lock().map(|state| state.sequence).unwrap_or(0)
 }
 
+#[cfg(test)]
+pub(crate) fn replayed_events_after(bus: &EventBus, sequence: u64) -> Vec<Value> {
+    let Ok(state) = bus.0.lock() else {
+        return Vec::new();
+    };
+    state
+        .replay
+        .iter()
+        .filter(|(event_sequence, _)| *event_sequence > sequence)
+        .filter_map(|(_, line)| serde_json::from_str(line).ok())
+        .collect()
+}
+
 /// Publish one structured event without blocking the app loop.
 pub fn publish_event(bus: &EventBus, event: &str, data: Value) -> u64 {
     let Ok(mut state) = bus.0.lock() else {

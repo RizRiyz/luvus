@@ -7228,6 +7228,57 @@ command = ["true"]
         assert!(!app.status.contains_key(&dead_pane));
     }
 
+    /// Closing an inactive workspace through pane teardown publishes one removal.
+    #[test]
+    fn closing_last_inactive_workspace_pane_emits_one_workspace_closed_event() {
+        let _env = crate::persist::test_env("close-last-inactive-workspace-pane");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let caller_ws = app.active_ws;
+        let caller_tab = app.workspaces[caller_ws].active_tab;
+        let caller_pane = app.layout().focus;
+
+        let target_root = crate::persist::config_dir().join("close-event-target-workspace");
+        std::fs::create_dir_all(&target_root).unwrap();
+        assert!(app.create_workspace_at(target_root));
+        let target_ws = app.active_ws;
+        let target_workspace_id = app.workspaces[target_ws].id.clone();
+        let target_pane = app.layout().focus;
+
+        app.active_ws = caller_ws;
+        app.workspaces[caller_ws].active_tab = caller_tab;
+        app.workspaces[caller_ws].tabs[caller_tab].layout.focus = caller_pane;
+        app.zoomed = true;
+        let event_floor = crate::ipc::api::current_sequence(&app.events);
+
+        app.handle_event(AppEvent::PtyExit(target_pane));
+
+        assert_eq!(app.workspaces.len(), 1);
+        assert!(
+            app.workspaces
+                .iter()
+                .all(|workspace| workspace.id != target_workspace_id),
+            "the inactive workspace is removed"
+        );
+        assert_eq!(app.active_ws, caller_ws);
+        assert_eq!(app.workspaces[caller_ws].active_tab, caller_tab);
+        assert_eq!(app.layout().focus, caller_pane);
+        assert!(app.zoomed, "the caller's zoom state is preserved");
+        assert!(!app.panes.contains_key(&target_pane));
+        assert!(!app.status.contains_key(&target_pane));
+
+        let events = crate::ipc::api::replayed_events_after(&app.events, event_floor);
+        let workspace_closed: Vec<_> = events
+            .iter()
+            .filter(|event| event["event"] == "workspace.closed")
+            .collect();
+        assert_eq!(workspace_closed.len(), 1);
+        assert_eq!(
+            workspace_closed[0]["data"],
+            json!({"workspace": target_ws.to_string()})
+        );
+    }
+
     #[test]
     fn workspace_organization_api_renames_pins_lists_and_validates() {
         let _env = crate::persist::test_env("workspace-organization-api");
