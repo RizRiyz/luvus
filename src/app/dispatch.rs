@@ -7156,6 +7156,78 @@ command = ["true"]
         assert_eq!(app.scroll_pane, None, "the new pane starts at live output");
     }
 
+    /// A failed background split is removed from its inactive owning layout.
+    #[test]
+    fn pane_split_failed_spawn_cleans_inactive_workspace_without_changing_caller() {
+        let _env = crate::persist::test_env("pane-split-failed-inactive-workspace");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let caller_ws = app.active_ws;
+        let caller_tab = app.workspaces[caller_ws].active_tab;
+        let caller_pane = app.layout().focus;
+
+        let target_root = crate::persist::config_dir().join("failed-target-workspace");
+        std::fs::create_dir_all(&target_root).unwrap();
+        assert!(app.create_workspace_at(target_root));
+        let target_ws = app.active_ws;
+        let target_tab = app.workspaces[target_ws].active_tab;
+        let target_pane = app.layout().focus;
+
+        app.active_ws = caller_ws;
+        app.workspaces[caller_ws].active_tab = caller_tab;
+        app.workspaces[caller_ws].tabs[caller_tab].layout.focus = caller_pane;
+        app.zoomed = true;
+        app.config.shell = "luvus-not-a-real-shell-deferred-split".to_string();
+
+        let out = app
+            .dispatch(
+                "pane.split",
+                &json!({"pane": target_pane.0.to_string(), "focus": false}),
+            )
+            .unwrap();
+        let dead_pane = PaneId(out["pane"].as_str().unwrap().parse().unwrap());
+        assert_eq!(app.pane_location(dead_pane), Some((target_ws, target_tab)));
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "the deferred spawn did not fail");
+            match rx.recv_timeout(remaining) {
+                Ok(AppEvent::PtyExit(id)) if id == dead_pane => {
+                    app.handle_event(AppEvent::PtyExit(id));
+                    break;
+                }
+                Ok(AppEvent::PtyReady { id, .. }) if id == dead_pane => {
+                    panic!("the deliberately invalid shell unexpectedly spawned")
+                }
+                Ok(_) => {}
+                Err(error) => panic!("the deferred spawn did not fail: {error}"),
+            }
+        }
+
+        assert!(
+            !app.workspaces[target_ws].tabs[target_tab]
+                .layout
+                .contains(dead_pane),
+            "the owning inactive layout drops the dead leaf"
+        );
+        assert_eq!(
+            app.workspaces[target_ws].tabs[target_tab].layout.leaves(),
+            vec![target_pane]
+        );
+        assert_eq!(
+            app.workspaces[target_ws].tabs[target_tab].layout.focus,
+            target_pane
+        );
+        assert_eq!(app.pane_location(dead_pane), None);
+        assert_eq!(app.active_ws, caller_ws);
+        assert_eq!(app.workspaces[caller_ws].active_tab, caller_tab);
+        assert_eq!(app.layout().focus, caller_pane);
+        assert!(app.zoomed, "the caller's zoom state is preserved");
+        assert!(!app.panes.contains_key(&dead_pane));
+        assert!(!app.status.contains_key(&dead_pane));
+    }
+
     #[test]
     fn workspace_organization_api_renames_pins_lists_and_validates() {
         let _env = crate::persist::test_env("workspace-organization-api");

@@ -5737,13 +5737,38 @@ impl App {
     }
 
     fn close_pane(&mut self, id: PaneId) {
+        let owner = self.pane_location(id);
         self.drop_leaf_runtime(id);
         self.release_leaf_ownership(id);
         self.session_dirty = true;
-        if self.layout_mut().remove(id) {
-            self.close_active_tab();
+        if let Some((workspace, tab)) = owner {
+            let tab_is_empty = self.workspaces[workspace].tabs[tab].layout.remove(id);
+            if tab_is_empty {
+                self.close_empty_tab(workspace, tab);
+            }
         }
         self.emit_event("pane.closed", serde_json::json!({"pane": id.0.to_string()}));
+    }
+
+    /// Remove an empty tab by location without changing a surviving caller's view.
+    fn close_empty_tab(&mut self, workspace_index: usize, tab_index: usize) {
+        let caller_focus = self.layout().focus;
+        let owner_focus = self.workspaces[workspace_index].tabs
+            [self.workspaces[workspace_index].active_tab]
+            .layout
+            .focus;
+
+        self.active_ws = workspace_index;
+        self.workspaces[workspace_index].active_tab = tab_index;
+        self.close_active_tab();
+
+        if let Some((workspace, tab)) = self.pane_location(owner_focus) {
+            self.workspaces[workspace].active_tab = tab;
+        }
+        if let Some((workspace, tab)) = self.pane_location(caller_focus) {
+            self.active_ws = workspace;
+            self.workspaces[workspace].active_tab = tab;
+        }
     }
 
     fn close_active_tab(&mut self) {
