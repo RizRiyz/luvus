@@ -712,6 +712,9 @@ fn file_label(it: FileMenuItem, editors: &[(String, String)], cat: &Catalog) -> 
         FileMenuItem::CopyPath => "Copy Path".to_string(),
         FileMenuItem::InsertPath => "Insert Path".to_string(),
         FileMenuItem::OpenAsNewWorkspace => "Open as Workspace".to_string(),
+        // Deliberately not "Open in Finder": for a file the desktop resolves
+        // the association, so a PDF lands in a viewer, not in a file manager.
+        FileMenuItem::OpenInOs => "Open Externally".to_string(),
         FileMenuItem::Divider => String::new(),
         FileMenuItem::Delete => "Delete".to_string(),
     }
@@ -875,6 +878,7 @@ mod label_case_tests {
             FileMenuItem::CopyPath,
             FileMenuItem::InsertPath,
             FileMenuItem::OpenAsNewWorkspace,
+            FileMenuItem::OpenInOs,
             FileMenuItem::Delete,
         ] {
             rows.push(file_label(it, &editors, cat));

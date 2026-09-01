@@ -668,6 +668,20 @@ impl App {
             KeyCode::Left | KeyCode::Char('h') => self.collapse_file_row_or_parent(),
             KeyCode::Right | KeyCode::Char('l') => self.expand_file_row_or_child(),
             KeyCode::Char('a') => self.open_file_menu_for_keyboard(),
+            // Bare `o` and Ctrl+O both arrive here: the arm does not inspect
+            // modifiers, so the vim-ish letter and the habit from other tools
+            // land on the same action.
+            KeyCode::Char('o') => {
+                let index = self.file_tree.cursor;
+                if let Some(path) = self
+                    .file_tree
+                    .visible_rows()
+                    .get(index)
+                    .map(|row| row.path.clone())
+                {
+                    crate::platform::open_path(&path);
+                }
+            }
             KeyCode::Enter => {
                 let target = if key.modifiers.contains(KeyModifiers::SHIFT) {
                     OpenTarget::Pane
@@ -781,6 +795,9 @@ impl App {
                 self.files_focused = false;
                 self.open_file_view(menu.path.clone(), OpenTarget::Tab);
             }
+            // Offered for folders too, so this one sits outside the file-only
+            // block above.
+            FileMenuItem::OpenInOs => crate::platform::open_path(&menu.path),
             FileMenuItem::OpenWith(i) => {
                 if let Some((cmd, _)) = menu.editors.get(i).cloned() {
                     self.files_focused = false;
@@ -1551,6 +1568,41 @@ mod tests {
         assert!(
             ditems.contains(&FileMenuItem::NewFile),
             "folder still has CRUD"
+        );
+    }
+
+    /// Handing an entry to the desktop is the one open action that makes sense
+    /// for a folder too, so unlike the editor rows it appears on both menus.
+    #[test]
+    fn file_menu_offers_os_open_for_files_and_folders() {
+        let file = FileMenu {
+            path: PathBuf::from("/tmp/x.pdf"),
+            is_dir: false,
+            anchor: (0, 0),
+            items: Vec::new(),
+            selected: None,
+            editors: Vec::new(),
+        };
+        let items = file.build_items();
+        assert!(
+            items.contains(&FileMenuItem::OpenInOs),
+            "offered for a file"
+        );
+        let os = items.iter().position(|i| *i == FileMenuItem::OpenInOs);
+        let del = items.iter().position(|i| *i == FileMenuItem::Delete);
+        assert!(os < del, "it belongs with the open block, above Delete");
+
+        let folder = FileMenu {
+            path: PathBuf::from("/tmp"),
+            is_dir: true,
+            anchor: (0, 0),
+            items: Vec::new(),
+            selected: None,
+            editors: Vec::new(),
+        };
+        assert!(
+            folder.build_items().contains(&FileMenuItem::OpenInOs),
+            "offered for a folder, which opens the file manager"
         );
     }
 

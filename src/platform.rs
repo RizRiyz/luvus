@@ -942,8 +942,66 @@ pub fn open_url(url: &str) {
     }
 }
 
+/// Hand `path` to the OS handler for its type: `open` (macOS), `xdg-open` and
+/// friends (Linux), `explorer` (Windows). A file opens in whatever application
+/// the desktop associates with it; a directory opens in the file manager.
+///
+/// Deliberately **not** routed through [`is_openable_url`]. That whitelist
+/// exists because a URL there is typed by whatever is running in a pane, so a
+/// click would reach the system handler for any scheme it names. A path here
+/// comes from the FILES tree — the user's own filesystem, chosen by pointing
+/// at it — so the scheme question does not arise. What still holds is the
+/// argv discipline: the path is one separate argument, never interpolated
+/// into a shell command, so metacharacters in a filename are inert.
+///
+/// Detached and never waited on, so an application cold-start cannot stall the
+/// event loop.
+pub fn open_path(path: &std::path::Path) {
+    use std::process::{Command, Stdio};
+    // An empty path makes some handlers fall back to the home directory, and a
+    // missing one makes them raise their own error dialog. Neither is a useful
+    // answer to "open this row", so fail silently instead.
+    if path.as_os_str().is_empty() || !path.exists() {
+        return;
+    }
+    let openers: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("open", &[])]
+    } else if cfg!(target_os = "windows") {
+        // `explorer` resolves a file to its default application and a folder to
+        // a window, without `cmd /C start` putting the path through a shell.
+        &[("explorer", &[])]
+    } else {
+        &[("xdg-open", &[]), ("gio", &["open"]), ("wslview", &[])]
+    };
+    for (cmd, args) in openers {
+        if no_window(
+            Command::new(cmd)
+                .args(*args)
+                .arg(path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .spawn()
+        .is_ok()
+        {
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// A path that cannot be opened must not reach a handler at all: the guard
+    /// runs before any spawn, so nothing pops an error dialog at the user.
+    #[test]
+    fn open_path_ignores_empty_and_missing_paths() {
+        super::open_path(std::path::Path::new(""));
+        let missing = std::env::temp_dir().join("luvus-open-path-does-not-exist");
+        let _ = std::fs::remove_file(&missing);
+        super::open_path(&missing);
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     #[test]
     fn process_start_marker_is_stable_for_the_current_process() {
