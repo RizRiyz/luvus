@@ -107,6 +107,9 @@ impl HostInputDecoder {
                     };
                     return DecodedEvents::None;
                 }
+                if matches!(&event, Event::Paste(_)) {
+                    return DecodedEvents::Many(events).combine(DecodedEvents::One(event));
+                }
                 if !matches!(&event, Event::Key(_)) {
                     self.state = DecodeState::Prefix {
                         events,
@@ -439,6 +442,26 @@ mod tests {
         assert!(matches!(output[0], Event::Key(ref key) if key.code == KeyCode::Esc));
         assert!(matches!(output[1], Event::Key(ref key) if key.code == KeyCode::Char('[')));
         assert!(matches!(output[2], Event::Key(ref key) if key.code == KeyCode::Char('x')));
+    }
+
+    #[test]
+    fn native_paste_replays_a_held_prefix_first() {
+        let now = Instant::now();
+        let mut decoder = HostInputDecoder::default();
+        assert!(matches!(
+            decoder.push_at(key(KeyCode::Esc), now),
+            DecodedEvents::None
+        ));
+
+        let mut output = Vec::new();
+        collect(decoder.push_at(Event::Paste("x".into()), now), &mut output);
+
+        assert!(matches!(
+            output.as_slice(),
+            [Event::Key(key), Event::Paste(text)]
+                if key.code == KeyCode::Esc && text == "x"
+        ));
+        assert!(decoder.wait_timeout().is_none());
     }
 
     #[test]
