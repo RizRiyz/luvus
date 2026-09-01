@@ -375,7 +375,6 @@ fn input_loop<W: Write>(mut writer: W, pending: Vec<Event>) {
                 break;
             }
         }
-        return;
     }
 
     #[cfg(not(windows))]

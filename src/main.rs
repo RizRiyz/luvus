@@ -1442,7 +1442,6 @@ fn input_loop(tx: Sender<AppEvent>, pending: Vec<Event>) {
                 break;
             }
         }
-        return;
     }
 
     #[cfg(not(windows))]
