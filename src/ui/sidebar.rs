@@ -212,9 +212,9 @@ pub(super) fn draw_sidebar(
 }
 
 /// The left sidebar's chrome, all on the **top row** (`area.y`, aligned with the
-/// tab bar): the `«` collapse chevron at the left edge, then the `luvus` wordmark,
-/// then the Menu pill at the right. Sets `settings_icon_rect` and
-/// `sidebar_toggle_rect`.
+/// tab bar): the `«` collapse chevron at the left edge, then the active named
+/// session, then the Menu pill at the right. Sets the session, Settings/Menu,
+/// and sidebar-toggle hit geometry.
 fn draw_left_chrome(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) {
     let cat = app.catalog;
     let hover = app.hover;
@@ -222,9 +222,6 @@ fn draw_left_chrome(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
         hover
             .is_some_and(|(hc, hr)| hc >= rc.x && hc < rc.right() && hr >= rc.y && hr < rc.bottom())
     };
-    let cx = area.x + 2;
-    let cw = area.width.saturating_sub(3);
-
     // The `«` collapse button sits at the left edge of the top row — the exact
     // row + column the tab-bar's `»` reopen button uses when the sidebar is
     // hidden, so toggling it never makes the control jump. Click it (or ⌃Space b)
@@ -245,11 +242,12 @@ fn draw_left_chrome(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     let menu_w = crate::ui::display_width(&menu_label) as u16;
     let menu = Rect::new(area.right().saturating_sub(menu_w + 1), area.y, menu_w, 1);
 
-    // The product wordmark lives here; the clickable build version now occupies
-    // the bottom-right status slot where the redundant workspace directory used
-    // to be.
-    let brand = Line::from(Span::styled("  luvus", Style::new().fg(t.text).bold()));
-    f.buffer_mut().set_line(cx, area.y, &brand, cw);
+    // The active named session replaces the static product wordmark. It is a
+    // bounded click target; long names truncate before the fixed Menu pill. Two
+    // quiet cells separate it from the collapse chevron so the controls do not
+    // read as one combined button.
+    let session_x = toggle.right().saturating_add(2).min(menu.x);
+    draw_named_session_button(f, area.y, session_x, menu.x, app, t);
 
     // Menu drawn after the wordmark so the pill always sits on top.
     let (fg, bg) = if over(menu) {
@@ -283,13 +281,15 @@ fn draw_right_chrome(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme)
     };
     f.render_widget(Paragraph::new(Span::styled(" » ", style)), toggle);
 
-    // If the left sidebar (which normally owns the Menu button) isn't shown,
-    // surface Menu here so Settings is never stranded (docs/29). Placed on the
-    // top row at the left, clear of the `»` collapse chevron on the right.
-    if !app.sidebars.left.shown() {
+    // If no rendered left sidebar claimed the chrome, surface both Menu and the
+    // active session here so neither control is stranded (docs/29). Menu remains
+    // at the sidebar's left edge and the session follows it toward the `»`
+    // collapse control.
+    if app.settings_icon_rect.is_none() {
         let label = format!(" {} ", app.catalog.menu);
         let w = crate::ui::display_width(&label) as u16;
-        let menu = Rect::new(area.x + 2, area.y, w.min(area.width), 1);
+        let chrome_left = area.x.saturating_add(2);
+        let menu = Rect::new(chrome_left, area.y, w.min(area.width), 1);
         if menu.right() <= toggle.x {
             let (fg, bg) = if over(menu) {
                 (t.crust, t.accent)
@@ -301,8 +301,43 @@ fn draw_right_chrome(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme)
                 menu,
             );
             app.settings_icon_rect = Some(menu);
+            draw_named_session_button(f, area.y, menu.right().saturating_add(1), toggle.x, app, t);
         }
     }
+}
+
+/// Draw the active named-session label into the available chrome interval.
+/// Both sidebars use this helper so the selector follows Menu when only the
+/// right sidebar is mounted, while preserving identical truncation and hover
+/// behavior on either side.
+fn draw_named_session_button(
+    f: &mut RenderTarget,
+    y: u16,
+    x: u16,
+    right: u16,
+    app: &mut App,
+    t: &Theme,
+) {
+    let available = right.saturating_sub(x);
+    let name = crate::ui::truncate(
+        &crate::session::display_name(),
+        available.saturating_sub(2) as usize,
+    );
+    // Symmetric padding makes the hover/open highlight read as a compact pill
+    // without relying on a dropdown glyph or letting the text touch its edges.
+    let label = format!(" {name} ");
+    let width = (crate::ui::display_width(&label) as u16).min(available);
+    let rect = Rect::new(x, y, width, 1);
+    app.named_session_button_rect = (app.server_mode && rect.width > 0).then_some(rect);
+    let hovered = app.hover.is_some_and(|(column, row)| {
+        column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
+    });
+    let style = if app.server_mode && (app.named_session_menu.is_some() || hovered) {
+        Style::new().fg(t.crust).bg(t.accent).bold()
+    } else {
+        Style::new().fg(t.text).bold()
+    };
+    f.render_widget(Paragraph::new(Span::styled(label, style)), rect);
 }
 
 /// The WORKSPACES dock: node rows (state dot + name + branch + path), the `+`

@@ -54,6 +54,7 @@ pub enum Cmd {
     OpenMission,
     OpenBoard,
     OpenSettings,
+    OpenSessions,
     ToggleSidebar,
     ToggleRightSidebar,
     ToggleAgents,
@@ -95,6 +96,7 @@ impl Cmd {
         Cmd::OpenMission,
         Cmd::OpenBoard,
         Cmd::OpenSettings,
+        Cmd::OpenSessions,
         Cmd::ToggleSidebar,
         Cmd::ToggleRightSidebar,
         Cmd::ToggleAgents,
@@ -134,6 +136,7 @@ impl Cmd {
             Cmd::OpenMission => "open_mission",
             Cmd::OpenBoard => "open_board",
             Cmd::OpenSettings => "open_settings",
+            Cmd::OpenSessions => "open_sessions",
             Cmd::ToggleSidebar => "toggle_sidebar",
             Cmd::ToggleRightSidebar => "toggle_right_sidebar",
             Cmd::ToggleAgents => "toggle_agents",
@@ -176,6 +179,7 @@ impl Cmd {
             Cmd::OpenMission => cat.mc_open,
             Cmd::OpenBoard => cat.cmd_open_board,
             Cmd::OpenSettings => cat.cmd_open_settings,
+            Cmd::OpenSessions => cat.cmd_open_sessions,
             Cmd::ToggleSidebar => cat.cmd_toggle_sidebar,
             Cmd::ToggleRightSidebar => cat.cmd_toggle_right_sidebar,
             Cmd::ToggleAgents => cat.cmd_toggle_agents,
@@ -221,7 +225,7 @@ impl Cmd {
             | Cmd::ToggleAgents
             | Cmd::ToggleFiles
             | Cmd::GlobalSearch => cat.settings.keys_sections[3],
-            Cmd::Switcher | Cmd::Detach => cat.settings.keys_sections[4],
+            Cmd::OpenSessions | Cmd::Switcher | Cmd::Detach => cat.settings.keys_sections[4],
         }
     }
 
@@ -258,6 +262,7 @@ impl Cmd {
             // `=` opens Settings (`,` now renames the tab, matching tmux). The
             // Menu button is always available too, so this is just the shortcut.
             Cmd::OpenSettings => "=",
+            Cmd::OpenSessions => "t",
             Cmd::ToggleSidebar => "b",
             Cmd::ToggleRightSidebar => "B",
             Cmd::ToggleAgents => "a",
@@ -687,6 +692,7 @@ impl App {
             Cmd::OpenMission => self.open_mission_control(self.active_ws),
             Cmd::OpenBoard => self.open_orch_board(),
             Cmd::OpenSettings => self.open_settings(),
+            Cmd::OpenSessions => self.open_named_session_menu(),
             Cmd::ToggleSidebar => self.toggle_all_sides(),
             Cmd::ToggleRightSidebar => self.toggle_side(crate::app::Side::Right),
             Cmd::ToggleAgents => {
@@ -749,6 +755,7 @@ mod tests {
         // `,` renames the tab (tmux-compatible); Settings moved to `=`.
         assert_eq!(m.get(","), Some(&Cmd::RenameTab));
         assert_eq!(m.get("="), Some(&Cmd::OpenSettings));
+        assert_eq!(m.get("t"), Some(&Cmd::OpenSessions));
         assert_eq!(m.get("y"), Some(&Cmd::CopyMode));
         assert_eq!(m.get("i"), Some(&Cmd::OpenDiff));
         assert_eq!(m.get("m"), Some(&Cmd::OpenMission));
@@ -757,6 +764,18 @@ mod tests {
         for &c in Cmd::ALL {
             assert!(m.values().any(|v| *v == c), "{c:?} bound");
         }
+    }
+
+    #[test]
+    fn open_sessions_command_opens_the_named_session_menu() {
+        let _env = crate::persist::test_env("open-sessions-key");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.server_mode = true;
+
+        app.run_cmd(Cmd::OpenSessions);
+
+        assert!(app.named_session_menu.is_some());
     }
 
     #[test]

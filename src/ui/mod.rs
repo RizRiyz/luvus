@@ -105,6 +105,7 @@ mod panes;
 mod picker;
 mod preview;
 mod search;
+mod session_menu;
 mod settings;
 mod sidebar;
 mod status;
@@ -159,6 +160,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     let agents_scroll = app.agents_scroll;
     let last_active_ws_shown = app.last_active_ws_shown;
     let switcher_scroll = app.switcher_scroll;
+    let named_session_scroll = app.named_session_menu.as_ref().map(|menu| menu.scroll);
     let orch_scroll = app.orch_scroll;
     let orch_detail_scroll = app.orch_detail_scroll;
     let orch_area = app.orch_area;
@@ -200,6 +202,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     let changelog_copy_rects = std::mem::take(&mut app.changelog_copy_rects);
     let switcher_rects = std::mem::take(&mut app.switcher_rects);
     let switcher_scope_rects = std::mem::take(&mut app.switcher_scope_rects);
+    let named_session_row_rects = std::mem::take(&mut app.named_session_row_rects);
     let mission_rows = std::mem::take(&mut app.mission_rows);
     let mission_scope_rects = std::mem::take(&mut app.mission_scope_rects);
     let mission_row_rects = std::mem::take(&mut app.mission_row_rects);
@@ -265,6 +268,9 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     let mobile_pane_prev_rect = app.mobile_pane_prev_rect;
     let mobile_pane_next_rect = app.mobile_pane_next_rect;
     let switcher_close_rect = app.switcher_close_rect;
+    let named_session_button_rect = app.named_session_button_rect;
+    let named_session_menu_rect = app.named_session_menu_rect;
+    let named_session_close_rect = app.named_session_close_rect;
     let settings_modal_rect = app.settings_modal_rect;
     let settings_close_rect = app.settings_close_rect;
     let changelog_modal_rect = app.changelog_modal_rect;
@@ -295,6 +301,9 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     app.agents_scroll = agents_scroll;
     app.last_active_ws_shown = last_active_ws_shown;
     app.switcher_scroll = switcher_scroll;
+    if let (Some(scroll), Some(menu)) = (named_session_scroll, app.named_session_menu.as_mut()) {
+        menu.scroll = scroll;
+    }
     app.orch_scroll = orch_scroll;
     app.orch_detail_scroll = orch_detail_scroll;
     app.orch_area = orch_area;
@@ -331,12 +340,16 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     app.changelog_copy_rects = changelog_copy_rects;
     app.switcher_rects = switcher_rects;
     app.switcher_scope_rects = switcher_scope_rects;
+    app.named_session_row_rects = named_session_row_rects;
     app.mission_rows = mission_rows;
     app.mission_scope_rects = mission_scope_rects;
     app.mission_row_rects = mission_row_rects;
     app.bar.hits = bar_hits;
     app.bar.overflow_hits = bar_overflow_hits;
     app.bar.overflow = bar_overflow;
+    app.named_session_button_rect = named_session_button_rect;
+    app.named_session_menu_rect = named_session_menu_rect;
+    app.named_session_close_rect = named_session_close_rect;
     if let (Some(rects), Some(search)) = (search_rects, app.search.as_mut()) {
         search.rects = rects;
     }
@@ -559,6 +572,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // set its own. A dock mounted nowhere (or a hidden sidebar) leaves its rects
     // zeroed, so nothing fires from under a widened pane area (docs/29).
     app.settings_icon_rect = None;
+    app.named_session_button_rect = None;
     app.sidebar_toggle_rect = None;
     app.right_sidebar_toggle_rect = None;
     app.version_rect = None;
@@ -904,6 +918,13 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         app.switcher_scope_rects.clear();
         app.switcher_close_rect = None;
     }
+    if app.named_session_menu.is_some() {
+        session_menu::draw_session_menu(f, area, app, &t);
+    } else {
+        app.named_session_menu_rect = None;
+        app.named_session_close_rect = None;
+        app.named_session_row_rects.clear();
+    }
     // The global scrollback-search overlay (docs/63), above the chrome.
     if app.search.is_some() {
         search::draw_search(f, area, app, &t);
@@ -917,6 +938,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         || picker_open
         || app.bar.overflow.is_some()
         || app.help_open
+        || app.named_session_menu.is_some()
         || app.worktree_prompt.is_some()
         || app.tab_rename.is_some()
         || app.tab_menu.is_some()

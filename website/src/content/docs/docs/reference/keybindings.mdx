@@ -21,7 +21,7 @@ the live cheat-sheet. Remap anything, change the prefix, or apply a preset in
 | `a` | agents All/Active | `m` | Mission Control |
 | `e` | focus FILES tree | `i` | focus DIFF review |
 | `M` | jump palette (tabs / workspaces / agents) | `/` | global fuzzy finder |
-| `=` | Settings | | |
+| `t` | named sessions | `=` | Settings |
 | `q` / `d` | detach | | |
 | `1`–`9` | jump to tab | | |
 
@@ -79,6 +79,13 @@ second `Esc` to close.
 Navigation results appear first. File, output, and other running-session
 results arrive in the same list without resetting the selected row. See the
 [Global Fuzzy Finder](/docs/guides/search/) guide for limits and CLI use.
+
+`Ctrl+Space t` opens the named-session selector directly. Use `↑` / `↓` or
+`j` / `k` to move, `Home` / `End` to reach either edge, and `Enter` to switch or
+create a session. `q` or `Esc` closes the list; inside the new-session prompt,
+`q` remains ordinary name text and `Esc` returns to the list. Like every
+configurable prefix command, **Open sessions** can be rebound in Settings →
+Keys.
 
 ## Focused modes and menus
 

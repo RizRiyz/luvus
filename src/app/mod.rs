@@ -37,6 +37,7 @@ mod modules;
 mod picker;
 mod preview;
 mod search;
+pub(crate) mod session_menu;
 mod settings;
 mod switcher;
 
@@ -498,6 +499,7 @@ pub enum SwitcherTarget {
     Settings,
     MissionControl,
     Version,
+    Sessions,
     Exit,
 }
 
@@ -1716,6 +1718,14 @@ pub struct App {
     /// finder. The server consumes this once and sends a logical handoff only
     /// to that client.
     pub pending_session_switch: Option<String>,
+    /// On-demand named-session menu. Its filesystem/process discovery runs only
+    /// while opening or activating this surface, never on an idle timer.
+    pub named_session_menu: Option<session_menu::NamedSessionMenu>,
+    pub named_session_button_rect: Option<Rect>,
+    pub named_session_menu_rect: Option<Rect>,
+    pub named_session_close_rect: Option<Rect>,
+    pub named_session_row_rects: Vec<(usize, Rect)>,
+    named_session_generation: u64,
     /// Persist structural state immediately after the last project workspace is
     /// replaced by the neutral home terminal. This prevents a crash inside the
     /// normal debounce window from restoring the project the user closed.
@@ -2224,6 +2234,12 @@ impl App {
             last_cursor: None,
             detach_requested: false,
             pending_session_switch: None,
+            named_session_menu: None,
+            named_session_button_rect: None,
+            named_session_menu_rect: None,
+            named_session_close_rect: None,
+            named_session_row_rects: Vec::new(),
+            named_session_generation: 0,
             persist_session_now: false,
             force_redraw: false,
             pending_notify: Vec::new(),
@@ -2831,6 +2847,12 @@ impl App {
             last_cursor: None,
             detach_requested: false,
             pending_session_switch: None,
+            named_session_menu: None,
+            named_session_button_rect: None,
+            named_session_menu_rect: None,
+            named_session_close_rect: None,
+            named_session_row_rects: Vec::new(),
+            named_session_generation: 0,
             persist_session_now: false,
             force_redraw: false,
             pending_notify: Vec::new(),

@@ -280,6 +280,27 @@ pub fn list_sessions() -> std::io::Result<Vec<SessionInfo>> {
     Ok(sessions)
 }
 
+/// Start one named server through the shared lifecycle API, then wait until its
+/// binary client transport is ready for an interactive handoff. This remains a
+/// bounded, caller-driven operation and must run off the app loop.
+pub fn start_client_session(name: &str) -> Result<SessionInfo, String> {
+    let selected = normalize_name(name)?;
+    let selected = selected.as_deref();
+    start_session(selected)?;
+    let client = client_socket_path_for(selected);
+    let deadline = Instant::now() + START_TIMEOUT;
+    while Instant::now() < deadline {
+        if is_running_at(&client) {
+            return Ok(session_info(selected));
+        }
+        std::thread::sleep(STOP_POLL_INTERVAL);
+    }
+    Err(format!(
+        "session {name} started but its client transport was unavailable after {}ms",
+        START_TIMEOUT.as_millis(),
+    ))
+}
+
 pub fn stop_session(name: Option<&str>) -> Result<SessionInfo, String> {
     let api = api_socket_path_for(name);
     let client = client_socket_path_for(name);

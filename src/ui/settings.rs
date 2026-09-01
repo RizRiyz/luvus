@@ -76,17 +76,18 @@ pub(super) fn draw_settings(
     dim_backdrop(f, area, t);
 
     // Width must fit the whole tab bar — translated labels (esp. CJK) can be much
-    // wider than English, so size to the tabs instead of a fixed cap. The tabs
-    // are `[X] {label}` pills separated by ` · `. Add only the two border
-    // columns so the toolbar defines the desktop modal width; this keeps
-    // General and Language close to the left and right edges without crowding
-    // adjacent tabs. Both dimensions remain capped to the current viewport.
+    // wider than English, so size to the tabs instead of a fixed cap. Every tab
+    // reserves one quiet cell on both sides of its plain label; only the active
+    // tab paints those cells, so selection never shifts the toolbar geometry.
+    // Tabs remain separated by ` · `. Keep the established 80-column content
+    // width when available so translated key-reference rows do not become
+    // narrower merely because their toolbar icons were removed.
     let tabs_w: u16 = SettingsTab::ALL
         .iter()
-        .map(|st| display_width(&format!("{} {}", st.icon(), st.label(app.catalog))) as u16)
+        .map(|st| display_width(st.label(app.catalog)) as u16 + 2)
         .sum::<u16>()
         + (SettingsTab::ALL.len().saturating_sub(1) as u16 * 3);
-    let w = (tabs_w + 2).max(54).min(area.width);
+    let w = (tabs_w + 2).max(80).min(area.width);
     let h = area.height.saturating_sub(2).clamp(16, 30).min(area.height);
     let modal = if app.compact {
         super::mobile::sheets::full_screen(area)
@@ -134,7 +135,7 @@ pub(super) fn draw_settings(
     if inner.height < 9 {
         if inner.height > 2 && inner.width > 0 {
             let rect = Rect::new(inner.x, inner.y + 2, inner.width, 1);
-            let label = format!("{} {}", tab.icon(), tab.label(app.catalog));
+            let label = format!(" {} ", tab.label(app.catalog));
             f.render_widget(
                 Paragraph::new(Span::styled(
                     truncate(&label, rect.width as usize),
@@ -181,7 +182,7 @@ pub(super) fn draw_settings(
             } else {
                 Style::new().fg(t.subtext0)
             };
-            let label = format!("{} {}", st.icon(), st.label(app.catalog));
+            let label = format!(" {} ", st.label(app.catalog));
             f.render_widget(
                 Paragraph::new(Span::styled(truncate(&label, cell_width as usize), style))
                     .alignment(Alignment::Center),
@@ -193,7 +194,7 @@ pub(super) fn draw_settings(
         let mut x = inner.x;
         let labels_width = SettingsTab::ALL
             .iter()
-            .map(|st| display_width(&format!("{} {}", st.icon(), st.label(app.catalog))) as u16)
+            .map(|st| display_width(st.label(app.catalog)) as u16 + 2)
             .sum::<u16>();
         let gaps = SettingsTab::ALL.len().saturating_sub(1) as u16;
         let separator = if labels_width.saturating_add(gaps.saturating_mul(3)) <= inner.width {
@@ -213,7 +214,7 @@ pub(super) fn draw_settings(
                 );
                 x = x.saturating_add(separator_width);
             }
-            let label = format!("{} {}", st.icon(), st.label(app.catalog));
+            let label = format!(" {} ", st.label(app.catalog));
             let cw = display_width(&label) as u16;
             if x + cw > inner.right() {
                 break;
@@ -1720,7 +1721,7 @@ mod tests {
     use ratatui::buffer::Buffer;
 
     #[test]
-    fn ascii_tab_markers_are_separated_and_remain_visible_at_80_columns() {
+    fn plain_tabs_are_padded_separated_and_visible_at_80_columns() {
         use crate::app::SettingsTab;
         use ratatui::{backend::TestBackend, Terminal};
 
@@ -1738,13 +1739,29 @@ mod tests {
         let narrow_buffer = terminal.backend().buffer();
         for pair in app.settings_tab_rects.windows(2) {
             let separator_x = pair[0].1.right();
-            assert_eq!(pair[1].1.x.saturating_sub(separator_x), 1);
-            assert_eq!(narrow_buffer[(separator_x, pair[0].1.y)].symbol(), "·");
+            assert_eq!(pair[1].1.x.saturating_sub(separator_x), 3);
+            assert_eq!(narrow_buffer[(separator_x + 1, pair[0].1.y)].symbol(), "·");
         }
         assert!(app
             .settings_tab_rects
             .iter()
             .any(|(tab, _)| *tab == SettingsTab::Language));
+        let general = app
+            .settings_tab_rects
+            .iter()
+            .find(|(tab, _)| *tab == SettingsTab::General)
+            .unwrap()
+            .1;
+        let general_text: String = (general.x..general.right())
+            .map(|x| narrow_buffer[(x, general.y)].symbol())
+            .collect();
+        assert_eq!(general_text, " General ");
+        assert_eq!(narrow_buffer[(general.x, general.y)].bg, app.theme.accent);
+        assert_eq!(
+            narrow_buffer[(general.right() - 1, general.y)].bg,
+            app.theme.accent
+        );
+        assert!(!general_text.contains('['));
 
         let mut wide = Terminal::new(TestBackend::new(120, 30)).unwrap();
         wide.draw(|frame| crate::ui::render(frame, &mut app))

@@ -1979,7 +1979,10 @@ mod tests {
             text.push_str(cell.symbol());
         }
 
-        assert!(text.contains("luvus"), "brand missing");
+        assert!(
+            text.contains(&crate::session::display_name()),
+            "active session name missing"
+        );
         assert!(text.contains("WORKSPACES"), "workspaces header missing");
         assert!(text.contains("AGENTS"), "agents header missing");
         assert!(text.contains("tab"), "tab status missing");

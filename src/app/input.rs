@@ -518,6 +518,18 @@ impl App {
                 }
                 return true;
             }
+            AppEvent::NamedSessionsLoaded { generation, result } => {
+                self.apply_named_sessions_loaded(generation, result);
+                return true;
+            }
+            AppEvent::NamedSessionPrepared {
+                generation,
+                name,
+                result,
+            } => {
+                self.apply_named_session_prepared(generation, name, result);
+                return true;
+            }
             other => other,
         };
         // Control-API requests and parked `wait.output` replies must be answered
@@ -979,6 +991,9 @@ impl App {
             | AppEvent::SearchResults { .. }
             | AppEvent::SearchFederatedResults { .. }
             | AppEvent::SearchHandoffReady { .. } => unreachable!(),
+            AppEvent::NamedSessionsLoaded { .. } | AppEvent::NamedSessionPrepared { .. } => {
+                unreachable!()
+            }
         }
     }
 
@@ -1014,6 +1029,9 @@ impl App {
     /// all single-line fields.
     fn paste_into_modal(&mut self, s: &str) -> bool {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        if self.named_session_menu.is_some() {
+            return self.paste_named_session_prompt(s);
+        }
         if self.module_setting_edit.is_some() {
             for character in s.chars().filter(|character| !character.is_control()) {
                 self.handle_module_setting_key(KeyEvent::new(
@@ -1105,6 +1123,18 @@ impl App {
         let (c, r) = at?;
         let hit = |rect: Rect| c >= rect.x && c < rect.right() && r >= rect.y && r < rect.bottom();
         let first = |rects: &[Rect]| rects.iter().copied().find(|rect| hit(*rect));
+
+        if self.named_session_menu.is_some() {
+            return self
+                .named_session_close_rect
+                .filter(|rect| hit(*rect))
+                .or_else(|| {
+                    self.named_session_row_rects
+                        .iter()
+                        .map(|(_, rect)| *rect)
+                        .find(|rect| hit(*rect))
+                });
+        }
 
         if self.changelog_open {
             return self
@@ -1223,6 +1253,7 @@ impl App {
             .chain(self.diff_row_rects.iter().map(|(_, rect)| *rect))
             .chain(
                 [
+                    self.named_session_button_rect,
                     self.switcher_button_rect,
                     self.mobile_pane_prev_rect,
                     self.mobile_pane_next_rect,
@@ -1276,6 +1307,17 @@ impl App {
                     self.help_scroll = self.help_scroll.saturating_add(2).min(self.help_scroll_max)
                 }
                 MouseEventKind::Down(MouseButton::Left) => self.help_open = false,
+                _ => {}
+            }
+            return;
+        }
+        if self.named_session_menu.is_some() {
+            match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.named_session_click(m.column, m.row)
+                }
+                MouseEventKind::ScrollUp => self.move_named_session_cursor(-1),
+                MouseEventKind::ScrollDown => self.move_named_session_cursor(1),
                 _ => {}
             }
             return;
@@ -2165,6 +2207,10 @@ impl App {
         }
 
         // The sidebar gear opens Settings.
+        if self.named_session_button_rect.is_some_and(hit) {
+            self.open_named_session_menu();
+            return;
+        }
         if self.settings_icon_rect.is_some_and(hit) {
             self.open_settings();
             return;
@@ -3295,6 +3341,10 @@ impl App {
         // take keys first (docs/13 §3.6).
         if self.module_setting_edit.is_some() {
             self.handle_module_setting_key(key);
+            return true;
+        }
+        if self.named_session_menu.is_some() {
+            self.named_session_key(key);
             return true;
         }
         // The Settings modal captures all input while open.

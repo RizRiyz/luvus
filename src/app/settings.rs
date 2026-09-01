@@ -34,18 +34,6 @@ impl SettingsTab {
         SettingsTab::Language,
     ];
 
-    pub fn icon(self) -> &'static str {
-        match self {
-            SettingsTab::General => "[G]",
-            SettingsTab::Theme => "[T]",
-            SettingsTab::Layout => "[L]",
-            SettingsTab::Keys => "[K]",
-            SettingsTab::Modules => "[M]",
-            SettingsTab::Integrations => "[A]",
-            SettingsTab::Language => "[L]",
-        }
-    }
-
     /// The tab label in the active UI language (docs/21).
     pub fn label(self, cat: &crate::i18n::Catalog) -> &'static str {
         match self {
@@ -2001,27 +1989,6 @@ mod tests {
         );
         assert_eq!(SettingsTab::ALL[1], SettingsTab::Theme, "before Theme");
         assert_eq!(SettingsTab::ALL.len(), 7, "still seven tabs");
-    }
-
-    #[test]
-    fn settings_tab_markers_have_consistent_terminal_width() {
-        let expected = [
-            (SettingsTab::General, "[G]"),
-            (SettingsTab::Theme, "[T]"),
-            (SettingsTab::Layout, "[L]"),
-            (SettingsTab::Keys, "[K]"),
-            (SettingsTab::Modules, "[M]"),
-            (SettingsTab::Integrations, "[A]"),
-            (SettingsTab::Language, "[L]"),
-        ];
-        for (tab, marker) in expected {
-            assert_eq!(tab.icon(), marker);
-            assert_eq!(
-                unicode_width::UnicodeWidthStr::width(tab.icon()),
-                3,
-                "{tab:?} marker must occupy three terminal columns"
-            );
-        }
     }
 
     /// The General tab's "Open files with" slider cycles read-only → each detected

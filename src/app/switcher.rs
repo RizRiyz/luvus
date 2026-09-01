@@ -240,6 +240,17 @@ impl App {
                 label: self.catalog.changelog.to_string(),
                 detail: format!("v{}", env!("CARGO_PKG_VERSION")),
             });
+            if self.server_mode {
+                rows.push(SwitcherRow::Action {
+                    target: SwitcherTarget::Sessions,
+                    label: self.catalog.named_sessions.to_string(),
+                    detail: format!(
+                        "{} · {}",
+                        crate::session::display_name(),
+                        self.catalog.session_current
+                    ),
+                });
+            }
             rows.push(SwitcherRow::Action {
                 target: SwitcherTarget::Exit,
                 label: self.catalog.act_exit.to_string(),
@@ -310,6 +321,7 @@ impl App {
             SwitcherTarget::Settings => self.open_settings(),
             SwitcherTarget::MissionControl => self.open_mission_control(self.active_ws),
             SwitcherTarget::Version => self.open_changelog(),
+            SwitcherTarget::Sessions => self.open_named_session_menu(),
             SwitcherTarget::Exit => self.detach_requested = true,
         }
     }
@@ -802,6 +814,7 @@ mod tests {
         let _env = crate::persist::test_env("mobile-navigator-exit");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(64, 35, tx).unwrap();
+        app.server_mode = true;
         app.compact = true;
         let actions: Vec<_> = app
             .switcher_rows()
@@ -812,6 +825,10 @@ mod tests {
             })
             .collect();
         assert!(matches!(actions.last(), Some(SwitcherTarget::Exit)));
+        assert!(matches!(
+            actions.get(actions.len().saturating_sub(2)),
+            Some(SwitcherTarget::Sessions)
+        ));
 
         app.switcher_activate(SwitcherTarget::Exit);
         assert!(app.detach_requested, "Exit detaches the current client");
