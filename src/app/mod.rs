@@ -904,6 +904,9 @@ pub enum FileMenuItem {
     InsertPath,
     /// Open this folder as a workspace (folders only), or focus it if already open.
     OpenAsNewWorkspace,
+    /// Hand the entry to the desktop: a file opens in its default application,
+    /// a folder in the file manager. Offered for both.
+    OpenInOs,
     Divider,
     Delete,
 }
@@ -925,6 +928,7 @@ impl FileMenu {
                 }
                 None => {}
             }
+            v.push(FileMenuItem::OpenInOs);
             v.push(FileMenuItem::Divider);
         }
         v.extend([
@@ -936,6 +940,7 @@ impl FileMenu {
         ]);
         if self.is_dir {
             v.push(FileMenuItem::OpenAsNewWorkspace);
+            v.push(FileMenuItem::OpenInOs);
         }
         v.extend([FileMenuItem::Divider, FileMenuItem::Delete]);
         v
