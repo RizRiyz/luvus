@@ -166,11 +166,11 @@ The default state root is `~/.luvus/`. Debug builds use `~/.luvus-dev/`, and
 another or copy state between them unless the human requests a migration.
 
 User preferences live in `config.json`, not TOML. It contains the theme,
-language, shell, layout, notifications, keybindings, sidebars, and Luvus Bar
-placement. Prefer the in-app Settings screen because it validates changes,
-applies supported settings live, and writes the file. Hand edits are loaded on
-restart. Preserve unknown keys and do not rewrite the file just to change one
-setting.
+language, shell, layout, notifications, prefix keybindings, opt-in direct
+keybindings, sidebars, and Luvus Bar placement. Prefer the in-app Settings
+screen because it validates changes, applies supported settings live, and
+writes the file. Hand edits are loaded on restart. Preserve unknown keys and do
+not rewrite the file just to change one setting.
 
 The default session stores runtime files directly under the state root. Named
 sessions keep their server-specific runtime files under

@@ -3467,6 +3467,15 @@ impl App {
         if self.mode == Mode::Resize {
             return self.handle_resize_mode_key(key);
         }
+        // Explicit direct shortcuts are the only normal-mode keys Luvus takes
+        // before pane/dashboard dispatch. The configured prefix retains
+        // precedence, and an empty direct map makes this a cheap no-op.
+        if self.mode == Mode::Normal && !self.prefix.matches(&key) {
+            if let Some(command) = keys::direct_command(&self.direct_keymap, &key) {
+                self.run_cmd(command);
+                return true;
+            }
+        }
         // FILES/DIFF dock focus is explicit and separate from terminal-pane
         // focus. The prefix remains available for global commands; ordinary
         // keys never leak into the pane until Esc/q returns control to it.

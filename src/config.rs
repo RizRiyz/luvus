@@ -67,6 +67,11 @@ pub struct Config {
     /// An empty value means the command is explicitly unbound.
     #[serde(default)]
     pub keybindings: std::collections::HashMap<String, String>,
+    /// Opt-in shortcuts handled without the command prefix: command id →
+    /// structured chord such as `alt+right`. Empty by default so normal shell
+    /// and nested-TUI input is never intercepted unless the user requests it.
+    #[serde(default)]
+    pub direct_keybindings: std::collections::HashMap<String, String>,
     /// The safe prefix that opens command mode (docs/64): an F1-F12 key or a
     /// Ctrl/Alt character chord such as `ctrl+space`, `ctrl+b`, or `alt+\\`.
     /// Plain text keys are rejected so normal terminal typing is never swallowed.
@@ -443,6 +448,7 @@ impl Default for Config {
             resume_launch_flags: false,
             agents_active_only: false,
             keybindings: std::collections::HashMap::new(),
+            direct_keybindings: std::collections::HashMap::new(),
             prefix: default_prefix(),
             mission_pricing: std::collections::HashMap::new(),
             mission_budget: None,
@@ -624,6 +630,10 @@ mod tests {
         assert_eq!(from_empty.theme, "quattro-rally");
         assert_eq!(from_empty.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
         assert!(
+            from_empty.direct_keybindings.is_empty(),
+            "existing configs do not gain input-stealing direct shortcuts"
+        );
+        assert!(
             !from_empty.agents_active_only,
             "old configs retain the All agents default"
         );
@@ -657,6 +667,16 @@ mod tests {
         // the new preview default without their `file_open` choice moving.
         assert_eq!(old.layout.file_click, FILE_CLICK_PREVIEW);
         assert_eq!(c.layout.file_click, FILE_CLICK_PREVIEW);
+        let mut direct = Config::default();
+        direct
+            .direct_keybindings
+            .insert("next_tab".into(), "alt+right".into());
+        let direct_json = serde_json::to_string(&direct).unwrap();
+        let direct_roundtrip: Config = serde_json::from_str(&direct_json).unwrap();
+        assert_eq!(
+            direct_roundtrip.direct_keybindings.get("next_tab"),
+            Some(&"alt+right".to_string())
+        );
         let picked: Config = serde_json::from_str(r#"{"layout":{"file_click":"tab"}}"#).unwrap();
         assert_eq!(picked.layout.file_click, FILE_CLICK_TAB);
         let old_custom: Config = serde_json::from_str(r#"{"layout":{"scrollback":5000}}"#).unwrap();

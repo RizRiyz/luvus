@@ -47,6 +47,7 @@ cleanly across versions because unknown fields get defaults.
 | `sidebars.files_side` | last side used by the FILES dock (`left` or `right`), retained while the dock is hidden |
 | `prefix` | the command-mode prefix (default `ctrl+space`). Accepts `f1`–`f12` as safe single keys, or a character/Space chord containing `Ctrl` or `Alt`, such as `ctrl+b`, `alt+\`, or `shift+f12` (see [Keybindings](/docs/reference/keybindings/)) |
 | `keybindings` | command id → key, overriding the defaults |
+| `direct_keybindings` | opt-in command id → modified semantic chord handled without the prefix. It is empty by default; configured chords are intercepted instead of reaching the focused pane (see [Keybindings](/docs/reference/keybindings/#opt-in-direct-shortcuts)). |
 | `bars.top_right` / `bars.bottom_right` / `bars.off` | canonical widget ids (`module:id`) in each Luvus Bar placement. `core:runtime-status` defaults to Bottom. Live content and notifications are never persisted. |
 
 ## Environment variables

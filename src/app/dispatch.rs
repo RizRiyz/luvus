@@ -268,6 +268,29 @@ mod socket_api_tests {
         );
         app.dispatch(
             "config.patch",
+            &json!({"patch":{"direct_keybindings":{"next_tab":"alt+right"}}}),
+        )
+        .unwrap();
+        assert_eq!(
+            keys::direct_command(
+                &app.direct_keymap,
+                &ratatui::crossterm::event::KeyEvent::new(
+                    ratatui::crossterm::event::KeyCode::Right,
+                    ratatui::crossterm::event::KeyModifiers::ALT,
+                ),
+            ),
+            Some(keys::Cmd::NextTab)
+        );
+        let direct_before = app.config.direct_keybindings.clone();
+        assert!(app
+            .dispatch(
+                "config.patch",
+                &json!({"patch":{"direct_keybindings":{"next_tab":"\u{1b}[1;3C"}}}),
+            )
+            .is_err());
+        assert_eq!(app.config.direct_keybindings, direct_before);
+        app.dispatch(
+            "config.patch",
             &json!({"patch":{"mission_pricing":{"new-model":[1.0,2.0,0.5]}}}),
         )
         .unwrap();
@@ -5297,6 +5320,8 @@ impl App {
                 "config prefix must be F1-F12 or a valid Ctrl/Alt chord".to_string(),
             )
         })?;
+        keys::validate_direct_keybindings(&next.direct_keybindings)
+            .map_err(|message| ("invalid_request".to_string(), message))?;
         if self.theme_registry.get(&next.theme).is_none() && next.theme != "terminal" {
             return Err((
                 "invalid_request".to_string(),
@@ -5306,11 +5331,13 @@ impl App {
         let theme = self.theme_registry.theme_or_default(&next.theme);
         let sidebars = Sidebars::from_config(&next.sidebars());
         let keymap = keys::build_keymap(&next.keybindings);
+        let direct_keymap = keys::build_direct_keymap(&next.direct_keybindings);
         let history_budget = next.scrollback_bytes();
         self.set_effective_theme(&next.theme, theme);
         self.catalog = crate::i18n::by_code(&next.language);
         self.prefix = prefix;
         self.keymap = keymap;
+        self.direct_keymap = direct_keymap;
         self.sidebars = sidebars;
         self.file_tree.show_hidden = next.layout.files_show_hidden;
         self.file_tree.scroll = 0;
@@ -5838,7 +5865,10 @@ fn merge_known_fields(
             format!("{path} cannot be patched as an object"),
         )
     })?;
-    let dynamic_map = matches!(path, "config.keybindings" | "config.mission_pricing");
+    let dynamic_map = matches!(
+        path,
+        "config.keybindings" | "config.direct_keybindings" | "config.mission_pricing"
+    );
     for (key, value) in patch {
         let Some(existing) = target.get_mut(key) else {
             if dynamic_map {

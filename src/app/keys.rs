@@ -471,6 +471,146 @@ impl PrefixSpec {
     }
 }
 
+/// An opt-in shortcut handled directly in normal mode, without first entering
+/// prefix mode. The configuration stores semantic keys (`alt+right`), never
+/// terminal byte sequences, because the client has already decoded those bytes
+/// into a [`KeyEvent`] before application dispatch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectKeySpec {
+    modifiers: KeyModifiers,
+    code: KeyCode,
+}
+
+impl DirectKeySpec {
+    const RELEVANT_MODIFIERS: KeyModifiers = KeyModifiers::CONTROL
+        .union(KeyModifiers::ALT)
+        .union(KeyModifiers::SHIFT);
+
+    pub fn parse(spec: &str) -> Option<Self> {
+        let mut modifiers = KeyModifiers::NONE;
+        let mut code = None;
+        for raw in spec.split('+') {
+            let part = raw.trim().to_ascii_lowercase();
+            match part.as_str() {
+                "" => {}
+                "ctrl" | "control" => modifiers.insert(KeyModifiers::CONTROL),
+                "alt" | "option" | "opt" => modifiers.insert(KeyModifiers::ALT),
+                "shift" => modifiers.insert(KeyModifiers::SHIFT),
+                "left" if code.is_none() => code = Some(KeyCode::Left),
+                "right" if code.is_none() => code = Some(KeyCode::Right),
+                "up" if code.is_none() => code = Some(KeyCode::Up),
+                "down" if code.is_none() => code = Some(KeyCode::Down),
+                "home" if code.is_none() => code = Some(KeyCode::Home),
+                "end" if code.is_none() => code = Some(KeyCode::End),
+                "pageup" | "page-up" if code.is_none() => code = Some(KeyCode::PageUp),
+                "pagedown" | "page-down" if code.is_none() => code = Some(KeyCode::PageDown),
+                "tab" if code.is_none() => code = Some(KeyCode::Tab),
+                "enter" | "return" if code.is_none() => code = Some(KeyCode::Enter),
+                "esc" | "escape" if code.is_none() => code = Some(KeyCode::Esc),
+                "delete" | "del" if code.is_none() => code = Some(KeyCode::Delete),
+                "insert" | "ins" if code.is_none() => code = Some(KeyCode::Insert),
+                "space" | "spc" if code.is_none() => code = Some(KeyCode::Char(' ')),
+                "plus" if code.is_none() => code = Some(KeyCode::Char('+')),
+                other if code.is_none() => {
+                    if let Some(number) = other
+                        .strip_prefix('f')
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .filter(|number| (1..=12).contains(number))
+                    {
+                        code = Some(KeyCode::F(number));
+                    } else if other.chars().count() == 1 && other.is_ascii() {
+                        code = Some(KeyCode::Char(other.chars().next()?));
+                    } else {
+                        return None;
+                    }
+                }
+                _ => return None,
+            }
+        }
+
+        let code = code?;
+        if modifiers.is_empty() {
+            return None;
+        }
+        if matches!(code, KeyCode::Char(_))
+            && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return None;
+        }
+        Some(Self { modifiers, code })
+    }
+
+    fn matches(&self, key: &KeyEvent) -> bool {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META)
+            || key.modifiers & Self::RELEVANT_MODIFIERS != self.modifiers
+        {
+            return false;
+        }
+        // A Windows AltGr character is reported as Ctrl+Alt. Never turn typed
+        // characters into direct commands merely because their layout needs
+        // AltGr; navigation keys with the same modifiers remain bindable.
+        if cfg!(windows)
+            && matches!(key.code, KeyCode::Char(_))
+            && key
+                .modifiers
+                .contains(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return false;
+        }
+        match (self.code, key.code) {
+            (KeyCode::Char(expected), KeyCode::Char(actual)) => {
+                expected.eq_ignore_ascii_case(&actual)
+            }
+            (KeyCode::Tab, KeyCode::BackTab) => self.modifiers.contains(KeyModifiers::SHIFT),
+            (expected, actual) => expected == actual,
+        }
+    }
+}
+
+pub type DirectKeymap = Vec<(DirectKeySpec, Cmd)>;
+
+/// Build only explicitly configured direct shortcuts. Unlike prefix bindings,
+/// this has no defaults: normal pane input remains untouched after upgrades.
+pub fn build_direct_keymap(overrides: &HashMap<String, String>) -> DirectKeymap {
+    let mut bindings: DirectKeymap = Vec::new();
+    for &cmd in Cmd::ALL {
+        let Some(spec) = overrides
+            .get(cmd.id())
+            .filter(|spec| !spec.is_empty())
+            .and_then(|spec| DirectKeySpec::parse(spec))
+        else {
+            continue;
+        };
+        if let Some(index) = bindings.iter().position(|(existing, _)| *existing == spec) {
+            bindings.remove(index);
+        }
+        bindings.push((spec, cmd));
+    }
+    bindings
+}
+
+pub fn direct_command(bindings: &DirectKeymap, key: &KeyEvent) -> Option<Cmd> {
+    bindings
+        .iter()
+        .find_map(|(spec, command)| spec.matches(key).then_some(*command))
+}
+
+pub fn validate_direct_keybindings(overrides: &HashMap<String, String>) -> Result<(), String> {
+    for &cmd in Cmd::ALL {
+        if let Some(spec) = overrides.get(cmd.id()).filter(|spec| !spec.is_empty()) {
+            if DirectKeySpec::parse(spec).is_none() {
+                return Err(format!(
+                    "direct binding {} must be a modified semantic key such as alt+right",
+                    cmd.id()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Build the active `key → Cmd` map from the (id → key) config overrides on top
 /// of every command's [`Cmd::default_keys`] (docs/64). There is no separate
 /// hardcoded alias block: aliases are just extra default keys, so a user who
@@ -896,6 +1036,108 @@ mod tests {
             f12.key_event(),
             KeyEvent::new(KeyCode::F(12), KeyModifiers::NONE)
         );
+    }
+
+    #[test]
+    fn direct_bindings_parse_semantic_modified_keys_only() {
+        let alt = KeyModifiers::ALT;
+        let right = DirectKeySpec::parse("alt+right").unwrap();
+        assert!(right.matches(&KeyEvent::new(KeyCode::Right, alt)));
+        assert!(!right.matches(&KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)));
+        assert!(!right.matches(&KeyEvent::new(KeyCode::Left, alt)));
+
+        assert!(DirectKeySpec::parse("ctrl+alt+left").is_some());
+        assert!(DirectKeySpec::parse("shift+f12").is_some());
+        assert!(DirectKeySpec::parse("alt+space").is_some());
+        assert_eq!(DirectKeySpec::parse("right"), None);
+        assert_eq!(DirectKeySpec::parse("shift+x"), None);
+        assert_eq!(DirectKeySpec::parse("\x1b[1;3C"), None);
+    }
+
+    #[test]
+    fn direct_bindings_are_opt_in_and_resolve_command_collisions() {
+        assert!(build_direct_keymap(&HashMap::new()).is_empty());
+
+        let mut configured = HashMap::new();
+        configured.insert(Cmd::PrevTab.id().to_string(), "alt+left".to_string());
+        configured.insert(Cmd::NextTab.id().to_string(), "alt+right".to_string());
+        let bindings = build_direct_keymap(&configured);
+        assert_eq!(
+            direct_command(&bindings, &KeyEvent::new(KeyCode::Left, KeyModifiers::ALT)),
+            Some(Cmd::PrevTab)
+        );
+        assert_eq!(
+            direct_command(&bindings, &KeyEvent::new(KeyCode::Right, KeyModifiers::ALT)),
+            Some(Cmd::NextTab)
+        );
+
+        configured.insert(Cmd::PrevTab.id().to_string(), "alt+right".to_string());
+        let bindings = build_direct_keymap(&configured);
+        assert_eq!(
+            direct_command(&bindings, &KeyEvent::new(KeyCode::Right, KeyModifiers::ALT)),
+            Some(Cmd::PrevTab),
+            "the later command in the stable command list owns a duplicate chord"
+        );
+    }
+
+    #[test]
+    fn direct_alt_arrows_switch_tabs_without_changing_prefix_bindings() {
+        let _env = crate::persist::test_env("direct-alt-tab-switch");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.run_cmd(Cmd::NewTab);
+        app.run_cmd(Cmd::NewTab);
+        assert_eq!(app.ws().active_tab, 2);
+
+        app.config
+            .direct_keybindings
+            .insert(Cmd::PrevTab.id().into(), "alt+left".into());
+        app.config
+            .direct_keybindings
+            .insert(Cmd::NextTab.id().into(), "alt+right".into());
+        app.direct_keymap = build_direct_keymap(&app.config.direct_keybindings);
+
+        assert!(app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Left,
+            KeyModifiers::ALT,
+        ))));
+        assert_eq!(app.ws().active_tab, 1);
+        assert!(app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::ALT,
+        ))));
+        assert_eq!(app.ws().active_tab, 2);
+
+        app.direct_keymap.clear();
+        assert!(!app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Left,
+            KeyModifiers::ALT,
+        ))));
+        assert_eq!(
+            app.ws().active_tab,
+            2,
+            "unbound Alt+Left returns to the pane"
+        );
+    }
+
+    #[test]
+    fn configured_prefix_takes_precedence_over_a_direct_collision() {
+        let _env = crate::persist::test_env("direct-prefix-precedence");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.run_cmd(Cmd::NewTab);
+        let active = app.ws().active_tab;
+        app.config
+            .direct_keybindings
+            .insert(Cmd::PrevTab.id().into(), "ctrl+space".into());
+        app.direct_keymap = build_direct_keymap(&app.config.direct_keybindings);
+
+        assert!(app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL,
+        ))));
+        assert_eq!(app.mode, Mode::Prefix);
+        assert_eq!(app.ws().active_tab, active);
     }
 
     #[test]

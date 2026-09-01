@@ -1559,6 +1559,9 @@ pub struct App {
     pub config: crate::config::Config,
     /// Active `key → Cmd` map for prefix mode (defaults + config overrides).
     pub keymap: std::collections::HashMap<String, Cmd>,
+    /// Explicit normal-mode shortcuts. Empty by default so pane input remains
+    /// authoritative unless the user opts a chord into Luvus handling.
+    pub direct_keymap: keys::DirectKeymap,
     /// The parsed prefix chord (docs/64), from `config.prefix`. Default Ctrl+Space.
     pub prefix: keys::PrefixSpec,
     /// The open Settings modal, if any (`Some` ⇒ modal captures input).
@@ -2104,6 +2107,7 @@ impl App {
         let sidebars = Sidebars::from_config(&config.sidebars());
         let shell = crate::platform::resolve_shell(&config.shell);
         let keymap = keys::build_keymap(&config.keybindings);
+        let direct_keymap = keys::build_direct_keymap(&config.direct_keybindings);
         let prefix = keys::PrefixSpec::parse(&config.prefix).unwrap_or_default();
         let modules = crate::module::registry::load();
         let mut bar = crate::bar::BarState::default();
@@ -2166,6 +2170,7 @@ impl App {
             catalog,
             config,
             keymap,
+            direct_keymap,
             prefix,
             agent_names: HashMap::new(),
             settings: None,
@@ -2424,6 +2429,7 @@ impl App {
         let theme = theme_registry.theme_or_default(&config.theme);
         let pane_appearance = child_appearance(&theme_registry, &config.theme, &theme, None);
         let keymap = keys::build_keymap(&config.keybindings);
+        let direct_keymap = keys::build_direct_keymap(&config.direct_keybindings);
         let prefix = keys::PrefixSpec::parse(&config.prefix).unwrap_or_default();
         let shell = crate::platform::resolve_shell(&config.shell);
         let history_budget_bytes = config.scrollback_bytes();
@@ -2779,6 +2785,7 @@ impl App {
             catalog,
             config,
             keymap,
+            direct_keymap,
             prefix,
             agent_names,
             settings: None,

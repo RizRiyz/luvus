@@ -174,9 +174,9 @@ the block keeps its supplied order, and the active workspace remains active.
 `config.get` returns the normalized live config. `config.patch` takes
 `{"patch":{...}}`, recursively merges only known fields, validates the result,
 applies theme, language, keymap, prefix, sidebars, layout gaps, file visibility,
-and pane history budgets live, then persists atomically. Unknown or invalid
-fields leave the current config unchanged. `server.reload_config` reloads the
-on-disk config through the same apply path.
+opt-in direct shortcuts, and pane history budgets live, then persists
+atomically. Unknown or invalid fields leave the current config unchanged.
+`server.reload_config` reloads the on-disk config through the same apply path.
 
 `server.agent_manifests` returns the active recognized agent names and rule
 count. `server.reload_agent_manifests` reloads built-in, managed, and user
