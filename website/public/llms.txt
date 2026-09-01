@@ -66,10 +66,10 @@ semantic diff layers, local notes, agent handoff, and review settings.
 
 - Scripting: https://luvus.dev/docs/guides/scripting/
 - CLI reference: https://luvus.dev/docs/reference/cli/
-- UHP guide: https://luvus.dev/docs/guides/uhp/
-- UHP contract: https://luvus.dev/docs/reference/uhp/
-- UHP methods: https://luvus.dev/docs/reference/api/
-- Terminal backend: https://luvus.dev/docs/reference/terminal-backend/
+- UHP guide: https://luvus.dev/docs/uhp/getting-started/
+- UHP contract: https://luvus.dev/docs/uhp/
+- UHP methods: https://luvus.dev/docs/uhp/methods/
+- UHP terminal methods: https://luvus.dev/docs/uhp/terminal/
 
 The running server is the machine-contract source of truth:
 

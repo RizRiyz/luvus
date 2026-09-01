@@ -1,5 +1,5 @@
 ---
-title: UHP method reference
+title: Method reference
 description: The complete Universal Harness Protocol 1.0 method surface.
 ---
 
@@ -21,7 +21,7 @@ default full-authority boundary, so methods do not need a session parameter.
 Harnesses can be given an optional short-lived scoped token instead of ambient
 owner authority.
 
-Start with [Automating with UHP](/docs/guides/uhp/)
+Start with [Getting started with UHP](/docs/uhp/getting-started/)
 for a practical connection, discovery, authentication, and streaming guide.
 Use `luvus --session <name> <command>` from outside a pane. Inside a pane, keep
 the inherited socket so commands cannot drift to another server. Server-facing
@@ -52,8 +52,13 @@ Errors come back structured:
 ```
 
 ```sh
-# Try it raw (macOS/Linux):
-printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.luvus/luvus.sock
+# From an existing Luvus pane on macOS or Linux:
+printf '%s\n' '{"id":"1","method":"ping","params":{}}' \
+  | nc -U "$LUVUS_SOCKET_PATH"
+
+# From any platform, with endpoint discovery owned by Luvus:
+printf '%s\n' '{"id":"1","method":"ping","params":{}}' \
+  | luvus --session review uhp proxy
 ```
 
 ## Method families
@@ -103,10 +108,10 @@ workspace. `branch` is valid only in worktree mode, and `task.merge` returns
 ```
 
 All families belong to the same
-[Universal Harness Protocol](/docs/reference/uhp/). Terminal methods do not
+[Universal Harness Protocol](/docs/uhp/). Terminal methods do not
 inherit the focused pane. They require explicit runtime identity and stricter
 framing, limits, and failure evidence. See the detailed
-[UHP terminal methods](/docs/reference/terminal-backend/) reference.
+[UHP terminal methods](/docs/uhp/terminal/) reference.
 
 ## Host profile and named sessions
 
@@ -239,7 +244,7 @@ The installed UHP schema embeds strict terminal method and stream components.
 Live terminal observe/control streams are capped at
 eight connections, use a two-frame queue, and are driven by existing coalesced
 output events rather than an idle timer. See the
-[UHP terminal methods](/docs/reference/terminal-backend/) for framing and
+[UHP terminal methods](/docs/uhp/terminal/) for framing and
 resynchronization rules.
 
 ## Runtime snapshots and agent authority
@@ -809,7 +814,7 @@ do not detach a fragment that contains a local `$ref` from its root document.
 
 `terminal.backend.events.subscribe` uses the same stream framing but filters to
 `terminal.*` events. Its acknowledgment includes the current sequence and queue
-capacity. See [UHP terminal methods](/docs/reference/terminal-backend/) for
+capacity. See [UHP terminal methods](/docs/uhp/terminal/) for
 subscribe-first snapshot reconciliation.
 
 ## Practical notes

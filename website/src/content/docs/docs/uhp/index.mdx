@@ -1,11 +1,17 @@
 ---
-title: Universal Harness Protocol
+title: Universal Harness Protocol (UHP)
 description: The stable Luvus UHP 1.0 contract for harnesses, orchestrators, and developer tools.
 ---
 
 UHP 1.0 is Luvus's single public automation protocol. It exposes the complete
 runtime and terminal state through one method registry, one schema bundle, one
 event sequence, and one version identity: `luvus-uhp` `1.0`.
+
+UHP exists so a script, coding harness, module, remote client, or future UI can
+control the same server-owned state without scraping terminal pixels or
+reimplementing Luvus behavior. Methods are semantic and validated: start an
+agent, move a pane, apply a layout, wait for output, add DIFF notes, or stream a
+terminal through explicit contracts.
 
 ```text
 UHP 1.0
@@ -21,6 +27,43 @@ UHP 1.0
 The Unix socket or Windows named pipe is only the local transport. The private
 binary protocol used to render attached Luvus clients is separate and is not a
 harness API.
+
+## Where UHP fits
+
+| Surface | Best for | Contract |
+|---|---|---|
+| `luvus <noun> <verb>` | Humans, shell scripts, and one operation at a time | Friendly wrappers and stable CLI output |
+| UHP 1.0 | Harnesses, integrations, event consumers, and remote clients | Typed NDJSON requests, replies, events, and streams |
+| Binary client transport | Luvus TUI rendering and input | Private implementation detail, not public automation |
+
+The CLI and UHP converge on the same validated app dispatch. A feature is not a
+separate protocol merely because it has its own method namespace.
+
+## Choose your path
+
+| You want to | Start here |
+|---|---|
+| Understand framing, discovery, identity, and safety | This overview |
+| Make your first call | [Getting started](/docs/uhp/getting-started/) |
+| Copy working Python, shell, agent, terminal, and event flows | [Practical examples](/docs/uhp/examples/) |
+| Build a remote transport or independent client | [Remote access](/docs/uhp/remote-access/) |
+| Look up an exact method and its parameters | [Method reference](/docs/uhp/methods/) |
+| Observe or control live PTYs | [Terminal methods](/docs/uhp/terminal/) |
+| Validate an implementation against UHP 1.0 | [Schemas and conformance](/docs/uhp/conformance/) |
+
+## Connection profiles
+
+UHP has three profiles with different authority and lifecycle:
+
+| Profile | How to reach it | Authority |
+|---|---|---|
+| Session server | Discovered owner-only Unix socket or Windows named pipe | Full authority of the local account, or a scoped delegated token |
+| Host | One request through `luvus uhp proxy` | Local host and named-session lifecycle; confirmed mutations only |
+| Access gateway | Explicit foreground `luvus uhp access` behind a trusted provider | Read-only by default or short-lived scoped control |
+
+Normal Luvus startup opens no TCP listener. The access gateway binds loopback
+only, and an external provider decides whether and how to carry that byte stream
+over SSH, a private overlay, or another authenticated tunnel.
 
 ## Discovery
 
@@ -106,6 +149,7 @@ and are not forwarded through `luvus uhp access`. Destructive or installation
 methods additionally require `confirm:true`.
 
 Its machine-readable access descriptor is part of the installed schema bundle.
-See [Connecting UHP transports and clients](/docs/guides/uhp-access/) before
-implementing a provider. See [Automating with UHP](/docs/guides/uhp/) for a walkthrough and the
-[UHP method reference](/docs/reference/api/) for the complete namespaces.
+See [Remote access and transport providers](/docs/uhp/remote-access/) before
+implementing a provider. See [Getting started with UHP](/docs/uhp/getting-started/)
+for a walkthrough and the [method reference](/docs/uhp/methods/) for the
+complete namespaces.

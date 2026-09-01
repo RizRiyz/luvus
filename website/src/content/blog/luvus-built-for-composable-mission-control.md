@@ -43,6 +43,6 @@ That is the kind of composability worth aiming for. Not a catalogue of integrati
 
 ## Keep exploring
 
-- [Control Luvus with the local API](/docs/reference/api/)
+- [Control Luvus with the local API](/docs/uhp/methods/)
 - [Build a module in any language](/docs/extend/writing-modules/)
 - [Add compact status with Luvus Bar](/docs/guides/bar/)

@@ -1,0 +1,151 @@
+---
+title: Schemas and conformance
+description: Consume the installed UHP 1.0 schema, validate clients, and run isolated cross-platform conformance suites.
+---
+
+UHP is contract-first. The versioned schemas and fixtures are source-controlled,
+embedded in every packaged Luvus binary, and exercised independently of the
+TUI. A compatible client discovers the live server and validates against the
+installed contract instead of copying Rust types or assuming features from a
+Luvus release number.
+
+## Sources of truth
+
+Use these in order:
+
+1. `uhp.capabilities` for methods and limits active on the selected server.
+2. `luvus uhp schema` for the complete installed UHP 1.0 schema bundle.
+3. The versioned files under `protocol/uhp/v1/` when developing from source.
+4. Website examples for explanation, never as a substitute for discovery.
+
+The local Unix socket or Windows named pipe, the stdio proxy, and a paired UHP
+access gateway carry the same request and response contracts. They are
+transports and profiles, not different protocol versions.
+
+## Inspect the installed contract
+
+Schema inspection does not require a running server:
+
+```sh
+luvus uhp schema > uhp-schema.json
+```
+
+The bundle contains multiple documents identified by `$id`. Register every
+document in your validator before resolving `$ref`; do not rewrite IDs into
+local filesystem paths. Important documents include:
+
+| Document | Purpose |
+|---|---|
+| request schema | Allowed method names and request envelopes |
+| response schema | Success and structured error envelopes |
+| event schema | Sequenced general event frames |
+| event catalog | Event name to payload-schema mapping |
+| terminal schemas | Strict terminal requests, replies, events, and control frames |
+| access descriptor | Remote bootstrap, pairing, scope, and expiry metadata |
+
+Then query the selected server:
+
+```sh
+luvus uhp capabilities
+```
+
+The response supplies the exact protocol identity, method registry, limits,
+authorization scopes, server generation, and event sequence. A client must not
+call a method absent from this response, even if a newer schema knows it.
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `protocol/uhp/v1/schema/` | Global request, response, event, catalog, and access documents |
+| `protocol/uhp/v1/fixtures/` | Valid and invalid global wire frames plus their manifest |
+| `protocol/uhp/v1/terminal/schema/` | Terminal namespace and stream documents |
+| `protocol/uhp/v1/terminal/fixtures/` | Terminal identities, input, streams, endpoints, and errors |
+| `protocol/uhp/v1/terminal/conformance/` | Versioned runner instructions and endpoint rules |
+| `examples/uhp/` | Dependency-free consumers and validators |
+
+The manifest records every fixture file, kind, expected validity, and line
+count. Update schemas, fixtures, the manifest, capabilities, runtime validation,
+and public docs together when the contract changes.
+
+## Validate the fixture packages
+
+From a source checkout:
+
+```sh
+python3 examples/uhp/consumer.py
+python3 examples/uhp/terminal/consumer.py --fixtures
+python3 examples/uhp/terminal/mock_conformance.py
+```
+
+These checks do not attach to an installed Luvus server. They catch malformed
+envelopes, duplicate keys, unknown fields, invalid identities, wrong limits,
+and mismatches between fixtures and the published schemas.
+
+## Run isolated live conformance
+
+Build the debug binary and let the runner create its own state below the
+checkout's `target/` directory:
+
+```sh
+cargo build --locked
+python3 examples/uhp/terminal/live_conformance.py
+python3 examples/uhp/terminal/failure_conformance.py \
+  --luvus target/debug/luvus
+```
+
+The live suite negotiates UHP 1.0, creates only its own terminals, exercises
+identity-safe reads and writes, waits without polling, verifies lifecycle
+events, and closes what it created. Failure injection covers missing and
+oversized frames, duplicate keys, stale identities, timeouts, lost responses,
+capacity, cancellation, endpoint replacement, and restart.
+
+On Windows, use the independent PowerShell consumer:
+
+```powershell
+cargo build --locked
+.\examples\uhp\terminal\live_conformance.ps1 `
+  -Luvus .\target\debug\luvus.exe
+```
+
+Never point live mutation or failure tests at `~/.luvus/`, an installed server,
+or a production named session.
+
+## Benchmark the protocol path
+
+Use an optimized build and equivalent workloads:
+
+```sh
+cargo build --release --locked
+python3 examples/uhp/terminal/benchmark.py \
+  --luvus target/release/luvus \
+  --panes 1,10,50 \
+  --samples 50 \
+  --idle-seconds 5
+```
+
+The benchmark records request latency and size, idle CPU, RSS, threads, file
+descriptors, and terminal-operation latency. macOS also reports physical and
+live allocator footprints. Compare only matching machines, terminal sizes,
+pane workloads, warm-up, binaries, and sample counts.
+
+## Client compliance checklist
+
+A production client should:
+
+- discover capabilities on every new server generation;
+- enforce the advertised frame, connection, queue, and stream limits;
+- validate stable workspace, tab, pane, and terminal identities;
+- serialize one ordinary request per connection and terminate it with LF;
+- correlate every response or control action by request ID;
+- subscribe before snapshot and recover from gaps or overflow;
+- treat EOF during a mutation as an unknown outcome;
+- avoid automatic retries for prompts, terminal input, launches, and deletes;
+- keep delegated tokens in memory, redact them, and honor expiry and scopes;
+- reject remote named-pipe paths and validate local endpoint ownership;
+- preserve unknown additive response fields where its decoder permits them;
+- expose uncertainty instead of guessing when discovery or validation fails.
+
+For the wire model, see the [UHP overview](/docs/uhp/). For callable fields,
+use the [method reference](/docs/uhp/methods/) and
+[terminal methods](/docs/uhp/terminal/).

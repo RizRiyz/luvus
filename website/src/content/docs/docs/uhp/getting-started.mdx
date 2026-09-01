@@ -1,5 +1,5 @@
 ---
-title: Automating with UHP
+title: Getting started with UHP
 description: Connect a script or coding harness to Luvus through Universal Harness Protocol 1.0.
 ---
 
@@ -11,6 +11,20 @@ configuration, and events.
 Normal commands such as `luvus pane list` are friendly wrappers over the same
 UHP methods. Unix sockets on macOS and Linux and named pipes on Windows are
 local transports, not separate APIs.
+
+## Before you connect
+
+Confirm that you are targeting the intended server and named session:
+
+```sh
+luvus server status
+luvus --session review uhp capabilities
+```
+
+Inside a Luvus pane, preserve its inherited endpoint and session environment.
+Outside Luvus, pass `--session <name>` explicitly when the default session is
+not your target. Begin with capability discovery and read-only calls. Add
+mutation or terminal-control authority only when the workflow requires it.
 
 ## Discover and inspect
 
@@ -141,7 +155,12 @@ Supply the returned secret in `auth`. Use `uhp.token.list` and
 For a provider or client that must work beyond the owner-only local endpoint,
 use `luvus uhp access`. It creates a scoped loopback gateway, emits a versioned
 machine-readable descriptor, and keeps transport outside Luvus core. See
-[Connecting UHP transports and clients](/docs/guides/uhp-access/).
+[Connecting UHP transports and clients](/docs/uhp/remote-access/).
 
-Continue with the [UHP reference](/docs/reference/uhp/) and
-[UHP method reference](/docs/reference/api/).
+## Continue building
+
+- Copy complete request flows from [Practical examples](/docs/uhp/examples/).
+- Find parameters and results in the [Method reference](/docs/uhp/methods/).
+- Build PTY capture and control with [Terminal methods](/docs/uhp/terminal/).
+- Carry UHP through a secure provider with [Remote access](/docs/uhp/remote-access/).
+- Validate a client with [Schemas and conformance](/docs/uhp/conformance/).

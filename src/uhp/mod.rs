@@ -2,7 +2,7 @@ mod gateway;
 mod pairing;
 
 use std::io::Write;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
@@ -10,9 +10,11 @@ use serde_json::{json, Value};
 use gateway::Gateway;
 use pairing::Pairing;
 
-const ACCESS_TTL: Duration = Duration::from_secs(30 * 60);
-const CONTROL_TTL: Duration = Duration::from_secs(15 * 60);
+const DEFAULT_ACCESS_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const PAIRING_TTL: Duration = Duration::from_secs(5 * 60);
+const TOKEN_REFRESH_WINDOW: u64 = 5 * 60;
+const MAX_ACCESS_TTL_SECS: u64 = 24 * 60 * 60;
+const ACCESS_USAGE: &str = "usage: luvus uhp access [--control] [--ttl <seconds> | --no-expiry]";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum AccessMode {
@@ -21,13 +23,6 @@ pub(super) enum AccessMode {
 }
 
 impl AccessMode {
-    pub(super) fn ttl(self) -> Duration {
-        match self {
-            Self::ReadOnly => ACCESS_TTL,
-            Self::Control => CONTROL_TTL,
-        }
-    }
-
     pub(super) fn scopes(self) -> &'static [&'static str] {
         match self {
             Self::ReadOnly => &["read"],
@@ -36,27 +31,59 @@ impl AccessMode {
     }
 }
 
-pub(super) struct AccessSession {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AccessOptions {
+    mode: AccessMode,
+    lifetime: AccessLifetime,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AccessLifetime {
+    Finite(Duration),
+    Process,
+}
+
+struct AccessSession {
     mode: AccessMode,
     gateway: Gateway,
     delegated: DelegatedToken,
+    retired: Vec<DelegatedToken>,
     pairing_code: String,
     pairing_expires_at: u64,
+    authority_expires_at: Option<u64>,
 }
 
 impl AccessSession {
-    pub(super) fn start(mode: AccessMode, context: crate::i18n::cli::Context) -> Result<Self> {
+    fn start(
+        mode: AccessMode,
+        lifetime: AccessLifetime,
+        context: crate::i18n::cli::Context,
+    ) -> Result<Self> {
         probe_server(context)?;
-        let delegated = DelegatedToken::create(mode)
+        let token_ttl = match lifetime {
+            AccessLifetime::Finite(ttl) => ttl,
+            AccessLifetime::Process => DEFAULT_ACCESS_TTL,
+        };
+        let delegated = DelegatedToken::create(mode, token_ttl)
             .map_err(|_| anyhow!(context.text("Could not authorize UHP access.")))?;
-        let pairing = Pairing::new(PAIRING_TTL)
+        let authority_expires_at = match lifetime {
+            AccessLifetime::Finite(_) => Some(delegated.expires_at),
+            AccessLifetime::Process => None,
+        };
+        let pairing_ttl = PAIRING_TTL.min(token_ttl);
+        let pairing = Pairing::new(pairing_ttl)
             .map_err(|_| anyhow!(context.text("Could not create a secure pairing code.")))?;
         let pairing_code = pairing.display_code().to_string();
-        let pairing_expires_at = unix_now()?.saturating_add(PAIRING_TTL.as_secs());
+        let pairing_expires_at = unix_now()?.saturating_add(pairing_ttl.as_secs());
+        let client_token = format!(
+            "luv_access_{}",
+            crate::terminal::backend::random_id().map_err(anyhow::Error::msg)?
+        );
         let gateway = Gateway::start(
             crate::persist::cli_socket_path(),
+            client_token,
+            authority_expires_at,
             delegated.secret.clone(),
-            delegated.expires_at,
             pairing,
             mode,
         )
@@ -65,12 +92,14 @@ impl AccessSession {
             mode,
             gateway,
             delegated,
+            retired: Vec::new(),
             pairing_code,
             pairing_expires_at,
+            authority_expires_at,
         })
     }
 
-    pub(super) fn port(&self) -> u16 {
+    fn port(&self) -> u16 {
         self.gateway.address().port()
     }
 
@@ -80,13 +109,30 @@ impl AccessSession {
             self.port(),
             &self.pairing_code,
             self.pairing_expires_at,
-            self.delegated.expires_at,
+            self.authority_expires_at,
         )
     }
 
-    pub(super) fn stop(&mut self) {
+    fn refresh_process_authority(&mut self, context: crate::i18n::cli::Context) -> Result<()> {
+        let now = unix_now()?;
+        self.retired.retain(|token| token.expires_at > now);
+        if self.delegated.expires_at.saturating_sub(now) > TOKEN_REFRESH_WINDOW {
+            return Ok(());
+        }
+        let next = DelegatedToken::create(self.mode, DEFAULT_ACCESS_TTL)
+            .map_err(|_| anyhow!(context.text("Could not authorize UHP access.")))?;
+        self.gateway.replace_upstream_token(next.secret.clone());
+        self.retired
+            .push(std::mem::replace(&mut self.delegated, next));
+        Ok(())
+    }
+
+    fn stop(&mut self) {
         self.gateway.cancel();
         self.delegated.revoke();
+        for token in &mut self.retired {
+            token.revoke();
+        }
         self.gateway.finish_stop();
     }
 }
@@ -102,30 +148,63 @@ impl Drop for AccessSession {
 /// provider can launch this command, forward the loopback endpoint, and pass
 /// the descriptor to any compatible client without knowing Luvus internals.
 pub(crate) fn run_cli(args: &[String], context: crate::i18n::cli::Context) -> Result<i32> {
-    let mode = parse_mode(args, "usage: luvus uhp access [--control]", context)?;
-    let mut access = AccessSession::start(mode, context)?;
+    let options = parse_options(args, context)?;
+    let mut access = AccessSession::start(options.mode, options.lifetime, context)?;
     shutdown::install();
     println!("{}", serde_json::to_string(&access.descriptor())?);
     std::io::stdout().flush()?;
 
-    let deadline = std::time::Instant::now() + mode.ttl();
-    while !shutdown::requested() && std::time::Instant::now() < deadline {
+    let deadline = match options.lifetime {
+        AccessLifetime::Finite(ttl) => Some(Instant::now() + ttl),
+        AccessLifetime::Process => None,
+    };
+    while !shutdown::requested() && deadline.is_none_or(|deadline| Instant::now() < deadline) {
+        if options.lifetime == AccessLifetime::Process {
+            access.refresh_process_authority(context)?;
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
     access.stop();
     Ok(0)
 }
 
-pub(super) fn parse_mode(
-    args: &[String],
-    usage: &'static str,
-    context: crate::i18n::cli::Context,
-) -> Result<AccessMode> {
-    match args {
-        [] => Ok(AccessMode::ReadOnly),
-        [flag] if flag == "--control" => Ok(AccessMode::Control),
-        _ => Err(anyhow!(crate::i18n::cli::help(usage, context.language()))),
+fn parse_options(args: &[String], context: crate::i18n::cli::Context) -> Result<AccessOptions> {
+    let mut mode = AccessMode::ReadOnly;
+    let mut lifetime = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--control" if mode == AccessMode::ReadOnly => {
+                mode = AccessMode::Control;
+                index += 1;
+            }
+            "--ttl" if lifetime.is_none() => {
+                let seconds = args
+                    .get(index + 1)
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .filter(|seconds| (1..=MAX_ACCESS_TTL_SECS).contains(seconds))
+                    .ok_or_else(|| {
+                        anyhow!(crate::i18n::cli::help(ACCESS_USAGE, context.language()))
+                    })?;
+                lifetime = Some(AccessLifetime::Finite(Duration::from_secs(seconds)));
+                index += 2;
+            }
+            "--no-expiry" if lifetime.is_none() => {
+                lifetime = Some(AccessLifetime::Process);
+                index += 1;
+            }
+            _ => {
+                return Err(anyhow!(crate::i18n::cli::help(
+                    ACCESS_USAGE,
+                    context.language()
+                )))
+            }
+        }
     }
+    Ok(AccessOptions {
+        mode,
+        lifetime: lifetime.unwrap_or(AccessLifetime::Finite(DEFAULT_ACCESS_TTL)),
+    })
 }
 
 fn unix_now() -> Result<u64> {
@@ -140,9 +219,9 @@ fn access_descriptor(
     port: u16,
     pairing_code: &str,
     pairing_expires_at: u64,
-    authority_expires_at: u64,
+    authority_expires_at: Option<u64>,
 ) -> Value {
-    json!({
+    let mut descriptor = json!({
         "$schema":"https://luvus.dev/protocol/uhp/v1/schema/access/descriptor.schema.json",
         "type":"luvus_uhp_access",
         "protocol":{
@@ -168,9 +247,14 @@ fn access_descriptor(
                 AccessMode::Control => "control",
             },
             "scopes":mode.scopes(),
-            "expires_at":authority_expires_at,
         },
-    })
+    });
+    if let Some(expires_at) = authority_expires_at {
+        descriptor["authority"]["expires_at"] = json!(expires_at);
+    } else {
+        descriptor["authority"]["expires_on_close"] = json!(true);
+    }
+    descriptor
 }
 
 struct DelegatedToken {
@@ -181,10 +265,10 @@ struct DelegatedToken {
 }
 
 impl DelegatedToken {
-    fn create(mode: AccessMode) -> Result<Self> {
+    fn create(mode: AccessMode, ttl: Duration) -> Result<Self> {
         let response = local_request(
             "uhp.token.create",
-            json!({"scopes":mode.scopes(),"ttl_s":mode.ttl().as_secs()}),
+            json!({"scopes":mode.scopes(),"ttl_s":ttl.as_secs()}),
         )?;
         let result = response
             .get("result")
@@ -331,9 +415,62 @@ mod tests {
 
     #[test]
     fn expiries_are_bounded() {
-        assert!(ACCESS_TTL <= Duration::from_secs(86_400));
-        assert!(CONTROL_TTL < ACCESS_TTL);
+        assert_eq!(DEFAULT_ACCESS_TTL, Duration::from_secs(86_400));
         assert_eq!(PAIRING_TTL, Duration::from_secs(300));
+        assert_eq!(MAX_ACCESS_TTL_SECS, 86_400);
+    }
+
+    #[test]
+    fn access_options_keep_safe_defaults_and_accept_a_bounded_ttl() {
+        let context = crate::i18n::cli::Context::for_language(crate::i18n::cli::Language::En);
+        assert_eq!(
+            parse_options(&[], context).unwrap(),
+            AccessOptions {
+                mode: AccessMode::ReadOnly,
+                lifetime: AccessLifetime::Finite(DEFAULT_ACCESS_TTL),
+            }
+        );
+        assert_eq!(
+            parse_options(&["--control".into()], context).unwrap(),
+            AccessOptions {
+                mode: AccessMode::Control,
+                lifetime: AccessLifetime::Finite(DEFAULT_ACCESS_TTL),
+            }
+        );
+        assert_eq!(
+            parse_options(
+                &["--ttl".into(), "7200".into(), "--control".into()],
+                context
+            )
+            .unwrap(),
+            AccessOptions {
+                mode: AccessMode::Control,
+                lifetime: AccessLifetime::Finite(Duration::from_secs(7200)),
+            }
+        );
+        assert_eq!(
+            parse_options(&["--no-expiry".into()], context).unwrap(),
+            AccessOptions {
+                mode: AccessMode::ReadOnly,
+                lifetime: AccessLifetime::Process,
+            }
+        );
+    }
+
+    #[test]
+    fn access_options_reject_invalid_or_ambiguous_ttls() {
+        let context = crate::i18n::cli::Context::for_language(crate::i18n::cli::Language::En);
+        for args in [
+            vec!["--ttl".into()],
+            vec!["--ttl".into(), "0".into()],
+            vec!["--ttl".into(), "86401".into()],
+            vec!["--ttl".into(), "60".into(), "--ttl".into(), "90".into()],
+            vec!["--ttl".into(), "60".into(), "--no-expiry".into()],
+            vec!["--no-expiry".into(), "--ttl".into(), "60".into()],
+            vec!["--control".into(), "--control".into()],
+        ] {
+            assert!(parse_options(&args, context).is_err(), "{args:?}");
+        }
     }
 
     #[test]
@@ -352,7 +489,7 @@ mod tests {
             43123,
             "ABCD-EFGH-JKLM",
             1_700_000_300,
-            1_700_000_900,
+            Some(1_700_000_900),
         );
         assert_eq!(descriptor["type"], "luvus_uhp_access");
         assert_eq!(descriptor["protocol"]["major"], 1);
@@ -363,5 +500,15 @@ mod tests {
         assert_eq!(descriptor["authority"]["scopes"][3], "terminal");
         assert!(descriptor.get("token").is_none());
         assert!(descriptor["authority"].get("token").is_none());
+
+        let process_bound = access_descriptor(
+            AccessMode::ReadOnly,
+            43123,
+            "ABCD-EFGH-JKLM",
+            1_700_000_300,
+            None,
+        );
+        assert_eq!(process_bound["authority"]["expires_on_close"], true);
+        assert!(process_bound["authority"].get("expires_at").is_none());
     }
 }

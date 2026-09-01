@@ -297,7 +297,7 @@ universal harness protocol:
   uhp schema                print the complete installed UHP JSON Schema bundle
   uhp snapshot              print a fenced session snapshot for harness bootstrap
   uhp events                stream sequenced UHP events
-  uhp access [--control]    expose scoped UHP through a private provider endpoint
+  uhp access [--control] [--ttl <seconds> | --no-expiry]   expose scoped UHP through a private provider endpoint
   uhp proxy                 forward one JSON request from stdin to the selected server
 
 sessions:
@@ -3976,7 +3976,7 @@ mod tests {
     #[test]
     fn uhp_help_includes_transport_neutral_access() {
         let help = rendered_topic_help("uhp", None);
-        assert!(help.contains("uhp access [--control]"));
+        assert!(help.contains("uhp access [--control] [--ttl <seconds> | --no-expiry]"));
         assert!(help.contains("private provider endpoint"));
     }
 
@@ -4727,7 +4727,7 @@ mod tests {
         assert!(readme.contains("User preferences live in `config.json`, not TOML"));
         assert!(readme.contains("https://luvus.dev/llms.txt as the task router"));
         assert!(llms.starts_with("# Luvus knowledge map for language models\n"));
-        assert!(llms.contains("https://luvus.dev/docs/reference/api/"));
+        assert!(llms.contains("https://luvus.dev/docs/uhp/methods/"));
     }
 
     #[test]

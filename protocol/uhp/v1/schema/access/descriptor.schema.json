@@ -53,9 +53,14 @@
           "minItems": 1,
           "uniqueItems": true
         },
-        "expires_at": { "type": "integer", "minimum": 0 }
+        "expires_at": { "type": "integer", "minimum": 0 },
+        "expires_on_close": { "const": true }
       },
-      "required": ["mode", "scopes", "expires_at"],
+      "required": ["mode", "scopes"],
+      "oneOf": [
+        { "required": ["expires_at"], "not": { "required": ["expires_on_close"] } },
+        { "required": ["expires_on_close"], "not": { "required": ["expires_at"] } }
+      ],
       "additionalProperties": false
     }
   },

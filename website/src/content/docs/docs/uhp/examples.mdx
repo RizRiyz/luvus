@@ -1,0 +1,276 @@
+---
+title: Practical UHP examples
+description: Copyable examples for discovery, topology, agents, terminal control, events, delegated authority, and remote clients.
+---
+
+These examples use UHP 1.0 through the selected Luvus session. Start with
+read-only discovery, use stable IDs returned by the server, and reconcile state
+before retrying any mutation whose response was lost.
+
+## Choose a connection path
+
+| Need | Use |
+|---|---|
+| One local request from a script | `luvus uhp proxy` |
+| Human-readable discovery or a quick smoke test | `luvus uhp capabilities`, `snapshot`, or `events` |
+| Persistent events or terminal streams | The discovered Unix socket or Windows named pipe |
+| Host and named-session lifecycle without a running server | The host profile through `luvus uhp proxy` |
+| A client behind SSH, a private overlay, or another tunnel | A provider forwarding `luvus uhp access` |
+
+Inside a Luvus pane, keep the inherited `LUVUS_SOCKET_PATH` and session
+environment. Outside Luvus, select a named session explicitly:
+
+```sh
+luvus --session review uhp capabilities
+```
+
+Do not hardcode `~/.luvus/luvus.sock`. Named sessions, Windows named pipes, and
+long Unix paths use different discovered endpoints.
+
+## Send a one-shot request
+
+`uhp proxy` reads one LF-terminated request from standard input, forwards it to
+the selected profile, prints one response, and exits:
+
+```sh
+printf '%s\n' \
+  '{"id":"snapshot-1","method":"session.snapshot","params":{}}' \
+  | luvus uhp proxy
+```
+
+A successful response contains the same request `id` and a `result`. A failure
+contains a structured `error`:
+
+```json
+{"id":"snapshot-1","error":{"code":"no_session","message":"no workspace is open"}}
+```
+
+Never parse human CLI tables when a UHP result is available.
+
+## Use UHP from Python
+
+This dependency-free helper works on macOS, Linux, and Windows because Luvus
+owns local endpoint discovery:
+
+```python
+import json
+import subprocess
+
+
+def uhp(method, params=None, session=None):
+    request = {
+        "id": "example-1",
+        "method": method,
+        "params": params or {},
+    }
+    command = ["luvus"]
+    if session:
+        command += ["--session", session]
+    command += ["uhp", "proxy"]
+    completed = subprocess.run(
+        command,
+        input=json.dumps(request) + "\n",
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    response = json.loads(completed.stdout)
+    if "error" in response:
+        error = response["error"]
+        raise RuntimeError(f'{error["code"]}: {error["message"]}')
+    return response["result"]
+
+
+capabilities = uhp("uhp.capabilities", session="review")
+print(capabilities["protocol"], len(capabilities["methods"]))
+```
+
+Use a unique request ID per in-flight request. For dynamic user data, always
+serialize JSON with a library instead of interpolating shell strings.
+
+## Inspect the complete session
+
+Begin a harness run with capabilities and a fenced snapshot:
+
+```json
+{"id":"caps-1","method":"uhp.capabilities","params":{}}
+{"id":"state-1","method":"session.snapshot","params":{}}
+```
+
+The snapshot contains stable workspace and tab IDs, pane routes, terminal
+identities, agent state, `revision`, and `event_sequence`. Public workspace
+indices are zero-based and tab positions are one-based, but stable IDs are
+preferred after discovery.
+
+For a narrower read:
+
+```json
+{"id":"agents-1","method":"agent.list","params":{}}
+{"id":"mission-1","method":"mission.snapshot","params":{"scope":"all"}}
+{"id":"files-1","method":"files.tree","params":{}}
+```
+
+Mission Control reads do not open or focus its tab. `mission.refresh` schedules
+one bounded refresh; call `mission.snapshot` again after completion rather than
+polling continuously.
+
+## Start and prompt an agent atomically
+
+Use `agent.start` instead of composing pane creation, command launch, naming,
+and readiness checks yourself:
+
+```json
+{
+  "id": "start-1",
+  "method": "agent.start",
+  "params": {
+    "name": "reviewer",
+    "kind": "codex",
+    "direction": "right",
+    "args": [],
+    "timeout_s": 30
+  }
+}
+```
+
+Then submit one prompt and optionally wait for post-submission evidence:
+
+```json
+{
+  "id": "prompt-1",
+  "method": "agent.prompt",
+  "params": {
+    "target": "reviewer",
+    "text": "Review the current diff and report only actionable findings.",
+    "wait": true,
+    "until": ["idle", "done", "blocked"],
+    "timeout_s": 600
+  }
+}
+```
+
+A timeout can still return `submitted:true`. Do not resend automatically: the
+agent may already be working. Inspect the returned evidence or call `agent.get`
+before deciding what to do next.
+
+## Capture a terminal safely
+
+Terminal mutations never target a title or tab position. Discover the exact PTY
+identity first:
+
+```json
+{"id":"inventory-1","method":"terminal.backend.inventory","params":{}}
+```
+
+Copy `server_generation`, `terminal_id`, and `pane_id` from the result into a
+bounded capture request:
+
+```json
+{
+  "id": "capture-1",
+  "method": "terminal.backend.capture",
+  "params": {
+    "server_generation": "<generation>",
+    "terminal_id": "<terminal-id>",
+    "pane_id": "7",
+    "mode": "recent_unwrapped",
+    "lines": 100,
+    "ansi": false
+  }
+}
+```
+
+Use `terminal.backend.submit_text` for one atomic paste-and-Enter action.
+`type_literal` never adds Enter, while `send_key` sends one documented logical
+key. A stale generation, replaced terminal, or moved route is rejected before
+input is queued.
+
+For an interactive client, open `terminal.backend.control` on the discovered
+native endpoint and keep the connection open after its acknowledgment:
+
+```json
+{"id":"control-1","method":"terminal.backend.control","params":{"server_generation":"<generation>","terminal_id":"<terminal-id>","pane_id":"7","mode":"visible","lines":80,"ansi":true}}
+{"id":"input-1","action":"type_literal","params":{"text":"cargo test"}}
+{"id":"input-2","action":"send_key","params":{"key":"enter"}}
+```
+
+Only one API control stream can lease a terminal at a time. Read-only observe
+streams remain available.
+
+## Subscribe without a snapshot race
+
+Use two connections:
+
+1. Open `events.subscribe` and retain frames after its acknowledgment.
+2. Request `session.snapshot` on another connection.
+3. Discard buffered events whose sequence is at or below the snapshot's
+   `event_sequence`.
+4. Apply later events in order.
+5. Resnapshot after `resync_required`, a sequence gap, EOF, reconnect, or a new
+   `server_generation`.
+
+```json
+{"id":"events-1","method":"events.subscribe","params":{"after_sequence":41}}
+```
+
+Use `events.wait`, `agent.wait`, `terminal.backend.wait_change`, or
+`terminal.backend.wait_output` for one bounded condition. Do not replace these
+with high-frequency polling.
+
+## Use optimistic concurrency
+
+State-changing methods may include `if_revision` from the latest snapshot or
+read result. If another mutation wins first, Luvus returns
+`revision_conflict` without executing yours. Refresh state, recompute the
+operation, and submit a new request ID.
+
+If the connection drops after a mutation was written, classify the outcome as
+unknown. Reconcile with a read before retrying prompts, input, launches,
+deletes, or layout changes.
+
+## Pair a remote client
+
+Run read-only access unless control is required:
+
+```sh
+luvus uhp access
+# or, explicitly:
+luvus uhp access --control
+# override either default with a bounded lifetime in seconds:
+luvus uhp access --control --ttl 3600
+# or keep access alive until this foreground command closes:
+luvus uhp access --control --no-expiry
+```
+
+The command prints one descriptor for a transport provider. After the provider
+forwards the advertised loopback stream, the client sends the pairing frame:
+
+```json
+{"type":"pair","code":"ABCD-EFGH-JKLM"}
+```
+
+The code is one-use and lasts at most five minutes. `--ttl` accepts 1 through
+86400 seconds and controls the paired authority lifetime; the pairing window is
+shortened when that lifetime is under five minutes. The token must
+be supplied as `auth` on later requests. Never publish the loopback listener,
+pairing code, or token, and never put them in logs.
+
+With `--no-expiry`, the pairing response uses `expires_on_close:true`. The
+client token remains valid only while that access command is running; Ctrl-C
+closes the gateway and revokes its bounded upstream authority.
+
+## Retry rules
+
+| Situation | Correct response |
+|---|---|
+| Validation error | Correct the request; it was not executed |
+| `revision_conflict` | Refresh state, recompute, and use a new request ID |
+| `resync_required` or event gap | Take a fresh snapshot and resubscribe |
+| Stale terminal identity | Refresh inventory; never retarget implicitly |
+| Agent prompt timeout with `submitted:true` | Inspect state; do not resend blindly |
+| Lost mutation response | Reconcile first; execution may have happened |
+| Unknown method | Refresh capabilities and use a supported fallback |
+
+Continue with the [method reference](/docs/uhp/methods/),
+[terminal methods](/docs/uhp/terminal/), and
+[schemas and conformance](/docs/uhp/conformance/).

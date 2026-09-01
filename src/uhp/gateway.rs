@@ -29,8 +29,9 @@ pub(super) struct Gateway {
 
 struct Shared {
     socket_path: PathBuf,
-    token: String,
-    token_expires_unix: u64,
+    client_token: String,
+    authority_expires_unix: Option<u64>,
+    upstream_token: Mutex<String>,
     pairing: Mutex<Pairing>,
     mode: AccessMode,
     cancelled: Arc<AtomicBool>,
@@ -78,8 +79,9 @@ impl RateWindow {
 impl Gateway {
     pub(super) fn start(
         socket_path: PathBuf,
-        token: String,
-        token_expires_unix: u64,
+        client_token: String,
+        authority_expires_unix: Option<u64>,
+        upstream_token: String,
         pairing: Pairing,
         mode: AccessMode,
     ) -> Result<Self> {
@@ -89,8 +91,9 @@ impl Gateway {
         let cancelled = Arc::new(AtomicBool::new(false));
         let shared = Arc::new(Shared {
             socket_path,
-            token,
-            token_expires_unix,
+            client_token,
+            authority_expires_unix,
+            upstream_token: Mutex::new(upstream_token),
             pairing: Mutex::new(pairing),
             mode,
             cancelled: cancelled.clone(),
@@ -117,6 +120,14 @@ impl Gateway {
 
     pub(super) fn address(&self) -> SocketAddr {
         self.address
+    }
+
+    pub(super) fn replace_upstream_token(&self, token: String) {
+        *self
+            .shared
+            .upstream_token
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = token;
     }
 
     pub(super) fn cancel(&self) {
@@ -272,7 +283,11 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) -> Result<()> {
         write_gateway_error(stream, id, "rate_limited")?;
         return Ok(());
     }
-    let Some(method) = value.get("method").and_then(Value::as_str) else {
+    let Some(method) = value
+        .get("method")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
         write_gateway_error(stream, id, "invalid_request")?;
         return Ok(());
     };
@@ -280,8 +295,9 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) -> Result<()> {
         write_gateway_error(stream, id, "forbidden")?;
         return Ok(());
     };
-    if !constant_time_eq(shared.token.as_bytes(), auth.as_bytes())
-        || !allowed_method(shared.mode, method)
+    if authority_expired(shared)
+        || !constant_time_eq(shared.client_token.as_bytes(), auth.as_bytes())
+        || !allowed_method(shared.mode, &method)
     {
         write_gateway_error(stream, id, "forbidden")?;
         return Ok(());
@@ -300,11 +316,21 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) -> Result<()> {
     if shared.cancelled.load(Ordering::Acquire) {
         return Err(io::Error::new(io::ErrorKind::Interrupted, "UHP access stopped").into());
     }
-    writeln!(local, "{frame}")?;
+    let mut forwarded = value;
+    let upstream_token = shared
+        .upstream_token
+        .lock()
+        .map_err(|_| anyhow!("gateway authorization unavailable"))?
+        .clone();
+    forwarded
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("invalid UHP-access request"))?
+        .insert("auth".into(), Value::String(upstream_token));
+    writeln!(local, "{}", serde_json::to_string(&forwarded)?)?;
     local.flush()?;
 
     if matches!(
-        method,
+        method.as_str(),
         "terminal.backend.observe" | "terminal.backend.control"
     ) {
         stream_terminal(
@@ -316,7 +342,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) -> Result<()> {
             method == "terminal.backend.control",
         )
     } else if matches!(
-        method,
+        method.as_str(),
         "events.subscribe" | "terminal.backend.events.subscribe"
     ) {
         stream_events(local, stream, &id, shared)
@@ -348,6 +374,7 @@ fn handle_pairing(mut stream: TcpStream, shared: &Shared, value: &Value) -> Resu
     });
     let candidate = value.get("code").and_then(Value::as_str).unwrap_or("");
     let accepted = !shared.cancelled.load(Ordering::Acquire)
+        && !authority_expired(shared)
         && valid_shape
         && shared
             .pairing
@@ -358,12 +385,16 @@ fn handle_pairing(mut stream: TcpStream, shared: &Shared, value: &Value) -> Resu
         write_gateway_error(stream, Value::Null, "forbidden")?;
         return Ok(());
     }
-    let response = json!({
+    let mut response = json!({
         "type":"paired",
-        "token":shared.token,
+        "token":shared.client_token,
         "scopes":shared.mode.scopes(),
-        "expires_at":shared.token_expires_unix,
     });
+    if let Some(expires_at) = shared.authority_expires_unix {
+        response["expires_at"] = json!(expires_at);
+    } else {
+        response["expires_on_close"] = json!(true);
+    }
     writeln!(stream, "{response}")?;
     stream.flush()?;
     Ok(())
@@ -394,7 +425,7 @@ impl TerminalForwarder {
         mut local_reader: LocalFrameReader,
         mut remote: TcpStream,
         cancelled: Arc<AtomicBool>,
-        expires_at: u64,
+        expires_at: Option<u64>,
     ) -> Result<Self> {
         let active = Arc::new(AtomicBool::new(true));
         let forward_active = Arc::clone(&active);
@@ -404,7 +435,7 @@ impl TerminalForwarder {
             .spawn(move || {
                 while forward_active.load(Ordering::Acquire)
                     && !cancelled.load(Ordering::Acquire)
-                    && !unix_expired(expires_at)
+                    && !expires_at.is_some_and(unix_expired)
                 {
                     match local_reader.read_frame(CANCELLATION_POLL) {
                         Ok(Some(frame)) => {
@@ -471,13 +502,13 @@ fn stream_terminal(
         local_reader,
         remote,
         Arc::clone(&shared.cancelled),
-        shared.token_expires_unix,
+        shared.authority_expires_unix,
     )?;
 
     let mut input = RemoteFrameReader::new(remote_reader)?;
     while forwarder.is_active()
         && !shared.cancelled.load(Ordering::Acquire)
-        && !unix_expired(shared.token_expires_unix)
+        && !authority_expired(shared)
     {
         match input.read_frame(Duration::from_millis(250)) {
             Ok(Some(frame)) if control && valid_terminal_control_frame(&frame) => {
@@ -506,6 +537,10 @@ fn unix_expired(expires_at: u64) -> bool {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(true, |now| now.as_secs() >= expires_at)
+}
+
+fn authority_expired(shared: &Shared) -> bool {
+    shared.authority_expires_unix.is_some_and(unix_expired)
 }
 
 fn valid_terminal_control_frame(frame: &str) -> bool {
@@ -604,7 +639,7 @@ fn stream_events(
     writeln!(remote, "{first}")?;
     remote.flush()?;
     remote.set_read_timeout(Some(Duration::from_millis(1)))?;
-    while !shared.cancelled.load(Ordering::Acquire) && !unix_expired(shared.token_expires_unix) {
+    while !shared.cancelled.load(Ordering::Acquire) && !authority_expired(shared) {
         if remote_closed(&remote) {
             break;
         }
@@ -799,7 +834,7 @@ fn read_local_frame(
 ) -> io::Result<Option<String>> {
     let deadline = Instant::now() + timeout;
     loop {
-        if shared.cancelled.load(Ordering::Acquire) || unix_expired(shared.token_expires_unix) {
+        if shared.cancelled.load(Ordering::Acquire) || authority_expired(shared) {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "UHP access stopped",
@@ -952,7 +987,8 @@ mod tests {
         let mut gateway = Gateway::start(
             PathBuf::from("target/test-state/uhp/no-server.sock"),
             "luv_tok_stop_test".to_string(),
-            4_000_000_000,
+            Some(4_000_000_000),
+            "luv_upstream_stop_test".to_string(),
             pairing,
             AccessMode::ReadOnly,
         )
@@ -980,7 +1016,8 @@ mod tests {
         let mut gateway = Gateway::start(
             PathBuf::from("target/test-state/uhp/no-server.sock"),
             token.clone(),
-            4_000_000_000,
+            Some(4_000_000_000),
+            token.clone(),
             pairing,
             AccessMode::ReadOnly,
         )
@@ -1017,7 +1054,8 @@ mod tests {
         let mut gateway = Gateway::start(
             PathBuf::from("target/test-state/uhp/no-control-server.sock"),
             token.clone(),
-            4_000_000_000,
+            Some(4_000_000_000),
+            token.clone(),
             pairing,
             AccessMode::Control,
         )
@@ -1059,11 +1097,14 @@ mod tests {
         let _env = crate::persist::test_env("uhp-terminal-stream");
         let socket_path = crate::persist::ensure_config_dir().join("uhp-terminal.sock");
         let listener = crate::ipc::transport::bind(&socket_path).unwrap();
+        let upstream_token = "luv_tok_upstream_test".to_string();
+        let expected_upstream = upstream_token.clone();
         let local_server = thread::spawn(move || {
             let mut connection = BufReader::new(listener.accept().unwrap());
             let request = crate::ipc::api::read_response_frame(&mut connection).unwrap();
             let request: Value = serde_json::from_str(&request).unwrap();
             assert_eq!(request["method"], "terminal.backend.control");
+            assert_eq!(request["auth"], expected_upstream);
             writeln!(
                 connection.get_mut(),
                 "{}",
@@ -1103,13 +1144,16 @@ mod tests {
         let mut gateway = Gateway::start(
             socket_path,
             token.clone(),
-            u64::MAX,
+            None,
+            upstream_token,
             pairing,
             AccessMode::Control,
         )
         .unwrap();
         let paired = exchange(gateway.address(), &json!({"type":"pair","code":code}));
         assert_eq!(paired["type"], "paired");
+        assert_eq!(paired["expires_on_close"], true);
+        assert!(paired.get("expires_at").is_none());
 
         let mut stream = TcpStream::connect(gateway.address()).unwrap();
         stream

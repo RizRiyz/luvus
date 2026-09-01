@@ -7,6 +7,13 @@ import starlight from '@astrojs/starlight';
 
 export default defineConfig({
   site: 'https://luvus.dev',
+  redirects: {
+    '/docs/guides/uhp': '/docs/uhp/getting-started/',
+    '/docs/guides/uhp-access': '/docs/uhp/remote-access/',
+    '/docs/reference/uhp': '/docs/uhp/',
+    '/docs/reference/api': '/docs/uhp/methods/',
+    '/docs/reference/terminal-backend': '/docs/uhp/terminal/',
+  },
   integrations: [
     starlight({
       title: 'Luvus',
@@ -89,8 +96,18 @@ export default defineConfig({
             { label: 'Settings & Theming', slug: 'docs/guides/settings' },
             { label: 'Community Themes', slug: 'docs/guides/themes' },
             { label: 'Scripting luvus', slug: 'docs/guides/scripting' },
-            { label: 'Automating with UHP', slug: 'docs/guides/uhp' },
-            { label: 'Remote UHP Access', slug: 'docs/guides/uhp-access' },
+          ],
+        },
+        {
+          label: 'UHP',
+          items: [
+            { label: 'Overview', slug: 'docs/uhp' },
+            { label: 'Getting Started', slug: 'docs/uhp/getting-started' },
+            { label: 'Practical Examples', slug: 'docs/uhp/examples' },
+            { label: 'Remote Access', slug: 'docs/uhp/remote-access' },
+            { label: 'Method Reference', slug: 'docs/uhp/methods' },
+            { label: 'Terminal Methods', slug: 'docs/uhp/terminal' },
+            { label: 'Schemas & Conformance', slug: 'docs/uhp/conformance' },
           ],
         },
         {
@@ -107,8 +124,6 @@ export default defineConfig({
           label: 'Reference',
           items: [
             { label: 'CLI Commands', slug: 'docs/reference/cli' },
-            { label: 'UHP Methods', slug: 'docs/reference/api' },
-            { label: 'Universal Harness Protocol', slug: 'docs/reference/uhp' },
             { label: 'Keybindings', slug: 'docs/reference/keybindings' },
             { label: 'Configuration', slug: 'docs/reference/configuration' },
             { label: 'Supported Agents', slug: 'docs/reference/agents' },

@@ -330,7 +330,11 @@ machine-readable descriptor for a scoped loopback gateway and remains in the
 foreground. It does not start or bundle a transport provider. Forward the
 endpoint only through an authenticated encrypted byte stream, pair once, then
 discover live capabilities. `--control` requires the user's explicit
-authorization and remains limited by the gateway allowlist.
+authorization and remains limited by the gateway allowlist. `--ttl <seconds>`
+may set either access lifetime from 1 through 86400 seconds; otherwise
+read-only and control access both default to 24 hours. `--no-expiry` binds the
+client token to the foreground access process and keeps it valid until that
+process closes.
 
 ## Remote use
 
@@ -389,8 +393,8 @@ newer release.
 - Documentation index: https://luvus.dev/llms.txt
 - Documentation: https://luvus.dev/docs/
 - CLI reference: https://luvus.dev/docs/reference/cli/
-- UHP guide: https://luvus.dev/docs/guides/uhp/
-- UHP methods: https://luvus.dev/docs/reference/api/
+- UHP guide: https://luvus.dev/docs/uhp/getting-started/
+- UHP methods: https://luvus.dev/docs/uhp/methods/
 - Security: https://luvus.dev/docs/explanation/security/
 - Troubleshooting: https://luvus.dev/docs/faq/
 - Source and issues: https://github.com/RizRiyz/luvus

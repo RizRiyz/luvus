@@ -31,7 +31,7 @@
           - "vendor/alacritty_terminal/**"
           - "vendor/vte/**"
           - "website/src/content/docs/docs/guides/scrollback.mdx"
-          - "website/src/content/docs/docs/reference/terminal-backend.mdx"
+          - "website/src/content/docs/docs/uhp/terminal.mdx"
 
 "area: panes and tabs":
   - changed-files:
@@ -102,10 +102,8 @@
           - "plugins/luvus/**"
           - "website/src/content/docs/docs/guides/codex-plugin.mdx"
           - "website/src/content/docs/docs/guides/scripting.mdx"
-          - "website/src/content/docs/docs/guides/uhp.mdx"
-          - "website/src/content/docs/docs/reference/api.mdx"
+          - "website/src/content/docs/docs/uhp/**"
           - "website/src/content/docs/docs/reference/cli.mdx"
-          - "website/src/content/docs/docs/reference/uhp.mdx"
 
 "area: modules":
   - changed-files:
