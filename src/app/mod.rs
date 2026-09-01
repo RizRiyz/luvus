@@ -396,6 +396,27 @@ pub struct TabRename {
     pub buffer: String,
 }
 
+/// One row of the open-worktree modal (docs/18 WT): a checkout of the repo, as
+/// reported by `git worktree list` — so every worktree shows, no matter which
+/// tool created it or where it lives on disk.
+pub struct WorktreeOpenEntry {
+    pub path: PathBuf,
+    /// `None` for a detached checkout (the short head labels it instead).
+    pub branch: Option<String>,
+    pub head: String,
+    pub is_main: bool,
+    /// Already open as a workspace — snapshotted when the modal opens, for the
+    /// row badge. The confirm re-resolves by path against live workspaces.
+    pub open: bool,
+}
+
+/// The open-worktree list modal: `Some` ⇒ open. ⏎ opens (or focuses) the
+/// highlighted checkout, esc closes.
+pub struct WorktreeOpenList {
+    pub entries: Vec<WorktreeOpenEntry>,
+    pub cursor: usize,
+}
+
 /// Stable-enough identity for a tab context-menu target. A tab's complete leaf
 /// set is unique inside a live session, including dashboard placeholder leaves.
 /// Resolving this snapshot at click time prevents an intervening API reorder
@@ -1595,6 +1616,9 @@ pub struct App {
     /// New-worktree branch-name prompt (docs/18 WT): `Some(buf)` ⇒ the modal is
     /// open, holding the branch being typed.
     pub worktree_prompt: Option<String>,
+    /// The open-worktree list modal (docs/18 WT): every checkout of the repo
+    /// from `git worktree list`, openable or focusable. `None` when closed.
+    pub worktree_open: Option<WorktreeOpenList>,
     /// Active tab-rename modal (docs/28); `None` when closed.
     pub tab_rename: Option<TabRename>,
     /// Active tab context menu; `None` when closed.
@@ -2184,6 +2208,7 @@ impl App {
             cmd_inspect: None,
             pane_title_rects: Vec::new(),
             worktree_prompt: None,
+            worktree_open: None,
             tab_rename: None,
             tab_menu: None,
             ws_menu: None,
@@ -2798,6 +2823,7 @@ impl App {
             cmd_inspect: None,
             pane_title_rects: Vec::new(),
             worktree_prompt: None,
+            worktree_open: None,
             tab_rename: None,
             tab_menu: None,
             ws_menu: None,
@@ -4429,10 +4455,7 @@ impl App {
             }
             WsMenuItem::OpenWorktree => {
                 if let Some(cwd) = cwd.filter(|p| crate::git::local::is_repo(p)) {
-                    // Land in this repo's worktrees folder so its checkouts list.
-                    let wt = worktrees_dir_for(&cwd);
-                    let start = if wt.is_dir() { wt } else { cwd };
-                    self.open_folder_picker_at(start);
+                    self.open_worktree_list(&cwd);
                 }
             }
             // Both switch to the node first, then open (or focus) its dashboard.
@@ -5141,6 +5164,72 @@ impl App {
                     b.push(c);
                 }
                 self.worktree_error = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// The workspace menu's "Open Worktree": list every checkout of the repo at
+    /// `cwd` (`git worktree list`) in a picker modal — bare entries and prunable
+    /// leftovers (folder already gone) are skipped since they can't be opened.
+    pub fn open_worktree_list(&mut self, cwd: &std::path::Path) {
+        let wts = match crate::git::local::worktrees(cwd) {
+            Ok(wts) => wts,
+            Err(e) => {
+                self.show_toast(e);
+                return;
+            }
+        };
+        let entries: Vec<WorktreeOpenEntry> = wts
+            .into_iter()
+            .filter(|w| !w.bare && w.path.is_dir())
+            .map(|w| WorktreeOpenEntry {
+                open: self.workspace_idx_for_path(&w.path).is_some(),
+                path: w.path,
+                branch: w.branch,
+                head: w.head,
+                is_main: w.is_main,
+            })
+            .collect();
+        if entries.is_empty() {
+            self.show_toast(self.catalog.no_worktrees_found);
+            return;
+        }
+        self.worktree_open = Some(WorktreeOpenList { entries, cursor: 0 });
+    }
+
+    /// The workspace already showing `path`, if any. Both sides are
+    /// canonicalized so a symlinked cwd (macOS `/tmp`) still matches.
+    fn workspace_idx_for_path(&self, path: &std::path::Path) -> Option<usize> {
+        let canon =
+            |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let target = canon(path);
+        self.workspaces.iter().position(|w| canon(&w.cwd) == target)
+    }
+
+    /// Keys for the open-worktree list modal: ↑/↓ (or k/j) move, ⏎ opens the
+    /// highlighted checkout — focusing the existing workspace when it's already
+    /// open, a worktree is one place — esc closes.
+    pub fn handle_worktree_open_key(&mut self, key: KeyEvent) {
+        let Some(list) = self.worktree_open.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.worktree_open = None,
+            KeyCode::Up | KeyCode::Char('k') => list.cursor = list.cursor.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                list.cursor = (list.cursor + 1).min(list.entries.len().saturating_sub(1));
+            }
+            KeyCode::Enter => {
+                let path = list.entries.get(list.cursor).map(|e| e.path.clone());
+                self.worktree_open = None;
+                if let Some(path) = path {
+                    if let Some(idx) = self.workspace_idx_for_path(&path) {
+                        self.active_ws = idx;
+                    } else {
+                        self.create_workspace_at(path);
+                    }
+                }
             }
             _ => {}
         }
@@ -6640,6 +6729,137 @@ mod tests {
         // Esc tears the whole prompt down.
         app.handle_worktree_prompt_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.worktree_prompt.is_none() && app.worktree_repo.is_none());
+    }
+
+    /// Build a repo with one commit and a **sibling-path** worktree — the layout
+    /// the old "Open Worktree" folder picker (which only browsed
+    /// `~/.luvus/worktrees/`) never showed. Returns `(base, repo, worktree)`.
+    fn repo_with_sibling_worktree(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("luvus-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x",
+        ]);
+        let wt = base.join("wt-feature");
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            wt.to_str().unwrap(),
+        ]);
+        (base, repo, wt)
+    }
+
+    #[test]
+    fn open_worktree_lists_every_checkout_and_opens_one() {
+        let _env = crate::persist::test_env("worktree-open-list");
+        let (base, repo, wt) = repo_with_sibling_worktree("wtopen");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_worktree_list(&repo);
+        let list = app.worktree_open.as_ref().expect("modal opens");
+        assert_eq!(list.entries.len(), 2, "main + sibling worktree both list");
+        assert!(list.entries[0].is_main);
+        assert_eq!(list.entries[1].branch.as_deref(), Some("feature"));
+        assert!(!list.entries[1].open);
+
+        // ⏎ on the sibling worktree opens it as a workspace.
+        let before = app.workspaces.len();
+        app.worktree_open.as_mut().unwrap().cursor = 1;
+        app.handle_worktree_open_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.worktree_open.is_none(), "modal closes");
+        assert_eq!(app.workspaces.len(), before + 1);
+        assert_eq!(
+            std::fs::canonicalize(&app.workspaces.last().unwrap().cwd).unwrap(),
+            std::fs::canonicalize(&wt).unwrap()
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn open_worktree_enter_focuses_an_already_open_checkout() {
+        let _env = crate::persist::test_env("worktree-open-focus");
+        let (base, repo, wt) = repo_with_sibling_worktree("wtfocus");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        // The worktree is already open as workspace 0; the repo is workspace 1
+        // (and focused, so the ⏎ below must actually switch focus).
+        app.workspaces[0].cwd = wt.clone();
+        assert!(app.create_workspace_at(repo.clone()));
+        assert_eq!(app.active_ws, 1);
+
+        app.open_worktree_list(&repo);
+        let list = app.worktree_open.as_ref().expect("modal opens");
+        let idx = list
+            .entries
+            .iter()
+            .position(|e| e.branch.as_deref() == Some("feature"))
+            .unwrap();
+        assert!(list.entries[idx].open, "already-open checkout is badged");
+
+        let before = app.workspaces.len();
+        app.worktree_open.as_mut().unwrap().cursor = idx;
+        app.handle_worktree_open_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.workspaces.len(), before, "no duplicate workspace");
+        assert_eq!(app.active_ws, 0, "the existing workspace is focused");
+
+        // Esc just closes the modal.
+        app.open_worktree_list(&repo);
+        app.handle_worktree_open_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.worktree_open.is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn open_worktree_modal_renders_branches_and_badges() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("worktree-open-render");
+        let (base, repo, wt) = repo_with_sibling_worktree("wtrender");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].cwd = wt; // the sibling worktree is already open
+        app.open_worktree_list(&repo);
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("Open Worktree"), "modal title renders");
+        assert!(screen.contains("feature"), "the sibling worktree row lists");
+        assert!(screen.contains("● open"), "already-open badge renders");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

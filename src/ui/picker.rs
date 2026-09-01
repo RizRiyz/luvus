@@ -257,6 +257,91 @@ pub(super) fn draw_worktree_prompt(
     }
 }
 
+/// The open-worktree list modal (docs/18 WT): every checkout of the repo from
+/// `git worktree list` — branch (or short head when detached), path, and an
+/// "open" badge when the checkout is already a workspace. ⏎ opens (or focuses)
+/// the highlighted row, esc closes.
+pub(super) fn draw_worktree_open(
+    f: &mut RenderTarget,
+    area: Rect,
+    list: &crate::app::WorktreeOpenList,
+    hover: Option<(u16, u16)>,
+    cat: &Catalog,
+    t: &Theme,
+) -> (Option<Rect>, Option<Rect>) {
+    dim_backdrop(f, area, t);
+    let w = area.width.saturating_sub(6).clamp(46, 76).min(area.width);
+    // Borders (2) + title (1) + gap (1) + hints (1) around the rows.
+    let h = (list.entries.len() as u16)
+        .saturating_add(5)
+        .clamp(7, 20)
+        .min(area.height);
+    let modal = centered_rect(area, w, h);
+    f.render_widget(Clear, modal);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(t.border_focus).bg(t.surface0))
+        .style(Style::new().bg(t.surface0));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!(" {}", cat.menu_open_worktree),
+            Style::new().fg(t.text).bold(),
+        )),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+
+    let bottom_y = inner.bottom().saturating_sub(1);
+    let listing = Rect::new(
+        inner.x + 1,
+        inner.y + 2,
+        inner.width.saturating_sub(2),
+        bottom_y.saturating_sub(inner.y + 2),
+    );
+    let avail = listing.height.max(1) as usize;
+    let scroll = list.cursor.saturating_sub(avail.saturating_sub(1));
+    for (vi, i) in (scroll..list.entries.len()).take(avail).enumerate() {
+        let e = &list.entries[i];
+        let y = listing.y + vi as u16;
+        let sel = i == list.cursor;
+        if sel {
+            fill_bg(f, Rect::new(listing.x, y, listing.width, 1), t.sel_bg);
+        }
+        // ⌂ marks the main checkout, ⎇ a linked worktree; a detached checkout
+        // is labelled by its short head instead of a branch.
+        let icon = if e.is_main { "⌂" } else { "⎇" };
+        let label = e
+            .branch
+            .clone()
+            .unwrap_or_else(|| e.head.chars().take(8).collect());
+        let badge = if e.open {
+            format!(" ● {}", cat.worktree_already_open)
+        } else {
+            String::new()
+        };
+        let used = 5 + display_width(&label) + display_width(&badge) + 2;
+        let path = trunc_tail(
+            &e.path.display().to_string(),
+            (listing.width as usize).saturating_sub(used),
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(if sel { "▸ " } else { "  " }, Style::new().fg(t.accent)),
+                Span::styled(format!("{icon} "), Style::new().fg(t.accent)),
+                Span::styled(label, Style::new().fg(t.text)),
+                Span::styled(format!("  {path}"), Style::new().fg(t.subtext0)),
+                Span::styled(badge, Style::new().fg(t.accent)),
+            ])),
+            Rect::new(listing.x, y, listing.width, 1),
+        );
+    }
+
+    let bottom = Rect::new(inner.x, bottom_y, inner.width, 1);
+    let (c, x) = footer_hints(f, bottom, cat.act_select, cat.act_cancel, hover, t);
+    (Some(c), Some(x))
+}
+
 /// The tab-rename modal (docs/28): a single text field pre-filled with the tab's
 /// current name. Mirrors `draw_worktree_prompt` (no error line).
 pub(super) fn draw_tab_rename(

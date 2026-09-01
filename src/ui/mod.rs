@@ -766,6 +766,12 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         app.modal_commit_rect = c;
         app.modal_cancel_rect = x;
     }
+    // The open-worktree list modal (docs/18 WT).
+    if let Some(list) = app.worktree_open.as_ref() {
+        let (c, x) = picker::draw_worktree_open(f, area, list, hover, cat, &t);
+        app.modal_commit_rect = c;
+        app.modal_cancel_rect = x;
+    }
     // The tab-rename modal (docs/28).
     if let Some(buf) = app.tab_rename.as_ref().map(|r| r.buffer.clone()) {
         let (c, x) = picker::draw_tab_rename(f, area, &buf, hover, cat, &t);
@@ -914,6 +920,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         || app.help_open
         || app.named_session_menu.is_some()
         || app.worktree_prompt.is_some()
+        || app.worktree_open.is_some()
         || app.tab_rename.is_some()
         || app.tab_menu.is_some()
         || app.ws_rename.is_some()

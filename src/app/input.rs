@@ -1052,6 +1052,11 @@ impl App {
             self.picker_paste(s);
             return true;
         }
+        // The open-worktree list has no text input; swallow the paste so it
+        // can't leak into the pane under the modal.
+        if self.worktree_open.is_some() {
+            return true;
+        }
         let handler: fn(&mut Self, KeyEvent) = if self.worktree_prompt.is_some() {
             Self::handle_worktree_prompt_key
         } else if self.tab_rename.is_some() {
@@ -1212,6 +1217,7 @@ impl App {
             || self.file_delete.is_some()
             || self.worktree_delete.is_some()
             || self.worktree_prompt.is_some()
+            || self.worktree_open.is_some()
             || self.tab_rename.is_some()
             || self.ws_rename.is_some()
             || self.pane_rename.is_some();
@@ -1632,6 +1638,12 @@ impl App {
         if self.worktree_prompt.is_some() {
             if let Some(k) = self.modal_button_key(&m) {
                 self.handle_worktree_prompt_key(k);
+            }
+            return;
+        }
+        if self.worktree_open.is_some() {
+            if let Some(k) = self.modal_button_key(&m) {
+                self.handle_worktree_open_key(k);
             }
             return;
         }
@@ -3366,6 +3378,11 @@ impl App {
         // The new-worktree branch prompt captures all input while open.
         if self.worktree_prompt.is_some() {
             self.handle_worktree_prompt_key(key);
+            return true;
+        }
+        // The open-worktree list modal captures all input while open.
+        if self.worktree_open.is_some() {
+            self.handle_worktree_open_key(key);
             return true;
         }
         // The tab-rename modal (docs/28) captures all input while open.

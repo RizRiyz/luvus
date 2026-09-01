@@ -124,9 +124,11 @@ fn parse_worktrees(raw: &str) -> Vec<Worktree> {
     let mut path: Option<PathBuf> = None;
     let mut head = String::new();
     let mut branch: Option<String> = None;
+    let mut bare = false;
     let flush = |path: &mut Option<PathBuf>,
                  head: &mut String,
                  branch: &mut Option<String>,
+                 bare: &mut bool,
                  out: &mut Vec<Worktree>| {
         if let Some(p) = path.take() {
             let is_main = out.is_empty(); // the main worktree is listed first
@@ -135,22 +137,25 @@ fn parse_worktrees(raw: &str) -> Vec<Worktree> {
                 branch: branch.take(),
                 head: std::mem::take(head),
                 is_main,
+                bare: std::mem::take(bare),
             });
         }
     };
     for line in raw.lines() {
         if let Some(p) = line.strip_prefix("worktree ") {
             // A new block; flush the previous one (handles missing blank lines).
-            flush(&mut path, &mut head, &mut branch, &mut out);
+            flush(&mut path, &mut head, &mut branch, &mut bare, &mut out);
             path = Some(PathBuf::from(p));
         } else if let Some(h) = line.strip_prefix("HEAD ") {
             head = h.to_string();
         } else if let Some(b) = line.strip_prefix("branch ") {
             branch = Some(b.strip_prefix("refs/heads/").unwrap_or(b).to_string());
+        } else if line == "bare" {
+            bare = true;
         }
-        // `bare`, `detached`, `locked`, … are ignored (branch stays None).
+        // `detached`, `locked`, … are ignored (branch stays None).
     }
-    flush(&mut path, &mut head, &mut branch, &mut out);
+    flush(&mut path, &mut head, &mut branch, &mut bare, &mut out);
     out
 }
 
@@ -796,10 +801,31 @@ detached
         assert_eq!(wts.len(), 3);
         assert!(wts[0].is_main, "first listed worktree is the main one");
         assert_eq!(wts[0].branch.as_deref(), Some("main"));
+        assert!(!wts[0].bare);
         assert_eq!(wts[1].branch.as_deref(), Some("feature"));
         assert!(!wts[1].is_main);
         assert_eq!(wts[2].branch, None, "detached worktree has no branch");
         assert_eq!(wts[2].head, "cccc3333");
+    }
+
+    #[test]
+    fn parses_bare_worktree_entry() {
+        // A bare clone lists the repo itself first, flagged `bare` — it has no
+        // working files, so callers offering checkouts to open must skip it.
+        let out = "\
+worktree /repo.git
+bare
+
+worktree /repo-wt
+HEAD dddd4444
+branch refs/heads/main
+";
+        let wts = parse_worktrees(out);
+        assert_eq!(wts.len(), 2);
+        assert!(wts[0].bare);
+        assert!(wts[0].is_main);
+        assert!(!wts[1].bare);
+        assert_eq!(wts[1].branch.as_deref(), Some("main"));
     }
 
     #[test]
