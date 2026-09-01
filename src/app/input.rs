@@ -1849,11 +1849,11 @@ impl App {
                 return;
             }
             MouseEventKind::Up(MouseButton::Left) | MouseEventKind::Up(MouseButton::Middle) => {
-                // A double-click already copied and highlighted on its press; its
-                // release keeps that selection rather than re-copying it or
-                // clearing it the way a plain click would.
+                // A double-click already copied on its press; clear its highlight on
+                // release so it behaves like a drag copy (toast is the feedback).
                 if self.dbl_click_release {
                     self.dbl_click_release = false;
+                    self.selection = None;
                     return;
                 }
                 if let Some(p) = self.link_press.take() {
@@ -1885,11 +1885,14 @@ impl App {
                 }
                 // A real drag copies its text + flashes a toast; a plain click
                 // clears the (1-cell) selection so nothing stays highlighted.
+                // After a successful copy the highlight is also cleared immediately
+                // — the toast is the feedback, not a lingering selection.
                 match self.selection_text() {
                     Some(text) => {
                         self.pending_clipboard = Some(text);
                         let msg = self.catalog.copied;
                         self.show_toast(msg);
+                        self.selection = None;
                     }
                     None => self.selection = None,
                 }
