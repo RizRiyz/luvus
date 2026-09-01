@@ -1,36 +1,380 @@
 ---
 title: Remote Sessions
-description: Run a session on another machine over plain SSH, with no port forwarding and no daemon.
+description: Install Luvus on a remote host, connect over SSH, reopen named sessions, and troubleshoot common connection problems.
 ---
 
+Luvus can keep the server, panes, agents, layouts, and scrollback on another
+machine while your current terminal acts as the client. The normal interactive
+command is:
+
 ```sh
-luvus --remote my-server        # any host from ~/.ssh/config, or user@host
-luvus --session api --remote my-server   # the remote host's named api session
+luvus --remote devbox
 ```
 
-That's the whole setup. luvus connects over **plain `ssh`**, starts (or
-reattaches to) a luvus server *on the remote machine*, and attaches your local
-terminal to it. No port-forwarding, no extra daemon, no config.
+Luvus launches your local `ssh` command, starts or finds the Luvus server on
+`devbox`, and attaches the current terminal to it. It does not open a public
+port, configure SSH forwarding, or require another daemon.
 
-- **Requirements:** `ssh` access to the host, and `luvus` installed on it.
-- **Executable discovery:** Luvus first uses the remote non-interactive SSH
-  `PATH`, then checks standard user installation locations such as
-  `~/.local/bin`, `~/.cargo/bin`, and `~/.nix-profile/bin`. This includes the
-  default location selected by the official installer when `/usr/local/bin` is
-  not writable.
-- **Efficient by design:** only changed screen cells cross the wire (a
-  keystroke costs ~22 bytes), so it stays responsive on slow links.
-- **Detach semantics** are identical to local: close your laptop, the remote
-  session keeps running. `luvus --remote my-server` again from anywhere
-  reattaches.
-- **Clipboard works:** selecting text copies to your **local** clipboard.
-- **Global finder stays remote:** `Ctrl+Space /` searches named sessions,
-  paths, and retained output from that remote Luvus home only. Selecting a
-  result in another running remote session reuses the same host and SSH options.
+## Choose the right remote workflow
 
-Extra ssh arguments pass through: `luvus --remote host -p 2222 -i ~/.ssh/key`.
+| What you want | Use |
+|---|---|
+| Open the full remote Luvus interface from a computer with Luvus installed | `luvus --remote devbox` |
+| Open a specific named session | `luvus --session api --remote devbox` |
+| Connect from a phone that only has an SSH app | SSH to the host, then run `luvus` there |
+| Send one JSON automation request | Pipe the request through `ssh devbox luvus uhp proxy` |
+| Build an independent remote or mobile client | Use [`luvus uhp access`](/docs/uhp/remote-access/) with a secure transport provider |
 
-On a narrow phone viewport Luvus automatically uses its dedicated mobile
-presentation, with one focused pane and a full-screen navigator. See
-[Mobile Sessions](/docs/guides/mobile/) for Termius sizing and the configurable
-width boundary.
+Most people want the first command. UHP Access is for application developers,
+not a prerequisite for interactive SSH sessions.
+
+## First connection
+
+### 1. Install Luvus on both machines
+
+The computer in front of you needs Luvus so it can run the local client. The
+remote host needs Luvus so it can own the server and panes.
+
+On macOS or Linux, run this on each machine:
+
+```sh
+curl -fsSL https://luvus.dev/install.sh | sh
+```
+
+Other supported installation methods are listed in the
+[installation guide](/docs/getting-started/installation/).
+
+### 2. Confirm ordinary SSH works
+
+Use the same destination that you plan to give Luvus:
+
+```sh
+ssh devbox
+```
+
+After signing in, verify the remote installation:
+
+```sh
+luvus --version
+exit
+```
+
+You can perform the same check without opening an interactive shell:
+
+```sh
+ssh devbox luvus --version
+```
+
+:::note
+Some remote shells omit user installation directories from their
+non-interactive `PATH`. `luvus --remote` handles this on POSIX hosts by checking
+`~/.local/bin`, `~/.cargo/bin`, `~/.nix-profile/bin`, `/usr/local/bin`, and the
+usual Homebrew paths when the first launch cannot find `luvus`.
+:::
+
+### 3. Attach
+
+Run this on your local machine:
+
+```sh
+luvus --remote devbox
+```
+
+The first connection starts the default remote Luvus server if needed. Later
+connections attach to that same server, so its workspaces, tabs, panes, and
+agents remain available.
+
+## SSH destination examples
+
+`<host>` accepts the same destination forms as OpenSSH:
+
+```sh
+# An alias from ~/.ssh/config
+luvus --remote devbox
+
+# A DNS name with an explicit user
+luvus --remote alice@dev.example.com
+
+# An IP address with an explicit user
+luvus --remote alice@203.0.113.10
+```
+
+Any arguments after the host are passed to `ssh`. Luvus places them before the
+SSH destination when it launches the command:
+
+```sh
+# Custom port
+luvus --remote alice@dev.example.com -p 2222
+
+# Specific private key
+luvus --remote alice@dev.example.com -i ~/.ssh/work_ed25519
+
+# Port and key together
+luvus --remote alice@203.0.113.10 -p 2222 -i ~/.ssh/work_ed25519
+
+# Connect through a bastion host
+luvus --remote private-devbox -J bastion.example.com
+
+# Use a separate SSH configuration file
+luvus --remote devbox -F ~/.ssh/work-config
+```
+
+Passwords, hardware-key confirmation, and host-key prompts are still handled by
+`ssh`. Luvus does not read or store those credentials.
+
+## A reusable SSH configuration
+
+An SSH alias keeps the Luvus command short and lets normal SSH tools reuse the
+same settings. Add this to `~/.ssh/config` on macOS or Linux, or
+`%USERPROFILE%\.ssh\config` on Windows:
+
+```ssh-config
+Host devbox
+  HostName 203.0.113.10
+  User alice
+  Port 2222
+  IdentityFile ~/.ssh/work_ed25519
+```
+
+Test the alias first, then attach:
+
+```sh
+ssh devbox
+luvus --remote devbox
+```
+
+ProxyJump, agent forwarding, host aliases, identity agents, and other OpenSSH
+settings continue to belong in this file. If `ssh devbox` cannot connect, Luvus
+cannot connect through that alias either.
+
+## Platform notes
+
+The remote command has the same shape on macOS, Linux, and Windows. In
+PowerShell, quote a Windows key path when it contains special characters or
+spaces:
+
+```powershell
+luvus --remote alice@dev.example.com -p 2222 -i "$HOME\.ssh\work_ed25519"
+```
+
+A Windows client needs the OpenSSH Client and `luvus.exe`. A Windows remote host
+also needs OpenSSH Server, and `luvus.exe` must be on the non-interactive `PATH`
+of the account used to sign in. The fallback search through POSIX user
+directories applies only to macOS and Linux remote hosts.
+
+## Named remote sessions
+
+The command without `--session` targets the remote host's `default` session.
+Select another independent remote server namespace by placing the global
+session option before `--remote`:
+
+```sh
+luvus --session api --remote devbox
+luvus --session frontend --remote devbox
+luvus --session incident-42 --remote devbox
+```
+
+You do not need to create the session first. Luvus starts it when necessary and
+reattaches to it on later runs of the same command.
+
+To inspect the remote host's sessions without opening the TUI:
+
+```sh
+ssh devbox luvus session list
+ssh devbox luvus session list --json
+```
+
+Inside a remote TUI, `Ctrl+Space t` opens the session switcher. Choosing a
+different session starts it when needed and moves only the current client. The
+previous session and its panes stay alive.
+
+## Detach and reconnect
+
+Press `Ctrl+Space q` to detach cleanly. Closing the local terminal, losing the
+network, or putting a laptop to sleep also disconnects the client without
+stopping the remote server.
+
+Reconnect with the same command:
+
+```sh
+luvus --remote devbox
+
+# Or reconnect to a named session
+luvus --session api --remote devbox
+```
+
+Luvus adds bounded SSH keepalives automatically. A dead connection is detected
+instead of remaining stuck indefinitely, and reconnecting does not create a
+second copy of the selected server.
+
+Stopping a remote server is different from detaching. It ends that session's
+live PTYs:
+
+```sh
+# Stop the default remote session
+ssh devbox luvus server stop
+
+# Stop one named remote session
+ssh devbox luvus --session api server stop
+```
+
+Use `server stop` only when you intend to stop the processes in that Luvus
+session.
+
+## What stays remote and what stays local
+
+The remote server owns:
+
+- workspaces, tabs, panes, PTYs, and terminal scrollback
+- agent processes, detection, resume state, and orchestration
+- the remote account's Luvus configuration and session data
+- file, Git, DIFF, and search results for remote projects
+
+With `luvus --remote`, the local attached client owns effects that should happen
+where you are sitting:
+
+- copied text goes to the local clipboard
+- notifications and sounds play locally
+- detected links open in the local browser
+- each attached client uses its own terminal size and mobile or desktop layout
+
+The global finder searches the selected remote Luvus home. It does not mix
+local workspaces or sessions into remote results.
+
+## Connect from a phone or tablet
+
+A phone does not need a native Luvus installation when it already has an SSH
+terminal such as Termius. Create a connection to the host in that app, then run
+Luvus at the remote prompt:
+
+```sh
+luvus
+```
+
+For a named session:
+
+```sh
+luvus --session api
+```
+
+Luvus automatically switches to its mobile presentation when the terminal is
+narrow enough. See [Mobile Sessions](/docs/guides/mobile/) for navigation,
+Termius sizing, and the configurable width boundary.
+
+## Run one remote UHP request over SSH
+
+You do not need an access gateway to run a single automation request over an
+SSH connection. `uhp proxy` reads one LF-terminated JSON request from stdin and
+writes one response:
+
+```sh
+printf '%s\n' '{"id":"snapshot","method":"session.snapshot","params":{}}' \
+  | ssh devbox luvus uhp proxy
+```
+
+Target a named session by selecting it on the remote command:
+
+```sh
+printf '%s\n' '{"id":"panes","method":"pane.list","params":{}}' \
+  | ssh devbox luvus --session api uhp proxy
+```
+
+This is a convenient path for scripts and diagnostics. For persistent event or
+terminal streams, use the owner endpoint locally on the host or connect a
+reviewed secure transport provider through
+[UHP Access](/docs/uhp/remote-access/).
+
+## Troubleshooting
+
+### `ssh` is missing locally
+
+Run:
+
+```sh
+luvus doctor
+ssh -V
+```
+
+Install an OpenSSH client using your operating system's package manager. On
+Windows, enable the built-in OpenSSH Client optional feature if `ssh.exe` is not
+already available.
+
+### SSH authentication fails or times out
+
+Remove Luvus from the equation and test the same destination and options:
+
+```sh
+ssh devbox
+ssh -v devbox
+```
+
+For explicit options, remember that ordinary SSH places them before the host:
+
+```sh
+ssh -p 2222 -i ~/.ssh/work_ed25519 alice@203.0.113.10
+```
+
+The equivalent Luvus form places passthrough options after its host argument:
+
+```sh
+luvus --remote alice@203.0.113.10 -p 2222 -i ~/.ssh/work_ed25519
+```
+
+### Luvus is not found on the remote host
+
+Confirm that it is installed for the same remote account:
+
+```sh
+ssh devbox luvus --version
+```
+
+On a POSIX host, inspect the common user locations if the command is absent:
+
+```sh
+ssh devbox 'command -v luvus || ls -l ~/.local/bin/luvus ~/.cargo/bin/luvus ~/.nix-profile/bin/luvus 2>/dev/null'
+```
+
+If none exists, install Luvus on the remote host. On a Windows remote host,
+`luvus.exe` must be available to the account used by OpenSSH in its
+non-interactive `PATH`.
+
+### The connection closes immediately
+
+Check both versions:
+
+```sh
+luvus --version
+ssh devbox luvus --version
+```
+
+Update the older installation when they differ, then retry. Also run the plain
+SSH command with `-v` to distinguish authentication, host-key, remote command,
+and network failures.
+
+### The wrong session opens
+
+No selector means `default`. Put the selector before `--remote` and reuse the
+same name when reconnecting:
+
+```sh
+luvus --session api --remote devbox
+```
+
+### A dropped connection does not stop the agents
+
+That is expected. The remote server owns the PTYs and remains alive after the
+client disconnects. Reattach with the same command. Use `server stop` only when
+you intentionally want to end the session's live processes.
+
+## Security model
+
+Interactive remote sessions inherit OpenSSH authentication, encryption,
+host-key verification, aliases, jump hosts, and policy. Luvus adds no public
+listener and sends no owner socket path over the network. The remote bridge
+exists only inside the SSH process, while the server endpoint remains private
+to the remote operating-system account.
+
+Do not expose `~/.luvus` sockets or Windows named pipes through a public tunnel.
+For an independent client that cannot run through the interactive SSH bridge,
+use the scoped, expiring pairing flow documented in
+[Remote access and transport providers](/docs/uhp/remote-access/).
