@@ -3752,6 +3752,20 @@ fn encode_key(
                         // an unambiguous key sequence.
                         '/' | '7' => Some('/'),
                         '_' => Some('_'),
+                        // A Ctrl chord on a letter is folded through
+                        // `to_ascii_uppercase() & 0x1f` below, which is caseless:
+                        // Ctrl+Shift+P and Ctrl+P both become 0x10, so an agent
+                        // binding Ctrl+Shift+<letter> silently gets the
+                        // unshifted action. Report the *unshifted* codepoint and
+                        // let `key_modifier_param` carry Shift, as the protocol
+                        // requires — Ctrl+Shift+P is `CSI 112;6u`, never
+                        // `CSI 80;...`, since the shifted codepoint would
+                        // reintroduce the very ambiguity being resolved.
+                        //
+                        // Only diverted when Shift is present: plain Ctrl+P is
+                        // already unambiguous as 0x10, and the disambiguate
+                        // level leaves such keys in their legacy form.
+                        'a'..='z' | 'A'..='Z' if shift => Some(c.to_ascii_lowercase()),
                         _ => None,
                     };
                     if let Some(codepoint) = codepoint {
@@ -4371,6 +4385,44 @@ mod tests {
             "a legacy Ctrl+/ alias regains slash identity for a nested CSI-u client"
         );
         assert_eq!(encode('_', true), Some(b"\x1b[95;5u".to_vec()));
+    }
+
+    /// `Ctrl+Shift+<letter>` must survive the trip to a nested TUI. The legacy
+    /// fold `to_ascii_uppercase() & 0x1f` is caseless, so it maps Ctrl+Shift+P
+    /// and Ctrl+P onto the same 0x10 and an agent binding the shifted chord
+    /// silently gets the unshifted action instead.
+    #[test]
+    fn control_shift_letters_reach_nested_tuis_distinctly() {
+        let encode = |character, modifiers, disambiguate| {
+            encode_key(
+                &KeyEvent::new(KeyCode::Char(character), modifiers),
+                b"\x1b\r",
+                false,
+                disambiguate,
+            )
+        };
+        let ctrl = KeyModifiers::CONTROL;
+        let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+
+        // Legacy encoding cannot separate them; this is the collapse itself.
+        assert_eq!(encode('p', ctrl, false), Some(vec![0x10]));
+        assert_eq!(encode('p', ctrl_shift, false), Some(vec![0x10]));
+
+        // A CSI-u client gets distinct sequences. The codepoint stays lowercase
+        // `p` (112) and Shift rides in the modifier param: 5 = ctrl, 6 = ctrl+shift.
+        assert_eq!(encode('p', ctrl, true), Some(vec![0x10]));
+        assert_eq!(encode('p', ctrl_shift, true), Some(b"\x1b[112;6u".to_vec()));
+        assert_ne!(encode('p', ctrl, true), encode('p', ctrl_shift, true));
+
+        // Crossterm may report the shifted press as uppercase; it must still
+        // report 112, never 80, or the ambiguity returns.
+        assert_eq!(encode('P', ctrl_shift, true), Some(b"\x1b[112;6u".to_vec()));
+
+        // Unshifted Ctrl chords keep their legacy bytes, and plain typing and
+        // Shift-only capitals are untouched by the protocol.
+        assert_eq!(encode('a', ctrl, true), Some(vec![0x01]));
+        assert_eq!(encode('A', KeyModifiers::SHIFT, true), Some(b"A".to_vec()));
+        assert_eq!(encode('a', KeyModifiers::NONE, true), Some(b"a".to_vec()));
     }
 
     #[test]
