@@ -193,14 +193,27 @@ pub(super) fn draw_picker(
     rects
 }
 
-/// Truncate a string to `max` columns, keeping the **tail** (the useful end of a
-/// path) with a leading `…`.
+/// Truncate a string to `max` display columns, keeping the **tail** (the useful
+/// end of a path) with a leading `…`. Width-aware like [`truncate`] (a CJK glyph
+/// counts as two, and is never split), so a wide-glyph path can't overflow its
+/// row and clip whatever renders after it.
 fn trunc_tail(s: &str, max: usize) -> String {
-    let n = s.chars().count();
-    if n <= max || max == 0 {
+    if max == 0 || display_width(s) <= max {
         return s.to_string();
     }
-    let tail: String = s.chars().skip(n - max.saturating_sub(1)).collect();
+    // Reserve one column for the ellipsis.
+    let budget = max - 1;
+    let mut used = 0;
+    let mut tail: Vec<char> = Vec::new();
+    for ch in s.chars().rev() {
+        let cw = display_width(&ch.to_string());
+        if used + cw > budget {
+            break;
+        }
+        tail.push(ch);
+        used += cw;
+    }
+    let tail: String = tail.into_iter().rev().collect();
     format!("…{tail}")
 }
 
@@ -574,5 +587,33 @@ fn fill_bg(f: &mut RenderTarget, rect: Rect, color: Color) {
         for x in rect.x..rect.right() {
             buf[(x, y)].set_bg(color);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trunc_tail_measures_display_columns() {
+        // ASCII: unchanged behavior — keep the tail, lead with `…`.
+        assert_eq!(trunc_tail("abcdef", 10), "abcdef");
+        assert_eq!(trunc_tail("abcdef", 4), "…def");
+        assert_eq!(trunc_tail("abcdef", 0), "abcdef");
+        // CJK: each glyph is two columns; the result must fit the column
+        // budget, not the char count, and never split a wide glyph.
+        let s = "宽".repeat(10); // 20 columns
+        let cut = trunc_tail(&s, 9);
+        assert!(cut.starts_with('…'));
+        assert!(
+            display_width(&cut) <= 9,
+            "{} columns leak past the budget",
+            display_width(&cut)
+        );
+        // 9 columns = 1 (…) + an 8-column budget: exactly four 2-column glyphs.
+        assert_eq!(cut, format!("…{}", "宽".repeat(4)));
+        // An 8-column cap leaves a 7-column budget; the fourth glyph would need
+        // 8, so it's dropped whole rather than split (7 used, one column spare).
+        assert_eq!(trunc_tail(&s, 8), format!("…{}", "宽".repeat(3)));
     }
 }

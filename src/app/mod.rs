@@ -5199,12 +5199,17 @@ impl App {
     }
 
     /// The workspace already showing `path`, if any. Both sides are
-    /// canonicalized so a symlinked cwd (macOS `/tmp`) still matches.
+    /// canonicalized so a symlinked cwd (macOS `/tmp`) still matches, and the
+    /// final comparison is [`crate::platform::same_path`] so spelling variance
+    /// (Windows case, separators, the `\\?\` prefix) can't read as "not open"
+    /// when canonicalization falls back to the raw path (docs/43 WIN-6).
     fn workspace_idx_for_path(&self, path: &std::path::Path) -> Option<usize> {
         let canon =
             |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         let target = canon(path);
-        self.workspaces.iter().position(|w| canon(&w.cwd) == target)
+        self.workspaces
+            .iter()
+            .position(|w| crate::platform::same_path(&canon(&w.cwd), &target))
     }
 
     /// Keys for the open-worktree list modal: ↑/↓ (or k/j) move, ⏎ opens the
@@ -6740,11 +6745,16 @@ mod tests {
         let repo = base.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let git = |args: &[&str]| {
-            std::process::Command::new("git")
+            let out = std::process::Command::new("git")
                 .args(args)
                 .current_dir(&repo)
                 .output()
                 .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         };
         git(&["init", "-q", "-b", "main"]);
         git(&[
@@ -6858,6 +6868,48 @@ mod tests {
         assert!(screen.contains("Open Worktree"), "modal title renders");
         assert!(screen.contains("feature"), "the sibling worktree row lists");
         assert!(screen.contains("● open"), "already-open badge renders");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn open_worktree_modal_truncates_wide_glyph_paths_by_columns() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("worktree-open-cjk");
+        let (base, repo, _wt) = repo_with_sibling_worktree("wtcjk");
+        // A worktree whose path is mostly double-width glyphs: 40 CJK chars are
+        // 80 columns, far past the row's path budget, so the path must be
+        // truncated by *columns* — char-count truncation overflows the row and
+        // clips the trailing "open" badge.
+        let cjk = base.join(format!("树{}", "宽".repeat(40)));
+        assert!(std::process::Command::new("git")
+            .args(["worktree", "add", "-q", "-b", "wide", cjk.to_str().unwrap()])
+            .current_dir(&repo)
+            .output()
+            .unwrap()
+            .status
+            .success());
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].cwd = cjk; // the wide-path worktree is already open
+        app.open_worktree_list(&repo);
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("wide"), "the wide-path worktree row lists");
+        assert!(
+            screen.contains("● open"),
+            "badge survives a wide-glyph path (column-aware truncation)"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }
