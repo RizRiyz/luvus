@@ -3,6 +3,8 @@ use super::types::{AgentDescriptor, IdentityDescriptor};
 pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "kiro",
     aliases: &[],
+    launch_command: "kiro-cli",
+    task_prompt_args: &[],
     identity: IdentityDescriptor {
         distinct: &["kiro"],
         ambiguous: &[],

@@ -121,6 +121,33 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
             keep -= 1;
         }
     }
+    if app.files_focused {
+        let diff = app.files_mode == crate::diff::FilesMode::Diff;
+        left.push(mode_label(if diff { "DIFF" } else { "FILES" }, t));
+        left.push(Span::raw("  "));
+        left.extend(hint(if diff { "j/k" } else { "hjkl" }, cat.act_move, t));
+        left.extend(hint("Enter", cat.act_open_menu, t));
+        left.extend(hint("a", cat.act_right_click, t));
+        if diff {
+            left.extend(hint("f", cat.act_filter, t));
+        }
+        left.extend(hint("Esc", cat.act_back, t));
+        return (Line::from(left), false);
+    }
+    let focused_view = app
+        .workspaces
+        .get(app.active_ws)
+        .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
+        .and_then(|tab| app.views.get(&tab.layout.focus));
+    if app.mode == Mode::Normal && matches!(focused_view, Some(crate::app::ViewKind::File(_))) {
+        left.push(mode_label("FILE", t));
+        left.push(Span::raw("  "));
+        left.extend(hint("j/k", cat.act_scroll, t));
+        left.extend(hint("/", cat.act_search, t));
+        left.extend(hint("y", cat.act_copy, t));
+        left.extend(hint("x", cat.act_close, t));
+        return (Line::from(left), false);
+    }
     if app.mode == Mode::Resize {
         left.push(mode_label(cat.mode_resize, t));
         left.push(Span::styled(
@@ -386,6 +413,85 @@ mod tests {
         );
         assert!(compound_hint(&[String::new(), "v".to_string()], "split", &app.theme).is_empty());
         assert!(compound_hint(&[String::new(), String::new()], "tab", &app.theme).is_empty());
+    }
+
+    #[test]
+    fn files_guidance_matches_tree_and_opened_view_actions() {
+        let _env = crate::persist::test_env("bar-status-files");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 24, tx).unwrap();
+        app.files_focused = true;
+        let theme = app.theme.clone();
+
+        let (line, _) = fixed_guidance(&app, &theme, 120);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+
+        assert!(
+            text.contains("Enter open"),
+            "unexpected FILES legend: {text}"
+        );
+        assert!(
+            text.contains("a right click"),
+            "unexpected FILES legend: {text}"
+        );
+        assert!(
+            !text.contains("x close"),
+            "tree legend must not advertise a file-view action: {text}"
+        );
+
+        app.files_mode = crate::diff::FilesMode::Diff;
+        let (line, _) = fixed_guidance(&app, &theme, 120);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("DIFF"), "unexpected DIFF legend: {text}");
+        assert!(
+            text.contains("Enter open"),
+            "unexpected DIFF legend: {text}"
+        );
+        assert!(text.contains("f filter"), "unexpected DIFF legend: {text}");
+
+        app.files_focused = false;
+        let pane = app.layout().focus;
+        app.views.insert(
+            pane,
+            crate::app::ViewKind::File(crate::files::FileView::new("README.md".into())),
+        );
+        let (line, _) = fixed_guidance(&app, &theme, 120);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("x close"), "unexpected FILE legend: {text}");
+
+        for (mode, expected) in [
+            (Mode::Resize, app.catalog.mode_resize),
+            (Mode::Prefix, app.catalog.mode_prefix),
+        ] {
+            app.mode = mode;
+            let (line, _) = fixed_guidance(&app, &theme, 120);
+            let text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert!(
+                text.contains(expected),
+                "{mode:?} controls must override the FILE legend: {text}"
+            );
+            assert_eq!(
+                line.spans[1].content.as_ref(),
+                format!(" {expected} "),
+                "{mode:?} must own the leading mode label"
+            );
+        }
     }
 
     #[test]

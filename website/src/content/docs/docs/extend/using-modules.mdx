@@ -28,9 +28,6 @@ Or browse the [module index](/modules/) on the site.
 is read-only and never touches your running session, so it's safe to run any
 time.
 
-Luvus 0.11.x also searches the legacy `bohay-module` topic so existing modules
-remain discoverable during the rename.
-
 ## Installing
 
 ```sh
@@ -43,7 +40,7 @@ Install is deliberately a conversation, not a one-shot. It:
 
 1. Shallow-clones the repo to a staging directory.
 2. **Prints every command the module declares** and asks you to confirm.
-3. Runs any `[[build]]` steps with a **scrubbed environment** (no `LUVUS_*` or `BOHAY_*`, no
+3. Runs any `[[build]]` steps with a **scrubbed environment** (no `LUVUS_*` and no
    socket access), so a build script can't drive your session.
 4. Verifies the manifest didn't change during the build.
 5. Moves the checkout into luvus-managed storage and records the exact commit.

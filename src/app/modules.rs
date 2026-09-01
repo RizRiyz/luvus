@@ -1461,7 +1461,7 @@ max = 10
 [[actions]]
 id = "show"
 title = "Show"
-command = ["sh", "-c", "echo t=$LUVUS_SETTING_TOKEN l=$LUVUS_SETTING_LIMIT old_t=$BOHAY_SETTING_TOKEN old_l=$BOHAY_SETTING_LIMIT"]
+command = ["sh", "-c", "echo t=$LUVUS_SETTING_TOKEN l=$LUVUS_SETTING_LIMIT"]
 "#,
         );
 
@@ -1484,7 +1484,7 @@ command = ["sh", "-c", "echo t=$LUVUS_SETTING_TOKEN l=$LUVUS_SETTING_LIMIT old_t
         let log = app.module_logs.iter().find(|l| l.id == log_id).unwrap();
         assert_eq!(log.status, ModuleStatus::Succeeded, "stderr: {}", log.err);
         assert!(
-            log.out.contains("t=abc123 l=10 old_t=abc123 old_l=10"),
+            log.out.contains("t=abc123 l=10"),
             "settings reached the command: {:?}",
             log.out
         );

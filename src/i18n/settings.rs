@@ -160,7 +160,7 @@ pub static EN: Catalog = Catalog {
         "Session",
     ],
     key_reference_headings: [
-        "Always on (not rebindable)",
+        "Always active",
         "Scroll history (no prefix)",
         "Copy mode (after Copy terminal text)",
         "Resize mode (after prefix + r)",
@@ -269,7 +269,7 @@ pub static ES: Catalog = Catalog {
     keys_command_mode: "Modo de comandos", keys_prefix: "Prefijo", keys_preset: "Preajuste", keys_capture_again: "pulsa {key} otra vez…", keys_capture_prefix: "pulsa F1-F12 o un atajo Ctrl/Alt…", keys_capture_key: "pulsa una tecla…", keys_invalid_prefix: "Usa F1-F12 o un atajo Ctrl/Alt", keys_confirm_prefix: "Pulsa {key} otra vez para confirmar", keys_copy_terminal_text: "Copiar texto del terminal",
     key_prefix_twice: "{prefix} ×2", key_space: "Espacio", key_arrows: "flechas", key_shift_arrow: "Shift+flecha", key_drag: "arrastrar", key_shift_drag: "Shift+arrastrar", key_click: "clic", key_right_click: "clic derecho", key_wheel: "rueda", key_drag_divider: "arrastrar divisor", key_tap_pane: "tocar panel",
     keys_sections: ["Paneles", "Pestañas", "Espacios y worktrees", "Vistas y paneles", "Sesión"],
-    key_reference_headings: ["Siempre activos (no reasignables)", "Historial (sin prefijo)", "Modo copia (tras Copiar texto del terminal)", "Modo redimensionar (tras prefijo + r)", "Pestaña Git (tras prefijo + g)", "Tablero de tareas (tras prefijo + o)", "Selector de carpetas (tras prefijo + N)", "Copiar y pegar", "Ratón"],
+    key_reference_headings: ["Siempre activos", "Historial (sin prefijo)", "Modo copia (tras Copiar texto del terminal)", "Modo redimensionar (tras prefijo + r)", "Pestaña Git (tras prefijo + g)", "Tablero de tareas (tras prefijo + o)", "Selector de carpetas (tras prefijo + N)", "Copiar y pegar", "Ratón"],
     key_reference_descriptions: [
 &["enfocar paneles (alias de vim)", "desconectar y dejar el servidor activo", "cerrar panel", "dividir abajo", "pestaña siguiente / anterior", "enviar el prefijo configurado literalmente"],
         &["entrar al historial del panel enfocado", "línea abajo / arriba", "página abajo / arriba", "inicio del historial / volver al vivo", "saltar por el historial (1 más antiguo, 9 más nuevo)", "volver al vivo"],
@@ -292,7 +292,7 @@ pub static PT: Catalog = Catalog {
     keys_command_mode: "Modo de comando", keys_prefix: "Prefixo", keys_preset: "Predefinição", keys_capture_again: "pressione {key} novamente…", keys_capture_prefix: "pressione F1-F12 ou um atalho Ctrl/Alt…", keys_capture_key: "pressione uma tecla…", keys_invalid_prefix: "Use F1-F12 ou um atalho Ctrl/Alt", keys_confirm_prefix: "Pressione {key} novamente para confirmar", keys_copy_terminal_text: "Copiar texto do terminal",
     key_prefix_twice: "{prefix} ×2", key_space: "Espaço", key_arrows: "setas", key_shift_arrow: "Shift+seta", key_drag: "arrastar", key_shift_drag: "Shift+arrastar", key_click: "clique", key_right_click: "clique direito", key_wheel: "roda", key_drag_divider: "arrastar divisor", key_tap_pane: "tocar painel",
     keys_sections: ["Painéis", "Abas", "Espaços e worktrees", "Vistas e painéis", "Sessão"],
-    key_reference_headings: ["Sempre ativos (não reatribuíveis)", "Histórico (sem prefixo)", "Modo de cópia (após Copiar texto do terminal)", "Modo de redimensionar (após prefixo + r)", "Aba Git (após prefixo + g)", "Quadro de tarefas (após prefixo + o)", "Seletor de pastas (após prefixo + N)", "Copiar e colar", "Mouse"],
+    key_reference_headings: ["Sempre ativos", "Histórico (sem prefixo)", "Modo de cópia (após Copiar texto do terminal)", "Modo de redimensionar (após prefixo + r)", "Aba Git (após prefixo + g)", "Quadro de tarefas (após prefixo + o)", "Seletor de pastas (após prefixo + N)", "Copiar e colar", "Mouse"],
     key_reference_descriptions: [
 &["focar painéis (aliases do vim)", "desconectar e manter o servidor ativo", "fechar painel", "dividir abaixo", "aba seguinte / anterior", "enviar o prefixo configurado literalmente"],
         &["entrar no histórico do painel focado", "linha abaixo / acima", "página abaixo / acima", "início do histórico / voltar ao vivo", "saltar pelo histórico (1 mais antigo, 9 mais novo)", "voltar ao vivo"],
@@ -315,7 +315,7 @@ pub static FR: Catalog = Catalog {
     keys_command_mode: "Mode commande", keys_prefix: "Préfixe", keys_preset: "Préréglage", keys_capture_again: "appuyez encore sur {key}…", keys_capture_prefix: "appuyez sur F1-F12 ou un raccourci Ctrl/Alt…", keys_capture_key: "appuyez sur une touche…", keys_invalid_prefix: "Utilisez F1-F12 ou un raccourci Ctrl/Alt", keys_confirm_prefix: "Appuyez encore sur {key} pour confirmer", keys_copy_terminal_text: "Copier le texte du terminal",
     key_prefix_twice: "{prefix} ×2", key_space: "Espace", key_arrows: "flèches", key_shift_arrow: "Shift+flèche", key_drag: "glisser", key_shift_drag: "Shift+glisser", key_click: "clic", key_right_click: "clic droit", key_wheel: "molette", key_drag_divider: "glisser le séparateur", key_tap_pane: "toucher le volet",
     keys_sections: ["Volets", "Onglets", "Espaces et worktrees", "Vues et panneaux", "Session"],
-    key_reference_headings: ["Toujours actifs (non réaffectables)", "Historique (sans préfixe)", "Mode copie (après Copier le texte du terminal)", "Mode redimensionnement (après préfixe + r)", "Onglet Git (après préfixe + g)", "Tableau des tâches (après préfixe + o)", "Sélecteur de dossiers (après préfixe + N)", "Copier et coller", "Souris"],
+    key_reference_headings: ["Toujours actifs", "Historique (sans préfixe)", "Mode copie (après Copier le texte du terminal)", "Mode redimensionnement (après préfixe + r)", "Onglet Git (après préfixe + g)", "Tableau des tâches (après préfixe + o)", "Sélecteur de dossiers (après préfixe + N)", "Copier et coller", "Souris"],
     key_reference_descriptions: [
 &["cibler les volets (alias vim)", "se détacher en laissant le serveur actif", "fermer le volet", "diviser vers le bas", "onglet suivant / précédent", "envoyer littéralement le préfixe configuré"],
         &["ouvrir l'historique du volet ciblé", "ligne suivante / précédente", "page suivante / précédente", "début de l'historique / retour au direct", "parcourir l'historique (1 ancien, 9 récent)", "retour au direct"],
@@ -338,7 +338,7 @@ pub static DE: Catalog = Catalog {
     keys_command_mode: "Befehlsmodus", keys_prefix: "Präfix", keys_preset: "Voreinstellung", keys_capture_again: "{key} erneut drücken…", keys_capture_prefix: "F1-F12 oder eine Ctrl/Alt-Kombination drücken…", keys_capture_key: "Taste drücken…", keys_invalid_prefix: "F1-F12 oder eine Ctrl/Alt-Kombination verwenden", keys_confirm_prefix: "{key} zur Bestätigung erneut drücken", keys_copy_terminal_text: "Terminaltext kopieren",
     key_prefix_twice: "{prefix} ×2", key_space: "Leertaste", key_arrows: "Pfeile", key_shift_arrow: "Shift+Pfeil", key_drag: "ziehen", key_shift_drag: "Shift+ziehen", key_click: "Klick", key_right_click: "Rechtsklick", key_wheel: "Mausrad", key_drag_divider: "Teiler ziehen", key_tap_pane: "Bereich antippen",
     keys_sections: ["Bereiche", "Tabs", "Arbeitsbereiche und Worktrees", "Ansichten und Panels", "Sitzung"],
-    key_reference_headings: ["Immer aktiv (nicht änderbar)", "Verlauf (ohne Präfix)", "Kopiermodus (nach Terminaltext kopieren)", "Größenmodus (nach Präfix + r)", "Git-Tab (nach Präfix + g)", "Aufgabenboard (nach Präfix + o)", "Ordnerauswahl (nach Präfix + N)", "Kopieren und Einfügen", "Maus"],
+    key_reference_headings: ["Immer aktiv", "Verlauf (ohne Präfix)", "Kopiermodus (nach Terminaltext kopieren)", "Größenmodus (nach Präfix + r)", "Git-Tab (nach Präfix + g)", "Aufgabenboard (nach Präfix + o)", "Ordnerauswahl (nach Präfix + N)", "Kopieren und Einfügen", "Maus"],
     key_reference_descriptions: [
 &["Bereiche fokussieren (vim-Aliasse)", "trennen und Server weiterlaufen lassen", "Bereich schließen", "nach unten teilen", "nächster / vorheriger Tab", "konfigurierten Präfix wörtlich senden"],
         &["Verlauf des fokussierten Bereichs öffnen", "Zeile ab / auf", "Seite ab / auf", "Verlaufsanfang / zurück zu live", "im Verlauf springen (1 älteste, 9 neueste)", "zurück zu live"],
@@ -408,7 +408,7 @@ pub static ID: Catalog = Catalog {
         "Sesi",
     ],
     key_reference_headings: [
-        "Selalu aktif (tidak dapat diubah)",
+        "Selalu aktif",
         "Riwayat (tanpa prefiks)",
         "Mode salin (setelah Salin teks terminal)",
         "Mode ubah ukuran (setelah prefiks + r)",
@@ -552,7 +552,7 @@ pub static ZH: Catalog = Catalog {
     key_tap_pane: "点击窗格",
     keys_sections: ["窗格", "标签", "工作区与 worktree", "视图与面板", "会话"],
     key_reference_headings: [
-        "始终可用（不可重绑）",
+        "始终可用",
         "滚动历史（无需前缀）",
         "复制模式（执行复制终端文本后）",
         "调整大小模式（前缀 + r 后）",
@@ -707,7 +707,7 @@ pub static JA: Catalog = Catalog {
         "セッション",
     ],
     key_reference_headings: [
-        "常時有効（再割り当て不可）",
+        "常時有効",
         "履歴スクロール（プレフィックス不要）",
         "コピーモード（テキストコピーの後）",
         "リサイズモード（プレフィックス + r の後）",
@@ -863,7 +863,7 @@ pub static KO: Catalog = Catalog {
         "세션",
     ],
     key_reference_headings: [
-        "항상 활성 (재할당 불가)",
+        "항상 활성",
         "스크롤 기록 (접두사 없음)",
         "복사 모드 (터미널 텍스트 복사 이후)",
         "크기 조정 모드 (접두사 + r 이후)",

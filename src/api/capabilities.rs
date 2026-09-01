@@ -98,6 +98,8 @@ pub const METHODS: &[&str] = &[
     "git.branches",
     "git.log",
     "git.open",
+    "mission.snapshot",
+    "mission.refresh",
     "mission.open",
     "diff.refresh",
     "diff.list",
@@ -184,6 +186,10 @@ pub const METHODS: &[&str] = &[
 ];
 
 const READ_ONLY_METHODS: &[&str] = &[
+    "host.capabilities",
+    "host.info",
+    "host.doctor",
+    "host.update.check",
     "uhp.capabilities",
     "uhp.stats",
     "uhp.token.list",
@@ -191,6 +197,10 @@ const READ_ONLY_METHODS: &[&str] = &[
     "server.agent_manifests",
     "config.get",
     "session.snapshot",
+    "session.list",
+    "session.status",
+    "skill.status",
+    "integration.status",
     "events.subscribe",
     "events.wait",
     "wait.output",
@@ -222,6 +232,8 @@ const READ_ONLY_METHODS: &[&str] = &[
     "git.status",
     "git.branches",
     "git.log",
+    "mission.snapshot",
+    "mission.refresh",
     "diff.list",
     "diff.get",
     "diff.note.list",
@@ -259,10 +271,18 @@ pub fn is_read_only(method: &str) -> bool {
 pub fn required_scope(method: &str) -> &'static str {
     if matches!(
         method,
-        "uhp.capabilities"
+        "host.capabilities"
+            | "host.info"
+            | "host.doctor"
+            | "host.update.check"
+            | "uhp.capabilities"
             | "uhp.stats"
             | "ping"
             | "session.snapshot"
+            | "session.list"
+            | "session.status"
+            | "skill.status"
+            | "integration.status"
             | "events.subscribe"
             | "events.wait"
             | "wait.output"
@@ -292,6 +312,14 @@ pub fn required_scope(method: &str) -> &'static str {
     } else {
         "admin"
     }
+}
+
+#[cfg(test)]
+pub fn all_methods() -> impl Iterator<Item = &'static str> {
+    METHODS
+        .iter()
+        .copied()
+        .chain(crate::api::host::METHODS.iter().copied())
 }
 
 fn is_idempotent(method: &str) -> bool {
@@ -371,8 +399,9 @@ mod tests {
 
     #[test]
     fn registry_has_no_duplicates_and_contains_required_surface() {
-        let unique: std::collections::BTreeSet<_> = METHODS.iter().copied().collect();
-        assert_eq!(unique.len(), METHODS.len());
+        let methods = all_methods().collect::<Vec<_>>();
+        let unique: std::collections::BTreeSet<_> = methods.iter().copied().collect();
+        assert_eq!(unique.len(), methods.len());
         for required in [
             "uhp.capabilities",
             "workspace.get",

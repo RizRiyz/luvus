@@ -42,6 +42,8 @@ application-cursor pager), Luvus forwards those keys unchanged. `Shift+↑`,
 Drag across a pane to select. Release **auto-copies** and flashes a *Copied*
 toast. luvus writes both your native OS clipboard (`pbcopy` / `wl-copy` /
 `xclip` / `clip`) and OSC 52, so it works locally *and* over SSH.
+Soft-wrapped display rows copy as one logical line. Hard line breaks and any
+leading indentation inside the selection remain unchanged.
 
 For keyboard selection, press **`Ctrl+Space`**, then **`y`** by default. Change
 the second key in **Settings → Keys → Copy terminal text**. Shift-based `V`

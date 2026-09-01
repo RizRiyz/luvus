@@ -24,8 +24,8 @@ Tap **MENU** to open the full-screen Mobile Navigator. It provides:
 - tabs from the active workspace and a global list of workspaces;
 - fuzzy filtering as soon as you type;
 - All, Agents, Tabs, and Workspaces scopes;
-- new tab, open workspace, Settings, Mission Control, update information, and
-  Exit;
+- new tab, open workspace, Settings, Mission Control, update information,
+  named Sessions, and Exit;
 
 Each result uses a two-row touch target. The primary row aligns the state and
 name from the left; the secondary row shows workspace, tab, pane, branch, or
@@ -39,6 +39,16 @@ remain fully supported when mouse input is unavailable.
 Selecting another workspace closes the navigator. The next time you open it,
 Agents and Tabs are rebuilt from that active workspace; Workspaces continues to
 show the whole running session.
+
+In a server-backed session, select **Sessions** near the bottom of the navigator
+to open the named-session sheet. It lists **New Session**, the current session,
+other running sessions,
+and stopped sessions in two-row touch targets. Choosing another session starts
+it when necessary and hands only this client to it; the previous session and
+its panes stay alive. New names use ASCII letters, digits, `.`, `_`, or `-` and
+may be up to 64 bytes. `Ctrl+Space t` opens the sheet directly. Arrow keys,
+`j` / `k`, `Home` / `End`, Enter, `q`, Escape, mouse wheel, and touch work in
+the same sheet.
 
 Exit appears after Changelog and behaves like `Ctrl+Space q`. In a server-backed
 session it detaches the current client while the server and panes keep running.

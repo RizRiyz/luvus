@@ -289,12 +289,10 @@ pub trait VtEngine: Send {
     /// callback must not retain the borrowed text after it returns.
     fn for_each_retained_row(&self, f: &mut dyn FnMut(usize, &str));
 
-    /// Extract an inclusive retained-row selection using terminal cell
+    /// Extract an inclusive linear retained-row selection using terminal cell
     /// coordinates. Implementations must preserve complete wide glyphs and
-    /// zero-width marks rather than treating columns as string character
-    /// indexes. When the selection starts after a whitespace-only margin,
-    /// following rows may omit up to that many leading blank cells, but must
-    /// preserve earlier content and any additional relative indentation.
+    /// zero-width marks, join soft-wrapped display rows, preserve hard line
+    /// breaks, and retain every selected content cell.
     fn retained_selection_text(&self, range: ((usize, usize), (usize, usize))) -> Option<String>;
 
     /// Return copy-mode navigation geometry for one retained row. Trailing
@@ -325,6 +323,11 @@ pub trait VtEngine: Send {
     /// Whether the child enabled application cursor mode. Combined with paste
     /// and mouse modes, this lets the input layer leave pager keys alone.
     fn application_cursor(&self) -> bool;
+
+    /// Whether the child requested unambiguous CSI-u encoding for control keys.
+    /// Input encoding must honor this for chords whose legacy byte loses the
+    /// original key identity, such as Ctrl+/ versus Ctrl+7.
+    fn disambiguate_escape_codes(&self) -> bool;
 
     /// Whether the child also requested **drag/motion tracking** (1002/1003) —
     /// press-and-move events are forwarded only then, so a click-only (1000)

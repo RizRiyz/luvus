@@ -29,6 +29,9 @@ luvus uhp schema
 luvus uhp snapshot
 ```
 
+The installed schema's `event_catalog.properties` maps general event names to
+their payload field schemas.
+
 The website documents the current release. A development build or older server
 can differ. Report the version and follow its live help for exact behavior.
 
@@ -131,8 +134,12 @@ Branch-backed dependencies unblock only after they are merged into the shared
 integration history.
 `task release` requeues active work and releases its path leases, but it does
 not stop the worker pane or discard its worktree.
-`task start` checks path leases before creating a branch, worktree, or pane. If
-it returns `lease_conflict`, resolve or release the named holder before retrying.
+`task start` checks path leases before creating a worker. Its default
+`mode=worktree` creates an isolated branch and checkout. Explicit
+`mode=workspace` creates a dedicated task tab in an existing shared checkout;
+it has no task branch or merge action. If start returns `lease_conflict`,
+resolve or release the named holder before retrying. Leases coordinate declared
+task paths but do not sandbox a workspace-mode agent.
 
 Tab positions are 1-based. Workspace indexes shown by the CLI are 0-based.
 Pane IDs and agent names are discovery results. Never convert between these
@@ -290,7 +297,9 @@ tasks, leases, modules, bars, configuration, and events.
 
 Open Mission Control in the active workspace with `luvus mission open`, target
 a zero-based workspace with `luvus mission open <workspace>`, or call the
-workspace-scoped UHP method `mission.open`.
+workspace-scoped UHP method `mission.open`. Use `mission.snapshot` to read agent
+and usage data without changing the UI. `mission.refresh` requests one explicit
+off-render-path usage scan rather than enabling background polling.
 
 Start with capability discovery and validate against the installed JSON Schema
 bundle. Do not infer method support from a release number alone.
@@ -309,6 +318,12 @@ leases are temporary authority, not ownership of a pane. The endpoint is an
 owner-only Unix socket on macOS and Linux or owner-restricted named pipe on
 Windows. Luvus does not open a public TCP listener. `luvus uhp proxy` is the
 bounded, transport-neutral one-request bridge.
+
+`host.capabilities` describes the proxy's separate local-owner profile for host
+diagnostics, named-session lifecycle, updates, skills, and integrations. It can
+work without a running session server, rejects delegated session tokens, and
+is not exposed through remote `uhp access`. Host installation and deletion
+methods require both explicit human authorization and `confirm:true`.
 
 For a persistent third-party transport or client, `luvus uhp access` emits one
 machine-readable descriptor for a scoped loopback gateway and remains in the

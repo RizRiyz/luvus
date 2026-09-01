@@ -140,6 +140,7 @@ impl AlacrittyEngine {
         // estimate until an engine provides native byte accounting.
         let config = Config {
             scrolling_history: history_rows_for_budget(history_budget_bytes, cols),
+            kitty_keyboard: true,
             ..Config::default()
         };
         let term = Term::new(config, &dims, proxy);
@@ -160,6 +161,7 @@ impl AlacrittyEngine {
                 self.history_budget_bytes,
                 self.term.grid().columns() as u16,
             ),
+            kitty_keyboard: true,
             ..Config::default()
         });
     }
@@ -798,75 +800,18 @@ impl VtEngine for AlacrittyEngine {
             return None;
         }
         let last_column = self.term.grid().columns().checked_sub(1)?;
-        let leading_blank_cells = |line: Line, limit: usize| {
-            let row = &self.term.grid()[line];
-            let limit = limit.min(last_column.saturating_add(1));
-            let mut column = 0;
-            while column < limit {
-                let cell = &row[Column(column)];
-                if cell
-                    .flags
-                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-                    || (cell.c != '\0' && !cell.c.is_whitespace())
-                {
-                    break;
-                }
-                if cell.flags.contains(Flags::WIDE_CHAR) {
-                    let spacer = column.saturating_add(1);
-                    if spacer >= limit
-                        || !row[Column(spacer)].flags.contains(Flags::WIDE_CHAR_SPACER)
-                    {
-                        break;
-                    }
-                    column += 2;
-                } else {
-                    column += 1;
-                }
-            }
-            column
-        };
-        // When the drag starts after a whitespace-only pane margin, treat that
-        // prefix as presentation padding. Following rows may begin earlier, so
-        // remove only blank cells and stop before their first real character.
-        // Additional indentation remains relative to the selected margin.
-        let margin = self
-            .retained_line(start_row)
-            .filter(|line| start_col > 0 && leading_blank_cells(*line, start_col) == start_col)
-            .map_or(0, |_| start_col);
-        let mut output = String::new();
-        let mut appended = false;
+        let start = Point::new(
+            self.retained_line(start_row)?,
+            Column(start_col.min(last_column)),
+        );
+        let end = Point::new(
+            self.retained_line(end_row)?,
+            Column(end_col.min(last_column)),
+        );
 
-        for row_index in start_row..=end_row {
-            let Some(line) = self.retained_line(row_index) else {
-                continue;
-            };
-            let left = if row_index == start_row {
-                start_col
-            } else {
-                leading_blank_cells(line, margin)
-            }
-            .min(last_column);
-            let right = if row_index == end_row {
-                end_col
-            } else {
-                last_column
-            }
-            .min(last_column);
-
-            if appended {
-                output.push('\n');
-            }
-            appended = true;
-            if left <= right {
-                let row = self.term.bounds_to_string(
-                    Point::new(line, Column(left)),
-                    Point::new(line, Column(right)),
-                );
-                output.push_str(row.trim_end_matches(' '));
-            }
-        }
-
-        appended.then_some(output)
+        // Alacritty owns the VT line-wrap metadata. Extract the complete range
+        // once so soft wraps are rejoined while real line breaks are retained.
+        Some(self.term.bounds_to_string(start, end))
     }
 
     fn retained_row_layout(&self, index: usize) -> Option<RetainedRowLayout> {
@@ -932,6 +877,10 @@ impl VtEngine for AlacrittyEngine {
 
     fn application_cursor(&self) -> bool {
         self.term.mode().contains(TermMode::APP_CURSOR)
+    }
+
+    fn disambiguate_escape_codes(&self) -> bool {
+        self.term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES)
     }
 
     fn mouse_drag(&self) -> bool {
@@ -1283,7 +1232,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_selection_removes_only_the_selected_blank_margin() {
+    fn retained_selection_uses_linear_cells_across_hard_lines() {
         let (tx, _rx) = channel();
         let mut engine = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 20));
         engine.advance(b"\x1b[H\x1b[2J - first\r\n - second\r\n - third");
@@ -1299,12 +1248,13 @@ mod tests {
             engine
                 .retained_selection_text(((rows[0], 1), (rows[2], 7)))
                 .as_deref(),
-            Some("- first\n- second\n- third")
+            Some("- first\n - second\n - third"),
+            "only the first row starts at the anchor column"
         );
     }
 
     #[test]
-    fn retained_selection_preserves_content_and_relative_indentation() {
+    fn retained_selection_preserves_selected_indentation() {
         let (tx, _rx) = channel();
         let mut engine = AlacrittyEngine::new(40, 6, tx, budget_for_rows(40, 20));
         engine.advance(
@@ -1326,8 +1276,8 @@ mod tests {
             engine
                 .retained_selection_text(((first, 4), (first + 2, 11)))
                 .as_deref(),
-            Some("first\nsecond\n  nested"),
-            "the selected blank margin is removed while deeper indentation remains"
+            Some("first\n    second\n      nested"),
+            "selected indentation on continuation rows remains content"
         );
 
         let chosen = rows
@@ -1345,7 +1295,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_selection_removes_a_complete_wide_whitespace_margin() {
+    fn retained_selection_preserves_wide_whitespace_cells() {
         let (tx, _rx) = channel();
         let mut engine = AlacrittyEngine::new(40, 4, tx, budget_for_rows(40, 20));
         engine.advance("\x1b[H\x1b[2J　first\r\n　second".as_bytes());
@@ -1361,7 +1311,38 @@ mod tests {
             engine
                 .retained_selection_text(((rows[0], 2), (rows[1], 7)))
                 .as_deref(),
-            Some("first\nsecond")
+            Some("first\n　second")
+        );
+    }
+
+    #[test]
+    fn retained_selection_joins_soft_wraps_and_keeps_hard_breaks() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(5, 4, tx, budget_for_rows(5, 20));
+        engine.advance(b"abcdefghij\r\nnext");
+
+        let mut rows = Vec::new();
+        engine.for_each_retained_row(&mut |row, text| {
+            if !text.is_empty() {
+                rows.push((row, text.to_string()));
+            }
+        });
+        let first = rows
+            .iter()
+            .find(|(_, text)| text == "abcde")
+            .map(|(row, _)| *row)
+            .expect("first soft-wrapped row");
+        let last = rows
+            .iter()
+            .find(|(_, text)| text == "next")
+            .map(|(row, _)| *row)
+            .expect("hard-line row");
+
+        assert_eq!(
+            engine
+                .retained_selection_text(((first, 0), (last, 3)))
+                .as_deref(),
+            Some("abcdefghij\nnext")
         );
     }
 
@@ -1623,6 +1604,25 @@ mod tests {
         assert!(!e.alternate_scroll());
         e.advance(b"\x1b[?1007h");
         assert!(e.alternate_scroll());
+    }
+
+    #[test]
+    fn nested_keyboard_disambiguation_is_tracked_across_config_updates() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 2_000));
+        assert!(!e.disambiguate_escape_codes());
+
+        e.advance(b"\x1b[>1u");
+        assert!(e.disambiguate_escape_codes());
+
+        e.set_history_budget(budget_for_rows(20, 1_000));
+        assert!(
+            e.disambiguate_escape_codes(),
+            "changing scrollback settings must not disable the child keyboard protocol"
+        );
+
+        e.advance(b"\x1b[<u");
+        assert!(!e.disambiguate_escape_codes());
     }
 
     #[test]

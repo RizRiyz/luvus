@@ -1,0 +1,470 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://luvus.dev/protocol/uhp/v1/event-catalog.schema.json",
+  "title": "Luvus Universal Harness Protocol general event payload catalog",
+  "description": "Payload schemas for events currently emitted by the general UHP event stream. The event envelope remains forward-compatible with future names.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "agent.authority_released",
+    "agent.authority_reported",
+    "agent.hook",
+    "config.changed",
+    "events.resync_required",
+    "layout.applied",
+    "layout.ratio_changed",
+    "lease.acquired",
+    "lease.released",
+    "pane.agent_status_changed",
+    "pane.closed",
+    "pane.created",
+    "pane.focused",
+    "pane.forked",
+    "pane.moved",
+    "pane.renamed",
+    "pane.resized",
+    "pane.swapped",
+    "pane.zoomed",
+    "server.agent_manifests_reloaded",
+    "tab.closed",
+    "tab.created",
+    "tab.moved",
+    "task.added",
+    "task.claimed",
+    "task.deleted",
+    "task.done",
+    "task.gate_failed",
+    "task.gate_passed",
+    "task.gate_running",
+    "task.merge_conflict",
+    "task.merge_failed",
+    "task.merge_started",
+    "task.merged",
+    "task.needs_compaction",
+    "task.ready",
+    "task.released",
+    "task.started",
+    "task.updated",
+    "terminal.closed",
+    "terminal.created",
+    "terminal.exited",
+    "terminal.metadata_changed",
+    "terminal.moved",
+    "terminal.output_ready",
+    "workspace.block_moved",
+    "workspace.closed",
+    "workspace.created",
+    "workspace.metadata_reported",
+    "workspace.moved"
+  ],
+  "properties": {
+    "agent.authority_released": { "$ref": "#/$defs/authority_released" },
+    "agent.authority_reported": { "$ref": "#/$defs/authority_reported" },
+    "agent.hook": { "$ref": "#/$defs/agent_hook" },
+    "config.changed": { "$ref": "#/$defs/empty" },
+    "events.resync_required": { "$ref": "#/$defs/resync_required" },
+    "layout.applied": { "$ref": "#/$defs/layout_applied" },
+    "layout.ratio_changed": { "$ref": "#/$defs/layout_ratio_changed" },
+    "lease.acquired": { "$ref": "#/$defs/lease" },
+    "lease.released": { "$ref": "#/$defs/lease_released" },
+    "pane.agent_status_changed": { "$ref": "#/$defs/agent_status" },
+    "pane.closed": { "$ref": "#/$defs/pane_only" },
+    "pane.created": { "$ref": "#/$defs/pane_created" },
+    "pane.focused": { "$ref": "#/$defs/pane_only" },
+    "pane.forked": { "$ref": "#/$defs/pane_forked" },
+    "pane.moved": { "$ref": "#/$defs/pane_moved" },
+    "pane.renamed": { "$ref": "#/$defs/pane_renamed" },
+    "pane.resized": { "$ref": "#/$defs/pane_resized" },
+    "pane.swapped": { "$ref": "#/$defs/pane_swapped" },
+    "pane.zoomed": { "$ref": "#/$defs/pane_zoomed" },
+    "server.agent_manifests_reloaded": { "$ref": "#/$defs/manifests_reloaded" },
+    "tab.closed": { "$ref": "#/$defs/tab_only" },
+    "tab.created": { "$ref": "#/$defs/tab_only" },
+    "tab.moved": { "$ref": "#/$defs/tab_moved" },
+    "task.added": { "$ref": "#/$defs/task" },
+    "task.claimed": { "$ref": "#/$defs/task" },
+    "task.deleted": { "$ref": "#/$defs/id_only" },
+    "task.done": { "$ref": "#/$defs/task" },
+    "task.gate_failed": { "$ref": "#/$defs/task_gate_failed" },
+    "task.gate_passed": { "$ref": "#/$defs/id_only" },
+    "task.gate_running": { "$ref": "#/$defs/task_gate_running" },
+    "task.merge_conflict": { "$ref": "#/$defs/task_merge_conflict" },
+    "task.merge_failed": { "$ref": "#/$defs/task_merge_failed" },
+    "task.merge_started": { "$ref": "#/$defs/task_merge_started" },
+    "task.merged": { "$ref": "#/$defs/task_merged" },
+    "task.needs_compaction": { "$ref": "#/$defs/task_needs_compaction" },
+    "task.ready": { "$ref": "#/$defs/id_only" },
+    "task.released": { "$ref": "#/$defs/task_released" },
+    "task.started": { "$ref": "#/$defs/task_started" },
+    "task.updated": { "$ref": "#/$defs/task" },
+    "terminal.closed": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/event.schema.json#/oneOf/1/properties/data" },
+    "terminal.created": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/event.schema.json#/oneOf/1/properties/data" },
+    "terminal.exited": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/event.schema.json#/oneOf/1/properties/data" },
+    "terminal.metadata_changed": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/event.schema.json#/oneOf/1/properties/data" },
+    "terminal.moved": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/event.schema.json#/oneOf/1/properties/data" },
+    "terminal.output_ready": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/event.schema.json#/oneOf/1/properties/data" },
+    "workspace.block_moved": { "$ref": "#/$defs/workspace_block_moved" },
+    "workspace.closed": { "$ref": "#/$defs/workspace_only" },
+    "workspace.created": { "$ref": "#/$defs/workspace_only" },
+    "workspace.metadata_reported": { "$ref": "#/$defs/workspace_only" },
+    "workspace.moved": { "$ref": "#/$defs/workspace_moved" }
+  },
+  "$defs": {
+    "empty": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "workspace_only": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace"],
+      "properties": { "workspace": { "type": "string" } }
+    },
+    "workspace_moved": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace", "to"],
+      "properties": {
+        "workspace": { "type": "string" },
+        "to": { "type": "string" }
+      }
+    },
+    "workspace_block_moved": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaces", "positions"],
+      "properties": {
+        "workspaces": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+        "positions": { "type": "array", "items": { "type": "integer", "minimum": 0 } }
+      }
+    },
+    "tab_only": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tab"],
+      "properties": { "tab": { "type": "string" } }
+    },
+    "tab_moved": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace", "from", "to", "active"],
+      "properties": {
+        "workspace": { "type": "string" },
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "active": { "type": "string" },
+        "mode": { "const": "swap" }
+      }
+    },
+    "pane_only": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pane"],
+      "properties": { "pane": { "type": "string" } }
+    },
+    "pane_created": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pane"],
+      "properties": {
+        "pane": { "type": "string" },
+        "module": { "type": "string" },
+        "terminal_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" }
+      }
+    },
+    "pane_forked": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to", "agent", "workspace", "tab"],
+      "properties": {
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "agent": { "type": "string" },
+        "workspace": { "type": "string" },
+        "tab": { "type": "string" }
+      }
+    },
+    "pane_moved": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pane", "workspace", "tab"],
+      "properties": {
+        "pane": { "type": "string" },
+        "workspace": { "type": "string" },
+        "tab": { "type": "string" }
+      }
+    },
+    "pane_renamed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pane", "name"],
+      "properties": {
+        "pane": { "type": "string" },
+        "name": { "type": ["string", "null"] }
+      }
+    },
+    "pane_resized": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pane", "cells"],
+      "properties": {
+        "pane": { "type": "string" },
+        "cells": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "pane_swapped": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pane", "with"],
+      "properties": {
+        "pane": { "type": "string" },
+        "with": { "type": "string" }
+      }
+    },
+    "pane_zoomed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pane", "enabled"],
+      "properties": {
+        "pane": { "type": "string" },
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "layout_applied": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace", "tab"],
+      "properties": {
+        "workspace": { "type": "string" },
+        "tab": { "type": "string" }
+      }
+    },
+    "layout_ratio_changed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace", "tab", "path", "ratio"],
+      "properties": {
+        "workspace": { "type": "string" },
+        "tab": { "type": "string" },
+        "path": { "type": "array", "items": { "enum": ["a", "b"] } },
+        "ratio": { "type": "number" }
+      }
+    },
+    "agent_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pane", "status", "agent", "cwd", "project", "branch", "authority"],
+      "properties": {
+        "pane": { "type": "string" },
+        "status": { "enum": ["blocked", "working", "done", "idle", "unknown"] },
+        "agent": { "type": "string" },
+        "cwd": { "type": "string" },
+        "project": { "type": "string" },
+        "branch": { "type": ["string", "null"] },
+        "authority": { "type": ["string", "null"] },
+        "state_source": { "type": ["string", "null"] }
+      }
+    },
+    "agent_hook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pane", "agent", "kind", "message", "tool"],
+      "properties": {
+        "pane": { "type": "string" },
+        "agent": { "type": "string" },
+        "kind": { "type": "string" },
+        "message": { "type": "string" },
+        "tool": { "type": "string" }
+      }
+    },
+    "authority_reported": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pane", "source", "agent", "status", "sequence", "ttl_s"],
+      "properties": {
+        "pane": { "type": "string" },
+        "source": { "type": "string" },
+        "agent": { "type": "string" },
+        "status": { "enum": ["blocked", "working", "done", "idle", "unknown"] },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "ttl_s": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "authority_released": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pane", "source", "reason"],
+      "properties": {
+        "pane": { "type": "string" },
+        "source": { "type": "string" },
+        "reason": { "enum": ["released", "expired"] }
+      }
+    },
+    "id_only": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": { "id": { "type": "string" } }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "status", "assignee", "deps", "paths", "gate", "outputs", "notes", "worktree", "branch", "context", "created", "updated"],
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "status": { "enum": ["queued", "claimed", "running", "blocked", "review", "done", "merging", "merged", "failed"] },
+        "assignee": { "type": ["integer", "null"], "minimum": 1 },
+        "deps": { "type": "array", "items": { "type": "string" } },
+        "paths": { "type": "array", "items": { "type": "string" } },
+        "gate": { "type": ["string", "null"] },
+        "outputs": { "type": "array", "items": { "type": "string" } },
+        "notes": { "type": "array", "items": { "type": "string" } },
+        "worktree": { "type": ["string", "null"] },
+        "branch": { "type": ["string", "null"] },
+        "mode": { "enum": ["worktree", "workspace"] },
+        "workspace_worker": { "$ref": "#/$defs/workspace_worker" },
+        "context": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "created": { "type": "integer", "minimum": 0 },
+        "updated": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "workspace_worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace_id", "tab_id", "root"],
+      "properties": {
+        "workspace_id": { "type": "string" },
+        "tab_id": { "type": "string" },
+        "root": { "type": "string" }
+      }
+    },
+    "task_released": {
+      "oneOf": [
+        { "$ref": "#/$defs/task" },
+        { "$ref": "#/$defs/id_only" }
+      ]
+    },
+    "task_started": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "pane", "mode", "workspace_id", "tab_id", "cwd", "worktree", "branch"],
+      "properties": {
+        "id": { "type": "string" },
+        "pane": { "type": "string" },
+        "mode": { "enum": ["worktree", "workspace"] },
+        "workspace_id": { "type": "string" },
+        "tab_id": { "type": "string" },
+        "cwd": { "type": "string" },
+        "worktree": { "type": ["string", "null"] },
+        "branch": { "type": ["string", "null"] }
+      }
+    },
+    "task_needs_compaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "context"],
+      "properties": {
+        "id": { "type": "string" },
+        "context": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "task_merge_started": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "branch", "into"],
+      "properties": {
+        "id": { "type": "string" },
+        "branch": { "type": "string" },
+        "into": { "type": "string" }
+      }
+    },
+    "task_merged": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "branch", "into", "commit"],
+      "properties": {
+        "id": { "type": "string" },
+        "branch": { "type": "string" },
+        "into": { "type": "string" },
+        "commit": { "type": "string" }
+      }
+    },
+    "task_merge_conflict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "branch", "files"],
+      "properties": {
+        "id": { "type": "string" },
+        "branch": { "type": "string" },
+        "files": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "task_merge_failed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "branch", "message"],
+      "properties": {
+        "id": { "type": "string" },
+        "branch": { "type": "string" },
+        "message": { "type": "string" }
+      }
+    },
+    "task_gate_running": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "gate"],
+      "properties": {
+        "id": { "type": "string" },
+        "gate": { "type": "string" }
+      }
+    },
+    "task_gate_failed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "code"],
+      "properties": {
+        "id": { "type": "string" },
+        "code": { "type": ["integer", "null"] }
+      }
+    },
+    "lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "pane", "task", "paths", "acquired"],
+      "properties": {
+        "id": { "type": "string" },
+        "pane": { "type": "integer", "minimum": 1 },
+        "task": { "type": "string" },
+        "paths": { "type": "array", "items": { "type": "string" } },
+        "acquired": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "lease_released": {
+      "oneOf": [
+        { "$ref": "#/$defs/id_only" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pane", "leases"],
+          "properties": {
+            "pane": { "type": "string" },
+            "leases": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      ]
+    },
+    "manifests_reloaded": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rules"],
+      "properties": { "rules": { "type": "integer", "minimum": 0 } }
+    },
+    "resync_required": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": { "reason": { "const": "subscriber_overflow" } }
+    }
+  }
+}

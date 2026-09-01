@@ -92,7 +92,7 @@ pub fn home_dir() -> Option<PathBuf> {
 /// (`pwsh.exe`, then `powershell.exe`), since `COMSPEC` is always `cmd.exe`
 /// regardless of the shell you launched from and so can't reveal PowerShell.
 pub fn resolve_shell(choice: &str) -> String {
-    if let Some(s) = crate::compat::inherited("LUVUS_SHELL", "BOHAY_SHELL") {
+    if let Some(s) = std::env::var_os("LUVUS_SHELL") {
         if !s.is_empty() {
             return s.to_string_lossy().into_owned();
         }
@@ -552,6 +552,21 @@ fn proc_fs_table() -> Option<PsTable> {
 /// The process table from one `ps` invocation — the portable fallback and the
 /// path macOS/BSD always take. See [`ps_table`] for why Linux prefers `/proc`.
 #[cfg(unix)]
+fn parse_ps_command_line(line: &str) -> Option<(u32, u32, &str)> {
+    let line = line.trim_start();
+    let pid_end = line.find(char::is_whitespace)?;
+    let (pid, rest) = line.split_at(pid_end);
+    let rest = rest.trim_start();
+    let ppid_end = rest.find(char::is_whitespace)?;
+    let (ppid, command) = rest.split_at(ppid_end);
+    let command = command.trim_start();
+    if command.is_empty() {
+        return None;
+    }
+    Some((pid.parse().ok()?, ppid.parse().ok()?, command))
+}
+
+#[cfg(unix)]
 fn ps_command_table() -> Option<PsTable> {
     use std::collections::HashMap;
     let out = match std::process::Command::new("ps")
@@ -565,23 +580,10 @@ fn ps_command_table() -> Option<PsTable> {
     let mut cmd: HashMap<u32, String> = HashMap::new();
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
     for line in text.lines() {
-        let mut it = line.split_whitespace();
-        let (Some(pid), Some(ppid)) = (it.next(), it.next()) else {
+        let Some((pid, ppid, command)) = parse_ps_command_line(line) else {
             continue;
         };
-        let (Ok(pid), Ok(ppid)) = (pid.parse::<u32>(), ppid.parse::<u32>()) else {
-            continue;
-        };
-        // Everything after the two numeric columns is the command, spaces intact.
-        let rest = line
-            .splitn(3, |c: char| c.is_whitespace())
-            .nth(2)
-            .unwrap_or("")
-            .trim_start();
-        if rest.is_empty() {
-            continue;
-        }
-        cmd.insert(pid, rest.to_string());
+        cmd.insert(pid, command.to_string());
         children.entry(ppid).or_default().push(pid);
     }
     Some((cmd, children))
@@ -1003,6 +1005,23 @@ mod tests {
         );
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ps_command_line_handles_padded_numeric_columns() {
+        assert_eq!(
+            super::parse_ps_command_line(" 5555 91833 /bin/zsh"),
+            Some((5555, 91833, "/bin/zsh"))
+        );
+        assert_eq!(
+            super::parse_ps_command_line(" 6647  5555 opencode2 --model  gpt"),
+            Some((6647, 5555, "opencode2 --model  gpt"))
+        );
+        assert_eq!(
+            super::parse_ps_command_line("15818 91833 /bin/zsh"),
+            Some((15818, 91833, "/bin/zsh"))
+        );
     }
 
     #[cfg(any(unix, windows))]

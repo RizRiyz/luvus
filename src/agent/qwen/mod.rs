@@ -7,6 +7,8 @@ pub(super) use sessions::recent as qwen_recent;
 pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "qwen",
     aliases: &[],
+    launch_command: "qwen",
+    task_prompt_args: &["--prompt-interactive"],
     identity: IdentityDescriptor {
         distinct: &["qwen"],
         ambiguous: &[],

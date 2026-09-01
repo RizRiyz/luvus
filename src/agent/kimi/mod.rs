@@ -8,6 +8,8 @@ pub(super) use sessions::{latest as kimi_latest, recent as kimi_recent};
 pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "kimi",
     aliases: &[],
+    launch_command: "kimi",
+    task_prompt_args: &["--prompt"],
     identity: IdentityDescriptor {
         distinct: &["kimi"],
         ambiguous: &[],

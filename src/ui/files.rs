@@ -88,12 +88,19 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
     // `visible_rows` returns a slice borrowing `file_tree`, so it must come after
     // the scroll write.
     let n = app.file_tree.visible_rows().len();
-    let max_scroll = n.saturating_sub(cap);
-    if app.file_tree.scroll > max_scroll {
-        app.file_tree.scroll = max_scroll;
+    app.file_tree.cursor = app.file_tree.cursor.min(n.saturating_sub(1));
+    if app.files_focused && cap > 0 {
+        if app.file_tree.cursor < app.file_tree.scroll {
+            app.file_tree.scroll = app.file_tree.cursor;
+        } else if app.file_tree.cursor >= app.file_tree.scroll.saturating_add(cap) {
+            app.file_tree.scroll = app.file_tree.cursor.saturating_add(1).saturating_sub(cap);
+        }
     }
+    let max_scroll = n.saturating_sub(cap);
+    app.file_tree.scroll = app.file_tree.scroll.min(max_scroll);
     let scroll = app.file_tree.scroll;
     let hover = app.hover;
+    let keyboard_cursor = app.files_focused.then_some(app.file_tree.cursor);
 
     let rows = app.file_tree.visible_rows();
     for (i, row) in rows.iter().enumerate().skip(scroll).take(cap) {
@@ -102,6 +109,7 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
         let hovered = hover.is_some_and(|(hc, hr)| {
             hc >= rect.x && hc < rect.right() && hr >= rect.y && hr < rect.bottom()
         });
+        let selected = keyboard_cursor == Some(i);
 
         // Indentation, then a marker column: a dir gets its expand chevron, a
         // file gets a small dot in the same column. A file used to render two
@@ -137,7 +145,7 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
         if row.is_dir {
             style = style.bold();
         }
-        if hovered {
+        if hovered || selected {
             style = style.fg(t.accent);
         }
         // A folder's chevron keeps the folder's own styling; a file's dot sits
@@ -148,7 +156,7 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
         let marker_style = if row.is_dir {
             style
         } else {
-            Style::new().fg(if hovered {
+            Style::new().fg(if hovered || selected {
                 t.accent
             } else {
                 git_fg.unwrap_or(t.overlay1)
@@ -163,6 +171,9 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
                 format!(" {badge}"),
                 Style::new().fg(git_fg.unwrap_or(t.overlay1)),
             ));
+        }
+        if selected {
+            f.buffer_mut().set_style(rect, Style::new().bg(t.surface1));
         }
         line_at(f, y, Line::from(spans));
         app.file_tree_rects.push((i, rect));

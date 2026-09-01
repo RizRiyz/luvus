@@ -4,7 +4,7 @@
 use crate::files::view_text_w;
 use std::path::{Path, PathBuf};
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{
     App, DockKind, FileMenu, FileMenuItem, FilePrompt, FilePromptKind, Mode, Tab, ViewKind,
@@ -261,17 +261,29 @@ impl App {
         }
     }
 
-    /// `Ctrl+Space e`: unmount the FILES dock, or restore it to the side where
-    /// the user last placed it. Mounting also makes sure that side is visible.
-    pub fn toggle_files_dock(&mut self) {
-        if self.sidebars.side_of(&DockKind::Files).is_some() {
-            self.unmount_dock(&DockKind::Files);
-        } else {
+    /// Give normal-mode keyboard input to the FILES tree. The dock is mounted
+    /// on its remembered side and that side is revealed when needed, but this
+    /// command does not hide any sidebar. `Ctrl+Space b` remains the visibility
+    /// control; Esc/q return input to the unchanged terminal-pane focus.
+    pub fn focus_files_tree(&mut self) {
+        if self.sidebars.side_of(&DockKind::Files).is_none() {
             let target = self.sidebars.files_side;
-            if self.sidebars.has_room(target) {
-                self.sidebars.get_mut(target).visible = true;
+            if !self.move_dock(&DockKind::Files, target) {
+                self.files_focused = false;
+                return;
             }
-            self.move_dock(&DockKind::Files, target);
+        }
+        let Some(side) = self.sidebars.side_of(&DockKind::Files) else {
+            self.files_focused = false;
+            return;
+        };
+        self.sidebars.get_mut(side).visible = true;
+        self.files_mode = crate::diff::FilesMode::Files;
+        self.files_focused = true;
+        if !self.workspaces.is_empty() {
+            self.ensure_file_tree();
+            let len = self.file_tree.visible_rows().len();
+            self.file_tree.cursor = self.file_tree.cursor.min(len.saturating_sub(1));
         }
     }
 
@@ -305,6 +317,7 @@ impl App {
     /// A FILES row was clicked: expand/collapse a folder, or open a file at
     /// `target` — the click behavior for a plain click, `Pane` for Shift+click.
     pub fn file_row_activate(&mut self, index: usize, target: OpenTarget) {
+        self.file_tree.cursor = index;
         let Some(row) = self.file_tree.visible_rows().get(index).cloned() else {
             return;
         };
@@ -523,8 +536,201 @@ impl App {
                 is_dir: r.is_dir,
                 anchor: (col, row),
                 items: Vec::new(),
+                selected: None,
                 editors,
             });
+        }
+    }
+
+    /// Open the selected row's action menu with an initial keyboard selection.
+    fn open_file_menu_for_keyboard(&mut self) {
+        self.clamp_file_cursor();
+        let index = self.file_tree.cursor;
+        let anchor = self
+            .file_tree_rects
+            .iter()
+            .find(|(row, _)| *row == index)
+            .map(|(_, rect)| (rect.right().saturating_sub(1), rect.y))
+            .unwrap_or((self.files_area.x, self.files_area.y.saturating_add(1)));
+        self.open_file_menu(index, anchor.0, anchor.1);
+        if let Some(menu) = self.file_menu.as_mut() {
+            menu.selected = menu
+                .build_items()
+                .iter()
+                .position(|item| *item != FileMenuItem::Divider);
+        }
+    }
+
+    fn clamp_file_cursor(&mut self) {
+        let len = self.file_tree.visible_rows().len();
+        self.file_tree.cursor = self.file_tree.cursor.min(len.saturating_sub(1));
+        self.reveal_file_cursor();
+    }
+
+    fn file_tree_page(&self) -> usize {
+        self.files_area.height.saturating_sub(1).max(1) as usize
+    }
+
+    fn reveal_file_cursor(&mut self) {
+        let page = self.file_tree_page();
+        let cursor = self.file_tree.cursor;
+        if cursor < self.file_tree.scroll {
+            self.file_tree.scroll = cursor;
+        } else if cursor >= self.file_tree.scroll.saturating_add(page) {
+            self.file_tree.scroll = cursor.saturating_add(1).saturating_sub(page);
+        }
+    }
+
+    fn move_file_cursor(&mut self, delta: isize) {
+        let len = self.file_tree.visible_rows().len();
+        if len == 0 {
+            self.file_tree.cursor = 0;
+            self.file_tree.scroll = 0;
+            return;
+        }
+        self.file_tree.cursor = self
+            .file_tree
+            .cursor
+            .saturating_add_signed(delta)
+            .min(len - 1);
+        self.reveal_file_cursor();
+    }
+
+    fn collapse_file_row_or_parent(&mut self) {
+        self.clamp_file_cursor();
+        let index = self.file_tree.cursor;
+        let Some(row) = self.file_tree.visible_rows().get(index).cloned() else {
+            return;
+        };
+        if row.is_dir && row.expanded {
+            self.file_tree.toggle(&row.path);
+            self.clamp_file_cursor();
+            return;
+        }
+        let Some(parent) = row.path.parent() else {
+            return;
+        };
+        if let Some(parent_index) = self
+            .file_tree
+            .visible_rows()
+            .iter()
+            .position(|candidate| candidate.path == parent)
+        {
+            self.file_tree.cursor = parent_index;
+            self.reveal_file_cursor();
+        }
+    }
+
+    fn expand_file_row_or_child(&mut self) {
+        self.clamp_file_cursor();
+        let index = self.file_tree.cursor;
+        let Some(row) = self.file_tree.visible_rows().get(index).cloned() else {
+            return;
+        };
+        if !row.is_dir {
+            return;
+        }
+        if !row.expanded {
+            self.file_tree.toggle(&row.path);
+            self.load_pending_dirs();
+            return;
+        }
+        if self
+            .file_tree
+            .visible_rows()
+            .get(index.saturating_add(1))
+            .is_some_and(|child| child.depth == row.depth.saturating_add(1))
+        {
+            self.file_tree.cursor = index + 1;
+            self.reveal_file_cursor();
+        }
+    }
+
+    /// Navigate the FILES tree while it owns keyboard focus. Returns to the
+    /// pane before opening a file so its native view receives subsequent keys.
+    pub fn handle_file_tree_key(&mut self, key: KeyEvent) -> bool {
+        let page = self.file_tree_page() as isize;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.files_focused = false,
+            KeyCode::Up | KeyCode::Char('k') => self.move_file_cursor(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_file_cursor(1),
+            KeyCode::PageUp => self.move_file_cursor(-page),
+            KeyCode::PageDown => self.move_file_cursor(page),
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.file_tree.cursor = 0;
+                self.reveal_file_cursor();
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                let len = self.file_tree.visible_rows().len();
+                self.file_tree.cursor = len.saturating_sub(1);
+                self.reveal_file_cursor();
+            }
+            KeyCode::Left | KeyCode::Char('h') => self.collapse_file_row_or_parent(),
+            KeyCode::Right | KeyCode::Char('l') => self.expand_file_row_or_child(),
+            KeyCode::Char('a') => self.open_file_menu_for_keyboard(),
+            KeyCode::Enter => {
+                let target = if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    OpenTarget::Pane
+                } else {
+                    self.file_click_target()
+                };
+                let index = self.file_tree.cursor;
+                let is_file = self
+                    .file_tree
+                    .visible_rows()
+                    .get(index)
+                    .is_some_and(|row| !row.is_dir);
+                if is_file {
+                    self.files_focused = false;
+                }
+                self.file_row_activate(index, target);
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// Keyboard navigation for a FILES row action menu. Dividers are skipped;
+    /// mouse-opened menus acquire a selection on the first navigation key.
+    pub fn handle_file_menu_key(&mut self, key: KeyEvent) {
+        let Some(menu) = self.file_menu.as_ref() else {
+            return;
+        };
+        let items = menu.build_items();
+        let selectable: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| (*item != FileMenuItem::Divider).then_some(index))
+            .collect();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.file_menu = None,
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
+                if selectable.is_empty() {
+                    return;
+                }
+                let current = self
+                    .file_menu
+                    .as_ref()
+                    .and_then(|menu| menu.selected)
+                    .and_then(|selected| selectable.iter().position(|index| *index == selected));
+                let next = if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
+                    current
+                        .map(|position| position.checked_sub(1).unwrap_or(selectable.len() - 1))
+                        .unwrap_or(selectable.len() - 1)
+                } else {
+                    current.map_or(0, |position| (position + 1) % selectable.len())
+                };
+                if let Some(menu) = self.file_menu.as_mut() {
+                    menu.selected = Some(selectable[next]);
+                }
+            }
+            KeyCode::Enter => {
+                let selected = self.file_menu.as_ref().and_then(|menu| menu.selected);
+                if let Some(item) = selected.and_then(|index| items.get(index)).copied() {
+                    self.file_menu_action(item);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -571,20 +777,30 @@ impl App {
         };
         match item {
             // Open actions target the clicked file (never a folder).
-            FileMenuItem::OpenReadonly => self.open_file_view(menu.path.clone(), OpenTarget::Tab),
+            FileMenuItem::OpenReadonly => {
+                self.files_focused = false;
+                self.open_file_view(menu.path.clone(), OpenTarget::Tab);
+            }
             FileMenuItem::OpenWith(i) => {
                 if let Some((cmd, _)) = menu.editors.get(i).cloned() {
+                    self.files_focused = false;
                     self.open_file_in_editor(menu.path.clone(), &cmd);
                 }
             }
-            FileMenuItem::OpenMarkdownPreview => self.open_document_preview_tab(
-                menu.path.clone(),
-                crate::files::preview::PreviewKind::Markdown,
-            ),
-            FileMenuItem::OpenMermaidPreview => self.open_document_preview_tab(
-                menu.path.clone(),
-                crate::files::preview::PreviewKind::Mermaid,
-            ),
+            FileMenuItem::OpenMarkdownPreview => {
+                self.files_focused = false;
+                self.open_document_preview_tab(
+                    menu.path.clone(),
+                    crate::files::preview::PreviewKind::Markdown,
+                );
+            }
+            FileMenuItem::OpenMermaidPreview => {
+                self.files_focused = false;
+                self.open_document_preview_tab(
+                    menu.path.clone(),
+                    crate::files::preview::PreviewKind::Mermaid,
+                );
+            }
             FileMenuItem::NewFile => {
                 self.file_prompt = prompt(FilePromptKind::NewFile, dir, None, String::new())
             }
@@ -626,6 +842,7 @@ impl App {
                 }
             }
             FileMenuItem::OpenAsNewWorkspace => {
+                self.files_focused = false;
                 // Focus-or-create like `workspace.open`, but resolve symlinks
                 // first. `same_path` is lexical only (no IO), so a FILES row
                 // reached through a symlink-spelled root would otherwise miss a
@@ -1097,7 +1314,7 @@ impl App {
                 self.copy_file_view(id);
                 return true;
             }
-            KeyCode::Char('q') => self.close_pane(id),
+            KeyCode::Char('q') | KeyCode::Char('x') => self.close_pane(id),
             KeyCode::Esc => {
                 // Esc clears a committed search first, else closes the view.
                 if v.search.is_some() {
@@ -1119,14 +1336,14 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
-    fn files_toggle_restores_last_side_across_restart() {
+    fn files_focus_restores_last_side_across_restart() {
         let _env = crate::persist::test_env("files-toggle-side");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
 
         assert!(app.move_dock(&DockKind::Files, Side::Right));
         assert_eq!(app.sidebars.side_of(&DockKind::Files), Some(Side::Right));
-        app.toggle_files_dock();
+        app.unmount_dock(&DockKind::Files);
         assert_eq!(app.sidebars.side_of(&DockKind::Files), None);
         assert_eq!(
             app.config
@@ -1140,7 +1357,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut reopened = App::new(80, 24, tx).unwrap();
         assert_eq!(reopened.sidebars.side_of(&DockKind::Files), None);
-        reopened.toggle_files_dock();
+        reopened.run_cmd(crate::app::Cmd::ToggleFiles);
         assert_eq!(
             reopened.sidebars.side_of(&DockKind::Files),
             Some(Side::Right),
@@ -1150,6 +1367,115 @@ mod tests {
             reopened.sidebars.right.visible,
             "showing FILES also reveals its sidebar"
         );
+    }
+
+    #[test]
+    fn files_focus_mounts_the_dock_and_reveals_its_remembered_side() {
+        let _env = crate::persist::test_env("files-keyboard-focus");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        assert!(app.move_dock(&DockKind::Files, Side::Right));
+        app.unmount_dock(&DockKind::Files);
+        app.sidebars.right.visible = false;
+
+        app.run_cmd(crate::app::Cmd::ToggleFiles);
+
+        assert!(app.files_focused);
+        assert_eq!(app.files_mode, crate::diff::FilesMode::Files);
+        assert_eq!(app.sidebars.side_of(&DockKind::Files), Some(Side::Right));
+        assert!(app.sidebars.right.visible);
+
+        app.run_cmd(crate::app::Cmd::ToggleFiles);
+        assert!(
+            app.files_focused,
+            "the command focuses instead of hiding FILES"
+        );
+        assert_eq!(app.sidebars.side_of(&DockKind::Files), Some(Side::Right));
+    }
+
+    fn seed_keyboard_tree(app: &mut App) -> PathBuf {
+        let root = PathBuf::from("keyboard-project");
+        app.file_tree.set_root(root.clone());
+        app.file_tree.apply_dir(
+            root.clone(),
+            vec![
+                crate::files::Entry {
+                    name: "src".to_string(),
+                    is_dir: true,
+                },
+                crate::files::Entry {
+                    name: "README.md".to_string(),
+                    is_dir: false,
+                },
+                crate::files::Entry {
+                    name: "notes.txt".to_string(),
+                    is_dir: false,
+                },
+            ],
+        );
+        app.file_tree.apply_dir(
+            root.join("src"),
+            vec![crate::files::Entry {
+                name: "main.rs".to_string(),
+                is_dir: false,
+            }],
+        );
+        app.files_area = ratatui::layout::Rect::new(0, 0, 30, 3);
+        app.files_focused = true;
+        root
+    }
+
+    #[test]
+    fn files_keyboard_navigation_expands_walks_and_keeps_the_cursor_visible() {
+        let _env = crate::persist::test_env("files-keyboard-navigation");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let root = seed_keyboard_tree(&mut app);
+
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(app.file_tree.visible_rows()[0].expanded);
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.file_tree.cursor, 1, "right enters the first child");
+        assert_eq!(
+            app.file_tree.visible_rows()[1].path,
+            root.join("src/main.rs")
+        );
+
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.file_tree.cursor, 0, "left returns to the parent");
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(app.file_tree.cursor, 3);
+        assert_eq!(app.file_tree.scroll, 2, "the last row remains in view");
+
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(!app.files_focused, "q returns input to the pane");
+    }
+
+    #[test]
+    fn files_keyboard_actions_skip_dividers_and_execute_the_selected_row() {
+        let _env = crate::persist::test_env("files-keyboard-actions");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let root = seed_keyboard_tree(&mut app);
+
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        let items = app.file_menu.as_ref().unwrap().build_items();
+        assert_eq!(app.file_menu.as_ref().unwrap().selected, Some(0));
+
+        // New File -> New Folder -> Rename -> Copy Path.
+        for _ in 0..3 {
+            app.handle_file_menu_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        let selected = app.file_menu.as_ref().unwrap().selected.unwrap();
+        assert!(items[selected] == FileMenuItem::CopyPath);
+        app.handle_file_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(
+            app.pending_clipboard.as_deref(),
+            Some(root.join("src").to_string_lossy().as_ref())
+        );
+        assert!(app.file_menu.is_none());
+        assert!(app.files_focused, "non-navigation actions keep tree focus");
     }
 
     #[test]
@@ -1189,6 +1515,7 @@ mod tests {
             is_dir: false,
             anchor: (0, 0),
             items: Vec::new(),
+            selected: None,
             editors: editors.clone(),
         };
         let items = file.build_items();
@@ -1211,6 +1538,7 @@ mod tests {
             is_dir: true,
             anchor: (0, 0),
             items: Vec::new(),
+            selected: None,
             editors: Vec::new(),
         };
         let ditems = folder.build_items();
@@ -1233,6 +1561,7 @@ mod tests {
             is_dir: false,
             anchor: (0, 0),
             items: Vec::new(),
+            selected: None,
             editors: Vec::new(),
         }
         .build_items();
@@ -1253,6 +1582,7 @@ mod tests {
             is_dir: false,
             anchor: (0, 0),
             items: Vec::new(),
+            selected: None,
             editors: Vec::new(),
         }
         .build_items();
@@ -1264,6 +1594,7 @@ mod tests {
             is_dir: false,
             anchor: (0, 0),
             items: Vec::new(),
+            selected: None,
             editors: Vec::new(),
         }
         .build_items();
@@ -1275,6 +1606,7 @@ mod tests {
             is_dir: false,
             anchor: (0, 0),
             items: Vec::new(),
+            selected: None,
             editors: Vec::new(),
         }
         .build_items();
@@ -1482,6 +1814,7 @@ mod tests {
             is_dir: false,
             anchor: (0, 0),
             items: Vec::new(),
+            selected: None,
             editors: editors.to_vec(),
         };
 
@@ -2459,7 +2792,7 @@ mod tests {
     }
 
     /// Opening a file makes a native view leaf that renders the file's contents
-    /// and line numbers in a pane, scrolls, and closes with `q`.
+    /// and line numbers in a pane, scrolls, and closes with `x`.
     #[test]
     fn file_view_pane_renders_scrolls_and_closes() {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -2502,8 +2835,8 @@ mod tests {
             "scrolled to end"
         );
 
-        // `q` closes the view leaf; the tile collapses back to the shell.
-        app.handle_file_key(vid, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        // `x` closes the view leaf; the tile collapses back to the shell.
+        app.handle_file_key(vid, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(!app.views.contains_key(&vid), "view leaf closed");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -3299,6 +3632,7 @@ mod tests {
             is_dir: false,
             anchor: (0, 0),
             items: Vec::new(),
+            selected: None,
             editors: Vec::new(),
         }
     }
@@ -3355,7 +3689,7 @@ mod tests {
         let typing_in = app.layout().focus;
 
         // Everything the user does to reach the action.
-        app.toggle_files_dock();
+        app.focus_files_tree();
         app.file_menu = Some(insert_menu(&std::env::temp_dir().join("target.rs")));
         assert_eq!(
             app.layout().focus,
@@ -3485,6 +3819,7 @@ mod tests {
                 is_dir,
                 anchor: (0, 0),
                 items: Vec::new(),
+                selected: None,
                 editors: Vec::new(),
             };
             let items = menu.build_items();
@@ -3507,6 +3842,7 @@ mod tests {
             is_dir: false,
             anchor: (0, 0),
             items: Vec::new(),
+            selected: None,
             editors: Vec::new(),
         };
         let file_items = file.build_items();
@@ -3520,6 +3856,7 @@ mod tests {
             is_dir: true,
             anchor: (0, 0),
             items: Vec::new(),
+            selected: None,
             editors: Vec::new(),
         };
         let folder_items = folder.build_items();
@@ -3554,6 +3891,7 @@ mod tests {
             is_dir: true,
             anchor: (0, 0),
             items: Vec::new(),
+            selected: None,
             editors: Vec::new(),
         });
         app.file_menu_action_pub(FileMenuItem::OpenAsNewWorkspace);
@@ -3604,6 +3942,7 @@ mod tests {
             is_dir: true,
             anchor: (0, 0),
             items: Vec::new(),
+            selected: None,
             editors: Vec::new(),
         });
         app.file_menu_action_pub(FileMenuItem::OpenAsNewWorkspace);
@@ -3646,6 +3985,7 @@ mod tests {
             is_dir: true,
             anchor: (0, 0),
             items: Vec::new(),
+            selected: None,
             editors: Vec::new(),
         });
         app.file_menu_action_pub(FileMenuItem::OpenAsNewWorkspace);

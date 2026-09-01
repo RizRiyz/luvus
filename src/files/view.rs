@@ -388,6 +388,50 @@ pub fn seg_text(line: &str, range: (usize, usize)) -> String {
     line.chars().skip(range.0).take(range.1 - range.0).collect()
 }
 
+/// Return the rows currently rendered by a native file view, aligned to its
+/// complete pane-content rectangle. The line-number gutter is represented by
+/// spaces so mouse cell coordinates continue to address the source text. This
+/// projection is built only for a double-click token lookup.
+pub fn token_rows(
+    v: &FileView,
+    content: ratatui::layout::Rect,
+    mobile: bool,
+) -> Option<Vec<String>> {
+    let FileLoad::Text(lines) = &v.load else {
+        return None;
+    };
+    let show_footer = !mobile || v.search.is_some();
+    let body_rows = content.height.saturating_sub(u16::from(show_footer)) as usize;
+    let gutter = gutter_width(lines.len());
+    let prefix = " ".repeat((gutter + 1) as usize);
+    let text_width = content.width.saturating_sub(gutter + 1) as usize;
+    if text_width == 0 {
+        return None;
+    }
+
+    let mut rows = Vec::with_capacity(body_rows);
+    if v.wrap {
+        'lines: for line in lines.iter().skip(v.scroll) {
+            for range in wrap_ranges(line, text_width) {
+                rows.push(format!("{prefix}{}", seg_text(line, range)));
+                if rows.len() >= body_rows {
+                    break 'lines;
+                }
+            }
+        }
+    } else {
+        rows.extend(lines.iter().skip(v.scroll).take(body_rows).map(|line| {
+            let visible: String = line
+                .chars()
+                .skip(v.hscroll as usize)
+                .take(text_width)
+                .collect();
+            format!("{prefix}{visible}")
+        }));
+    }
+    Some(rows)
+}
+
 /// Extract the text under a mouse selection over a file view (docs/38), so
 /// drag-to-copy works like a pane. `content` is the view's content rect and
 /// `((sx,sy),(ex,ey))` the selection in reading order (terminal cells).
@@ -435,7 +479,7 @@ pub fn selection_text(
     }
 
     let mut out = String::new();
-    let mut first = true;
+    let mut previous: Option<(usize, usize)> = None;
     for ty in sy..=ey {
         let vi = (ty.saturating_sub(content.y)) as usize;
         let Some(&(line, seg_s, seg_e)) = rowmap.get(vi) else {
@@ -464,11 +508,15 @@ pub fn selection_text(
         } else {
             String::new()
         };
-        if !first {
-            out.push('\n');
+        if let Some((previous_line, previous_end)) = previous {
+            if previous_line == line {
+                out.extend(chars[previous_end.min(chars.len())..start].iter().copied());
+            } else {
+                out.push('\n');
+            }
         }
-        first = false;
-        out.push_str(seg.trim_end());
+        out.push_str(&seg);
+        previous = Some((line, end));
     }
     let out = out.trim_end_matches('\n').to_string();
     (!out.is_empty()).then_some(out)
@@ -606,6 +654,32 @@ mod tests {
         // Short line and empty line each stay a single row.
         assert_eq!(wrap_ranges("hi", 10), vec![(0, 2)]);
         assert_eq!(wrap_ranges("", 10), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn wrapped_selection_joins_visual_rows_without_inventing_a_newline() {
+        let mut view = FileView::new(PathBuf::from("article.txt"));
+        view.apply(FileLoad::Text(vec!["the quick brown fox".into()]));
+        let content = ratatui::layout::Rect::new(0, 0, 15, 3);
+        let text_x = gutter_width(1) + 1;
+
+        assert_eq!(
+            selection_text(&view, content, ((text_x, 0), (text_x + 8, 1))).as_deref(),
+            Some("the quick brown fox")
+        );
+    }
+
+    #[test]
+    fn selection_preserves_real_file_line_breaks() {
+        let mut view = FileView::new(PathBuf::from("source.txt"));
+        view.apply(FileLoad::Text(vec!["alpha".into(), "beta".into()]));
+        let content = ratatui::layout::Rect::new(0, 0, 15, 3);
+        let text_x = gutter_width(2) + 1;
+
+        assert_eq!(
+            selection_text(&view, content, ((text_x, 0), (text_x + 3, 1))).as_deref(),
+            Some("alpha\nbeta")
+        );
     }
 
     #[test]

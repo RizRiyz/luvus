@@ -368,9 +368,12 @@ surface:
   or merging. `task merge` is serialized into
   `luvus/integration`: wait for its response, treat `merged` as terminal, and
   resolve a reported conflict before retrying. A branch-backed dependency does
-  not unblock its dependents until it is merged. `task start` checks leases
-  before creating a branch, worktree, or pane, so resolve a returned
-  `lease_conflict` before retrying. `task release` requeues an
+  not unblock its dependents until it is merged. `task start` defaults to
+  isolated `mode=worktree`; explicit `mode=workspace` creates a branchless task
+  tab in a shared checkout and cannot be merged. Start checks leases before
+  creating either worker, so resolve a returned `lease_conflict` before
+  retrying. Leases coordinate declared paths but do not sandbox a shared
+  checkout. `task release` requeues an
   active task and releases its path leases; it does not stop the worker pane.
 - Inspect module metadata, actions, settings, and logs before changing module
   state. Installation, uninstallation, and consequential setting changes need
@@ -383,8 +386,11 @@ surface:
   serve the user's request.
 - Open Mission Control directly with `luvus mission open [<workspace>]` when
   the user asks for it. The optional workspace index is 0-based; omit it to
-  target the active workspace. For UHP automation, use the workspace-scoped
-  `mission.open` method.
+  target the active workspace. For UHP automation, use `mission.snapshot` with
+  workspace scope (the default) or explicit all-workspace scope to inspect
+  data without changing the UI,
+  `mission.refresh` for an explicit usage refresh, and `mission.open` only to
+  change the visible tab.
 - Agent detection is built into Luvus. `luvus integration install` manages
   optional native session-resume hooks and must not be used merely to make an
   agent appear in the sidebar. Install or remove an integration only when the

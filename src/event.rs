@@ -129,6 +129,17 @@ pub enum AppEvent {
         session: String,
         result: Result<(), String>,
     },
+    /// A user-requested snapshot of known named sessions completed off-loop.
+    NamedSessionsLoaded {
+        generation: u64,
+        result: Result<Vec<crate::session::SessionInfo>, String>,
+    },
+    /// A selected named session is ready for this client to attach.
+    NamedSessionPrepared {
+        generation: u64,
+        name: String,
+        result: Result<(), crate::app::session_menu::NamedSessionOpenError>,
+    },
     /// One structured Git status scan feeds FILES tint and DIFF (docs/88).
     DiffStatus {
         token: u64,
@@ -222,6 +233,8 @@ pub enum AppEvent {
     /// tokens/context/cost keyed by agent + session id, read off-loop from native
     /// agent stores, plus each ledger's mtime so unchanged sessions stay cached.
     UsageScanned {
+        scope: crate::mission::MissionScope,
+        scanned: Vec<crate::mission::UsageKey>,
         usage: std::collections::HashMap<crate::mission::UsageKey, crate::mission::AgentUsage>,
         mtimes: std::collections::HashMap<crate::mission::UsageKey, std::time::SystemTime>,
     },

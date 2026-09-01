@@ -1,18 +1,19 @@
 ---
 title: Multi-Agent Orchestration
-description: Run multiple AI agents on one project in parallel with isolated worktrees, path leases, quality gates, and safe merging.
+description: Coordinate AI agents with isolated worktrees or shared-workspace task tabs, path leases, quality gates, and safe merging.
 ---
 
 Run **multiple AI agents on one project in parallel**, without them stepping on
 each other. luvus coordinates the team through a shared **task board**: every
-worker runs in its own isolated **git worktree**, **path leases** stop
-overlapping edits from even being assigned, **quality gates** verify work
-before it counts, and a **merge gate** integrates finished branches without
-ever touching your checkout.
+worker can run in an isolated **git worktree** or an explicit **shared
+workspace** task tab. **Path leases** coordinate intended edits, **quality
+gates** verify work before it counts, and a **merge gate** integrates finished
+worktree branches without touching your checkout.
 
 :::tip[TL;DR]
-Open the board (`Ctrl+Space o`), press `a` to add a task, `s` to start an
-isolated worker for it, `d` to finish (runs its quality gate), `m` to merge.
+Open the board (`Ctrl+Space o`), press `a` to add a task, then `s` to choose
+worktree or workspace mode and an agent. Press `d` to finish; worktree tasks
+can then use `m` to merge.
 :::
 
 ## The concepts
@@ -21,7 +22,7 @@ isolated worker for it, `d` to finish (runs its quality gate), `m` to merge.
 |---|---|
 | **Task** | A unit of work: title, the file globs it will touch, dependencies, and an optional quality-gate command. Gets an id like `t1`. |
 | **Lease** | A reservation on file paths. Two workers can't hold overlapping globs, so conflicting work can't be assigned. |
-| **Worker** | A pane running an agent in a dedicated git worktree on its own branch (`luvus/<id>`) for physical isolation, so two workers literally edit different files on disk. |
+| **Worker** | A task-owned pane. Worktree mode uses a dedicated branch and checkout; workspace mode uses a dedicated task tab in an existing shared checkout. |
 | **Quality gate** | A command (e.g. `cargo test`) that runs when a task is marked done. It must pass before the task can merge. |
 | **Merge gate** | Integrates a finished branch into `luvus/integration` inside a dedicated worktree, never your working checkout. A conflict blocks the task instead of corrupting anything. |
 
@@ -34,8 +35,8 @@ integrates at a time. An interrupted integration restores its prior `done` or
 they never start before their dependency is available in the integration
 history. The ledger lives in `~/.luvus/orch.json`, separate from your session.
 
-`task start` validates the task's path lease before it creates a branch,
-worktree, or pane. If another task already holds an overlapping path, the start
+`task start` validates the task's path lease before it creates a worktree or
+workspace worker pane. If another task already holds an overlapping path, start
 returns `lease_conflict` and leaves the queued task untouched. After a server
 restart, leases follow workers that were restored to new pane IDs; leases with
 no live task owner are discarded so stale reservations cannot block the queue.
@@ -45,7 +46,7 @@ paths, Luvus keeps the existing holder and marks the unprotected task blocked.
 ## The board
 
 Open the `◇ orch` tab with **`Ctrl+Space o`**. It shows every task (status ·
-id · title · dependencies · worker pane and branch once started) and the active
+id · title · dependencies · mode · worker location once started) and the active
 leases, live. Navigate with `j`/`k`, the wheel, or click a row. On a wide
 terminal, the selected task's branch, paths, gate, output, and notes stay visible
 in a detail panel.
@@ -59,7 +60,11 @@ Mouse controls follow the same validated actions as the keyboard and CLI:
 - click its worker label to jump to the worker pane;
 - right click a task for the actions valid in its current state;
 - click **New task** to open the form, then click fields and form actions;
-- click an agent in the start-worker picker, then click **start**.
+- choose **worktree** or **workspace** in the first start-worker step, then
+  choose an agent in the second step;
+- when the board is empty, click the Worktree/Workspace labels in the Flow
+  panel to compare their lifecycle diagrams. This is informational and does
+  not change the next worker's mode.
 
 The task menu stays bound to the task that opened it, even if the board changes
 before an action is chosen.
@@ -67,11 +72,11 @@ before an action is chosen.
 | Key | Action |
 |-----|--------|
 | `a` | **new task**: a Title / Paths / Deps / Gate form (`⇥` between fields, `⏎` creates) |
-| `s` | **start** an isolated worktree worker for the selected task |
+| `s` | **start**: choose worktree/workspace mode, then choose an agent |
 | `d` | **done**: runs its quality gate (pass → done, fail → held at review) |
 | `m` | **merge** into `luvus/integration` |
 | `⏎` | **jump** to its worker pane |
-| `x` | **requeue** an active task and release its path leases |
+| `x` | **release** an active task and its path leases |
 | `q` | close the board without stopping tasks or workers |
 
 ## A worked example
@@ -106,9 +111,12 @@ can run the whole loop itself:
 luvus task add "OAuth module" --paths "src/auth/**" --gate "cargo test auth"
 luvus task list · get t1 · update t1 --status running --note "learning: …"
 
-# start workers (parallel, isolated)
+# start workers (worktree remains the default)
 luvus task start t1 --agent "claude"
 luvus task next --start --agent "claude"   # claim + start the next ready task
+
+# run directly in an existing checkout (no branch or merge step)
+luvus task start t2 --mode workspace --agent "codex"
 
 # finish + merge
 luvus task heartbeat t1 --context 0.6      # context gate: >0.85 blocks `done`
@@ -135,8 +143,11 @@ Events on the bus: `task.added` · `task.claimed` · `task.started` ·
 
 - **Nothing spawns unattended.** Workers start only when you press `s` or run
   `task start`.
-- **Your checkout is never touched.** Workers edit in their own worktrees.
-  Merges happen in a dedicated integration worktree.
+- **Worktree mode is isolated by default.** Workers edit in their own worktrees
+  and merges happen in a dedicated integration worktree.
+- **Workspace mode is intentionally shared.** It creates a task tab without a
+  branch or nested workspace. Leases coordinate Luvus tasks but do not prevent
+  agents or external tools from writing outside declared paths.
 - **Conflicts can't corrupt.** The merge gate aborts cleanly on conflict and
   surfaces it (task → `blocked`).
 - **Two layers of isolation.** Leases prevent overlapping work from being
@@ -150,7 +161,7 @@ Events on the bus: `task.added` · `task.claimed` · `task.started` ·
 
 | Symptom | Fix |
 |---|---|
-| `s` → *not a git repo* | The board needs a workspace that's a git repository (workers are worktrees). |
+| `s` → *not a git repo* | Worktree mode needs Git. Select workspace mode to run a branchless worker in the current directory. |
 | `s` → *deps not done* | A dependency task isn't `done` yet. |
 | `s` → *lease conflict* | Another task owns an overlapping path. Finish or release that task before retrying. No worker was created. |
 | `d` → *needs compaction* | The worker's context is over 85%, so compact (e.g. `/compact`), then retry. |

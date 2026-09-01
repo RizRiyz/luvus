@@ -16,13 +16,21 @@ luvus uhp snapshot
 
 Capabilities report the protocol version, method contracts, access mode,
 required scope, idempotence, atomic methods, limits, event sequence, terminal
-features, and server identity rules. The schema defines exact request and
-response fields. Do not infer a method from a newer website or binary.
+features, and server identity rules. The schema defines exact request, response,
+and general event payload fields. Do not infer a method from a newer website or
+binary.
 
 `luvus uhp proxy` accepts one newline-delimited request from stdin and emits one
 response. A request has `id`, `method`, and `params`; add `auth` only for an
 explicit delegated token. Keep the inherited or explicitly selected session
 and socket when invoking it.
+
+`host.capabilities` discovers a separate on-demand profile handled by the
+proxy itself. Its host diagnostics, named-session lifecycle, update, skill,
+and integration methods can work without a running server. They trust only the
+local operating-system account, reject delegated tokens, and are not exposed
+through `uhp access`. Every host mutation that installs or deletes data
+requires `confirm:true` and the human's explicit authorization.
 
 `luvus uhp access [--control]` instead creates a temporary authenticated
 loopback gateway for a persistent third-party byte-stream provider. Its first
@@ -58,7 +66,8 @@ read current state and reconcile instead of blindly retrying.
 - Workspace topology: `workspace.*`, `tab.*`, `pane.*`, and `layout.*`
 - Agents: `agent.*`, with `agent.prompt` preferred for atomic prompt submission
 - Search, files, Git, and review: `search.*`, `files.*`, `git.*`, and `diff.*`
-- Mission Control: `mission.open`
+- Mission Control: read with `mission.snapshot`, refresh usage on demand with
+  `mission.refresh`, and change the visible UI only with `mission.open`
 - Worktrees and orchestration: `worktree.*`, `task.*`, and `lease.*`
 - Extensions: `module.*`
 - Themes and configuration: `theme.*`, `config.*`, and `manifest.reload`

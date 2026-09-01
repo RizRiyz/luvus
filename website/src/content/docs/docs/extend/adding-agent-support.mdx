@@ -77,6 +77,8 @@ use super::types::{AgentDescriptor, IdentityDescriptor};
 pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "myagent",
     aliases: &["my-agent"],
+    launch_command: "myagent-cli",
+    task_prompt_args: &[],
     identity: IdentityDescriptor {
         distinct: &["myagent-cli"],
         ambiguous: &["myagent"],
@@ -92,7 +94,10 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 The canonical `id` is lowercase, stable, and used in session records, API
 responses, persistence, documentation, and integration reports. `aliases`
 normalize accepted user input to that canonical ID; they do not create another
-agent.
+agent. `launch_command` is the exact executable used to start a fresh
+interactive worker from ORCH. Put required static arguments before an ORCH task
+briefing in `task_prompt_args`. Keep shell syntax and user data out of both
+fields.
 
 ### Identity evidence
 

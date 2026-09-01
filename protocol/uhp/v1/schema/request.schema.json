@@ -13,7 +13,7 @@
       "enum": [
         "uhp.capabilities", "uhp.stats", "uhp.token.create", "uhp.token.list", "uhp.token.revoke",
         "ping", "server.stop", "server.reload_config", "server.agent_manifests", "server.reload_agent_manifests", "config.get", "config.patch",
-        "session.snapshot", "events.subscribe", "events.wait", "wait.output",
+        "host.capabilities", "host.info", "host.doctor", "host.update.check", "host.update.install", "session.snapshot", "session.list", "session.status", "session.start", "session.stop", "session.restart", "session.delete", "skill.status", "skill.enable", "skill.disable", "integration.status", "integration.install", "integration.uninstall", "events.subscribe", "events.wait", "wait.output",
         "workspace.list", "workspace.get", "workspace.new", "workspace.open", "workspace.focus", "workspace.rename", "workspace.pin", "workspace.move", "workspace.move_block", "workspace.report_metadata", "workspace.close",
         "node.list", "node.new", "node.open", "node.focus", "node.rename", "node.pin", "node.close",
         "tab.list", "tab.get", "tab.new", "tab.focus", "tab.move", "tab.swap", "tab.rename", "tab.close",
@@ -23,7 +23,7 @@
         "search", "search.capabilities", "search.query", "search.activate",
         "files.tree", "files.open", "files.reveal", "files.refresh",
         "git.status", "git.branches", "git.log", "git.open",
-        "mission.open",
+        "mission.snapshot", "mission.refresh", "mission.open",
         "diff.refresh", "diff.list", "diff.open", "diff.get", "diff.navigate", "diff.note.add", "diff.note.apply", "diff.note.list", "diff.note.edit", "diff.note.resolve", "diff.note.reopen", "diff.note.remove", "diff.note.send",
         "worktree.list", "worktree.create", "worktree.open", "worktree.remove",
         "task.add", "task.list", "task.get", "task.claim", "task.next", "task.start", "task.heartbeat", "task.update", "task.done", "task.merge", "task.release", "task.delete",
@@ -62,10 +62,67 @@
         "timeout_s": { "type": "number", "minimum": 0, "maximum": 3600 },
         "after_sequence": { "type": "integer", "minimum": 0 }
       }
+    },
+    "missionQueryParams": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "scope": { "enum": ["workspace", "all"] },
+        "workspace": { "oneOf": [{ "type": "string", "pattern": "^[0-9]+$" }, { "type": "integer", "minimum": 0 }] },
+        "workspace_id": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "not": { "required": ["workspace", "workspace_id"] }
+    },
+    "sessionTargetParams": {
+      "type": "object", "additionalProperties": false, "required": ["name"],
+      "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$", "not": { "enum": [".", ".."] } } }
+    },
+    "sessionDeleteParams": {
+      "type": "object", "additionalProperties": false, "required": ["name", "confirm"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$", "not": { "enum": [".", ".."] } },
+        "confirm": { "const": true }
+      }
+    },
+    "confirmedParams": {
+      "type": "object", "additionalProperties": false, "required": ["confirm"],
+      "properties": { "confirm": { "const": true } }
+    },
+    "integrationChangeParams": {
+      "type": "object", "additionalProperties": false, "required": ["agent", "confirm"],
+      "properties": {
+        "agent": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9._-]+$" },
+        "confirm": { "const": true }
+      }
+    },
+    "taskStartParams": {
+      "type": "object", "additionalProperties": false, "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "branch": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "agent": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "mode": { "enum": ["worktree", "workspace"] },
+        "workspace_id": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "allOf": [
+        { "if": { "properties": { "mode": { "const": "workspace" } }, "required": ["mode"] },
+          "then": { "not": { "required": ["branch"] } } },
+        { "if": { "properties": { "mode": { "const": "worktree" } }, "required": ["mode"] },
+          "then": { "not": { "required": ["workspace_id"] } } }
+      ]
+    },
+    "taskNextParams": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "start": { "type": "boolean" },
+        "agent": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "pane": { "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "integer", "minimum": 0 }] },
+        "mode": { "enum": ["worktree", "workspace"] },
+        "workspace_id": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
     }
   },
   "allOf": [
-    { "if": { "properties": { "method": { "enum": ["uhp.capabilities", "uhp.stats", "uhp.token.list"] } } },
+    { "if": { "properties": { "method": { "enum": ["host.capabilities", "host.info", "host.doctor", "host.update.check", "skill.status", "integration.status", "uhp.capabilities", "uhp.stats", "uhp.token.list", "session.list"] } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
     { "if": { "properties": { "method": { "const": "uhp.token.create" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/tokenCreateParams" } } } },
@@ -75,6 +132,20 @@
       "then": { "properties": { "params": { "$ref": "#/$defs/subscribeParams" } } } },
     { "if": { "properties": { "method": { "const": "events.wait" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/eventWaitParams" } } } },
+    { "if": { "properties": { "method": { "enum": ["mission.snapshot", "mission.refresh"] } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/missionQueryParams" } } } },
+    { "if": { "properties": { "method": { "enum": ["session.status", "session.start", "session.stop", "session.restart"] } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/sessionTargetParams" } } } },
+    { "if": { "properties": { "method": { "const": "session.delete" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/sessionDeleteParams" } } } },
+    { "if": { "properties": { "method": { "enum": ["host.update.install", "skill.enable", "skill.disable"] } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/confirmedParams" } } } },
+    { "if": { "properties": { "method": { "enum": ["integration.install", "integration.uninstall"] } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/integrationChangeParams" } } } },
+    { "if": { "properties": { "method": { "const": "task.start" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/taskStartParams" } } } },
+    { "if": { "properties": { "method": { "const": "task.next" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/taskNextParams" } } } },
     { "if": { "properties": { "method": { "const": "terminal.backend.inventory" } } },
       "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/inventory.schema.json" } } } },
     { "if": { "properties": { "method": { "const": "terminal.backend.snapshot" } } },

@@ -10,7 +10,6 @@ pub(super) const OPERATIONS: IntegrationOperations = IntegrationOperations {
     install,
     uninstall,
     is_installed,
-    legacy_is_installed,
 };
 
 const PLUGIN: &str = r#"// luvus opencode integration (docs/23) — reports the session id for native resume.
@@ -69,8 +68,4 @@ fn uninstall() -> Result<()> {
 
 fn is_installed() -> bool {
     plugin_path().exists()
-}
-
-fn legacy_is_installed() -> bool {
-    plugin_dir().join("bohay.js").is_file()
 }

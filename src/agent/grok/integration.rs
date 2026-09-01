@@ -11,7 +11,6 @@ pub(super) const OPERATIONS: IntegrationOperations = IntegrationOperations {
     install,
     uninstall,
     is_installed,
-    legacy_is_installed,
 };
 
 fn hooks_dir() -> PathBuf {
@@ -62,8 +61,4 @@ fn uninstall() -> Result<()> {
 
 fn is_installed() -> bool {
     hook_path().exists()
-}
-
-fn legacy_is_installed() -> bool {
-    hooks_dir().join("bohay.json").is_file()
 }

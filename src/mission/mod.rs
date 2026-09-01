@@ -23,6 +23,15 @@ pub enum MissionScope {
     All,
 }
 
+/// One demand-driven usage scan requested by Mission Control or UHP. Keeping
+/// the scope and anchor workspace in the request lets automation inspect the
+/// fleet without changing the user's active workspace or dashboard state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MissionUsageRequest {
+    pub scope: MissionScope,
+    pub workspace: usize,
+}
+
 /// Stable cache identity for a native usage ledger. Session identifiers are
 /// agent-local, so the agent name must be part of the key.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

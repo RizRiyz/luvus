@@ -40,9 +40,6 @@ case "$os" in
 esac
 
 # ── resolve version ──
-if [ -z "${LUVUS_VERSION:-}" ] && [ -n "${BOHAY_VERSION:-}" ]; then
-  LUVUS_VERSION=$BOHAY_VERSION
-fi
 if [ -n "${LUVUS_VERSION:-}" ]; then
   tag="$LUVUS_VERSION"
 else
@@ -64,9 +61,6 @@ tar -xzf "$tmp/$asset" -C "$tmp" || err "extract failed"
 chmod +x "$tmp/$BIN"
 
 # ── choose an install dir on PATH ──
-if [ -z "${LUVUS_INSTALL_DIR:-}" ] && [ -n "${BOHAY_INSTALL_DIR:-}" ]; then
-  LUVUS_INSTALL_DIR=$BOHAY_INSTALL_DIR
-fi
 if [ -n "${LUVUS_INSTALL_DIR:-}" ]; then
   dir="$LUVUS_INSTALL_DIR"
 elif [ -w /usr/local/bin ]; then

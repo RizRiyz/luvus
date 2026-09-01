@@ -13,6 +13,11 @@ reattaches to) a luvus server *on the remote machine*, and attaches your local
 terminal to it. No port-forwarding, no extra daemon, no config.
 
 - **Requirements:** `ssh` access to the host, and `luvus` installed on it.
+- **Executable discovery:** Luvus first uses the remote non-interactive SSH
+  `PATH`, then checks standard user installation locations such as
+  `~/.local/bin`, `~/.cargo/bin`, and `~/.nix-profile/bin`. This includes the
+  default location selected by the official installer when `/usr/local/bin` is
+  not writable.
 - **Efficient by design:** only changed screen cells cross the wire (a
   keystroke costs ~22 bytes), so it stays responsive on slow links.
 - **Detach semantics** are identical to local: close your laptop, the remote

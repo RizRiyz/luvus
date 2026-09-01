@@ -30,6 +30,7 @@ fn row_is_hovered(row: Rect, hover: Option<(u16, u16)>) -> bool {
 /// offset survives between frames without every caller tracking one.
 struct PopupCtx<'a> {
     hover: Option<(u16, u16)>,
+    selected: Option<usize>,
     mobile: bool,
     id: PopupId,
     scroll: &'a mut MenuScroll,
@@ -54,6 +55,7 @@ fn render_popup(
 ) -> Vec<Rect> {
     let PopupCtx {
         hover,
+        selected,
         mobile,
         id,
         scroll,
@@ -95,6 +97,9 @@ fn render_popup(
     // How many rows fit, and how far the list can therefore be scrolled.
     let per_screen = (inner.height / row_height) as usize;
     let max_offset = rows.len().saturating_sub(per_screen);
+    if let Some(selected) = selected {
+        scroll.reveal(id, selected, per_screen, max_offset);
+    }
     let offset = scroll.record(id, popup, max_offset);
 
     let mut rects = vec![Rect::default(); rows.len()];
@@ -129,7 +134,7 @@ fn render_popup(
             rects[i] = row;
             continue;
         }
-        let hot = row_is_hovered(row, hover);
+        let hot = selected.map_or_else(|| row_is_hovered(row, hover), |index| index == i);
         let fg = if hot {
             t.crust
         } else if r.destructive {
@@ -202,6 +207,7 @@ pub(super) fn draw_ws_menu(
         t,
         PopupCtx {
             hover: app.hover,
+            selected: None,
             mobile: app.compact,
             id: PopupId::Ws,
             scroll: &mut app.menu_scroll,
@@ -244,6 +250,7 @@ pub(super) fn draw_tab_menu(
         t,
         PopupCtx {
             hover: app.hover,
+            selected: None,
             mobile: app.compact,
             id: PopupId::Tab,
             scroll: &mut app.menu_scroll,
@@ -302,6 +309,7 @@ pub(super) fn draw_tab_menu(
             t,
             PopupCtx {
                 hover: app.hover,
+                selected: None,
                 mobile: app.compact,
                 id: PopupId::TabSwap,
                 scroll: &mut app.menu_scroll,
@@ -353,6 +361,7 @@ pub(super) fn draw_pane_menu(
         t,
         PopupCtx {
             hover: app.hover,
+            selected: None,
             mobile: app.compact,
             id: PopupId::Pane,
             scroll: &mut app.menu_scroll,
@@ -411,6 +420,7 @@ pub(super) fn draw_pane_menu(
                 t,
                 PopupCtx {
                     hover: app.hover,
+                    selected: None,
                     mobile: app.compact,
                     id: PopupId::PaneMove,
                     scroll: &mut app.menu_scroll,
@@ -461,6 +471,7 @@ pub(super) fn draw_agent_menu(
         t,
         PopupCtx {
             hover: app.hover,
+            selected: None,
             mobile: app.compact,
             id: PopupId::Agent,
             scroll: &mut app.menu_scroll,
@@ -559,6 +570,7 @@ pub(super) fn draw_file_menu(
     };
     let anchor = menu.anchor;
     let editors = menu.editors.clone();
+    let selected = menu.selected;
     let items = menu.build_items();
     let rows: Vec<MenuRow> = items
         .iter()
@@ -576,6 +588,7 @@ pub(super) fn draw_file_menu(
         t,
         PopupCtx {
             hover: app.hover,
+            selected,
             mobile: app.compact,
             id: PopupId::File,
             scroll: &mut app.menu_scroll,
@@ -590,12 +603,8 @@ pub(super) fn draw_diff_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
     let Some(menu) = app.diff_menu.as_ref() else {
         return;
     };
-    let items = [
-        DiffMenuItem::OpenPreview,
-        DiffMenuItem::OpenPane,
-        DiffMenuItem::OpenTab,
-        DiffMenuItem::CopyPath,
-    ];
+    let items = crate::app::DiffMenu::ITEMS;
+    let selected = menu.selected;
     let rows: Vec<MenuRow> = items
         .iter()
         .map(|item| MenuRow {
@@ -618,6 +627,7 @@ pub(super) fn draw_diff_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
         t,
         PopupCtx {
             hover: app.hover,
+            selected,
             mobile: app.compact,
             id: PopupId::Diff,
             scroll: &mut app.menu_scroll,
@@ -657,6 +667,7 @@ pub(super) fn draw_orch_menu(
         t,
         PopupCtx {
             hover: app.hover,
+            selected: None,
             mobile: app.compact,
             id: PopupId::Orch,
             scroll: &mut app.menu_scroll,
@@ -732,6 +743,7 @@ pub(super) fn draw_dock_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
         t,
         PopupCtx {
             hover: app.hover,
+            selected: None,
             mobile: app.compact,
             id: PopupId::Dock,
             scroll: &mut app.menu_scroll,
@@ -901,6 +913,7 @@ mod tests {
             is_dir: false,
             anchor: (10, 0),
             items: Vec::new(),
+            selected: None,
             editors: vec![
                 ("vim".to_string(), "Vim".to_string()),
                 ("hx".to_string(), "Helix".to_string()),
@@ -975,6 +988,30 @@ mod tests {
         assert!(
             app.file_delete.is_some(),
             "clicking the scrolled-in row ran its action"
+        );
+    }
+
+    #[test]
+    fn keyboard_selection_keeps_the_file_action_in_view() {
+        let _env = crate::persist::test_env("menu-keyboard-reveal");
+        let mut app = app_with_file_menu(10);
+        let selected = app
+            .file_menu
+            .as_ref()
+            .unwrap()
+            .build_items()
+            .iter()
+            .position(|item| *item == FileMenuItem::Delete)
+            .unwrap();
+        app.file_menu.as_mut().unwrap().selected = Some(selected);
+        let mut term = Terminal::new(TestBackend::new(80, 10)).unwrap();
+
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        assert!(app.menu_scroll.offset_of(PopupId::File) > 0);
+        assert!(
+            rect_of(&app, FileMenuItem::Delete).height > 0,
+            "the selected keyboard action is rendered and reachable"
         );
     }
 

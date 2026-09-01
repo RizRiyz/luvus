@@ -53,15 +53,14 @@ where possible.
 - Never stop, restart, attach to, benchmark, or delete the user's production
   Luvus server during development.
 - Debug builds normally use `~/.luvus-dev/`; installed release builds use
-  `~/.luvus/`. An inherited `LUVUS_SOCKET_PATH`, `BOHAY_SOCKET_PATH`, or session
-  selector can still route a debug command to another running server.
+  `~/.luvus/`. An inherited `LUVUS_SOCKET_PATH` or session selector can still
+  route a debug command to another running server.
 - Before a debug lifecycle or integration test, run outside a managed Luvus
   pane or explicitly isolate the home and remove inherited socket/session
   selectors. On Unix, a safe pattern is:
 
   ```bash
-  env -u LUVUS_SOCKET_PATH -u BOHAY_SOCKET_PATH \
-      -u LUVUS_SESSION -u BOHAY_SESSION \
+  env -u LUVUS_SOCKET_PATH -u LUVUS_SESSION \
       LUVUS_HOME="$HOME/.luvus-dev" \
       ./target/debug/luvus --session agent-test server restart
   ```
@@ -214,7 +213,11 @@ For a built-in adapter:
 
 1. Create `src/agent/<agent>/mod.rs` and assemble one immutable
    `AgentDescriptor`. Keep the canonical `id` lowercase and stable; aliases
-   normalize user input but do not create additional agents.
+   normalize user input but do not create additional agents. Set
+   `launch_command` to the exact executable for a fresh interactive session;
+   do not put flags or shell syntax in this field. Put a required static
+   ORCH prompt subcommand or flag such as `ask` in `task_prompt_args`; never
+   embed user data.
 2. Declare identity evidence accurately. Put unmistakable executable names in
    `distinct`, ordinary words in `ambiguous`, versioned executable logic in a
    narrow `binary_matcher`, and exact interpreter package names—including npm
@@ -270,8 +273,8 @@ not the current public contract.
 Prefer a module when a feature can live outside core without weakening the user
 experience. Modules are directories with `luvus-module.toml`, executable argv
 commands, settings, actions, event hooks, panes, docks, and bar widgets. They
-receive canonical `LUVUS_*` context and temporary `BOHAY_*` compatibility
-aliases. They must not receive direct in-process access to `App`.
+receive canonical `LUVUS_*` context. They must not receive direct in-process
+access to `App`.
 
 New dependencies require a concrete benefit and review of maintenance,
 licensing, supply-chain exposure, binary size, compile time, and cross-platform

@@ -196,8 +196,8 @@ fn confirm() -> Result<bool> {
     Ok(matches!(line.trim(), "y" | "Y" | "yes"))
 }
 
-/// Run a build command in `dir` with a scrubbed environment — no `LUVUS_*` and
-/// no socket access, so build steps can't drive luvus.
+/// Run a build command in `dir` with a scrubbed environment and no socket
+/// access, so build steps cannot inherit current or retired control data.
 fn run_build(dir: &Path, argv: &[String]) -> Result<()> {
     let Some((program, args)) = argv.split_first() else {
         bail!("empty build command");
@@ -206,7 +206,7 @@ fn run_build(dir: &Path, argv: &[String]) -> Result<()> {
     cmd.args(args).current_dir(dir);
     cmd.env_clear();
     for (k, v) in std::env::vars() {
-        if !k.starts_with("LUVUS_") && !k.starts_with("BOHAY_") {
+        if inherited_build_var_allowed(&k) {
             cmd.env(k, v);
         }
     }
@@ -215,6 +215,10 @@ fn run_build(dir: &Path, argv: &[String]) -> Result<()> {
         bail!("exited with {status}");
     }
     Ok(())
+}
+
+fn inherited_build_var_allowed(key: &str) -> bool {
+    !key.starts_with("LUVUS_") && !key.starts_with("BOHAY_")
 }
 
 fn git(args: &[&str]) -> Result<()> {
@@ -246,7 +250,13 @@ fn short(sha: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::module::manifest::LEGACY_MANIFEST_FILE;
+
+    #[test]
+    fn build_environment_scrubs_current_and_retired_control_data() {
+        assert!(!inherited_build_var_allowed("LUVUS_SOCKET_PATH"));
+        assert!(!inherited_build_var_allowed("BOHAY_SOCKET_PATH"));
+        assert!(inherited_build_var_allowed("PATH"));
+    }
 
     #[test]
     fn parse_owner_repo_and_paths() {
@@ -272,13 +282,13 @@ mod tests {
             std::env::temp_dir().join(format!("luvus-manifest-switch-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
-        let legacy_path = root.join(LEGACY_MANIFEST_FILE);
-        let before = b"legacy manifest";
-        fs::write(&legacy_path, before).unwrap();
-        assert_eq!(ModuleManifest::path(&root), legacy_path);
+        let manifest_path = root.join(MANIFEST_FILE);
+        let before = b"module manifest";
+        fs::write(&manifest_path, before).unwrap();
+        assert_eq!(ModuleManifest::path(&root), manifest_path);
 
-        fs::write(root.join(MANIFEST_FILE), "replacement manifest").unwrap();
-        let error = verify_manifest_unchanged(&root, &legacy_path, before)
+        fs::write(&manifest_path, "replacement manifest").unwrap();
+        let error = verify_manifest_unchanged(&root, &manifest_path, before)
             .unwrap_err()
             .to_string();
         assert!(error.contains("manifest changed during build"), "{error}");

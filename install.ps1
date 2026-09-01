@@ -23,7 +23,6 @@ if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
 $target = 'x86_64-pc-windows-msvc'
 
 # ── resolve version ──
-if (-not $env:LUVUS_VERSION -and $env:BOHAY_VERSION) { $env:LUVUS_VERSION = $env:BOHAY_VERSION }
 if ($env:LUVUS_VERSION) {
   $tag = $env:LUVUS_VERSION
 } else {
@@ -55,7 +54,6 @@ try {
   $exe = Join-Path $tmp "$Bin.exe"
   if (-not (Test-Path $exe)) { Fail "archive did not contain $Bin.exe" }
 
-  if (-not $env:LUVUS_INSTALL_DIR -and $env:BOHAY_INSTALL_DIR) { $env:LUVUS_INSTALL_DIR = $env:BOHAY_INSTALL_DIR }
   $dir = if ($env:LUVUS_INSTALL_DIR) { $env:LUVUS_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'luvus' }
   New-Item -ItemType Directory -Path $dir -Force | Out-Null
   Copy-Item $exe (Join-Path $dir "$Bin.exe") -Force

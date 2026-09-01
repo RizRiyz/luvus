@@ -82,6 +82,20 @@ mod tests {
                     descriptor.id
                 );
             }
+            assert!(
+                !descriptor.launch_command.is_empty()
+                    && !descriptor.launch_command.chars().any(char::is_whitespace),
+                "invalid launch command for {}",
+                descriptor.id
+            );
+            assert!(
+                descriptor
+                    .task_prompt_args
+                    .iter()
+                    .all(|arg| { !arg.is_empty() && !arg.chars().any(char::is_whitespace) }),
+                "invalid task prompt argument for {}",
+                descriptor.id
+            );
         }
     }
 

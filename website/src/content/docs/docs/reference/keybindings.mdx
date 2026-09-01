@@ -17,10 +17,11 @@ the live cheat-sheet. Remap anything, change the prefix, or apply a preset in
 | `z` | zoom pane | `w` / `W` | next / previous workspace |
 | `r` | resize mode (then arrows) | `G` | new worktree |
 | `f` | fork agent session | `g` | git tab |
-| `b` / `B` | toggle left / right sidebar | `o` | orchestration board |
+| `b` / `B` | toggle both / right sidebar | `o` | orchestration board |
 | `a` | agents All/Active | `m` | Mission Control |
-| `e` | toggle FILES dock | `M` | jump palette (tabs / workspaces / agents) |
-| `/` | global fuzzy finder | `=` | Settings |
+| `e` | focus FILES tree | `i` | focus DIFF review |
+| `M` | jump palette (tabs / workspaces / agents) | `/` | global fuzzy finder |
+| `t` | named sessions | `=` | Settings |
 | `q` / `d` | detach | | |
 | `1`–`9` | jump to tab | | |
 
@@ -79,10 +80,19 @@ Navigation results appear first. File, output, and other running-session
 results arrive in the same list without resetting the selected row. See the
 [Global Fuzzy Finder](/docs/guides/search/) guide for limits and CLI use.
 
-## No-prefix keys and menus
+`Ctrl+Space t` opens the named-session selector directly. Use `↑` / `↓` or
+`j` / `k` to move, `Home` / `End` to reach either edge, and `Enter` to switch or
+create a session. `q` or `Esc` closes the list; inside the new-session prompt,
+`q` remains ordinary name text and `Esc` returns to the list. Like every
+configurable prefix command, **Open sessions** can be rebound in Settings →
+Keys.
 
-`Shift+↑` enters [scroll mode](/docs/guides/scrollback/), and the mouse does
-everything else.
+## Focused modes and menus
+
+`Shift+↑` enters [scroll mode](/docs/guides/scrollback/). `Ctrl+Space e` focuses
+the FILES tree, while `Ctrl+Space i` focuses the DIFF review list. Both accept
+arrows or `j` / `k`, and `Esc` returns to the pane. After `Enter` opens a file
+view, `x` closes that view. An opened DIFF review closes with `q` or `Esc`.
 
 **Right-click menus** (no key needed): a **tab** to rename it, a **workspace** row
 for its menu (rename / close / worktrees / git / board), a **pane** to split or

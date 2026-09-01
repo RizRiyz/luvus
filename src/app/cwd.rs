@@ -299,7 +299,7 @@ impl App {
         self.workspaces[dest].tabs.push(tab);
         let new_tab = self.workspaces[dest].tabs.len() - 1;
         if self.workspaces[src].tabs.is_empty() && self.workspaces.len() > 1 {
-            self.close_workspace(src);
+            self.close_workspace_after_rehome(src);
         }
         let dest = self
             .workspaces
@@ -739,6 +739,10 @@ mod tests {
                 .iter()
                 .all(|ws| !crate::platform::same_path(&ws.cwd, &home)),
             "empty source workspace closed"
+        );
+        assert!(
+            !app.automatic_workspace_open_is_suppressed(&home),
+            "automatic CWD rehoming is not an explicit workspace removal"
         );
         let files = files_rx
             .recv_timeout(Duration::from_secs(1))

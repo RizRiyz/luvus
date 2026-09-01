@@ -5,6 +5,7 @@
 
 pub mod capabilities;
 pub mod error;
+pub mod host;
 pub mod schema;
 pub mod topology;
 

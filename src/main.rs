@@ -8,7 +8,6 @@ mod app;
 mod bar;
 mod changelog;
 mod cli;
-mod compat;
 mod config;
 mod detect;
 mod diff;
@@ -45,6 +44,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
+#[cfg(windows)]
+use ratatui::crossterm::event::poll as poll_event;
 use ratatui::crossterm::event::{
     read as read_event, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture,
     EnableBracketedPaste, EnableFocusChange, EnableMouseCapture, Event, KeyboardEnhancementFlags,
@@ -66,7 +67,6 @@ fn main() -> Result<()> {
     // waits aren't quantized to Windows' ~15.6ms default (the cause of laggy
     // typing in panes there). No-op on Unix; restored when `main` returns.
     let _timer = platform::high_res_timer();
-    compat::normalize_legacy_environment();
     let raw_args: Vec<String> = std::env::args().collect();
     let args = session::configure_from_args(&raw_args).map_err(anyhow::Error::msg)?;
     match args.get(1).map(String::as_str) {
@@ -90,13 +90,8 @@ fn main() -> Result<()> {
         std::process::exit(cli::run(&args)?);
     }
 
-    // Migration belongs to commands that use the runtime, not informational
-    // output. In particular, `luvus --version` must stay side-effect-free and
-    // must never contaminate stdout/stderr used by installers and scripts.
-    persist::migrate_legacy_state()?;
-    integration::migrate_legacy_integrations();
     // One-time local cleanup of the old default-on skill installation. This
-    // never downloads or installs a skill; it only removes Luvus/Bohay-managed
+    // never downloads or installs a skill; it only removes legacy managed
     // global pointers and exact known auto-installed files.
     let _ = skill::migrate_legacy_installation();
     match args.get(1).map(String::as_str) {
@@ -631,20 +626,76 @@ fn attach_cmd(args: &[String]) -> Result<()> {
 /// socket through plain ssh and attach to it locally. No port-forwarding, no
 /// `~/.ssh/config` edits — keepalive options are passed on argv only.
 fn remote_attach(args: &[String]) -> Result<()> {
-    let mut cmd = remote_ssh_command(args)?;
+    let (result, status) = remote_attach_attempt(remote_ssh_command(args)?);
+    if result
+        .as_ref()
+        .is_err_and(ipc::client::is_handshake_io_error)
+        && status.as_ref().and_then(std::process::ExitStatus::code) == Some(127)
+    {
+        let (fallback_result, fallback_status) =
+            remote_attach_attempt(remote_fallback_ssh_command(args)?);
+        if fallback_result
+            .as_ref()
+            .is_err_and(ipc::client::is_handshake_io_error)
+            && fallback_status
+                .as_ref()
+                .and_then(std::process::ExitStatus::code)
+                == Some(127)
+        {
+            let context = i18n::cli::Context::configured();
+            let host = args.get(2).map_or("", String::as_str);
+            return Err(anyhow!(
+                "{}\n{}",
+                context.render(
+                    "Luvus was not found on the remote host {host}.",
+                    &[("host", host)]
+                ),
+                context.text(
+                    "Install Luvus there or place it in PATH or a standard user installation directory."
+                )
+            ));
+        }
+        return fallback_result;
+    }
+    result
+}
+
+fn remote_attach_attempt(mut cmd: Command) -> (Result<()>, Option<std::process::ExitStatus>) {
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()); // stderr inherited so ssh can prompt for auth
     let mut child = cmd
         .spawn()
-        .map_err(|e| anyhow!("failed to launch ssh: {e}"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow!("no ssh stdout"))?;
-    let stdin = child.stdin.take().ok_or_else(|| anyhow!("no ssh stdin"))?;
+        .map_err(|e| anyhow!("failed to launch ssh: {e}"));
+    let Ok(ref mut child) = child else {
+        return (child.map(|_| ()), None);
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let status = child.wait().ok();
+        return (Err(anyhow!("no ssh stdout")), status);
+    };
+    let Some(stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let status = child.wait().ok();
+        return (Err(anyhow!("no ssh stdin")), status);
+    };
     let result = ipc::client::attach(stdout, stdin);
+    let status = wait_for_remote_child(child);
+    (result, status)
+}
+
+fn wait_for_remote_child(child: &mut std::process::Child) -> Option<std::process::ExitStatus> {
+    // EOF from the SSH stdout normally means the child is already exiting. Give
+    // it a short bounded window to publish its real status before terminating a
+    // bridge that failed or disconnected without cleaning itself up.
+    for _ in 0..10 {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(_) => break,
+        }
+    }
     let _ = child.kill();
-    let _ = child.wait();
-    result
+    child.wait().ok()
 }
 
 /// Build the remote bridge command separately so session propagation stays
@@ -673,6 +724,53 @@ fn remote_ssh_command(args: &[String]) -> Result<Command> {
     Ok(cmd)
 }
 
+/// Retry path for POSIX remote hosts whose non-interactive SSH PATH omits the
+/// per-user directory selected by the official installer. The ordinary bare
+/// command is always attempted first, preserving existing Windows SSH behavior.
+fn remote_fallback_ssh_command(args: &[String]) -> Result<Command> {
+    let host = args
+        .get(2)
+        .ok_or_else(|| anyhow!("usage: luvus --remote <host> [ssh args]"))?;
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-T")
+        .arg("-o")
+        .arg("ServerAliveInterval=15")
+        .arg("-o")
+        .arg("ServerAliveCountMax=3");
+    for extra in args.iter().skip(3) {
+        cmd.arg(extra);
+    }
+
+    let mut bridge_args = Vec::new();
+    if let Some(name) = session::active_name() {
+        bridge_args.push("--session".to_string());
+        bridge_args.push(name);
+    } else if session::explicit_session_requested() {
+        bridge_args.push("--session".to_string());
+        bridge_args.push(session::DEFAULT_SESSION_NAME.to_string());
+    }
+    bridge_args.push("remote-client-bridge".to_string());
+    let bridge_args = bridge_args
+        .iter()
+        .map(|arg| posix_shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let script = format!(
+        "for luvus_bin in \"$HOME/.local/bin/luvus\" \"$HOME/.cargo/bin/luvus\" \
+         \"$HOME/.nix-profile/bin/luvus\" /usr/local/bin/luvus \
+         /opt/homebrew/bin/luvus /home/linuxbrew/.linuxbrew/bin/luvus; do \
+         if [ -x \"$luvus_bin\" ]; then exec \"$luvus_bin\" {bridge_args}; fi; done; \
+         printf '%s\\n' 'luvus remote: executable not found in common install locations' >&2; \
+         exit 127"
+    );
+    cmd.arg(host).arg(script).stderr(Stdio::inherit());
+    Ok(cmd)
+}
+
+fn posix_shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 fn server_running(sock: &Path) -> bool {
     ipc::transport::endpoint_exists(sock, Duration::from_millis(50))
 }
@@ -684,7 +782,6 @@ fn spawn_server() -> Result<()> {
         // The selector was already resolved into LUVUS_SESSION. A parent pane's
         // injected API socket must not leak into a newly spawned server.
         .env_remove("LUVUS_SOCKET_PATH")
-        .env_remove("BOHAY_SOCKET_PATH")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -1317,23 +1414,67 @@ fn remove_unbound_socket(path: &Path) -> std::io::Result<()> {
 }
 
 fn input_loop(tx: Sender<AppEvent>, pending: Vec<Event>) {
-    for event in pending {
-        let Some(event) = app_event(event) else {
-            continue;
-        };
-        if tx.send(event).is_err() {
-            return;
+    #[cfg(windows)]
+    {
+        let mut decoder = crate::terminal::host_input::HostInputDecoder::default();
+        for event in pending {
+            if !send_decoded_input(&tx, decoder.push(event)) {
+                return;
+            }
+        }
+        loop {
+            if let Some(timeout) = decoder.wait_timeout() {
+                match poll_event(timeout) {
+                    Ok(false) => {
+                        if !send_decoded_input(&tx, decoder.flush_expired()) {
+                            break;
+                        }
+                        continue;
+                    }
+                    Ok(true) => {}
+                    Err(_) => break,
+                }
+            }
+            let Ok(event) = read_event() else {
+                break;
+            };
+            if !send_decoded_input(&tx, decoder.push(event)) {
+                break;
+            }
         }
     }
-    while let Ok(event) = read_event() {
-        let sent = match app_event(event) {
-            Some(event) => tx.send(event),
-            None => Ok(()),
-        };
-        if sent.is_err() {
-            break;
+
+    #[cfg(not(windows))]
+    {
+        for event in pending {
+            if !send_input_event(&tx, event) {
+                return;
+            }
+        }
+        while let Ok(event) = read_event() {
+            if !send_input_event(&tx, event) {
+                break;
+            }
         }
     }
+}
+
+fn send_input_event(tx: &Sender<AppEvent>, event: Event) -> bool {
+    app_event(event).is_none_or(|event| tx.send(event).is_ok())
+}
+
+#[cfg(windows)]
+fn send_decoded_input(
+    tx: &Sender<AppEvent>,
+    decoded: crate::terminal::host_input::DecodedEvents,
+) -> bool {
+    let mut connected = true;
+    decoded.for_each(|event| {
+        if connected {
+            connected = send_input_event(tx, event);
+        }
+    });
+    connected
 }
 
 fn app_event(event: Event) -> Option<AppEvent> {
@@ -1570,6 +1711,55 @@ mod tests {
                 "remote-client-bridge",
             ]
         );
+    }
+
+    #[test]
+    fn remote_bridge_fallback_checks_standard_user_installations() {
+        let _env = crate::persist::test_env("named-session-remote-fallback");
+        let raw = [
+            "luvus",
+            "--session",
+            "api",
+            "--remote",
+            "devbox",
+            "-p",
+            "2222",
+        ]
+        .map(String::from);
+        let args = crate::session::configure_from_args(&raw).unwrap();
+        let command = remote_fallback_ssh_command(&args).unwrap();
+        let actual: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            &actual[..7],
+            [
+                "-T",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=3",
+                "-p",
+                "2222",
+            ]
+        );
+        assert_eq!(actual[7], "devbox");
+        let script = &actual[8];
+        assert!(script.contains("\"$HOME/.local/bin/luvus\""));
+        assert!(script.contains("\"$HOME/.cargo/bin/luvus\""));
+        assert!(script.contains("\"$HOME/.nix-profile/bin/luvus\""));
+        assert!(script.contains("/usr/local/bin/luvus"));
+        assert!(script.contains("/opt/homebrew/bin/luvus"));
+        assert!(script.contains("/home/linuxbrew/.linuxbrew/bin/luvus"));
+        assert!(script.contains("'--session' 'api' 'remote-client-bridge'"));
+        assert!(script.ends_with("exit 127"));
+    }
+
+    #[test]
+    fn remote_bridge_shell_arguments_are_single_quoted() {
+        assert_eq!(posix_shell_quote("plain"), "'plain'");
+        assert_eq!(posix_shell_quote("team's"), "'team'\\''s'");
     }
 
     /// Manual benchmark of the server render hot path (full UI render + in-place
@@ -1835,7 +2025,10 @@ mod tests {
             text.push_str(cell.symbol());
         }
 
-        assert!(text.contains("luvus"), "brand missing");
+        assert!(
+            text.contains(&crate::session::display_name()),
+            "active session name missing"
+        );
         assert!(text.contains("WORKSPACES"), "workspaces header missing");
         assert!(text.contains("AGENTS"), "agents header missing");
         assert!(text.contains("tab"), "tab status missing");
@@ -2382,6 +2575,9 @@ mod tests {
         app.orch_start = Some(crate::app::OrchStart {
             task: "t1".into(),
             cursor: 0,
+            step: crate::app::OrchStartStep::Agent,
+            mode: crate::orch::TaskWorkerMode::Worktree,
+            shared_workers: 0,
         });
         let text = render_lines(&mut app).join("\n");
         assert!(text.contains("claude"), "picker lists agents");
@@ -2589,7 +2785,7 @@ mod tests {
             "the how-to intro is visible at the top:\n{top}"
         );
         assert!(
-            !top.contains("not rebindable"),
+            !top.contains("Always active"),
             "the always-on reference is below the fold before scrolling:\n{top}"
         );
 
@@ -2600,7 +2796,7 @@ mod tests {
         }
         let mid = screen(&mut app);
         assert!(
-            mid.contains("not rebindable") && mid.contains("focus panes"),
+            mid.contains("Always active") && mid.contains("focus panes"),
             "the always-on reference is reachable by cursor:\n{mid}"
         );
 

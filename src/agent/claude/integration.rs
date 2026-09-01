@@ -11,7 +11,6 @@ pub(super) const OPERATIONS: IntegrationOperations = IntegrationOperations {
     install,
     uninstall,
     is_installed,
-    legacy_is_installed,
 };
 
 fn config_dir() -> PathBuf {
@@ -50,8 +49,4 @@ fn uninstall() -> Result<()> {
 
 fn is_installed() -> bool {
     integration::shell_hook_installed(spec(), &["Notification", "Stop"])
-}
-
-fn legacy_is_installed() -> bool {
-    integration::legacy_shell_hook_installed(spec())
 }

@@ -58,15 +58,3 @@ cleanly across versions because unknown fields get defaults.
 | `EDITOR` | offered as an "open with" choice for files, alongside the editors found on `PATH` |
 | `LUVUS_PANE_ID` | *injected into every pane*, the pane's own id |
 | `LUVUS_SOCKET_PATH` | *injected into every pane*, the control socket |
-
-## Bohay 0.10 compatibility
-
-Luvus 0.11.x accepts `BOHAY_HOME`, `BOHAY_SHELL`, `BOHAY_SESSION`,
-`BOHAY_SOCKET_PATH`, and the old update/integration override variables as
-fallbacks when their `LUVUS_*` equivalents are absent. Every pane and module is
-given both `LUVUS_*` and `BOHAY_*` identity variables during the transition.
-New configuration and documentation should use only `LUVUS_*`.
-
-On a default-home first launch, durable data is copied from `~/.bohay/` to
-`~/.luvus/`. The source remains untouched for rollback. Explicit custom homes
-are never copied automatically.

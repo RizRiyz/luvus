@@ -12,6 +12,15 @@ PANE = re.compile(r"^[1-9][0-9]{0,9}$")
 SOURCE = re.compile(r"^[A-Za-z][A-Za-z0-9._:/-]{0,63}$")
 AGENT = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+SESSION_NAME = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+INTEGRATION_AGENT = re.compile(r"^[a-z0-9._-]{1,64}$")
+EMPTY_HOST_METHODS = {
+    "host.capabilities", "host.info", "host.doctor", "host.update.check",
+    "session.list", "skill.status", "integration.status",
+}
+SESSION_TARGET_METHODS = {
+    "session.status", "session.start", "session.stop", "session.restart",
+}
 STATES = {"idle", "working", "blocked", "done"}
 RESULT_TYPES = {
     "uhp_capabilities",
@@ -87,6 +96,14 @@ def pane(value):
 
 def bounded_string(value, maximum, allow_empty=True):
     return isinstance(value, str) and (allow_empty or bool(value)) and len(value) <= maximum
+
+
+def session_name(value):
+    return (
+        isinstance(value, str)
+        and value not in {".", ".."}
+        and SESSION_NAME.fullmatch(value) is not None
+    )
 
 
 def valid_request(value):
@@ -330,6 +347,49 @@ def valid_global_request(value, methods):
     if value["method"] == "events.subscribe":
         after = value["params"].get("after_sequence", 0)
         return integer(after) and after >= 0
+    if value["method"] in EMPTY_HOST_METHODS:
+        return not value["params"]
+    if value["method"] in SESSION_TARGET_METHODS:
+        params = value["params"]
+        return set(params) == {"name"} and session_name(params["name"])
+    if value["method"] in {"host.update.install", "skill.enable", "skill.disable"}:
+        return value["params"] == {"confirm": True}
+    if value["method"] in {"integration.install", "integration.uninstall"}:
+        params = value["params"]
+        return (
+            set(params) == {"agent", "confirm"}
+            and params["confirm"] is True
+            and isinstance(params["agent"], str)
+            and INTEGRATION_AGENT.fullmatch(params["agent"]) is not None
+        )
+    if value["method"] == "session.delete":
+        params = value["params"]
+        return (
+            set(params) == {"name", "confirm"}
+            and params["confirm"] is True
+            and session_name(params["name"])
+        )
+    if value["method"] == "task.start":
+        params = value["params"]
+        if not set(params) <= {"id", "branch", "agent", "mode", "workspace_id"}:
+            return False
+        if not bounded_string(params.get("id"), 128, allow_empty=False):
+            return False
+        if "branch" in params and not bounded_string(params["branch"], 255, allow_empty=False):
+            return False
+        if "agent" in params and not bounded_string(params["agent"], 4096, allow_empty=False):
+            return False
+        if "workspace_id" in params and not bounded_string(
+            params["workspace_id"], 128, allow_empty=False
+        ):
+            return False
+        mode = params.get("mode")
+        if mode is not None and (not isinstance(mode, str) or mode not in {"worktree", "workspace"}):
+            return False
+        if mode == "workspace" and "branch" in params:
+            return False
+        if mode == "worktree" and "workspace_id" in params:
+            return False
     return True
 
 

@@ -4,9 +4,84 @@
 //! untouched; render/input branch on `Tab::is_mission()`, mirroring the git tab.
 
 use super::*;
-use crate::mission::{MissionRow, MissionRowView, MissionScope};
+use crate::mission::{MissionRow, MissionRowView, MissionScope, MissionUsageRequest};
 
 impl App {
+    /// Structured Mission Control data for automation. This deliberately omits
+    /// native session identifiers and blocked-output snippets: the read scope
+    /// exposes the same operational summary as the dashboard, not credentials
+    /// or terminal content.
+    pub(crate) fn mission_snapshot_value(
+        &self,
+        scope: MissionScope,
+        workspace_index: usize,
+    ) -> serde_json::Value {
+        let rows = self
+            .build_mission_rows_for(scope, workspace_index)
+            .into_iter()
+            .filter_map(|row| {
+                let (kind, pane, workspace, tab) = match row.row {
+                    MissionRow::Live(pane) => {
+                        let (workspace, tab) = self.pane_location(pane)?;
+                        ("live", Some(pane.0.to_string()), workspace, Some(tab + 1))
+                    }
+                    MissionRow::Session(index) => {
+                        let session = self.resumable.get(index)?;
+                        let workspace = self.workspaces.iter().position(|workspace| {
+                            crate::platform::same_path(&workspace.cwd, &session.cwd)
+                        })?;
+                        ("resumable", None, workspace, None)
+                    }
+                };
+                let usage = row.usage.map(|usage| {
+                    serde_json::json!({
+                        "model": usage.model,
+                        "tokens_in": usage.tokens_in,
+                        "tokens_out": usage.tokens_out,
+                        "cache_tokens": usage.cache,
+                        "total_tokens": usage.total_tokens(),
+                        "context": usage.context,
+                        "cost_usd": usage.cost,
+                    })
+                });
+                Some(serde_json::json!({
+                    "kind": kind,
+                    "pane": pane,
+                    "agent": row.agent,
+                    "state": mission_state_label(row.state),
+                    "workspace": workspace.to_string(),
+                    "workspace_id": self.workspaces[workspace].id,
+                    "workspace_name": self.workspaces[workspace].name,
+                    "tab": tab.map(|tab| tab.to_string()),
+                    "location": row.location,
+                    "usage": usage,
+                }))
+            })
+            .collect::<Vec<_>>();
+        let total_cost = rows
+            .iter()
+            .filter_map(|row| row["usage"]["cost_usd"].as_f64())
+            .sum::<f64>();
+        let total_tokens = rows
+            .iter()
+            .filter_map(|row| row["usage"]["total_tokens"].as_u64())
+            .sum::<u64>();
+        serde_json::json!({
+            "type": "mission_snapshot",
+            "scope": match scope { MissionScope::Workspace => "workspace", MissionScope::All => "all" },
+            "workspace": workspace_index.to_string(),
+            "workspace_id": self.workspaces.get(workspace_index).map(|workspace| workspace.id.as_str()),
+            "refreshing": self.mission_usage_refreshing(),
+            "summary": {
+                "agents": rows.len(),
+                "tokens": total_tokens,
+                "cost_usd": total_cost,
+                "burn_usd_per_hour": self.mission_burn,
+            },
+            "rows": rows,
+        })
+    }
+
     /// Open (or focus) the Mission Control tab for `workspace`. Idempotent — one
     /// mission tab per workspace. Mirrors `open_git_tab` / `open_orch_board`.
     pub fn open_mission_control(&mut self, wsi: usize) {
@@ -79,11 +154,19 @@ impl App {
     /// scan is running; after it lands, Mission Control stays idle until another
     /// explicit request or a later transition into the dashboard.
     pub fn request_mission_usage_refresh(&mut self) {
-        self.mission_usage_requested = true;
+        self.request_mission_usage_refresh_for(self.mission_scope, self.active_ws);
+    }
+
+    /// Queue a usage refresh without changing Mission Control's visible scope.
+    /// UHP uses this path so a read-only fleet query never steals UI focus.
+    pub fn request_mission_usage_refresh_for(&mut self, scope: MissionScope, workspace: usize) {
+        if scope == MissionScope::All || workspace < self.workspaces.len() {
+            self.mission_usage_requested = Some(MissionUsageRequest { scope, workspace });
+        }
     }
 
     pub fn mission_usage_refreshing(&self) -> bool {
-        self.mission_usage_requested || self.usage_scan_inflight
+        self.mission_usage_requested.is_some() || self.usage_scan_inflight
     }
 
     /// Detect focus transitions in one central place so mouse, keyboard, API,
@@ -99,16 +182,18 @@ impl App {
     /// Usage targets visible in the selected Mission Control scope. Avoid
     /// opening one workspace's dashboard and scanning every resumable session
     /// Luvus has ever discovered in unrelated workspaces.
-    pub(crate) fn mission_usage_targets(
+    pub(crate) fn mission_usage_targets_for(
         &self,
+        scope: MissionScope,
+        workspace_index: usize,
     ) -> std::collections::HashMap<crate::mission::UsageKey, std::path::PathBuf> {
         let mut targets = std::collections::HashMap::new();
-        if self.workspaces.get(self.active_ws).is_none() {
+        if scope != MissionScope::All && self.workspaces.get(workspace_index).is_none() {
             return targets;
         }
-        let all = self.mission_scope == MissionScope::All;
+        let all = scope == MissionScope::All;
         for (wi, workspace) in self.workspaces.iter().enumerate() {
-            if !all && wi != self.active_ws {
+            if !all && wi != workspace_index {
                 continue;
             }
             for id in workspace.tabs.iter().flat_map(|tab| tab.layout.leaves()) {
@@ -131,7 +216,7 @@ impl App {
         }
         for session in &self.resumable {
             let included = self.workspaces.iter().enumerate().any(|(wi, workspace)| {
-                (all || wi == self.active_ws)
+                (all || wi == workspace_index)
                     && crate::platform::same_path(&session.cwd, &workspace.cwd)
             });
             if included {
@@ -151,15 +236,23 @@ impl App {
     /// so they contribute nothing. Resumable sessions are appended once and keep
     /// their global index, making activation equally safe in both scopes.
     pub fn build_mission_rows(&self) -> Vec<MissionRowView> {
+        self.build_mission_rows_for(self.mission_scope, self.active_ws)
+    }
+
+    pub fn build_mission_rows_for(
+        &self,
+        scope: MissionScope,
+        workspace_index: usize,
+    ) -> Vec<MissionRowView> {
         let mut rows = Vec::new();
-        if self.workspaces.get(self.active_ws).is_none() {
+        if scope != MissionScope::All && self.workspaces.get(workspace_index).is_none() {
             return rows;
         }
-        let all = self.mission_scope == MissionScope::All;
+        let all = scope == MissionScope::All;
         // Live agents first.
         let mut live_sessions = std::collections::HashSet::new();
         for (wi, workspace) in self.workspaces.iter().enumerate() {
-            if !all && wi != self.active_ws {
+            if !all && wi != workspace_index {
                 continue;
             }
             for (ti, tab) in workspace.tabs.iter().enumerate() {
@@ -226,7 +319,8 @@ impl App {
         // already represented by a live pane.
         for (idx, s) in self.resumable.iter().enumerate() {
             let workspace = self.workspaces.iter().enumerate().find(|(wi, workspace)| {
-                (all || *wi == self.active_ws) && crate::platform::same_path(&s.cwd, &workspace.cwd)
+                (all || *wi == workspace_index)
+                    && crate::platform::same_path(&s.cwd, &workspace.cwd)
             });
             let Some((_, workspace)) = workspace else {
                 continue;
@@ -371,5 +465,15 @@ impl App {
             KeyCode::Char('q') => self.close_mission_tab(),
             _ => {}
         }
+    }
+}
+
+fn mission_state_label(state: crate::ui::theme::State) -> &'static str {
+    match state {
+        crate::ui::theme::State::Blocked => "blocked",
+        crate::ui::theme::State::Working => "working",
+        crate::ui::theme::State::Done => "done",
+        crate::ui::theme::State::Idle => "idle",
+        crate::ui::theme::State::Unknown => "unknown",
     }
 }

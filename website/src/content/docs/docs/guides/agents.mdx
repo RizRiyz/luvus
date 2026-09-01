@@ -45,7 +45,9 @@ luvus remembers whichever view you select across restarts.
 
 Open Mission Control with `Ctrl+Space m`, from the desktop switcher, or with
 `luvus mission open [<workspace>]`. Automation clients can call the same
-workspace-scoped operation through UHP as `mission.open`.
+workspace-scoped operation through UHP as `mission.open`. To read Mission
+Control data without opening or focusing the tab, use `mission.snapshot`; use
+`mission.refresh` only when fresh native usage counters are needed.
 
 Mission Control reads the structured usage counters that each agent already
 stores for its own session. It shows input, output, and cache tokens, context

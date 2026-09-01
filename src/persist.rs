@@ -7,7 +7,6 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::app::App;
@@ -15,13 +14,16 @@ use crate::ids::PaneId;
 use crate::layout::LayoutTree;
 
 const SNAPSHOT_VERSION: u32 = 1;
-const LEGACY_MIGRATION_MARKER: &str = ".migrated-from-bohay-0.10";
 
 #[derive(Serialize, Deserialize)]
 pub struct SessionSnapshot {
     pub version: u32,
     pub active_ws: usize,
     pub workspaces: Vec<WsSnap>,
+    /// Workspace roots the user explicitly closed. Automatic attach-time CWD
+    /// opening must not resurrect them; an explicit open removes the entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub closed_workspace_paths: Vec<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -162,9 +164,6 @@ pub(crate) struct TestEnv {
     prev: Option<std::ffi::OsString>,
     prev_session: Option<std::ffi::OsString>,
     prev_socket: Option<std::ffi::OsString>,
-    prev_legacy_home: Option<std::ffi::OsString>,
-    prev_legacy_session: Option<std::ffi::OsString>,
-    prev_legacy_socket: Option<std::ffi::OsString>,
     dir: PathBuf,
 }
 
@@ -183,12 +182,6 @@ impl Drop for TestEnv {
             Some(value) => std::env::set_var("LUVUS_SOCKET_PATH", value),
             None => std::env::remove_var("LUVUS_SOCKET_PATH"),
         }
-        restore_env("BOHAY_HOME", &self.prev_legacy_home);
-        restore_env(
-            crate::session::LEGACY_SESSION_ENV_VAR,
-            &self.prev_legacy_session,
-        );
-        restore_env("BOHAY_SOCKET_PATH", &self.prev_legacy_socket);
         crate::session::clear_explicit_for_test();
         let _ = std::fs::remove_dir_all(&self.dir);
     }
@@ -200,35 +193,18 @@ pub(crate) fn test_env(tag: &str) -> TestEnv {
     let prev = std::env::var_os("LUVUS_HOME");
     let prev_session = std::env::var_os(crate::session::SESSION_ENV_VAR);
     let prev_socket = std::env::var_os("LUVUS_SOCKET_PATH");
-    let prev_legacy_home = std::env::var_os("BOHAY_HOME");
-    let prev_legacy_session = std::env::var_os(crate::session::LEGACY_SESSION_ENV_VAR);
-    let prev_legacy_socket = std::env::var_os("BOHAY_SOCKET_PATH");
     let dir = std::env::temp_dir().join(format!("luvus-test-{}-{}", tag, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::env::set_var("LUVUS_HOME", &dir);
     std::env::remove_var(crate::session::SESSION_ENV_VAR);
     std::env::remove_var("LUVUS_SOCKET_PATH");
-    std::env::remove_var("BOHAY_HOME");
-    std::env::remove_var(crate::session::LEGACY_SESSION_ENV_VAR);
-    std::env::remove_var("BOHAY_SOCKET_PATH");
     crate::session::clear_explicit_for_test();
     TestEnv {
         _guard: guard,
         prev,
         prev_session,
         prev_socket,
-        prev_legacy_home,
-        prev_legacy_session,
-        prev_legacy_socket,
         dir,
-    }
-}
-
-#[cfg(test)]
-fn restore_env(key: &str, value: &Option<std::ffi::OsString>) {
-    match value {
-        Some(value) => std::env::set_var(key, value),
-        None => std::env::remove_var(key),
     }
 }
 
@@ -244,183 +220,6 @@ pub fn config_dir() -> PathBuf {
         ".luvus"
     };
     home.join(name)
-}
-
-/// Copy durable 0.10 state into the 0.11 Luvus home on first launch.
-///
-/// Migration is deliberately conservative: explicit/custom homes opt out,
-/// an existing Luvus home is never merged or overwritten, and a reachable
-/// legacy server defers the copy. Runtime sockets, locks, cached skills, and
-/// worktrees are not copied. The Bohay home remains intact for rollback.
-pub fn migrate_legacy_state() -> std::io::Result<()> {
-    if std::env::var_os("LUVUS_HOME").is_some() || std::env::var_os("BOHAY_HOME").is_some() {
-        return Ok(());
-    }
-    let Some(home) = crate::platform::home_dir() else {
-        return Ok(());
-    };
-    let (legacy_name, current_name) = if cfg!(debug_assertions) {
-        (".bohay-dev", ".luvus-dev")
-    } else {
-        (".bohay", ".luvus")
-    };
-    migrate_legacy_state_between(&home.join(legacy_name), &home.join(current_name))
-}
-
-fn migrate_legacy_state_between(
-    legacy: &std::path::Path,
-    current: &std::path::Path,
-) -> std::io::Result<()> {
-    if !legacy_state_recognized(legacy) || current.exists() {
-        return Ok(());
-    }
-    if legacy_server_running(legacy) {
-        eprintln!(
-            "Luvus migration deferred: stop the running Bohay server with `bohay server stop`, then run Luvus again."
-        );
-        return Ok(());
-    }
-
-    let lock_path = current.with_file_name(".luvus-migration.lock");
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(lock_path)?;
-    lock.lock_exclusive()?;
-    // Another process may have completed while this one waited.
-    if current.exists() {
-        return Ok(());
-    }
-
-    let stage = current.with_file_name(format!(
-        ".{}.migrating-{}",
-        current
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("luvus"),
-        std::process::id()
-    ));
-    if stage.exists() {
-        fs::remove_dir_all(&stage)?;
-    }
-    ensure_private_dir(&stage);
-    if let Err(error) = copy_legacy_tree(legacy, &stage, true) {
-        let _ = fs::remove_dir_all(&stage);
-        return Err(error);
-    }
-    rewrite_managed_module_roots(&stage.join("modules.json"), legacy, current)?;
-    fs::write(
-        stage.join(LEGACY_MIGRATION_MARKER),
-        format!("source={}\nversion=0.11.0\n", legacy.display()),
-    )?;
-    fs::rename(&stage, current)?;
-    Ok(())
-}
-
-fn legacy_state_recognized(root: &std::path::Path) -> bool {
-    root.is_dir()
-        && [
-            "config.json",
-            "session.json",
-            "sessions",
-            "orch.json",
-            "modules.json",
-            "modules",
-            "manifests",
-            "worktrees",
-        ]
-        .iter()
-        .any(|name| root.join(name).exists())
-}
-
-fn legacy_server_running(root: &std::path::Path) -> bool {
-    let mut candidates = vec![
-        (root.join("bohay.sock"), "api"),
-        (root.join("bohay-client.sock"), "client"),
-    ];
-    if let Ok(entries) = fs::read_dir(root.join("sessions")) {
-        for entry in entries.flatten().filter(|entry| entry.path().is_dir()) {
-            candidates.push((entry.path().join("bohay.sock"), "api"));
-            candidates.push((entry.path().join("bohay-client.sock"), "client"));
-        }
-    }
-    candidates.into_iter().any(|(logical, role)| {
-        let path = crate::session::legacy_socket_path(logical, role);
-        crate::ipc::transport::connect_legacy(&path).is_ok()
-    })
-}
-
-fn copy_legacy_tree(
-    src: &std::path::Path,
-    dst: &std::path::Path,
-    root: bool,
-) -> std::io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name_text = name.to_string_lossy();
-        if (root && matches!(name_text.as_ref(), "worktrees" | "skill"))
-            || matches!(
-                name_text.as_ref(),
-                "bohay.sock" | "bohay-client.sock" | "server.lock"
-            )
-            || name_text.ends_with(".sock")
-            || name_text.ends_with(".lock")
-        {
-            continue;
-        }
-        let source = entry.path();
-        let target = dst.join(&name);
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            copy_legacy_tree(&source, &target, false)?;
-        } else if kind.is_file() {
-            fs::copy(source, target)?;
-        }
-        // Symlinks are intentionally skipped. Following a user-controlled link
-        // could copy data from outside the state directory.
-    }
-    Ok(())
-}
-
-fn rewrite_managed_module_roots(
-    registry: &std::path::Path,
-    legacy: &std::path::Path,
-    current: &std::path::Path,
-) -> std::io::Result<()> {
-    let Ok(text) = fs::read_to_string(registry) else {
-        return Ok(());
-    };
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return Ok(());
-    };
-    let old_modules = legacy.join("modules").to_string_lossy().to_string();
-    let new_modules = current.join("modules").to_string_lossy().to_string();
-    rewrite_json_prefix(&mut value, &old_modules, &new_modules);
-    let encoded = serde_json::to_vec_pretty(&value).map_err(std::io::Error::other)?;
-    fs::write(registry, encoded)
-}
-
-fn rewrite_json_prefix(value: &mut serde_json::Value, old: &str, new: &str) {
-    match value {
-        serde_json::Value::String(text) if text.starts_with(old) => {
-            *text = format!("{new}{}", &text[old.len()..]);
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                rewrite_json_prefix(value, old, new);
-            }
-        }
-        serde_json::Value::Object(values) => {
-            for value in values.values_mut() {
-                rewrite_json_prefix(value, old, new);
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Create the state dir if needed and, on Unix, keep it owner-only (`0700`).
@@ -674,7 +473,7 @@ pub fn cli_socket_path() -> PathBuf {
     if crate::session::explicit_session_requested() {
         return socket_path();
     }
-    match crate::compat::inherited("LUVUS_SOCKET_PATH", "BOHAY_SOCKET_PATH") {
+    match std::env::var_os("LUVUS_SOCKET_PATH") {
         Some(p) if !p.is_empty() => PathBuf::from(p),
         _ => socket_path(),
     }
@@ -980,6 +779,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
         version: SNAPSHOT_VERSION,
         active_ws: app.active_ws,
         workspaces,
+        closed_workspace_paths: app.closed_workspace_paths.clone(),
     }
 }
 
@@ -1059,6 +859,17 @@ mod diff_snap_schema_tests {
     use super::*;
 
     #[test]
+    fn older_sessions_default_to_no_closed_workspace_paths() {
+        let snapshot: SessionSnapshot = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "active_ws": 0,
+            "workspaces": [],
+        }))
+        .unwrap();
+        assert!(snapshot.closed_workspace_paths.is_empty());
+    }
+
+    #[test]
     fn diff_snapshot_display_state_defaults_without_dropping_the_session() {
         let path = crate::diff::RepoPath::from_path(std::path::Path::new("src/lib.rs")).unwrap();
         let snap = DiffSnap {
@@ -1111,94 +922,6 @@ mod diff_snap_schema_tests {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    use std::os::unix::net::UnixListener;
-
-    #[test]
-    fn legacy_state_migration_is_copy_only_and_skips_runtime_artifacts() {
-        let root = std::env::temp_dir().join(format!("luvus-migration-{}", std::process::id()));
-        let legacy = root.join(".bohay");
-        let current = root.join(".luvus");
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(legacy.join("sessions/docs")).unwrap();
-        fs::create_dir_all(legacy.join("worktrees/repo/branch")).unwrap();
-        fs::create_dir_all(legacy.join("modules/git/demo")).unwrap();
-        fs::write(legacy.join("config.toml"), "theme = \"gold\"").unwrap();
-        fs::write(legacy.join("sessions/docs/session.json"), "{}").unwrap();
-        fs::write(legacy.join("bohay.sock"), "stale").unwrap();
-        fs::write(legacy.join("server.lock"), "stale").unwrap();
-        fs::write(legacy.join("worktrees/repo/branch/file"), "user checkout").unwrap();
-        fs::write(legacy.join("modules/git/demo/file"), "module").unwrap();
-        fs::write(
-            legacy.join("modules.json"),
-            format!(
-                r#"{{"modules":[{{"root":"{}/modules/git/demo"}}]}}"#,
-                legacy.display()
-            ),
-        )
-        .unwrap();
-
-        migrate_legacy_state_between(&legacy, &current).unwrap();
-
-        assert_eq!(
-            fs::read_to_string(current.join("config.toml")).unwrap(),
-            "theme = \"gold\""
-        );
-        assert!(current.join("sessions/docs/session.json").is_file());
-        assert!(current.join("modules/git/demo/file").is_file());
-        assert!(!current.join("bohay.sock").exists());
-        assert!(!current.join("server.lock").exists());
-        assert!(!current.join("worktrees").exists());
-        assert!(current.join(LEGACY_MIGRATION_MARKER).is_file());
-        let registry = fs::read_to_string(current.join("modules.json")).unwrap();
-        assert!(registry.contains(&current.join("modules").display().to_string()));
-        assert!(!registry.contains(&legacy.join("modules").display().to_string()));
-        assert!(
-            legacy.join("config.toml").is_file(),
-            "rollback state remains intact"
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn legacy_state_never_overwrites_an_existing_luvus_home() {
-        let root =
-            std::env::temp_dir().join(format!("luvus-migration-existing-{}", std::process::id()));
-        let legacy = root.join(".bohay");
-        let current = root.join(".luvus");
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&legacy).unwrap();
-        fs::create_dir_all(&current).unwrap();
-        fs::write(legacy.join("config.toml"), "old").unwrap();
-        fs::write(current.join("config.toml"), "new").unwrap();
-        migrate_legacy_state_between(&legacy, &current).unwrap();
-        assert_eq!(
-            fs::read_to_string(current.join("config.toml")).unwrap(),
-            "new"
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn migration_detects_a_live_legacy_long_path_alias() {
-        let root = std::env::temp_dir().join(format!(
-            "luvus-legacy-running-{}-{}",
-            std::process::id(),
-            "x".repeat(120)
-        ));
-        let logical = root.join("bohay.sock");
-        let alias = crate::session::legacy_socket_path(logical, "api");
-        let _ = fs::remove_dir_all(&root);
-        let _ = fs::remove_file(&alias);
-        fs::create_dir_all(&root).unwrap();
-        fs::create_dir_all(alias.parent().unwrap()).unwrap();
-        let listener = UnixListener::bind(&alias).unwrap();
-
-        assert!(legacy_server_running(&root));
-
-        drop(listener);
-        let _ = fs::remove_file(alias);
-        let _ = fs::remove_dir_all(root);
-    }
 
     /// A CLI in a pane/module targets the injected socket (its own server), not
     /// the home-derived default — so `luvus …` inside a dev pane reaches the dev
@@ -1207,8 +930,6 @@ mod tests {
     fn cli_socket_path_prefers_the_injected_socket() {
         let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var_os("LUVUS_SOCKET_PATH");
-        let saved_legacy = std::env::var_os("BOHAY_SOCKET_PATH");
-        std::env::remove_var("BOHAY_SOCKET_PATH");
 
         std::env::set_var("LUVUS_SOCKET_PATH", "/tmp/injected-luvus.sock");
         assert_eq!(cli_socket_path(), PathBuf::from("/tmp/injected-luvus.sock"));
@@ -1224,7 +945,6 @@ mod tests {
             Some(v) => std::env::set_var("LUVUS_SOCKET_PATH", v),
             None => std::env::remove_var("LUVUS_SOCKET_PATH"),
         }
-        restore_env("BOHAY_SOCKET_PATH", &saved_legacy);
     }
 
     #[test]
@@ -1293,23 +1013,5 @@ mod tests {
         let _listener = crate::ipc::transport::bind(&sock).unwrap();
         let mode = fs::metadata(&sock).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "socket is chmod 0600, got {mode:o}");
-    }
-}
-
-#[cfg(all(test, windows))]
-mod windows_migration_tests {
-    use super::*;
-
-    #[test]
-    fn migration_detects_a_live_legacy_named_pipe() {
-        let root = std::env::temp_dir().join(format!("luvus-legacy-pipe-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        let path = root.join("bohay.sock");
-        let _listener = crate::ipc::transport::bind_legacy_for_test(&path).unwrap();
-
-        assert!(legacy_server_running(&root));
-
-        let _ = fs::remove_dir_all(root);
     }
 }

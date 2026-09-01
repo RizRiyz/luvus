@@ -50,12 +50,16 @@ pub enum Cmd {
     PrevWorkspace,
     NewWorktree,
     OpenGit,
+    OpenDiff,
     OpenMission,
     OpenBoard,
     OpenSettings,
+    OpenSessions,
     ToggleSidebar,
     ToggleRightSidebar,
     ToggleAgents,
+    /// Focus the FILES tree. The historical enum/config id remains stable so
+    /// existing user keymaps keep working after the command's UX is refined.
     ToggleFiles,
     Switcher,
     GlobalSearch,
@@ -88,9 +92,11 @@ impl Cmd {
         Cmd::PrevWorkspace,
         Cmd::NewWorktree,
         Cmd::OpenGit,
+        Cmd::OpenDiff,
         Cmd::OpenMission,
         Cmd::OpenBoard,
         Cmd::OpenSettings,
+        Cmd::OpenSessions,
         Cmd::ToggleSidebar,
         Cmd::ToggleRightSidebar,
         Cmd::ToggleAgents,
@@ -126,9 +132,11 @@ impl Cmd {
             Cmd::PrevWorkspace => "prev_node",
             Cmd::NewWorktree => "new_worktree",
             Cmd::OpenGit => "open_git",
+            Cmd::OpenDiff => "open_diff",
             Cmd::OpenMission => "open_mission",
             Cmd::OpenBoard => "open_board",
             Cmd::OpenSettings => "open_settings",
+            Cmd::OpenSessions => "open_sessions",
             Cmd::ToggleSidebar => "toggle_sidebar",
             Cmd::ToggleRightSidebar => "toggle_right_sidebar",
             Cmd::ToggleAgents => "toggle_agents",
@@ -167,9 +175,11 @@ impl Cmd {
             Cmd::PrevWorkspace => cat.cmd_prev_workspace,
             Cmd::NewWorktree => cat.cmd_new_worktree,
             Cmd::OpenGit => cat.cmd_open_git,
+            Cmd::OpenDiff => cat.cmd_open_diff,
             Cmd::OpenMission => cat.mc_open,
             Cmd::OpenBoard => cat.cmd_open_board,
             Cmd::OpenSettings => cat.cmd_open_settings,
+            Cmd::OpenSessions => cat.cmd_open_sessions,
             Cmd::ToggleSidebar => cat.cmd_toggle_sidebar,
             Cmd::ToggleRightSidebar => cat.cmd_toggle_right_sidebar,
             Cmd::ToggleAgents => cat.cmd_toggle_agents,
@@ -206,6 +216,7 @@ impl Cmd {
             | Cmd::PrevWorkspace
             | Cmd::NewWorktree => cat.settings.keys_sections[2],
             Cmd::OpenGit
+            | Cmd::OpenDiff
             | Cmd::OpenMission
             | Cmd::OpenBoard
             | Cmd::OpenSettings
@@ -214,7 +225,7 @@ impl Cmd {
             | Cmd::ToggleAgents
             | Cmd::ToggleFiles
             | Cmd::GlobalSearch => cat.settings.keys_sections[3],
-            Cmd::Switcher | Cmd::Detach => cat.settings.keys_sections[4],
+            Cmd::OpenSessions | Cmd::Switcher | Cmd::Detach => cat.settings.keys_sections[4],
         }
     }
 
@@ -245,11 +256,13 @@ impl Cmd {
             Cmd::PrevWorkspace => "W",
             Cmd::NewWorktree => "G",
             Cmd::OpenGit => "g",
+            Cmd::OpenDiff => "i",
             Cmd::OpenMission => "m",
             Cmd::OpenBoard => "o",
             // `=` opens Settings (`,` now renames the tab, matching tmux). The
             // Menu button is always available too, so this is just the shortcut.
             Cmd::OpenSettings => "=",
+            Cmd::OpenSessions => "t",
             Cmd::ToggleSidebar => "b",
             Cmd::ToggleRightSidebar => "B",
             Cmd::ToggleAgents => "a",
@@ -675,15 +688,17 @@ impl App {
             Cmd::PrevWorkspace => self.cycle_workspace(-1),
             Cmd::NewWorktree => self.open_worktree_prompt(),
             Cmd::OpenGit => self.open_git_tab_active(),
+            Cmd::OpenDiff => self.focus_diff_list(),
             Cmd::OpenMission => self.open_mission_control(self.active_ws),
             Cmd::OpenBoard => self.open_orch_board(),
             Cmd::OpenSettings => self.open_settings(),
+            Cmd::OpenSessions => self.open_named_session_menu(),
             Cmd::ToggleSidebar => self.toggle_all_sides(),
             Cmd::ToggleRightSidebar => self.toggle_side(crate::app::Side::Right),
             Cmd::ToggleAgents => {
                 self.set_agents_filter(!self.agents_active_only);
             }
-            Cmd::ToggleFiles => self.toggle_files_dock(),
+            Cmd::ToggleFiles => self.focus_files_tree(),
             Cmd::Switcher => self.toggle_switcher(),
             Cmd::GlobalSearch => self.toggle_search(),
             Cmd::Detach => self.detach_requested = true,
@@ -740,13 +755,27 @@ mod tests {
         // `,` renames the tab (tmux-compatible); Settings moved to `=`.
         assert_eq!(m.get(","), Some(&Cmd::RenameTab));
         assert_eq!(m.get("="), Some(&Cmd::OpenSettings));
+        assert_eq!(m.get("t"), Some(&Cmd::OpenSessions));
         assert_eq!(m.get("y"), Some(&Cmd::CopyMode));
+        assert_eq!(m.get("i"), Some(&Cmd::OpenDiff));
         assert_eq!(m.get("m"), Some(&Cmd::OpenMission));
         assert_eq!(m.get("M"), Some(&Cmd::Switcher));
         // every command is reachable by its default key
         for &c in Cmd::ALL {
             assert!(m.values().any(|v| *v == c), "{c:?} bound");
         }
+    }
+
+    #[test]
+    fn open_sessions_command_opens_the_named_session_menu() {
+        let _env = crate::persist::test_env("open-sessions-key");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.server_mode = true;
+
+        app.run_cmd(Cmd::OpenSessions);
+
+        assert!(app.named_session_menu.is_some());
     }
 
     #[test]
@@ -910,7 +939,7 @@ mod tests {
     }
 
     #[test]
-    fn prefix_question_opens_help_and_any_key_closes() {
+    fn prefix_question_opens_scrollable_help_and_other_keys_close() {
         use crate::event::AppEvent;
         use ratatui::crossterm::event::KeyModifiers;
         let prefix = || AppEvent::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
@@ -922,7 +951,21 @@ mod tests {
         app.handle_event(prefix());
         app.handle_event(ch('?')); // Ctrl+Space ? opens the cheat-sheet
         assert!(app.help_open, "? opened the help overlay");
-        app.handle_event(ch('x')); // any key dismisses it (and is swallowed)
+        app.handle_event(ch('j'));
+        assert!(app.help_open, "navigation keeps the overlay open");
+        assert_eq!(app.help_scroll, 1);
+        app.help_scroll_max = 40;
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::End,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.help_scroll, 40);
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.help_scroll, 39, "up moves away from the bottom");
+        app.handle_event(ch('x')); // a non-navigation key dismisses it (and is swallowed)
         assert!(!app.help_open, "next key closed the overlay");
         // The swallowed key must not have acted (e.g. closed a pane).
         assert_eq!(app.panes.len(), 1);

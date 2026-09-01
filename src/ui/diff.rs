@@ -178,7 +178,7 @@ pub(super) fn draw_diff_view(
         format!(" SEARCH> {}", view.search.as_deref().unwrap_or_default())
     } else {
         format!(
-            " [s] layout  [/] search  [n] note  [a] send  [m] viewed  {viewed}/{total} · {note_count} notes"
+            " [j/k] move  [q] close  [s] layout  [m] viewed  [/] search  [n] note  [a] send  ·  {viewed}/{total} viewed · {note_count} notes"
         )
     };
     if truncated {

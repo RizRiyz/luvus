@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::files::view_text_w;
+use unicode_width::UnicodeWidthChar;
 
 /// Keep the command overlay useful when a just-spawned child has not appeared
 /// in the platform process snapshot yet. The OS tree remains authoritative for
@@ -159,24 +160,6 @@ fn finish_selected_text(mut out: String) -> Option<String> {
     (!out.trim().is_empty()).then_some(out)
 }
 
-/// Drop the one blank cell which can sit between a pane edge and uniformly
-/// aligned prose. This is deliberately narrow: code with its usual two- or
-/// four-space indentation is retained exactly as selected.
-fn strip_uniform_single_cell_margin(text: String) -> String {
-    let mut saw_text = false;
-    let uniform_margin = text.lines().filter(|line| !line.is_empty()).all(|line| {
-        saw_text = true;
-        line.starts_with(' ') && !line.starts_with("  ")
-    });
-    if !saw_text || !uniform_margin {
-        return text;
-    }
-    text.lines()
-        .map(|line| line.strip_prefix(' ').unwrap_or(line))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// A second left click within this of the first, on the same cell (±1), is a
 /// double-click. Terminals emit no native double-click, so luvus times it.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -184,6 +167,54 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// A run of grid cells on one row: `(row, start_col, end_col)`, `end_col`
 /// exclusive — the same shape as [`crate::links::Link::spans`].
 type CellSpan = (u16, u16, u16);
+
+/// Convert rendered native-view rows to the same cell-aligned representation
+/// used by terminal token lookup. This runs only on a double-click, never on a
+/// frame, and keeps wide and zero-width characters from shifting the clicked
+/// cell away from its word.
+fn align_plain_rows(rows: Vec<String>) -> crate::terminal::vt::AlignedRows {
+    let mut aligned = crate::terminal::vt::AlignedRows::new(rows.len());
+    for (row, line) in rows.into_iter().enumerate() {
+        let mut column = 0u16;
+        let mut base: Option<(char, usize, Vec<char>)> = None;
+        let flush = |base: &mut Option<(char, usize, Vec<char>)>,
+                     aligned: &mut crate::terminal::vt::AlignedRows,
+                     column: &mut u16| {
+            let Some((character, width, zero_width)) = base.take() else {
+                return;
+            };
+            aligned.push_cell(
+                row as u16,
+                *column,
+                character,
+                (!zero_width.is_empty()).then_some(zero_width.as_slice()),
+            );
+            for offset in 1..width {
+                aligned.push_cell(
+                    row as u16,
+                    column.saturating_add(offset as u16),
+                    crate::terminal::vt::ALIGNED_WIDE_CELL,
+                    None,
+                );
+            }
+            *column = column.saturating_add(width as u16);
+        };
+
+        for character in line.chars() {
+            let width = character.width().unwrap_or(0);
+            if width == 0 {
+                if let Some((_, _, zero_width)) = base.as_mut() {
+                    zero_width.push(character);
+                }
+                continue;
+            }
+            flush(&mut base, &mut aligned, &mut column);
+            base = Some((character, width, Vec::new()));
+        }
+        flush(&mut base, &mut aligned, &mut column);
+    }
+    aligned
+}
 
 /// The whitespace-delimited word covering grid cell (`col`, `row`), and the one
 /// span it occupies. `None` on a whitespace or out-of-range cell. Wide-cell
@@ -487,6 +518,18 @@ impl App {
                 }
                 return true;
             }
+            AppEvent::NamedSessionsLoaded { generation, result } => {
+                self.apply_named_sessions_loaded(generation, result);
+                return true;
+            }
+            AppEvent::NamedSessionPrepared {
+                generation,
+                name,
+                result,
+            } => {
+                self.apply_named_session_prepared(generation, name, result);
+                return true;
+            }
             other => other,
         };
         // Control-API requests and parked `wait.output` replies must be answered
@@ -752,12 +795,27 @@ impl App {
                 branches,
                 workspace_candidates,
             } => self.apply_cwd_scan(panes, branches, workspace_candidates),
-            // Mission Control usage (docs/54, MC-2): swap in the fresh cache; the
-            // mission render blits it. Repaint so a visible mission tab updates.
-            AppEvent::UsageScanned { usage, mtimes } => {
+            // Mission Control usage (docs/54, MC-2): replace a fleet scan or
+            // merge only the keys covered by a workspace scan. Repaint so a
+            // visible mission tab updates.
+            AppEvent::UsageScanned {
+                scope,
+                scanned,
+                usage,
+                mtimes,
+            } => {
                 self.usage_scan_inflight = false;
-                self.agent_usage = usage;
-                self.usage_mtimes = mtimes;
+                if scope == crate::mission::MissionScope::All {
+                    self.agent_usage = usage;
+                    self.usage_mtimes = mtimes;
+                } else {
+                    for key in scanned {
+                        self.agent_usage.remove(&key);
+                        self.usage_mtimes.remove(&key);
+                    }
+                    self.agent_usage.extend(usage);
+                    self.usage_mtimes.extend(mtimes);
+                }
                 // Fleet burn rate: change in total cost since the last scan (docs/54).
                 let total: f64 = self.agent_usage.values().filter_map(|u| u.cost).sum();
                 let now = std::time::Instant::now();
@@ -933,6 +991,9 @@ impl App {
             | AppEvent::SearchResults { .. }
             | AppEvent::SearchFederatedResults { .. }
             | AppEvent::SearchHandoffReady { .. } => unreachable!(),
+            AppEvent::NamedSessionsLoaded { .. } | AppEvent::NamedSessionPrepared { .. } => {
+                unreachable!()
+            }
         }
     }
 
@@ -968,6 +1029,9 @@ impl App {
     /// all single-line fields.
     fn paste_into_modal(&mut self, s: &str) -> bool {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        if self.named_session_menu.is_some() {
+            return self.paste_named_session_prompt(s);
+        }
         if self.module_setting_edit.is_some() {
             for character in s.chars().filter(|character| !character.is_control()) {
                 self.handle_module_setting_key(KeyEvent::new(
@@ -1059,6 +1123,18 @@ impl App {
         let (c, r) = at?;
         let hit = |rect: Rect| c >= rect.x && c < rect.right() && r >= rect.y && r < rect.bottom();
         let first = |rects: &[Rect]| rects.iter().copied().find(|rect| hit(*rect));
+
+        if self.named_session_menu.is_some() {
+            return self
+                .named_session_close_rect
+                .filter(|rect| hit(*rect))
+                .or_else(|| {
+                    self.named_session_row_rects
+                        .iter()
+                        .map(|(_, rect)| *rect)
+                        .find(|rect| hit(*rect))
+                });
+        }
 
         if self.changelog_open {
             return self
@@ -1177,6 +1253,7 @@ impl App {
             .chain(self.diff_row_rects.iter().map(|(_, rect)| *rect))
             .chain(
                 [
+                    self.named_session_button_rect,
                     self.switcher_button_rect,
                     self.mobile_pane_prev_rect,
                     self.mobile_pane_next_rect,
@@ -1220,10 +1297,28 @@ impl App {
         if let MouseEventKind::Down(_) = m.kind {
             self.menu_scroll.press(m.column, m.row);
         }
-        // Any click dismisses the help overlay.
+        // The shortcut reference scrolls with the wheel; a click dismisses it.
         if self.help_open {
-            if let MouseEventKind::Down(MouseButton::Left) = m.kind {
-                self.help_open = false;
+            match m.kind {
+                MouseEventKind::ScrollUp => {
+                    self.help_scroll = self.help_scroll.min(self.help_scroll_max).saturating_sub(2)
+                }
+                MouseEventKind::ScrollDown => {
+                    self.help_scroll = self.help_scroll.saturating_add(2).min(self.help_scroll_max)
+                }
+                MouseEventKind::Down(MouseButton::Left) => self.help_open = false,
+                _ => {}
+            }
+            return;
+        }
+        if self.named_session_menu.is_some() {
+            match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.named_session_click(m.column, m.row)
+                }
+                MouseEventKind::ScrollUp => self.move_named_session_cursor(-1),
+                MouseEventKind::ScrollDown => self.move_named_session_cursor(1),
+                _ => {}
             }
             return;
         }
@@ -1557,6 +1652,18 @@ impl App {
                 self.handle_pane_rename_key(k);
             }
             return;
+        }
+        // Pointer interaction outside the FILES dock returns keyboard input to
+        // the pane or control the user actually clicked. A click inside keeps
+        // the tree focus and its cursor intact.
+        if matches!(m.kind, MouseEventKind::Down(_)) && self.files_focused {
+            let inside_files = m.column >= self.files_area.x
+                && m.column < self.files_area.right()
+                && m.row >= self.files_area.y
+                && m.row < self.files_area.bottom();
+            if !inside_files {
+                self.files_focused = false;
+            }
         }
         // Bar actions and the read-only overflow popup own their rendered
         // rectangles. This sits below every modal guard: while a modal is open,
@@ -2100,6 +2207,10 @@ impl App {
         }
 
         // The sidebar gear opens Settings.
+        if self.named_session_button_rect.is_some_and(hit) {
+            self.open_named_session_menu();
+            return;
+        }
         if self.settings_icon_rect.is_some_and(hit) {
             self.open_settings();
             return;
@@ -2205,6 +2316,7 @@ impl App {
             } else {
                 crate::app::files::OpenTarget::Preview
             };
+            self.files_focused = false;
             self.diff_row_activate(row, target);
             return;
         }
@@ -2473,7 +2585,8 @@ impl App {
                     // forwarded, so typing to the agent resumes with no lost key.
                     pane.scroll_to_bottom();
                     exit = true;
-                    if let Some(bytes) = encode_key(&key, newline, pane.application_cursor()) {
+                    let (app_cursor, disambiguate) = pane.key_encoding_modes();
+                    if let Some(bytes) = encode_key(&key, newline, app_cursor, disambiguate) {
                         pane.send(&bytes);
                     }
                 }
@@ -2553,22 +2666,12 @@ impl App {
         let Some(copy) = self.copy_mode.take() else {
             return;
         };
-        let is_codex = self
-            .status
-            .get(&copy.pane)
-            .is_some_and(|status| status.agent == "codex");
         let text = self
             .panes
             .get(&copy.pane)
             .and_then(|pane| pane.retained_selection_text(copy.ordered()))
             .and_then(finish_selected_text);
-        if let Some(text) = text.map(|text| {
-            if is_codex {
-                strip_uniform_single_cell_margin(text)
-            } else {
-                text
-            }
-        }) {
+        if let Some(text) = text {
             self.pending_clipboard = Some(text);
             let msg = self.catalog.copied;
             self.show_toast(msg);
@@ -2846,46 +2949,27 @@ impl App {
         }
         if let Some(selection) = sel.retained {
             let range = selection.ordered();
-            let text = self
+            return self
                 .panes
                 .get(&sel.pane)?
                 .retained_selection_text(range)
-                .and_then(finish_selected_text)?;
-            let is_codex = self
-                .status
-                .get(&sel.pane)
-                .is_some_and(|status| status.agent == "codex");
-            return Some(if range.0 .1 == 0 || is_codex {
-                strip_uniform_single_cell_margin(text)
-            } else {
-                text
-            });
+                .and_then(finish_selected_text);
         }
         let ((sx, sy), (ex, ey)) = sel.ordered();
         let (cx, cy) = (sel.content.x, sel.content.y);
-        let text = self.panes.get(&sel.pane)?.visible_selection_text((
-            (
-                (sy as usize).saturating_sub(cy as usize),
-                (sx as usize).saturating_sub(cx as usize),
-            ),
-            (
-                (ey as usize).saturating_sub(cy as usize),
-                (ex as usize).saturating_sub(cx as usize),
-            ),
-        ))?;
-        // A drag may begin in the single blank pane cell before uniformly
-        // aligned prose. Codex also emits that one-cell transcript gutter even
-        // when the drag starts on its first visible character. It remains
-        // visibly selected, but is padding rather than useful clipboard text.
-        let is_codex = self
-            .status
-            .get(&sel.pane)
-            .is_some_and(|status| status.agent == "codex");
-        Some(if sx == cx || is_codex {
-            strip_uniform_single_cell_margin(text)
-        } else {
-            text
-        })
+        self.panes
+            .get(&sel.pane)?
+            .visible_selection_text((
+                (
+                    (sy as usize).saturating_sub(cy as usize),
+                    (sx as usize).saturating_sub(cx as usize),
+                ),
+                (
+                    (ey as usize).saturating_sub(cy as usize),
+                    (ex as usize).saturating_sub(cx as usize),
+                ),
+            ))
+            .and_then(finish_selected_text)
     }
 
     /// Copy the path, URL, or word under screen cell (`col`, `row`) to the
@@ -2901,16 +2985,33 @@ impl App {
         let Some((pane, content)) = self.pane_content_at(col, row) else {
             return false;
         };
-        let rows = {
-            let Some(p) = self.panes.get(&pane) else {
-                return false;
-            };
-            let Ok(engine) = p.engine.lock() else {
-                return false;
-            };
-            // Cell-aligned rows: a wide glyph before the token would otherwise
-            // shift `gcol` off the intended character (and its highlight).
-            engine.visible_rows_aligned()
+        let rows = match self.views.get(&pane) {
+            Some(crate::app::ViewKind::File(view)) => {
+                let Some(rows) = crate::files::token_rows(view, content, self.compact) else {
+                    return false;
+                };
+                align_plain_rows(rows)
+            }
+            Some(crate::app::ViewKind::Preview(view)) => {
+                let Some(rows) = super::preview::token_rows(view, content, self.compact) else {
+                    return false;
+                };
+                align_plain_rows(rows)
+            }
+            // DIFF owns its source-cell clicks for review and note selection.
+            // Do not route it through generic word copying.
+            Some(crate::app::ViewKind::Diff(_)) => return false,
+            None => {
+                let Some(p) = self.panes.get(&pane) else {
+                    return false;
+                };
+                let Ok(engine) = p.engine.lock() else {
+                    return false;
+                };
+                // Cell-aligned rows: a wide glyph before the token would otherwise
+                // shift `gcol` off the intended character (and its highlight).
+                engine.visible_rows_aligned()
+            }
         };
         let (gcol, grow) = (col - content.x, row - content.y);
         let (text, spans) = match copy_link_at_grid(&rows, gcol, grow) {
@@ -3191,9 +3292,30 @@ impl App {
             }
             return true;
         }
-        // The help cheat-sheet overlay swallows the next key press and closes.
+        // The help cheat-sheet is a complete, scrollable shortcut reference.
+        // Unknown keys still dismiss it and are swallowed, preserving the old
+        // safety property that closing help cannot act on the focused pane.
         if self.help_open {
-            self.help_open = false;
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.help_scroll = self.help_scroll.saturating_add(1)
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.help_scroll = self.help_scroll.min(self.help_scroll_max).saturating_sub(1)
+                }
+                KeyCode::PageDown | KeyCode::Char(' ') => {
+                    self.help_scroll = self.help_scroll.saturating_add(10)
+                }
+                KeyCode::PageUp => {
+                    self.help_scroll = self
+                        .help_scroll
+                        .min(self.help_scroll_max)
+                        .saturating_sub(10)
+                }
+                KeyCode::Home => self.help_scroll = 0,
+                KeyCode::End => self.help_scroll = self.help_scroll_max,
+                _ => self.help_open = false,
+            }
             return true;
         }
         // The changelog modal captures keys: scroll with the arrows / j/k / page
@@ -3220,6 +3342,10 @@ impl App {
         // take keys first (docs/13 §3.6).
         if self.module_setting_edit.is_some() {
             self.handle_module_setting_key(key);
+            return true;
+        }
+        if self.named_session_menu.is_some() {
+            self.named_session_key(key);
             return true;
         }
         // The Settings modal captures all input while open.
@@ -3281,15 +3407,11 @@ impl App {
             return true;
         }
         if self.file_menu.is_some() {
-            if key.code == KeyCode::Esc {
-                self.file_menu = None;
-            }
+            self.handle_file_menu_key(key);
             return true;
         }
         if self.diff_menu.is_some() {
-            if key.code == KeyCode::Esc {
-                self.diff_menu = None;
-            }
+            self.handle_diff_menu_key(key);
             return true;
         }
         if self.orch_menu.is_some() {
@@ -3346,6 +3468,21 @@ impl App {
         if self.mode == Mode::Resize {
             return self.handle_resize_mode_key(key);
         }
+        // FILES/DIFF dock focus is explicit and separate from terminal-pane
+        // focus. The prefix remains available for global commands; ordinary
+        // keys never leak into the pane until Esc/q returns control to it.
+        if self.files_focused {
+            if self.prefix.matches(&key) {
+                self.files_focused = false;
+                self.mode = Mode::Prefix;
+            } else {
+                match self.files_mode {
+                    crate::diff::FilesMode::Files => self.handle_file_tree_key(key),
+                    crate::diff::FilesMode::Diff => self.handle_diff_list_key(key),
+                };
+            }
+            return true;
+        }
         // A focused dashboard tab (git / orch / mission) captures normal-mode keys
         // (its own j/k/⏎/…); the `Ctrl+Space` prefix still works for global ops.
         if self.mode == Mode::Normal
@@ -3371,11 +3508,12 @@ impl App {
                 if self.prefix.matches(&key) {
                     let prefix = self.prefix.key_event();
                     let newline = self.config.shift_enter_bytes().to_vec();
-                    let app_cursor = self.focused().is_some_and(|p| p.application_cursor());
-                    if let (Some(p), Some(bytes)) =
-                        (self.focused(), encode_key(&prefix, &newline, app_cursor))
-                    {
-                        p.send(&bytes);
+                    if let Some(pane) = self.focused() {
+                        let (app_cursor, disambiguate) = pane.key_encoding_modes();
+                        if let Some(bytes) = encode_key(&prefix, &newline, app_cursor, disambiguate)
+                        {
+                            pane.send(&bytes);
+                        }
                     }
                     return true; // left prefix mode → the status bar updates
                 }
@@ -3388,6 +3526,7 @@ impl App {
                     }
                     if c == '?' {
                         self.help_open = true;
+                        self.help_scroll = 0;
                         return true;
                     }
                 }
@@ -3461,8 +3600,11 @@ impl App {
                 let newline = self.config.shift_enter_bytes();
                 // Cursor keys follow the pane's DECCKM state: a `less` that
                 // turned application cursor mode on only recognizes SS3 codes.
-                let app_cursor = self.focused().is_some_and(|p| p.application_cursor());
-                if let Some(bytes) = encode_key(&key, newline, app_cursor) {
+                let (app_cursor, disambiguate) = self
+                    .focused()
+                    .map(|pane| pane.key_encoding_modes())
+                    .unwrap_or((false, false));
+                if let Some(bytes) = encode_key(&key, newline, app_cursor, disambiguate) {
                     if let Some(p) = self.focused() {
                         // Typing snaps the view back to the live bottom, so you
                         // always see what you type (like every terminal).
@@ -3582,7 +3724,12 @@ fn mouse_wheel_seq(up: bool, col: u16, row: u16, sgr: bool) -> Vec<u8> {
 /// (`ESC O <letter>`) when the app enabled application cursor mode, exactly as a
 /// real terminal would send them — some apps (`less`) only recognize the SS3
 /// form once they've turned the mode on.
-fn encode_key(key: &KeyEvent, newline: &[u8], app_cursor: bool) -> Option<Vec<u8>> {
+fn encode_key(
+    key: &KeyEvent,
+    newline: &[u8],
+    app_cursor: bool,
+    disambiguate: bool,
+) -> Option<Vec<u8>> {
     // AltGr arrives as Ctrl+Alt on Windows (`keys::is_ctrl_chord`) and types a
     // character — it is neither a Ctrl chord nor an `ESC`-prefixed Alt key.
     let ctrl = super::keys::is_ctrl_chord(key.modifiers);
@@ -3596,6 +3743,35 @@ fn encode_key(key: &KeyEvent, newline: &[u8], app_cursor: bool) -> Option<Vec<u8
     let bytes: Vec<u8> = match key.code {
         KeyCode::Char(c) => {
             if ctrl {
+                if disambiguate {
+                    let codepoint = match c {
+                        // Crossterm represents a legacy 0x1f input byte as
+                        // Ctrl+7. The originating terminal could not
+                        // distinguish it from Ctrl+/, so prefer the user-facing
+                        // slash binding when the nested application requests
+                        // an unambiguous key sequence.
+                        '/' | '7' => Some('/'),
+                        '_' => Some('_'),
+                        // A Ctrl chord on a letter is folded through
+                        // `to_ascii_uppercase() & 0x1f` below, which is caseless:
+                        // Ctrl+Shift+P and Ctrl+P both become 0x10, so an agent
+                        // binding Ctrl+Shift+<letter> silently gets the
+                        // unshifted action. Report the *unshifted* codepoint and
+                        // let `key_modifier_param` carry Shift, as the protocol
+                        // requires — Ctrl+Shift+P is `CSI 112;6u`, never
+                        // `CSI 80;...`, since the shifted codepoint would
+                        // reintroduce the very ambiguity being resolved.
+                        //
+                        // Only diverted when Shift is present: plain Ctrl+P is
+                        // already unambiguous as 0x10, and the disambiguate
+                        // level leaves such keys in their legacy form.
+                        'a'..='z' | 'A'..='Z' if shift => Some(c.to_ascii_lowercase()),
+                        _ => None,
+                    };
+                    if let Some(codepoint) = codepoint {
+                        return Some(csi_u_char(codepoint, key.modifiers));
+                    }
+                }
                 let b = match c.to_ascii_lowercase() {
                     'a'..='z' => (c.to_ascii_uppercase() as u8) & 0x1f,
                     ' ' | '@' => 0,
@@ -3603,7 +3779,10 @@ fn encode_key(key: &KeyEvent, newline: &[u8], app_cursor: bool) -> Option<Vec<u8
                     '\\' => 0x1c,
                     ']' => 0x1d,
                     '^' => 0x1e,
-                    '_' => 0x1f,
+                    // Ctrl+/ is the user-facing chord for the US control byte.
+                    // Legacy terminal input arrives through crossterm as
+                    // Ctrl+7, while enhanced keyboard protocols preserve `/`.
+                    '_' | '/' | '7' => 0x1f,
                     _ => return None,
                 };
                 if alt {
@@ -3685,6 +3864,15 @@ fn encode_key(key: &KeyEvent, newline: &[u8], app_cursor: bool) -> Option<Vec<u8
 
 fn csi(final_byte: u8) -> Vec<u8> {
     vec![0x1b, b'[', final_byte]
+}
+
+fn csi_u_char(character: char, modifiers: KeyModifiers) -> Vec<u8> {
+    format!(
+        "\x1b[{};{}u",
+        character as u32,
+        key_modifier_param(modifiers)
+    )
+    .into_bytes()
 }
 
 /// Encode a cursor key (arrows / Home / End). In application cursor mode
@@ -4066,7 +4254,8 @@ mod tests {
     fn shift_enter_sends_a_newline_not_a_submit() {
         // The default newline sequence is `ESC CR`.
         let nl = b"\x1b\r";
-        let enter = |m: KeyModifiers| encode_key(&KeyEvent::new(KeyCode::Enter, m), nl, false);
+        let enter =
+            |m: KeyModifiers| encode_key(&KeyEvent::new(KeyCode::Enter, m), nl, false, false);
         assert_eq!(
             enter(KeyModifiers::NONE),
             Some(b"\r".to_vec()),
@@ -4087,6 +4276,7 @@ mod tests {
             encode_key(
                 &KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
                 nl,
+                false,
                 false
             ),
             Some(b"\r".to_vec())
@@ -4101,8 +4291,9 @@ mod tests {
     fn altgr_types_its_character_instead_of_a_control_byte() {
         let nl = b"\x1b\r";
         let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
-        let enc =
-            |c: char, m: KeyModifiers| encode_key(&KeyEvent::new(KeyCode::Char(c), m), nl, false);
+        let enc = |c: char, m: KeyModifiers| {
+            encode_key(&KeyEvent::new(KeyCode::Char(c), m), nl, false, false)
+        };
         if cfg!(windows) {
             for c in ['\\', '@', '#', '[', ']', '{', '}', '|', '~', '€'] {
                 assert_eq!(
@@ -4129,7 +4320,7 @@ mod tests {
         // The exception is for characters only: every other key keeps both
         // modifiers, so Ctrl+Alt+Enter is still a modified Enter.
         assert_eq!(
-            encode_key(&KeyEvent::new(KeyCode::Enter, altgr), nl, false),
+            encode_key(&KeyEvent::new(KeyCode::Enter, altgr), nl, false, false),
             Some(nl.to_vec()),
             "Ctrl+Alt+Enter still sends the configured newline"
         );
@@ -4140,14 +4331,20 @@ mod tests {
     #[test]
     fn shift_enter_sequence_is_configurable() {
         let shift = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
-        assert_eq!(encode_key(&shift, b"\n", false), Some(b"\n".to_vec()));
         assert_eq!(
-            encode_key(&shift, b"\x1b[13;2u", false),
+            encode_key(&shift, b"\n", false, false),
+            Some(b"\n".to_vec())
+        );
+        assert_eq!(
+            encode_key(&shift, b"\x1b[13;2u", false, false),
             Some(b"\x1b[13;2u".to_vec())
         );
         // Plain Enter ignores the newline sequence and always submits.
         let plain = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(encode_key(&plain, b"\n", false), Some(b"\r".to_vec()));
+        assert_eq!(
+            encode_key(&plain, b"\n", false, false),
+            Some(b"\r".to_vec())
+        );
     }
 
     #[test]
@@ -4156,6 +4353,7 @@ mod tests {
             encode_key(
                 &KeyEvent::new(KeyCode::Char('a'), modifiers),
                 b"\x1b\r",
+                false,
                 false,
             )
         };
@@ -4169,21 +4367,91 @@ mod tests {
 
     #[test]
     fn alt_backspace_sends_meta_delete_for_word_deletion() {
-        let key = |modifiers| {
+        let key = |modifiers, disambiguate| {
             encode_key(
                 &KeyEvent::new(KeyCode::Backspace, modifiers),
                 b"\x1b\r",
                 false,
+                disambiguate,
             )
         };
 
-        assert_eq!(key(KeyModifiers::NONE), Some(vec![0x7f]));
-        assert_eq!(key(KeyModifiers::ALT), Some(vec![0x1b, 0x7f]));
+        for disambiguate in [false, true] {
+            assert_eq!(key(KeyModifiers::NONE, disambiguate), Some(vec![0x7f]));
+            assert_eq!(key(KeyModifiers::ALT, disambiguate), Some(vec![0x1b, 0x7f]));
+        }
+    }
+
+    #[test]
+    fn control_slash_reaches_nested_tuis_across_terminal_encodings() {
+        let encode = |character, disambiguate| {
+            encode_key(
+                &KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL),
+                b"\x1b\r",
+                false,
+                disambiguate,
+            )
+        };
+
+        assert_eq!(encode('/', false), Some(vec![0x1f]));
+        assert_eq!(
+            encode('7', false),
+            Some(vec![0x1f]),
+            "crossterm decodes the legacy 0x1f byte as Ctrl+7"
+        );
+        assert_eq!(encode('_', false), Some(vec![0x1f]));
+
+        assert_eq!(encode('/', true), Some(b"\x1b[47;5u".to_vec()));
+        assert_eq!(
+            encode('7', true),
+            Some(b"\x1b[47;5u".to_vec()),
+            "a legacy Ctrl+/ alias regains slash identity for a nested CSI-u client"
+        );
+        assert_eq!(encode('_', true), Some(b"\x1b[95;5u".to_vec()));
+    }
+
+    /// `Ctrl+Shift+<letter>` must survive the trip to a nested TUI. The legacy
+    /// fold `to_ascii_uppercase() & 0x1f` is caseless, so it maps Ctrl+Shift+P
+    /// and Ctrl+P onto the same 0x10 and an agent binding the shifted chord
+    /// silently gets the unshifted action instead.
+    #[test]
+    fn control_shift_letters_reach_nested_tuis_distinctly() {
+        let encode = |character, modifiers, disambiguate| {
+            encode_key(
+                &KeyEvent::new(KeyCode::Char(character), modifiers),
+                b"\x1b\r",
+                false,
+                disambiguate,
+            )
+        };
+        let ctrl = KeyModifiers::CONTROL;
+        let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+
+        // Legacy encoding cannot separate them; this is the collapse itself.
+        assert_eq!(encode('p', ctrl, false), Some(vec![0x10]));
+        assert_eq!(encode('p', ctrl_shift, false), Some(vec![0x10]));
+
+        // A CSI-u client gets distinct sequences. The codepoint stays lowercase
+        // `p` (112) and Shift rides in the modifier param: 5 = ctrl, 6 = ctrl+shift.
+        assert_eq!(encode('p', ctrl, true), Some(vec![0x10]));
+        assert_eq!(encode('p', ctrl_shift, true), Some(b"\x1b[112;6u".to_vec()));
+        assert_ne!(encode('p', ctrl, true), encode('p', ctrl_shift, true));
+
+        // Crossterm may report the shifted press as uppercase; it must still
+        // report 112, never 80, or the ambiguity returns.
+        assert_eq!(encode('P', ctrl_shift, true), Some(b"\x1b[112;6u".to_vec()));
+
+        // Unshifted Ctrl chords keep their legacy bytes, and plain typing and
+        // Shift-only capitals are untouched by the protocol.
+        assert_eq!(encode('a', ctrl, true), Some(vec![0x01]));
+        assert_eq!(encode('A', KeyModifiers::SHIFT, true), Some(b"A".to_vec()));
+        assert_eq!(encode('a', KeyModifiers::NONE, true), Some(b"a".to_vec()));
     }
 
     #[test]
     fn navigation_keys_preserve_modifiers_for_nested_prompt_editors() {
-        let key = |code, modifiers| encode_key(&KeyEvent::new(code, modifiers), b"\x1b\r", false);
+        let key =
+            |code, modifiers| encode_key(&KeyEvent::new(code, modifiers), b"\x1b\r", false, false);
 
         // The existing unmodified sequences stay byte-for-byte compatible.
         assert_eq!(
@@ -4231,7 +4499,8 @@ mod tests {
         // When the pane enabled DECCKM (`ESC[?1h`), unmodified cursor keys go out
         // as SS3 (`ESC O <letter>`) — the bytes a real terminal sends once the
         // app turned the mode on. `less` is strict about this and ignores CSI.
-        let app = |code, modifiers| encode_key(&KeyEvent::new(code, modifiers), b"\x1b\r", true);
+        let app =
+            |code, modifiers| encode_key(&KeyEvent::new(code, modifiers), b"\x1b\r", true, false);
         assert_eq!(
             app(KeyCode::Up, KeyModifiers::NONE),
             Some(b"\x1bOA".to_vec())
@@ -4270,7 +4539,8 @@ mod tests {
 
     #[test]
     fn tilde_navigation_keys_preserve_modifiers() {
-        let key = |code, modifiers| encode_key(&KeyEvent::new(code, modifiers), b"\x1b\r", false);
+        let key =
+            |code, modifiers| encode_key(&KeyEvent::new(code, modifiers), b"\x1b\r", false, false);
         assert_eq!(
             key(KeyCode::Delete, KeyModifiers::NONE),
             Some(b"\x1b[3~".to_vec())
@@ -4287,8 +4557,14 @@ mod tests {
 
     #[test]
     fn function_keys_encode_to_tilde_codes() {
-        let key =
-            |n, modifiers| encode_key(&KeyEvent::new(KeyCode::F(n), modifiers), b"\x1b\r", false);
+        let key = |n, modifiers| {
+            encode_key(
+                &KeyEvent::new(KeyCode::F(n), modifiers),
+                b"\x1b\r",
+                false,
+                false,
+            )
+        };
         // F1–F4 and F5–F12 carry the standard xterm CSI-tilde codes.
         assert_eq!(key(1, KeyModifiers::NONE), Some(b"\x1b[11~".to_vec()));
         assert_eq!(key(4, KeyModifiers::NONE), Some(b"\x1b[14~".to_vec()));
@@ -4945,6 +5221,24 @@ mod link_click_tests {
         (app, term, (content.x + at, content.y))
     }
 
+    fn double_click(app: &mut App, at: (u16, u16)) {
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+    }
+
     /// `Ctrl`+click a path, then return the view it landed on. Tests run from
     /// the repo root, so `Cargo.toml` is a real relative path from the pane's
     /// working directory.
@@ -5215,25 +5509,7 @@ mod link_click_tests {
     }
 
     #[test]
-    fn mouse_copy_drops_a_uniform_one_cell_pane_margin() {
-        assert_eq!(
-            strip_uniform_single_cell_margin(
-                " Hello, rain on a windowpane\n Hello, wind with a traveling name\n Hello, all things we almost miss"
-                    .into()
-            ),
-            "Hello, rain on a windowpane\nHello, wind with a traveling name\nHello, all things we almost miss"
-        );
-        assert_eq!(
-            strip_uniform_single_cell_margin(
-                "    let preserved = true;\n    run(preserved);".into()
-            ),
-            "    let preserved = true;\n    run(preserved);",
-            "normal code indentation must stay intact"
-        );
-    }
-
-    #[test]
-    fn mouse_drag_copy_drops_the_pane_edge_margin_from_terminal_text() {
+    fn mouse_drag_copy_preserves_selected_terminal_cells() {
         let _env = crate::persist::test_env("mouse-copy-pane-margin");
         let source = " Morning arrives without ceremony,\r\n a thin gold line on the edge of the glass.\r\n The kettle speaks in its private language,";
         let (mut app, mut term, _) = fixture_showing(source, 0);
@@ -5273,7 +5549,7 @@ mod link_click_tests {
         assert_eq!(
             app.selection_text().as_deref(),
             Some(
-                "Morning arrives without ceremony,\na thin gold line on the edge of the glass.\nThe kettle speaks in its private language,"
+                " Morning arrives without ceremony,\n a thin gold line on the edge of the glass.\n The kettle speaks in its private language,"
             )
         );
         app.handle_event(mouse(
@@ -5285,7 +5561,7 @@ mod link_click_tests {
         assert_eq!(
             app.pending_clipboard.as_deref(),
             Some(
-                "Morning arrives without ceremony,\na thin gold line on the edge of the glass.\nThe kettle speaks in its private language,"
+                " Morning arrives without ceremony,\n a thin gold line on the edge of the glass.\n The kettle speaks in its private language,"
             )
         );
     }
@@ -5483,6 +5759,97 @@ mod link_click_tests {
             "the second press copies the whitespace word"
         );
         assert!(app.selection.is_some(), "and highlights it");
+    }
+
+    #[test]
+    fn a_double_click_copies_a_word_from_a_native_file_view() {
+        let _env = crate::persist::test_env("double-click-file-view");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let pane = app.layout().focus;
+        let mut view = crate::files::FileView::new(PathBuf::from("sample.txt"));
+        view.wrap = false;
+        view.apply(crate::files::FileLoad::Text(vec![
+            "你好 file-view world".into()
+        ]));
+        app.panes.remove(&pane);
+        app.views.insert(pane, crate::app::ViewKind::File(view));
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("file content rect");
+        let text_x = content.x + crate::files::gutter_width(1) + 1;
+
+        // Two wide glyphs occupy four cells before the separating space.
+        double_click(&mut app, (text_x + 6, content.y));
+
+        assert_eq!(app.pending_clipboard.as_deref(), Some("file-view"));
+        assert!(
+            app.selection.is_some(),
+            "the copied file word is highlighted"
+        );
+    }
+
+    #[test]
+    fn a_double_click_copies_a_word_from_a_document_preview() {
+        use crate::files::preview::{
+            layout, Block, DocumentView, LayoutKey, PreviewDocument, PreviewKind, PreviewLoad,
+        };
+
+        let _env = crate::persist::test_env("double-click-document-preview");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let pane = app.layout().focus;
+        let source = Arc::<str>::from("hello rendered-preview world");
+        let document = Arc::new(PreviewDocument::new(
+            Arc::clone(&source),
+            vec![Block::Code {
+                language: None,
+                text: source.to_string(),
+                range: 0..source.len(),
+            }],
+        ));
+        let mut view = DocumentView::new(PathBuf::from("README.md"), PreviewKind::Markdown);
+        view.apply(PreviewLoad::Ready(Arc::clone(&document)));
+        app.panes.remove(&pane);
+        app.views.insert(pane, crate::app::ViewKind::Preview(view));
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("preview content rect");
+        let key = LayoutKey {
+            width: content.width,
+            ascii: false,
+        };
+        if let Some(crate::app::ViewKind::Preview(view)) = app.views.get_mut(&pane) {
+            view.apply_layout(key, Arc::new(layout::build(document, key)));
+        }
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        // Code preview rows have a two-cell presentation indent.
+        double_click(&mut app, (content.x + 2 + 7, content.y));
+
+        assert_eq!(app.pending_clipboard.as_deref(), Some("rendered-preview"));
+        assert!(
+            app.selection.is_some(),
+            "the copied preview word is highlighted"
+        );
     }
 
     /// The wide-character case for copying: a CJK glyph before a token shifts every
@@ -5811,20 +6178,16 @@ mod link_click_tests {
     }
 
     #[test]
-    fn codex_copy_drops_its_one_cell_transcript_gutter_on_one_row() {
-        let _env = crate::persist::test_env("codex-copy-gutter");
+    fn mouse_copy_is_independent_of_detected_agent() {
+        let _env = crate::persist::test_env("mouse-copy-agent-independent");
         let (mut app, _term, _) = fixture_showing("  hello", 0);
         let pane = app.layout().focus;
-        app.status.get_mut(&pane).expect("pane status").agent = "codex".into();
         let content = app
             .pane_content_rects
             .iter()
             .find(|(id, _)| *id == pane)
             .map(|(_, rect)| *rect)
             .expect("pane content rect");
-        // The drag starts one cell inside the pane and selects one row, so this
-        // verifies Codex gutter cleanup without relying on rectangular
-        // multiline selection.
         app.selection = Some(crate::app::Selection {
             pane,
             content,
@@ -5835,6 +6198,9 @@ mod link_click_tests {
             dragging: false,
         });
 
-        assert_eq!(app.selection_text().as_deref(), Some("hello"));
+        let shell = app.selection_text();
+        app.status.get_mut(&pane).expect("pane status").agent = "codex".into();
+        assert_eq!(app.selection_text(), shell);
+        assert_eq!(shell.as_deref(), Some(" hello"));
     }
 }

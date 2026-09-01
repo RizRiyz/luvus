@@ -1030,6 +1030,14 @@ impl Pane {
             .unwrap_or(false)
     }
 
+    /// Input modes read together under one engine lock.
+    pub fn key_encoding_modes(&self) -> (bool, bool) {
+        self.engine
+            .lock()
+            .map(|e| (e.application_cursor(), e.disambiguate_escape_codes()))
+            .unwrap_or((false, false))
+    }
+
     /// `(mouse_report, sgr)` — whether the child tracks the mouse, and whether
     /// it wants SGR-encoded reports. Read together under one lock.
     /// The app's mouse-tracking state, read under **one** engine lock — callers
@@ -1169,23 +1177,18 @@ fn apply_pane_env(
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("LUVUS_ENV", "1");
-    cmd.env("BOHAY_ENV", "1");
     cmd.env("LUVUS_PANE_ID", id.0.to_string());
-    cmd.env("BOHAY_PANE_ID", id.0.to_string());
     if let Some(sock) = crate::ipc::api::socket_path_env() {
         cmd.env("LUVUS_SOCKET_PATH", &sock);
-        cmd.env("BOHAY_SOCKET_PATH", sock);
     }
     if let Some(name) = crate::session::active_name() {
         cmd.env(crate::session::SESSION_ENV_VAR, &name);
-        cmd.env(crate::session::LEGACY_SESSION_ENV_VAR, name);
     }
     // This session's exact binary, so an agent can use `$LUVUS_BIN_PATH`
     // instead of a `luvus` on PATH that may be an older install with a
     // different CLI (skill/binary skew). Matches the server it talks to.
     if let Ok(exe) = std::env::current_exe() {
         cmd.env("LUVUS_BIN_PATH", &exe);
-        cmd.env("BOHAY_BIN_PATH", exe);
     }
 }
 

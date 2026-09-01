@@ -383,6 +383,39 @@ mod socket_api_tests {
     }
 
     #[test]
+    fn task_start_api_supports_explicit_workspace_mode() {
+        let (_env, mut app) = app("socket-task-workspace");
+        let workspace_id = app.workspaces[0].id.clone();
+        let workspaces_before = app.workspaces.len();
+        let tabs_before = app.workspaces[0].tabs.len();
+        app.orch
+            .add_task("shared".into(), vec![], vec![], None)
+            .unwrap();
+
+        let result = app
+            .dispatch(
+                "task.start",
+                &json!({
+                    "id":"t1",
+                    "mode":"workspace",
+                    "workspace_id":workspace_id
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(result["mode"], "workspace");
+        assert_eq!(result["workspace_id"], workspace_id);
+        assert!(result["worktree"].is_null());
+        assert!(result["branch"].is_null());
+        assert_eq!(app.workspaces.len(), workspaces_before);
+        assert_eq!(app.workspaces[0].tabs.len(), tabs_before + 1);
+        assert_eq!(
+            app.orch.task("t1").unwrap().worker_mode,
+            Some(crate::orch::TaskWorkerMode::Workspace)
+        );
+    }
+
+    #[test]
     fn socket_mutations_support_optimistic_revision_guards() {
         let (_env, mut app) = app("socket-revision-guard");
         let (reply, _) = std::sync::mpsc::channel();
@@ -664,10 +697,15 @@ impl App {
         // changing scope, or pressing/clicking refresh queues one worker scan;
         // merely retaining a hidden mission tab performs no usage IO.
         self.sync_mission_usage_visibility();
-        if self.mission_usage_requested && !self.usage_scan_inflight {
-            self.mission_usage_requested = false;
+        if self.mission_usage_requested.is_some() && !self.usage_scan_inflight {
+            let request = self
+                .mission_usage_requested
+                .take()
+                .expect("usage request checked above");
             self.usage_scan_inflight = true;
-            let targets = self.mission_usage_targets();
+            let targets = self.mission_usage_targets_for(request.scope, request.workspace);
+            let scanned = targets.keys().cloned().collect::<Vec<_>>();
+            let scope = request.scope;
             let overrides = self.config.mission_pricing.clone();
             // Previous results let an explicit refresh reuse unchanged transcripts:
             // one stat per idle session, with no read or parse.
@@ -706,7 +744,12 @@ impl App {
                         usage.insert(key, u);
                     }
                 }
-                let _ = tx.send(AppEvent::UsageScanned { usage, mtimes });
+                let _ = tx.send(AppEvent::UsageScanned {
+                    scope,
+                    scanned,
+                    usage,
+                    mtimes,
+                });
             });
         }
         // The per-pane classification below locks each pane's VT engine + scans its
@@ -1182,6 +1225,7 @@ impl App {
         }
     }
 
+    /// Validate and execute one bounded local API method against server-owned state.
     pub(crate) fn dispatch(&mut self, method: &str, p: &Value) -> Result<Value, (String, String)> {
         match method {
             "ping" => Ok(json!({
@@ -1379,8 +1423,10 @@ impl App {
                         "could not create a terminal in the home directory".to_string(),
                     ));
                 }
-                let base = self.resolve_pane(p).unwrap_or_else(|| self.layout().focus);
-                self.layout_mut().focus = base;
+                let base = match p.get("pane") {
+                    None | Some(Value::Null) => self.layout().focus,
+                    Some(_) => self.resolve_pane(p).ok_or_else(not_found)?,
+                };
                 let dir = p
                     .get("direction")
                     .and_then(|v| v.as_str())
@@ -1390,14 +1436,15 @@ impl App {
                 } else {
                     Axis::Col
                 };
-                self.split(axis);
-                let new = self.layout().focus;
-                // `focus: false` keeps the caller's focus where it was (background
-                // split), instead of moving it to the new pane.
-                if p.get("focus").and_then(|v| v.as_bool()) == Some(false) {
-                    self.layout_mut().focus = base;
-                }
-                Ok(json!({"type":"pane","pane": new.0.to_string()}))
+                let focus = p.get("focus").and_then(|v| v.as_bool()) != Some(false);
+                let new = self.split_pane(base, axis, focus).ok_or_else(not_found)?;
+                let (workspace, tab) = self.pane_location(new).ok_or_else(not_found)?;
+                Ok(json!({
+                    "type":"pane",
+                    "pane": new.0.to_string(),
+                    "workspace": workspace.to_string(),
+                    "tab": (tab + 1).to_string(),
+                }))
             }
             "pane.move" => {
                 let id = self.resolve_pane(p).ok_or_else(not_found)?;
@@ -1741,10 +1788,12 @@ impl App {
                     .position(|w| crate::platform::same_path(&w.cwd, &path))
                 {
                     Some(i) => {
+                        self.forget_closed_workspace_path(&path);
                         if focus {
                             self.active_ws = i;
                         }
                     }
+                    None if !focus && self.automatic_workspace_open_is_suppressed(&path) => {}
                     // Report a failed open instead of answering with the
                     // *previously* active node, which read as success and left
                     // the caller (and the user) looking at the wrong folder.
@@ -3683,6 +3732,44 @@ impl App {
                 self.open_git_tab(i);
                 Ok(json!({"type":"ok","git": self.active_is_git()}))
             }
+            "mission.snapshot" | "mission.refresh" => {
+                reject_api_fields(p, &["scope", "workspace", "workspace_id"])?;
+                let scope = match p.get("scope") {
+                    None => crate::mission::MissionScope::Workspace,
+                    Some(Value::String(scope)) if scope == "workspace" => {
+                        crate::mission::MissionScope::Workspace
+                    }
+                    Some(Value::String(scope)) if scope == "all" => {
+                        crate::mission::MissionScope::All
+                    }
+                    Some(_) => {
+                        return Err((
+                            "invalid_request".to_string(),
+                            "scope must be workspace or all".to_string(),
+                        ))
+                    }
+                };
+                let workspace = self.optional_socket_workspace(p)?.unwrap_or(self.active_ws);
+                if scope == crate::mission::MissionScope::Workspace
+                    && workspace >= self.workspaces.len()
+                {
+                    return Err(workspace_update_error(
+                        workspace,
+                        WorkspaceUpdateError::NotFound,
+                    ));
+                }
+                if method == "mission.refresh" {
+                    self.request_mission_usage_refresh_for(scope, workspace);
+                    Ok(json!({
+                        "type":"mission_refresh",
+                        "scope":match scope { crate::mission::MissionScope::Workspace => "workspace", crate::mission::MissionScope::All => "all" },
+                        "workspace":workspace.to_string(),
+                        "refreshing":true,
+                    }))
+                } else {
+                    Ok(self.mission_snapshot_value(scope, workspace))
+                }
+            }
             "mission.open" => {
                 let i = self.optional_socket_workspace(p)?.unwrap_or(self.active_ws);
                 if i >= self.workspaces.len() {
@@ -3834,16 +3921,27 @@ impl App {
                 Ok(json!({ "type": "task", "task": task_json(&task) }))
             }
             "task.start" => {
-                // ORCH-3: spawn an isolated worker (worktree + pane) for the task.
                 let id = req_str(p, "id")?.to_string();
-                let (pane, path) =
-                    self.task_start(&id, opt_str(p, "branch"), opt_str(p, "agent"))?;
+                let mode =
+                    task_worker_mode(p, self.orch.task(&id).and_then(|task| task.worker_mode))?;
+                let started = self.task_start(
+                    &id,
+                    opt_str(p, "branch"),
+                    opt_str(p, "agent"),
+                    mode,
+                    opt_str(p, "workspace_id"),
+                )?;
                 let task = self.orch.task(&id).map(task_json).unwrap_or(Value::Null);
                 Ok(json!({
                     "type": "task",
                     "task": task,
-                    "pane": pane.0.to_string(),
-                    "worktree": path.display().to_string(),
+                    "pane": started.pane.0.to_string(),
+                    "mode": started.mode.as_str(),
+                    "workspace_id": started.workspace_id,
+                    "tab_id": started.tab_id,
+                    "cwd": started.cwd.display().to_string(),
+                    "worktree": started.worktree,
+                    "branch": started.branch,
                 }))
             }
             "task.update" => {
@@ -3910,18 +4008,33 @@ impl App {
                 ))
             }
             "task.next" => {
-                // ORCH-4 scheduler: hand out the next ready task. `--start` spawns
-                // an isolated worker (ORCH-3); otherwise claim it for this pane.
+                // ORCH-4 scheduler: hand out the next ready task. `--start`
+                // spawns the requested worker mode; otherwise claim it here.
                 match self.orch.next_ready() {
                     None => Ok(json!({ "type": "none", "message": "no ready tasks" })),
                     Some(id) => {
                         if p.get("start").and_then(|v| v.as_bool()).unwrap_or(false) {
-                            let (pane, path) = self.task_start(&id, None, opt_str(p, "agent"))?;
+                            let mode = task_worker_mode(
+                                p,
+                                self.orch.task(&id).and_then(|task| task.worker_mode),
+                            )?;
+                            let started = self.task_start(
+                                &id,
+                                None,
+                                opt_str(p, "agent"),
+                                mode,
+                                opt_str(p, "workspace_id"),
+                            )?;
                             let task = self.orch.task(&id).map(task_json).unwrap_or(Value::Null);
                             Ok(json!({
                                 "type": "task", "task": task,
-                                "pane": pane.0.to_string(),
-                                "worktree": path.display().to_string(),
+                                "pane": started.pane.0.to_string(),
+                                "mode": started.mode.as_str(),
+                                "workspace_id": started.workspace_id,
+                                "tab_id": started.tab_id,
+                                "cwd": started.cwd.display().to_string(),
+                                "worktree": started.worktree,
+                                "branch": started.branch,
                             }))
                         } else {
                             let pane = self.orch_pane(p)?;
@@ -5568,6 +5681,25 @@ fn orch_err(r: crate::orch::Reject) -> (String, String) {
     (r.code.to_string(), r.message)
 }
 
+fn task_worker_mode(
+    p: &Value,
+    existing: Option<crate::orch::TaskWorkerMode>,
+) -> Result<crate::orch::TaskWorkerMode, (String, String)> {
+    match p.get("mode") {
+        None => Ok(existing.unwrap_or(crate::orch::TaskWorkerMode::Worktree)),
+        Some(Value::String(mode)) => crate::orch::TaskWorkerMode::parse(mode).ok_or_else(|| {
+            (
+                "bad_request".to_string(),
+                "mode must be worktree or workspace".to_string(),
+            )
+        }),
+        Some(_) => Err((
+            "bad_request".to_string(),
+            "mode must be worktree or workspace".to_string(),
+        )),
+    }
+}
+
 /// A `Task` as a JSON value for API results + bus events.
 fn task_json(t: &crate::orch::Task) -> Value {
     serde_json::to_value(t).unwrap_or(Value::Null)
@@ -6052,6 +6184,76 @@ mod tests {
             .expect_err("missing workspace must not change the active view");
         assert_eq!(error.0, "not_found");
         assert_eq!((app.active_ws, app.ws().active_tab), before);
+    }
+
+    #[test]
+    fn mission_snapshot_and_refresh_are_read_only_ui_independent_controls() {
+        let _env = crate::persist::test_env("mission-snapshot-api");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let cwd = app.ws().cwd.clone();
+        app.resumable.push(crate::agent::SessionInfo {
+            agent: "codex".into(),
+            session_id: "native-secret-id".into(),
+            cwd,
+            updated: std::time::SystemTime::now(),
+        });
+        app.agent_usage.insert(
+            crate::mission::UsageKey::new("codex", "native-secret-id"),
+            crate::mission::AgentUsage {
+                model: "gpt-5".into(),
+                tokens_in: 120,
+                tokens_out: 30,
+                cache: 10,
+                context: Some(0.25),
+                cost: Some(0.42),
+            },
+        );
+        let before = (app.active_ws, app.ws().active_tab, app.active_is_mission());
+
+        let snapshot = app
+            .dispatch("mission.snapshot", &json!({"scope":"workspace"}))
+            .unwrap();
+        assert_eq!(snapshot["type"], "mission_snapshot");
+        assert_eq!(snapshot["rows"][0]["kind"], "resumable");
+        assert_eq!(snapshot["rows"][0]["usage"]["total_tokens"], 150);
+        assert!(
+            snapshot["rows"][0].get("session_id").is_none(),
+            "read scope does not expose native session identifiers"
+        );
+        assert_eq!(
+            (app.active_ws, app.ws().active_tab, app.active_is_mission()),
+            before,
+            "snapshot does not open or focus Mission Control"
+        );
+
+        let refreshed = app
+            .dispatch("mission.refresh", &json!({"scope":"all"}))
+            .unwrap();
+        assert_eq!(refreshed["type"], "mission_refresh");
+        assert_eq!(
+            app.mission_usage_requested,
+            Some(crate::mission::MissionUsageRequest {
+                scope: crate::mission::MissionScope::All,
+                workspace: 0,
+            })
+        );
+        assert_eq!(
+            (app.active_ws, app.ws().active_tab, app.active_is_mission()),
+            before,
+            "refresh queues work without changing the UI"
+        );
+
+        let bad_scope = app
+            .dispatch("mission.snapshot", &json!({"scope":null}))
+            .expect_err("a present non-string scope must not use the default");
+        assert_eq!(bad_scope.0, "invalid_request");
+
+        let all = app
+            .dispatch("mission.snapshot", &json!({"scope":"all","workspace":999}))
+            .expect("all-workspace scope does not depend on its anchor index");
+        assert_eq!(all["type"], "mission_snapshot");
+        assert_eq!(all["rows"][0]["kind"], "resumable");
     }
 
     #[test]
@@ -6929,6 +7131,26 @@ command = ["true"]
         assert_eq!(app.agent_name_for(pane), Some("harness-shell"));
     }
 
+    /// An explicit null pane has the same focused-pane semantics as omission.
+    #[test]
+    fn pane_split_null_pane_targets_the_focused_layout_pane() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let base = app.layout().focus;
+
+        let out = app
+            .dispatch("pane.split", &json!({"pane": null, "focus": false}))
+            .expect("an explicit null pane falls back to layout focus");
+        let split = PaneId(out["pane"].as_str().unwrap().parse().unwrap());
+
+        assert_ne!(split, base);
+        assert_eq!(out["workspace"], "0");
+        assert_eq!(out["tab"], "1");
+        assert_eq!(app.pane_location(split), Some((0, 0)));
+        assert_eq!(app.layout().focus, base);
+    }
+
+    /// Background and default splits preserve their established focus behavior.
     #[test]
     fn pane_split_no_focus_keeps_the_caller_focused() {
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -6945,6 +7167,234 @@ command = ["true"]
         // Default split still moves focus to the new pane.
         let out2 = app.dispatch("pane.split", &json!({})).unwrap();
         assert_eq!(app.layout().focus.0.to_string(), out2["pane"]);
+    }
+
+    /// Cross-workspace splits attach once and report their owning workspace and tab.
+    #[test]
+    fn pane_split_targets_foreign_workspace_without_detaching() {
+        let _env = crate::persist::test_env("pane-split-foreign-workspace");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let caller_ws = app.active_ws;
+        let caller_tab = app.workspaces[caller_ws].active_tab;
+        let caller_pane = app.layout().focus;
+
+        let target_root = crate::persist::config_dir().join("target-workspace");
+        let target_cwd = target_root.join("nested-pane-cwd");
+        std::fs::create_dir_all(&target_cwd).unwrap();
+        assert!(app.create_workspace_at(target_root.clone()));
+        let target_ws = app.active_ws;
+        let target_tab = app.workspaces[target_ws].active_tab;
+        let target_pane = app.layout().focus;
+        app.panes.get_mut(&target_pane).unwrap().cwd = target_cwd.clone();
+
+        app.active_ws = caller_ws;
+        app.workspaces[caller_ws].active_tab = caller_tab;
+        app.workspaces[caller_ws].tabs[caller_tab].layout.focus = caller_pane;
+        app.zoomed = true;
+
+        let out = app
+            .dispatch(
+                "pane.split",
+                &json!({"pane": target_pane.0.to_string(), "focus": false}),
+            )
+            .unwrap();
+        let new_pane = PaneId(out["pane"].as_str().unwrap().parse().unwrap());
+
+        assert_eq!(out["workspace"], target_ws.to_string());
+        assert_eq!(out["tab"], (target_tab + 1).to_string());
+        assert_eq!(
+            app.active_ws, caller_ws,
+            "the caller's workspace stays active"
+        );
+        assert_eq!(app.workspaces[caller_ws].active_tab, caller_tab);
+        assert_eq!(app.layout().focus, caller_pane, "the caller keeps focus");
+        assert!(app.zoomed, "a background split preserves caller zoom");
+        assert_eq!(app.pane_location(new_pane), Some((target_ws, target_tab)));
+        assert_eq!(
+            app.workspaces[target_ws].tabs[target_tab].layout.focus, target_pane,
+            "the inactive target tab's focus is restored"
+        );
+        assert_eq!(
+            app.panes.get(&new_pane).map(|pane| &pane.cwd),
+            Some(&target_cwd),
+            "a split inherits the target pane's live cwd"
+        );
+        let occurrences = app
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| tab.layout.leaves())
+            .filter(|pane| *pane == new_pane)
+            .count();
+        assert_eq!(occurrences, 1, "every spawned pane has one layout owner");
+
+        app.status.get_mut(&new_pane).unwrap().agent = "claude".into();
+        let agents = app.dispatch("agent.list", &json!({})).unwrap();
+        let new_pane_text = new_pane.0.to_string();
+        let row = agents["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["pane"].as_str() == Some(new_pane_text.as_str()))
+            .expect("the attached pane is visible to agent.list");
+        assert_eq!(row["workspace"], target_ws.to_string());
+        assert_eq!(row["tab"], (target_tab + 1).to_string());
+
+        app.config.layout.new_pane_to_workspace_root = true;
+        let root_out = app
+            .dispatch(
+                "pane.split",
+                &json!({"pane": target_pane.0.to_string(), "focus": false}),
+            )
+            .unwrap();
+        let root_pane = PaneId(root_out["pane"].as_str().unwrap().parse().unwrap());
+        assert_eq!(app.pane_location(root_pane), Some((target_ws, target_tab)));
+        assert_eq!(
+            app.panes.get(&root_pane).map(|pane| &pane.cwd),
+            Some(&target_root),
+            "root-first mode uses the target workspace root, not the caller's"
+        );
+
+        app.config.layout.new_pane_to_workspace_root = false;
+        app.zoomed = true;
+        app.scroll_pane = Some(caller_pane);
+        let focused_out = app
+            .dispatch("pane.split", &json!({"pane": target_pane.0.to_string()}))
+            .unwrap();
+        let focused_pane = PaneId(focused_out["pane"].as_str().unwrap().parse().unwrap());
+        assert_eq!(app.active_ws, target_ws);
+        assert_eq!(app.workspaces[target_ws].active_tab, target_tab);
+        assert_eq!(app.layout().focus, focused_pane);
+        assert_eq!(
+            app.pane_location(focused_pane),
+            Some((target_ws, target_tab))
+        );
+        assert!(!app.zoomed, "a focused split exits zoom");
+        assert_eq!(app.scroll_pane, None, "the new pane starts at live output");
+    }
+
+    /// A failed background split is removed from its inactive owning layout.
+    #[test]
+    fn pane_split_failed_spawn_cleans_inactive_workspace_without_changing_caller() {
+        let _env = crate::persist::test_env("pane-split-failed-inactive-workspace");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let caller_ws = app.active_ws;
+        let caller_tab = app.workspaces[caller_ws].active_tab;
+        let caller_pane = app.layout().focus;
+
+        let target_root = crate::persist::config_dir().join("failed-target-workspace");
+        std::fs::create_dir_all(&target_root).unwrap();
+        assert!(app.create_workspace_at(target_root));
+        let target_ws = app.active_ws;
+        let target_tab = app.workspaces[target_ws].active_tab;
+        let target_pane = app.layout().focus;
+
+        app.active_ws = caller_ws;
+        app.workspaces[caller_ws].active_tab = caller_tab;
+        app.workspaces[caller_ws].tabs[caller_tab].layout.focus = caller_pane;
+        app.zoomed = true;
+        app.config.shell = "luvus-not-a-real-shell-deferred-split".to_string();
+
+        let out = app
+            .dispatch(
+                "pane.split",
+                &json!({"pane": target_pane.0.to_string(), "focus": false}),
+            )
+            .unwrap();
+        let dead_pane = PaneId(out["pane"].as_str().unwrap().parse().unwrap());
+        assert_eq!(app.pane_location(dead_pane), Some((target_ws, target_tab)));
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "the deferred spawn did not fail");
+            match rx.recv_timeout(remaining) {
+                Ok(AppEvent::PtyExit(id)) if id == dead_pane => {
+                    app.handle_event(AppEvent::PtyExit(id));
+                    break;
+                }
+                Ok(AppEvent::PtyReady { id, .. }) if id == dead_pane => {
+                    panic!("the deliberately invalid shell unexpectedly spawned")
+                }
+                Ok(_) => {}
+                Err(error) => panic!("the deferred spawn did not fail: {error}"),
+            }
+        }
+
+        assert!(
+            !app.workspaces[target_ws].tabs[target_tab]
+                .layout
+                .contains(dead_pane),
+            "the owning inactive layout drops the dead leaf"
+        );
+        assert_eq!(
+            app.workspaces[target_ws].tabs[target_tab].layout.leaves(),
+            vec![target_pane]
+        );
+        assert_eq!(
+            app.workspaces[target_ws].tabs[target_tab].layout.focus,
+            target_pane
+        );
+        assert_eq!(app.pane_location(dead_pane), None);
+        assert_eq!(app.active_ws, caller_ws);
+        assert_eq!(app.workspaces[caller_ws].active_tab, caller_tab);
+        assert_eq!(app.layout().focus, caller_pane);
+        assert!(app.zoomed, "the caller's zoom state is preserved");
+        assert!(!app.panes.contains_key(&dead_pane));
+        assert!(!app.status.contains_key(&dead_pane));
+    }
+
+    /// Closing an inactive workspace through pane teardown publishes one removal.
+    #[test]
+    fn closing_last_inactive_workspace_pane_emits_one_workspace_closed_event() {
+        let _env = crate::persist::test_env("close-last-inactive-workspace-pane");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let caller_ws = app.active_ws;
+        let caller_tab = app.workspaces[caller_ws].active_tab;
+        let caller_pane = app.layout().focus;
+
+        let target_root = crate::persist::config_dir().join("close-event-target-workspace");
+        std::fs::create_dir_all(&target_root).unwrap();
+        assert!(app.create_workspace_at(target_root));
+        let target_ws = app.active_ws;
+        let target_workspace_id = app.workspaces[target_ws].id.clone();
+        let target_pane = app.layout().focus;
+
+        app.active_ws = caller_ws;
+        app.workspaces[caller_ws].active_tab = caller_tab;
+        app.workspaces[caller_ws].tabs[caller_tab].layout.focus = caller_pane;
+        app.zoomed = true;
+        let event_floor = crate::ipc::api::current_sequence(&app.events);
+
+        app.handle_event(AppEvent::PtyExit(target_pane));
+
+        assert_eq!(app.workspaces.len(), 1);
+        assert!(
+            app.workspaces
+                .iter()
+                .all(|workspace| workspace.id != target_workspace_id),
+            "the inactive workspace is removed"
+        );
+        assert_eq!(app.active_ws, caller_ws);
+        assert_eq!(app.workspaces[caller_ws].active_tab, caller_tab);
+        assert_eq!(app.layout().focus, caller_pane);
+        assert!(app.zoomed, "the caller's zoom state is preserved");
+        assert!(!app.panes.contains_key(&target_pane));
+        assert!(!app.status.contains_key(&target_pane));
+
+        let events = crate::ipc::api::replayed_events_after(&app.events, event_floor);
+        let workspace_closed: Vec<_> = events
+            .iter()
+            .filter(|event| event["event"] == "workspace.closed")
+            .collect();
+        assert_eq!(workspace_closed.len(), 1);
+        assert_eq!(
+            workspace_closed[0]["data"],
+            json!({"workspace": target_ws.to_string()})
+        );
     }
 
     #[test]

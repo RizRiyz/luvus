@@ -36,8 +36,9 @@ verifies that a connected server process belongs to the current Windows user.
   diff drivers, text conversion, color, and submodule recursion, and strips
   terminal controls from displayed code. It has no staging, discard, commit,
   push, or GitHub-publishing action.
-- **Orchestration workers** start only on your explicit action, and merges
-  happen in an isolated worktree, never your checkout.
+- **Orchestration workers** start only on your explicit action. Worktree mode is
+  isolated and merges in a dedicated integration worktree. Workspace mode is
+  explicitly labeled as a shared checkout and has no merge action.
 
 ## Local review data
 

@@ -6,18 +6,19 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
 pub const SESSION_ENV_VAR: &str = "LUVUS_SESSION";
-pub const LEGACY_SESSION_ENV_VAR: &str = "BOHAY_SESSION";
 pub const DEFAULT_SESSION_NAME: &str = "default";
 
 const MAX_SESSION_NAME_LEN: usize = 64;
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const START_TIMEOUT: Duration = Duration::from_secs(5);
 
 static EXPLICIT_SESSION_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -102,11 +103,10 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
     }
 
     EXPLICIT_SESSION_REQUESTED.store(false, Ordering::Relaxed);
-    let inherited_socket = crate::compat::inherited("LUVUS_SOCKET_PATH", "BOHAY_SOCKET_PATH")
-        .is_some_and(|v| !v.is_empty());
+    let inherited_socket = std::env::var_os("LUVUS_SOCKET_PATH").is_some_and(|v| !v.is_empty());
     if !inherited_socket {
-        if let Some(name) = crate::compat::inherited(SESSION_ENV_VAR, LEGACY_SESSION_ENV_VAR)
-            .and_then(|value| value.into_string().ok())
+        if let Some(name) =
+            std::env::var_os(SESSION_ENV_VAR).and_then(|value| value.into_string().ok())
         {
             match normalize_name(&name)? {
                 Some(name) => std::env::set_var(SESSION_ENV_VAR, name),
@@ -121,11 +121,9 @@ fn apply_explicit_name(name: &str) -> Result<(), String> {
     match normalize_name(name)? {
         Some(name) => {
             std::env::set_var(SESSION_ENV_VAR, name);
-            std::env::remove_var(LEGACY_SESSION_ENV_VAR);
         }
         None => {
             std::env::remove_var(SESSION_ENV_VAR);
-            std::env::remove_var(LEGACY_SESSION_ENV_VAR);
         }
     }
     EXPLICIT_SESSION_REQUESTED.store(true, Ordering::Relaxed);
@@ -137,7 +135,7 @@ pub fn explicit_session_requested() -> bool {
 }
 
 pub fn active_name() -> Option<String> {
-    crate::compat::inherited(SESSION_ENV_VAR, LEGACY_SESSION_ENV_VAR)
+    std::env::var_os(SESSION_ENV_VAR)
         .and_then(|value| value.into_string().ok())
         .filter(|name| name != DEFAULT_SESSION_NAME)
         .filter(|name| validate_name(name).is_ok())
@@ -204,12 +202,6 @@ pub fn client_socket_path_for(name: Option<&str>) -> PathBuf {
 fn socket_path_for(name: Option<&str>, file_name: &str, role: &str) -> PathBuf {
     let logical = session_dir_for(name).join(file_name);
     socket_alias_path(logical, "luvus", role)
-}
-
-/// Resolve a Bohay 0.10 logical socket path exactly as the old binary did.
-/// Migration uses this to detect a live old server before copying its state.
-pub(crate) fn legacy_socket_path(logical: PathBuf, role: &str) -> PathBuf {
-    socket_alias_path(logical, "bohay", role)
 }
 
 #[cfg(unix)]
@@ -288,6 +280,27 @@ pub fn list_sessions() -> std::io::Result<Vec<SessionInfo>> {
     Ok(sessions)
 }
 
+/// Start one named server through the shared lifecycle API, then wait until its
+/// binary client transport is ready for an interactive handoff. This remains a
+/// bounded, caller-driven operation and must run off the app loop.
+pub fn start_client_session(name: &str) -> Result<SessionInfo, String> {
+    let selected = normalize_name(name)?;
+    let selected = selected.as_deref();
+    start_session(selected)?;
+    let client = client_socket_path_for(selected);
+    let deadline = Instant::now() + START_TIMEOUT;
+    while Instant::now() < deadline {
+        if is_running_at(&client) {
+            return Ok(session_info(selected));
+        }
+        std::thread::sleep(STOP_POLL_INTERVAL);
+    }
+    Err(format!(
+        "session {name} started but its client transport was unavailable after {}ms",
+        START_TIMEOUT.as_millis(),
+    ))
+}
+
 pub fn stop_session(name: Option<&str>) -> Result<SessionInfo, String> {
     let api = api_socket_path_for(name);
     let client = client_socket_path_for(name);
@@ -323,6 +336,104 @@ pub fn stop_session(name: Option<&str>) -> Result<SessionInfo, String> {
         name.unwrap_or(DEFAULT_SESSION_NAME),
         STOP_TIMEOUT.as_millis()
     ))
+}
+
+/// Start one server namespace without changing the caller's selected session.
+/// The child receives an explicit selector and no inherited socket override,
+/// so a managed pane cannot accidentally route it to another running server.
+pub fn start_session(name: Option<&str>) -> Result<SessionInfo, String> {
+    if let Some(name) = name {
+        validate_name(name)?;
+    }
+    let info = session_info(name);
+    if info.running {
+        return Ok(info);
+    }
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let mut command = Command::new(executable);
+    command
+        .arg("--session")
+        .arg(name.unwrap_or(DEFAULT_SESSION_NAME))
+        .arg("server")
+        .env_remove("LUVUS_SOCKET_PATH")
+        .env_remove(SESSION_ENV_VAR)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    detach_server_command(&mut command);
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+
+    let deadline = Instant::now() + START_TIMEOUT;
+    while Instant::now() < deadline {
+        let info = session_info(name);
+        if info.running {
+            return Ok(info);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "session {} server exited before startup with {status}",
+                    name.unwrap_or(DEFAULT_SESSION_NAME)
+                ));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = terminate_and_wait(&mut child);
+                return Err(format!(
+                    "could not inspect session {} startup: {error}",
+                    name.unwrap_or(DEFAULT_SESSION_NAME)
+                ));
+            }
+        }
+        std::thread::sleep(STOP_POLL_INTERVAL);
+    }
+    let cleanup = terminate_and_wait(&mut child);
+    let mut message = format!(
+        "session {} did not start within {}ms",
+        name.unwrap_or(DEFAULT_SESSION_NAME),
+        START_TIMEOUT.as_millis()
+    );
+    if let Err(error) = cleanup {
+        message.push_str(&format!("; could not reap timed-out server: {error}"));
+    }
+    Err(message)
+}
+
+pub fn restart_session(name: Option<&str>) -> Result<SessionInfo, String> {
+    if session_info(name).running {
+        stop_session(name)?;
+    }
+    start_session(name)
+}
+
+fn terminate_and_wait(child: &mut std::process::Child) -> Result<(), String> {
+    let kill = child.kill();
+    match child.wait() {
+        Ok(_) => Ok(()),
+        Err(wait_error) => match kill {
+            Ok(()) => Err(wait_error.to_string()),
+            Err(kill_error) => Err(format!(
+                "kill failed: {kill_error}; wait failed: {wait_error}"
+            )),
+        },
+    }
+}
+
+#[cfg(unix)]
+fn detach_server_command(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+}
+
+#[cfg(windows)]
+fn detach_server_command(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(0x0000_0008 | 0x0000_0200);
 }
 
 pub fn delete_session(name: &str) -> Result<SessionInfo, String> {
@@ -375,6 +486,22 @@ mod tests {
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| part.to_string()).collect()
+    }
+
+    #[test]
+    fn timed_out_server_child_is_terminated_and_reaped() {
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "ping -n 30 127.0.0.1 >NUL"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 30"]);
+            command
+        };
+        let mut child = crate::platform::no_window(&mut command).spawn().unwrap();
+        terminate_and_wait(&mut child).unwrap();
+        assert!(child.try_wait().unwrap().is_some());
     }
 
     #[test]
@@ -511,15 +638,13 @@ mod tests {
     }
 
     #[test]
-    fn default_selector_preserves_the_legacy_root() {
+    fn default_selector_uses_the_root_session() {
         let _env = crate::persist::test_env("session-default-selector");
-        std::env::set_var(LEGACY_SESSION_ENV_VAR, "old-inherited");
         let cleaned =
             configure_from_args(&argv(&["luvus", "--session=default", "server", "status"]))
                 .unwrap();
         assert_eq!(cleaned, argv(&["luvus", "server", "status"]));
         assert_eq!(active_name(), None);
-        assert!(std::env::var_os(LEGACY_SESSION_ENV_VAR).is_none());
         assert_eq!(active_dir(), crate::persist::config_dir());
         assert!(explicit_session_requested());
     }

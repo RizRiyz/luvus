@@ -33,7 +33,6 @@ exclude = [
     "/SECURITY.md",
     "/install.sh",
     "/install.ps1",
-    "/migrate.sh",
     "/RELEASING.md",
     "/scripts",
     "/website",
