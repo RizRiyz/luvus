@@ -97,7 +97,7 @@ impl HostInputDecoder {
             DecodeState::Prefix {
                 mut events,
                 matched,
-                deadline: _,
+                deadline,
             } => {
                 if is_key_release(&event) {
                     self.state = DecodeState::Prefix {
@@ -106,6 +106,14 @@ impl HostInputDecoder {
                         deadline: now + PREFIX_TIMEOUT,
                     };
                     return DecodedEvents::None;
+                }
+                if !matches!(&event, Event::Key(_)) {
+                    self.state = DecodeState::Prefix {
+                        events,
+                        matched,
+                        deadline,
+                    };
+                    return DecodedEvents::One(event);
                 }
                 if marker_char(&event) == START_MARKER.get(matched).copied() {
                     events.push(event);
@@ -431,6 +439,59 @@ mod tests {
         assert!(matches!(output[0], Event::Key(ref key) if key.code == KeyCode::Esc));
         assert!(matches!(output[1], Event::Key(ref key) if key.code == KeyCode::Char('[')));
         assert!(matches!(output[2], Event::Key(ref key) if key.code == KeyCode::Char('x')));
+    }
+
+    #[test]
+    fn asynchronous_events_do_not_break_a_start_marker() {
+        let now = Instant::now();
+        let mut decoder = HostInputDecoder::default();
+        let start_marker = marker(START_MARKER);
+        let mut output = Vec::new();
+
+        for event in start_marker[..3].iter().cloned() {
+            collect(decoder.push_at(event, now), &mut output);
+        }
+        collect(decoder.push_at(Event::Resize(120, 40), now), &mut output);
+        for event in start_marker[3..].iter().cloned() {
+            collect(decoder.push_at(event, now), &mut output);
+        }
+        collect(decoder.push_at(key(KeyCode::Char('x')), now), &mut output);
+        for event in marker(END_MARKER) {
+            collect(decoder.push_at(event, now), &mut output);
+        }
+
+        assert!(matches!(
+            output.as_slice(),
+            [Event::Resize(120, 40), Event::Paste(text)] if text == "x"
+        ));
+    }
+
+    #[test]
+    fn false_end_marker_prefix_stays_in_the_payload() {
+        let now = Instant::now();
+        let mut decoder = HostInputDecoder::default();
+        for event in marker(START_MARKER) {
+            decoder.push_at(event, now);
+        }
+        for event in [
+            key(KeyCode::Esc),
+            key(KeyCode::Char('[')),
+            key(KeyCode::Char('2')),
+            key(KeyCode::Char('0')),
+            key(KeyCode::Char('1')),
+            key(KeyCode::Char('x')),
+        ] {
+            decoder.push_at(event, now);
+        }
+
+        let mut output = Vec::new();
+        for event in marker(END_MARKER) {
+            collect(decoder.push_at(event, now), &mut output);
+        }
+        assert!(matches!(
+            output.as_slice(),
+            [Event::Paste(text)] if text == "\u{1b}[201x"
+        ));
     }
 
     #[test]
