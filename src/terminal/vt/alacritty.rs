@@ -140,6 +140,7 @@ impl AlacrittyEngine {
         // estimate until an engine provides native byte accounting.
         let config = Config {
             scrolling_history: history_rows_for_budget(history_budget_bytes, cols),
+            kitty_keyboard: true,
             ..Config::default()
         };
         let term = Term::new(config, &dims, proxy);
@@ -160,6 +161,7 @@ impl AlacrittyEngine {
                 self.history_budget_bytes,
                 self.term.grid().columns() as u16,
             ),
+            kitty_keyboard: true,
             ..Config::default()
         });
     }
@@ -875,6 +877,10 @@ impl VtEngine for AlacrittyEngine {
 
     fn application_cursor(&self) -> bool {
         self.term.mode().contains(TermMode::APP_CURSOR)
+    }
+
+    fn disambiguate_escape_codes(&self) -> bool {
+        self.term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES)
     }
 
     fn mouse_drag(&self) -> bool {
@@ -1598,6 +1604,25 @@ mod tests {
         assert!(!e.alternate_scroll());
         e.advance(b"\x1b[?1007h");
         assert!(e.alternate_scroll());
+    }
+
+    #[test]
+    fn nested_keyboard_disambiguation_is_tracked_across_config_updates() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 2_000));
+        assert!(!e.disambiguate_escape_codes());
+
+        e.advance(b"\x1b[>1u");
+        assert!(e.disambiguate_escape_codes());
+
+        e.set_history_budget(budget_for_rows(20, 1_000));
+        assert!(
+            e.disambiguate_escape_codes(),
+            "changing scrollback settings must not disable the child keyboard protocol"
+        );
+
+        e.advance(b"\x1b[<u");
+        assert!(!e.disambiguate_escape_codes());
     }
 
     #[test]

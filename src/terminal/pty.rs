@@ -1030,6 +1030,14 @@ impl Pane {
             .unwrap_or(false)
     }
 
+    /// Input modes read together under one engine lock.
+    pub fn key_encoding_modes(&self) -> (bool, bool) {
+        self.engine
+            .lock()
+            .map(|e| (e.application_cursor(), e.disambiguate_escape_codes()))
+            .unwrap_or((false, false))
+    }
+
     /// `(mouse_report, sgr)` — whether the child tracks the mouse, and whether
     /// it wants SGR-encoded reports. Read together under one lock.
     /// The app's mouse-tracking state, read under **one** engine lock — callers

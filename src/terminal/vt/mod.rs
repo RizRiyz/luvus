@@ -324,6 +324,11 @@ pub trait VtEngine: Send {
     /// and mouse modes, this lets the input layer leave pager keys alone.
     fn application_cursor(&self) -> bool;
 
+    /// Whether the child requested unambiguous CSI-u encoding for control keys.
+    /// Input encoding must honor this for chords whose legacy byte loses the
+    /// original key identity, such as Ctrl+/ versus Ctrl+7.
+    fn disambiguate_escape_codes(&self) -> bool;
+
     /// Whether the child also requested **drag/motion tracking** (1002/1003) —
     /// press-and-move events are forwarded only then, so a click-only (1000)
     /// app isn't spammed with motion it never asked for.
