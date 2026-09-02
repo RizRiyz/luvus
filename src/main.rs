@@ -1640,6 +1640,9 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
         if let Some(url) = app.pending_open_url.take() {
             crate::platform::open_url(&url);
         }
+        if let Some(path) = app.pending_open_path.take() {
+            crate::platform::open_path(&path);
+        }
         if let Some(text) = app.pending_clipboard.take() {
             let notify = tx.clone();
             emit_clipboard_tracked_to(&text, clipboard::local_completion(), move || {
