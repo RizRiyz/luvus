@@ -219,21 +219,32 @@ pub struct SideState {
     pub visible: bool,
     pub width: u16,
     pub docks: Vec<DockKind>,
-    /// Relative height share per mounted dock, parallel to `docks`. Empty, or
-    /// stale after a dock was added or removed, means an equal split — see
-    /// [`SideState::dock_weights`].
+    /// Relative height share per mounted dock, parallel to `docks`. Empty means
+    /// an equal split. Topology changes go through [`SideState::push_dock`] /
+    /// [`SideState::remove_dock`], which keep this vector aligned by dock
+    /// identity — or clear it when it was already unusable — so a stale list
+    /// cannot be reassigned positionally. See [`SideState::dock_weights`].
     pub weights: Vec<u16>,
 }
 
 impl SideState {
+    /// Load a sidebar. Dock ids beyond [`MAX_DOCKS_PER_SIDE`] are dropped.
+    /// Weights are kept only when they already match the mounted docks
+    /// one-for-one and every share is positive; any other list (wrong length
+    /// after the cap truncation, or a zero) is discarded so it cannot be
+    /// reassigned to different docks.
     fn from_config(c: &crate::config::SideConfig) -> SideState {
         let mut docks: Vec<DockKind> = c.docks.iter().map(|s| DockKind::from_id(s)).collect();
         // Enforce the per-side cap on load: a hand-edited or pre-cap config with
         // more than `MAX_DOCKS_PER_SIDE` here keeps the first few; the overflow
         // falls to "off" (unmounted, still in the registry to re-place).
         docks.truncate(MAX_DOCKS_PER_SIDE);
-        let mut weights = c.dock_weights.clone();
-        weights.truncate(docks.len());
+        let weights =
+            if c.dock_weights.len() == docks.len() && c.dock_weights.iter().all(|w| *w > 0) {
+                c.dock_weights.clone()
+            } else {
+                Vec::new()
+            };
         SideState {
             visible: c.visible,
             width: c.width.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX),
@@ -268,6 +279,46 @@ impl SideState {
     /// True if `kind` is mounted in this sidebar.
     pub fn has(&self, kind: &DockKind) -> bool {
         self.docks.contains(kind)
+    }
+
+    /// Remove every occurrence of `kind`, dropping the weight at the same
+    /// index when the two vectors still line up. A stale or mismatched weight
+    /// list is cleared instead of being left for a later positional truncate.
+    pub fn remove_dock(&mut self, kind: &DockKind) {
+        if self.weights.len() == self.docks.len() {
+            let mut i = 0;
+            while i < self.docks.len() {
+                if self.docks[i] == *kind {
+                    self.docks.remove(i);
+                    self.weights.remove(i);
+                } else {
+                    i += 1;
+                }
+            }
+        } else {
+            self.docks.retain(|d| d != kind);
+            self.weights.clear();
+        }
+    }
+
+    /// Append `kind`. When the existing weights already describe the mounted
+    /// docks, the new dock gets the rounded average of those shares (minimum 1)
+    /// so it opens at a fair size instead of a sliver. Empty or unusable
+    /// weights stay empty so [`SideState::dock_weights`] falls back to an even
+    /// split.
+    pub fn push_dock(&mut self, kind: DockKind) {
+        let append_weight = !self.weights.is_empty()
+            && self.weights.len() == self.docks.len()
+            && self.weights.iter().all(|w| *w > 0);
+        if append_weight {
+            let sum: u32 = self.weights.iter().map(|w| u32::from(*w)).sum();
+            let n = self.weights.len() as u32;
+            let avg = sum.saturating_add(n / 2).checked_div(n).unwrap_or(1).max(1) as u16;
+            self.weights.push(avg);
+        } else {
+            self.weights.clear();
+        }
+        self.docks.push(kind);
     }
 }
 
@@ -3173,12 +3224,9 @@ impl App {
             return false;
         }
         for side in [Side::Left, Side::Right] {
-            self.sidebars.get_mut(side).docks.retain(|d| d != kind);
+            self.sidebars.get_mut(side).remove_dock(kind);
         }
-        let dst = self.sidebars.get_mut(target);
-        if !dst.docks.contains(kind) {
-            dst.docks.push(kind.clone());
-        }
+        self.sidebars.get_mut(target).push_dock(kind.clone());
         if kind == &DockKind::Files {
             self.sidebars.files_side = target;
         }
@@ -3196,7 +3244,7 @@ impl App {
     /// registry and can be re-placed). Persists.
     pub fn unmount_dock(&mut self, kind: &DockKind) {
         for side in [Side::Left, Side::Right] {
-            self.sidebars.get_mut(side).docks.retain(|d| d != kind);
+            self.sidebars.get_mut(side).remove_dock(kind);
         }
         // Remember an explicit "off" for a module dock so its own `ui.dock.push`
         // (startup / `workspace.created` / a refresh) can't resurrect it on the
@@ -3318,7 +3366,7 @@ impl App {
         for id in ids {
             let kind = DockKind::Module(id.clone());
             for side in [Side::Left, Side::Right] {
-                self.sidebars.get_mut(side).docks.retain(|d| d != &kind);
+                self.sidebars.get_mut(side).remove_dock(&kind);
             }
             self.module_docks.remove(id);
         }
@@ -5761,7 +5809,7 @@ impl App {
             return Vec::new();
         };
         let mut heights = Vec::with_capacity(n);
-        let mut y = seam.y;
+        let mut y = seam.y.saturating_add(crate::ui::SIDEBAR_CHROME_ROWS);
         for i in 0..n {
             let end = dividers.get(i).copied().unwrap_or(seam.bottom());
             heights.push(end.saturating_sub(y));
@@ -8977,6 +9025,106 @@ mod tests {
         );
     }
 
+    /// Removing a dock drops the weight at the same index; a config round-trip
+    /// keeps that identity mapping instead of truncating positionally.
+    #[test]
+    fn removing_a_dock_keeps_sibling_weights_and_round_trips() {
+        let mut side = SideState {
+            visible: true,
+            width: 30,
+            docks: vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files],
+            weights: vec![5, 3, 2],
+        };
+        side.remove_dock(&DockKind::Agents);
+        assert_eq!(
+            side.docks,
+            vec![DockKind::Workspaces, DockKind::Files],
+            "the middle dock is gone"
+        );
+        assert_eq!(side.weights, vec![5, 2], "its neighbours keep their shares");
+
+        let loaded = SideState::from_config(&side.to_config());
+        assert_eq!(loaded.docks, side.docks);
+        assert_eq!(loaded.weights, side.weights);
+    }
+
+    /// A persisted weight list of the wrong length is discarded, not truncated
+    /// onto whichever docks happen to remain.
+    #[test]
+    fn from_config_discards_a_weight_list_of_the_wrong_length() {
+        let cfg = crate::config::SideConfig {
+            visible: true,
+            width: 30,
+            docks: vec!["workspaces".into(), "agents".into()],
+            dock_weights: vec![5, 3, 2],
+        };
+        let side = SideState::from_config(&cfg);
+        assert!(
+            side.weights.is_empty(),
+            "stale weights are not kept: {:?}",
+            side.weights
+        );
+        assert_eq!(
+            side.dock_weights(),
+            vec![1, 1],
+            "the even-split fallback applies"
+        );
+    }
+
+    /// A newly mounted dock on a weighted side gets the rounded average of the
+    /// existing shares, not a leftover sliver.
+    #[test]
+    fn mounting_a_dock_appends_the_rounded_average_weight() {
+        let mut side = SideState {
+            visible: true,
+            width: 30,
+            docks: vec![DockKind::Workspaces, DockKind::Agents],
+            weights: vec![5, 3],
+        };
+        side.push_dock(DockKind::Files);
+        assert_eq!(
+            side.docks,
+            vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files]
+        );
+        assert_eq!(
+            side.weights,
+            vec![5, 3, 4],
+            "the new dock gets round((5+3)/2) = 4"
+        );
+    }
+
+    /// Moving a dock to the other side keeps the source weights aligned with
+    /// the docks that stayed, and the destination receives the dock without
+    /// inheriting a positional leftover.
+    #[test]
+    fn move_dock_keeps_remaining_weights_aligned_on_both_sides() {
+        let _env = crate::persist::test_env("dock-move-weights");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files];
+        app.sidebars.left.weights = vec![5, 3, 2];
+        app.sidebars.right.docks = Vec::new();
+        app.sidebars.right.weights = Vec::new();
+
+        assert!(app.move_dock(&DockKind::Agents, Side::Right));
+        assert_eq!(
+            app.sidebars.left.docks,
+            vec![DockKind::Workspaces, DockKind::Files]
+        );
+        assert_eq!(
+            app.sidebars.left.weights,
+            vec![5, 2],
+            "source keeps the weights of the docks that stayed"
+        );
+        assert_eq!(app.sidebars.right.docks, vec![DockKind::Agents]);
+        assert!(
+            app.sidebars.right.weights.is_empty(),
+            "empty destination stays on the even-split fallback: {:?}",
+            app.sidebars.right.weights
+        );
+        assert_eq!(app.sidebars.right.dock_weights(), vec![1]);
+    }
+
     /// Dragging a divider moves the boundary between the two docks it separates
     /// and leaves the rest of the sidebar alone. Neither side can be squeezed
     /// past `MIN_DOCK_HEIGHT`, so a dock can always be grabbed back.
@@ -8988,8 +9136,9 @@ mod tests {
 
         app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents];
         app.sidebars.left.weights = Vec::new();
-        // Stand in for a frame: a 30-row sidebar split evenly, so the rule
-        // between the two docks sits at row 15.
+        // Stand in for a frame: a 30-row sidebar whose two chrome rows sit
+        // above the dock body. The pair owns 27 rows (chrome plus the divider
+        // itself take the rest); the rule sits at row 15.
         app.left_seam = Some(Rect::new(29, 0, 1, 30));
         app.dock_dividers = vec![(Side::Left, 0, 15)];
 
@@ -9003,7 +9152,7 @@ mod tests {
         );
         assert_eq!(
             weights[0] + weights[1],
-            29,
+            27,
             "the pair's combined rows are conserved"
         );
 
@@ -9042,6 +9191,89 @@ mod tests {
             app.sidebars.left.weights.is_empty(),
             "no split was written: {:?}",
             app.sidebars.left.weights
+        );
+    }
+
+    /// Dragging a rendered divider by exactly one row must move that published
+    /// rule by one row, not jump, and must conserve the pair's combined height.
+    /// Fails while `dock_heights` measures from the seam origin (chrome rows
+    /// inflate the first dock) and passes once it starts at the dock body.
+    #[test]
+    fn dragging_a_rendered_dock_divider_by_one_row_moves_it_exactly_one_row() {
+        let _env = crate::persist::test_env("dock-divider-one-row");
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 40, tx).unwrap();
+        app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents];
+        app.sidebars.left.visible = true;
+        app.sidebars.left.weights = Vec::new();
+
+        let mut term = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let dy = app
+            .dock_dividers
+            .iter()
+            .find(|(side, _, _)| *side == Side::Left)
+            .map(|(_, _, y)| *y)
+            .expect("two stacked docks publish a left divider");
+        let col = app
+            .left_seam
+            .expect("left sidebar is shown")
+            .x
+            .saturating_sub(1);
+        let sum_before: u16 = app.dock_heights(Side::Left).iter().sum();
+        assert!(
+            sum_before > 0,
+            "rendered docks have a measurable pair: {:?}",
+            app.dock_heights(Side::Left)
+        );
+
+        assert!(
+            app.begin_dock_resize(col, dy),
+            "the published divider is a hit target"
+        );
+        app.update_dock_resize(col, dy + 1);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let down = app
+            .dock_dividers
+            .iter()
+            .find(|(side, _, _)| *side == Side::Left)
+            .map(|(_, _, y)| *y)
+            .expect("divider still published after a one-row drag down");
+        assert_eq!(down, dy + 1, "the rule moved down by exactly one row");
+        assert_eq!(
+            app.dock_heights(Side::Left).iter().sum::<u16>(),
+            sum_before,
+            "the pair's combined rows are conserved after dragging down"
+        );
+
+        app.sidebars.left.weights = Vec::new();
+        app.end_dock_resize();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let reset = app
+            .dock_dividers
+            .iter()
+            .find(|(side, _, _)| *side == Side::Left)
+            .map(|(_, _, y)| *y)
+            .expect("even split republishes a divider");
+        assert_eq!(reset, dy, "clearing weights restores the original split");
+
+        assert!(app.begin_dock_resize(col, dy));
+        app.update_dock_resize(col, dy - 1);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let up = app
+            .dock_dividers
+            .iter()
+            .find(|(side, _, _)| *side == Side::Left)
+            .map(|(_, _, y)| *y)
+            .expect("divider still published after a one-row drag up");
+        assert_eq!(up, dy - 1, "the rule moved up by exactly one row");
+        assert_eq!(
+            app.dock_heights(Side::Left).iter().sum::<u16>(),
+            sum_before,
+            "the pair's combined rows are conserved after dragging up"
         );
     }
 

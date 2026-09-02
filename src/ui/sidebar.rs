@@ -46,6 +46,11 @@ pub(super) type SidebarHits = (
 type WorkspaceHits = (Vec<(usize, Rect)>, Option<Rect>);
 type AgentHits = (Vec<(PaneId, Rect)>, Vec<(usize, Rect)>);
 
+/// Rows of sidebar chrome above the dock stack: the brand/menu row plus one
+/// blank separator row. The dock body, and therefore dock-height measurement
+/// during a divider drag, starts this many rows below the sidebar origin.
+pub(crate) const SIDEBAR_CHROME_ROWS: u16 = 2;
+
 /// Rows each list item occupies: two content rows, drawn back-to-back.
 const ROW_STRIDE: u16 = 2;
 
@@ -188,7 +193,7 @@ pub(super) fn draw_sidebar(
     // blank separator row). The body is inset by one column on the separator side
     // so a dock never paints over the edge rule; the dock draw fns stay
     // side-agnostic.
-    let body_top = area.y + 2;
+    let body_top = area.y.saturating_add(SIDEBAR_CHROME_ROWS);
     let (body_x, body_w) = match side {
         Side::Left => (area.x, area.width),
         Side::Right => (area.x + 1, area.width.saturating_sub(1)),
