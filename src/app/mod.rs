@@ -412,7 +412,16 @@ pub struct WorktreeOpenEntry {
 
 /// The open-worktree list modal: `Some` ⇒ open. ⏎ opens (or focuses) the
 /// highlighted checkout, esc closes.
+///
+/// It opens `loading` and fills in when [`App::apply_worktree_list`] receives
+/// the off-loop scan (the named-session menu's shape): `generation` is the
+/// request this modal is waiting on, so a result for an earlier, since-closed
+/// or reopened modal is dropped instead of resurrecting it.
 pub struct WorktreeOpenList {
+    pub generation: u64,
+    pub loading: bool,
+    /// The git error when the scan failed; shown in place of the rows.
+    pub error: Option<String>,
     pub entries: Vec<WorktreeOpenEntry>,
     pub cursor: usize,
 }
@@ -1619,6 +1628,9 @@ pub struct App {
     /// The open-worktree list modal (docs/18 WT): every checkout of the repo
     /// from `git worktree list`, openable or focusable. `None` when closed.
     pub worktree_open: Option<WorktreeOpenList>,
+    /// Bumped on every open and close of the open-worktree list, so a scan
+    /// result carrying an older value is stale and ignored.
+    worktree_open_generation: u64,
     /// Clickable targets in the open-worktree list, set by the renderer each
     /// frame. Rows precede the modal body in hit-test order, so a click lands on
     /// the row under it and only a click on neither is "outside".
@@ -2213,6 +2225,7 @@ impl App {
             pane_title_rects: Vec::new(),
             worktree_prompt: None,
             worktree_open: None,
+            worktree_open_generation: 0,
             worktree_open_rects: Vec::new(),
             tab_rename: None,
             tab_menu: None,
@@ -2829,6 +2842,7 @@ impl App {
             pane_title_rects: Vec::new(),
             worktree_prompt: None,
             worktree_open: None,
+            worktree_open_generation: 0,
             worktree_open_rects: Vec::new(),
             tab_rename: None,
             tab_menu: None,
@@ -4459,8 +4473,10 @@ impl App {
                     self.worktree_error = None;
                 }
             }
+            // No repo check here: it would run git on the loop, and the worker
+            // reports "not a git repository" in the modal anyway.
             WsMenuItem::OpenWorktree => {
-                if let Some(cwd) = cwd.filter(|p| crate::git::local::is_repo(p)) {
+                if let Some(cwd) = cwd {
                     self.open_worktree_list(&cwd);
                 }
             }
@@ -5176,32 +5192,83 @@ impl App {
     }
 
     /// The workspace menu's "Open Worktree": list every checkout of the repo at
-    /// `cwd` (`git worktree list`) in a picker modal — bare entries and prunable
-    /// leftovers (folder already gone) are skipped since they can't be opened.
+    /// `cwd` (`git worktree list`) in a picker modal. The modal opens at once in
+    /// its loading state; the scan runs on a worker thread and lands through
+    /// [`AppEvent::WorktreeListLoaded`] → [`App::apply_worktree_list`]. It
+    /// must not run on the loop: git stats every checkout to flag prunable
+    /// ones, and a sibling checkout can sit on a stale network mount, which
+    /// would freeze every attached client for as long as that stat hangs.
     pub fn open_worktree_list(&mut self, cwd: &std::path::Path) {
-        let wts = match crate::git::local::worktrees(cwd) {
-            Ok(wts) => wts,
+        self.worktree_open_generation = self.worktree_open_generation.wrapping_add(1);
+        let generation = self.worktree_open_generation;
+        self.worktree_open = Some(WorktreeOpenList {
+            generation,
+            loading: true,
+            error: None,
+            entries: Vec::new(),
+            cursor: 0,
+        });
+        let cwd = cwd.to_path_buf();
+        let tx = self.app_tx.clone();
+        std::thread::spawn(move || {
+            let result = openable_worktrees(&cwd);
+            let _ = tx.send(AppEvent::WorktreeListLoaded { generation, result });
+        });
+    }
+
+    /// Close the open-worktree list. Bumps the generation so a scan still in
+    /// flight for it is discarded on arrival rather than reopening the modal.
+    pub fn close_worktree_list(&mut self) {
+        self.worktree_open_generation = self.worktree_open_generation.wrapping_add(1);
+        self.worktree_open = None;
+    }
+
+    /// Fill the open-worktree list with the scan started by
+    /// [`App::open_worktree_list`]. A result whose `generation` isn't the one
+    /// the current modal waits on (closed, or reopened since) is dropped. An
+    /// empty listing closes the modal with a toast, as there's nothing to pick;
+    /// a git failure shows in the modal so the user sees what went wrong.
+    pub fn apply_worktree_list(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<crate::git::model::Worktree>, String>,
+    ) {
+        if self
+            .worktree_open
+            .as_ref()
+            .is_none_or(|list| list.generation != generation)
+        {
+            return;
+        }
+        let entries: Vec<WorktreeOpenEntry> = match result {
+            Ok(wts) => wts
+                .into_iter()
+                .map(|w| WorktreeOpenEntry {
+                    open: self.workspace_idx_for_path(&w.path).is_some(),
+                    path: w.path,
+                    branch: w.branch,
+                    head: w.head,
+                    is_main: w.is_main,
+                })
+                .collect(),
             Err(e) => {
-                self.show_toast(e);
+                if let Some(list) = self.worktree_open.as_mut() {
+                    list.loading = false;
+                    list.error = Some(e);
+                }
                 return;
             }
         };
-        let entries: Vec<WorktreeOpenEntry> = wts
-            .into_iter()
-            .filter(|w| !w.bare && w.path.is_dir())
-            .map(|w| WorktreeOpenEntry {
-                open: self.workspace_idx_for_path(&w.path).is_some(),
-                path: w.path,
-                branch: w.branch,
-                head: w.head,
-                is_main: w.is_main,
-            })
-            .collect();
         if entries.is_empty() {
+            self.close_worktree_list();
             self.show_toast(self.catalog.no_worktrees_found);
             return;
         }
-        self.worktree_open = Some(WorktreeOpenList { entries, cursor: 0 });
+        if let Some(list) = self.worktree_open.as_mut() {
+            list.loading = false;
+            list.entries = entries;
+            list.cursor = 0;
+        }
     }
 
     /// The workspace already showing `path`, if any. Both sides are
@@ -5226,14 +5293,16 @@ impl App {
             return;
         };
         match key.code {
-            KeyCode::Esc => self.worktree_open = None,
+            KeyCode::Esc => self.close_worktree_list(),
             KeyCode::Up | KeyCode::Char('k') => list.cursor = list.cursor.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => {
                 list.cursor = (list.cursor + 1).min(list.entries.len().saturating_sub(1));
             }
+            // Nothing to pick yet; the rows are still being listed.
+            KeyCode::Enter if list.loading => {}
             KeyCode::Enter => {
                 let path = list.entries.get(list.cursor).map(|e| e.path.clone());
-                self.worktree_open = None;
+                self.close_worktree_list();
                 if let Some(path) = path {
                     if let Some(idx) = self.workspace_idx_for_path(&path) {
                         self.active_ws = idx;
@@ -6125,6 +6194,18 @@ fn group_worktrees(nodes: &[(Option<&std::path::Path>, bool)]) -> Vec<(usize, bo
     out
 }
 
+/// The checkouts of the repo at `cwd` a user can open as a workspace: every
+/// entry of `git worktree list` except bare ones (no working files) and
+/// prunable leftovers whose folder is already gone. Runs git and a stat per
+/// entry, so callers on the app loop hand it to a worker thread.
+fn openable_worktrees(cwd: &std::path::Path) -> Result<Vec<crate::git::model::Worktree>, String> {
+    crate::git::local::worktrees(cwd).map(|wts| {
+        wts.into_iter()
+            .filter(|w| !w.bare && w.path.is_dir())
+            .collect()
+    })
+}
+
 /// `~/.luvus/worktrees/<repo>/` — the folder that holds all of `repo`'s luvus
 /// worktrees. Nested under the **main** worktree's name so every checkout of one
 /// repo groups under a single folder (same rule `create_worktree` uses).
@@ -6800,6 +6881,145 @@ mod tests {
         (base, repo, wt)
     }
 
+    /// Open the worktree list and apply its scan inline — the worker thread's
+    /// job, done synchronously so a test can assert on the rows at once.
+    fn open_worktree_list_now(app: &mut App, repo: &std::path::Path) {
+        app.open_worktree_list(repo);
+        let generation = app.worktree_open.as_ref().unwrap().generation;
+        app.apply_worktree_list(generation, openable_worktrees(repo));
+    }
+
+    #[test]
+    fn open_worktree_list_scans_off_loop_and_lands_through_the_event() {
+        let _env = crate::persist::test_env("worktree-open-event");
+        let (base, repo, _wt) = repo_with_sibling_worktree("wtevent");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_worktree_list(&repo);
+        let list = app.worktree_open.as_ref().expect("modal opens at once");
+        assert!(list.loading, "rows arrive later; the modal shows loading");
+        assert!(list.entries.is_empty());
+
+        // ⏎ while loading is a no-op: there's nothing to pick yet, and the
+        // modal must not close under the user.
+        app.handle_worktree_open_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.worktree_open.is_some());
+
+        // The worker's result comes back as an event (other events may be
+        // interleaved; wait for ours) and fills the rows.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let ev = rx
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .expect("worktree scan result arrives");
+            let ours = matches!(ev, AppEvent::WorktreeListLoaded { .. });
+            app.handle_event(ev);
+            if ours {
+                break;
+            }
+        }
+        let list = app.worktree_open.as_ref().expect("modal stays open");
+        assert!(!list.loading);
+        assert_eq!(list.entries.len(), 2, "main + sibling worktree both list");
+        assert!(list.entries[0].is_main);
+        assert_eq!(list.entries[1].branch.as_deref(), Some("feature"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn stale_worktree_list_result_is_dropped() {
+        let _env = crate::persist::test_env("worktree-open-stale");
+        let (base, repo, _wt) = repo_with_sibling_worktree("wtstale");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        // Closed before the scan landed: the result must not reopen the modal.
+        app.open_worktree_list(&repo);
+        let first = app.worktree_open.as_ref().unwrap().generation;
+        app.handle_worktree_open_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.worktree_open.is_none());
+        app.apply_worktree_list(first, openable_worktrees(&repo));
+        assert!(app.worktree_open.is_none(), "a closed modal stays closed");
+
+        // Reopened before the first scan landed: the old result is ignored and
+        // the modal keeps waiting for its own.
+        app.open_worktree_list(&repo);
+        app.open_worktree_list(&repo);
+        let second = app.worktree_open.as_ref().unwrap().generation;
+        assert_ne!(first, second);
+        app.apply_worktree_list(first, openable_worktrees(&repo));
+        assert!(app.worktree_open.as_ref().unwrap().loading, "still waiting");
+        app.apply_worktree_list(second, openable_worktrees(&repo));
+        let list = app.worktree_open.as_ref().unwrap();
+        assert!(!list.loading);
+        assert_eq!(list.entries.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn worktree_list_shows_the_git_error_in_the_modal() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let _env = crate::persist::test_env("worktree-open-error");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let not_repo = std::env::temp_dir();
+        app.open_worktree_list(&not_repo);
+        let generation = app.worktree_open.as_ref().unwrap().generation;
+        app.apply_worktree_list(generation, Err("fatal: not a git repository".into()));
+        let list = app
+            .worktree_open
+            .as_ref()
+            .expect("modal stays open with the error");
+        assert!(!list.loading);
+        assert_eq!(list.error.as_deref(), Some("fatal: not a git repository"));
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            screen.contains("not a git repository"),
+            "error renders in the modal"
+        );
+
+        // ⏎ on an empty (errored) list just closes it.
+        app.handle_worktree_open_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.worktree_open.is_none());
+    }
+
+    #[test]
+    fn worktree_list_renders_its_loading_row() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let _env = crate::persist::test_env("worktree-open-loading");
+        let (base, repo, _wt) = repo_with_sibling_worktree("wtloading");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_worktree_list(&repo);
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains(app.catalog.menu_open_worktree));
+        assert!(screen.contains(app.catalog.worktree_loading));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn open_worktree_lists_every_checkout_and_opens_one() {
         let _env = crate::persist::test_env("worktree-open-list");
@@ -6807,7 +7027,7 @@ mod tests {
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
-        app.open_worktree_list(&repo);
+        open_worktree_list_now(&mut app, &repo);
         let list = app.worktree_open.as_ref().expect("modal opens");
         assert_eq!(list.entries.len(), 2, "main + sibling worktree both list");
         assert!(list.entries[0].is_main);
@@ -6838,7 +7058,7 @@ mod tests {
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
-        app.open_worktree_list(&repo);
+        open_worktree_list_now(&mut app, &repo);
 
         // Render once so the modal records its clickable rects.
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -6866,7 +7086,7 @@ mod tests {
         );
 
         // The dimmed backdrop cancels, like the folder picker's.
-        app.open_worktree_list(&repo);
+        open_worktree_list_now(&mut app, &repo);
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         let after = app.workspaces.len();
         app.handle_event(AppEvent::Mouse(MouseEvent {
@@ -6891,7 +7111,7 @@ mod tests {
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
-        app.open_worktree_list(&repo);
+        open_worktree_list_now(&mut app, &repo);
 
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
@@ -6956,7 +7176,7 @@ mod tests {
         assert!(app.create_workspace_at(repo.clone()));
         assert_eq!(app.active_ws, 1);
 
-        app.open_worktree_list(&repo);
+        open_worktree_list_now(&mut app, &repo);
         let list = app.worktree_open.as_ref().expect("modal opens");
         let idx = list
             .entries
@@ -6972,7 +7192,7 @@ mod tests {
         assert_eq!(app.active_ws, 0, "the existing workspace is focused");
 
         // Esc just closes the modal.
-        app.open_worktree_list(&repo);
+        open_worktree_list_now(&mut app, &repo);
         app.handle_worktree_open_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.worktree_open.is_none());
 
@@ -6989,7 +7209,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         app.workspaces[0].cwd = wt; // the sibling worktree is already open
-        app.open_worktree_list(&repo);
+        open_worktree_list_now(&mut app, &repo);
 
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
@@ -7032,7 +7252,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         app.workspaces[0].cwd = cjk; // the wide-path worktree is already open
-        app.open_worktree_list(&repo);
+        open_worktree_list_now(&mut app, &repo);
 
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
@@ -7084,7 +7304,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         app.workspaces[0].cwd = long; // the long-branch worktree is already open
-        app.open_worktree_list(&repo);
+        open_worktree_list_now(&mut app, &repo);
 
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();

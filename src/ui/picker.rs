@@ -321,9 +321,28 @@ pub(super) fn draw_worktree_open(
         inner.width.saturating_sub(2),
         bottom_y.saturating_sub(inner.y + 2),
     );
+    let mut rects = Vec::new();
+    // The rows arrive off-loop (docs/18 WT): a placeholder while the scan
+    // runs, the git error if it failed, the checkouts once it lands.
+    if list.loading {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!(" {}", cat.worktree_loading),
+                Style::new().fg(t.overlay1),
+            )),
+            Rect::new(listing.x, listing.y, listing.width, 1),
+        );
+    } else if let Some(error) = list.error.as_deref() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                truncate(error, listing.width as usize),
+                Style::new().fg(t.coral),
+            )),
+            Rect::new(listing.x, listing.y, listing.width, 1),
+        );
+    }
     let avail = listing.height.max(1) as usize;
     let scroll = list.cursor.saturating_sub(avail.saturating_sub(1));
-    let mut rects = Vec::new();
     for (vi, i) in (scroll..list.entries.len()).take(avail).enumerate() {
         let e = &list.entries[i];
         let y = listing.y + vi as u16;

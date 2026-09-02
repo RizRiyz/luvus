@@ -522,6 +522,10 @@ impl App {
                 self.apply_named_sessions_loaded(generation, result);
                 return true;
             }
+            AppEvent::WorktreeListLoaded { generation, result } => {
+                self.apply_worktree_list(generation, result);
+                return true;
+            }
             AppEvent::NamedSessionPrepared {
                 generation,
                 name,
@@ -991,9 +995,9 @@ impl App {
             | AppEvent::SearchResults { .. }
             | AppEvent::SearchFederatedResults { .. }
             | AppEvent::SearchHandoffReady { .. } => unreachable!(),
-            AppEvent::NamedSessionsLoaded { .. } | AppEvent::NamedSessionPrepared { .. } => {
-                unreachable!()
-            }
+            AppEvent::NamedSessionsLoaded { .. }
+            | AppEvent::NamedSessionPrepared { .. }
+            | AppEvent::WorktreeListLoaded { .. } => unreachable!(),
         }
     }
 
@@ -1680,7 +1684,7 @@ impl App {
                         Some(PickerHit::Row(i)) => self.worktree_open_click(i),
                         // Inert modal surface; the footer is handled above.
                         Some(PickerHit::Hint(_)) | Some(PickerHit::Modal) => {}
-                        None => self.worktree_open = None, // click outside cancels
+                        None => self.close_worktree_list(), // click outside cancels
                     }
                 }
                 MouseEventKind::ScrollUp => {
