@@ -104,9 +104,21 @@ fn dock_slots(body: Rect, weights: &[u16]) -> (Vec<Rect>, Vec<u16>) {
         // exactly to the former `remaining / docks_left`, so an unresized
         // sidebar lays out to the cell as it always did.
         let weight_left: u32 = weights[i..].iter().map(|w| u32::from(*w)).sum();
-        let h = (u32::from(remaining) * u32::from(weights[i]))
+        let share = (u32::from(remaining) * u32::from(weights[i]))
             .checked_div(weight_left)
             .unwrap_or(0) as u16;
+        // The drag keeps both sides of a divider at the floor, but weights are
+        // relative and the body is not: a lopsided pair, or the same pair after
+        // the terminal shrinks, can round a share down to nothing and hide a
+        // dock. Hold the floor here too, while reserving what the docks below
+        // still need (their own floor plus a divider row each) so honouring it
+        // cannot starve them. On a body too small for every floor the
+        // reservation shrinks the ceiling below the floor, and the `min` keeps
+        // the clamp well-formed while the layout degrades evenly.
+        let docks_left = (n - i) as u16;
+        let reserved = docks_left.saturating_sub(1) * (crate::app::MIN_DOCK_HEIGHT + 1);
+        let ceiling = remaining.saturating_sub(reserved);
+        let h = share.clamp(crate::app::MIN_DOCK_HEIGHT.min(ceiling), ceiling);
         slots.push(Rect::new(body.x, y, body.width, h));
         y += h;
         if i + 1 < n {
@@ -797,6 +809,46 @@ mod tests {
         assert_eq!(dividers.len(), 1);
         let used: u16 = slots.iter().map(|s| s.height).sum::<u16>() + dividers.len() as u16;
         assert_eq!(used, body.height, "no row is lost to rounding");
+    }
+
+    /// Weights are relative but the body is not, so a lopsided pair — or an
+    /// ordinary one after the terminal shrinks — could round a share down to
+    /// nothing and hide a dock. Every dock keeps the floor the drag promises.
+    #[test]
+    fn a_lopsided_weight_still_keeps_every_dock_at_the_floor() {
+        let floor = crate::app::MIN_DOCK_HEIGHT;
+        let body = ratatui::layout::Rect::new(0, 0, 20, 20);
+        let (slots, dividers) = super::dock_slots(body, &[1, 100]);
+        assert_eq!(
+            slots[0].height, floor,
+            "the starved dock is held at the floor"
+        );
+        assert!(
+            slots[1].height >= floor,
+            "and the greedy one still fits: {slots:?}"
+        );
+        let used: u16 = slots.iter().map(|s| s.height).sum::<u16>() + dividers.len() as u16;
+        assert_eq!(used, body.height, "no row is lost");
+
+        // Three docks, with the middle one starved.
+        let (slots, _) = super::dock_slots(body, &[100, 1, 100]);
+        for slot in &slots {
+            assert!(
+                slot.height >= floor,
+                "every dock keeps the floor: {slots:?}"
+            );
+        }
+    }
+
+    /// A body too small to give every dock its floor must still lay out and
+    /// spend every row rather than panic on an inverted clamp.
+    #[test]
+    fn a_body_below_every_floor_degrades_instead_of_panicking() {
+        let body = ratatui::layout::Rect::new(0, 0, 20, 5);
+        let (slots, dividers) = super::dock_slots(body, &[1, 1]);
+        assert_eq!(slots.len(), 2);
+        let used: u16 = slots.iter().map(|s| s.height).sum::<u16>() + dividers.len() as u16;
+        assert_eq!(used, body.height);
     }
 
     use crate::app::App;

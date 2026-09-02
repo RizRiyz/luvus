@@ -1317,7 +1317,7 @@ const SIDEBAR_GRAB_TOL: u16 = 2;
 /// Rows a dock keeps no matter how far its divider is dragged: enough for the
 /// header plus one line of content, so a dock can be made small but never
 /// squeezed into nothing the user then cannot grab back.
-const MIN_DOCK_HEIGHT: u16 = 3;
+pub(crate) const MIN_DOCK_HEIGHT: u16 = 3;
 
 impl Selection {
     /// (start, end) terminal cells in reading order (top-left → bottom-right).
