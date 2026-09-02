@@ -646,6 +646,17 @@ impl App {
         }
     }
 
+    /// Queue `path` to open with the *client's* OS handler, the same way
+    /// [`App::open_url`] queues a browser open: with `--remote` the desktop
+    /// in front of the user is the one that should see the file.
+    ///
+    /// No filesystem access here — existence is checked on the client when it
+    /// receives [`crate::ipc::protocol::ServerMessage::OpenPath`].
+    pub fn open_path_externally(&mut self, path: PathBuf) {
+        self.show_toast(crate::ui::truncate(&path.display().to_string(), 60));
+        self.pending_open_path = Some(path);
+    }
+
     /// Navigate the FILES tree while it owns keyboard focus. Returns to the
     /// pane before opening a file so its native view receives subsequent keys.
     pub fn handle_file_tree_key(&mut self, key: KeyEvent) -> bool {
@@ -668,10 +679,16 @@ impl App {
             KeyCode::Left | KeyCode::Char('h') => self.collapse_file_row_or_parent(),
             KeyCode::Right | KeyCode::Char('l') => self.expand_file_row_or_child(),
             KeyCode::Char('a') => self.open_file_menu_for_keyboard(),
-            // Bare `o` and Ctrl+O both arrive here: the arm does not inspect
-            // modifiers, so the vim-ish letter and the habit from other tools
-            // land on the same action.
-            KeyCode::Char('o') => {
+            // Bare `o` and Ctrl+O only. Any other modifier combination (Alt,
+            // Ctrl+Alt which is how Windows AltGr text arrives, Super) must
+            // fall through so it cannot trigger the action. A separate argv
+            // entry prevents shell injection, but the OS handler still
+            // executes application or shortcut-like files the same way a
+            // double-click would; the path is the user's own FILES row.
+            KeyCode::Char('o')
+                if key.modifiers == KeyModifiers::NONE
+                    || key.modifiers == KeyModifiers::CONTROL =>
+            {
                 let index = self.file_tree.cursor;
                 if let Some(path) = self
                     .file_tree
@@ -679,7 +696,7 @@ impl App {
                     .get(index)
                     .map(|row| row.path.clone())
                 {
-                    crate::platform::open_path(&path);
+                    self.open_path_externally(path);
                 }
             }
             KeyCode::Enter => {
@@ -797,7 +814,7 @@ impl App {
             }
             // Offered for folders too, so this one sits outside the file-only
             // block above.
-            FileMenuItem::OpenInOs => crate::platform::open_path(&menu.path),
+            FileMenuItem::OpenInOs => self.open_path_externally(menu.path),
             FileMenuItem::OpenWith(i) => {
                 if let Some((cmd, _)) = menu.editors.get(i).cloned() {
                     self.files_focused = false;
@@ -1604,6 +1621,57 @@ mod tests {
             folder.build_items().contains(&FileMenuItem::OpenInOs),
             "offered for a folder, which opens the file manager"
         );
+    }
+
+    /// Bare `o` and Ctrl+O queue the focused row for the client's OS handler;
+    /// Alt+O and Ctrl+Alt+O (Windows AltGr) must not.
+    #[test]
+    fn files_keyboard_open_externally_accepts_only_bare_o_and_ctrl_o() {
+        let _env = crate::persist::test_env("files-open-externally-key");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        seed_keyboard_tree(&mut app);
+        let cursor = app.file_tree.cursor;
+        let path = app.file_tree.visible_rows()[cursor].path.clone();
+
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert_eq!(app.pending_open_path.as_ref(), Some(&path), "bare o");
+
+        app.pending_open_path = None;
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        assert_eq!(app.pending_open_path.as_ref(), Some(&path), "Ctrl+O");
+
+        app.pending_open_path = None;
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::ALT));
+        assert!(app.pending_open_path.is_none(), "Alt+O must fall through");
+
+        app.handle_file_tree_key(KeyEvent::new(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ));
+        assert!(
+            app.pending_open_path.is_none(),
+            "Ctrl+Alt+O (Windows AltGr) must fall through"
+        );
+    }
+
+    #[test]
+    fn file_menu_open_in_os_queues_the_path_for_the_client() {
+        let _env = crate::persist::test_env("files-open-externally-menu");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let path = PathBuf::from("/tmp/x.pdf");
+        app.file_menu = Some(FileMenu {
+            path: path.clone(),
+            is_dir: false,
+            anchor: (0, 0),
+            items: Vec::new(),
+            selected: None,
+            editors: Vec::new(),
+        });
+        app.file_menu_action_pub(FileMenuItem::OpenInOs);
+        assert_eq!(app.pending_open_path.as_ref(), Some(&path));
+        assert!(app.file_menu.is_none());
     }
 
     #[test]

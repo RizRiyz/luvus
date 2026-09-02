@@ -278,6 +278,7 @@ where
             Ok(ServerMessage::Sound(signal)) => crate::emit_sound(signal),
             Ok(ServerMessage::Clipboard(text)) => crate::emit_clipboard(&text),
             Ok(ServerMessage::OpenUrl(url)) => crate::platform::open_url(&url),
+            Ok(ServerMessage::OpenPath(path)) => crate::platform::open_path(&path),
             Ok(ServerMessage::SwitchSession { name }) => break ClientExit::SwitchSession(name),
             Ok(ServerMessage::Detach) => break ClientExit::Detached,
             Ok(ServerMessage::ServerShutdown { .. }) => break ClientExit::ServerStopped,

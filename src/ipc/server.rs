@@ -533,6 +533,9 @@ pub fn run() -> Result<()> {
         if let Some(url) = app.pending_open_url.take() {
             broadcast(&mut clients, ServerMessage::OpenUrl(url));
         }
+        if let Some(path) = app.pending_open_path.take() {
+            broadcast(&mut clients, ServerMessage::OpenPath(path));
+        }
         if let Some(text) = app.pending_clipboard.take() {
             broadcast(&mut clients, ServerMessage::Clipboard(text));
         }

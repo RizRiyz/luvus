@@ -1766,6 +1766,9 @@ pub struct App {
     /// A URL to open in the client's browser (docs/58) — set by a Ctrl+click on a
     /// link in a pane, drained + broadcast by the loop like `pending_clipboard`.
     pub pending_open_url: Option<String>,
+    /// A filesystem path to open with the client's OS handler — set from the
+    /// FILES tree, drained + broadcast by the loop like `pending_open_url`.
+    pub pending_open_path: Option<PathBuf>,
     /// The cell `hover_link` was resolved for, so holding `Ctrl` while resting on a
     /// cell does not rescan. Cleared when `Ctrl` is released, so pointing at a
     /// link *first* and pressing `Ctrl` after still lights it up.
@@ -2257,6 +2260,7 @@ impl App {
             mouse_grab: None,
             pending_clipboard: None,
             pending_open_url: None,
+            pending_open_path: None,
             link_scan_at: None,
             hover_link: None,
             link_press: None,
@@ -2871,6 +2875,7 @@ impl App {
             mouse_grab: None,
             pending_clipboard: None,
             pending_open_url: None,
+            pending_open_path: None,
             link_scan_at: None,
             hover_link: None,
             link_press: None,

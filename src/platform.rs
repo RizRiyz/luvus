@@ -942,58 +942,86 @@ pub fn open_url(url: &str) {
     }
 }
 
+/// True when `path` is worth handing to an OS handler: non-empty and present.
+/// An empty path makes some handlers fall back to the home directory, and a
+/// missing one makes them raise their own error dialog. Neither is a useful
+/// answer to "open this row".
+fn path_is_openable(path: &Path) -> bool {
+    !path.as_os_str().is_empty() && path.exists()
+}
+
 /// Hand `path` to the OS handler for its type: `open` (macOS), `xdg-open` and
 /// friends (Linux), `explorer` (Windows). A file opens in whatever application
 /// the desktop associates with it; a directory opens in the file manager.
 ///
-/// Deliberately **not** routed through [`is_openable_url`]. That whitelist
-/// exists because a URL there is typed by whatever is running in a pane, so a
-/// click would reach the system handler for any scheme it names. A path here
-/// comes from the FILES tree — the user's own filesystem, chosen by pointing
-/// at it — so the scheme question does not arise. What still holds is the
-/// argv discipline: the path is one separate argument, never interpolated
-/// into a shell command, so metacharacters in a filename are inert.
+/// Fire-and-forget from the caller's point of view: the existence check and
+/// the launcher spawn run on a named worker thread (`luvus-open-path`) so they
+/// cannot stall the app loop, and that thread waits on the child so the
+/// launcher is reaped.
 ///
-/// Detached and never waited on, so an application cold-start cannot stall the
-/// event loop.
-pub fn open_path(path: &std::path::Path) {
-    use std::process::{Command, Stdio};
-    // An empty path makes some handlers fall back to the home directory, and a
-    // missing one makes them raise their own error dialog. Neither is a useful
-    // answer to "open this row", so fail silently instead.
-    if path.as_os_str().is_empty() || !path.exists() {
-        return;
-    }
-    let openers: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
-        &[("open", &[])]
-    } else if cfg!(target_os = "windows") {
-        // `explorer` resolves a file to its default application and a folder to
-        // a window, without `cmd /C start` putting the path through a shell.
-        &[("explorer", &[])]
-    } else {
-        &[("xdg-open", &[]), ("gio", &["open"]), ("wslview", &[])]
-    };
-    for (cmd, args) in openers {
-        if no_window(
-            Command::new(cmd)
-                .args(*args)
-                .arg(path)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null()),
-        )
-        .spawn()
-        .is_ok()
-        {
-            return;
-        }
-    }
+/// A separate argv entry prevents shell injection, but the OS handler still
+/// executes application or shortcut-like files (`.app`, `.desktop`, `.lnk`,
+/// `.command`) exactly as a double-click would. The path comes from the user's
+/// own FILES tree, chosen deliberately, and is never derived from pane output,
+/// which is why it is not routed through [`is_openable_url`].
+pub fn open_path(path: &Path) {
+    let path = path.to_path_buf();
+    let _ = std::thread::Builder::new()
+        .name("luvus-open-path".into())
+        .spawn(move || {
+            if !path_is_openable(&path) {
+                return;
+            }
+            use std::process::{Command, Stdio};
+            let openers: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+                &[("open", &[])]
+            } else if cfg!(target_os = "windows") {
+                // `explorer` resolves a file to its default application and a folder to
+                // a window, without `cmd /C start` putting the path through a shell.
+                &[("explorer", &[])]
+            } else {
+                &[("xdg-open", &[]), ("gio", &["open"]), ("wslview", &[])]
+            };
+            for (cmd, args) in openers {
+                if let Ok(mut child) = no_window(
+                    Command::new(cmd)
+                        .args(*args)
+                        .arg(&path)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null()),
+                )
+                .spawn()
+                {
+                    let _ = child.wait();
+                    return;
+                }
+            }
+        });
 }
 
 #[cfg(test)]
 mod tests {
-    /// A path that cannot be opened must not reach a handler at all: the guard
-    /// runs before any spawn, so nothing pops an error dialog at the user.
+    /// A path that cannot be opened must not reach a handler at all. The guard
+    /// is synchronous so tests can observe it without spawning an opener.
+    #[test]
+    fn path_is_openable_rejects_empty_and_missing_paths() {
+        assert!(
+            !super::path_is_openable(std::path::Path::new("")),
+            "empty path"
+        );
+        let missing = std::env::temp_dir().join("luvus-open-path-does-not-exist");
+        let _ = std::fs::remove_file(&missing);
+        assert!(!super::path_is_openable(&missing), "missing path");
+        assert!(
+            super::path_is_openable(&std::env::temp_dir()),
+            "an existing directory is openable"
+        );
+    }
+
+    /// Calling `open_path` on a path the guard would refuse must not panic.
+    /// The empty/missing check now runs on a worker thread, so this cannot
+    /// observe it synchronously — see `path_is_openable_rejects_empty_and_missing_paths`.
     #[test]
     fn open_path_ignores_empty_and_missing_paths() {
         super::open_path(std::path::Path::new(""));
