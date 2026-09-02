@@ -17,6 +17,37 @@ use crate::terminal::pty::InputSender;
 /// a wide glyph without being confused with an actual space between words.
 pub(crate) const ALIGNED_WIDE_CELL: char = '\0';
 
+const MAX_TERMINAL_HYPERLINK_URI_BYTES: usize = 4_096;
+const MAX_TERMINAL_HYPERLINK_ID_BYTES: usize = 256;
+
+/// One OSC 8 hyperlink retained by the terminal engine.
+///
+/// The URI is engine-neutral and its spans use visible grid coordinates. This
+/// metadata is materialized only for deliberate text/link gestures, never for
+/// ordinary rendering or agent detection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalHyperlink {
+    id: String,
+    uri: String,
+    spans: Vec<(u16, u16, u16)>,
+}
+
+impl TerminalHyperlink {
+    pub(crate) fn uri(&self) -> &str {
+        &self.uri
+    }
+
+    pub(crate) fn spans(&self) -> &[(u16, u16, u16)] {
+        &self.spans
+    }
+
+    fn covers(&self, row: u16, col: u16) -> bool {
+        self.spans
+            .iter()
+            .any(|(span_row, start, end)| *span_row == row && col >= *start && col < *end)
+    }
+}
+
 /// Visible terminal text indexed one character per grid cell, plus the sparse
 /// zero-width components attached to base cells. Keeping the latter separate
 /// preserves column lookup without dropping combining marks, variation
@@ -24,6 +55,7 @@ pub(crate) const ALIGNED_WIDE_CELL: char = '\0';
 pub struct AlignedRows {
     rows: Vec<String>,
     zero_width: Vec<(u16, u16, Vec<char>)>,
+    hyperlinks: Vec<TerminalHyperlink>,
 }
 
 impl AlignedRows {
@@ -31,6 +63,7 @@ impl AlignedRows {
         Self {
             rows: vec![String::new(); row_count],
             zero_width: Vec::new(),
+            hyperlinks: Vec::new(),
         }
     }
 
@@ -39,6 +72,7 @@ impl AlignedRows {
         Self {
             rows,
             zero_width: Vec::new(),
+            hyperlinks: Vec::new(),
         }
     }
 
@@ -57,6 +91,47 @@ impl AlignedRows {
 
     pub(crate) fn rows(&self) -> &[String] {
         &self.rows
+    }
+
+    pub(crate) fn push_hyperlink_cell(&mut self, row: u16, col: u16, id: &str, uri: &str) {
+        if uri.is_empty()
+            || uri.len() > MAX_TERMINAL_HYPERLINK_URI_BYTES
+            || id.len() > MAX_TERMINAL_HYPERLINK_ID_BYTES
+            || uri.chars().any(char::is_control)
+            || id.chars().any(char::is_control)
+        {
+            return;
+        }
+        let hyperlink = match self
+            .hyperlinks
+            .iter_mut()
+            .rev()
+            .find(|hyperlink| hyperlink.id == id && hyperlink.uri == uri)
+        {
+            Some(hyperlink) => hyperlink,
+            None => {
+                self.hyperlinks.push(TerminalHyperlink {
+                    id: id.to_string(),
+                    uri: uri.to_string(),
+                    spans: Vec::new(),
+                });
+                self.hyperlinks
+                    .last_mut()
+                    .expect("the terminal hyperlink was just inserted")
+            }
+        };
+        match hyperlink.spans.last_mut() {
+            Some((span_row, _, end)) if *span_row == row && *end == col => {
+                *end = col.saturating_add(1)
+            }
+            _ => hyperlink.spans.push((row, col, col.saturating_add(1))),
+        }
+    }
+
+    pub(crate) fn hyperlink_at(&self, row: u16, col: u16) -> Option<&TerminalHyperlink> {
+        self.hyperlinks
+            .iter()
+            .find(|hyperlink| hyperlink.covers(row, col))
     }
 
     pub(crate) fn zero_width_at(&self, row: u16, col: u16) -> &[char] {

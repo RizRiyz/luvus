@@ -701,6 +701,14 @@ impl VtEngine for AlacrittyEngine {
             } else {
                 indexed.cell.zerowidth()
             };
+            if let Some(hyperlink) = indexed.cell.hyperlink() {
+                lines.push_hyperlink_cell(
+                    r as u16,
+                    indexed.point.column.0 as u16,
+                    hyperlink.id(),
+                    hyperlink.uri(),
+                );
+            }
             lines.push_cell(r as u16, indexed.point.column.0 as u16, c, zero_width);
         }
         lines
@@ -1188,6 +1196,22 @@ mod tests {
 
     fn budget_for_rows(cols: usize, rows: usize) -> usize {
         estimated_row_bytes(cols).saturating_mul(rows)
+    }
+
+    #[test]
+    fn visible_rows_retain_osc8_targets_and_spans() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(24, 2, tx, budget_for_rows(24, 20));
+        engine.advance(
+            b"before \x1b]8;id=claude;file:///repo/src/main.rs\x1b\\main.rs\x1b]8;;\x1b\\ after",
+        );
+
+        let rows = engine.visible_rows_aligned();
+        let hyperlink = rows.hyperlink_at(0, 8).expect("OSC 8 target retained");
+        assert_eq!(hyperlink.uri(), "file:///repo/src/main.rs");
+        assert_eq!(hyperlink.spans(), &[(0, 7, 14)]);
+        assert!(rows.hyperlink_at(0, 6).is_none());
+        assert!(rows.hyperlink_at(0, 14).is_none());
     }
 
     #[test]
