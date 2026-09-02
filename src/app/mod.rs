@@ -3218,7 +3218,13 @@ impl App {
     /// the side. Placing a dock onto the side it already occupies is never "full".
     pub fn move_dock(&mut self, kind: &DockKind, target: Side) -> bool {
         let dst = self.sidebars.get(target);
-        if !dst.has(kind) && dst.docks.len() >= MAX_DOCKS_PER_SIDE {
+        // Already there: honour the no-op. Removing and re-appending would
+        // push the dock to the bottom of its stack and, now that weights
+        // follow dock identity, swap its share for the average of the rest.
+        if dst.has(kind) {
+            return true;
+        }
+        if dst.docks.len() >= MAX_DOCKS_PER_SIDE {
             let msg = self.catalog.sidebar_full;
             self.show_toast(msg);
             return false;
@@ -9123,6 +9129,29 @@ mod tests {
             app.sidebars.right.weights
         );
         assert_eq!(app.sidebars.right.dock_weights(), vec![1]);
+    }
+
+    /// Moving a dock onto the side it already occupies is the documented
+    /// no-op: its position in the stack and its share must both survive.
+    #[test]
+    fn move_dock_onto_its_own_side_keeps_order_and_weights() {
+        let _env = crate::persist::test_env("dock-move-same-side");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files];
+        app.sidebars.left.weights = vec![5, 3, 2];
+
+        assert!(app.move_dock(&DockKind::Agents, Side::Left));
+        assert_eq!(
+            app.sidebars.left.docks,
+            vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files],
+            "the dock stays where it was, not at the bottom"
+        );
+        assert_eq!(
+            app.sidebars.left.weights,
+            vec![5, 3, 2],
+            "its share is untouched"
+        );
     }
 
     /// Dragging a divider moves the boundary between the two docks it separates
