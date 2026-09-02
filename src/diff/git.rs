@@ -93,7 +93,14 @@ fn apply_numstat(raw: &[u8], layer: &DiffLayer, files: &mut [DiffFile]) -> Resul
             continue;
         };
         let old_path = file.key.old_path.as_ref().unwrap_or(new_path);
-        if let Some((additions, deletions)) = by_path.get(&(old_path.clone(), new_path.clone())) {
+        let counts = by_path
+            .get(&(old_path.clone(), new_path.clone()))
+            .or_else(|| {
+                (*layer == DiffLayer::Worktree && old_path != new_path)
+                    .then(|| by_path.get(&(new_path.clone(), new_path.clone())))
+                    .flatten()
+            });
+        if let Some((additions, deletions)) = counts {
             file.additions = *additions;
             file.deletions = *deletions;
             file.binary = additions.is_none() && deletions.is_none();
@@ -955,6 +962,27 @@ mod tests {
             .flat_map(|h| &h.lines)
             .any(|line| line.text == "worktree"));
         assert_eq!(before, repo.git(&["status", "--porcelain=v2", "-z"]));
+    }
+
+    #[test]
+    fn real_repo_matches_worktree_counts_after_staged_rename() {
+        let repo = TestRepo::new("staged-rename-worktree-edit");
+        std::fs::write(repo.0.join("old.txt"), "base\n").unwrap();
+        repo.git(&["add", "old.txt"]);
+        repo.git(&["commit", "-qm", "base"]);
+        repo.git(&["mv", "old.txt", "new.txt"]);
+        std::fs::write(repo.0.join("new.txt"), "base\nworktree\n").unwrap();
+
+        let snapshot = scan(&repo.0, 1).unwrap();
+        let worktree = snapshot
+            .files
+            .iter()
+            .find(|file| file.key.layer == DiffLayer::Worktree)
+            .unwrap();
+
+        assert_eq!(worktree.key.old_path.as_ref().unwrap().display, "old.txt");
+        assert_eq!(worktree.key.new_path.as_ref().unwrap().display, "new.txt");
+        assert_eq!((worktree.additions, worktree.deletions), (Some(1), Some(0)));
     }
 
     #[test]
