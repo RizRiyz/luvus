@@ -134,14 +134,15 @@ pub enum AppEvent {
         generation: u64,
         result: Result<Vec<crate::session::SessionInfo>, String>,
     },
-    /// The "Open Worktree" listing (`git worktree list` plus a stat per
-    /// checkout) finished off-loop. Other checkouts may live on other mounts,
-    /// so the scan must never run on the loop: a stale network path would
-    /// freeze every attached client. `generation` discards a result whose
-    /// modal was closed or reopened meanwhile.
+    /// The "Open Worktree" listing finished off-loop: `git worktree list`, a
+    /// stat per checkout, and the canonicalized "already open" match against
+    /// the workspaces snapshotted at request time. Other checkouts may live on
+    /// other mounts, so none of that may run on the loop: a stale network path
+    /// would freeze every attached client. `generation` discards a result
+    /// whose modal was closed or reopened meanwhile.
     WorktreeListLoaded {
         generation: u64,
-        result: Result<Vec<crate::git::model::Worktree>, String>,
+        result: Result<Vec<crate::app::WorktreeOpenEntry>, String>,
     },
     /// A selected named session is ready for this client to attach.
     NamedSessionPrepared {

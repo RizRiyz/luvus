@@ -274,6 +274,24 @@ pub(super) fn draw_worktree_prompt(
     }
 }
 
+/// A path for on-screen use: control characters (a newline in a worktree
+/// path, which `git worktree list -z` preserves) become their escapes, so the
+/// cell writer can't silently drop them and the column budget measures what
+/// actually renders.
+fn visible_path(p: &std::path::Path) -> String {
+    p.display()
+        .to_string()
+        .chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
 /// The open-worktree list modal (docs/18 WT): every checkout of the repo from
 /// `git worktree list` — branch (or short head when detached), path, and an
 /// "open" badge when the checkout is already a workspace. ⏎ opens (or focuses)
@@ -376,7 +394,7 @@ pub(super) fn draw_worktree_open(
         // path keeps at least a third of what's left. Otherwise a long branch
         // name would push the path's tail and the badge off the row.
         let prefix = format!("▸ {icon} ");
-        let path_full = e.path.display().to_string();
+        let path_full = visible_path(&e.path);
         let room = (listing.width as usize)
             .saturating_sub(display_width(&prefix) + 2 + display_width(&badge));
         let path_reserve = (room / 3).min(display_width(&path_full));

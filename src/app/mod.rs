@@ -399,14 +399,16 @@ pub struct TabRename {
 /// One row of the open-worktree modal (docs/18 WT): a checkout of the repo, as
 /// reported by `git worktree list` — so every worktree shows, no matter which
 /// tool created it or where it lives on disk.
+#[derive(Clone, Debug, PartialEq)]
 pub struct WorktreeOpenEntry {
     pub path: PathBuf,
     /// `None` for a detached checkout (the short head labels it instead).
     pub branch: Option<String>,
     pub head: String,
     pub is_main: bool,
-    /// Already open as a workspace — snapshotted when the modal opens, for the
-    /// row badge. The confirm re-resolves by path against live workspaces.
+    /// Already open as a workspace — resolved on the worker against the
+    /// workspaces snapshotted when the modal opened, for the row badge. The
+    /// confirm re-resolves by path against live workspaces.
     pub open: bool,
 }
 
@@ -5209,9 +5211,14 @@ impl App {
             cursor: 0,
         });
         let cwd = cwd.to_path_buf();
+        // Snapshot the open workspace roots: the "already open" badge needs a
+        // canonicalize per checkout, which is exactly the kind of stat the
+        // worker exists to keep off the loop. A workspace opened mid-scan is
+        // only missed on the badge — ⏎ re-resolves against live workspaces.
+        let open_cwds: Vec<PathBuf> = self.workspaces.iter().map(|w| w.cwd.clone()).collect();
         let tx = self.app_tx.clone();
         std::thread::spawn(move || {
-            let result = openable_worktrees(&cwd);
+            let result = openable_worktrees(&cwd, &open_cwds);
             let _ = tx.send(AppEvent::WorktreeListLoaded { generation, result });
         });
     }
@@ -5227,11 +5234,12 @@ impl App {
     /// [`App::open_worktree_list`]. A result whose `generation` isn't the one
     /// the current modal waits on (closed, or reopened since) is dropped. An
     /// empty listing closes the modal with a toast, as there's nothing to pick;
-    /// a git failure shows in the modal so the user sees what went wrong.
+    /// a git failure shows in the modal so the user sees what went wrong. The
+    /// entries arrive fully resolved; nothing here touches the filesystem.
     pub fn apply_worktree_list(
         &mut self,
         generation: u64,
-        result: Result<Vec<crate::git::model::Worktree>, String>,
+        result: Result<Vec<WorktreeOpenEntry>, String>,
     ) {
         if self
             .worktree_open
@@ -5240,17 +5248,8 @@ impl App {
         {
             return;
         }
-        let entries: Vec<WorktreeOpenEntry> = match result {
-            Ok(wts) => wts
-                .into_iter()
-                .map(|w| WorktreeOpenEntry {
-                    open: self.workspace_idx_for_path(&w.path).is_some(),
-                    path: w.path,
-                    branch: w.branch,
-                    head: w.head,
-                    is_main: w.is_main,
-                })
-                .collect(),
+        let entries = match result {
+            Ok(entries) => entries,
             Err(e) => {
                 if let Some(list) = self.worktree_open.as_mut() {
                     list.loading = false;
@@ -5271,18 +5270,11 @@ impl App {
         }
     }
 
-    /// The workspace already showing `path`, if any. Both sides are
-    /// canonicalized so a symlinked cwd (macOS `/tmp`) still matches, and the
-    /// final comparison is [`crate::platform::same_path`] so spelling variance
-    /// (Windows case, separators, the `\\?\` prefix) can't read as "not open"
-    /// when canonicalization falls back to the raw path (docs/43 WIN-6).
+    /// The workspace already showing `path`, if any (see [`checkout_idx_in`]).
+    /// Stats `path` and every workspace root, so it's for the user's own pick
+    /// on ⏎ — the listing resolves its badges on the worker instead.
     fn workspace_idx_for_path(&self, path: &std::path::Path) -> Option<usize> {
-        let canon =
-            |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        let target = canon(path);
-        self.workspaces
-            .iter()
-            .position(|w| crate::platform::same_path(&canon(&w.cwd), &target))
+        checkout_idx_in(path, self.workspaces.iter().map(|w| w.cwd.as_path()))
     }
 
     /// Keys for the open-worktree list modal: ↑/↓ (or k/j) move, ⏎ opens the
@@ -6196,14 +6188,43 @@ fn group_worktrees(nodes: &[(Option<&std::path::Path>, bool)]) -> Vec<(usize, bo
 
 /// The checkouts of the repo at `cwd` a user can open as a workspace: every
 /// entry of `git worktree list` except bare ones (no working files) and
-/// prunable leftovers whose folder is already gone. Runs git and a stat per
-/// entry, so callers on the app loop hand it to a worker thread.
-fn openable_worktrees(cwd: &std::path::Path) -> Result<Vec<crate::git::model::Worktree>, String> {
-    crate::git::local::worktrees(cwd).map(|wts| {
-        wts.into_iter()
-            .filter(|w| !w.bare && w.path.is_dir())
-            .collect()
-    })
+/// prunable leftovers whose folder is already gone, each flagged `open` when
+/// one of `open_cwds` (the workspace roots) is the same checkout. Runs git,
+/// a stat and a canonicalize per entry, so callers on the app loop hand it to
+/// a worker thread.
+fn openable_worktrees(
+    cwd: &std::path::Path,
+    open_cwds: &[PathBuf],
+) -> Result<Vec<WorktreeOpenEntry>, String> {
+    let wts = crate::git::local::worktrees(cwd)?;
+    Ok(wts
+        .into_iter()
+        .filter(|w| !w.bare && w.path.is_dir())
+        .map(|w| WorktreeOpenEntry {
+            open: checkout_idx_in(&w.path, open_cwds.iter().map(PathBuf::as_path)).is_some(),
+            path: w.path,
+            branch: w.branch,
+            head: w.head,
+            is_main: w.is_main,
+        })
+        .collect())
+}
+
+/// The position in `cwds` of the folder that is the same checkout as `path`,
+/// if any. Both sides are canonicalized so a symlinked cwd (macOS `/tmp`)
+/// still matches, and the final comparison is [`crate::platform::same_path`]
+/// so spelling variance (Windows case, separators, the `\\?\` prefix) can't
+/// read as "not open" when canonicalization falls back to the raw path
+/// (docs/43 WIN-6). Stats every path it's given: keep it off the app loop
+/// unless the paths are the user's own pick.
+fn checkout_idx_in<'a>(
+    path: &std::path::Path,
+    cwds: impl IntoIterator<Item = &'a std::path::Path>,
+) -> Option<usize> {
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let target = canon(path);
+    cwds.into_iter()
+        .position(|cwd| crate::platform::same_path(&canon(cwd), &target))
 }
 
 /// `~/.luvus/worktrees/<repo>/` — the folder that holds all of `repo`'s luvus
@@ -6886,7 +6907,8 @@ mod tests {
     fn open_worktree_list_now(app: &mut App, repo: &std::path::Path) {
         app.open_worktree_list(repo);
         let generation = app.worktree_open.as_ref().unwrap().generation;
-        app.apply_worktree_list(generation, openable_worktrees(repo));
+        let cwds: Vec<PathBuf> = app.workspaces.iter().map(|w| w.cwd.clone()).collect();
+        app.apply_worktree_list(generation, openable_worktrees(repo, &cwds));
     }
 
     #[test]
@@ -6941,7 +6963,7 @@ mod tests {
         let first = app.worktree_open.as_ref().unwrap().generation;
         app.handle_worktree_open_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.worktree_open.is_none());
-        app.apply_worktree_list(first, openable_worktrees(&repo));
+        app.apply_worktree_list(first, openable_worktrees(&repo, &[]));
         assert!(app.worktree_open.is_none(), "a closed modal stays closed");
 
         // Reopened before the first scan landed: the old result is ignored and
@@ -6950,9 +6972,9 @@ mod tests {
         app.open_worktree_list(&repo);
         let second = app.worktree_open.as_ref().unwrap().generation;
         assert_ne!(first, second);
-        app.apply_worktree_list(first, openable_worktrees(&repo));
+        app.apply_worktree_list(first, openable_worktrees(&repo, &[]));
         assert!(app.worktree_open.as_ref().unwrap().loading, "still waiting");
-        app.apply_worktree_list(second, openable_worktrees(&repo));
+        app.apply_worktree_list(second, openable_worktrees(&repo, &[]));
         let list = app.worktree_open.as_ref().unwrap();
         assert!(!list.loading);
         assert_eq!(list.entries.len(), 2);
@@ -6994,6 +7016,74 @@ mod tests {
         // ⏎ on an empty (errored) list just closes it.
         app.handle_worktree_open_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.worktree_open.is_none());
+    }
+
+    #[test]
+    fn worktree_list_resolves_the_open_badge_on_the_worker() {
+        // The badge is matched against the workspace roots snapshotted at
+        // request time, on the worker — nothing in `apply_worktree_list`
+        // stats a path. A symlinked spelling of the root still matches.
+        let _env = crate::persist::test_env("worktree-open-badge");
+        let (base, repo, wt) = repo_with_sibling_worktree("wtbadge");
+        let feature = |entries: &[WorktreeOpenEntry]| {
+            entries
+                .iter()
+                .find(|e| e.branch.as_deref() == Some("feature"))
+                .map(|e| e.open)
+                .expect("sibling worktree listed")
+        };
+        assert!(!feature(&openable_worktrees(&repo, &[]).unwrap()));
+        assert!(feature(
+            &openable_worktrees(&repo, std::slice::from_ref(&wt)).unwrap()
+        ));
+        #[cfg(unix)]
+        {
+            let link = base.join("wt-link");
+            std::os::unix::fs::symlink(&wt, &link).unwrap();
+            assert!(feature(&openable_worktrees(&repo, &[link]).unwrap()));
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn worktree_list_renders_control_characters_in_paths_visibly() {
+        use ratatui::{backend::TestBackend, Terminal};
+        // `git worktree list -z` keeps a newline inside a path; the cell
+        // writer would drop it, gluing the halves together. It renders as
+        // its escape instead, so the row shows what the path really is.
+        let _env = crate::persist::test_env("worktree-open-ctrl");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.worktree_open = Some(WorktreeOpenList {
+            generation: 1,
+            loading: false,
+            error: None,
+            entries: vec![WorktreeOpenEntry {
+                path: PathBuf::from("/repo/odd\nname"),
+                branch: Some("odd".into()),
+                head: "bbbb2222".into(),
+                is_main: false,
+                open: false,
+            }],
+            cursor: 0,
+        });
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            screen.contains("/repo/odd\\nname"),
+            "newline shows as its escape"
+        );
+        assert!(
+            !screen.contains("/repo/oddname"),
+            "halves are not glued together"
+        );
     }
 
     #[test]
