@@ -124,6 +124,7 @@ command for you:
 | Claude Code | its project transcript store |
 | GitHub Copilot CLI | its session-state store |
 | Codex | its rollout files |
+| Antigravity CLI | its workspace conversation cache (`~/.gemini/antigravity-cli/cache/last_conversations.json`) |
 | opencode | its session storage |
 | Kimi | its session index (`~/.kimi-code/session_index.jsonl`) |
 | Grok | its session directory (`~/.grok/sessions`) |
@@ -194,17 +195,21 @@ so it is not listed as a native pane-fork target.
 ## Precise events: the integration hook
 
 Screen-based detection needs no setup and works for everything. The optional
-**hook** adds precision: the agent itself reports its exact session id and
-lifecycle events (permission prompt raised, turn ended) into luvus:
+**hook** adds precision: the agent itself reports its exact session id and,
+where its hook contract supports them safely, lifecycle events into luvus:
 
 ```sh
-luvus integration install claude    # or: copilot · codex · opencode · kimi · grok · hermes · omp
+luvus integration install claude    # or: copilot · codex · antigravity · opencode · kimi · grok · hermes · omp
 ```
 
 or toggle it in **Settings → Integrations**. What it does per agent:
 
 - **claude / copilot / codex**: registers a small session-start hook script in
   the agent's own settings file.
+- **antigravity**: adds one Luvus-owned `PreInvocation` entry to
+  `~/.gemini/config/hooks.json`. It reports only the exact conversation id for
+  `agy --conversation <id>` restore; screen detection continues to own agent
+  state, and every other named Antigravity hook is preserved.
 - **opencode**: installs a tiny plugin file.
 - **kimi**: adds a `[[hooks]]` entry to `~/.kimi-code/config.toml`, edited in
   place so your API keys, comments, and own hooks are left untouched.

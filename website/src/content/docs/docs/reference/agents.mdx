@@ -8,6 +8,7 @@ description: What luvus supports per agent, covering live status, session resume
 | Claude Code | ✓ | ✓ | ✓ | ✓ |
 | GitHub Copilot CLI | ✓ | ✓ | no | ✓ |
 | Codex | ✓ | ✓ | ✓ | ✓ |
+| Antigravity CLI (`agy`) | ✓ | ✓ | no | session only |
 | opencode | ✓ | ✓ | no | ✓ |
 | Kimi Code CLI | ✓ | ✓ | no | ✓ |
 | Grok Build | ✓ | ✓ | ✓ | ✓ |
@@ -51,6 +52,15 @@ description: What luvus supports per agent, covering live status, session resume
   `luvus integration install omp` drops a single `luvus.ts` there — no config
   file is edited. Named profiles, `PI_CODING_AGENT_DIR`, `PI_CONFIG_DIR`, and
   OMP's XDG session store remain supported.
+
+  Antigravity CLI publishes its newest conversation per workspace in
+  `~/.gemini/antigravity-cli/cache/last_conversations.json`, which Luvus reads
+  offline and with a strict size bound. `luvus integration install
+  antigravity` additionally registers one Luvus-owned `PreInvocation` hook
+  under `~/.gemini/config/hooks.json` for exact live pane ownership. Luvus
+  restores either source with `agy --conversation <id>`. Screen detection
+  remains responsible for idle/working/blocked state, and uninstall preserves
+  every other named hook.
 
   Hermes installs `~/.hermes/plugins/luvus-agent-state`, or the equivalent
   directory under `HERMES_HOME`, and enables only that plugin in

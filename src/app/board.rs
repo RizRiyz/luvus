@@ -2347,6 +2347,7 @@ mod tests {
         let expected = [
             ("aider", "aider --message"),
             ("amp", "amp --execute"),
+            ("antigravity", "agy -p"),
             ("claude", "claude"),
             ("codex", "codex"),
             ("copilot", "copilot --interactive"),

@@ -4,6 +4,7 @@ pub(crate) static BUILTINS: &[&AgentDescriptor] = &[
     &super::claude::DESCRIPTOR,
     &super::codex::DESCRIPTOR,
     &super::gemini::DESCRIPTOR,
+    &super::antigravity::DESCRIPTOR,
     &super::aider::DESCRIPTOR,
     &super::opencode::DESCRIPTOR,
     &super::copilot::DESCRIPTOR,
@@ -27,6 +28,7 @@ static INTEGRATIONS: &[&AgentDescriptor] = &[
     &super::claude::DESCRIPTOR,
     &super::copilot::DESCRIPTOR,
     &super::codex::DESCRIPTOR,
+    &super::antigravity::DESCRIPTOR,
     &super::opencode::DESCRIPTOR,
     &super::kimi::DESCRIPTOR,
     &super::grok::DESCRIPTOR,
@@ -134,6 +136,11 @@ mod tests {
     fn aliases_resolve_to_the_canonical_descriptor() {
         assert_eq!(find("cursor-agent").map(|agent| agent.id), Some("cursor"));
         assert_eq!(find("CURSOR").map(|agent| agent.id), Some("cursor"));
+        assert_eq!(find("agy").map(|agent| agent.id), Some("antigravity"));
+        assert_eq!(
+            find("ANTIGRAVITY-CLI").map(|agent| agent.id),
+            Some("antigravity")
+        );
         assert!(find("not-an-agent").is_none());
     }
 
@@ -153,6 +160,7 @@ mod tests {
             ("claude", &["claude"][..], &[][..]),
             ("codex", &["codex"][..], &[][..]),
             ("gemini", &["gemini"][..], &[][..]),
+            ("antigravity", &["antigravity-cli"][..], &["agy"][..]),
             ("aider", &["aider"][..], &[][..]),
             ("opencode", &["opencode"][..], &[][..]),
             ("copilot", &["copilot"][..], &[][..]),
@@ -195,8 +203,21 @@ mod tests {
         assert_eq!(
             resumable,
             [
-                "claude", "codex", "gemini", "opencode", "copilot", "kimi", "qwen", "cursor",
-                "grok", "hermes", "muse", "omp", "pi", "fx",
+                "claude",
+                "codex",
+                "gemini",
+                "antigravity",
+                "opencode",
+                "copilot",
+                "kimi",
+                "qwen",
+                "cursor",
+                "grok",
+                "hermes",
+                "muse",
+                "omp",
+                "pi",
+                "fx",
             ]
         );
 
@@ -214,8 +235,20 @@ mod tests {
         assert_eq!(
             discoverable,
             [
-                "claude", "codex", "gemini", "opencode", "copilot", "kimi", "qwen", "grok",
-                "hermes", "muse", "omp", "pi", "fx",
+                "claude",
+                "codex",
+                "gemini",
+                "antigravity",
+                "opencode",
+                "copilot",
+                "kimi",
+                "qwen",
+                "grok",
+                "hermes",
+                "muse",
+                "omp",
+                "pi",
+                "fx",
             ]
         );
 
@@ -237,7 +270,17 @@ mod tests {
                 .iter()
                 .map(|descriptor| descriptor.id)
                 .collect::<Vec<_>>(),
-            ["claude", "copilot", "codex", "opencode", "kimi", "grok", "hermes", "omp",]
+            [
+                "claude",
+                "copilot",
+                "codex",
+                "antigravity",
+                "opencode",
+                "kimi",
+                "grok",
+                "hermes",
+                "omp",
+            ]
         );
     }
 }

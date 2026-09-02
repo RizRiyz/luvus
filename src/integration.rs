@@ -60,6 +60,12 @@ pub fn run(args: &[String], context: crate::i18n::cli::Context) -> Result<i32> {
         args.get(2).map(String::as_str),
         args.get(3).map(String::as_str),
     ) {
+        (Some("hook"), Some(agent))
+            if crate::agent::registry::find(agent)
+                .is_some_and(|descriptor| descriptor.id == crate::agent::antigravity::NAME) =>
+        {
+            Ok(crate::agent::antigravity::run_hook())
+        }
         (Some("install"), Some(agent)) if operation(agent).is_some() => {
             install(agent)?;
             println!(

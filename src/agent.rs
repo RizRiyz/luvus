@@ -17,6 +17,7 @@ use std::time::SystemTime;
 
 pub(crate) mod aider;
 pub(crate) mod amp;
+pub(crate) mod antigravity;
 pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod copilot;
@@ -143,6 +144,19 @@ fn filter_launch_flags(agent: &str, launch: &[String]) -> Vec<String> {
     while i < launch.len() {
         let t = launch[i].as_str();
         let head = t.split('=').next().unwrap_or(t);
+        // Antigravity resumes by conversation id and uses `-c` for the newest
+        // conversation. Neither selector may survive beside the exact id Luvus
+        // is restoring.
+        if agent == antigravity::NAME && matches!(head, "--conversation" | "-c") {
+            i += 1;
+            if head == "--conversation"
+                && !t.contains('=')
+                && launch.get(i).is_some_and(|value| !value.starts_with('-'))
+            {
+                i += 1;
+            }
+            continue;
+        }
         // Hermes accepts an optional name after continue. Neither the selector
         // nor its value may survive into an exact-id restore.
         if agent == "hermes" && matches!(head, "--continue" | "-c") {
@@ -377,6 +391,11 @@ mod tests {
             resume_command("gemini", "g1").as_deref(),
             Some("gemini --resume 'g1'\r")
         );
+        assert_eq!(
+            resume_command("agy", "ec33ebf9-0cba-4100-8142-c61503f6c587").as_deref(),
+            Some("agy --conversation 'ec33ebf9-0cba-4100-8142-c61503f6c587'\r")
+        );
+        assert!(is_resumable("antigravity-cli"));
         assert_eq!(
             resume_command("qwen", "q1").as_deref(),
             Some("qwen --resume 'q1'\r")
@@ -682,6 +701,17 @@ mod tests {
             f("hermes", &["--continue", "old title", "--tui"]),
             vec!["--tui"],
             "Hermes drops its optional continue title"
+        );
+        assert_eq!(
+            f(
+                "antigravity",
+                &["--conversation", "old-id", "--model", "gemini-3.1-pro"]
+            ),
+            vec!["--model", "gemini-3.1-pro"]
+        );
+        assert_eq!(
+            f("antigravity", &["--conversation=old-id", "-c", "--sandbox"]),
+            vec!["--sandbox"]
         );
         // A kept flag keeps its value.
         assert_eq!(

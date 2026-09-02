@@ -192,7 +192,7 @@ pub fn session_usage(agent: &str, cwd: &Path, session_id: &str) -> Option<AgentU
         "fx" => fx_usage(&fx_dir(&fx::sessions::base(), session_id)),
         // These agents currently expose identity/state but no stable,
         // structured, per-session usage store Luvus can read safely.
-        "aider" | "kiro" | "cursor" | "amp" | "droid" => None,
+        "aider" | "antigravity" | "kiro" | "cursor" | "amp" | "droid" => None,
         _ => None, // manifest-defined agents degrade honestly too.
     }
 }
@@ -1193,6 +1193,8 @@ mod tests {
     fn unsupported_agents_never_receive_guessed_usage() {
         for agent in [
             "aider",
+            "antigravity",
+            "agy",
             "kiro",
             "cursor",
             "cursor-agent",

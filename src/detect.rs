@@ -1838,6 +1838,28 @@ Would you like to proceed?
             ]),
             Some("pi".into())
         );
+        let antigravity_unix = "/Users/me/.local/bin/agy --conversation ec33ebf9-0cba-4100-8142-c61503f6c587 --sandbox";
+        assert_eq!(
+            m.agent_in_processes(&[antigravity_unix.into()]),
+            Some("antigravity".into())
+        );
+        assert_eq!(
+            m.launch_args_for(&[antigravity_unix.into()], "antigravity"),
+            Some(vec![
+                "--conversation".into(),
+                "ec33ebf9-0cba-4100-8142-c61503f6c587".into(),
+                "--sandbox".into(),
+            ])
+        );
+        let antigravity_windows = r#"C:\Users\me\AppData\Local\agy\bin\agy.exe -p "fix the tests""#;
+        assert_eq!(
+            m.agent_in_processes(&[antigravity_windows.into()]),
+            Some("antigravity".into())
+        );
+        assert_eq!(
+            m.launch_args_for(&[antigravity_windows.into()], "antigravity"),
+            Some(vec!["-p".into(), "fix the tests".into()])
+        );
     }
 
     #[test]
@@ -2587,6 +2609,47 @@ Would you like to proceed?
             "zsh"
         );
         assert_eq!(named("gemini is a constellation\n", &proc("-zsh")), "zsh");
+        assert_eq!(
+            named("read the Antigravity documentation\n", &proc("-zsh")),
+            "zsh"
+        );
+        assert_eq!(
+            named(
+                "",
+                &proc("/Applications/Antigravity.app/Contents/MacOS/Antigravity")
+            ),
+            "zsh",
+            "the desktop editor binary is not the Antigravity CLI"
+        );
+        assert_eq!(
+            named(
+                "Requesting permission for:\nDo you want to proceed?",
+                &proc("/Users/me/.local/bin/agy")
+            ),
+            "antigravity"
+        );
+        let blocked = classify(
+            Some("agy"),
+            "Requesting permission for:\nDo you want to proceed?",
+            true,
+            false,
+            "zsh",
+            "",
+            &proc("/Users/me/.local/bin/agy"),
+            &m,
+        );
+        assert_eq!(blocked.state, State::Blocked);
+        let working = classify(
+            Some("agy"),
+            "⠹ Working on the task",
+            true,
+            false,
+            "zsh",
+            "",
+            &proc("C:\\Users\\me\\AppData\\Local\\agy\\bin\\agy.exe"),
+            &m,
+        );
+        assert_eq!(working.state, State::Working);
 
         // Flags never count as the binary, and .exe is stripped.
         assert_eq!(named("", &proc("cargo test --example amp")), "zsh");
