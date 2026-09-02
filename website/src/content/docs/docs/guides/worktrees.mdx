@@ -10,10 +10,32 @@ folders. luvus makes them **first-class workspaces**.
 
 - **`Ctrl+Space G`**: type a branch name, and luvus runs `git worktree add`
   under `~/.luvus/worktrees/<repo>/<branch>` and opens it as a workspace.
+  That folder is only where luvus **places** new worktrees; opening one (below)
+  is not limited to it.
 - **The folder picker** (`Ctrl+Space N`): when browsing a git repo, an *Open
   with new worktree* row (or the `w` key) does the same for that repo.
 - **CLI**: `luvus worktree create <branch>` · `open <path>` · `list` ·
   `remove <path>` (the branch is kept).
+
+## Open one
+
+Right-click a repo's sidebar row and choose **Open Worktree**. The list is fed
+by `git worktree list`, so it shows every checkout git knows about, wherever it
+lives on disk and whichever tool created it: a sibling folder from
+`git worktree add ../feature`, one made by another editor, or one under
+`~/.luvus/worktrees/`. Each row shows the branch (or the short commit when
+detached), the path, and an **open** badge when that checkout is already a
+workspace.
+
+- `⏎` opens the highlighted checkout as a new workspace. If it is already open,
+  luvus **focuses that workspace** instead of opening a duplicate, since a
+  worktree is one place.
+- `↑`/`↓` (or `j`/`k`) move, `esc` closes. Rows are clickable.
+- The listing runs off the app loop, so a slow filesystem shows a brief
+  *Loading worktrees…* row rather than stalling the terminal.
+
+Bare entries and worktrees whose folder is already gone (`git worktree prune`
+would remove them) are left out, since there is nothing to open.
 
 ## Why it's great with agents
 
