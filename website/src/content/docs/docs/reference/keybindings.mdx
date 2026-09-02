@@ -185,9 +185,12 @@ The filter uses the global finder's bounded index (Git tracked and unignored
 files, with a filesystem fallback), displays relative paths, and marks partial
 results when a limit is reached.
 In the FILES tree, `o` or `Ctrl+O` opens the selected file or folder in the
-desktop's own application.
-After `Enter` opens a file view, `x` closes that view. An opened DIFF review
-closes with `q` or `Esc`.
+desktop's own application, on the machine running the client. The path is
+passed as a separate argument, which prevents shell injection but does not
+change what the OS handler does: application or shortcut-like entries
+(`.app`, `.desktop`, `.lnk`, `.command`) run exactly as a double-click would,
+so only open entries you trust. After `Enter` opens a file view, `x` closes
+that view. An opened DIFF review closes with `q` or `Esc`.
 
 **Rename dialogs** (a tab, a workspace, or a pane): `←` / `→` move the text
 cursor, `Home` / `End` jump to the start or end of the name, `Backspace` and
