@@ -1,14 +1,21 @@
 //! Native Nous Research Hermes CLI support.
 //!
-//! Hermes keeps canonical session metadata in a SQLite database under its
-//! selected `HERMES_HOME`. Luvus reads only the session identity, workspace,
-//! and activity timestamp through a bounded read-only query. Conversation
-//! messages, credentials, configuration, and memory are never opened here.
+//! Hermes reports exact live session ownership through its optional plugin.
+//! Luvus persists that association for restart resume without opening Hermes's
+//! private history store.
 
-use super::types::{AgentDescriptor, DiscoveryOperations, IdentityDescriptor, SessionOperations};
+use std::path::PathBuf;
+
+use super::types::{AgentDescriptor, IdentityDescriptor, SessionOperations};
 
 mod integration;
-pub(in crate::agent) mod sessions;
+
+pub(super) fn base() -> PathBuf {
+    std::env::var_os("HERMES_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| super::home().join(".hermes"))
+}
 
 pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     id: "hermes",
@@ -26,12 +33,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         overlap_priority: 0,
     },
     sessions: Some(SessionOperations {
-        discovery: Some(DiscoveryOperations {
-            base: sessions::base,
-            recent: sessions::recent,
-            latest: sessions::latest,
-            list: Some(sessions::list),
-        }),
+        discovery: None,
         resume: |session| format!("hermes --resume {session}\r"),
         // Hermes exposes `/branch` and `/fork` inside a live CLI, but does not
         // document an external command that safely forks a stored session.

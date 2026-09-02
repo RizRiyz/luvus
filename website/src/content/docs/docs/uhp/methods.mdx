@@ -16,6 +16,8 @@ short-lived stdio profile provided by `luvus uhp proxy`; they do not require a
 running session endpoint.
 
 The resolved logical path is injected into every pane as `$LUVUS_SOCKET_PATH`.
+`$LUVUS_API_ADDRESS` carries the platform-native address for integrations that
+connect directly, including the complete named-pipe address on Windows.
 The selected local endpoint is protected by current-user ownership and is the
 default full-authority boundary, so methods do not need a session parameter.
 Harnesses can be given an optional short-lived scoped token instead of ambient
@@ -96,6 +98,23 @@ Parameter shapes mirror the CLI flags (`luvus task add --paths x` →
 `{"paths": ["x"]}`). For CLI commands, an omitted pane uses
 `$LUVUS_PANE_ID` when available; a raw API request with no pane uses the
 currently focused pane.
+
+`pane.report_session` binds an exact built-in agent session to its owning pane.
+The identity-only form remains compatible with existing integrations:
+
+```json
+{"id":"session","method":"pane.report_session","params":{"pane":"9","agent":"hermes","session_id":"session_123"}}
+```
+
+Trusted local integrations may attach cumulative structured usage. Token
+counters and timestamps are bounded integers, cost is a finite non-negative
+number or `null`, and older reports cannot replace a newer value. Integration
+usage remains authoritative across native-store refreshes for as long as its
+pane owns that exact session.
+
+```json
+{"id":"usage","method":"pane.report_session","params":{"pane":"9","agent":"opencode","session_id":"ses_123","usage":{"model":"anthropic/claude-sonnet-4","tokens_in":1200,"tokens_out":340,"cache_read":800,"cache_write":40,"cost":0.42,"updated_at":1788330000000}}}
+```
 
 `task.start` and `task.next` with `start: true` accept `mode: "worktree"` or
 `mode: "workspace"`; omitted mode means worktree. Workspace mode may include a

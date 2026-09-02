@@ -108,7 +108,7 @@ pub fn sessions_for(agent: &str, cwd: &Path) -> Vec<String> {
 /// The shell command that resumes an agent's native session, if supported.
 /// Returns `None` for unknown agents or unsafe ids.
 pub fn resume_command(agent: &str, session_id: &str) -> Option<String> {
-    if !safe_id(session_id) {
+    if !safe_session_id(session_id) {
         return None;
     }
     let src = source(agent)?;
@@ -250,7 +250,7 @@ pub fn fork_session_id(agent: &str, bound: Option<&str>, cwd: &Path) -> Option<S
 /// full context in a new, diverging session (the original is left untouched).
 /// `None` for agents without a native fork, unknown agents, or unsafe ids.
 pub fn fork_command(agent: &str, session_id: &str) -> Option<String> {
-    if !safe_id(session_id) {
+    if !safe_session_id(session_id) {
         return None;
     }
     let f = source(agent)?.fork?;
@@ -263,12 +263,18 @@ pub fn can_fork(agent: &str) -> bool {
     source(agent).and_then(|s| s.fork).is_some()
 }
 
-fn safe_id(id: &str) -> bool {
+pub(crate) fn safe_session_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 256
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/'))
+}
+
+/// Canonical built-in agent id for trusted integration reports. Manifest-only
+/// identities do not gain native session capabilities through this path.
+pub(crate) fn canonical_builtin(agent: &str) -> Option<&'static str> {
+    registry::find(agent).map(|descriptor| descriptor.id)
 }
 
 fn home() -> PathBuf {

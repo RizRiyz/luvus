@@ -398,8 +398,11 @@ surface:
 - For Antigravity CLI, `luvus integration install antigravity` adds exact
   conversation identity for restore. It is session-only; native screen
   detection remains authoritative for agent state.
+- For OpenCode, `luvus integration install opencode` adds exact TUI-local root
+  session ownership and structured usage. Without it, usage stays unavailable.
 - For Hermes, `luvus integration install hermes` adds exact per-pane session
-  ownership while native read-only session discovery remains the fallback.
+  ownership for restart resume. Detection remains native, but Luvus does not
+  scan Hermes's private history store.
 - Subscribe to events only for a live monitoring request. Stop when its
   condition is satisfied and never retain an unbounded stream.
 

@@ -805,15 +805,28 @@ impl App {
                 mtimes,
             } => {
                 self.usage_scan_inflight = false;
+                self.prune_reported_usage();
                 if scope == crate::mission::MissionScope::All {
-                    self.agent_usage = usage;
+                    let mut next = usage;
+                    for key in self.reported_usage.keys() {
+                        if let Some(value) = self.agent_usage.get(key) {
+                            next.insert(key.clone(), value.clone());
+                        }
+                    }
+                    self.agent_usage = next;
                     self.usage_mtimes = mtimes;
                 } else {
                     for key in scanned {
-                        self.agent_usage.remove(&key);
+                        if !self.reported_usage.contains_key(&key) {
+                            self.agent_usage.remove(&key);
+                        }
                         self.usage_mtimes.remove(&key);
                     }
-                    self.agent_usage.extend(usage);
+                    self.agent_usage.extend(
+                        usage
+                            .into_iter()
+                            .filter(|(key, _)| !self.reported_usage.contains_key(key)),
+                    );
                     self.usage_mtimes.extend(mtimes);
                 }
                 // Fleet burn rate: change in total cost since the last scan (docs/54).

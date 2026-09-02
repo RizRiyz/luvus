@@ -111,6 +111,13 @@ static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// replace `path`. A failed write or replacement leaves the previous file
 /// untouched and removes the incomplete temporary file.
 pub(crate) fn write_json_atomic(path: &Path, value: &Value) -> Result<()> {
+    let output = serde_json::to_vec_pretty(value)?;
+    write_bytes_atomic(path, &output)
+}
+
+/// Atomically replace one integration-owned text or config asset without
+/// exposing a partially written file to the agent process.
+pub(crate) fn write_bytes_atomic(path: &Path, output: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("configuration path has no parent"))?;
@@ -118,8 +125,6 @@ pub(crate) fn write_json_atomic(path: &Path, value: &Value) -> Result<()> {
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow!("configuration filename is not valid Unicode"))?;
-    let output = serde_json::to_vec_pretty(value)?;
-
     let (temporary, mut file) = (0..16)
         .find_map(|_| {
             let sequence = ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -141,7 +146,7 @@ pub(crate) fn write_json_atomic(path: &Path, value: &Value) -> Result<()> {
         .ok_or_else(|| anyhow!("could not reserve a temporary configuration file"))?;
 
     let result = (|| -> Result<()> {
-        file.write_all(&output)?;
+        file.write_all(output)?;
         file.flush()?;
         file.sync_all()?;
         drop(file);
@@ -623,15 +628,21 @@ mod tests {
         let _env = crate::persist::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let tmp = std::env::temp_dir().join(format!("luvus-uninst-oc-{}", std::process::id()));
+        let tmp = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-state/integration")
+            .join(format!("luvus-uninst-oc-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
+        let old = std::env::var_os("XDG_CONFIG_HOME");
         std::env::set_var("XDG_CONFIG_HOME", &tmp);
         install("opencode").unwrap();
         assert!(is_installed("opencode"));
         uninstall("opencode").unwrap();
         assert!(!is_installed("opencode"), "plugin removed");
         uninstall("opencode").unwrap(); // idempotent
-        std::env::remove_var("XDG_CONFIG_HOME");
+        match old {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -795,27 +806,34 @@ mod tests {
     }
 
     #[test]
-    fn opencode_installs_a_plugin_file() {
+    fn opencode_installs_a_tui_plugin_without_process_spawns() {
         let _env = crate::persist::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let tmp = std::env::temp_dir().join(format!("luvus-opencode-{}", std::process::id()));
+        let tmp = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-state/integration")
+            .join(format!("luvus-opencode-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
+        let old = std::env::var_os("XDG_CONFIG_HOME");
         std::env::set_var("XDG_CONFIG_HOME", &tmp);
 
         install("opencode").unwrap();
-        let plugin = tmp.join("opencode").join("plugin").join("luvus.js");
+        let plugin = tmp.join("opencode").join("luvus-tui.mjs");
         let js = fs::read_to_string(&plugin).unwrap();
         assert!(js.contains("session.created"), "hooks the session event");
-        assert!(js.contains("--agent"), "reports the session");
+        assert!(js.contains("pane.report_session"), "reports the session");
         assert!(
-            js.contains("process.env.LUVUS_BIN_PATH"),
-            "uses the exact server-selected binary before PATH fallback"
+            js.contains("net.createConnection"),
+            "uses direct bounded local transport"
         );
+        assert!(!js.contains("child_process"));
         assert!(js.contains("opencode"));
         assert!(is_installed("opencode"));
 
-        std::env::remove_var("XDG_CONFIG_HOME");
+        match old {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
         let _ = fs::remove_dir_all(&tmp);
     }
 

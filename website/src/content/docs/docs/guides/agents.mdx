@@ -62,7 +62,7 @@ Click a session row to select it and update the Selected Agent panel. Use
 | Claude Code | project transcript |
 | Codex | rollout token counters |
 | GitHub Copilot CLI | session shutdown metrics |
-| opencode | read-only session database |
+| opencode | selected-session integration events |
 | Kimi | session status records |
 | Grok | completed-turn usage records |
 | Pi | assistant message usage |
@@ -114,10 +114,10 @@ pane, so a repeating prompt can't spam you.
 
 ## Session resume: the flagship
 
-luvus reopens each agent's **own conversation** after a restart, with zero
-configuration. It discovers the agent's most recent session from the agent's
-native on-disk store, keyed to the pane's folder, and runs the right resume
-command for you:
+luvus reopens each agent's **own conversation** after a restart. For agents
+with a stable native store, it discovers the session by pane folder with no
+setup. Integrations provide exact ownership where directory matching alone is
+not sufficient, and Luvus runs the agent's own resume command:
 
 | Agent | Resumes via |
 |---|---|
@@ -125,10 +125,10 @@ command for you:
 | GitHub Copilot CLI | its session-state store |
 | Codex | its rollout files |
 | Antigravity CLI | its workspace conversation cache (`~/.gemini/antigravity-cli/cache/last_conversations.json`) |
-| opencode | its session storage |
+| opencode | its session storage, plus exact live ownership from the optional integration |
 | Kimi | its session index (`~/.kimi-code/session_index.jsonl`) |
 | Grok | its session directory (`~/.grok/sessions`) |
-| Hermes CLI | its active SQLite session store (`$HERMES_HOME/state.db` or `~/.hermes/state.db`) |
+| Hermes CLI | its exact session report from the optional integration |
 | Pi | its session store (`~/.pi/agent/sessions`) |
 | Oh My Pi (OMP) | its profile-, XDG-, and override-aware native session store |
 | Muse Code | its XDG data store (`$XDG_DATA_HOME/muse/sessions`) |
@@ -188,9 +188,10 @@ Muse Code supports native detection and resume, but not **Fork to New Pane**.
 Its `/fork` command exists only inside the active TUI, and its CLI refuses to
 resume the same live session in a sibling pane.
 
-Hermes CLI has the same external boundary. Luvus can resume its native
-sessions, but Hermes exposes `/branch` and `/fork` only inside the active TUI,
-so it is not listed as a native pane-fork target.
+Hermes CLI has the same external boundary. Luvus can resume a session whose
+exact identity was reported and persisted by its integration, but Hermes
+exposes `/branch` and `/fork` only inside the active TUI, so it is not listed as
+a native pane-fork target.
 
 ## Precise events: the integration hook
 
@@ -210,15 +211,21 @@ or toggle it in **Settings → Integrations**. What it does per agent:
   `~/.gemini/config/hooks.json`. It reports only the exact conversation id for
   `agy --conversation <id>` restore; screen detection continues to own agent
   state, and every other named Antigravity hook is preserved.
-- **opencode**: installs a tiny plugin file.
+- **opencode**: installs a TUI-local plugin and registers it in the effective
+  `tui.json`, `tui.jsonc`, or `OPENCODE_TUI_CONFIG` file
+  without removing comments or unrelated plugins. It reports only the root
+  session selected in that pane and sends cumulative structured usage directly
+  to the inherited owner-local Luvus endpoint. No `luvus` process is spawned per
+  update and no agent database is opened.
 - **kimi**: adds a `[[hooks]]` entry to `~/.kimi-code/config.toml`, edited in
   place so your API keys, comments, and own hooks are left untouched.
 - **grok**: installs its own hook file without editing Grok's authentication
   configuration.
 - **hermes**: installs an opt-in plugin under the active `HERMES_HOME`. It
-  reports an exact session id once per session while the read-only SQLite
-  adapter remains the zero-setup fallback. Luvus preserves unrelated YAML
-  settings and removes only its own plugin entry on uninstall.
+  reports an exact session id once per session, which Luvus persists for
+  restart resume. Luvus preserves unrelated YAML settings and removes only its
+  own plugin entry on uninstall. Without the integration, detection still
+  works but historical Hermes sessions are not scanned or guessed.
 - **omp**: installs one managed TypeScript extension in OMP's active agent
   directory. It reports exact session identity and authoritative
   idle/working/blocked/done transitions while preserving Luvus's native

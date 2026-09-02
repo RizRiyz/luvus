@@ -1602,23 +1602,105 @@ impl App {
                 Ok(self.pane_processes(id))
             }
             "pane.report_session" => {
+                reject_api_fields(p, &["pane", "agent", "session_id", "usage"])?;
                 let id = self.resolve_pane(p).ok_or_else(not_found)?;
-                let agent = p
-                    .get("agent")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let session_id = p
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if let Some(s) = self.status.get_mut(&id) {
-                    if !agent.is_empty() {
-                        s.agent = agent.clone();
+                let raw_agent = required_bounded_string(p, "agent", 64)?;
+                let agent = crate::agent::canonical_builtin(&raw_agent).ok_or_else(|| {
+                    (
+                        "invalid_request".to_string(),
+                        "agent must name a built-in Luvus adapter".to_string(),
+                    )
+                })?;
+                let session_id = required_bounded_string(p, "session_id", 256)?;
+                if !crate::agent::safe_session_id(&session_id) {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "session_id must contain only safe identifier characters".to_string(),
+                    ));
+                }
+
+                let key = crate::mission::UsageKey::new(agent, &session_id);
+                let usage = p.get("usage").map(parse_reported_usage).transpose()?;
+                self.prune_reported_usage();
+
+                if self.status.iter().any(|(pane, status)| {
+                    *pane != id
+                        && status.agent_session.as_ref().is_some_and(|session| {
+                            session.agent == key.agent && session.session_id == key.session_id
+                        })
+                }) {
+                    return Err((
+                        "conflict".to_string(),
+                        "session is already owned by another pane".to_string(),
+                    ));
+                }
+                if let Some(report) = &usage {
+                    if let Some(previous) = self.reported_usage.get(&key) {
+                        if previous.pane != id {
+                            return Err((
+                                "conflict".to_string(),
+                                "session usage is already owned by another pane".to_string(),
+                            ));
+                        }
+                        if report.updated_at < previous.updated_at {
+                            return Err((
+                                "stale_report".to_string(),
+                                "usage report is older than the current value".to_string(),
+                            ));
+                        }
                     }
-                    s.agent_session = Some(AgentSession { agent, session_id });
-                    s.force_detect = true;
+                }
+
+                if usage.is_some()
+                    && !self.reported_usage.contains_key(&key)
+                    && self.reported_usage.len() >= crate::mission::MAX_REPORTED_USAGE_ENTRIES
+                {
+                    return Err((
+                        "resource_exhausted".to_string(),
+                        "reported usage cache is full".to_string(),
+                    ));
+                }
+
+                let replaced = self
+                    .reported_usage
+                    .iter()
+                    .filter_map(|(existing, owner)| {
+                        (owner.pane == id && existing != &key).then_some(existing.clone())
+                    })
+                    .collect::<Vec<_>>();
+                for existing in replaced {
+                    self.reported_usage.remove(&existing);
+                    self.agent_usage.remove(&existing);
+                    self.usage_mtimes.remove(&existing);
+                }
+
+                let status = self.status.get_mut(&id).ok_or_else(not_found)?;
+                status.agent = agent.to_string();
+                status.agent_session = Some(AgentSession {
+                    agent: agent.to_string(),
+                    session_id,
+                });
+                status.force_detect = true;
+
+                if let Some(mut report) = usage {
+                    if !self.config.mission_pricing.is_empty() {
+                        report.value.cost = crate::mission::estimate_cost_with(
+                            &report.value.model,
+                            report.value.tokens_in,
+                            report.value.tokens_out,
+                            report.value.cache,
+                            &self.config.mission_pricing,
+                        );
+                    }
+                    self.agent_usage.insert(key.clone(), report.value);
+                    self.reported_usage.insert(
+                        key.clone(),
+                        crate::mission::ReportedUsage {
+                            pane: id,
+                            updated_at: report.updated_at,
+                        },
+                    );
+                    self.usage_mtimes.remove(&key);
                 }
                 self.session_dirty = true;
                 Ok(json!({"type":"ok"}))
@@ -6079,6 +6161,124 @@ fn optional_bounded_string(
     }
 }
 
+fn required_bounded_string(
+    p: &Value,
+    key: &str,
+    max_characters: usize,
+) -> Result<String, (String, String)> {
+    optional_bounded_string(p, key, max_characters)?
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            (
+                "invalid_request".to_string(),
+                format!("{key} must be a non-empty string"),
+            )
+        })
+}
+
+struct ValidatedReportedUsage {
+    value: crate::mission::AgentUsage,
+    updated_at: u64,
+}
+
+fn parse_reported_usage(value: &Value) -> Result<ValidatedReportedUsage, (String, String)> {
+    const MAX_COUNTER: u64 = 1_000_000_000_000_000;
+    const MAX_COST: f64 = 1_000_000_000_000.0;
+
+    reject_api_fields(
+        value,
+        &[
+            "model",
+            "tokens_in",
+            "tokens_out",
+            "cache_read",
+            "cache_write",
+            "cost",
+            "updated_at",
+        ],
+    )?;
+    let model = optional_bounded_string(value, "model", 256)?.unwrap_or_default();
+    if model.chars().any(char::is_control) {
+        return Err((
+            "invalid_request".to_string(),
+            "usage.model must not contain control characters".to_string(),
+        ));
+    }
+    let counter = |name: &str| -> Result<u64, (String, String)> {
+        value
+            .get(name)
+            .and_then(Value::as_u64)
+            .filter(|counter| *counter <= MAX_COUNTER)
+            .ok_or_else(|| {
+                (
+                    "invalid_request".to_string(),
+                    format!("usage.{name} must be an integer from 0 to {MAX_COUNTER}"),
+                )
+            })
+    };
+    let tokens_in = counter("tokens_in")?;
+    let tokens_out = counter("tokens_out")?;
+    let cache_read = counter("cache_read")?;
+    let cache_write = counter("cache_write")?;
+    let updated_at = value
+        .get("updated_at")
+        .and_then(Value::as_u64)
+        .filter(|timestamp| *timestamp > 0 && *timestamp <= 9_007_199_254_740_991)
+        .ok_or_else(|| {
+            (
+                "invalid_request".to_string(),
+                "usage.updated_at must be a positive safe integer".to_string(),
+            )
+        })?;
+    let cost = match value.get("cost") {
+        None | Some(Value::Null) => None,
+        Some(raw) => {
+            let parsed = raw
+                .as_f64()
+                .filter(|cost| cost.is_finite())
+                .ok_or_else(|| {
+                    (
+                        "invalid_request".to_string(),
+                        "usage.cost must be a finite non-negative number or null".to_string(),
+                    )
+                })?;
+            if !(0.0..=MAX_COST).contains(&parsed) {
+                return Err((
+                    "invalid_request".to_string(),
+                    format!("usage.cost must be between 0 and {MAX_COST}"),
+                ));
+            }
+            (parsed > 0.0).then_some(parsed)
+        }
+    };
+    let cache = cache_read.checked_add(cache_write).ok_or_else(|| {
+        (
+            "invalid_request".to_string(),
+            "usage cache counters overflow".to_string(),
+        )
+    })?;
+    let mut usage = crate::mission::AgentUsage {
+        model,
+        tokens_in,
+        tokens_out,
+        cache,
+        context: None,
+        cost,
+    };
+    if usage.cost.is_none() {
+        usage.cost = crate::mission::estimate_cost(
+            &usage.model,
+            usage.tokens_in,
+            usage.tokens_out,
+            usage.cache,
+        );
+    }
+    Ok(ValidatedReportedUsage {
+        value: usage,
+        updated_at,
+    })
+}
+
 /// Privacy-preserving executable inventory from cached process command lines.
 /// Keep only argv[0], plus an interpreter's first non-flag script name, and
 /// de-duplicate in scan order. Full argv commonly contains prompts or secrets.
@@ -6188,6 +6388,45 @@ mod tests {
             "git {args:?} failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn reported_usage_rejects_malformed_and_out_of_range_values() {
+        let valid = json!({
+            "model":"provider/model",
+            "tokens_in":1,
+            "tokens_out":2,
+            "cache_read":3,
+            "cache_write":4,
+            "cost":0.5,
+            "updated_at":100
+        });
+        let report = parse_reported_usage(&valid).unwrap();
+        assert_eq!(report.value.cache, 7);
+
+        for (field, value) in [
+            ("tokens_in", json!(-1)),
+            ("tokens_out", json!(1.5)),
+            ("cache_read", json!(1_000_000_000_000_001_u64)),
+            ("updated_at", json!(0)),
+            ("updated_at", json!(9_007_199_254_740_992_u64)),
+            ("cost", json!(-0.01)),
+            ("cost", json!(1_000_000_000_001_f64)),
+        ] {
+            let mut malformed = valid.clone();
+            malformed[field] = value;
+            assert!(
+                parse_reported_usage(&malformed).is_err(),
+                "{field} was accepted: {malformed}"
+            );
+        }
+
+        let mut control = valid.clone();
+        control["model"] = json!("bad\nmodel");
+        assert!(parse_reported_usage(&control).is_err());
+        let mut unknown = valid;
+        unknown["extra"] = json!(true);
+        assert!(parse_reported_usage(&unknown).is_err());
     }
 
     #[test]

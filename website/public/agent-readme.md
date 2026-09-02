@@ -152,6 +152,8 @@ Every managed pane receives context:
 - `LUVUS_ENV=1` identifies a Luvus-managed environment.
 - `LUVUS_PANE_ID` identifies the current pane.
 - `LUVUS_SOCKET_PATH` identifies the selected session's control endpoint.
+- `LUVUS_API_ADDRESS` identifies the platform-native address used by direct
+  local integrations, including the complete named-pipe address on Windows.
 
 Preserve these variables when invoking `luvus`. They keep development, named,
 remote, and default sessions isolated. Do not replace the endpoint with a
@@ -286,9 +288,13 @@ discovery rather than inferring support from an agent name.
   `luvus integration install antigravity` hook reports only the exact
   conversation id needed for `agy --conversation <id>` restore; screen
   detection remains authoritative for state.
-- Hermes session discovery works without setup. When exact pane ownership is
-  required, `luvus integration install hermes` adds an opt-in Hermes plugin
-  that reports each session once while retaining the native database fallback.
+- OpenCode detection and legacy JSON session discovery work without setup.
+  `luvus integration install opencode` adds a TUI-local plugin that reports
+  only the root session selected in that pane plus structured usage. Without
+  it, Mission Control leaves OpenCode usage unavailable instead of guessing.
+- `luvus integration install hermes` adds exact per-pane session ownership for
+  restart resume. Hermes detection still works without it, but Luvus does not
+  scan Hermes's private history database or guess a session.
 
 Do not claim every shell command resumes after restart. Do not guess native
 session IDs. List sessions and use the exact returned identifier.

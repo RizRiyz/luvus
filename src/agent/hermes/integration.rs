@@ -88,7 +88,7 @@ def register(ctx):
 "#;
 
 fn base() -> PathBuf {
-    super::sessions::base()
+    super::base()
 }
 
 fn plugin_dir() -> PathBuf {

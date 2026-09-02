@@ -1212,6 +1212,9 @@ fn apply_pane_env(
     if let Some(sock) = crate::ipc::api::socket_path_env() {
         cmd.env("LUVUS_SOCKET_PATH", &sock);
     }
+    if let Some(address) = crate::ipc::api::socket_address_env() {
+        cmd.env("LUVUS_API_ADDRESS", &address);
+    }
     if let Some(name) = crate::session::active_name() {
         cmd.env(crate::session::SESSION_ENV_VAR, &name);
     }

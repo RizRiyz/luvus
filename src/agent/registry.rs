@@ -244,7 +244,6 @@ mod tests {
                 "kimi",
                 "qwen",
                 "grok",
-                "hermes",
                 "muse",
                 "omp",
                 "pi",
