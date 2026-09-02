@@ -1619,6 +1619,10 @@ pub struct App {
     /// The open-worktree list modal (docs/18 WT): every checkout of the repo
     /// from `git worktree list`, openable or focusable. `None` when closed.
     pub worktree_open: Option<WorktreeOpenList>,
+    /// Clickable targets in the open-worktree list, set by the renderer each
+    /// frame. Rows precede the modal body in hit-test order, so a click lands on
+    /// the row under it and only a click on neither is "outside".
+    pub worktree_open_rects: Vec<(PickerHit, Rect)>,
     /// Active tab-rename modal (docs/28); `None` when closed.
     pub tab_rename: Option<TabRename>,
     /// Active tab context menu; `None` when closed.
@@ -2209,6 +2213,7 @@ impl App {
             pane_title_rects: Vec::new(),
             worktree_prompt: None,
             worktree_open: None,
+            worktree_open_rects: Vec::new(),
             tab_rename: None,
             tab_menu: None,
             ws_menu: None,
@@ -2824,6 +2829,7 @@ impl App {
             pane_title_rects: Vec::new(),
             worktree_prompt: None,
             worktree_open: None,
+            worktree_open_rects: Vec::new(),
             tab_rename: None,
             tab_menu: None,
             ws_menu: None,
@@ -5240,6 +5246,20 @@ impl App {
         }
     }
 
+    /// A click on open-worktree list row `i`: highlight it, then open it by the
+    /// same path ⏎ takes, so the mouse and the keyboard can't diverge. An index
+    /// from a stale frame is ignored rather than opening the wrong checkout.
+    pub fn worktree_open_click(&mut self, i: usize) {
+        let Some(list) = self.worktree_open.as_mut() else {
+            return;
+        };
+        if i >= list.entries.len() {
+            return;
+        }
+        list.cursor = i;
+        self.handle_worktree_open_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    }
+
     /// Focus an exact zero-based tab position in the active workspace.
     pub fn focus_tab(&mut self, index: usize) -> Result<(), TabFocusError> {
         self.focus_tab_in_workspace(self.active_ws, index)
@@ -6803,6 +6823,121 @@ mod tests {
         assert_eq!(
             std::fs::canonicalize(&app.workspaces.last().unwrap().cwd).unwrap(),
             std::fs::canonicalize(&wt).unwrap()
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn open_worktree_modal_click_opens_the_row_under_the_pointer() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("worktree-open-click");
+        let (base, repo, wt) = repo_with_sibling_worktree("wtclick");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_worktree_list(&repo);
+
+        // Render once so the modal records its clickable rects.
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let row1 = app
+            .worktree_open_rects
+            .iter()
+            .find_map(|(hit, rect)| matches!(*hit, PickerHit::Row(1)).then_some(*rect))
+            .expect("the sibling worktree row is clickable");
+
+        // The keyboard cursor still sits on row 0, so a click that opened the
+        // *highlighted* row instead of the clicked one would fail here.
+        let before = app.workspaces.len();
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: row1.x + 2,
+            row: row1.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.worktree_open.is_none(), "modal closes");
+        assert_eq!(app.workspaces.len(), before + 1);
+        assert_eq!(
+            std::fs::canonicalize(&app.workspaces.last().unwrap().cwd).unwrap(),
+            std::fs::canonicalize(&wt).unwrap()
+        );
+
+        // The dimmed backdrop cancels, like the folder picker's.
+        app.open_worktree_list(&repo);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let after = app.workspaces.len();
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.worktree_open.is_none(), "backdrop click cancels");
+        assert_eq!(app.workspaces.len(), after, "cancelling opens nothing");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn open_worktree_modal_hovering_a_row_repaints_it() {
+        use ratatui::crossterm::event::{MouseEvent, MouseEventKind};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("worktree-open-hover");
+        let (base, repo, _wt) = repo_with_sibling_worktree("wthover");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_worktree_list(&repo);
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let row_rect = |app: &App, i: usize| {
+            app.worktree_open_rects
+                .iter()
+                .find_map(|(hit, rect)| {
+                    matches!(*hit, PickerHit::Row(n) if n == i).then_some(*rect)
+                })
+                .expect("row is recorded")
+        };
+        let (row0, row1) = (row_rect(&app, 0), row_rect(&app, 1));
+
+        // Moving onto a row is a changed frame: without it the highlight would
+        // never repaint, which is what "hover does nothing" looked like.
+        let moved = |column, row| {
+            AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Moved,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        assert!(
+            app.handle_event(moved(row1.x + 2, row1.y)),
+            "moving onto a row redraws"
+        );
+        assert!(
+            !app.handle_event(moved(row1.x + 5, row1.y)),
+            "moving within one row does not"
+        );
+        assert!(
+            app.handle_event(moved(row0.x + 2, row0.y)),
+            "crossing to another row redraws"
+        );
+
+        // And the hovered row is actually painted: the pointer sits on row 0,
+        // the keyboard cursor too, so hovering row 1 must light a *second* row.
+        app.handle_event(moved(row1.x + 2, row1.y));
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let bg_of = |rect: Rect| buf[(rect.x + 2, rect.y)].bg;
+        assert_ne!(
+            bg_of(row1),
+            bg_of(row0),
+            "the hovered row is filled differently from the cursor row"
         );
 
         let _ = std::fs::remove_dir_all(&base);

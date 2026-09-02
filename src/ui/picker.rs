@@ -278,6 +278,11 @@ pub(super) fn draw_worktree_prompt(
 /// `git worktree list` — branch (or short head when detached), path, and an
 /// "open" badge when the checkout is already a workspace. ⏎ opens (or focuses)
 /// the highlighted row, esc closes.
+///
+/// Returns the footer's ⏎/esc button rects (as the text-input modals do, for the
+/// hover pills and the shared button routing) plus the clickable list rects: one
+/// [`PickerHit::Row`] per rendered row, then [`PickerHit::Modal`] for the modal
+/// body, so the input layer can tell a row from inert chrome from the backdrop.
 pub(super) fn draw_worktree_open(
     f: &mut RenderTarget,
     area: Rect,
@@ -285,7 +290,7 @@ pub(super) fn draw_worktree_open(
     hover: Option<(u16, u16)>,
     cat: &Catalog,
     t: &Theme,
-) -> (Option<Rect>, Option<Rect>) {
+) -> (Option<Rect>, Option<Rect>, Vec<(PickerHit, Rect)>) {
     dim_backdrop(f, area, t);
     let w = area.width.saturating_sub(6).clamp(46, 76).min(area.width);
     // Borders (2) + title (1) + gap (1) + hints (1) around the rows.
@@ -318,12 +323,22 @@ pub(super) fn draw_worktree_open(
     );
     let avail = listing.height.max(1) as usize;
     let scroll = list.cursor.saturating_sub(avail.saturating_sub(1));
+    let mut rects = Vec::new();
     for (vi, i) in (scroll..list.entries.len()).take(avail).enumerate() {
         let e = &list.entries[i];
         let y = listing.y + vi as u16;
+        let row_rect = Rect::new(listing.x, y, listing.width, 1);
         let sel = i == list.cursor;
-        if sel {
-            fill_bg(f, Rect::new(listing.x, y, listing.width, 1), t.sel_bg);
+        // Hover speaks the app's pointer language (accent fill, dark text) — the
+        // same as a context-menu row — while the keyboard cursor keeps its own
+        // subtler `sel_bg`, so the pointer and the cursor stay tellable apart
+        // when they sit on different rows.
+        let hot =
+            hover.is_some_and(|(hc, hr)| hr == y && hc >= row_rect.x && hc < row_rect.right());
+        if hot {
+            fill_bg(f, row_rect, t.accent);
+        } else if sel {
+            fill_bg(f, row_rect, t.sel_bg);
         }
         // ⌂ marks the main checkout, ⎇ a linked worktree; a detached checkout
         // is labelled by its short head instead of a branch.
@@ -348,21 +363,27 @@ pub(super) fn draw_worktree_open(
         let path_reserve = (room / 3).min(display_width(&path_full));
         let label = truncate(&label, room.saturating_sub(path_reserve));
         let path = trunc_tail(&path_full, room.saturating_sub(display_width(&label)));
+        // Over the accent fill every span switches to the dark ink the theme
+        // pairs with it; the per-span colours only read on the plain background.
+        let ink = |fg: Color| Style::new().fg(if hot { t.crust } else { fg });
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(if sel { "▸ " } else { "  " }, Style::new().fg(t.accent)),
-                Span::styled(format!("{icon} "), Style::new().fg(t.accent)),
-                Span::styled(label, Style::new().fg(t.text)),
-                Span::styled(format!("  {path}"), Style::new().fg(t.subtext0)),
-                Span::styled(badge, Style::new().fg(t.accent)),
+                Span::styled(if sel { "▸ " } else { "  " }, ink(t.accent)),
+                Span::styled(format!("{icon} "), ink(t.accent)),
+                Span::styled(label, ink(t.text)),
+                Span::styled(format!("  {path}"), ink(t.subtext0)),
+                Span::styled(badge, ink(t.accent)),
             ])),
-            Rect::new(listing.x, y, listing.width, 1),
+            row_rect,
         );
+        rects.push((PickerHit::Row(i), row_rect));
     }
+    // Last, so a row wins the hit test and only a click on neither is outside.
+    rects.push((PickerHit::Modal, modal));
 
     let bottom = Rect::new(inner.x, bottom_y, inner.width, 1);
     let (c, x) = footer_hints(f, bottom, cat.act_select, cat.act_cancel, hover, t);
-    (Some(c), Some(x))
+    (Some(c), Some(x), rects)
 }
 
 /// The tab-rename modal (docs/28): a single text field pre-filled with the tab's

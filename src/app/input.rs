@@ -1213,11 +1213,26 @@ impl App {
         if let Some(menu) = &self.dock_menu {
             return first(&menu.rects);
         }
+        // The open-worktree list hovers per row, not just on its footer buttons:
+        // without the row rects here, crossing from one row to the next would not
+        // count as a changed frame and the highlight would never repaint.
+        if self.worktree_open.is_some() {
+            return self
+                .worktree_open_rects
+                .iter()
+                .filter(|(target, _)| matches!(*target, PickerHit::Row(_)))
+                .map(|(_, rect)| *rect)
+                .chain(
+                    [self.modal_commit_rect, self.modal_cancel_rect]
+                        .into_iter()
+                        .flatten(),
+                )
+                .find(|rect| hit(*rect));
+        }
         let modal_owns_mouse = self.file_prompt.is_some()
             || self.file_delete.is_some()
             || self.worktree_delete.is_some()
             || self.worktree_prompt.is_some()
-            || self.worktree_open.is_some()
             || self.tab_rename.is_some()
             || self.ws_rename.is_some()
             || self.pane_rename.is_some();
@@ -1641,9 +1656,40 @@ impl App {
             }
             return;
         }
+        // The open-worktree list is a list, not a text field: it owns the mouse
+        // the way the folder picker does — a click opens the row under it, the
+        // wheel moves the cursor, and the dimmed backdrop cancels.
         if self.worktree_open.is_some() {
-            if let Some(k) = self.modal_button_key(&m) {
-                self.handle_worktree_open_key(k);
+            match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    // The footer buttons come first: they overlay the modal body,
+                    // which would otherwise swallow them as inert chrome.
+                    if let Some(k) = self.modal_button_key(&m) {
+                        self.handle_worktree_open_key(k);
+                        return;
+                    }
+                    let (c, r) = (m.column, m.row);
+                    let hit = self
+                        .worktree_open_rects
+                        .iter()
+                        .find(|(_, rect)| {
+                            c >= rect.x && c < rect.right() && r >= rect.y && r < rect.bottom()
+                        })
+                        .map(|(hit, _)| *hit);
+                    match hit {
+                        Some(PickerHit::Row(i)) => self.worktree_open_click(i),
+                        // Inert modal surface; the footer is handled above.
+                        Some(PickerHit::Hint(_)) | Some(PickerHit::Modal) => {}
+                        None => self.worktree_open = None, // click outside cancels
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    self.handle_worktree_open_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+                }
+                MouseEventKind::ScrollDown => {
+                    self.handle_worktree_open_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+                }
+                _ => {}
             }
             return;
         }
