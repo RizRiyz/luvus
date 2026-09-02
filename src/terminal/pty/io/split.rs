@@ -22,7 +22,9 @@ pub(super) fn start(
     data_pending: Arc<AtomicBool>,
     content_revision: Arc<AtomicU64>,
 ) -> io::Result<()> {
-    let mut writer = master.take_writer()?;
+    let mut writer = master
+        .take_writer()
+        .map_err(|error| io::Error::other(format!("take PTY writer: {error:#}")))?;
     thread::Builder::new()
         .name(format!("luvus-pty-writer-{}", id.0))
         .spawn(move || {
@@ -33,7 +35,9 @@ pub(super) fn start(
             }
         })?;
 
-    let reader = master.try_clone_reader()?;
+    let reader = master
+        .try_clone_reader()
+        .map_err(|error| io::Error::other(format!("clone PTY reader: {error:#}")))?;
     thread::Builder::new()
         .name(format!("luvus-pty-reader-{}", id.0))
         .spawn(move || read_loop(id, reader, engine, app_tx, data_pending, content_revision))?;
