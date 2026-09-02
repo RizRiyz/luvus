@@ -195,6 +195,12 @@ pub enum ServerMessage {
     /// the server is on another machine, and the browser you want is the one in
     /// front of you.
     OpenUrl(String),
+    /// Hand this path to the display client's OS handler, for the same reason
+    /// [`OpenUrl`] is client-side: with `--remote` the desktop in front of the
+    /// user is the one that should see the file. It opens only if that path
+    /// exists on the client machine (for example a mounted share); otherwise
+    /// the client silently does nothing.
+    OpenPath(std::path::PathBuf),
     /// Ask this display client to reconnect to another validated named session.
     /// It contains no socket path or command and is resolved by the client using
     /// the same local/remote session rules as process startup.
@@ -1093,6 +1099,15 @@ mod tests {
             .contains("clipboard image exceeds size limit"));
     }
 
+    fn open_path_roundtrips_to_the_display_client() {
+        let mut bytes = Vec::new();
+        let path = std::path::PathBuf::from("/tmp/notes.pdf");
+        write_message(&mut bytes, &ServerMessage::OpenPath(path.clone())).unwrap();
+        assert!(matches!(
+            read_message::<_, ServerMessage>(&mut &bytes[..]).unwrap(),
+            ServerMessage::OpenPath(decoded) if decoded == path
+        ));
+    }
     /// A wide glyph written through ratatui's own `set_string` (the path modals,
     /// the sidebar, the git tab, and every other chrome surface use) leaves its
     /// second column as a space (`symbol: None`). Serialization must blank that
