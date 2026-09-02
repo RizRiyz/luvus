@@ -1292,13 +1292,13 @@ impl App {
                     )
                 })?;
                 let next = patched_config(&self.config, patch)?;
-                self.apply_socket_config(next)?;
+                self.apply_socket_config(next, Some(patch))?;
                 Ok(json!({"type":"config", "config":self.config}))
             }
             "server.reload_config" => {
                 reject_api_fields(p, &[])?;
                 let next = crate::config::load();
-                self.apply_socket_config(next)?;
+                self.apply_socket_config(next, None)?;
                 Ok(json!({"type":"config_reloaded", "config":self.config}))
             }
             "server.agent_manifests" => {
@@ -3112,7 +3112,7 @@ impl App {
                 let key = declaration.key.canonical();
                 if !self.config.bars.is_explicitly_placed(&key, region) {
                     self.config.bars.place(&key, region);
-                    crate::config::save(&self.config);
+                    self.persist_config();
                     self.bar.clear_geometry();
                 }
                 Ok(
@@ -5410,6 +5410,7 @@ impl App {
     pub(super) fn apply_socket_config(
         &mut self,
         next: crate::config::Config,
+        persist_patch: Option<&Value>,
     ) -> Result<(), (String, String)> {
         let prefix = keys::PrefixSpec::parse(&next.prefix).ok_or_else(|| {
             (
@@ -5445,8 +5446,11 @@ impl App {
         }
         self.config = next;
         self.changelog_rows = None;
-        let persisted = self.config.clone();
-        std::thread::spawn(move || crate::config::save(&persisted));
+        if let Some(patch) = persist_patch {
+            self.persist_config_patch(patch);
+        } else {
+            self.reset_config_baseline();
+        }
         self.emit_event("config.changed", json!({}));
         Ok(())
     }

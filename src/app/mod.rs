@@ -1557,6 +1557,9 @@ pub struct App {
     pub catalog: &'static crate::i18n::Catalog,
     /// Persisted user configuration (theme, layout, notifications, keys).
     pub config: crate::config::Config,
+    /// This server's last local config snapshot. Persistence diffs against this
+    /// snapshot so another named server's newer, unrelated fields survive.
+    config_baseline: crate::config::Config,
     /// Active `key → Cmd` map for prefix mode (defaults + config overrides).
     pub keymap: std::collections::HashMap<String, Cmd>,
     /// Explicit normal-mode shortcuts. Empty by default so pane input remains
@@ -2101,6 +2104,7 @@ impl App {
         let name = ws_name(&cwd);
 
         let config = crate::config::load();
+        let config_baseline = config.clone();
         let files_show_hidden = config.layout.files_show_hidden;
         let agents_active_only = config.agents_active_only;
         crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
@@ -2173,6 +2177,7 @@ impl App {
             theme_registry,
             catalog,
             config,
+            config_baseline,
             keymap,
             direct_keymap,
             prefix,
@@ -2427,6 +2432,7 @@ impl App {
 
     fn from_snapshot(snap: SessionSnapshot, app_tx: Sender<AppEvent>) -> Option<App> {
         let config = crate::config::load();
+        let config_baseline = config.clone();
         let files_show_hidden = config.layout.files_show_hidden;
         let agents_active_only = config.agents_active_only;
         let theme_registry = crate::theme::ThemeRegistry::load();
@@ -2788,6 +2794,7 @@ impl App {
             theme_registry,
             catalog,
             config,
+            config_baseline,
             keymap,
             direct_keymap,
             prefix,
@@ -3094,7 +3101,30 @@ impl App {
     pub fn save_sidebars(&mut self) {
         self.config.sidebars = Some(self.sidebars.to_config());
         self.config.sidebar_width = self.sidebars.left.width;
-        crate::config::save(&self.config);
+        self.persist_config();
+    }
+
+    /// Merge only this server's local changes into the shared home-level config.
+    /// A failed best-effort write keeps the old baseline so the next mutation
+    /// retries every unsaved field.
+    pub(crate) fn persist_config(&mut self) {
+        if crate::config::save_changes(&self.config_baseline, &self.config) {
+            self.config_baseline = self.config.clone();
+        }
+    }
+
+    /// Persist local changes while forcing an explicit user/API patch even when
+    /// this server already held the requested value in memory.
+    pub(crate) fn persist_config_patch(&mut self, patch: &serde_json::Value) {
+        if crate::config::save_changes_with_patch(&self.config_baseline, &self.config, Some(patch))
+        {
+            self.config_baseline = self.config.clone();
+        }
+    }
+
+    /// Adopt an externally reloaded config without writing it back to disk.
+    pub(crate) fn reset_config_baseline(&mut self) {
+        self.config_baseline = self.config.clone();
     }
 
     /// Apply the AGENTS All / Active projection without performing I/O. This is
@@ -3116,7 +3146,7 @@ impl App {
         let config_changed = self.config.agents_active_only != active_only;
         if config_changed {
             self.config.agents_active_only = active_only;
-            crate::config::save(&self.config);
+            self.persist_config();
         }
         runtime_changed || config_changed
     }
@@ -6443,6 +6473,34 @@ mod tests {
             restored.agents_active_only,
             "snapshot restoration reads config instead of snapshot state"
         );
+    }
+
+    #[test]
+    fn stale_named_app_change_does_not_restore_an_old_theme() {
+        let _env = crate::persist::test_env("named-app-config-merge");
+        let initial = crate::config::Config {
+            theme: "gruvbox-light".into(),
+            ..crate::config::Config::default()
+        };
+        crate::config::save(&initial);
+
+        let (alpha_tx, _alpha_rx) = mpsc::channel();
+        let (beta_tx, _beta_rx) = mpsc::channel();
+        let mut alpha = App::new(80, 24, alpha_tx).unwrap();
+        let mut beta = App::new(80, 24, beta_tx).unwrap();
+        assert_eq!(alpha.config.theme, "gruvbox-light");
+        assert_eq!(beta.config.theme, "gruvbox-light");
+
+        alpha.apply_theme("quattro-rally");
+        assert!(beta.set_agents_filter(true));
+
+        let merged = crate::config::load();
+        assert_eq!(merged.theme, "quattro-rally");
+        assert!(merged.agents_active_only);
+
+        let (restarted_tx, _restarted_rx) = mpsc::channel();
+        let restarted = App::new(80, 24, restarted_tx).unwrap();
+        assert_eq!(restarted.config.theme, "quattro-rally");
     }
 
     // A saved pane whose cwd no longer exists (deleted project dir) must not

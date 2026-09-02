@@ -1226,8 +1226,13 @@ fn theme_cmd(args: &[String], context: crate::i18n::cli::Context) -> Result<i32>
                 }
                 Ok(_) | Err(_) => {
                     let mut config = crate::config::load();
+                    let baseline = config.clone();
                     config.theme = selected;
-                    crate::config::save(&config);
+                    crate::config::save_changes_with_patch(
+                        &baseline,
+                        &config,
+                        Some(&json!({"theme": config.theme.clone()})),
+                    );
                     println!(
                         "{} {} — {}",
                         context.text("using theme"),

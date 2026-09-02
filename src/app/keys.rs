@@ -790,14 +790,14 @@ impl App {
         }
         self.config.keybindings.insert(cmd.id().to_string(), key);
         self.keymap = build_keymap(&self.config.keybindings);
-        crate::config::save(&self.config);
+        self.persist_config();
     }
 
     /// Reset `cmd` to its default key (drop any override), persist, and rebuild.
     pub fn reset_binding(&mut self, cmd: Cmd) {
         self.config.keybindings.remove(cmd.id());
         self.keymap = build_keymap(&self.config.keybindings);
-        crate::config::save(&self.config);
+        self.persist_config();
     }
 
     /// Set the command-mode prefix from a safe spec such as `ctrl+b`, `alt+\`,
@@ -808,7 +808,7 @@ impl App {
             Some(p) => {
                 self.config.prefix = p.spec();
                 self.prefix = p;
-                crate::config::save(&self.config);
+                self.persist_config();
                 true
             }
             None => false,
@@ -831,7 +831,7 @@ impl App {
         }
         self.set_prefix(preset.prefix); // also saves config
         self.keymap = build_keymap(&self.config.keybindings);
-        crate::config::save(&self.config);
+        self.persist_config();
         true
     }
 

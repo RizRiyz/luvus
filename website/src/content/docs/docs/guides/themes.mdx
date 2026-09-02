@@ -175,8 +175,10 @@ one palette or one intentional parent/child family.
 
 Theme files and `config.theme` are shared at the Luvus-home level. `theme use`
 updates the selected server immediately and persists the choice. Other already
-running named servers retain their in-memory registry until `theme reload` or a
-restart; target one explicitly with `luvus --session <name> theme reload`.
+running named servers retain their in-memory selection until a restart or an
+explicit `luvus --session <name> theme use <id>`. Config writes merge only the
+fields changed by that server, so changing an unrelated setting in another
+session cannot restore an older theme.
 
 Normal custom themes are rendered by the server, so every attached client sees
 the same palette. **Terminal** remains special and client-derived. A custom

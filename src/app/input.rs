@@ -457,7 +457,7 @@ impl App {
                 return true;
             }
             AppEvent::ConfigReloaded { id, config, reply } => {
-                let response = match self.apply_socket_config(config) {
+                let response = match self.apply_socket_config(config, None) {
                     Ok(()) => {
                         json!({"id":id,"result":{"type":"config_reloaded","config":self.config}})
                     }
