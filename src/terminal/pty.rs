@@ -1,8 +1,11 @@
-//! PTY pane: spawn a child against a pseudo-terminal and pump its output
-//! through a `VtEngine`. In M0 we use portable-pty's reader/writer directly;
-//! the dedicated fd-owning actor thread (needed for live handoff) lands later.
+//! PTY pane lifecycle. Unix panes use one poll-driven descriptor actor for
+//! ordered input and output; Windows keeps portable-pty's split reader/writer
+//! backend. Child waiting is shared process-wide.
 
-use std::io::{Read, Write};
+#[cfg(windows)]
+use std::io::Read;
+#[cfg(any(windows, test))]
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -19,6 +22,8 @@ use crate::terminal::appearance::PaneAppearance;
 use crate::terminal::backend::TerminalRuntime;
 use crate::terminal::vt::{create_engine, VtEngine, VtEngineKind};
 
+mod io;
+
 const CHILD_REAPER_INTERVAL: Duration = Duration::from_millis(50);
 
 struct ReaperEntry {
@@ -33,10 +38,9 @@ static CHILD_REAPER: OnceLock<Sender<ReaperEntry>> = OnceLock::new();
 #[cfg(test)]
 static CHILD_REAPER_STARTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Hand a child to the process-wide reaper. A pane still owns dedicated reader
-/// and writer threads so one blocked PTY cannot stall another pane, but waiting
-/// for child exit needs no per-pane thread: `try_wait` is non-blocking on every
-/// portable-pty backend.
+/// Hand a child to the process-wide reaper. Pane I/O remains isolated behind
+/// its platform backend, but waiting for child exit needs no per-pane thread:
+/// `try_wait` is non-blocking on every portable-pty backend.
 fn register_child_reaper(
     id: PaneId,
     child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -127,6 +131,52 @@ pub(crate) enum InputAction {
     },
 }
 
+/// Ordered PTY input plus an optional Unix actor wakeup. Terminal-generated
+/// replies and user input share this sender, preserving their FIFO order.
+#[derive(Clone)]
+pub(crate) struct InputSender {
+    sender: Sender<InputAction>,
+    #[cfg(unix)]
+    wake: Arc<OnceLock<Arc<io::unix_actor::WakePipe>>>,
+}
+
+impl InputSender {
+    #[cfg(unix)]
+    fn with_wake_slot(
+        sender: Sender<InputAction>,
+        wake: Arc<OnceLock<Arc<io::unix_actor::WakePipe>>>,
+    ) -> Self {
+        Self { sender, wake }
+    }
+
+    pub(crate) fn send(
+        &self,
+        action: InputAction,
+    ) -> std::result::Result<(), mpsc::SendError<InputAction>> {
+        self.sender.send(action)?;
+        self.wake();
+        Ok(())
+    }
+
+    fn wake(&self) {
+        #[cfg(unix)]
+        if let Some(wake) = self.wake.get() {
+            wake.wake();
+        }
+    }
+}
+
+impl From<Sender<InputAction>> for InputSender {
+    fn from(sender: Sender<InputAction>) -> Self {
+        Self {
+            sender,
+            #[cfg(unix)]
+            wake: Arc::new(OnceLock::new()),
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
 fn write_input_action(writer: &mut dyn Write, action: InputAction) -> std::io::Result<()> {
     match action {
         InputAction::Bytes(bytes) => writer.write_all(&bytes)?,
@@ -163,7 +213,7 @@ pub struct Pane {
     pub engine: Arc<Mutex<dyn VtEngine>>,
     /// `None` until a deferred spawn's worker stores it (docs/82).
     master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
-    input_tx: Sender<InputAction>,
+    input_tx: InputSender,
     pub cwd: PathBuf,
     pub command: String,
     /// The shell's pid, for reading its live working directory and process
@@ -214,6 +264,7 @@ impl Drop for Pane {
         // A deferred spawn that hasn't forked yet aborts in the worker; one
         // that has forked is killed by the worker's own post-fork check.
         self.cancelled.store(true, Ordering::SeqCst);
+        self.input_tx.wake();
         // Already reaped → the pid may belong to someone else now.
         if self.child_exited.load(Ordering::SeqCst) {
             return;
@@ -491,9 +542,9 @@ impl Pane {
         };
         drop(pair.slave);
 
-        // All bytes (user input + terminal responses) funnel through one channel
-        // to a single writer thread — keeps ordering correct, needs no mutex.
-        let (input_tx, input_rx) = mpsc::channel::<InputAction>();
+        // User input and terminal-generated responses share one ordered queue.
+        // Unix wakes one poll-driven actor; Windows retains the split backend.
+        let (input_tx, input_rx) = io::input_channel();
         let engine = create_engine(
             VtEngineKind::default(),
             cols,
@@ -509,23 +560,22 @@ impl Pane {
             }
         }
 
-        let mut writer = pair.master.take_writer()?;
-        thread::spawn(move || {
-            while let Ok(action) = input_rx.recv() {
-                if write_input_action(writer.as_mut(), action).is_err() {
-                    break;
-                }
-            }
-        });
-
-        let reader = pair.master.try_clone_reader()?;
-        let eng = engine.clone();
-        let tx = app_tx.clone();
         let data_pending = Arc::new(AtomicBool::new(false));
-        let pending = data_pending.clone();
         let content_revision = Arc::new(AtomicU64::new(0));
-        let revision = content_revision.clone();
-        thread::spawn(move || read_loop(id, reader, eng, tx, pending, revision));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        if let Err(error) = io::start(
+            id,
+            pair.master.as_ref(),
+            input_rx,
+            engine.clone(),
+            app_tx.clone(),
+            data_pending.clone(),
+            content_revision.clone(),
+            cancelled.clone(),
+        ) {
+            terminate_spawned_child(child.as_mut());
+            return Err(error.into());
+        }
 
         // Reap the child so we notice it exiting. The shared reaper sets the
         // exit flag *before* the event goes out, so by the time the loop closes
@@ -547,7 +597,7 @@ impl Pane {
             data_pending,
             child_exited,
             size: Arc::new(Mutex::new((cols, rows))),
-            cancelled: Arc::new(AtomicBool::new(false)),
+            cancelled,
         })
     }
 
@@ -572,7 +622,7 @@ impl Pane {
     ) -> Pane {
         // Everything a caller can observe before the child exists: the engine
         // (pane.read, detection, rendering) and the input queue.
-        let (input_tx, input_rx) = mpsc::channel::<InputAction>();
+        let (input_tx, input_rx) = io::input_channel();
         let engine = create_engine(
             VtEngineKind::default(),
             cols,
@@ -586,22 +636,6 @@ impl Pane {
                 engine.advance(screen.as_bytes());
             }
         }
-
-        // The writer thread starts with the pane and blocks until the spawn
-        // worker hands over the PTY writer; bytes sent meanwhile queue in
-        // input_rx. On every failure path the worker drops `master_tx`, so
-        // this thread exits with the queue instead of leaking.
-        let (master_tx, master_rx) = mpsc::channel::<Box<dyn Write + Send>>();
-        thread::spawn(move || {
-            let Ok(mut writer) = master_rx.recv() else {
-                return;
-            };
-            while let Ok(action) = input_rx.recv() {
-                if write_input_action(writer.as_mut(), action).is_err() {
-                    break;
-                }
-            }
-        });
 
         let child_pid = Arc::new(AtomicU32::new(0));
         let terminal_runtime: Arc<Mutex<Option<TerminalRuntime>>> = Arc::new(Mutex::new(None));
@@ -726,28 +760,25 @@ impl Pane {
                     });
                 }
 
-                let writer = match pair.master.take_writer() {
-                    Ok(writer) => writer,
-                    Err(_) => {
-                        let _ = tx.send(AppEvent::PtyExit(id));
-                        return;
-                    }
-                };
-                let reader = match pair.master.try_clone_reader() {
-                    Ok(reader) => reader,
-                    Err(_) => return fail(),
-                };
-                *master.lock().unwrap_or_else(|p| p.into_inner()) = Some(pair.master);
-                let read_tx = tx.clone();
-                let ready_tx = tx.clone();
-                thread::spawn(move || {
-                    read_loop(id, reader, engine, read_tx, data_pending, content_revision)
-                });
-                register_child_reaper(id, child, child_exited, tx.clone());
-
-                if master_tx.send(writer).is_err() {
+                if io::start(
+                    id,
+                    pair.master.as_ref(),
+                    input_rx,
+                    engine,
+                    tx.clone(),
+                    data_pending,
+                    content_revision,
+                    cancelled.clone(),
+                )
+                .is_err()
+                {
+                    terminate_spawned_child(child.as_mut());
+                    child_exited.store(true, Ordering::SeqCst);
                     return fail();
                 }
+                *master.lock().unwrap_or_else(|p| p.into_inner()) = Some(pair.master);
+                let ready_tx = tx.clone();
+                register_child_reaper(id, child, child_exited, tx.clone());
                 *terminal_runtime
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(runtime);
@@ -1192,6 +1223,7 @@ fn apply_pane_env(
     }
 }
 
+#[cfg(windows)]
 fn read_loop(
     id: PaneId,
     mut reader: Box<dyn Read + Send>,
