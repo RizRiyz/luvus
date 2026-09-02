@@ -12,6 +12,7 @@ pub(super) const OPERATIONS: IntegrationOperations = IntegrationOperations {
     install,
     uninstall,
     is_installed,
+    hook: Some(run_hook),
 };
 
 const BLOCK_NAME: &str = "luvus";
@@ -121,7 +122,7 @@ fn install() -> Result<()> {
     fs::write(&script, SCRIPT)?;
     integration::set_executable(&script)?;
     hooks.insert(BLOCK_NAME.to_string(), managed_block(&command));
-    fs::write(&config, serde_json::to_string_pretty(&value)?)?;
+    integration::write_json_atomic(&config, &value)?;
     Ok(())
 }
 
@@ -134,7 +135,7 @@ fn uninstall() -> Result<()> {
             .ok_or_else(|| anyhow!("Antigravity hooks must contain a JSON object"))?;
         if hooks.get(BLOCK_NAME).is_some_and(block_is_managed) {
             hooks.remove(BLOCK_NAME);
-            fs::write(&config, serde_json::to_string_pretty(&value)?)?;
+            integration::write_json_atomic(&config, &value)?;
         }
     }
     let _ = fs::remove_file(script_path());
@@ -178,7 +179,7 @@ fn read_hook_input() -> Option<Vec<u8>> {
     Some(input)
 }
 
-pub(super) fn run_hook() -> i32 {
+fn run_hook() -> i32 {
     let environment_matches = std::env::var_os("LUVUS_ENV").as_deref()
         == Some(std::ffi::OsStr::new("1"))
         && std::env::var_os("LUVUS_SOCKET_PATH").is_some_and(|path| !path.is_empty());

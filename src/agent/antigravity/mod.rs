@@ -32,7 +32,3 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     }),
     integration: Some(integration::OPERATIONS),
 };
-
-pub(crate) fn run_hook() -> i32 {
-    integration::run_hook()
-}

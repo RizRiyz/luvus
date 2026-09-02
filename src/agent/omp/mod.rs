@@ -45,6 +45,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         install: || install_extension().map(|_| ()),
         uninstall: uninstall_extension,
         is_installed: extension_installed,
+        hook: None,
     }),
 };
 

@@ -39,6 +39,8 @@ pub(crate) struct IntegrationOperations {
     pub install: fn() -> Result<()>,
     pub uninstall: fn() -> Result<()>,
     pub is_installed: fn() -> bool,
+    /// Optional private hook entrypoint owned by the agent adapter.
+    pub hook: Option<fn() -> i32>,
 }
 
 #[derive(Clone, Copy)]

@@ -2,6 +2,20 @@
 
 use std::path::{Path, PathBuf};
 
+/// Atomically move a completed same-directory temporary file over `destination`.
+/// Windows needs replace-existing semantics that `std::fs::rename` does not
+/// provide consistently; Unix rename already has the required behavior.
+pub fn atomic_replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        windows::atomic_replace_file(source, destination)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(source, destination)
+    }
+}
+
 #[cfg(windows)]
 mod windows;
 
