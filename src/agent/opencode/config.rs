@@ -151,6 +151,75 @@ fn decode_string(input: &str, start: usize, end: usize) -> Option<String> {
     serde_json::from_str(&input[start..end]).ok()
 }
 
+/// Validate every JSONC token without rewriting the user's formatting. A
+/// scratch copy replaces comments and trailing commas with spaces before
+/// serde validates all strings, scalars, arrays, and objects.
+fn validate_jsonc(input: &str) -> Result<()> {
+    if input.len() > MAX_TUI_CONFIG_BYTES {
+        return Err(anyhow!("OpenCode tui config exceeds 1 MiB"));
+    }
+    let source = input.as_bytes();
+    let mut normalized = source.to_vec();
+    let mut cursor = 0;
+    while cursor < source.len() {
+        match source[cursor] {
+            b'"' => cursor = string_end(source, cursor)?,
+            b'/' if source.get(cursor + 1) == Some(&b'/') => {
+                while source.get(cursor).is_some_and(|byte| *byte != b'\n') {
+                    normalized[cursor] = b' ';
+                    cursor += 1;
+                }
+            }
+            b'/' if source.get(cursor + 1) == Some(&b'*') => {
+                normalized[cursor] = b' ';
+                normalized[cursor + 1] = b' ';
+                cursor += 2;
+                loop {
+                    if source.get(cursor..cursor + 2) == Some(b"*/") {
+                        normalized[cursor] = b' ';
+                        normalized[cursor + 1] = b' ';
+                        cursor += 2;
+                        break;
+                    }
+                    let Some(byte) = source.get(cursor) else {
+                        return Err(anyhow!("invalid OpenCode tui config: unclosed comment"));
+                    };
+                    if !matches!(byte, b'\r' | b'\n') {
+                        normalized[cursor] = b' ';
+                    }
+                    cursor += 1;
+                }
+            }
+            _ => cursor += 1,
+        }
+    }
+
+    cursor = 0;
+    while cursor < normalized.len() {
+        match normalized[cursor] {
+            b'"' => cursor = string_end(&normalized, cursor)?,
+            b',' => {
+                let mut next = cursor + 1;
+                while normalized.get(next).is_some_and(u8::is_ascii_whitespace) {
+                    next += 1;
+                }
+                if matches!(normalized.get(next), Some(b']' | b'}')) {
+                    normalized[cursor] = b' ';
+                }
+                cursor += 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+
+    let value: serde_json::Value = serde_json::from_slice(&normalized)
+        .map_err(|error| anyhow!("invalid OpenCode tui config: {error}"))?;
+    if !value.is_object() {
+        return Err(anyhow!("OpenCode tui config must contain an object"));
+    }
+    Ok(())
+}
+
 fn root_object(input: &str) -> Result<RootObject> {
     if input.len() > MAX_TUI_CONFIG_BYTES {
         return Err(anyhow!("OpenCode tui config exceeds 1 MiB"));
@@ -313,6 +382,7 @@ fn add_plugin(input: &str) -> Result<String> {
 }
 
 pub(super) fn enable(input: &str) -> Result<String> {
+    validate_jsonc(input)?;
     let mut output = input.to_string();
     loop {
         let root = root_object(&output)?;
@@ -342,6 +412,7 @@ pub(super) fn enable(input: &str) -> Result<String> {
 }
 
 pub(super) fn disable(input: &str) -> Result<String> {
+    validate_jsonc(input)?;
     let mut output = input.to_string();
     loop {
         let root = root_object(&output)?;
@@ -362,13 +433,14 @@ pub(super) fn disable(input: &str) -> Result<String> {
 }
 
 pub(super) fn enabled(input: &str) -> bool {
-    plugin_elements(input).is_ok_and(|(_, array)| {
-        array
-            .elements
-            .iter()
-            .copied()
-            .any(|element| plugin_name(input, element).as_deref() == Some(TUI_PLUGIN_SPEC))
-    })
+    validate_jsonc(input).is_ok()
+        && plugin_elements(input).is_ok_and(|(_, array)| {
+            array
+                .elements
+                .iter()
+                .copied()
+                .any(|element| plugin_name(input, element).as_deref() == Some(TUI_PLUGIN_SPEC))
+        })
 }
 
 #[cfg(test)]
@@ -440,5 +512,26 @@ mod tests {
             "x".repeat(MAX_TUI_CONFIG_BYTES)
         ))
         .is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_scalars_and_nested_jsonc_before_editing() {
+        for invalid in [
+            r#"{"theme":unquoted}"#,
+            r#"{"nested":[1,,2]}"#,
+            r#"{"nested":{"missing":}}"#,
+            r#"{"nested":{"bad" 1}}"#,
+            r#"{"theme":"bad\q"}"#,
+        ] {
+            assert!(
+                enable(invalid).is_err(),
+                "accepted invalid JSONC: {invalid}"
+            );
+            assert!(
+                disable(invalid).is_err(),
+                "accepted invalid JSONC: {invalid}"
+            );
+            assert!(!enabled(invalid), "reported invalid JSONC as enabled");
+        }
     }
 }

@@ -633,7 +633,9 @@ mod tests {
             .join(format!("luvus-uninst-oc-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         let old = std::env::var_os("XDG_CONFIG_HOME");
+        let old_tui = std::env::var_os("OPENCODE_TUI_CONFIG");
         std::env::set_var("XDG_CONFIG_HOME", &tmp);
+        std::env::remove_var("OPENCODE_TUI_CONFIG");
         install("opencode").unwrap();
         assert!(is_installed("opencode"));
         uninstall("opencode").unwrap();
@@ -642,6 +644,10 @@ mod tests {
         match old {
             Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
             None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match old_tui {
+            Some(value) => std::env::set_var("OPENCODE_TUI_CONFIG", value),
+            None => std::env::remove_var("OPENCODE_TUI_CONFIG"),
         }
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -815,7 +821,9 @@ mod tests {
             .join(format!("luvus-opencode-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         let old = std::env::var_os("XDG_CONFIG_HOME");
+        let old_tui = std::env::var_os("OPENCODE_TUI_CONFIG");
         std::env::set_var("XDG_CONFIG_HOME", &tmp);
+        std::env::remove_var("OPENCODE_TUI_CONFIG");
 
         install("opencode").unwrap();
         let plugin = tmp.join("opencode").join("luvus-tui.mjs");
@@ -833,6 +841,10 @@ mod tests {
         match old {
             Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
             None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match old_tui {
+            Some(value) => std::env::set_var("OPENCODE_TUI_CONFIG", value),
+            None => std::env::remove_var("OPENCODE_TUI_CONFIG"),
         }
         let _ = fs::remove_dir_all(&tmp);
     }

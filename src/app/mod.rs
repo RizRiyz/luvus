@@ -7107,6 +7107,7 @@ mod tests {
             scanned: vec![key.clone()],
             usage: std::collections::HashMap::new(),
             mtimes: std::collections::HashMap::new(),
+            report_owned: vec![key.clone()],
         });
         assert_eq!(app.agent_usage[&key].tokens_in, 1200);
 
@@ -7118,6 +7119,57 @@ mod tests {
         assert_eq!(response["result"]["type"], "ok");
         assert!(!app.agent_usage.contains_key(&key));
         assert!(!app.reported_usage.contains_key(&key));
+    }
+
+    #[test]
+    fn late_native_scan_cannot_reclassify_removed_reported_usage() {
+        let _env = crate::persist::test_env("reported-session-late-scan");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let old = crate::mission::UsageKey::new("opencode", "ses_old");
+        let response = api_call(
+            &mut app,
+            "pane.report_session",
+            json!({
+                "pane": pane.0.to_string(),
+                "agent": "opencode",
+                "session_id": "ses_old",
+                "usage": {
+                    "model": "openai/gpt-5",
+                    "tokens_in": 100,
+                    "tokens_out": 20,
+                    "cache_read": 5,
+                    "cache_write": 1,
+                    "cost": 0.01,
+                    "updated_at": 100
+                }
+            }),
+        );
+        assert_eq!(response["result"]["type"], "ok");
+        let stale = app.agent_usage[&old].clone();
+
+        let response = api_call(
+            &mut app,
+            "pane.report_session",
+            json!({
+                "pane": pane.0.to_string(),
+                "agent": "opencode",
+                "session_id": "ses_new"
+            }),
+        );
+        assert_eq!(response["result"]["type"], "ok");
+        assert!(!app.reported_usage.contains_key(&old));
+
+        app.handle_event(crate::event::AppEvent::UsageScanned {
+            scope: crate::mission::MissionScope::All,
+            scanned: vec![old.clone()],
+            usage: [(old.clone(), stale)].into(),
+            mtimes: [(old.clone(), std::time::SystemTime::UNIX_EPOCH)].into(),
+            report_owned: vec![old.clone()],
+        });
+        assert!(!app.agent_usage.contains_key(&old));
+        assert!(!app.usage_mtimes.contains_key(&old));
     }
 
     #[test]
@@ -11324,6 +11376,7 @@ mod tests {
             )]
             .into(),
             mtimes: [(first.clone(), refreshed)].into(),
+            report_owned: Vec::new(),
         });
         assert_eq!(app.agent_usage[&first].tokens_in, 3);
         assert_eq!(app.agent_usage[&second].tokens_in, 2);
@@ -11339,6 +11392,7 @@ mod tests {
             scanned: vec![first.clone()],
             usage: [(first.clone(), app.agent_usage[&first].clone())].into(),
             mtimes: [(first.clone(), refreshed)].into(),
+            report_owned: Vec::new(),
         });
         assert!(app.agent_usage.contains_key(&first));
         assert!(!app.agent_usage.contains_key(&second));

@@ -74,7 +74,13 @@ fn install() -> Result<()> {
     let updated_config = super::config::enable(&original_config)?;
 
     let plugin_path = tui_plugin_path();
-    let original_plugin = fs::read(&plugin_path).ok();
+    let original_plugin = match fs::read(&plugin_path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| format!("read {}", plugin_path.display()));
+        }
+    };
     integration::write_bytes_atomic(&plugin_path, TUI_PLUGIN.as_bytes())
         .with_context(|| format!("write {}", plugin_path.display()))?;
     if let Err(error) = integration::write_bytes_atomic(&config_path, updated_config.as_bytes()) {
@@ -242,6 +248,37 @@ mod tests {
             fs::read_to_string(&config).unwrap(),
             r#"{"plugin":"do-not-replace"}"#
         );
+
+        match old {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match old_tui {
+            Some(value) => std::env::set_var("OPENCODE_TUI_CONFIG", value),
+            None => std::env::remove_var("OPENCODE_TUI_CONFIG"),
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn existing_plugin_read_errors_stop_before_config_mutation() {
+        let _lock = crate::persist::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = fixture("unreadable-plugin");
+        let old = std::env::var_os("XDG_CONFIG_HOME");
+        let old_tui = std::env::var_os("OPENCODE_TUI_CONFIG");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::remove_var("OPENCODE_TUI_CONFIG");
+        let config = root.join("opencode/tui.json");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, "{}\n").unwrap();
+        fs::create_dir(tui_plugin_path()).unwrap();
+
+        let error = install().unwrap_err().to_string();
+        assert!(error.contains("read"), "unexpected error: {error}");
+        assert_eq!(fs::read_to_string(&config).unwrap(), "{}\n");
+        assert!(tui_plugin_path().is_dir());
 
         match old {
             Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),

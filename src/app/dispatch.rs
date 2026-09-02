@@ -734,11 +734,19 @@ impl App {
             // one stat per idle session, with no read or parse.
             let prev_usage = self.agent_usage.clone();
             let prev_mtimes = self.usage_mtimes.clone();
+            let report_owned = self.reported_usage.keys().cloned().collect::<Vec<_>>();
+            let excluded = report_owned
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>();
             let tx = self.app_tx.clone();
             std::thread::spawn(move || {
                 let mut usage = std::collections::HashMap::new();
                 let mut mtimes = std::collections::HashMap::new();
                 for (key, cwd) in targets {
+                    if excluded.contains(&key) {
+                        continue;
+                    }
                     let mtime = crate::agent::session_mtime(&key.agent, &cwd, &key.session_id);
                     if let Some(mt) = mtime {
                         mtimes.insert(key.clone(), mt);
@@ -772,6 +780,7 @@ impl App {
                     scanned,
                     usage,
                     mtimes,
+                    report_owned,
                 });
             });
         }
@@ -1651,16 +1660,6 @@ impl App {
                     }
                 }
 
-                if usage.is_some()
-                    && !self.reported_usage.contains_key(&key)
-                    && self.reported_usage.len() >= crate::mission::MAX_REPORTED_USAGE_ENTRIES
-                {
-                    return Err((
-                        "resource_exhausted".to_string(),
-                        "reported usage cache is full".to_string(),
-                    ));
-                }
-
                 let replaced = self
                     .reported_usage
                     .iter()
@@ -1668,6 +1667,18 @@ impl App {
                         (owner.pane == id && existing != &key).then_some(existing.clone())
                     })
                     .collect::<Vec<_>>();
+                if usage.is_some()
+                    && !reported_usage_has_capacity(
+                        self.reported_usage.len(),
+                        self.reported_usage.contains_key(&key),
+                        !replaced.is_empty(),
+                    )
+                {
+                    return Err((
+                        "resource_exhausted".to_string(),
+                        "reported usage cache is full".to_string(),
+                    ));
+                }
                 for existing in replaced {
                     self.reported_usage.remove(&existing);
                     self.agent_usage.remove(&existing);
@@ -6181,6 +6192,14 @@ struct ValidatedReportedUsage {
     updated_at: u64,
 }
 
+fn reported_usage_has_capacity(
+    current_len: usize,
+    key_present: bool,
+    replaces_same_pane: bool,
+) -> bool {
+    key_present || replaces_same_pane || current_len < crate::mission::MAX_REPORTED_USAGE_ENTRIES
+}
+
 fn parse_reported_usage(value: &Value) -> Result<ValidatedReportedUsage, (String, String)> {
     const MAX_COUNTER: u64 = 1_000_000_000_000_000;
     const MAX_COST: f64 = 1_000_000_000_000.0;
@@ -6427,6 +6446,15 @@ mod tests {
         let mut unknown = valid;
         unknown["extra"] = json!(true);
         assert!(parse_reported_usage(&unknown).is_err());
+    }
+
+    #[test]
+    fn full_report_cache_allows_only_updates_and_same_pane_replacements() {
+        let full = crate::mission::MAX_REPORTED_USAGE_ENTRIES;
+        assert!(reported_usage_has_capacity(full, true, false));
+        assert!(reported_usage_has_capacity(full, false, true));
+        assert!(!reported_usage_has_capacity(full, false, false));
+        assert!(reported_usage_has_capacity(full - 1, false, false));
     }
 
     #[test]

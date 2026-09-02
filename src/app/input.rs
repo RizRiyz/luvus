@@ -801,11 +801,18 @@ impl App {
             AppEvent::UsageScanned {
                 scope,
                 scanned,
-                usage,
-                mtimes,
+                mut usage,
+                mut mtimes,
+                report_owned,
             } => {
                 self.usage_scan_inflight = false;
                 self.prune_reported_usage();
+                let excluded = report_owned
+                    .into_iter()
+                    .chain(self.reported_usage.keys().cloned())
+                    .collect::<std::collections::HashSet<_>>();
+                usage.retain(|key, _| !excluded.contains(key));
+                mtimes.retain(|key, _| !excluded.contains(key));
                 if scope == crate::mission::MissionScope::All {
                     let mut next = usage;
                     for key in self.reported_usage.keys() {
