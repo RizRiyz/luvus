@@ -103,13 +103,24 @@ fn dock_slots(body: Rect, weights: &[u16]) -> (Vec<Rect>, Vec<u16>) {
     }
     let bottom = body.bottom();
     let mut y = body.y;
+    // Equal weights keep the legacy even split (`remaining / docks_left`), so a
+    // sidebar that has never been dragged lays out to the cell it always did.
+    // Unequal weights — including rendered heights stored after a drag — are
+    // proportioned against the *content* rows still unallocated (remaining
+    // minus the divider rows still to be drawn). That is the pool those
+    // heights already sum to, so a second layout produces the same geometry
+    // instead of stealing a row from an untouched dock to pay for a divider.
+    let equal = weights.iter().all(|w| *w == weights[0]);
     for i in 0..n {
         let remaining = bottom.saturating_sub(y);
-        // Share of what is left, by weight. With equal weights this reduces
-        // exactly to the former `remaining / docks_left`, so an unresized
-        // sidebar lays out to the cell as it always did.
         let weight_left: u32 = weights[i..].iter().map(|w| u32::from(*w)).sum();
-        let share = (u32::from(remaining) * u32::from(weights[i]))
+        let docks_left = (n - i) as u16;
+        let pool = if equal {
+            remaining
+        } else {
+            remaining.saturating_sub(docks_left.saturating_sub(1))
+        };
+        let share = (u32::from(pool) * u32::from(weights[i]))
             .checked_div(weight_left)
             .unwrap_or(0) as u16;
         // The drag keeps both sides of a divider at the floor, but weights are
@@ -120,7 +131,6 @@ fn dock_slots(body: Rect, weights: &[u16]) -> (Vec<Rect>, Vec<u16>) {
         // cannot starve them. On a body too small for every floor the
         // reservation shrinks the ceiling below the floor, and the `min` keeps
         // the clamp well-formed while the layout degrades evenly.
-        let docks_left = (n - i) as u16;
         let reserved = docks_left.saturating_sub(1) * (crate::app::MIN_DOCK_HEIGHT + 1);
         let ceiling = remaining.saturating_sub(reserved);
         let h = share.clamp(crate::app::MIN_DOCK_HEIGHT.min(ceiling), ceiling);
@@ -801,6 +811,30 @@ mod tests {
         // Every row is accounted for: slots plus one row per divider.
         let used: u16 = slots.iter().map(|s| s.height).sum::<u16>() + dividers.len() as u16;
         assert_eq!(used, body.height);
+    }
+
+    /// Rendered heights stored as weights after a drag must survive a second
+    /// layout pass. The previous formula proportioned against remaining rows
+    /// *including* dividers, so `[15, 8, 5]` on a 30-row body became `[16, 8, 4]`
+    /// and grew a dock that was not part of the drag.
+    #[test]
+    fn persisted_heights_round_trip_through_layout() {
+        let body = ratatui::layout::Rect::new(0, 0, 20, 30);
+        let weights = [15_u16, 8, 5];
+        let (slots, dividers) = super::dock_slots(body, &weights);
+        assert_eq!(
+            slots.iter().map(|s| s.height).collect::<Vec<_>>(),
+            weights,
+            "heights used as weights must reproduce themselves"
+        );
+        assert_eq!(dividers, vec![15, 24]);
+        let (again, dividers_again) = super::dock_slots(body, &weights);
+        assert_eq!(
+            again.iter().map(|s| s.height).collect::<Vec<_>>(),
+            weights,
+            "a second pass must not drift"
+        );
+        assert_eq!(dividers_again, dividers);
     }
 
     /// A weighted split hands out the sidebar in proportion, and still spends

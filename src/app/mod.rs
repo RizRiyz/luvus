@@ -9606,6 +9606,92 @@ mod tests {
         );
     }
 
+    /// Three stacked docks: dragging one divider must not resize the dock that
+    /// is not in the pair, the divider must follow the cursor by one row, and
+    /// a second render must not drift. Covers both dividers.
+    #[test]
+    fn dragging_one_of_three_dock_dividers_leaves_the_untouched_dock_still() {
+        let _env = crate::persist::test_env("dock-divider-three");
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 40, tx).unwrap();
+        app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files];
+        app.sidebars.left.visible = true;
+        app.sidebars.left.weights = Vec::new();
+
+        let mut term = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        let col = {
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            app.left_seam
+                .expect("left sidebar is shown")
+                .x
+                .saturating_sub(1)
+        };
+
+        for index in 0..2 {
+            app.sidebars.left.weights = Vec::new();
+            app.end_dock_resize();
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+            let before = app.dock_heights(Side::Left);
+            assert_eq!(before.len(), 3, "three docks after even split: {before:?}");
+            let dy = app
+                .dock_dividers
+                .iter()
+                .find(|(side, i, _)| *side == Side::Left && *i == index)
+                .map(|(_, _, y)| *y)
+                .unwrap_or_else(|| panic!("divider {index} is published"));
+            let untouched = if index == 0 { 2 } else { 0 };
+
+            assert!(
+                app.begin_dock_resize(col, dy),
+                "divider {index} is a hit target"
+            );
+            app.update_dock_resize(col, dy + 1);
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+            let after = app.dock_heights(Side::Left);
+            assert_eq!(
+                after[untouched], before[untouched],
+                "divider {index}: dock {untouched} is not in the pair: before={before:?} after={after:?}"
+            );
+            assert_eq!(
+                after[index].saturating_add(after[index + 1]),
+                before[index].saturating_add(before[index + 1]),
+                "divider {index}: the pair's rows are conserved: before={before:?} after={after:?}"
+            );
+            let moved = app
+                .dock_dividers
+                .iter()
+                .find(|(side, i, _)| *side == Side::Left && *i == index)
+                .map(|(_, _, y)| *y)
+                .unwrap_or_else(|| panic!("divider {index} still published after the drag"));
+            assert_eq!(
+                moved,
+                dy + 1,
+                "divider {index} followed the cursor by exactly one row"
+            );
+
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            let again = app.dock_heights(Side::Left);
+            assert_eq!(
+                again, after,
+                "divider {index}: a second render must not drift: {after:?} -> {again:?}"
+            );
+            let still = app
+                .dock_dividers
+                .iter()
+                .find(|(side, i, _)| *side == Side::Left && *i == index)
+                .map(|(_, _, y)| *y)
+                .unwrap_or_else(|| panic!("divider {index} still published after a second render"));
+            assert_eq!(
+                still, moved,
+                "divider {index} must not walk on a second render"
+            );
+        }
+    }
+
     /// the invariant the WORKSPACES-vs-FILES bug violated; it now covers every
     /// dock geometry field at once, so a future dock can't reintroduce it.
     #[test]
