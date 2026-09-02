@@ -8,13 +8,12 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
 
 use super::shared::{chat_store, pi_store};
-use super::{claude, codex, copilot, fx, gemini, grok, kimi, omp, opencode, pi, qwen, registry};
+use super::{claude, codex, copilot, fx, gemini, grok, kimi, omp, pi, qwen, registry};
 use crate::mission::{context_frac, estimate_cost, AgentUsage};
 
 /// A single persisted JSONL event can contain an arbitrarily large tool result
@@ -165,11 +164,6 @@ pub fn session_usage(agent: &str, cwd: &Path, session_id: &str) -> Option<AgentU
             session_id,
         )?),
         "copilot" => copilot_usage(&copilot_path(&copilot::sessions::base(), session_id)),
-        "opencode" => opencode_usage(
-            &opencode_db_path(&opencode::sessions::base()),
-            session_id,
-            cwd,
-        ),
         "kimi" => kimi_usage(&kimi::sessions::session_dir(
             &kimi::sessions::base(),
             session_id,
@@ -192,7 +186,7 @@ pub fn session_usage(agent: &str, cwd: &Path, session_id: &str) -> Option<AgentU
         "fx" => fx_usage(&fx_dir(&fx::sessions::base(), session_id)),
         // These agents currently expose identity/state but no stable,
         // structured, per-session usage store Luvus can read safely.
-        "aider" | "antigravity" | "kiro" | "cursor" | "amp" | "droid" => None,
+        "aider" | "antigravity" | "kiro" | "cursor" | "amp" | "droid" | "opencode" => None,
         _ => None, // manifest-defined agents degrade honestly too.
     }
 }
@@ -204,7 +198,6 @@ pub fn session_mtime(agent: &str, cwd: &Path, session_id: &str) -> Option<System
         "claude" => claude_path(&claude::sessions::base(), cwd, session_id),
         "codex" => codex::sessions::session_path(&codex::sessions::base(), session_id)?,
         "copilot" => copilot_path(&copilot::sessions::base(), session_id),
-        "opencode" => opencode_db_path(&opencode::sessions::base()),
         "kimi" => kimi::sessions::session_dir(&kimi::sessions::base(), session_id)?
             .join("agents/main/wire.jsonl"),
         "grok" => grok::sessions::session_dir(&grok::sessions::base(), cwd, session_id)?
@@ -231,10 +224,6 @@ fn copilot_path(base: &Path, session_id: &str) -> PathBuf {
     base.join("session-state")
         .join(session_id)
         .join("events.jsonl")
-}
-
-fn opencode_db_path(storage: &Path) -> PathBuf {
-    storage.parent().unwrap_or(storage).join("opencode.db")
 }
 
 fn fx_dir(base: &Path, session_id: &str) -> PathBuf {
@@ -407,52 +396,6 @@ fn copilot_usage(path: &Path) -> Option<AgentUsage> {
         };
     }
     usage.cost = exact_estimate.filter(|_| dominant > 0);
-    finish(usage)
-}
-
-fn opencode_usage(db: &Path, session_id: &str, cwd: &Path) -> Option<AgentUsage> {
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
-        | OpenFlags::SQLITE_OPEN_NO_MUTEX
-        | OpenFlags::SQLITE_OPEN_URI;
-    let conn = Connection::open_with_flags(db, flags).ok()?;
-    let _ = conn.busy_timeout(Duration::from_millis(25));
-    let row = conn
-        .query_row(
-            "SELECT model, cost, tokens_input, tokens_output, \
-                    tokens_cache_read, tokens_cache_write \
-             FROM session WHERE id = ?1 AND directory = ?2 LIMIT 1",
-            (session_id, cwd.to_string_lossy().as_ref()),
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, f64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                ))
-            },
-        )
-        .optional()
-        .ok()??;
-
-    let as_u64 = |value: i64| u64::try_from(value).unwrap_or(0);
-    let mut usage = AgentUsage {
-        tokens_in: as_u64(row.2),
-        tokens_out: as_u64(row.3),
-        cache: as_u64(row.4).saturating_add(as_u64(row.5)),
-        ..AgentUsage::default()
-    };
-    if let Some(raw_model) = row.0 {
-        usage.model = serde_json::from_str::<Value>(&raw_model)
-            .ok()
-            .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
-            .unwrap_or(raw_model);
-    }
-    // OpenCode's custom providers commonly persist `0` when billing data is
-    // unavailable. Treat only a positive value as authoritative, then fall back
-    // to the configured estimate table.
-    usage.cost = (row.1 > 0.0 && row.1.is_finite()).then_some(row.1);
     finish(usage)
 }
 
@@ -665,7 +608,6 @@ fn fx_usage(dir: &Path) -> Option<AgentUsage> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::time::Instant;
 
     fn tmp(tag: &str) -> PathBuf {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -674,40 +616,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    fn create_opencode_schema(conn: &Connection) {
-        conn.execute_batch(
-            "CREATE TABLE session (
-                id TEXT PRIMARY KEY,
-                directory TEXT NOT NULL,
-                model TEXT,
-                cost REAL NOT NULL,
-                tokens_input INTEGER NOT NULL,
-                tokens_output INTEGER NOT NULL,
-                tokens_reasoning INTEGER NOT NULL,
-                tokens_cache_read INTEGER NOT NULL,
-                tokens_cache_write INTEGER NOT NULL
-            );",
-        )
-        .unwrap();
-    }
-
-    fn insert_opencode_session(
-        conn: &Connection,
-        id: &str,
-        directory: &str,
-        model: &str,
-        cost: f64,
-        tokens: [i64; 4],
-    ) {
-        conn.execute(
-            "INSERT INTO session VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8)",
-            rusqlite::params![
-                id, directory, model, cost, tokens[0], tokens[1], tokens[2], tokens[3]
-            ],
-        )
-        .unwrap();
     }
 
     #[test]
@@ -809,231 +717,6 @@ mod tests {
             (280, 100, 720)
         );
         assert_eq!(usage.model, "gpt-5.4");
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn opencode_reads_aggregate_session_row_without_writing() {
-        let dir = tmp("opencode");
-        let db = dir.join("opencode.db");
-        let conn = Connection::open(&db).unwrap();
-        create_opencode_schema(&conn);
-        insert_opencode_session(
-            &conn,
-            "ses-1",
-            "/work/app",
-            r#"{"id":"anthropic/claude-sonnet-4"}"#,
-            0.42,
-            [300, 40, 600, 10],
-        );
-        drop(conn);
-
-        let before = fs::read(&db).unwrap();
-        let usage = opencode_usage(&db, "ses-1", Path::new("/work/app")).unwrap();
-        assert_eq!(
-            (usage.tokens_in, usage.tokens_out, usage.cache),
-            (300, 40, 610)
-        );
-        assert_eq!(usage.model, "anthropic/claude-sonnet-4");
-        assert_eq!(usage.cost, Some(0.42));
-        assert!(opencode_usage(&db, "ses-1", Path::new("/work/other")).is_none());
-        assert!(opencode_usage(&db, "missing", Path::new("/work/app")).is_none());
-        assert_eq!(
-            fs::read(&db).unwrap(),
-            before,
-            "read-only query changed the database"
-        );
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn opencode_accepts_plain_models_estimates_zero_cost_and_clamps_tokens() {
-        let dir = tmp("opencode-values");
-        let db = dir.join("opencode.db");
-        let conn = Connection::open(&db).unwrap();
-        create_opencode_schema(&conn);
-        insert_opencode_session(
-            &conn,
-            "plain",
-            "/work/plain",
-            "claude-sonnet-4",
-            0.0,
-            [300, 40, 600, 10],
-        );
-        insert_opencode_session(
-            &conn,
-            "negative",
-            "/work/negative",
-            "unknown-model",
-            0.0,
-            [-1, -2, -3, -4],
-        );
-        drop(conn);
-
-        let usage = opencode_usage(&db, "plain", Path::new("/work/plain")).unwrap();
-        assert_eq!(usage.model, "claude-sonnet-4");
-        assert_eq!(
-            (usage.tokens_in, usage.tokens_out, usage.cache),
-            (300, 40, 610)
-        );
-        let expected = estimate_cost("claude-sonnet-4", 300, 40, 610).unwrap();
-        assert_eq!(usage.cost, Some(expected));
-
-        let usage = opencode_usage(&db, "negative", Path::new("/work/negative")).unwrap();
-        assert_eq!((usage.tokens_in, usage.tokens_out, usage.cache), (0, 0, 0));
-        assert_eq!(usage.cost, None);
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn opencode_missing_incompatible_and_corrupt_databases_are_non_fatal() {
-        let dir = tmp("opencode-invalid");
-        let missing = dir.join("missing.db");
-        assert!(opencode_usage(&missing, "ses-1", Path::new("/work/app")).is_none());
-        assert!(
-            !missing.exists(),
-            "read-only open created a missing database"
-        );
-
-        let incompatible = dir.join("incompatible.db");
-        drop(Connection::open(&incompatible).unwrap());
-        assert!(opencode_usage(&incompatible, "ses-1", Path::new("/work/app")).is_none());
-
-        let corrupt = dir.join("corrupt.db");
-        fs::write(&corrupt, b"not a sqlite database").unwrap();
-        assert!(opencode_usage(&corrupt, "ses-1", Path::new("/work/app")).is_none());
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn opencode_reads_committed_wal_data_without_mutating_rows_or_schema() {
-        let dir = tmp("opencode-wal");
-        let db = dir.join("opencode.db");
-        let writer = Connection::open(&db).unwrap();
-        assert_eq!(
-            writer
-                .query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0))
-                .unwrap(),
-            "wal"
-        );
-        create_opencode_schema(&writer);
-        insert_opencode_session(
-            &writer,
-            "ses-wal",
-            "/work/wal",
-            "gpt-5",
-            0.25,
-            [100, 20, 30, 4],
-        );
-        writer
-            .execute(
-                "UPDATE session SET tokens_input = 250, tokens_output = 45 WHERE id = 'ses-wal'",
-                [],
-            )
-            .unwrap();
-        let wal = db.with_extension("db-wal");
-        let shared_memory = db.with_extension("db-shm");
-        let db_before = fs::read(&db).unwrap();
-        let wal_before = fs::read(&wal).unwrap();
-        let shared_memory_len = fs::metadata(&shared_memory).unwrap().len();
-
-        let usage = opencode_usage(&db, "ses-wal", Path::new("/work/wal")).unwrap();
-        assert_eq!(
-            (usage.tokens_in, usage.tokens_out, usage.cache),
-            (250, 45, 34)
-        );
-        assert_eq!(usage.cost, Some(0.25));
-        let stored: (i64, i64) = writer
-            .query_row(
-                "SELECT tokens_input, tokens_output FROM session WHERE id = 'ses-wal'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(stored, (250, 45));
-        let schema_rows: i64 = writer
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE name = 'session' AND type = 'table'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(schema_rows, 1);
-        assert_eq!(fs::read(&db).unwrap(), db_before);
-        assert_eq!(fs::read(&wal).unwrap(), wal_before);
-        assert_eq!(
-            fs::metadata(&shared_memory).unwrap().len(),
-            shared_memory_len
-        );
-        drop(writer);
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn opencode_locked_database_wait_is_bounded_and_recovers() {
-        let dir = tmp("opencode-locked");
-        let db = dir.join("opencode.db");
-        let writer = Connection::open(&db).unwrap();
-        create_opencode_schema(&writer);
-        insert_opencode_session(
-            &writer,
-            "ses-locked",
-            "/work/locked",
-            "gpt-5",
-            0.5,
-            [100, 20, 30, 4],
-        );
-        writer
-            .execute_batch("BEGIN EXCLUSIVE; UPDATE session SET tokens_input = 200;")
-            .unwrap();
-
-        let started = Instant::now();
-        assert!(opencode_usage(&db, "ses-locked", Path::new("/work/locked")).is_none());
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "locked read exceeded its bounded wait: {:?}",
-            started.elapsed()
-        );
-
-        writer.execute_batch("ROLLBACK").unwrap();
-        let usage = opencode_usage(&db, "ses-locked", Path::new("/work/locked")).unwrap();
-        assert_eq!(usage.tokens_in, 100);
-        drop(writer);
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn opencode_thousand_warm_reads_keep_values_stable() {
-        let dir = tmp("opencode-warm-reads");
-        let db = dir.join("opencode.db");
-        let conn = Connection::open(&db).unwrap();
-        create_opencode_schema(&conn);
-        insert_opencode_session(
-            &conn,
-            "ses-bench",
-            "/work/bench",
-            "gpt-5",
-            0.5,
-            [100, 20, 30, 4],
-        );
-        drop(conn);
-
-        let mut elapsed = Vec::with_capacity(1_000);
-        for _ in 0..1_000 {
-            let started = Instant::now();
-            let usage = opencode_usage(&db, "ses-bench", Path::new("/work/bench")).unwrap();
-            elapsed.push(started.elapsed());
-            assert_eq!(
-                (usage.tokens_in, usage.tokens_out, usage.cache),
-                (100, 20, 34)
-            );
-        }
-        elapsed.sort_unstable();
-        eprintln!(
-            "OpenCode 1,000 warm reads: median {:?}, total {:?}",
-            elapsed[elapsed.len() / 2],
-            elapsed.iter().sum::<Duration>()
-        );
         fs::remove_dir_all(dir).unwrap();
     }
 

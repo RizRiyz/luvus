@@ -295,7 +295,7 @@ impl App {
         self.file_tree.show_hidden = show;
         self.file_tree.scroll = 0;
         self.config.layout.files_show_hidden = show;
-        crate::config::save(&self.config);
+        self.persist_config();
     }
 
     /// What a plain left click on a FILES row does, from `layout.file_click`

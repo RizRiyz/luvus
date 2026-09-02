@@ -912,7 +912,7 @@ impl App {
         let theme_id = self.config.theme.clone();
         self.set_effective_theme(&theme_id, selected);
         self.changelog_rows = None;
-        config::save(&self.config);
+        self.persist_config_patch(&serde_json::json!({"theme": theme_id}));
     }
 
     /// Swap the server's in-memory registry after an off-loop scan. A missing
@@ -935,7 +935,7 @@ impl App {
     fn apply_language(&mut self, code: &str) {
         self.config.language = code.to_string();
         self.catalog = crate::i18n::by_code(code);
-        config::save(&self.config);
+        self.persist_config_patch(&serde_json::json!({"language": code}));
     }
 
     /// Layout tab ‹ ›/click on a row's control (docs/29). Width sliders step by
@@ -974,7 +974,7 @@ impl App {
                 ) as usize;
                 self.config.layout.scrollback_bytes = Some(next);
                 self.apply_history_budget();
-                config::save(&self.config);
+                self.persist_config();
             }
             LayoutRow::MobileWidth => {
                 let current = self.config.layout.mobile_width;
@@ -984,20 +984,20 @@ impl App {
                     (24, std::cmp::Ordering::Less) => 0,
                     _ => (current as i32 + 4 * delta).clamp(24, 200) as u16,
                 };
-                config::save(&self.config);
+                self.persist_config();
             }
             LayoutRow::PaneTitles => {
                 self.config.layout.show_titles = !self.config.layout.show_titles;
-                config::save(&self.config);
+                self.persist_config();
             }
             LayoutRow::PaneTitlePath => {
                 self.config.layout.pane_title_path = !self.config.layout.pane_title_path;
-                config::save(&self.config);
+                self.persist_config();
             }
             LayoutRow::ResumeWs => {
                 self.config.layout.resume_in_new_workspace =
                     !self.config.layout.resume_in_new_workspace;
-                config::save(&self.config);
+                self.persist_config();
             }
             LayoutRow::DiffLayout => {
                 self.config.layout.diff_layout = if delta < 0 {
@@ -1015,23 +1015,23 @@ impl App {
                 } else {
                     self.config.layout.diff_layout.cycle()
                 };
-                config::save(&self.config);
+                self.persist_config();
             }
             LayoutRow::DiffWrap => {
                 self.config.layout.diff_wrap = !self.config.layout.diff_wrap;
-                config::save(&self.config);
+                self.persist_config();
             }
             LayoutRow::DiffContext => {
                 self.config.layout.diff_context_lines =
                     (self.config.layout.diff_context_lines as i32 + delta)
                         .clamp(0, i32::from(crate::diff::MAX_CONTEXT_LINES))
                         as u16;
-                config::save(&self.config);
+                self.persist_config();
             }
             LayoutRow::DiffLineNumbers => {
                 self.config.layout.diff_show_line_numbers =
                     !self.config.layout.diff_show_line_numbers;
-                config::save(&self.config);
+                self.persist_config();
             }
             LayoutRow::DiffMarkers => {
                 self.config.layout.diff_marker_style = if delta < 0 {
@@ -1039,15 +1039,15 @@ impl App {
                 } else {
                     self.config.layout.diff_marker_style.cycle()
                 };
-                config::save(&self.config);
+                self.persist_config();
             }
             LayoutRow::DiffColors => {
                 self.config.layout.diff_color_mode = self.config.layout.diff_color_mode.cycle();
-                config::save(&self.config);
+                self.persist_config();
             }
             LayoutRow::DiffLiveRefresh => {
                 self.config.layout.diff_live_refresh = !self.config.layout.diff_live_refresh;
-                config::save(&self.config);
+                self.persist_config();
             }
             #[cfg(windows)]
             LayoutRow::Shell => self.cycle_shell(delta),
@@ -1080,7 +1080,7 @@ impl App {
                 };
                 self.config.bars.place(&key, region);
                 self.bar.clear_geometry();
-                config::save(&self.config);
+                self.persist_config();
                 if let Some(next) = self
                     .layout_rows()
                     .iter()
@@ -1135,7 +1135,7 @@ impl App {
                 };
                 self.config.bars.place(&key, next);
                 self.bar.clear_geometry();
-                config::save(&self.config);
+                self.persist_config();
                 if let Some(cursor) = self
                     .layout_rows()
                     .iter()
@@ -1165,7 +1165,7 @@ impl App {
             .unwrap_or(0) as i32;
         let next = (((cur + delta) % n + n) % n) as usize;
         self.config.layout.file_open = opts[next].clone();
-        config::save(&self.config);
+        self.persist_config();
     }
 
     /// Cycle what a plain FILES click does (docs/38): preview ⇄ open in tab.
@@ -1181,7 +1181,7 @@ impl App {
             .unwrap_or(0) as i32;
         let next = (((cur + delta) % n + n) % n) as usize;
         self.config.layout.file_click = opts[next].to_string();
-        config::save(&self.config);
+        self.persist_config();
     }
 
     /// The current click-behavior choice as a display string. An unrecognized
@@ -1204,7 +1204,7 @@ impl App {
             .unwrap_or(0) as i32;
         let next = (((cur + delta) % n + n) % n) as usize;
         self.config.layout.shift_enter = opts[next].0.to_string();
-        config::save(&self.config);
+        self.persist_config();
     }
 
     /// The current Shift+Enter choice's display label (the raw keyword if unknown).
@@ -1245,12 +1245,12 @@ impl App {
             .unwrap_or(0) as i32;
         let next = (((cur + delta) % n + n) % n) as usize;
         self.config.shell = choices[next].0.to_string();
-        config::save(&self.config);
+        self.persist_config();
     }
 
     fn apply_gaps(&mut self) {
         crate::layout::set_gaps(self.config.layout.col_gap, self.config.layout.row_gap);
-        config::save(&self.config);
+        self.persist_config();
     }
 
     /// Push the retained-history budget to every live pane. Alacritty's
@@ -1274,30 +1274,30 @@ impl App {
             Some(GeneralRow::ShiftEnter) => self.cycle_shift_enter(delta),
             Some(GeneralRow::CheckUpdates) => {
                 self.config.check_updates = !self.config.check_updates;
-                config::save(&self.config);
+                self.persist_config();
             }
             Some(GeneralRow::ResumeFlags) => {
                 self.config.resume_launch_flags = !self.config.resume_launch_flags;
-                config::save(&self.config);
+                self.persist_config();
             }
             Some(GeneralRow::NewPaneToWorkspaceRoot) => {
                 self.config.layout.new_pane_to_workspace_root =
                     !self.config.layout.new_pane_to_workspace_root;
-                config::save(&self.config);
+                self.persist_config();
             }
             Some(GeneralRow::AgentTitle) => {
                 self.config.layout.agent_title = !self.config.layout.agent_title;
-                config::save(&self.config);
+                self.persist_config();
             }
             Some(GeneralRow::SoundStyle) => self.cycle_sound_style(delta),
             Some(GeneralRow::SoundDone) => {
                 self.config.notifications.sound_on_done = !self.config.notifications.sound_on_done;
-                config::save(&self.config);
+                self.persist_config();
             }
             Some(GeneralRow::SoundBlocked) => {
                 self.config.notifications.sound_on_blocked =
                     !self.config.notifications.sound_on_blocked;
-                config::save(&self.config);
+                self.persist_config();
             }
             // Test rows fire on Enter/click only (see `settings_activate`) —
             // arrows must not ring them, or holding ‹ › would spam cues.
@@ -1315,7 +1315,7 @@ impl App {
         let count = crate::sound::STYLES.len() as i32;
         let next = ((index + delta) % count + count) % count;
         self.config.notifications.sound_style = crate::sound::STYLES[next as usize].key().into();
-        config::save(&self.config);
+        self.persist_config();
     }
 
     pub fn sound_style_label(&self) -> &'static str {

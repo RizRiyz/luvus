@@ -1226,8 +1226,15 @@ fn theme_cmd(args: &[String], context: crate::i18n::cli::Context) -> Result<i32>
                 }
                 Ok(_) | Err(_) => {
                     let mut config = crate::config::load();
+                    let baseline = config.clone();
                     config.theme = selected;
-                    crate::config::save(&config);
+                    if !crate::config::save_changes_with_patch(
+                        &baseline,
+                        &config,
+                        Some(&json!({"theme": config.theme.clone()})),
+                    ) {
+                        return Err(anyhow!(context.text("could not save the theme selection")));
+                    }
                     println!(
                         "{} {} — {}",
                         context.text("using theme"),
@@ -4011,6 +4018,22 @@ mod tests {
                 "{invalid:?}"
             );
         }
+    }
+
+    #[test]
+    fn theme_use_reports_a_config_write_failure() {
+        let _env = crate::persist::test_env("theme-write-failure");
+        let home = crate::persist::config_dir();
+        fs::write(&home, "not a directory").unwrap();
+
+        let result = theme_cmd(
+            &["use".into(), "quattro-rally".into()],
+            crate::i18n::cli::Context::for_language(crate::i18n::cli::Language::En),
+        );
+        fs::remove_file(home).unwrap();
+
+        let error = result.unwrap_err();
+        assert_eq!(error.to_string(), "could not save the theme selection");
     }
 
     #[test]

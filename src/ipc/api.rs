@@ -1542,6 +1542,13 @@ pub fn socket_path_env() -> Option<String> {
     SOCKET.get().map(|p| p.to_string_lossy().to_string())
 }
 
+/// Platform-native address for integrations that connect directly rather than
+/// invoking the CLI. Unix returns the socket path; Windows returns the complete
+/// named-pipe address derived by the server transport.
+pub fn socket_address_env() -> Option<String> {
+    SOCKET.get().map(|path| transport::discovery_address(path))
+}
+
 /// Reclaim a proven-stale API socket and bind its listener. The caller holds
 /// the per-state-directory startup lock across both API and client binds.
 pub fn bind_server(

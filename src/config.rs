@@ -3,11 +3,14 @@
 //! has a serde default, so old/new configs round-trip and a missing or corrupt
 //! file just yields defaults.
 
-use std::fs;
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::app::{SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN};
 
@@ -557,6 +560,10 @@ fn config_path() -> PathBuf {
     crate::persist::config_dir().join("config.json")
 }
 
+fn config_lock_path() -> PathBuf {
+    crate::persist::config_dir().join("config.lock")
+}
+
 /// Load the config, or defaults if missing / unparsable.
 pub fn load() -> Config {
     fs::read_to_string(config_path())
@@ -604,20 +611,162 @@ fn legacy_scrollback_bytes(lines: usize) -> usize {
         .clamp(SCROLLBACK_BYTES_MIN, SCROLLBACK_BYTES_MAX)
 }
 
-/// Save the config atomically (best effort).
+static CONFIG_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Save a complete config atomically (best effort).
+///
+/// Runtime app code should use [`save_changes`] instead. A complete write is
+/// appropriate for isolated initialization and tests, but a long-running named
+/// server may hold an older copy of fields changed by another server.
+#[cfg(test)]
 pub fn save(cfg: &Config) {
+    let _ = with_config_lock(|| write_config_atomic(cfg));
+}
+
+/// Persist only fields changed between one server's last local config and its
+/// current config. The newest shared config is reloaded under a cross-process
+/// lock before applying the deep patch, so a named server cannot overwrite an
+/// unrelated setting with an older in-memory value.
+///
+/// Returns `true` after either a successful write or a no-op. Callers retain
+/// their old baseline on `false`, allowing the next change to retry everything
+/// that has not reached disk yet.
+pub fn save_changes(base: &Config, desired: &Config) -> bool {
+    save_changes_with_patch(base, desired, None)
+}
+
+/// Persist local changes and also apply an explicit user/API patch. The
+/// explicit patch matters when a stale server is asked to select the value it
+/// already has in memory: there may be no local delta, but the shared file must
+/// still record the user's choice.
+pub fn save_changes_with_patch(base: &Config, desired: &Config, explicit: Option<&Value>) -> bool {
+    let Ok(base) = serde_json::to_value(base) else {
+        return false;
+    };
+    let Ok(desired) = serde_json::to_value(desired) else {
+        return false;
+    };
+    let delta = value_delta(&base, &desired);
+    if delta.is_none() && explicit.is_none() {
+        return true;
+    }
+
+    with_config_lock(|| {
+        let mut latest = serde_json::to_value(load()).map_err(io::Error::other)?;
+        if let Some(delta) = &delta {
+            apply_delta(&mut latest, delta);
+        }
+        if let Some(explicit) = explicit {
+            apply_delta(&mut latest, explicit);
+        }
+        let merged: Config = serde_json::from_value(latest).map_err(io::Error::other)?;
+        write_config_atomic(&normalize_config(merged))
+    })
+    .is_ok()
+}
+
+fn with_config_lock<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
     let dir = crate::persist::ensure_config_dir();
     if !dir.is_dir() {
-        return;
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "configuration directory is unavailable",
+        ));
     }
-    let Ok(json) = serde_json::to_string_pretty(cfg) else {
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(config_lock_path())?;
+    lock.lock_exclusive()?;
+    operation()
+}
+
+fn write_config_atomic(cfg: &Config) -> io::Result<()> {
+    let json = serde_json::to_vec_pretty(cfg).map_err(io::Error::other)?;
+    let path = config_path();
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.json");
+    let (temporary, mut file): (PathBuf, File) = (0..16)
+        .find_map(|_| {
+            let sequence = CONFIG_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let temporary = path.with_file_name(format!(
+                ".{file_name}.luvus-{}-{sequence}.tmp",
+                std::process::id()
+            ));
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+            {
+                Ok(file) => Some(Ok((temporary, file))),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .transpose()?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "temporary config files"))?;
+
+    let result = (|| {
+        file.write_all(&json)?;
+        file.flush()?;
+        drop(file);
+        crate::platform::atomic_replace_file(&temporary, &path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// Produce a JSON Merge Patch style delta, recursing into maps so independent
+/// nested settings such as two Layout fields do not replace each other.
+fn value_delta(base: &Value, desired: &Value) -> Option<Value> {
+    match (base, desired) {
+        (Value::Object(base), Value::Object(desired)) => {
+            let mut delta = Map::new();
+            for key in base.keys() {
+                if !desired.contains_key(key) {
+                    delta.insert(key.clone(), Value::Null);
+                }
+            }
+            for (key, desired) in desired {
+                match base.get(key).and_then(|base| value_delta(base, desired)) {
+                    Some(value) => {
+                        delta.insert(key.clone(), value);
+                    }
+                    None if !base.contains_key(key) => {
+                        delta.insert(key.clone(), desired.clone());
+                    }
+                    None => {}
+                }
+            }
+            (!delta.is_empty()).then_some(Value::Object(delta))
+        }
+        _ if base == desired => None,
+        _ => Some(desired.clone()),
+    }
+}
+
+fn apply_delta(target: &mut Value, delta: &Value) {
+    let Value::Object(delta) = delta else {
+        *target = delta.clone();
         return;
     };
-    let path = config_path();
-    let tmp = path.with_extension("json.tmp");
-    if let Ok(mut f) = fs::File::create(&tmp) {
-        if f.write_all(json.as_bytes()).is_ok() && f.flush().is_ok() {
-            let _ = fs::rename(&tmp, &path);
+    if !target.is_object() {
+        *target = Value::Object(Map::new());
+    }
+    let target = target.as_object_mut().expect("object assigned above");
+    for (key, value) in delta {
+        if value.is_null() {
+            target.remove(key);
+        } else if let Some(current) = target.get_mut(key) {
+            apply_delta(current, value);
+        } else {
+            target.insert(key.clone(), value.clone());
         }
     }
 }
@@ -736,6 +885,62 @@ mod tests {
         config.agents_active_only = false;
         save(&config);
         assert!(!load().agents_active_only);
+    }
+
+    #[test]
+    fn stale_named_server_changes_preserve_newer_shared_fields() {
+        let _env = crate::persist::test_env("config-named-server-merge");
+        let mut initial = Config {
+            theme: "gruvbox-light".into(),
+            ..Config::default()
+        };
+        initial.keybindings.insert("close_pane".into(), "x".into());
+        save(&initial);
+
+        // Alpha and Beta model two named servers that loaded the same shared
+        // config before either one changed it.
+        let alpha_base = load();
+        let beta_base = load();
+
+        let mut alpha = alpha_base.clone();
+        alpha.theme = "quattro-rally".into();
+        assert!(save_changes(&alpha_base, &alpha));
+
+        // Beta still remembers the old light theme. Its unrelated change must
+        // not write that stale theme back to disk.
+        let mut beta = beta_base.clone();
+        beta.check_updates = false;
+        beta.keybindings.remove("close_pane");
+        assert!(save_changes(&beta_base, &beta));
+
+        let merged = load();
+        assert_eq!(merged.theme, "quattro-rally");
+        assert!(!merged.check_updates);
+        assert!(!merged.keybindings.contains_key("close_pane"));
+
+        // Deep patches also preserve independent fields in one nested section.
+        let alpha_base = alpha;
+        let beta_base = beta;
+        let mut alpha = alpha_base.clone();
+        alpha.layout.show_titles = false;
+        assert!(save_changes(&alpha_base, &alpha));
+        let mut beta = beta_base.clone();
+        beta.layout.files_show_hidden = true;
+        assert!(save_changes(&beta_base, &beta));
+
+        let merged = load();
+        assert!(!merged.layout.show_titles);
+        assert!(merged.layout.files_show_hidden);
+        assert_eq!(merged.theme, "quattro-rally");
+
+        // An explicit selection still wins when it matches this stale server's
+        // local value and therefore would not appear in the computed delta.
+        assert!(save_changes_with_patch(
+            &beta,
+            &beta,
+            Some(&serde_json::json!({"theme":"gruvbox-light"})),
+        ));
+        assert_eq!(load().theme, "gruvbox-light");
     }
 
     #[test]

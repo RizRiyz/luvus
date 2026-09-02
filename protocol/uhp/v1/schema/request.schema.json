@@ -94,6 +94,27 @@
         "confirm": { "const": true }
       }
     },
+    "paneReportSessionParams": {
+      "type": "object", "additionalProperties": false, "required": ["agent", "session_id"],
+      "properties": {
+        "pane": { "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "integer", "minimum": 0 }] },
+        "agent": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9._:/-]+$" },
+        "usage": {
+          "type": "object", "additionalProperties": false,
+          "required": ["tokens_in", "tokens_out", "cache_read", "cache_write", "updated_at"],
+          "properties": {
+            "model": { "type": "string", "maxLength": 256 },
+            "tokens_in": { "type": "integer", "minimum": 0, "maximum": 1000000000000000 },
+            "tokens_out": { "type": "integer", "minimum": 0, "maximum": 1000000000000000 },
+            "cache_read": { "type": "integer", "minimum": 0, "maximum": 1000000000000000 },
+            "cache_write": { "type": "integer", "minimum": 0, "maximum": 1000000000000000 },
+            "cost": { "type": ["number", "null"], "minimum": 0, "maximum": 1000000000000 },
+            "updated_at": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+          }
+        }
+      }
+    },
     "taskStartParams": {
       "type": "object", "additionalProperties": false, "required": ["id"],
       "properties": {
@@ -142,6 +163,8 @@
       "then": { "properties": { "params": { "$ref": "#/$defs/confirmedParams" } } } },
     { "if": { "properties": { "method": { "enum": ["integration.install", "integration.uninstall"] } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/integrationChangeParams" } } } },
+    { "if": { "properties": { "method": { "const": "pane.report_session" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/paneReportSessionParams" } } } },
     { "if": { "properties": { "method": { "const": "task.start" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/taskStartParams" } } } },
     { "if": { "properties": { "method": { "const": "task.next" } } },

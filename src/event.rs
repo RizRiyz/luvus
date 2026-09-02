@@ -237,6 +237,10 @@ pub enum AppEvent {
         scanned: Vec<crate::mission::UsageKey>,
         usage: std::collections::HashMap<crate::mission::UsageKey, crate::mission::AgentUsage>,
         mtimes: std::collections::HashMap<crate::mission::UsageKey, std::time::SystemTime>,
+        /// Integration-owned keys excluded when this worker started. Carrying
+        /// the snapshot prevents a late result from reclassifying report data
+        /// as native after pane ownership changes.
+        report_owned: Vec<crate::mission::UsageKey>,
     },
     /// A git-tab fetch finished; apply it to the matching `GitView`.
     GitData {

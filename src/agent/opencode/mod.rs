@@ -1,5 +1,6 @@
 use super::types::{AgentDescriptor, DiscoveryOperations, IdentityDescriptor, SessionOperations};
 
+mod config;
 mod integration;
 pub(in crate::agent) mod sessions;
 #[cfg(test)]

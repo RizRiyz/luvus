@@ -1633,6 +1633,9 @@ pub struct App {
     pub catalog: &'static crate::i18n::Catalog,
     /// Persisted user configuration (theme, layout, notifications, keys).
     pub config: crate::config::Config,
+    /// This server's last local config snapshot. Persistence diffs against this
+    /// snapshot so another named server's newer, unrelated fields survive.
+    config_baseline: crate::config::Config,
     /// Active `key → Cmd` map for prefix mode (defaults + config overrides).
     pub keymap: std::collections::HashMap<String, Cmd>,
     /// Explicit normal-mode shortcuts. Empty by default so pane input remains
@@ -1784,6 +1787,11 @@ pub struct App {
     /// path (docs/54 MC-2/MC-4).
     pub agent_usage:
         std::collections::HashMap<crate::mission::UsageKey, crate::mission::AgentUsage>,
+    /// Entries whose exact session and counters came from a live integration.
+    /// Kept separately from native mtimes so a background native-store refresh
+    /// cannot erase or overwrite the stronger pane-local authority.
+    pub(crate) reported_usage:
+        std::collections::HashMap<crate::mission::UsageKey, crate::mission::ReportedUsage>,
     /// Each scanned transcript's mtime, so the next usage scan re-reads a session
     /// only when its file actually changed (docs/54) — an idle session costs one
     /// `stat`, not a full read+parse.
@@ -2180,6 +2188,7 @@ impl App {
         let name = ws_name(&cwd);
 
         let config = crate::config::load();
+        let config_baseline = config.clone();
         let files_show_hidden = config.layout.files_show_hidden;
         let agents_active_only = config.agents_active_only;
         crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
@@ -2252,6 +2261,7 @@ impl App {
             theme_registry,
             catalog,
             config,
+            config_baseline,
             keymap,
             direct_keymap,
             prefix,
@@ -2317,6 +2327,7 @@ impl App {
             mission_burn: None,
             mission_last_cost: None,
             agent_usage: std::collections::HashMap::new(),
+            reported_usage: std::collections::HashMap::new(),
             usage_mtimes: std::collections::HashMap::new(),
             last_cursor: None,
             detach_requested: false,
@@ -2507,6 +2518,7 @@ impl App {
 
     fn from_snapshot(snap: SessionSnapshot, app_tx: Sender<AppEvent>) -> Option<App> {
         let config = crate::config::load();
+        let config_baseline = config.clone();
         let files_show_hidden = config.layout.files_show_hidden;
         let agents_active_only = config.agents_active_only;
         let theme_registry = crate::theme::ThemeRegistry::load();
@@ -2868,6 +2880,7 @@ impl App {
             theme_registry,
             catalog,
             config,
+            config_baseline,
             keymap,
             direct_keymap,
             prefix,
@@ -2933,6 +2946,7 @@ impl App {
             mission_burn: None,
             mission_last_cost: None,
             agent_usage: std::collections::HashMap::new(),
+            reported_usage: std::collections::HashMap::new(),
             usage_mtimes: std::collections::HashMap::new(),
             last_cursor: None,
             detach_requested: false,
@@ -3175,7 +3189,30 @@ impl App {
     pub fn save_sidebars(&mut self) {
         self.config.sidebars = Some(self.sidebars.to_config());
         self.config.sidebar_width = self.sidebars.left.width;
-        crate::config::save(&self.config);
+        self.persist_config();
+    }
+
+    /// Merge only this server's local changes into the shared home-level config.
+    /// A failed best-effort write keeps the old baseline so the next mutation
+    /// retries every unsaved field.
+    pub(crate) fn persist_config(&mut self) {
+        if crate::config::save_changes(&self.config_baseline, &self.config) {
+            self.config_baseline = self.config.clone();
+        }
+    }
+
+    /// Persist local changes while forcing an explicit user/API patch even when
+    /// this server already held the requested value in memory.
+    pub(crate) fn persist_config_patch(&mut self, patch: &serde_json::Value) {
+        if crate::config::save_changes_with_patch(&self.config_baseline, &self.config, Some(patch))
+        {
+            self.config_baseline = self.config.clone();
+        }
+    }
+
+    /// Adopt an externally reloaded config without writing it back to disk.
+    pub(crate) fn reset_config_baseline(&mut self) {
+        self.config_baseline = self.config.clone();
     }
 
     /// Apply the AGENTS All / Active projection without performing I/O. This is
@@ -3197,7 +3234,7 @@ impl App {
         let config_changed = self.config.agents_active_only != active_only;
         if config_changed {
             self.config.agents_active_only = active_only;
-            crate::config::save(&self.config);
+            self.persist_config();
         }
         runtime_changed || config_changed
     }
@@ -5908,6 +5945,16 @@ impl App {
         self.backend_terminal_index.retain(|_, pane| *pane != id);
         self.backend_labels.remove(&id);
         self.cancel_backend_revision_waits(id);
+        let reported = self
+            .reported_usage
+            .iter()
+            .filter_map(|(key, owner)| (owner.pane == id).then_some(key.clone()))
+            .collect::<Vec<_>>();
+        for key in reported {
+            self.reported_usage.remove(&key);
+            self.agent_usage.remove(&key);
+            self.usage_mtimes.remove(&key);
+        }
         self.panes.remove(&id);
         self.status.remove(&id);
         self.views.remove(&id);
@@ -6338,6 +6385,17 @@ mod tests {
         app.active_ws = 0;
     }
 
+    fn api_call(app: &mut App, method: &str, params: serde_json::Value) -> serde_json::Value {
+        let (reply, _rx) = mpsc::channel();
+        serde_json::from_str(&app.handle_api(&ApiRequest {
+            id: "test".into(),
+            method: method.into(),
+            params,
+            reply,
+        }))
+        .unwrap()
+    }
+
     /// The new-pane cwd resolver hands back the chain of directories that still
     /// exist, in preference order, and never a directory it has already found
     /// missing. Regression for `spawn_cwd`'s old `unwrap_or(root)`, which
@@ -6616,6 +6674,34 @@ mod tests {
             restored.agents_active_only,
             "snapshot restoration reads config instead of snapshot state"
         );
+    }
+
+    #[test]
+    fn stale_named_app_change_does_not_restore_an_old_theme() {
+        let _env = crate::persist::test_env("named-app-config-merge");
+        let initial = crate::config::Config {
+            theme: "gruvbox-light".into(),
+            ..crate::config::Config::default()
+        };
+        crate::config::save(&initial);
+
+        let (alpha_tx, _alpha_rx) = mpsc::channel();
+        let (beta_tx, _beta_rx) = mpsc::channel();
+        let mut alpha = App::new(80, 24, alpha_tx).unwrap();
+        let mut beta = App::new(80, 24, beta_tx).unwrap();
+        assert_eq!(alpha.config.theme, "gruvbox-light");
+        assert_eq!(beta.config.theme, "gruvbox-light");
+
+        alpha.apply_theme("quattro-rally");
+        assert!(beta.set_agents_filter(true));
+
+        let merged = crate::config::load();
+        assert_eq!(merged.theme, "quattro-rally");
+        assert!(merged.agents_active_only);
+
+        let (restarted_tx, _restarted_rx) = mpsc::channel();
+        let restarted = App::new(80, 24, restarted_tx).unwrap();
+        assert_eq!(restarted.config.theme, "quattro-rally");
     }
 
     // A saved pane whose cwd no longer exists (deleted project dir) must not
@@ -7224,6 +7310,220 @@ mod tests {
             .unwrap();
         assert_eq!(sess.agent, "claude");
         assert_eq!(sess.session_id, "abc-123");
+    }
+
+    #[test]
+    fn reported_session_usage_is_validated_ordered_and_scan_safe() {
+        let _env = crate::persist::test_env("reported-session-usage");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let valid = json!({
+            "pane": pane.0.to_string(),
+            "agent": "opencode",
+            "session_id": "ses_live",
+            "usage": {
+                "model": "anthropic/claude-sonnet-4",
+                "tokens_in": 1200,
+                "tokens_out": 340,
+                "cache_read": 800,
+                "cache_write": 40,
+                "cost": 0.42,
+                "updated_at": 1000
+            }
+        });
+        let response = api_call(&mut app, "pane.report_session", valid);
+        assert_eq!(response["result"]["type"], "ok");
+
+        let key = crate::mission::UsageKey::new("opencode", "ses_live");
+        let usage = app.agent_usage.get(&key).unwrap();
+        assert_eq!(
+            (usage.tokens_in, usage.tokens_out, usage.cache),
+            (1200, 340, 840)
+        );
+        assert_eq!(usage.cost, Some(0.42));
+        assert_eq!(app.reported_usage[&key].pane, pane);
+
+        let mut stale = json!({
+            "pane": pane.0.to_string(), "agent": "opencode", "session_id": "ses_live",
+            "usage": {
+                "model": "wrong", "tokens_in": 1, "tokens_out": 1,
+                "cache_read": 0, "cache_write": 0, "cost": 1.0, "updated_at": 999
+            }
+        });
+        let response = api_call(&mut app, "pane.report_session", stale.clone());
+        assert_eq!(response["error"]["code"], "stale_report");
+        assert_eq!(app.agent_usage[&key].tokens_in, 1200);
+
+        stale["usage"]["tokens_in"] = json!(1.5);
+        stale["usage"]["updated_at"] = json!(1001);
+        let response = api_call(&mut app, "pane.report_session", stale);
+        assert_eq!(response["error"]["code"], "invalid_request");
+        assert_eq!(app.agent_usage[&key].tokens_in, 1200);
+
+        app.handle_event(crate::event::AppEvent::UsageScanned {
+            scope: crate::mission::MissionScope::All,
+            scanned: vec![key.clone()],
+            usage: std::collections::HashMap::new(),
+            mtimes: std::collections::HashMap::new(),
+            report_owned: vec![key.clone()],
+        });
+        assert_eq!(app.agent_usage[&key].tokens_in, 1200);
+
+        let response = api_call(
+            &mut app,
+            "pane.report_session",
+            json!({"pane":pane.0.to_string(),"agent":"opencode","session_id":"ses_next"}),
+        );
+        assert_eq!(response["result"]["type"], "ok");
+        assert!(!app.agent_usage.contains_key(&key));
+        assert!(!app.reported_usage.contains_key(&key));
+    }
+
+    #[test]
+    fn late_native_scan_cannot_reclassify_removed_reported_usage() {
+        let _env = crate::persist::test_env("reported-session-late-scan");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let old = crate::mission::UsageKey::new("opencode", "ses_old");
+        let response = api_call(
+            &mut app,
+            "pane.report_session",
+            json!({
+                "pane": pane.0.to_string(),
+                "agent": "opencode",
+                "session_id": "ses_old",
+                "usage": {
+                    "model": "openai/gpt-5",
+                    "tokens_in": 100,
+                    "tokens_out": 20,
+                    "cache_read": 5,
+                    "cache_write": 1,
+                    "cost": 0.01,
+                    "updated_at": 100
+                }
+            }),
+        );
+        assert_eq!(response["result"]["type"], "ok");
+        let stale = app.agent_usage[&old].clone();
+
+        let response = api_call(
+            &mut app,
+            "pane.report_session",
+            json!({
+                "pane": pane.0.to_string(),
+                "agent": "opencode",
+                "session_id": "ses_new"
+            }),
+        );
+        assert_eq!(response["result"]["type"], "ok");
+        assert!(!app.reported_usage.contains_key(&old));
+
+        app.handle_event(crate::event::AppEvent::UsageScanned {
+            scope: crate::mission::MissionScope::All,
+            scanned: vec![old.clone()],
+            usage: [(old.clone(), stale)].into(),
+            mtimes: [(old.clone(), std::time::SystemTime::UNIX_EPOCH)].into(),
+            report_owned: vec![old.clone()],
+        });
+        assert!(!app.agent_usage.contains_key(&old));
+        assert!(!app.usage_mtimes.contains_key(&old));
+    }
+
+    #[test]
+    fn reported_session_rejects_unknown_fields_agents_and_unsafe_ids_without_mutation() {
+        let _env = crate::persist::test_env("reported-session-invalid");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        for params in [
+            json!({"pane":pane.0.to_string(),"agent":"claude","session_id":"ok","extra":true}),
+            json!({"pane":pane.0.to_string(),"agent":"manifest-only","session_id":"ok"}),
+            json!({"pane":pane.0.to_string(),"agent":"claude","session_id":"unsafe id"}),
+            json!({"pane":pane.0.to_string(),"agent":"claude","session_id":""}),
+        ] {
+            let response = api_call(&mut app, "pane.report_session", params);
+            assert!(
+                response.get("error").is_some(),
+                "unexpected response: {response}"
+            );
+            assert!(app.status[&pane].agent_session.is_none());
+        }
+    }
+
+    #[test]
+    fn reported_session_has_one_owner_and_closing_that_pane_prunes_its_usage() {
+        let _env = crate::persist::test_env("reported-session-owner");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.run_cmd(crate::app::keys::Cmd::SplitRight);
+        let panes = app.layout().leaves();
+        assert_eq!(panes.len(), 2);
+        let owner = panes[0];
+        let other = panes[1];
+        let payload = |pane: PaneId| {
+            json!({
+                "pane": pane.0.to_string(),
+                "agent": "opencode",
+                "session_id": "ses_owned",
+                "usage": {
+                    "model": "openai/gpt-5",
+                    "tokens_in": 10,
+                    "tokens_out": 5,
+                    "cache_read": 2,
+                    "cache_write": 1,
+                    "cost": 0.01,
+                    "updated_at": 100
+                }
+            })
+        };
+
+        assert_eq!(
+            api_call(&mut app, "pane.report_session", payload(owner))["result"]["type"],
+            "ok"
+        );
+        let key = crate::mission::UsageKey::new("opencode", "ses_owned");
+        let rejected = api_call(&mut app, "pane.report_session", payload(other));
+        assert_eq!(rejected["error"]["code"], "conflict");
+        assert_eq!(app.reported_usage[&key].pane, owner);
+        assert!(app.status[&other].agent_session.is_none());
+
+        app.close_pane(owner);
+        assert!(!app.reported_usage.contains_key(&key));
+        assert!(!app.agent_usage.contains_key(&key));
+    }
+
+    #[test]
+    fn reported_usage_uses_the_same_pricing_override_as_native_usage() {
+        let _env = crate::persist::test_env("reported-session-pricing");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.config
+            .mission_pricing
+            .insert("custom-model".to_string(), [2.0, 8.0, 1.0]);
+        let pane = app.layout().focus;
+        let response = api_call(
+            &mut app,
+            "pane.report_session",
+            json!({
+                "pane": pane.0.to_string(),
+                "agent": "opencode",
+                "session_id": "ses_priced",
+                "usage": {
+                    "model": "provider/custom-model-v1",
+                    "tokens_in": 1_000_000,
+                    "tokens_out": 1_000_000,
+                    "cache_read": 1_000_000,
+                    "cache_write": 0,
+                    "cost": 999.0,
+                    "updated_at": 100
+                }
+            }),
+        );
+        assert_eq!(response["result"]["type"], "ok");
+        let key = crate::mission::UsageKey::new("opencode", "ses_priced");
+        assert_eq!(app.agent_usage[&key].cost, Some(11.0));
     }
 
     #[test]
@@ -11640,6 +11940,7 @@ mod tests {
             )]
             .into(),
             mtimes: [(first.clone(), refreshed)].into(),
+            report_owned: Vec::new(),
         });
         assert_eq!(app.agent_usage[&first].tokens_in, 3);
         assert_eq!(app.agent_usage[&second].tokens_in, 2);
@@ -11655,6 +11956,7 @@ mod tests {
             scanned: vec![first.clone()],
             usage: [(first.clone(), app.agent_usage[&first].clone())].into(),
             mtimes: [(first.clone(), refreshed)].into(),
+            report_owned: Vec::new(),
         });
         assert!(app.agent_usage.contains_key(&first));
         assert!(!app.agent_usage.contains_key(&second));

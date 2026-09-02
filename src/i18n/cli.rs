@@ -2694,6 +2694,8 @@ static TEXT: &[Translation] = &[
         "사용 중인 테마"),
     tr!("applies when Luvus starts", "se aplica cuando Luvus se inicia", "aplica quando o Luvus iniciar", "s'applique au démarrage de Luvus", "wird beim Start von Luvus angewendet", "berlaku saat Luvus dimulai", "将在 Luvus 启动时应用", "Luvus 起動時に適用されます",
         "Luvus 시작 시 적용됨"),
+    tr!("could not save the theme selection", "no se pudo guardar la selección del tema", "não foi possível salvar a seleção do tema", "impossible d’enregistrer la sélection du thème", "Theme-Auswahl konnte nicht gespeichert werden", "pilihan tema tidak dapat disimpan", "无法保存主题选择", "テーマの選択を保存できませんでした",
+        "테마 선택을 저장할 수 없습니다"),
     tr!("uninstalled", "desinstalado", "desinstalado", "désinstallé", "deinstalliert", "dihapus", "已卸载", "アンインストール済み",
         "제거됨"),
     tr!("reloaded", "recargados", "recarregados", "rechargés", "neu geladen", "dimuat ulang", "已重新加载", "再読み込みしました",

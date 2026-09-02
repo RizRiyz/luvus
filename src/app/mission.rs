@@ -7,6 +7,30 @@ use super::*;
 use crate::mission::{MissionRow, MissionRowView, MissionScope, MissionUsageRequest};
 
 impl App {
+    /// Remove integration usage whose owning pane is gone or no longer bound
+    /// to the same agent session. This is event-driven and bounded by the
+    /// reported cache size; it adds no idle scan or timer.
+    pub(crate) fn prune_reported_usage(&mut self) {
+        let stale = self
+            .reported_usage
+            .iter()
+            .filter_map(|(key, owner)| {
+                let live = self.panes.contains_key(&owner.pane)
+                    && self.status.get(&owner.pane).is_some_and(|status| {
+                        status.agent_session.as_ref().is_some_and(|session| {
+                            session.agent == key.agent && session.session_id == key.session_id
+                        })
+                    });
+                (!live).then_some(key.clone())
+            })
+            .collect::<Vec<_>>();
+        for key in stale {
+            self.reported_usage.remove(&key);
+            self.agent_usage.remove(&key);
+            self.usage_mtimes.remove(&key);
+        }
+    }
+
     /// Structured Mission Control data for automation. This deliberately omits
     /// native session identifiers and blocked-output snippets: the read scope
     /// exposes the same operational summary as the dashboard, not credentials
