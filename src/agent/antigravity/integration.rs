@@ -78,19 +78,9 @@ fn managed_block(command: &str) -> Value {
 }
 
 fn block_is_managed(block: &Value) -> bool {
-    block
-        .get("PreInvocation")
-        .and_then(Value::as_array)
-        .is_some_and(|handlers| {
-            handlers.iter().any(|handler| {
-                handler
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .is_some_and(|command| {
-                        command.contains("luvus-agent-hook") || command.contains("bohay-agent-hook")
-                    })
-            })
-        })
+    hook_command(&script_path())
+        .map(|command| block == &managed_block(&command))
+        .unwrap_or(false)
 }
 
 fn read_config(path: &Path) -> Result<Value> {
@@ -166,17 +156,19 @@ fn hook_params(input: &[u8], pane: &str) -> Option<Value> {
     }))
 }
 
-fn read_hook_input() -> Option<Vec<u8>> {
-    let stdin = io::stdin();
-    let mut stdin = stdin.lock();
+fn read_hook_input_from(reader: &mut impl Read) -> Option<Vec<u8>> {
     let mut input = Vec::new();
-    let mut limited = (&mut stdin).take(MAX_HOOK_PAYLOAD + 1);
+    let mut limited = reader.take(MAX_HOOK_PAYLOAD + 1);
     limited.read_to_end(&mut input).ok()?;
     if input.len() as u64 > MAX_HOOK_PAYLOAD {
-        let _ = io::copy(&mut stdin, &mut io::sink());
         return None;
     }
     Some(input)
+}
+
+fn read_hook_input() -> Option<Vec<u8>> {
+    let stdin = io::stdin();
+    read_hook_input_from(&mut stdin.lock())
 }
 
 fn run_hook() -> i32 {
@@ -279,6 +271,37 @@ mod tests {
         assert_eq!(fs::read_to_string(&config).unwrap(), collision);
         assert!(!script_path().exists());
 
+        let substring_collision = r#"{"luvus":{"PreInvocation":[{"type":"command","command":"echo luvus-agent-hook.sh","timeout":5}]}}"#;
+        fs::write(&config, substring_collision).unwrap();
+        assert!(install().is_err());
+        assert_eq!(fs::read_to_string(&config).unwrap(), substring_collision);
+        assert!(!script_path().exists());
+
+        let command = hook_command(&script_path()).unwrap();
+        let mixed_handlers = json!({
+            (BLOCK_NAME): {
+                "PreInvocation": [
+                    {
+                        "type": "command",
+                        "command": command,
+                        "timeout": HOOK_TIMEOUT_SECONDS,
+                    },
+                    {
+                        "type": "command",
+                        "command": "echo user-owned",
+                    },
+                ],
+            },
+        });
+        fs::write(
+            &config,
+            serde_json::to_string_pretty(&mixed_handlers).unwrap(),
+        )
+        .unwrap();
+        assert!(install().is_err());
+        assert_eq!(read_config(&config).unwrap(), mixed_handlers);
+        assert!(!script_path().exists());
+
         std::env::remove_var("ANTIGRAVITY_CLI_CONFIG_DIR");
         let _ = fs::remove_dir_all(root);
     }
@@ -296,5 +319,40 @@ mod tests {
         assert!(params.get("transcriptPath").is_none());
         assert!(hook_params(br#"{"conversationId":"bad id"}"#, "42").is_none());
         assert!(hook_params(&vec![b'x'; MAX_HOOK_PAYLOAD as usize + 1], "42").is_none());
+    }
+
+    #[test]
+    fn managed_block_requires_the_exact_generated_shape() {
+        let _env = crate::persist::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = temp_root("ownership");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        std::env::set_var("ANTIGRAVITY_CLI_CONFIG_DIR", &root);
+
+        let command = hook_command(&script_path()).unwrap();
+        let generated = managed_block(&command);
+        assert!(block_is_managed(&generated));
+
+        let mut mixed = generated.clone();
+        mixed["PreInvocation"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type": "command", "command": "echo user-owned"}));
+        assert!(!block_is_managed(&mixed));
+
+        let collision = managed_block(&format!("echo {SCRIPT_NAME}"));
+        assert!(!block_is_managed(&collision));
+
+        std::env::remove_var("ANTIGRAVITY_CLI_CONFIG_DIR");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn oversized_hook_input_stops_at_the_bound() {
+        let mut input = io::Cursor::new(vec![b'x'; MAX_HOOK_PAYLOAD as usize + 64]);
+        assert!(read_hook_input_from(&mut input).is_none());
+        assert_eq!(input.position(), MAX_HOOK_PAYLOAD + 1);
     }
 }
