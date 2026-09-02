@@ -1,0 +1,25 @@
+# Official Luvus detection manifest for Antigravity CLI.
+# This provides detection-only compatibility to older identity-enabled Luvus
+# versions; native launch, session, resume, and integration support still ships
+# in the Luvus binary.
+agent = "antigravity"
+
+[identity]
+distinct = ["antigravity-cli"]
+ambiguous = ["agy"]
+
+# Antigravity's permission panel identifies both the pending operation and its
+# proceed control. Requiring both avoids matching ordinary transcript prose.
+[[rule]]
+state = "blocked"
+priority = 320
+region = "screen"
+all = ["requesting permission for:", "proceed"]
+
+# The live CLI uses a spinner while a model turn is active. Restrict the rule to
+# Antigravity so unrelated terminal animation cannot affect another agent.
+[[rule]]
+state = "working"
+priority = 200
+region = "screen"
+spinner = true
