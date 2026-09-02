@@ -1924,11 +1924,11 @@ impl App {
                 return;
             }
             MouseEventKind::Up(MouseButton::Left) | MouseEventKind::Up(MouseButton::Middle) => {
-                // A double-click already copied and highlighted on its press; its
-                // release keeps that selection rather than re-copying it or
-                // clearing it the way a plain click would.
+                // A double-click already copied on its press; clear its highlight on
+                // release so it behaves like a drag copy (toast is the feedback).
                 if self.dbl_click_release {
                     self.dbl_click_release = false;
+                    self.selection = None;
                     return;
                 }
                 if let Some(p) = self.link_press.take() {
@@ -1964,11 +1964,14 @@ impl App {
                 }
                 // A real drag copies its text + flashes a toast; a plain click
                 // clears the (1-cell) selection so nothing stays highlighted.
+                // After a successful copy the highlight is also cleared immediately
+                // — the toast is the feedback, not a lingering selection.
                 match self.selection_text() {
                     Some(text) => {
                         self.pending_clipboard = Some(text);
                         let msg = self.catalog.copied;
                         self.show_toast(msg);
+                        self.selection = None;
                     }
                     None => self.selection = None,
                 }
@@ -3114,7 +3117,49 @@ impl App {
             // column the underline lands on (or which cells Ctrl-click opens).
             engine.visible_rows_aligned()
         };
-        let link = crate::links::link_at(rows.rows(), col - content.x, row - content.y)?;
+        let grid_col = col - content.x;
+        let grid_row = row - content.y;
+
+        // OSC 8 carries an authoritative target which can differ from the label
+        // Claude and other terminal programs render. Preserve it rather than
+        // reclassifying a visible filename as a website. An unsupported or
+        // malformed target is deliberately inert and never falls back to the
+        // label, since that would undo the safety boundary.
+        if let Some(hyperlink) = rows.hyperlink_at(grid_row, grid_col) {
+            let uri = hyperlink.uri();
+            let visible = crate::links::link_at(rows.rows(), grid_col, grid_row);
+            let line = visible.as_ref().and_then(|link| match &link.hit {
+                crate::links::Hit::Path { line, .. } => *line,
+                crate::links::Hit::Url(_) => None,
+            });
+            let (hit, target) = if let Some(path) = crate::links::file_uri_path(uri) {
+                if !path.is_file() {
+                    return None;
+                }
+                (
+                    crate::links::Hit::Path {
+                        raw: uri.to_string(),
+                        text: path.to_string_lossy().into_owned(),
+                        line,
+                    },
+                    LinkTarget::File { path, line },
+                )
+            } else if crate::platform::is_openable_url(uri) {
+                (
+                    crate::links::Hit::Url(uri.to_string()),
+                    LinkTarget::Url(uri.to_string()),
+                )
+            } else {
+                return None;
+            };
+            let link = crate::links::Link {
+                hit,
+                spans: hyperlink.spans().to_vec(),
+            };
+            return Some(HoverLink { pane, link, target });
+        }
+
+        let link = crate::links::link_at(rows.rows(), grid_col, grid_row)?;
         let target = match &link.hit {
             crate::links::Hit::Url(u) => {
                 crate::platform::is_openable_url(u).then(|| LinkTarget::Url(u.clone()))?
@@ -5301,6 +5346,35 @@ mod link_click_tests {
         (app, term, (content.x + at, content.y))
     }
 
+    /// A fixture whose visible label and OSC 8 target intentionally differ.
+    fn fixture_showing_osc8(
+        label: &str,
+        uri: &str,
+        at: u16,
+    ) -> (App, Terminal<TestBackend>, (u16, u16)) {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let pane = app.layout().focus;
+        let sequence = format!("\x1b[H\x1b[2J\x1b]8;id=agent;{uri}\x1b\\{label}\x1b]8;;\x1b\\\r\n");
+        app.panes
+            .get(&pane)
+            .unwrap()
+            .engine
+            .lock()
+            .unwrap()
+            .advance(sequence.as_bytes());
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(p, _)| *p == pane)
+            .map(|(_, r)| *r)
+            .expect("pane content rect");
+        (app, term, (content.x + at, content.y))
+    }
+
     fn double_click(app: &mut App, at: (u16, u16)) {
         app.handle_event(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -5350,6 +5424,58 @@ mod link_click_tests {
         let (app, id, tabs) = click_cargo_toml(KeyModifiers::CONTROL);
         assert_eq!(app.ws().tabs.len(), tabs, "no new tab");
         assert!(app.preview_views.contains(&id), "it is the preview pane");
+    }
+
+    #[test]
+    fn osc8_file_target_overrides_a_domain_shaped_label() {
+        let _env = crate::persist::test_env("link-osc8-file");
+        let path = std::env::current_dir().unwrap().join("Cargo.toml");
+        let uri = format!("file://{}", path.display());
+        let (app, _term, at) = fixture_showing_osc8("luvus.dev", &uri, 2);
+
+        match app.link_at_screen(at.0, at.1).map(|hover| hover.target) {
+            Some(LinkTarget::File {
+                path: target,
+                line: None,
+            }) => assert_eq!(target, path),
+            other => panic!("OSC 8 file target must win over its label, got {other:?}"),
+        }
+        assert!(app.pending_open_url.is_none());
+    }
+
+    #[test]
+    fn osc8_file_label_preserves_a_visible_line_number() {
+        let _env = crate::persist::test_env("link-osc8-line");
+        let path = std::env::current_dir().unwrap().join("Cargo.toml");
+        let uri = format!("file://{}", path.display());
+        let (app, _term, at) = fixture_showing_osc8("Cargo.toml:42", &uri, 3);
+
+        assert!(matches!(
+            app.link_at_screen(at.0, at.1).map(|hover| hover.target),
+            Some(LinkTarget::File {
+                path: target,
+                line: Some(42)
+            }) if target == path
+        ));
+    }
+
+    #[test]
+    fn unsupported_osc8_target_is_inert_without_label_fallback() {
+        let _env = crate::persist::test_env("link-osc8-inert");
+        let (app, _term, at) = fixture_showing_osc8("luvus.dev", "vscode://file/repo/main.rs", 2);
+
+        assert_eq!(app.link_at_screen(at.0, at.1), None);
+    }
+
+    #[test]
+    fn http_osc8_target_opens_even_when_its_label_looks_like_a_file() {
+        let _env = crate::persist::test_env("link-osc8-http");
+        let (app, _term, at) = fixture_showing_osc8("Cargo.toml", "https://example.com/actual", 2);
+
+        assert_eq!(
+            app.link_at_screen(at.0, at.1).map(|hover| hover.target),
+            Some(LinkTarget::Url("https://example.com/actual".into()))
+        );
     }
 
     /// `Open in tab` is the other click behavior, and the only placement that

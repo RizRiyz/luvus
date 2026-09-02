@@ -1,3 +1,7 @@
 {
-  "files": ["claude.toml"]
+  "files": [
+    "antigravity.toml",
+    "claude.toml",
+    "gemini.toml"
+  ]
 }

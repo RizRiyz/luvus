@@ -5,18 +5,48 @@
 
 pub mod alacritty;
 
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use ratatui::style::{Color, Modifier};
 
 use crate::terminal::appearance::PaneAppearance;
-use crate::terminal::pty::InputAction;
+use crate::terminal::pty::InputSender;
 
 /// Internal continuation marker used by [`VtEngine::visible_rows_aligned`].
 /// A terminal never renders NUL as text, so it can represent the second cell of
 /// a wide glyph without being confused with an actual space between words.
 pub(crate) const ALIGNED_WIDE_CELL: char = '\0';
+
+const MAX_TERMINAL_HYPERLINK_URI_BYTES: usize = 4_096;
+const MAX_TERMINAL_HYPERLINK_ID_BYTES: usize = 256;
+
+/// One OSC 8 hyperlink retained by the terminal engine.
+///
+/// The URI is engine-neutral and its spans use visible grid coordinates. This
+/// metadata is materialized only for deliberate text/link gestures, never for
+/// ordinary rendering or agent detection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalHyperlink {
+    id: String,
+    uri: String,
+    spans: Vec<(u16, u16, u16)>,
+}
+
+impl TerminalHyperlink {
+    pub(crate) fn uri(&self) -> &str {
+        &self.uri
+    }
+
+    pub(crate) fn spans(&self) -> &[(u16, u16, u16)] {
+        &self.spans
+    }
+
+    fn covers(&self, row: u16, col: u16) -> bool {
+        self.spans
+            .iter()
+            .any(|(span_row, start, end)| *span_row == row && col >= *start && col < *end)
+    }
+}
 
 /// Visible terminal text indexed one character per grid cell, plus the sparse
 /// zero-width components attached to base cells. Keeping the latter separate
@@ -25,6 +55,7 @@ pub(crate) const ALIGNED_WIDE_CELL: char = '\0';
 pub struct AlignedRows {
     rows: Vec<String>,
     zero_width: Vec<(u16, u16, Vec<char>)>,
+    hyperlinks: Vec<TerminalHyperlink>,
 }
 
 impl AlignedRows {
@@ -32,6 +63,7 @@ impl AlignedRows {
         Self {
             rows: vec![String::new(); row_count],
             zero_width: Vec::new(),
+            hyperlinks: Vec::new(),
         }
     }
 
@@ -40,6 +72,7 @@ impl AlignedRows {
         Self {
             rows,
             zero_width: Vec::new(),
+            hyperlinks: Vec::new(),
         }
     }
 
@@ -58,6 +91,47 @@ impl AlignedRows {
 
     pub(crate) fn rows(&self) -> &[String] {
         &self.rows
+    }
+
+    pub(crate) fn push_hyperlink_cell(&mut self, row: u16, col: u16, id: &str, uri: &str) {
+        if uri.is_empty()
+            || uri.len() > MAX_TERMINAL_HYPERLINK_URI_BYTES
+            || id.len() > MAX_TERMINAL_HYPERLINK_ID_BYTES
+            || uri.chars().any(char::is_control)
+            || id.chars().any(char::is_control)
+        {
+            return;
+        }
+        let hyperlink = match self
+            .hyperlinks
+            .iter_mut()
+            .rev()
+            .find(|hyperlink| hyperlink.id == id && hyperlink.uri == uri)
+        {
+            Some(hyperlink) => hyperlink,
+            None => {
+                self.hyperlinks.push(TerminalHyperlink {
+                    id: id.to_string(),
+                    uri: uri.to_string(),
+                    spans: Vec::new(),
+                });
+                self.hyperlinks
+                    .last_mut()
+                    .expect("the terminal hyperlink was just inserted")
+            }
+        };
+        match hyperlink.spans.last_mut() {
+            Some((span_row, _, end)) if *span_row == row && *end == col => {
+                *end = col.saturating_add(1)
+            }
+            _ => hyperlink.spans.push((row, col, col.saturating_add(1))),
+        }
+    }
+
+    pub(crate) fn hyperlink_at(&self, row: u16, col: u16) -> Option<&TerminalHyperlink> {
+        self.hyperlinks
+            .iter()
+            .find(|hyperlink| hyperlink.covers(row, col))
     }
 
     pub(crate) fn zero_width_at(&self, row: u16, col: u16) -> &[char] {
@@ -88,10 +162,11 @@ pub(crate) fn create_engine(
     kind: VtEngineKind,
     cols: u16,
     rows: u16,
-    resp_tx: Sender<InputAction>,
+    resp_tx: impl Into<InputSender>,
     history_budget_bytes: usize,
     appearance: PaneAppearance,
 ) -> Arc<Mutex<dyn VtEngine>> {
+    let resp_tx = resp_tx.into();
     match kind {
         VtEngineKind::Alacritty => {
             Arc::new(Mutex::new(alacritty::AlacrittyEngine::with_appearance(
@@ -109,17 +184,59 @@ pub(crate) fn create_engine(
 /// trait surface stays free of engine-specific types. The cell's *symbol* (its
 /// grapheme cluster) is passed alongside as a `&str`, not stored here, so the
 /// common one-char case needs no per-cell allocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RenderCell {
     pub fg: Color,
     pub bg: Color,
     pub mods: Modifier,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cursor {
     pub x: u16,
     pub y: u16,
     pub visible: bool,
+}
+
+/// One owned terminal cell captured at a render boundary. Ordinary cells keep
+/// only their scalar value; reusable suffix storage preserves the rare
+/// combining, variation-selector, or joined-glyph case. The VT lock is released
+/// before the UI projects this data into client buffers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DamageCell {
+    pub column: u16,
+    pub character: char,
+    pub zero_width: Vec<char>,
+    pub style: RenderCell,
+}
+
+/// A complete visible terminal row affected by the latest output generation.
+///
+/// Alacritty records narrower column bounds, but Luvus snapshots a complete
+/// damaged row. This keeps wide-character bases, spacer cells, cleared tails,
+/// and combining sequences correct while still avoiding work for every other
+/// visible row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DamageRow {
+    pub row: u16,
+    pub cells: Vec<DamageCell>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DamageKind {
+    Full,
+    Partial,
+}
+
+/// Engine-neutral terminal damage captured under the VT lock.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DamageSnapshot {
+    pub generation: u64,
+    pub kind: DamageKind,
+    pub cursor: Cursor,
+    pub composer_region: Option<CodexComposerRegion>,
+    pub scroll_offset: usize,
+    pub rows: Vec<DamageRow>,
 }
 
 /// Visible rows occupied by Codex's composer, including its blank padding rows.
@@ -212,6 +329,20 @@ pub trait VtEngine: Send {
     /// so emoji and accented text render whole. Wide-char spacer cells are
     /// skipped by the implementation.
     fn for_each_cell(&self, f: &mut dyn FnMut(u16, u16, &str, RenderCell));
+
+    /// Capture owned visible rows affected since the last acknowledged render.
+    /// Implementations may conservatively return [`DamageKind::Full`].
+    fn damage_snapshot(&mut self) -> DamageSnapshot;
+
+    /// Forget damage through `generation` only when no newer output exists.
+    /// Returns `true` when the acknowledgement was accepted. A rejected
+    /// acknowledgement must preserve all damage so a later frame can safely
+    /// repeat work rather than lose output.
+    fn acknowledge_damage(&mut self, generation: u64) -> bool;
+
+    /// Return owned row and cell storage after the caller has finished using a
+    /// snapshot. Implementations may retain a bounded pool or simply drop it.
+    fn recycle_damage_snapshot(&mut self, snapshot: DamageSnapshot);
 
     /// Bottom `n` rows of the visible grid, for agent detection. Independent of
     /// the user's scroll position.

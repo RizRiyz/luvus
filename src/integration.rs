@@ -7,7 +7,9 @@
 //! process/screen detection; they are never required for sidebar recognition.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
@@ -60,6 +62,9 @@ pub fn run(args: &[String], context: crate::i18n::cli::Context) -> Result<i32> {
         args.get(2).map(String::as_str),
         args.get(3).map(String::as_str),
     ) {
+        (Some("hook"), Some(agent)) => hook_operation(agent)
+            .map(|hook| hook())
+            .ok_or_else(|| anyhow!("unsupported integration hook")),
         (Some("install"), Some(agent)) if operation(agent).is_some() => {
             install(agent)?;
             println!(
@@ -98,6 +103,55 @@ pub fn run(args: &[String], context: crate::i18n::cli::Context) -> Result<i32> {
 
 pub(crate) fn home() -> PathBuf {
     crate::platform::home_dir().unwrap_or_default()
+}
+
+static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Serialize JSON into a same-directory temporary file, sync it, and atomically
+/// replace `path`. A failed write or replacement leaves the previous file
+/// untouched and removes the incomplete temporary file.
+pub(crate) fn write_json_atomic(path: &Path, value: &Value) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("configuration path has no parent"))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("configuration filename is not valid Unicode"))?;
+    let output = serde_json::to_vec_pretty(value)?;
+
+    let (temporary, mut file) = (0..16)
+        .find_map(|_| {
+            let sequence = ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let temporary = parent.join(format!(
+                ".{file_name}.luvus-{}-{sequence}.tmp",
+                std::process::id()
+            ));
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+            {
+                Ok(file) => Some(Ok((temporary, file))),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .transpose()?
+        .ok_or_else(|| anyhow!("could not reserve a temporary configuration file"))?;
+
+    let result = (|| -> Result<()> {
+        file.write_all(&output)?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        crate::platform::atomic_replace_file(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 /// Where + how an agent's shell hook is configured (docs/23). `file` is the JSON
@@ -153,6 +207,10 @@ pub fn agent_at(index: usize) -> Option<&'static str> {
 
 fn operation(agent: &str) -> Option<crate::agent::types::IntegrationOperations> {
     crate::agent::registry::find(agent)?.integration
+}
+
+fn hook_operation(agent: &str) -> Option<fn() -> i32> {
+    operation(agent)?.hook
 }
 
 /// Install the integration for `agent` (used by the Settings tab + CLI).
@@ -306,6 +364,54 @@ mod tests {
 
     fn omp_extension() -> &'static str {
         crate::agent::omp::extension_source()
+    }
+
+    #[test]
+    fn internal_hook_dispatch_is_owned_by_the_agent_descriptor() {
+        assert!(operation("antigravity")
+            .and_then(|operations| operations.hook)
+            .is_some());
+        assert!(operation("agy")
+            .and_then(|operations| operations.hook)
+            .is_some());
+        assert!(operation("claude")
+            .and_then(|operations| operations.hook)
+            .is_none());
+    }
+
+    #[test]
+    fn atomic_json_write_replaces_complete_files_and_cleans_failed_temps() {
+        let root = std::env::temp_dir().join(format!(
+            "luvus-atomic-json-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let config = root.join("hooks.json");
+        fs::write(&config, r#"{"existing":{"token":"keep"}}"#).unwrap();
+        write_json_atomic(
+            &config,
+            &json!({"existing": {"token": "keep"}, "luvus": {"enabled": true}}),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+        assert_eq!(value["existing"]["token"], "keep");
+        assert_eq!(value["luvus"]["enabled"], true);
+
+        let blocked = root.join("blocked.json");
+        fs::create_dir(&blocked).unwrap();
+        assert!(write_json_atomic(&blocked, &json!({"never": "replace"})).is_err());
+        assert!(blocked.is_dir());
+        assert!(fs::read_dir(&root).unwrap().flatten().all(|entry| {
+            !entry
+                .file_name()
+                .to_string_lossy()
+                .contains(".blocked.json.luvus-")
+        }));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

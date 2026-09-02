@@ -7,6 +7,86 @@
 //! one cell to the token's edges and stops. A pane full of text costs the same
 //! as an empty one, which is what keeps this off the render hot path.
 
+use std::path::PathBuf;
+
+/// Decode an OSC 8 `file://` target into an absolute local path.
+///
+/// Only an empty authority or `localhost` is accepted. Invalid escaping,
+/// control characters, query strings, fragments, and relative paths are
+/// rejected so terminal output cannot hand an arbitrary URI to the OS.
+pub fn file_uri_path(uri: &str) -> Option<PathBuf> {
+    if uri
+        .chars()
+        .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return None;
+    }
+    let rest = uri.strip_prefix("file://")?;
+    if rest.contains(['?', '#']) {
+        return None;
+    }
+    let encoded_path = if rest.starts_with('/') {
+        rest
+    } else {
+        let slash = rest.find('/')?;
+        let authority = &rest[..slash];
+        if !authority.eq_ignore_ascii_case("localhost") {
+            return None;
+        }
+        &rest[slash..]
+    };
+    let decoded = percent_decode_uri_path(encoded_path)?;
+    if decoded.starts_with("//") || decoded.starts_with("\\\\") {
+        return None;
+    }
+
+    #[cfg(windows)]
+    let decoded = {
+        let bytes = decoded.as_bytes();
+        if bytes.len() >= 4
+            && bytes[0] == b'/'
+            && bytes[1].is_ascii_alphabetic()
+            && bytes[2] == b':'
+            && bytes[3] == b'/'
+        {
+            decoded[1..].to_string()
+        } else {
+            decoded
+        }
+    };
+
+    let path = PathBuf::from(decoded);
+    path.is_absolute().then_some(path)
+}
+
+fn percent_decode_uri_path(encoded: &str) -> Option<String> {
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        let high = hex_value(*bytes.get(index + 1)?)?;
+        let low = hex_value(*bytes.get(index + 2)?)?;
+        decoded.push((high << 4) | low);
+        index += 3;
+    }
+    let decoded = String::from_utf8(decoded).ok()?;
+    (!decoded.chars().any(char::is_control)).then_some(decoded)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// What a grid token turned out to be.
 ///
 /// A path is returned **unresolved**: this module does no IO, so whether the file
@@ -317,6 +397,42 @@ pub fn link_at(rows: &[String], col: u16, row: u16) -> Option<Link> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_only_absolute_local_file_uris() {
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                file_uri_path("file:///Users/example/My%20File.rs"),
+                Some(PathBuf::from("/Users/example/My File.rs"))
+            );
+            assert_eq!(
+                file_uri_path("file://localhost/Users/example/main.rs"),
+                Some(PathBuf::from("/Users/example/main.rs"))
+            );
+        }
+        #[cfg(windows)]
+        assert_eq!(
+            file_uri_path("file:///C:/Users/example/main.rs"),
+            Some(PathBuf::from("C:/Users/example/main.rs"))
+        );
+
+        for rejected in [
+            "file://server/share/main.rs",
+            "file:////server/share/main.rs",
+            "file://relative.rs",
+            "file:///bad%2",
+            "file:///bad%GG",
+            "file:///bad%00name",
+            "file:///path.rs?query",
+            "file:///path.rs#fragment",
+            "file:///literal space.rs",
+            "vscode://file/path.rs",
+            "https://example.com/path.rs",
+        ] {
+            assert_eq!(file_uri_path(rejected), None, "accepted {rejected:?}");
+        }
+    }
 
     /// Pad to a fixed width, the way `visible_rows` hands them over.
     fn grid(lines: &[&str], w: usize) -> Vec<String> {

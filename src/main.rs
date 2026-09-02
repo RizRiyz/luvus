@@ -1469,7 +1469,7 @@ fn send_decoded_input(
 }
 
 fn app_event(event: Event) -> Option<AppEvent> {
-    match event {
+    match crate::terminal::host_key::normalize_platform_modifiers(event) {
         Event::Key(k) => Some(AppEvent::Key(k)),
         Event::Mouse(m) => Some(AppEvent::Mouse(m)),
         Event::Resize(_, _) => Some(AppEvent::Resize),

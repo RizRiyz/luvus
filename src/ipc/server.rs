@@ -54,6 +54,11 @@ static CHANGED_PROJECTIONS: AtomicU64 = AtomicU64::new(0);
 static UNCHANGED_PROJECTIONS: AtomicU64 = AtomicU64::new(0);
 static FRAMES_ENQUEUED: AtomicU64 = AtomicU64::new(0);
 static FRAMES_BACKPRESSURED: AtomicU64 = AtomicU64::new(0);
+static FULL_TERMINAL_PROJECTIONS: AtomicU64 = AtomicU64::new(0);
+static PARTIAL_TERMINAL_PROJECTIONS: AtomicU64 = AtomicU64::new(0);
+static RETAINED_RENDER_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_DAMAGE_ROWS: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_DAMAGE_CELLS: AtomicU64 = AtomicU64::new(0);
 static LOOP_EVENT_WAKES: AtomicU64 = AtomicU64::new(0);
 static LOOP_DEADLINE_WAKES: AtomicU64 = AtomicU64::new(0);
 static CAUSE_VISIBLE_PTY: AtomicU64 = AtomicU64::new(0);
@@ -82,6 +87,13 @@ pub fn performance_snapshot() -> serde_json::Value {
         "unchanged_projections": UNCHANGED_PROJECTIONS.load(Ordering::Relaxed),
         "frames_enqueued": FRAMES_ENQUEUED.load(Ordering::Relaxed),
         "frames_backpressured": FRAMES_BACKPRESSURED.load(Ordering::Relaxed),
+        "terminal_projection": {
+            "full": FULL_TERMINAL_PROJECTIONS.load(Ordering::Relaxed),
+            "partial": PARTIAL_TERMINAL_PROJECTIONS.load(Ordering::Relaxed),
+            "fallbacks": RETAINED_RENDER_FALLBACKS.load(Ordering::Relaxed),
+            "damage_rows": TERMINAL_DAMAGE_ROWS.load(Ordering::Relaxed),
+            "damage_cells": TERMINAL_DAMAGE_CELLS.load(Ordering::Relaxed),
+        },
         "render_causes": {
             "visible_pty": CAUSE_VISIBLE_PTY.load(Ordering::Relaxed),
             "background_pty": CAUSE_BACKGROUND_PTY.load(Ordering::Relaxed),
@@ -164,6 +176,10 @@ impl RenderRequest {
         self.causes != 0
     }
 
+    fn is_visible_pty_only(self) -> bool {
+        self.causes == RenderCause::VisiblePty.bit()
+    }
+
     fn clear(&mut self) {
         *self = Self::default();
     }
@@ -212,7 +228,17 @@ struct ClientState {
     last_frame: Option<protocol::FrameData>,
     behind: bool,
     force_full: bool,
+    retained_pane_content: Vec<(crate::ids::PaneId, Rect)>,
+    retained_ready: bool,
     last_activity: u64,
+}
+
+#[derive(Default)]
+struct RenderScratch {
+    damage: HashMap<crate::ids::PaneId, crate::terminal::vt::DamageSnapshot>,
+    generations: HashMap<crate::ids::PaneId, u64>,
+    order: Vec<u64>,
+    dead: Vec<u64>,
 }
 
 impl ClientState {
@@ -232,6 +258,8 @@ impl ClientState {
             last_frame: None,
             behind: false,
             force_full: true,
+            retained_pane_content: Vec::new(),
+            retained_ready: false,
             last_activity,
         }
     }
@@ -381,6 +409,7 @@ pub fn run() -> Result<()> {
 
     let mut clients: Clients = HashMap::new();
     let mut foreground: Option<u64> = None;
+    let mut render_scratch = RenderScratch::default();
     // Geometry last committed to the shared PTYs and interactive hit-test state.
     // Secondary-client projections never change it.
     let mut interactive_size = DEFAULT_SIZE;
@@ -583,6 +612,8 @@ pub fn run() -> Result<()> {
                 &mut foreground,
                 &mut interactive_size,
                 forced,
+                render_request.is_visible_pty_only(),
+                &mut render_scratch,
             );
             render_request.clear();
             // Re-arm the PTY readers now that their output is on screen. A flag
@@ -697,9 +728,10 @@ fn apply(
             }
             let target_size = clients.get(&id).map(|client| client.size);
             if promoted || target_size.is_some_and(|size| size != *interactive_size) {
-                let disconnected = clients
-                    .get_mut(&id)
-                    .is_some_and(|client| render_client(app, client, true, false).disconnected);
+                let no_damage = HashMap::new();
+                let disconnected = clients.get_mut(&id).is_some_and(|client| {
+                    render_client(app, client, true, false, false, &no_damage).disconnected
+                });
                 if disconnected {
                     clients.remove(&id);
                     *foreground = latest_client(clients);
@@ -804,37 +836,166 @@ fn render_clients(
     foreground: &mut Option<u64>,
     interactive_size: &mut (u16, u16),
     force_all: bool,
+    visible_pty_only: bool,
+    scratch: &mut RenderScratch,
 ) -> bool {
     RENDER_PASSES.fetch_add(1, Ordering::Relaxed);
+    if clients.is_empty() {
+        return false;
+    }
     if foreground.is_none_or(|id| !clients.contains_key(&id)) {
         *foreground = latest_client(clients);
         apply_foreground_theme(app, clients, *foreground);
     }
 
-    let mut order: Vec<u64> = clients.keys().copied().collect();
-    order.sort_unstable_by_key(|id| (*foreground != Some(*id), *id));
-    let mut dead = Vec::new();
+    let retained_client_ready = foreground
+        .and_then(|id| clients.get(&id))
+        .is_some_and(|client| {
+            client.retained_ready
+                && !client.force_full
+                && !client.behind
+                && client.last_frame.is_some()
+        });
+    let partial_candidate =
+        visible_pty_only && !force_all && retained_client_ready && ui::retained_pty_eligible(app);
+    if partial_candidate {
+        capture_visible_terminal_damage(app, &mut scratch.damage);
+    } else {
+        capture_visible_terminal_generations(app, &mut scratch.generations);
+    }
+    let partial_pass = partial_candidate
+        && !scratch.damage.is_empty()
+        && scratch
+            .damage
+            .values()
+            .all(|snapshot| snapshot.kind == crate::terminal::vt::DamageKind::Partial);
+
+    scratch.order.clear();
+    scratch.order.extend(clients.keys().copied());
+    scratch
+        .order
+        .sort_unstable_by_key(|id| (*foreground != Some(*id), *id));
+    scratch.dead.clear();
     let mut presented = false;
-    for id in order {
+    for id in scratch.order.iter().copied() {
         let interactive = *foreground == Some(id);
         if let Some(client) = clients.get_mut(&id) {
-            let outcome = render_client(app, client, interactive, force_all);
+            let outcome = render_client(
+                app,
+                client,
+                interactive,
+                force_all,
+                partial_pass,
+                &scratch.damage,
+            );
             presented |= outcome.enqueued;
             if outcome.disconnected {
-                dead.push(id);
+                scratch.dead.push(id);
             } else if interactive {
                 *interactive_size = client.size;
             }
         }
     }
-    for id in dead {
+    for id in scratch.dead.drain(..) {
         clients.remove(&id);
     }
     if foreground.is_some_and(|id| !clients.contains_key(&id)) {
         *foreground = latest_client(clients);
         apply_foreground_theme(app, clients, *foreground);
     }
+    if partial_candidate {
+        acknowledge_visible_terminal_damage(app, &mut scratch.damage);
+    } else {
+        acknowledge_visible_terminal_generations(app, &mut scratch.generations);
+    }
     presented
+}
+
+fn capture_visible_terminal_generations(
+    app: &App,
+    generations: &mut HashMap<crate::ids::PaneId, u64>,
+) {
+    generations.clear();
+    if app.workspaces.is_empty()
+        || app.active_is_git()
+        || app.active_is_orch()
+        || app.active_is_mission()
+    {
+        return;
+    }
+    let pane_ids = app.layout().leaves();
+    generations.reserve(pane_ids.len());
+    for id in pane_ids {
+        let Some(pane) = app.panes.get(&id) else {
+            continue;
+        };
+        if let Ok(engine) = pane.engine.lock() {
+            generations.insert(id, engine.output_generation());
+        }
+    }
+}
+
+fn capture_visible_terminal_damage(
+    app: &App,
+    snapshots: &mut HashMap<crate::ids::PaneId, crate::terminal::vt::DamageSnapshot>,
+) {
+    snapshots.clear();
+    if app.workspaces.is_empty()
+        || app.active_is_git()
+        || app.active_is_orch()
+        || app.active_is_mission()
+    {
+        return;
+    }
+    let pane_ids = app.layout().leaves();
+    snapshots.reserve(pane_ids.len());
+    for id in pane_ids {
+        let Some(pane) = app.panes.get(&id) else {
+            continue;
+        };
+        if let Ok(mut engine) = pane.engine.lock() {
+            let snapshot = engine.damage_snapshot();
+            TERMINAL_DAMAGE_ROWS.fetch_add(snapshot.rows.len() as u64, Ordering::Relaxed);
+            TERMINAL_DAMAGE_CELLS.fetch_add(
+                snapshot
+                    .rows
+                    .iter()
+                    .map(|row| row.cells.len() as u64)
+                    .sum::<u64>(),
+                Ordering::Relaxed,
+            );
+            snapshots.insert(id, snapshot);
+        }
+    }
+}
+
+fn acknowledge_visible_terminal_damage(
+    app: &App,
+    snapshots: &mut HashMap<crate::ids::PaneId, crate::terminal::vt::DamageSnapshot>,
+) {
+    for (id, snapshot) in snapshots.drain() {
+        let Some(pane) = app.panes.get(&id) else {
+            continue;
+        };
+        if let Ok(mut engine) = pane.engine.lock() {
+            let _ = engine.acknowledge_damage(snapshot.generation);
+            engine.recycle_damage_snapshot(snapshot);
+        }
+    }
+}
+
+fn acknowledge_visible_terminal_generations(
+    app: &App,
+    generations: &mut HashMap<crate::ids::PaneId, u64>,
+) {
+    for (id, generation) in generations.drain() {
+        let Some(pane) = app.panes.get(&id) else {
+            continue;
+        };
+        if let Ok(mut engine) = pane.engine.lock() {
+            let _ = engine.acknowledge_damage(generation);
+        }
+    }
 }
 
 /// Render and enqueue one client's next frame. Returns true when its writer is
@@ -844,6 +1005,8 @@ fn render_client(
     client: &mut ClientState,
     interactive: bool,
     force_all: bool,
+    partial_pass: bool,
+    damage: &HashMap<crate::ids::PaneId, crate::terminal::vt::DamageSnapshot>,
 ) -> RenderClientOutcome {
     CLIENT_PROJECTIONS.fetch_add(1, Ordering::Relaxed);
     let area = Rect::new(0, 0, client.size.0, client.size.1);
@@ -851,16 +1014,43 @@ fn render_client(
         client.render_buf = Buffer::empty(area);
         client.last_frame = None;
         client.force_full = true;
-    } else {
-        client.render_buf.reset();
+        client.retained_ready = false;
     }
 
-    let (cursor, cursor_visible) = {
+    let may_patch = partial_pass
+        && interactive
+        && client.retained_ready
+        && !client.force_full
+        && !client.behind
+        && client.last_frame.is_some();
+    let patched = if may_patch {
+        let mut target = ui::RenderTarget::new(&mut client.render_buf, area);
+        ui::patch_terminal_damage(&mut target, app, &client.retained_pane_content, damage)
+            .map(|()| (target.cursor(), target.cursor_visible()))
+            .ok()
+    } else {
+        None
+    };
+
+    let (cursor, cursor_visible) = if let Some(cursor) = patched {
+        PARTIAL_TERMINAL_PROJECTIONS.fetch_add(1, Ordering::Relaxed);
+        cursor
+    } else {
+        if partial_pass {
+            RETAINED_RENDER_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+        }
+        FULL_TERMINAL_PROJECTIONS.fetch_add(1, Ordering::Relaxed);
+        client.render_buf.reset();
         let mut target = ui::RenderTarget::new(&mut client.render_buf, area);
         if interactive {
             ui::render_into(&mut target, app);
+            client
+                .retained_pane_content
+                .clone_from(&app.pane_content_rects);
+            client.retained_ready = true;
         } else {
             ui::render_projection(&mut target, app);
+            client.retained_ready = false;
         }
         (target.cursor(), target.cursor_visible())
     };
@@ -918,6 +1108,7 @@ fn render_client(
         Err(FrameSendError::Full) => {
             FRAMES_BACKPRESSURED.fetch_add(1, Ordering::Relaxed);
             client.behind = true;
+            client.retained_ready = false;
             RenderClientOutcome::default()
         }
         Err(FrameSendError::Disconnected) => RenderClientOutcome {
@@ -1181,14 +1372,16 @@ mod tests {
     use super::{
         apply, broadcast, frame_cadence_ready, frame_wait, record_event_render_request,
         render_clients, ClientSender, ClientState, EventRenderSource, FrameSendError, RenderCause,
-        RenderRequest, FRAME_INTERVAL,
+        RenderRequest, RenderScratch, FRAME_INTERVAL,
     };
     use crate::app::App;
     use crate::event::{AppEvent, ClientInput};
     use crate::ipc::protocol::FrameDiff;
+    use crate::terminal::appearance::PaneAppearance;
+    use crate::terminal::vt::{create_engine, VtEngineKind};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::collections::HashMap;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1220,6 +1413,98 @@ mod tests {
             ServerMessage::FrameDiff(frame) => (frame.width, frame.height),
             _ => panic!("expected rendered frame"),
         }
+    }
+
+    #[test]
+    fn visible_pty_only_frame_uses_retained_rows_after_full_baseline() {
+        let _env = crate::persist::test_env("server-retained-terminal-rows");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(100, 30, app_tx).expect("app starts");
+        app.server_mode = true;
+        let focus = app.layout().focus;
+        let (response_tx, _response_rx) = mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            100,
+            30,
+            response_tx,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes.get_mut(&focus).expect("focused pane").engine = engine.clone();
+
+        let (client, rx) = display_client(100, 30, 1);
+        let mut clients = HashMap::from([(1, client)]);
+        let mut foreground = Some(1);
+        let mut interactive_size = (100, 30);
+        let mut scratch = RenderScratch::default();
+        assert!(render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            false,
+            false,
+            &mut scratch,
+        ));
+        assert!(matches!(rx.recv().unwrap(), ServerMessage::Frame(_)));
+        clients[&1]
+            .sender
+            .frame_pending
+            .store(false, Ordering::Release);
+
+        engine
+            .lock()
+            .expect("engine lock")
+            .advance(b"one changed row");
+        let before = super::PARTIAL_TERMINAL_PROJECTIONS.load(Ordering::Relaxed);
+        assert!(render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            false,
+            true,
+            &mut scratch,
+        ));
+        assert!(matches!(rx.recv().unwrap(), ServerMessage::FrameDiff(_)));
+        assert!(
+            super::PARTIAL_TERMINAL_PROJECTIONS.load(Ordering::Relaxed) > before,
+            "PTY-only render patched the retained client buffer"
+        );
+        assert!(!clients[&1].behind);
+
+        // A slow client may reject the next partial frame. Its retained buffer
+        // is then deliberately abandoned and the next accepted render is a
+        // complete resynchronization, so acknowledging shared VT damage cannot
+        // leave that client permanently behind.
+        engine.lock().expect("engine lock").advance(b" more");
+        assert!(!render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            false,
+            true,
+            &mut scratch,
+        ));
+        assert!(clients[&1].behind);
+        assert!(!clients[&1].retained_ready);
+        clients[&1]
+            .sender
+            .frame_pending
+            .store(false, Ordering::Release);
+        assert!(render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            false,
+            false,
+            &mut scratch,
+        ));
+        assert!(matches!(rx.recv().unwrap(), ServerMessage::Frame(_)));
+        assert!(!clients[&1].behind);
     }
 
     #[test]
@@ -1357,6 +1642,7 @@ mod tests {
         let mut clients = HashMap::from([(1, large), (2, small)]);
         let mut foreground = Some(1);
         let mut interactive_size = (120, 40);
+        let mut scratch = RenderScratch::default();
 
         render_clients(
             &mut app,
@@ -1364,6 +1650,8 @@ mod tests {
             &mut foreground,
             &mut interactive_size,
             false,
+            false,
+            &mut scratch,
         );
 
         assert_eq!(received_frame_size(&large_rx), (120, 40));

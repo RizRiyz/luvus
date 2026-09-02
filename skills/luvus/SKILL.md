@@ -395,6 +395,9 @@ surface:
   optional native session-resume hooks and must not be used merely to make an
   agent appear in the sidebar. Install or remove an integration only when the
   user explicitly requests that lifecycle integration.
+- For Antigravity CLI, `luvus integration install antigravity` adds exact
+  conversation identity for restore. It is session-only; native screen
+  detection remains authoritative for agent state.
 - For Hermes, `luvus integration install hermes` adds exact per-pane session
   ownership while native read-only session discovery remains the fallback.
 - Subscribe to events only for a live monitoring request. Stop when its

@@ -36,9 +36,22 @@ pub fn scan(root: &Path, generation: u64) -> Result<DiffSnapshot, String> {
     let repo_id = digest_path(&common);
     let worktree_id = digest_path(&repo_root);
     let mut files = parse_status(&raw, &repo_id, &worktree_id, &repo_root)?;
+    let mut fingerprint = Sha256::new();
+    fingerprint.update(&raw);
+    for layer in [DiffLayer::Staged, DiffLayer::Worktree] {
+        if !files.iter().any(|file| file.key.layer == layer) {
+            continue;
+        }
+        if let Ok(numstat) = load_numstat(&repo_root, &layer) {
+            fingerprint.update(&numstat);
+            // Counts are useful metadata, but a malformed or unsupported
+            // numstat response must not hide an otherwise valid status list.
+            let _ = apply_numstat(&numstat, &layer, &mut files);
+        }
+    }
     let omitted_files = files.len().saturating_sub(DIFF_FILE_CAP);
     files.truncate(DIFF_FILE_CAP);
-    let fingerprint = digest_bytes(&raw);
+    let fingerprint = format!("{:x}", fingerprint.finalize());
     Ok(DiffSnapshot {
         generation,
         fingerprint,
@@ -50,6 +63,110 @@ pub fn scan(root: &Path, generation: u64) -> Result<DiffSnapshot, String> {
         files,
         omitted_files,
     })
+}
+
+fn load_numstat(root: &Path, layer: &DiffLayer) -> Result<Vec<u8>, String> {
+    let mut args = vec![
+        OsString::from("diff"),
+        OsString::from("--numstat"),
+        OsString::from("-z"),
+        OsString::from("--no-ext-diff"),
+        OsString::from("--no-textconv"),
+        OsString::from("--ignore-submodules=all"),
+        OsString::from("--find-renames"),
+    ];
+    if *layer == DiffLayer::Staged {
+        args.push(OsString::from("--cached"));
+    }
+    run_git_bytes(root, &args, STATUS_BYTE_CAP)
+}
+
+fn apply_numstat(raw: &[u8], layer: &DiffLayer, files: &mut [DiffFile]) -> Result<(), String> {
+    let stats = parse_numstat(raw)?;
+    let by_path: HashMap<_, _> = stats
+        .into_iter()
+        .map(|stat| ((stat.old_path, stat.new_path), stat.counts))
+        .collect();
+
+    for file in files.iter_mut().filter(|file| &file.key.layer == layer) {
+        let Some(new_path) = file.key.new_path.as_ref().or(file.key.old_path.as_ref()) else {
+            continue;
+        };
+        let old_path = file.key.old_path.as_ref().unwrap_or(new_path);
+        let counts = by_path
+            .get(&(old_path.clone(), new_path.clone()))
+            .or_else(|| {
+                (*layer == DiffLayer::Worktree && old_path != new_path)
+                    .then(|| by_path.get(&(new_path.clone(), new_path.clone())))
+                    .flatten()
+            });
+        if let Some((additions, deletions)) = counts {
+            file.additions = *additions;
+            file.deletions = *deletions;
+            file.binary = additions.is_none() && deletions.is_none();
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct NumStat {
+    old_path: RepoPath,
+    new_path: RepoPath,
+    counts: (Option<u32>, Option<u32>),
+}
+
+fn parse_numstat(raw: &[u8]) -> Result<Vec<NumStat>, String> {
+    let mut rest = raw;
+    let mut stats = Vec::new();
+    while !rest.is_empty() {
+        let (additions, after_additions) = take_numstat_field(rest, b'\t')?;
+        let (deletions, after_deletions) = take_numstat_field(after_additions, b'\t')?;
+        let (path, after_path) = take_numstat_field(after_deletions, 0)?;
+        let (old_path, new_path, next) = if path.is_empty() {
+            // With `-z`, rename/copy records use an empty first pathname,
+            // followed by separate NUL-terminated source and destination names.
+            let (old, after_old) = take_numstat_field(after_path, 0)?;
+            let (new, after_new) = take_numstat_field(after_old, 0)?;
+            (
+                repo_path_from_bytes(old)?,
+                repo_path_from_bytes(new)?,
+                after_new,
+            )
+        } else {
+            let path = repo_path_from_bytes(path)?;
+            (path.clone(), path, after_path)
+        };
+        stats.push(NumStat {
+            old_path,
+            new_path,
+            counts: (
+                parse_numstat_count(additions)?,
+                parse_numstat_count(deletions)?,
+            ),
+        });
+        rest = next;
+    }
+    Ok(stats)
+}
+
+fn take_numstat_field(input: &[u8], delimiter: u8) -> Result<(&[u8], &[u8]), String> {
+    let end = input
+        .iter()
+        .position(|byte| *byte == delimiter)
+        .ok_or_else(|| "truncated Git numstat record".to_string())?;
+    Ok((&input[..end], &input[end + 1..]))
+}
+
+fn parse_numstat_count(value: &[u8]) -> Result<Option<u32>, String> {
+    if value == b"-" {
+        return Ok(None);
+    }
+    let value = std::str::from_utf8(value)
+        .map_err(|_| "Git numstat count is not ASCII".to_string())?
+        .parse::<u32>()
+        .map_err(|_| "invalid Git numstat count".to_string())?;
+    Ok(Some(value))
 }
 
 fn parse_status(
@@ -690,6 +807,22 @@ mod tests {
     }
 
     #[test]
+    fn parses_numstat_paths_renames_and_binary_files() {
+        let raw = b"12\t3\tsrc/main.rs\0\
+                    1\t0\t\0old name.rs\0new name.rs\0\
+                    -\t-\timage.png\0";
+        let stats = parse_numstat(raw).unwrap();
+
+        assert_eq!(stats.len(), 3);
+        assert_eq!(stats[0].new_path.display, "src/main.rs");
+        assert_eq!(stats[0].counts, (Some(12), Some(3)));
+        assert_eq!(stats[1].old_path.display, "old name.rs");
+        assert_eq!(stats[1].new_path.display, "new name.rs");
+        assert_eq!(stats[1].counts, (Some(1), Some(0)));
+        assert_eq!(stats[2].counts, (None, None));
+    }
+
+    #[test]
     fn parses_patch_line_numbers() {
         let file = DiffFile {
             key: DiffKey {
@@ -814,6 +947,8 @@ mod tests {
             .iter()
             .find(|file| file.key.layer == DiffLayer::Worktree)
             .unwrap();
+        assert_eq!((staged.additions, staged.deletions), (Some(1), Some(1)));
+        assert_eq!((worktree.additions, worktree.deletions), (Some(1), Some(1)));
         let staged_diff = load_diff(&snapshot.repo_root, staged, 3).unwrap();
         let worktree_diff = load_diff(&snapshot.repo_root, worktree, 3).unwrap();
         assert!(staged_diff
@@ -827,6 +962,27 @@ mod tests {
             .flat_map(|h| &h.lines)
             .any(|line| line.text == "worktree"));
         assert_eq!(before, repo.git(&["status", "--porcelain=v2", "-z"]));
+    }
+
+    #[test]
+    fn real_repo_matches_worktree_counts_after_staged_rename() {
+        let repo = TestRepo::new("staged-rename-worktree-edit");
+        std::fs::write(repo.0.join("old.txt"), "base\n").unwrap();
+        repo.git(&["add", "old.txt"]);
+        repo.git(&["commit", "-qm", "base"]);
+        repo.git(&["mv", "old.txt", "new.txt"]);
+        std::fs::write(repo.0.join("new.txt"), "base\nworktree\n").unwrap();
+
+        let snapshot = scan(&repo.0, 1).unwrap();
+        let worktree = snapshot
+            .files
+            .iter()
+            .find(|file| file.key.layer == DiffLayer::Worktree)
+            .unwrap();
+
+        assert_eq!(worktree.key.old_path.as_ref().unwrap().display, "old.txt");
+        assert_eq!(worktree.key.new_path.as_ref().unwrap().display, "new.txt");
+        assert_eq!((worktree.additions, worktree.deletions), (Some(1), Some(0)));
     }
 
     #[test]

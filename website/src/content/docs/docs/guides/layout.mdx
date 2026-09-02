@@ -245,6 +245,10 @@ same as `Shift`+click on a FILES row.
 read-only tab placements. A configured terminal editor opens the file at the
 top, because line-jump arguments differ between editors.
 
+When an agent such as Claude prints a terminal file hyperlink, luvus uses its
+validated local file target rather than guessing from the visible label. It
+then follows the same **File click behavior** and **Open files with** settings.
+
 **A path only underlines if the file is really there.** Paths are resolved against
 that pane's working directory, so `src/main.rs` means what it means to the shell
 you are looking at. Text that merely looks like a path stays inert, and so do

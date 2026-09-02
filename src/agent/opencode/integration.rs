@@ -10,6 +10,7 @@ pub(super) const OPERATIONS: IntegrationOperations = IntegrationOperations {
     install,
     uninstall,
     is_installed,
+    hook: None,
 };
 
 const PLUGIN: &str = r#"// luvus opencode integration (docs/23) — reports the session id for native resume.
