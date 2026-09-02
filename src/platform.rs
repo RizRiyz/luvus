@@ -5,6 +5,27 @@ use std::path::{Path, PathBuf};
 #[cfg(windows)]
 mod windows;
 
+#[cfg(target_os = "macos")]
+mod macos;
+
+/// Whether the physical Option modifier is currently held by the local user.
+///
+/// Some macOS terminal emulators consume Option while translating Backspace,
+/// leaving Crossterm with an indistinguishable plain Backspace event. Querying
+/// the combined session flags at that narrow boundary lets the client restore
+/// Option without changing terminal configuration or globally intercepting
+/// keyboard input. Other platforms already report Alt through their terminal
+/// or console event and deliberately return false here.
+#[cfg(target_os = "macos")]
+pub fn option_modifier_pressed() -> bool {
+    macos::option_modifier_pressed()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn option_modifier_pressed() -> bool {
+    false
+}
+
 /// Do two paths name the same folder? (docs/43 WIN-6.)
 ///
 /// Node lookup used to compare `PathBuf`s with `==`, so any difference in
