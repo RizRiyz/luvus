@@ -968,6 +968,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     }
 
     let cursor = if settings_hits.is_some()
+        || app.search.is_some()
         || picker_open
         || app.bar.overflow.is_some()
         || app.help_open
