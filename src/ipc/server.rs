@@ -533,9 +533,11 @@ pub fn run() -> Result<()> {
         if let Some(url) = app.pending_open_url.take() {
             broadcast(&mut clients, ServerMessage::OpenUrl(url));
         }
-        if let Some(path) = app.pending_open_path.take() {
-            broadcast(&mut clients, ServerMessage::OpenPath(path));
-        }
+        // `pending_open_path` is never broadcast: it is routed to the one client
+        // whose input produced it, inside `apply`. Nothing else sets it today;
+        // if something ever did, dropping it here beats opening the path on a
+        // desktop that never asked for it.
+        app.pending_open_path = None;
         if let Some(text) = app.pending_clipboard.take() {
             broadcast(&mut clients, ServerMessage::Clipboard(text));
         }
@@ -720,7 +722,29 @@ fn apply(
                 ClientInput::Paste(text) => AppEvent::Paste(text),
                 ClientInput::Resize(..) => unreachable!("handled above"),
             };
-            app.handle_event(event)
+            let changed = app.handle_event(event);
+            // A desktop-side effect belongs to the client whose input produced
+            // it, not to every attached display: with two clients, one user's
+            // Open Externally must not open the path on the other desktop too.
+            // The originator is only known here, so the path is routed now
+            // rather than at the loop's broadcast point, where later batched
+            // input may already have moved `foreground` to someone else.
+            if let Some(path) = app.pending_open_path.take() {
+                let gone = clients.get(&id).is_some_and(|client| {
+                    client
+                        .sender
+                        .send_control(ServerMessage::OpenPath(path))
+                        .is_err()
+                });
+                if gone {
+                    clients.remove(&id);
+                    if *foreground == Some(id) {
+                        *foreground = latest_client(clients);
+                        apply_foreground_theme(app, clients, *foreground);
+                    }
+                }
+            }
+            changed
         }
         // Redraw only if the event actually changed the UI — a plain keystroke
         // forwarded to a pane does not (its echo arrives as a separate `PtyData`).
@@ -1432,5 +1456,58 @@ mod tests {
         assert_eq!(interactive_size, (46, 16));
         assert!(app.compact, "the newly active narrow client owns its view");
         assert_eq!(received_frame_size(&small_rx), (46, 16));
+    }
+
+    fn received_open_path(rx: &mpsc::Receiver<ServerMessage>) -> Option<std::path::PathBuf> {
+        while let Ok(msg) = rx.try_recv() {
+            if let ServerMessage::OpenPath(path) = msg {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    /// Open Externally is a desktop effect, so it goes to the one client whose
+    /// input queued it. The other attached display must not receive it, even
+    /// though it is the foreground client when the input arrives.
+    #[test]
+    fn open_path_is_routed_to_the_initiating_client_only() {
+        let _env = crate::persist::test_env("multi-client-open-path");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(120, 40, app_tx).expect("app starts");
+        app.server_mode = true;
+        let (large, large_rx) = display_client(120, 40, 2);
+        let (small, small_rx) = display_client(50, 20, 1);
+        let mut clients = HashMap::from([(1, large), (2, small)]);
+        let mut foreground = Some(1);
+        let mut interactive_size = (120, 40);
+        let mut next_activity = 3;
+
+        // Stand in for the FILES action the key would trigger: the path is
+        // already queued when client 2's input is applied.
+        let path = std::path::PathBuf::from("/tmp/notes.pdf");
+        app.pending_open_path = Some(path.clone());
+        apply(
+            AppEvent::ClientInput {
+                id: 2,
+                input: ClientInput::Key(KeyEvent::new(KeyCode::Null, KeyModifiers::NONE)),
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        );
+
+        assert!(app.pending_open_path.is_none(), "drained by the input path");
+        assert_eq!(
+            received_open_path(&small_rx).as_ref(),
+            Some(&path),
+            "the initiating client receives the path"
+        );
+        assert!(
+            received_open_path(&large_rx).is_none(),
+            "the other attached client must not open it too"
+        );
     }
 }

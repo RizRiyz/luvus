@@ -1766,8 +1766,10 @@ pub struct App {
     /// A URL to open in the client's browser (docs/58) — set by a Ctrl+click on a
     /// link in a pane, drained + broadcast by the loop like `pending_clipboard`.
     pub pending_open_url: Option<String>,
-    /// A filesystem path to open with the client's OS handler — set from the
-    /// FILES tree, drained + broadcast by the loop like `pending_open_url`.
+    /// A filesystem path to open with the OS handler of the client whose input
+    /// set it — from the FILES tree. Unlike `pending_open_url` it is not
+    /// broadcast: the server drains it right after applying that client's
+    /// input and sends it to that client alone.
     pub pending_open_path: Option<PathBuf>,
     /// The cell `hover_link` was resolved for, so holding `Ctrl` while resting on a
     /// cell does not rescan. Cleared when `Ctrl` is released, so pointing at a
