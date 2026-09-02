@@ -118,6 +118,7 @@ fn install() -> Result<()> {
 
 fn uninstall() -> Result<()> {
     let config = config_path();
+    let mut removed_managed_block = false;
     if config.is_file() {
         let mut value = read_config(&config)?;
         let hooks = value
@@ -126,9 +127,12 @@ fn uninstall() -> Result<()> {
         if hooks.get(BLOCK_NAME).is_some_and(block_is_managed) {
             hooks.remove(BLOCK_NAME);
             integration::write_json_atomic(&config, &value)?;
+            removed_managed_block = true;
         }
     }
-    let _ = fs::remove_file(script_path());
+    if removed_managed_block {
+        let _ = fs::remove_file(script_path());
+    }
     Ok(())
 }
 
@@ -344,6 +348,51 @@ mod tests {
 
         let collision = managed_block(&format!("echo {SCRIPT_NAME}"));
         assert!(!block_is_managed(&collision));
+
+        std::env::remove_var("ANTIGRAVITY_CLI_CONFIG_DIR");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn uninstall_preserves_unmanaged_block_and_referenced_script() {
+        let _env = crate::persist::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = temp_root("unmanaged-uninstall");
+        let _ = fs::remove_dir_all(&root);
+        std::env::set_var("ANTIGRAVITY_CLI_CONFIG_DIR", &root);
+        fs::create_dir_all(script_path().parent().unwrap()).unwrap();
+
+        let command = hook_command(&script_path()).unwrap();
+        let unmanaged = json!({
+            (BLOCK_NAME): {
+                "PreInvocation": [
+                    {
+                        "type": "command",
+                        "command": command,
+                        "timeout": HOOK_TIMEOUT_SECONDS,
+                    },
+                    {
+                        "type": "command",
+                        "command": "echo user-owned",
+                    },
+                ],
+            },
+        });
+        fs::write(
+            root.join("hooks.json"),
+            serde_json::to_string_pretty(&unmanaged).unwrap(),
+        )
+        .unwrap();
+        fs::write(script_path(), "user-owned script").unwrap();
+
+        uninstall().unwrap();
+
+        assert_eq!(read_config(&root.join("hooks.json")).unwrap(), unmanaged);
+        assert_eq!(
+            fs::read_to_string(script_path()).unwrap(),
+            "user-owned script"
+        );
 
         std::env::remove_var("ANTIGRAVITY_CLI_CONFIG_DIR");
         let _ = fs::remove_dir_all(root);
