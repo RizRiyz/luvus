@@ -6883,13 +6883,16 @@ mod tests {
         // truncated by *columns* — char-count truncation overflows the row and
         // clips the trailing "open" badge.
         let cjk = base.join(format!("树{}", "宽".repeat(40)));
-        assert!(std::process::Command::new("git")
+        let out = std::process::Command::new("git")
             .args(["worktree", "add", "-q", "-b", "wide", cjk.to_str().unwrap()])
             .current_dir(&repo)
             .output()
-            .unwrap()
-            .status
-            .success());
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
@@ -6909,6 +6912,65 @@ mod tests {
         assert!(
             screen.contains("● open"),
             "badge survives a wide-glyph path (column-aware truncation)"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn open_worktree_modal_keeps_path_and_badge_under_a_long_branch_name() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("worktree-open-long-branch");
+        let (base, repo, _wt) = repo_with_sibling_worktree("wtlong");
+        // A 70-column branch name is wider than the whole row budget. The label
+        // must be truncated to share the row with the path's tail and the
+        // "open" badge — an untruncated label pushes both off the row.
+        let branch = format!("topic/{}", "x".repeat(64));
+        let long = base.join("wt-long");
+        let out = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                &branch,
+                long.to_str().unwrap(),
+            ])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].cwd = long; // the long-branch worktree is already open
+        app.open_worktree_list(&repo);
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            screen.contains("topic/xxx"),
+            "the branch label still leads the row"
+        );
+        assert!(
+            screen.contains("wt-long"),
+            "the path's tail survives a long branch name"
+        );
+        assert!(
+            screen.contains("● open"),
+            "the badge survives a long branch name"
         );
 
         let _ = std::fs::remove_dir_all(&base);

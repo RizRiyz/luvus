@@ -196,9 +196,13 @@ pub(super) fn draw_picker(
 /// Truncate a string to `max` display columns, keeping the **tail** (the useful
 /// end of a path) with a leading `…`. Width-aware like [`truncate`] (a CJK glyph
 /// counts as two, and is never split), so a wide-glyph path can't overflow its
-/// row and clip whatever renders after it.
+/// row and clip whatever renders after it. A zero budget yields nothing — never
+/// the full string — so a caller whose budget collapsed can't overflow either.
 fn trunc_tail(s: &str, max: usize) -> String {
-    if max == 0 || display_width(s) <= max {
+    if max == 0 {
+        return String::new();
+    }
+    if display_width(s) <= max {
         return s.to_string();
     }
     // Reserve one column for the ellipsis.
@@ -333,11 +337,17 @@ pub(super) fn draw_worktree_open(
         } else {
             String::new()
         };
-        let used = 5 + display_width(&label) + display_width(&badge) + 2;
-        let path = trunc_tail(
-            &e.path.display().to_string(),
-            (listing.width as usize).saturating_sub(used),
-        );
+        // One shared budget for the whole row: the fixed chrome (cursor, icon,
+        // gap, badge) comes off first; the label leads but is capped so the
+        // path keeps at least a third of what's left. Otherwise a long branch
+        // name would push the path's tail and the badge off the row.
+        let prefix = format!("▸ {icon} ");
+        let path_full = e.path.display().to_string();
+        let room = (listing.width as usize)
+            .saturating_sub(display_width(&prefix) + 2 + display_width(&badge));
+        let path_reserve = (room / 3).min(display_width(&path_full));
+        let label = truncate(&label, room.saturating_sub(path_reserve));
+        let path = trunc_tail(&path_full, room.saturating_sub(display_width(&label)));
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(if sel { "▸ " } else { "  " }, Style::new().fg(t.accent)),
@@ -596,10 +606,13 @@ mod tests {
 
     #[test]
     fn trunc_tail_measures_display_columns() {
-        // ASCII: unchanged behavior — keep the tail, lead with `…`.
+        // ASCII: keep the tail, lead with `…`.
         assert_eq!(trunc_tail("abcdef", 10), "abcdef");
         assert_eq!(trunc_tail("abcdef", 4), "…def");
-        assert_eq!(trunc_tail("abcdef", 0), "abcdef");
+        // A collapsed budget yields nothing (never the full string), and a
+        // one-column budget fits only the ellipsis.
+        assert_eq!(trunc_tail("abcdef", 0), "");
+        assert_eq!(trunc_tail("abcdef", 1), "…");
         // CJK: each glyph is two columns; the result must fit the column
         // budget, not the char count, and never split a wide glyph.
         let s = "宽".repeat(10); // 20 columns
