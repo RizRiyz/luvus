@@ -259,19 +259,15 @@ impl App {
         }
     }
 
-    /// A PR action (run in the workspace's terminal pane so the user sees output and
-    /// can answer any prompt — `gh pr merge` is interactive, which is the safe
-    /// "confirm before merging" path).
+    /// A deliberate PR action run in the workspace's terminal pane so the user
+    /// sees output and can handle checkout refusals or review errors.
     fn pr_action(&mut self, kind: &str) {
         let Some(n) = self.active_git().and_then(|g| g.open_pr) else {
             return;
         };
         let cmd = match kind {
             "checkout" => format!("gh pr checkout {n}"),
-            "diff" => format!("gh pr diff {n}"),
-            "merge" => format!("gh pr merge {n}"),
             "approve" => format!("gh pr review {n} --approve"),
-            "ready" => format!("gh pr ready {n}"),
             _ => return,
         };
         self.git_run_in_pane(cmd);
@@ -299,11 +295,8 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.git_scroll(-1),
             KeyCode::Char('r') => self.git_refresh_detail(),
             KeyCode::Char('o') => self.pr_detail_web(),
-            KeyCode::Char('d') => self.pr_action("diff"),
             KeyCode::Char('c') | KeyCode::Enter => self.pr_action("checkout"),
-            KeyCode::Char('M') => self.pr_action("merge"),
             KeyCode::Char('a') => self.pr_action("approve"),
-            KeyCode::Char('R') => self.pr_action("ready"),
             _ => {}
         }
     }
@@ -1078,15 +1071,14 @@ impl App {
         let g = self.active_git()?;
         match g.section {
             Section::Prs => {
+                if diff {
+                    return None;
+                }
                 let n = match &g.prs {
                     Load::Loaded(v) => filtered_prs(v, &g.filter).nth(g.cursor)?.number,
                     _ => return None,
                 };
-                Some(if diff {
-                    format!("gh pr diff {n}")
-                } else {
-                    format!("gh pr checkout {n}")
-                })
+                Some(format!("gh pr checkout {n}"))
             }
             Section::Issues => {
                 let n = match &g.issues {
@@ -1494,7 +1486,12 @@ mod tests {
                 body: "steps to reproduce".into(),
                 labels: vec!["bug".into()],
                 assignees: vec![],
-                comments: 2,
+                comment_count: 2,
+                comments: vec![crate::git::model::DiscussionComment {
+                    author: "reviewer".into(),
+                    body: "I can reproduce this".into(),
+                    created_at: "2026-07-23T01:00:00Z".into(),
+                }],
                 updated_at: "2026-07-23T00:00:00Z".into(),
             }))),
         );
@@ -1950,7 +1947,7 @@ mod tests {
     }
 
     #[test]
-    fn pr_actions_produce_commands() {
+    fn pr_checkout_remains_and_removed_shortcuts_do_not_launch_commands() {
         use crate::git::model::{Checks, PullRequest};
         use crate::git::{GitView, Section};
 
@@ -1990,10 +1987,16 @@ mod tests {
             app.git_selected_command(false).as_deref(),
             Some("gh pr checkout 42")
         );
-        assert_eq!(
-            app.git_selected_command(true).as_deref(),
-            Some("gh pr diff 42")
-        );
+        assert_eq!(app.git_selected_command(true), None);
+
+        app.active_git_mut().unwrap().open_pr = Some(42);
+        for key in ['M', 'R', 'd'] {
+            app.handle_pr_detail_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+            assert!(
+                app.active_is_git(),
+                "removed PR shortcut {key} must not launch a pane command"
+            );
+        }
     }
 
     #[test]
