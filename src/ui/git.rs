@@ -355,42 +355,40 @@ fn title_case(value: &str) -> String {
     }
 }
 
+struct DetailRows<'a> {
+    prefix: &'a [Line<'static>],
+    discussion: &'a [DetailTextRow],
+    peer_row_count: usize,
+}
+
 fn render_scrolled_detail(
     f: &mut RenderTarget,
     area: Rect,
-    prefix: &[Line<'static>],
-    discussion: &[DetailTextRow],
+    rows: DetailRows<'_>,
     requested_scroll: usize,
     cat: &Catalog,
     t: &Theme,
 ) -> usize {
     let available = area.height as usize;
-    let row_count = prefix.len() + discussion.len();
-    let scroll = requested_scroll.min(row_count.saturating_sub(available));
+    let row_count = rows.prefix.len() + rows.discussion.len();
+    let scroll = requested_scroll.min(row_count.max(rows.peer_row_count).saturating_sub(available));
     for (y, index) in (area.y..).zip((scroll..row_count).take(available)) {
         let row = Rect::new(area.x, y, area.width, 1);
-        if let Some(line) = prefix.get(index) {
+        if let Some(line) = rows.prefix.get(index) {
             f.render_widget(Paragraph::new(line.clone()), row);
         } else {
-            let line = detail_text_line(&discussion[index - prefix.len()], cat, t);
+            let line = detail_text_line(&rows.discussion[index - rows.prefix.len()], cat, t);
             f.render_widget(Paragraph::new(line), row);
         }
     }
     scroll
 }
 
-fn render_fixed_detail(f: &mut RenderTarget, area: Rect, rows: Vec<Line<'static>>, t: &Theme) {
+fn render_detail_rail(f: &mut RenderTarget, area: Rect, rows: Vec<Line<'static>>, scroll: usize) {
     let available = area.height as usize;
-    let clipped = rows.len() > available;
-    for (index, (y, line)) in (area.y..).zip(rows.into_iter().take(available)).enumerate() {
-        if clipped && index + 1 == available {
-            f.render_widget(
-                Paragraph::new(Span::styled("…", Style::new().fg(t.overlay0))),
-                Rect::new(area.x, y, area.width, 1),
-            );
-        } else {
-            f.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
-        }
+    let scroll = scroll.min(rows.len().saturating_sub(available));
+    for (y, line) in (area.y..).zip(rows.into_iter().skip(scroll).take(available)) {
+        f.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
     }
 }
 
@@ -533,15 +531,37 @@ fn draw_pr_detail(
 
     if let Some((main, divider, sidebar)) = columns {
         let discussion = &g.detail_text_cache.as_ref().unwrap().rows;
-        let scroll = render_scrolled_detail(f, main, &lead, discussion, g.scroll, cat, t);
+        let scroll = render_scrolled_detail(
+            f,
+            main,
+            DetailRows {
+                prefix: &lead,
+                discussion,
+                peer_row_count: rail.len(),
+            },
+            g.scroll,
+            cat,
+            t,
+        );
         draw_detail_divider(f, divider, area, t);
-        render_fixed_detail(f, sidebar, rail, t);
+        render_detail_rail(f, sidebar, rail, scroll);
         scroll
     } else {
         lead.extend(rail);
         lead.push(Line::from(""));
         let discussion = &g.detail_text_cache.as_ref().unwrap().rows;
-        render_scrolled_detail(f, area, &lead, discussion, g.scroll, cat, t)
+        render_scrolled_detail(
+            f,
+            area,
+            DetailRows {
+                prefix: &lead,
+                discussion,
+                peer_row_count: 0,
+            },
+            g.scroll,
+            cat,
+            t,
+        )
     }
 }
 
@@ -680,15 +700,37 @@ fn draw_issue_detail(
 
     if let Some((main, divider, sidebar)) = columns {
         let discussion = &g.detail_text_cache.as_ref().unwrap().rows;
-        let scroll = render_scrolled_detail(f, main, &lead, discussion, g.scroll, cat, t);
+        let scroll = render_scrolled_detail(
+            f,
+            main,
+            DetailRows {
+                prefix: &lead,
+                discussion,
+                peer_row_count: rail.len(),
+            },
+            g.scroll,
+            cat,
+            t,
+        );
         draw_detail_divider(f, divider, area, t);
-        render_fixed_detail(f, sidebar, rail, t);
+        render_detail_rail(f, sidebar, rail, scroll);
         scroll
     } else {
         lead.extend(rail);
         lead.push(Line::from(""));
         let discussion = &g.detail_text_cache.as_ref().unwrap().rows;
-        render_scrolled_detail(f, area, &lead, discussion, g.scroll, cat, t)
+        render_scrolled_detail(
+            f,
+            area,
+            DetailRows {
+                prefix: &lead,
+                discussion,
+                peer_row_count: 0,
+            },
+            g.scroll,
+            cat,
+            t,
+        )
     }
 }
 
@@ -730,14 +772,33 @@ fn wrap(s: &str, width: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut line = String::new();
     for word in s.split_whitespace() {
-        if line.is_empty() {
-            line = word.to_string();
-        } else if line.chars().count() + 1 + word.chars().count() <= width {
-            line.push(' ');
-            line.push_str(word);
-        } else {
-            out.push(std::mem::take(&mut line));
-            line = word.to_string();
+        let word_width = word.chars().count();
+        let mut chunks = word.chars();
+        let mut first_chunk = true;
+        loop {
+            let chunk: String = chunks.by_ref().take(width).collect();
+            if chunk.is_empty() {
+                break;
+            }
+            if !first_chunk || word_width > width {
+                if !line.is_empty() {
+                    out.push(std::mem::take(&mut line));
+                }
+                if chunk.chars().count() == width {
+                    out.push(chunk);
+                } else {
+                    line = chunk;
+                }
+            } else if line.is_empty() {
+                line = chunk;
+            } else if line.chars().count() + 1 + chunk.chars().count() <= width {
+                line.push(' ');
+                line.push_str(&chunk);
+            } else {
+                out.push(std::mem::take(&mut line));
+                line = chunk;
+            }
+            first_chunk = false;
         }
     }
     if !line.is_empty() {
@@ -1646,6 +1707,70 @@ mod detail_layout_tests {
             1,
         ));
         assert_eq!(cache.as_ref().unwrap().width, 60);
+    }
+
+    #[test]
+    fn long_unbroken_comment_is_split_to_the_reader_width() {
+        let comments = vec![DiscussionComment {
+            author: "reviewer".into(),
+            body: "https://example.com/abcdefghijklmnopqrstuvwxyz0123456789".into(),
+            created_at: "2026-09-02T08:00:00Z".into(),
+        }];
+        let rows = DetailTextCache::rows(20, "description", &comments, 1, wrap);
+        let body_rows: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match row {
+                DetailTextRow::CommentBody(line) => Some(line.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(body_rows.len() > 1);
+        assert!(body_rows.iter().all(|line| line.chars().count() <= 17));
+        assert_eq!(body_rows.concat(), comments[0].body);
+    }
+
+    #[test]
+    fn wide_short_details_can_scroll_to_late_metadata() {
+        let area = Rect::new(0, 0, 120, 7);
+        let mut pr = GitView::new(std::path::PathBuf::from("."));
+        pr.detail = Load::Loaded(pr_detail());
+        pr.scroll = usize::MAX;
+        let mut pr_buffer = Buffer::empty(area);
+        let mut pr_target = RenderTarget::new(&mut pr_buffer, area);
+        draw_pr_detail(
+            &mut pr_target,
+            area,
+            &mut pr,
+            crate::i18n::by_code("en"),
+            &Theme::quattro_rally(),
+        );
+        assert!(find_text(&pr_buffer, "bob").is_some());
+
+        let mut issue = GitView::new(std::path::PathBuf::from("."));
+        issue.issue_detail = Load::Loaded(IssueDetail {
+            number: 7,
+            title: "Improve issue details".into(),
+            state: "OPEN".into(),
+            author: "alice".into(),
+            body: "Issue description in the main column.".into(),
+            labels: vec!["bug".into(), "ux".into(), "reader".into()],
+            assignees: vec!["bob".into()],
+            comment_count: 1,
+            comments: vec![comment()],
+            updated_at: "2026-09-02T09:00:00Z".into(),
+        });
+        issue.scroll = usize::MAX;
+        let mut issue_buffer = Buffer::empty(area);
+        let mut issue_target = RenderTarget::new(&mut issue_buffer, area);
+        draw_issue_detail(
+            &mut issue_target,
+            area,
+            &mut issue,
+            crate::i18n::by_code("en"),
+            &Theme::quattro_rally(),
+        );
+        assert!(find_text(&issue_buffer, "@bob").is_some());
     }
 }
 
