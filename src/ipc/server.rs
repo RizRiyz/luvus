@@ -936,7 +936,7 @@ fn capture_visible_terminal_generations(
 }
 
 fn capture_visible_terminal_damage(
-    app: &mut App,
+    app: &App,
     snapshots: &mut HashMap<crate::ids::PaneId, crate::terminal::vt::DamageSnapshot>,
 ) {
     snapshots.clear();
