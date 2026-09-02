@@ -24,8 +24,8 @@ pub use model::Checks;
 pub use model::GitRootInfo;
 pub use model::WorktreeMembership;
 use model::{
-    BranchInfo, Commit, CommitShow, Contributor, Issue, IssueDetail, PrDetail, PullRequest,
-    RepoInfo, RepoStatus,
+    BranchInfo, Commit, CommitShow, Contributor, DiscussionComment, Issue, IssueDetail, PrDetail,
+    PullRequest, RepoInfo, RepoStatus,
 };
 
 /// Which section of the git tab is shown.
@@ -144,6 +144,98 @@ pub enum Load<T> {
     Error(String),
 }
 
+/// Identity of the discussion currently cached for the detail reader.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DetailTextTarget {
+    Pr(u64),
+    Issue(u64),
+}
+
+/// Theme-independent rows retained by the detail reader after word wrapping.
+/// Styling remains in the UI so changing themes does not stale this cache.
+pub(crate) enum DetailTextRow {
+    DescriptionHeading,
+    EmptyDescription,
+    Description(String),
+    Blank,
+    CommentsHeading { shown: u64, total: u64 },
+    CommentHeader { author: String, date: String },
+    EmptyComment,
+    CommentBody(String),
+}
+
+/// Wrapped detail text is rebuilt only when the loaded item or reader width
+/// changes. This keeps large GitHub discussions out of the per-frame hot path.
+pub(crate) struct DetailTextCache {
+    pub target: DetailTextTarget,
+    pub width: usize,
+    pub rows: Vec<DetailTextRow>,
+}
+
+impl DetailTextCache {
+    pub(crate) fn rows(
+        width: usize,
+        body: &str,
+        comments: &[DiscussionComment],
+        total: u64,
+        wrap: impl Fn(&str, usize) -> Vec<String>,
+    ) -> Vec<DetailTextRow> {
+        let mut rows = vec![DetailTextRow::DescriptionHeading];
+        if body.trim().is_empty() {
+            rows.push(DetailTextRow::EmptyDescription);
+        } else {
+            for raw in body.replace('\r', "").lines() {
+                rows.extend(
+                    wrap(raw, width.saturating_sub(3))
+                        .into_iter()
+                        .map(|line| DetailTextRow::Description(format!("   {line}"))),
+                );
+            }
+        }
+
+        if total > 0 {
+            rows.push(DetailTextRow::Blank);
+            rows.push(DetailTextRow::CommentsHeading {
+                shown: comments.len() as u64,
+                total,
+            });
+            for comment in comments {
+                rows.push(DetailTextRow::Blank);
+                rows.push(DetailTextRow::CommentHeader {
+                    author: if comment.author.is_empty() {
+                        "—".to_string()
+                    } else {
+                        format!("@{}", comment.author)
+                    },
+                    date: comment
+                        .created_at
+                        .split('T')
+                        .next()
+                        .unwrap_or("")
+                        .to_string(),
+                });
+                let comment_body = if comment.body.trim().is_empty() {
+                    None
+                } else {
+                    Some(comment.body.as_str())
+                };
+                if let Some(comment_body) = comment_body {
+                    for raw in comment_body.replace('\r', "").lines() {
+                        rows.extend(
+                            wrap(raw, width.saturating_sub(3))
+                                .into_iter()
+                                .map(DetailTextRow::CommentBody),
+                        );
+                    }
+                } else {
+                    rows.push(DetailTextRow::EmptyComment);
+                }
+            }
+        }
+        rows
+    }
+}
+
 /// Results delivered back to the loop from a fetch thread.
 pub enum GitPayload {
     Status(Result<RepoStatus, String>),
@@ -201,6 +293,8 @@ pub struct GitView {
     /// back with esc). Mirrors `open_pr` (docs/17).
     pub open_issue: Option<u64>,
     pub issue_detail: Load<IssueDetail>,
+    /// Cached, width-aware plain-text discussion rows for the open PR or issue.
+    pub(crate) detail_text_cache: Option<DetailTextCache>,
     /// The explicit Status file selection as `(path, staged)`. Unlike the
     /// cursor-list sections, Status also contains repository metadata, so its
     /// selection must be tracked by file identity rather than a screen row.
@@ -300,6 +394,7 @@ impl GitView {
             commit_detail: Load::Idle,
             open_issue: None,
             issue_detail: Load::Idle,
+            detail_text_cache: None,
             status_selected: None,
             status_staged_rows: 0..0,
             status_unstaged_rows: 0..0,
@@ -333,6 +428,7 @@ impl GitView {
             // Only apply detail if the panel is still open (it may have closed
             // while the fetch was in flight).
             GitPayload::PrDetail(r) => {
+                self.detail_text_cache = None;
                 if self.open_pr.is_some() {
                     self.detail = into_load(*r);
                 }
@@ -345,6 +441,7 @@ impl GitView {
                 }
             }
             GitPayload::IssueDetail(r) => {
+                self.detail_text_cache = None;
                 if self.open_issue.is_some() {
                     self.issue_detail = into_load(*r);
                 }

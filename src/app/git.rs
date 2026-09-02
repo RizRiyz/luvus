@@ -225,6 +225,7 @@ impl App {
         if let Some(g) = self.active_git_mut() {
             g.open_pr = Some(number);
             g.detail = Load::Loading;
+            g.detail_text_cache = None;
             g.scroll = 0;
         }
         let tx = self.app_tx.clone();
@@ -255,6 +256,7 @@ impl App {
         if let Some(g) = self.active_git_mut() {
             g.open_pr = None;
             g.detail = Load::Idle;
+            g.detail_text_cache = None;
             g.scroll = 0;
         }
     }
@@ -552,6 +554,7 @@ impl App {
         if let Some(g) = self.active_git_mut() {
             g.open_issue = Some(number);
             g.issue_detail = Load::Loading;
+            g.detail_text_cache = None;
             g.scroll = 0;
         }
         let tx = self.app_tx.clone();
@@ -575,6 +578,7 @@ impl App {
         if let Some(g) = self.active_git_mut() {
             g.open_issue = None;
             g.issue_detail = Load::Idle;
+            g.detail_text_cache = None;
             g.scroll = 0;
         }
     }
@@ -640,6 +644,7 @@ impl App {
             g.commit_detail = Load::Idle;
             g.open_issue = None;
             g.issue_detail = Load::Idle;
+            g.detail_text_cache = None;
             if g.section != section || had_detail {
                 g.section = section;
                 g.cursor = 0;

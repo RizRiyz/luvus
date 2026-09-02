@@ -6,8 +6,8 @@
 use super::*;
 use crate::git::model::{Checks, IssueDetail, PrDetail, PullRequest};
 use crate::git::{
-    filtered_branches, filtered_commits, filtered_issues, filtered_prs, GitView, Load, Scope,
-    Section,
+    filtered_branches, filtered_commits, filtered_issues, filtered_prs, DetailTextCache,
+    DetailTextRow, DetailTextTarget, GitView, Load, Scope, Section,
 };
 use crate::i18n::Catalog;
 
@@ -284,63 +284,49 @@ fn push_detail_title(
     }
 }
 
-fn push_description(
-    rows: &mut Vec<Line<'static>>,
-    body: &str,
+fn update_detail_text_cache(
+    cache: &mut Option<DetailTextCache>,
+    target: DetailTextTarget,
     width: usize,
-    cat: &Catalog,
-    t: &Theme,
-) {
-    rows.push(detail_heading(cat.detail_description, t));
-    if body.trim().is_empty() {
-        rows.push(Line::from(Span::styled(
-            format!("   {}", cat.detail_no_description),
-            Style::new().fg(t.overlay0),
-        )));
-    } else {
-        for raw in body.replace('\r', "").lines() {
-            for line in wrap(raw, width.saturating_sub(3)) {
-                rows.push(Line::from(Span::styled(
-                    format!("   {line}"),
-                    Style::new().fg(t.subtext0),
-                )));
-            }
-        }
-    }
-}
-
-fn push_comments(
-    rows: &mut Vec<Line<'static>>,
+    body: &str,
     comments: &[crate::git::model::DiscussionComment],
     total: u64,
-    width: usize,
-    cat: &Catalog,
-    t: &Theme,
-) {
-    if total == 0 {
-        return;
+) -> bool {
+    if cache
+        .as_ref()
+        .is_some_and(|cached| cached.target == target && cached.width == width)
+    {
+        return false;
     }
-    rows.push(Line::from(""));
-    let shown = comments.len() as u64;
-    let count = if shown < total {
-        format!("{shown}/{total}")
-    } else {
-        total.to_string()
-    };
-    rows.push(detail_heading(
-        format!("{} ({count})", title_case(cat.detail_comments)),
-        t,
-    ));
-    for comment in comments {
-        rows.push(Line::from(""));
-        let author = if comment.author.is_empty() {
-            "—".to_string()
-        } else {
-            format!("@{}", comment.author)
-        };
-        let date = comment.created_at.split('T').next().unwrap_or("");
-        rows.push(Line::from(vec![
-            Span::styled(author, Style::new().fg(t.text).bold()),
+    *cache = Some(DetailTextCache {
+        target,
+        width,
+        rows: DetailTextCache::rows(width, body, comments, total, wrap),
+    });
+    true
+}
+
+fn detail_text_line<'a>(row: &'a DetailTextRow, cat: &'a Catalog, t: &Theme) -> Line<'a> {
+    match row {
+        DetailTextRow::DescriptionHeading => detail_heading(cat.detail_description, t),
+        DetailTextRow::EmptyDescription => Line::from(vec![
+            Span::raw("   "),
+            Span::styled(cat.detail_no_description, Style::new().fg(t.overlay0)),
+        ]),
+        DetailTextRow::Description(line) => {
+            Line::from(Span::styled(line.as_str(), Style::new().fg(t.subtext0)))
+        }
+        DetailTextRow::Blank => Line::from(""),
+        DetailTextRow::CommentsHeading { shown, total } => {
+            let count = if shown < total {
+                format!("{shown}/{total}")
+            } else {
+                total.to_string()
+            };
+            detail_heading(format!("{} ({count})", title_case(cat.detail_comments)), t)
+        }
+        DetailTextRow::CommentHeader { author, date } => Line::from(vec![
+            Span::styled(author.as_str(), Style::new().fg(t.text).bold()),
             Span::styled(
                 if date.is_empty() {
                     String::new()
@@ -349,20 +335,15 @@ fn push_comments(
                 },
                 Style::new().fg(t.overlay1),
             ),
-        ]));
-        let body = if comment.body.trim().is_empty() {
-            cat.detail_no_description
-        } else {
-            &comment.body
-        };
-        for raw in body.replace('\r', "").lines() {
-            for line in wrap(raw, width.saturating_sub(3)) {
-                rows.push(Line::from(vec![
-                    Span::styled("│ ", Style::new().fg(t.accent)),
-                    Span::styled(line, Style::new().fg(t.subtext0)),
-                ]));
-            }
-        }
+        ]),
+        DetailTextRow::EmptyComment => Line::from(vec![
+            Span::styled("│ ", Style::new().fg(t.accent)),
+            Span::styled(cat.detail_no_description, Style::new().fg(t.overlay0)),
+        ]),
+        DetailTextRow::CommentBody(line) => Line::from(vec![
+            Span::styled("│ ", Style::new().fg(t.accent)),
+            Span::styled(line.as_str(), Style::new().fg(t.subtext0)),
+        ]),
     }
 }
 
@@ -377,13 +358,23 @@ fn title_case(value: &str) -> String {
 fn render_scrolled_detail(
     f: &mut RenderTarget,
     area: Rect,
-    rows: Vec<Line<'static>>,
+    prefix: &[Line<'static>],
+    discussion: &[DetailTextRow],
     requested_scroll: usize,
+    cat: &Catalog,
+    t: &Theme,
 ) -> usize {
     let available = area.height as usize;
-    let scroll = requested_scroll.min(rows.len().saturating_sub(available));
-    for (y, line) in (area.y..).zip(rows.into_iter().skip(scroll).take(available)) {
-        f.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
+    let row_count = prefix.len() + discussion.len();
+    let scroll = requested_scroll.min(row_count.saturating_sub(available));
+    for (y, index) in (area.y..).zip((scroll..row_count).take(available)) {
+        let row = Rect::new(area.x, y, area.width, 1);
+        if let Some(line) = prefix.get(index) {
+            f.render_widget(Paragraph::new(line.clone()), row);
+        } else {
+            let line = detail_text_line(&discussion[index - prefix.len()], cat, t);
+            f.render_widget(Paragraph::new(line), row);
+        }
     }
     scroll
 }
@@ -417,7 +408,7 @@ fn draw_detail_divider(f: &mut RenderTarget, x: u16, area: Rect, t: &Theme) {
 fn draw_pr_detail(
     f: &mut RenderTarget,
     area: Rect,
-    g: &GitView,
+    g: &mut GitView,
     cat: &Catalog,
     t: &Theme,
 ) -> usize {
@@ -435,8 +426,15 @@ fn draw_pr_detail(
     };
     let columns = detail_columns(area);
     let content_width = columns.map_or(area.width, |(main, _, _)| main.width) as usize;
+    update_detail_text_cache(
+        &mut g.detail_text_cache,
+        DetailTextTarget::Pr(d.number),
+        content_width,
+        &d.body,
+        &d.comments,
+        d.comment_count,
+    );
     let mut lead: Vec<Line> = Vec::new();
-    let mut content: Vec<Line> = Vec::new();
     let mut rail: Vec<Line> = Vec::new();
 
     let (badge, bcol) = detail_badge(d, cat, t);
@@ -454,16 +452,6 @@ fn draw_pr_detail(
     }
     lead.push(Line::from(byline));
     lead.push(Line::from(""));
-
-    push_description(&mut content, &d.body, content_width, cat, t);
-    push_comments(
-        &mut content,
-        &d.comments,
-        d.comment_count,
-        content_width,
-        cat,
-        t,
-    );
 
     rail.push(Line::from(Span::styled(
         format!("[{badge}]"),
@@ -544,16 +532,16 @@ fn draw_pr_detail(
     }
 
     if let Some((main, divider, sidebar)) = columns {
-        lead.extend(content);
-        let scroll = render_scrolled_detail(f, main, lead, g.scroll);
+        let discussion = &g.detail_text_cache.as_ref().unwrap().rows;
+        let scroll = render_scrolled_detail(f, main, &lead, discussion, g.scroll, cat, t);
         draw_detail_divider(f, divider, area, t);
         render_fixed_detail(f, sidebar, rail, t);
         scroll
     } else {
         lead.extend(rail);
         lead.push(Line::from(""));
-        lead.extend(content);
-        render_scrolled_detail(f, area, lead, g.scroll)
+        let discussion = &g.detail_text_cache.as_ref().unwrap().rows;
+        render_scrolled_detail(f, area, &lead, discussion, g.scroll, cat, t)
     }
 }
 
@@ -611,7 +599,7 @@ fn draw_commit_detail(f: &mut RenderTarget, area: Rect, g: &GitView, t: &Theme) 
 fn draw_issue_detail(
     f: &mut RenderTarget,
     area: Rect,
-    g: &GitView,
+    g: &mut GitView,
     cat: &Catalog,
     t: &Theme,
 ) -> usize {
@@ -629,8 +617,15 @@ fn draw_issue_detail(
     };
     let columns = detail_columns(area);
     let content_width = columns.map_or(area.width, |(main, _, _)| main.width) as usize;
+    update_detail_text_cache(
+        &mut g.detail_text_cache,
+        DetailTextTarget::Issue(d.number),
+        content_width,
+        &d.body,
+        &d.comments,
+        d.comment_count,
+    );
     let mut lead: Vec<Line> = Vec::new();
-    let mut content: Vec<Line> = Vec::new();
     let mut rail: Vec<Line> = Vec::new();
 
     push_detail_title(&mut lead, d.number, &d.title, content_width, t);
@@ -652,16 +647,6 @@ fn draw_issue_detail(
     }
     lead.push(Line::from(byline));
     lead.push(Line::from(""));
-
-    push_description(&mut content, &d.body, content_width, cat, t);
-    push_comments(
-        &mut content,
-        &d.comments,
-        d.comment_count,
-        content_width,
-        cat,
-        t,
-    );
 
     rail.push(Line::from(Span::styled(
         format!("[{badge}]"),
@@ -694,16 +679,16 @@ fn draw_issue_detail(
     }
 
     if let Some((main, divider, sidebar)) = columns {
-        lead.extend(content);
-        let scroll = render_scrolled_detail(f, main, lead, g.scroll);
+        let discussion = &g.detail_text_cache.as_ref().unwrap().rows;
+        let scroll = render_scrolled_detail(f, main, &lead, discussion, g.scroll, cat, t);
         draw_detail_divider(f, divider, area, t);
         render_fixed_detail(f, sidebar, rail, t);
         scroll
     } else {
         lead.extend(rail);
         lead.push(Line::from(""));
-        lead.extend(content);
-        render_scrolled_detail(f, area, lead, g.scroll)
+        let discussion = &g.detail_text_cache.as_ref().unwrap().rows;
+        render_scrolled_detail(f, area, &lead, discussion, g.scroll, cat, t)
     }
 }
 
@@ -1626,6 +1611,41 @@ mod detail_layout_tests {
         assert!(find_text(&buffer, "feature/git-reader").is_some());
         assert!(find_text(&buffer, "pull request description").is_some());
         assert!(find_text(&buffer, "This comment belongs").is_some());
+    }
+
+    #[test]
+    fn discussion_rows_are_reused_until_target_or_width_changes() {
+        let comments = vec![comment()];
+        let mut cache = None;
+        assert!(update_detail_text_cache(
+            &mut cache,
+            DetailTextTarget::Pr(42),
+            78,
+            "description",
+            &comments,
+            1,
+        ));
+        let rows = cache.as_ref().unwrap().rows.as_ptr();
+
+        assert!(!update_detail_text_cache(
+            &mut cache,
+            DetailTextTarget::Pr(42),
+            78,
+            "description",
+            &comments,
+            1,
+        ));
+        assert_eq!(cache.as_ref().unwrap().rows.as_ptr(), rows);
+
+        assert!(update_detail_text_cache(
+            &mut cache,
+            DetailTextTarget::Pr(42),
+            60,
+            "description",
+            &comments,
+            1,
+        ));
+        assert_eq!(cache.as_ref().unwrap().width, 60);
     }
 }
 
