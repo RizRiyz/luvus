@@ -15,6 +15,10 @@ pub(crate) const MAX_AGENT_START_ARGS: usize = 64;
 const AGENT_PROMPT_QUIET: Duration = Duration::from_millis(1200);
 const DETECTION_INTERVAL: Duration = Duration::from_millis(100);
 const DETECTION_AUDIT_INTERVAL: Duration = Duration::from_secs(2);
+const CWD_SCAN_INTERVAL: Duration = Duration::from_secs(1);
+const PROC_SCAN_INTERVAL: Duration = Duration::from_secs(2);
+const SESSION_SCAN_INTERVAL: Duration = Duration::from_secs(4);
+const WAIT_RETEST_INTERVAL: Duration = Duration::from_millis(100);
 
 /// A parked `wait.output` request (docs/81): reply when the pane's recent
 /// output contains `needle`, or the optional deadline passes.
@@ -59,6 +63,79 @@ mod socket_api_tests {
             app.needs_fast_runtime_tick(now),
             "an in-flight state dwell retains the fast cadence"
         );
+    }
+
+    #[test]
+    fn quiet_runtime_has_no_loop_deadline() {
+        let (_env, mut app) = app("quiet-runtime-deadline");
+        let now = Instant::now();
+        for status in app.status.values_mut() {
+            status.force_detect = false;
+            status.candidate = status.state;
+            status.last_activity = now - ACTIVITY_WINDOW - QUIET_DWELL - Duration::from_secs(1);
+        }
+        app.runtime_cwd_dirty = false;
+        app.runtime_proc_dirty = false;
+        app.runtime_sessions_dirty = false;
+        assert_eq!(
+            app.next_runtime_deadline(now, true),
+            None,
+            "a quiet attached fleet must not wake the loop on a timer"
+        );
+        assert_eq!(
+            app.next_runtime_deadline(now, false),
+            None,
+            "a quiet detached server must block on the event channel"
+        );
+
+        let until = now + Duration::from_secs(2);
+        app.toast = Some(("copied".into(), until));
+        assert_eq!(app.next_runtime_deadline(now, true), Some(until));
+        app.toast = None;
+
+        for status in app.status.values_mut() {
+            status.last_resize = Some(now - RESIZE_GRACE - Duration::from_millis(1));
+        }
+        assert_eq!(
+            app.next_runtime_deadline(now, true),
+            None,
+            "an expired resize grace must not become a 1ms loop timeout"
+        );
+
+        let resized = now;
+        app.last_detect_at = now;
+        for status in app.status.values_mut() {
+            status.last_resize = Some(resized);
+        }
+        let deadline = app
+            .next_runtime_deadline(now, true)
+            .expect("a live resize grace must keep a future loop deadline");
+        assert!(deadline > now);
+        assert!(deadline <= now + RESIZE_GRACE);
+    }
+
+    #[test]
+    fn detached_runtime_skips_heartbeat_scans() {
+        let (_env, mut app) = app("detached-heartbeat-scans");
+        let now = Instant::now();
+        for status in app.status.values_mut() {
+            status.force_detect = false;
+            status.candidate = status.state;
+            status.last_activity = now - ACTIVITY_WINDOW - QUIET_DWELL - Duration::from_secs(1);
+        }
+        app.runtime_cwd_dirty = true;
+        app.runtime_proc_dirty = true;
+        app.runtime_sessions_dirty = true;
+        app.last_cwd_at = now - Duration::from_secs(10);
+        app.last_proc_at = now - Duration::from_secs(10);
+        app.last_sessions_at = now - Duration::from_secs(10);
+        app.detect_tick_with(now, false);
+        assert!(app.cwd_scan_inflight == false, "detached cwd scan");
+        assert!(app.proc_scan_inflight == false, "detached proc scan");
+        assert!(app.sessions_scan_inflight == false, "detached session scan");
+        assert!(app.runtime_cwd_dirty);
+        assert!(app.runtime_proc_dirty);
+        assert!(app.runtime_sessions_dirty);
     }
 
     #[test]
@@ -578,21 +655,14 @@ fn blocking_hint(bottom: &str) -> Option<String> {
 }
 
 impl App {
-    /// Whether the server loop must retain its 100 ms runtime cadence.
+    /// Whether any parked or detection work still has a near-term deadline.
     ///
-    /// Quiet panes do not need a 33 ms poll. Fresh output, an in-flight
-    /// classification dwell, an expiring integration lease, or a parked API
-    /// workflow does: these paths have user-visible deadlines and keep the
-    /// existing detection latency until the scheduler can sleep again.
+    /// Idle prompt redraws do not keep the 100 ms cadence. Working panes still
+    /// do until `ACTIVITY_WINDOW + QUIET_DWELL` elapses, as do in-flight dwells,
+    /// integration leases, and parked API waits.
+    #[cfg(test)]
     pub(crate) fn needs_fast_runtime_tick(&self, now: Instant) -> bool {
-        let detection_active = self.status.values().any(|status| {
-            status.force_detect
-                || status.candidate != status.state
-                || status.agent_report.is_some()
-                || now.saturating_duration_since(status.last_activity)
-                    < ACTIVITY_WINDOW + QUIET_DWELL
-        });
-        detection_active
+        self.detection_work_pending(now)
             || !self.output_waits.is_empty()
             || !self.agent_waits.is_empty()
             || !self.agent_starts.is_empty()
@@ -602,32 +672,159 @@ impl App {
             || self.search_flash.is_some()
     }
 
-    /// Recompute every pane's agent state. Cheap; called a few times a second.
-    /// Returns whether anything the sidebar shows changed, so the loop repaints a
-    /// silent agent's Working→Done transition even when no other event fires.
-    pub fn detect_tick(&mut self, now: Instant) -> bool {
-        // No node open (docs/43 §3.3 — the session was closed). Closing the last
-        // node also closed every pane, so there is nothing to classify, and
-        // `layout()` below would index an empty `workspaces`. The server keeps
-        // ticking here with no clients attached, so this is a live path, not a
-        // theoretical one.
-        if self.workspaces.is_empty() {
-            return false;
+    fn detection_work_pending(&self, now: Instant) -> bool {
+        !self.detection_dirty.is_empty()
+            || self.status.values().any(|status| {
+                status.force_detect
+                    || status.candidate != status.state
+                    || status.agent_report.is_some()
+                    || status
+                        .last_resize
+                        .is_some_and(|t| now.duration_since(t) < RESIZE_GRACE)
+                    || (status.state == State::Working
+                        && now.saturating_duration_since(status.last_activity)
+                            < ACTIVITY_WINDOW + QUIET_DWELL)
+            })
+    }
+
+    fn detection_audit_needed(&self) -> bool {
+        !self.detection_dirty.is_empty()
+            || self.status.values().any(|status| {
+                status.force_detect
+                    || status.candidate != status.state
+                    || status.agent_report.is_some()
+                    || matches!(status.state, State::Working | State::Blocked)
+            })
+    }
+
+    pub(crate) fn mark_runtime_scans_dirty(&mut self) {
+        self.runtime_cwd_dirty = true;
+        self.runtime_proc_dirty = true;
+        self.runtime_sessions_dirty = true;
+    }
+
+    pub(crate) fn sooner_deadline(slot: &mut Option<Instant>, candidate: Instant) {
+        *slot = Some(match *slot {
+            Some(current) => current.min(candidate),
+            None => candidate,
+        });
+    }
+
+    /// Next Instant the event loop must wake if no `AppEvent` arrives.
+    /// `None` means block on the channel: PTY, API, client, and signals wake it.
+    /// Past Instants are not kept as a 1ms spin: expired resize grace must drop
+    /// out, while work that is already due wakes this iteration (`now`).
+    pub(crate) fn next_runtime_deadline(
+        &self,
+        now: Instant,
+        clients_attached: bool,
+    ) -> Option<Instant> {
+        let mut deadline = None;
+        let mut consider = |candidate: Instant, due: bool| {
+            if candidate > now {
+                Self::sooner_deadline(&mut deadline, candidate);
+            } else if due {
+                Self::sooner_deadline(&mut deadline, now);
+            }
+        };
+
+        if let Some((_, exp)) = self.toast {
+            consider(exp, true);
         }
-        // Refresh working directories ~once a second so spaces follow the user.
-        // The file-viewer upkeep rides the same 1s cadence — sub-second freshness
-        // buys nothing (a node switch or an on-disk edit showing within a second
-        // is fine) and 10x/s stats + allocs would be wasted work on the loop.
-        if now.duration_since(self.last_cwd_at) >= Duration::from_secs(1) && !self.cwd_scan_inflight
+        if let Some(flash) = self.search_flash.as_ref() {
+            consider(flash.until, true);
+        }
+        if let Some(exp) = self.bar.notifications.iter().map(|n| n.expires_at).min() {
+            consider(exp, true);
+        }
+
+        if self.detection_work_pending(now) {
+            consider(self.last_detect_at + DETECTION_INTERVAL, true);
+        }
+        if self.detection_audit_needed() {
+            consider(
+                self.last_detection_audit_at + DETECTION_AUDIT_INTERVAL,
+                false,
+            );
+        }
+        for status in self.status.values() {
+            if status.candidate != status.state {
+                consider(
+                    status.candidate_since + commit_dwell(status.candidate),
+                    true,
+                );
+            }
+            if let Some(report) = status.agent_report.as_ref() {
+                consider(report.expires_at, true);
+            }
+            if let Some(resized) = status.last_resize {
+                consider(resized + RESIZE_GRACE, false);
+            }
+            if status.state == State::Working {
+                consider(status.last_activity + ACTIVITY_WINDOW + QUIET_DWELL, false);
+            }
+        }
+
+        if !self.output_waits.is_empty() {
+            consider(self.last_output_wait_scan + WAIT_RETEST_INTERVAL, true);
+            for waiter in self.output_waits.values().flatten() {
+                if let Some(exp) = waiter.deadline {
+                    consider(exp, true);
+                }
+            }
+        }
+        for waiter in self.agent_waits.values().flatten() {
+            consider(waiter.deadline, true);
+        }
+        for start in self.agent_starts.values() {
+            consider(start.deadline, true);
+        }
+        for prompt in self.agent_prompts.values().flatten() {
+            consider(prompt.deadline, true);
+            if prompt.saw_output {
+                consider(prompt.last_output_at + AGENT_PROMPT_QUIET, true);
+            }
+        }
+        if !self.backend_revision_waits.is_empty() {
+            consider(self.last_backend_wait_scan + WAIT_RETEST_INTERVAL, true);
+            if let Some(exp) = self.next_backend_revision_deadline() {
+                consider(exp, true);
+            }
+        }
+
+        if clients_attached {
+            if self.runtime_cwd_dirty && !self.cwd_scan_inflight {
+                consider(self.last_cwd_at + CWD_SCAN_INTERVAL, false);
+            }
+            if self.runtime_proc_dirty && !self.proc_scan_inflight {
+                consider(self.last_proc_at + PROC_SCAN_INTERVAL, false);
+            }
+            if self.runtime_sessions_dirty && !self.sessions_scan_inflight {
+                consider(self.last_sessions_at + SESSION_SCAN_INTERVAL, false);
+            }
+        }
+
+        deadline
+    }
+
+    fn schedule_runtime_scans(&mut self, now: Instant, clients_attached: bool) {
+        if !clients_attached {
+            return;
+        }
+        // CWD/git follow the user after PTY activity, throttled to 1s. Quiet
+        // panes do not spawn a worker or walk process trees.
+        if self.runtime_cwd_dirty
+            && !self.cwd_scan_inflight
+            && now.duration_since(self.last_cwd_at) >= CWD_SCAN_INTERVAL
         {
+            self.runtime_cwd_dirty = false;
             self.last_cwd_at = now;
             self.cwd_scan_inflight = true;
-            // Agent identity keeps its independent two-second cadence, but
-            // when its deadline lands on this CWD scan both projections share
-            // one OS process-table snapshot.
-            let include_processes = now.duration_since(self.last_proc_at) >= Duration::from_secs(2)
-                && !self.proc_scan_inflight;
+            let include_processes = self.runtime_proc_dirty
+                && !self.proc_scan_inflight
+                && now.duration_since(self.last_proc_at) >= PROC_SCAN_INTERVAL;
             if include_processes {
+                self.runtime_proc_dirty = false;
                 self.last_proc_at = now;
                 self.proc_scan_inflight = true;
             }
@@ -677,14 +874,12 @@ impl App {
             // Live-refresh open file views whose file changed on disk (FILE-5).
             self.ensure_file_views();
         }
-        // Rescan the agents' session stores a little less often. The scan is
-        // filesystem work that grows with on-disk history, so it runs on a
-        // worker thread and posts `SessionsScanned` back — never inline here
-        // (this tick is on the render-critical event loop). `inflight` stops
-        // scans from piling up if one is ever slower than the interval.
-        if now.duration_since(self.last_sessions_at) >= Duration::from_secs(4)
+        // Resumable-session disk scans run on attach/demand, not a 4s walk.
+        if self.runtime_sessions_dirty
             && !self.sessions_scan_inflight
+            && now.duration_since(self.last_sessions_at) >= SESSION_SCAN_INTERVAL
         {
+            self.runtime_sessions_dirty = false;
             self.last_sessions_at = now;
             self.sessions_scan_inflight = true;
             let tx = self.app_tx.clone();
@@ -692,14 +887,13 @@ impl App {
                 let _ = tx.send(AppEvent::SessionsScanned(crate::agent::recent_sessions(12)));
             });
         }
-        // Identity comes from the pane's *processes* (docs/07), which means a `ps`
-        // scan — a subprocess spawn, so it runs on a worker thread and posts
-        // `ProcScanned` back. Never inline: this tick is on the render-critical
-        // loop. 2s is well inside the human-visible window for "an agent started"
-        // while costing one `ps` for all panes, not one per pane.
-        if now.duration_since(self.last_proc_at) >= Duration::from_secs(2)
+        // Identity comes from the pane's *processes* (docs/07). One `ps` covers
+        // every pane; it runs only after PTY activity, never as a heartbeat.
+        if self.runtime_proc_dirty
             && !self.proc_scan_inflight
+            && now.duration_since(self.last_proc_at) >= PROC_SCAN_INTERVAL
         {
+            self.runtime_proc_dirty = false;
             self.last_proc_at = now;
             self.proc_scan_inflight = true;
             let pids: Vec<u32> = self
@@ -716,6 +910,25 @@ impl App {
                 let _ = tx.send(AppEvent::ProcScanned(found));
             });
         }
+    }
+
+    /// Recompute every pane's agent state. Cheap; called when the loop wakes.
+    /// Returns whether anything the sidebar shows changed, so the loop repaints a
+    /// silent agent's Working→Done transition even when no other event fires.
+    pub fn detect_tick(&mut self, now: Instant) -> bool {
+        self.detect_tick_with(now, true)
+    }
+
+    pub(crate) fn detect_tick_with(&mut self, now: Instant, clients_attached: bool) -> bool {
+        // No node open (docs/43 §3.3 — the session was closed). Closing the last
+        // node also closed every pane, so there is nothing to classify, and
+        // `layout()` below would index an empty `workspaces`. The server keeps
+        // ticking here with no clients attached, so this is a live path, not a
+        // theoretical one.
+        if self.workspaces.is_empty() {
+            return false;
+        }
+        self.schedule_runtime_scans(now, clients_attached);
         // Mission Control usage is demand-driven. Opening/focusing the dashboard,
         // changing scope, or pressing/clicking refresh queues one worker scan;
         // merely retaining a hidden mission tab performs no usage IO.
@@ -794,8 +1007,8 @@ impl App {
         let focus = self.layout().focus;
         self.detection_dirty
             .retain(|id| self.panes.contains_key(id));
-        let full_audit =
-            now.duration_since(self.last_detection_audit_at) >= DETECTION_AUDIT_INTERVAL;
+        let full_audit = self.detection_audit_needed()
+            && now.duration_since(self.last_detection_audit_at) >= DETECTION_AUDIT_INTERVAL;
         if full_audit {
             self.last_detection_audit_at = now;
             self.detection_full_fleet_audits = self.detection_full_fleet_audits.saturating_add(1);

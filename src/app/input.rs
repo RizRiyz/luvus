@@ -438,6 +438,8 @@ impl App {
                 if let Some(pane) = self.panes.get_mut(&id) {
                     pane.cwd = cwd;
                 }
+                self.runtime_cwd_dirty = true;
+                self.runtime_proc_dirty = true;
                 self.register_backend_terminal(id);
                 crate::logging::event(
                     crate::logging::EventKind::PaneOpen,
@@ -667,6 +669,8 @@ impl App {
                     s.last_activity = Instant::now();
                 }
                 self.detection_dirty.insert(id);
+                self.runtime_cwd_dirty = true;
+                self.runtime_proc_dirty = true;
                 // A parked `wait.output` for this pane just got new output to
                 // test against — resolve it on the same wake (docs/81).
                 self.check_output_waits(id);
@@ -999,7 +1003,8 @@ impl App {
             // Handled by the server loop; never reaches here at runtime.
             AppEvent::ClientConnected { .. }
             | AppEvent::ClientDetach { .. }
-            | AppEvent::ClientInput { .. } => false,
+            | AppEvent::ClientInput { .. }
+            | AppEvent::Shutdown => false,
             // Consumed by the pre-dispatch worker-result branch above.
             AppEvent::ThemeUninstalled { .. }
             | AppEvent::ConfigReloaded { .. }

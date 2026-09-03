@@ -1252,6 +1252,14 @@ impl App {
             .retain(|_, waits| !waits.is_empty());
     }
 
+    pub(crate) fn next_backend_revision_deadline(&self) -> Option<Instant> {
+        self.backend_revision_waits
+            .values()
+            .flatten()
+            .map(|wait| wait.deadline)
+            .min()
+    }
+
     pub(super) fn cancel_backend_revision_waits(&mut self, pane_id: PaneId) {
         if let Some(waits) = self.backend_revision_waits.remove(&pane_id) {
             for wait in waits {
