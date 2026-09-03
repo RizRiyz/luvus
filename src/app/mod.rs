@@ -1360,11 +1360,6 @@ pub struct ResizeDrag {
 /// makes the seam comfortably grabbable without stealing clicks from content.
 const RESIZE_GRAB_TOL: u16 = 2;
 
-/// How many columns onto the content side of a sidebar's edge still grab it for a
-/// resize (docs/29). Widens the 1-column seam into a comfortable target without
-/// reaching into the sidebar body (where dock rows own the width).
-const SIDEBAR_GRAB_TOL: u16 = 2;
-
 /// Rows a dock keeps no matter how far its divider is dragged: enough for the
 /// header plus one line of content, so a dock can be made small but never
 /// squeezed into nothing the user then cannot grab back.
@@ -5715,12 +5710,10 @@ impl App {
     }
 
     /// The sidebar whose draggable edge seam is at `(c, r)`, if any (docs/29).
-    /// The seam `│` column always grabs; the grab band also reaches
-    /// `SIDEBAR_GRAB_TOL` columns onto the **content side**, but only across pane
-    /// borders and gaps. A pane's content owns every one of its cells, including
-    /// the first column where text selection or a mouse-tracking TUI may begin.
-    /// The grab band never reaches into the sidebar body either, where dock rows
-    /// own the width, so it cannot steal a workspace or agent click.
+    /// Only the rendered `│` rule grabs. Pane borders and content remain owned by
+    /// the pane, while the sidebar body remains owned by its docks. Keeping one
+    /// exact visual target makes the hover affordance match the drag behavior on
+    /// both sides and prevents an invisible grab band from stealing edge input.
     fn sidebar_seam_at(&self, c: u16, r: u16) -> Option<Side> {
         // The seam spans the full frame visually, but only the pane lane is a
         // resize target. The tab and status rows own their cells; in particular,
@@ -5735,16 +5728,6 @@ impl App {
                 continue;
             }
             if c == seam.x {
-                return Some(side);
-            }
-            // Distance onto the content side (right of a left seam, left of a
-            // right seam); `None` when the cursor is on the sidebar side.
-            let dist = match side {
-                Side::Left => c.checked_sub(seam.x),
-                Side::Right => seam.x.checked_sub(c),
-            };
-            let Some(d) = dist else { continue };
-            if (1..=SIDEBAR_GRAB_TOL).contains(&d) && self.pane_content_at(c, r).is_none() {
                 return Some(side);
             }
         }
@@ -8775,10 +8758,9 @@ mod tests {
             .find(|(id, _)| *id == pane)
             .map(|(_, rect)| *rect)
             .expect("focused pane has a content rect");
-        let distance = content.x.saturating_sub(seam.x);
         assert!(
-            (1..=SIDEBAR_GRAB_TOL).contains(&distance),
-            "the first content column exercises the sidebar grab tolerance"
+            content.x > seam.x,
+            "the first content column is on the pane side of the rule"
         );
 
         let mouse = |kind, column| {
@@ -8805,6 +8787,63 @@ mod tests {
         ));
         app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), content.x + 3));
         assert_eq!(app.pending_clipboard.as_deref(), Some("edge"));
+    }
+
+    #[test]
+    fn only_the_rendered_sidebar_rules_resize_and_highlight() {
+        let _env = crate::persist::test_env("sidebar-exact-resize-rule");
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.move_dock(&DockKind::Agents, Side::Right);
+        app.sidebars.right.visible = true;
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let pane = app.layout().focus;
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("focused pane has a content rect");
+        let row = content.y + 1;
+        let left = app.left_seam.expect("left rule is rendered");
+        let right = app.right_seam.expect("right rule is rendered");
+        let cases = [
+            (Side::Left, left.x, left.x + 1, content.x),
+            (
+                Side::Right,
+                right.x,
+                right.x.saturating_sub(1),
+                content.right().saturating_sub(1),
+            ),
+        ];
+
+        for (side, rule, pane_border, content_edge) in cases {
+            app.update_hover_sidebar(rule, row);
+            assert_eq!(app.hover_sidebar, Some(side), "{side:?} rule highlights");
+            assert!(
+                app.begin_sidebar_resize(rule, row),
+                "{side:?} rule begins resizing"
+            );
+            assert_eq!(app.sidebar_resize, Some(side));
+            app.end_sidebar_resize();
+
+            for column in [pane_border, content_edge] {
+                app.update_hover_sidebar(column, row);
+                assert_eq!(
+                    app.hover_sidebar, None,
+                    "{side:?} pane column {column} does not highlight the sidebar rule"
+                );
+                assert!(
+                    !app.begin_sidebar_resize(column, row),
+                    "{side:?} pane column {column} does not begin sidebar resizing"
+                );
+            }
+        }
     }
 
     #[test]
