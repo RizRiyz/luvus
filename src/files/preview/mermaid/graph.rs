@@ -234,8 +234,9 @@ pub fn render(flow: &Flowchart, width: usize, ascii: bool) -> Vec<String> {
         order.reverse();
     }
     if layout::supports_spatial_layout(width) {
-        return layout::render(flow, width, ascii)
-            .unwrap_or_else(|| render_structured(flow, &order, width, ascii));
+        if let Some(rendered) = layout::render(flow, width, ascii) {
+            return rendered;
+        }
     }
     let chain = is_chain(flow);
     if chain {

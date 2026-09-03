@@ -17,6 +17,9 @@ const MAX_NODE_WIDTH: usize = 28;
 const MAX_LABEL_LINES: usize = 3;
 const NODE_ROW_GAP: usize = 2;
 const MAX_CANVAS_CELLS: usize = 120_000;
+const ROUTE_DIRECTIONS: [(isize, isize); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+const START_DIRECTION: usize = 4;
+const STATE_DIRECTIONS: usize = 5;
 
 const NORTH: u8 = 1;
 const EAST: u8 = 2;
@@ -85,6 +88,54 @@ struct RouteGrid {
     height: usize,
     cells: Vec<u8>,
     dotted: Vec<bool>,
+}
+
+struct RouteScratch {
+    distance: Vec<usize>,
+    previous: Vec<usize>,
+    stamps: Vec<u32>,
+    generation: u32,
+    queue: BinaryHeap<Reverse<(usize, usize, usize)>>,
+}
+
+impl RouteScratch {
+    fn new(state_count: usize) -> Self {
+        Self {
+            distance: vec![0; state_count],
+            previous: vec![0; state_count],
+            stamps: vec![0; state_count],
+            generation: 0,
+            queue: BinaryHeap::new(),
+        }
+    }
+
+    fn begin_route(&mut self) {
+        if self.generation == u32::MAX {
+            self.stamps.fill(0);
+            self.generation = 1;
+        } else {
+            self.generation += 1;
+        }
+        self.queue.clear();
+    }
+
+    fn distance(&self, state: usize) -> usize {
+        if self.stamps[state] == self.generation {
+            self.distance[state]
+        } else {
+            usize::MAX
+        }
+    }
+
+    fn previous(&self, state: usize) -> Option<usize> {
+        (self.stamps[state] == self.generation).then_some(self.previous[state])
+    }
+
+    fn set(&mut self, state: usize, distance: usize, previous: usize) {
+        self.stamps[state] = self.generation;
+        self.distance[state] = distance;
+        self.previous[state] = previous;
+    }
 }
 
 impl RouteGrid {
@@ -428,7 +479,7 @@ fn render_vertical(
         let measured: Vec<(Vec<String>, usize)> = nodes
             .iter()
             .zip(widths.iter())
-            .map(|(node, width)| measure_node(&flow.nodes[*node], *width))
+            .map(|(node, width)| measure_node(&flow.nodes[*node], *width, ascii))
             .collect();
         let rank_height = measured
             .iter()
@@ -510,13 +561,13 @@ fn natural_node_width(node: &Node) -> usize {
         .clamp(MIN_NODE_WIDTH, MAX_NODE_WIDTH)
 }
 
-fn measure_node(node: &Node, width: usize) -> (Vec<String>, usize) {
+fn measure_node(node: &Node, width: usize, ascii: bool) -> (Vec<String>, usize) {
     let content_width = width.saturating_sub(if matches!(node.shape, NodeShape::Decision) {
         6
     } else {
         4
     });
-    let lines = wrap_label(&node.label, content_width.max(1));
+    let lines = wrap_label(&node.label, content_width.max(1), ascii);
     let height = lines.len()
         + if matches!(node.shape, NodeShape::Decision) {
             4
@@ -580,7 +631,7 @@ fn render_horizontal(
         let measured: Vec<(usize, Vec<String>, usize)> = ranked.ranks[*rank]
             .iter()
             .map(|node| {
-                let (lines, height) = measure_node(&flow.nodes[*node], *rank_width);
+                let (lines, height) = measure_node(&flow.nodes[*node], *rank_width, ascii);
                 (*node, lines, height)
             })
             .collect();
@@ -655,6 +706,11 @@ fn paint_spatial(
     let blocked = node_obstacles(boxes, width, height);
     let glyphs = Glyphs::for_ascii(ascii);
     let mut routes = RouteGrid::new(width, height);
+    let mut route_scratch = RouteScratch::new(
+        width
+            .saturating_mul(height)
+            .saturating_mul(STATE_DIRECTIONS),
+    );
     let mut labels = Vec::new();
     let mut pending_labels = Vec::new();
     let mut arrows = Vec::new();
@@ -673,7 +729,15 @@ fn paint_spatial(
         let source = by_node[edge.from];
         let target = by_node[edge.to];
         let (start, end, arrow) = edge_ports(source, target, axis, glyphs);
-        let Some(path) = shortest_route(start, end, &blocked, &routes, width, height) else {
+        let Some(path) = shortest_route(
+            start,
+            end,
+            &blocked,
+            &routes,
+            width,
+            height,
+            &mut route_scratch,
+        ) else {
             continue;
         };
         routes.polyline(&path, edge.dotted);
@@ -690,7 +754,7 @@ fn paint_spatial(
     }
     for (end, label) in pending_labels {
         if let Some(label) =
-            place_route_label(end, label, &blocked, &labels, &arrows, width, height)
+            place_route_label(end, label, &blocked, &labels, &arrows, width, height, ascii)
         {
             labels.push(label);
         }
@@ -782,26 +846,21 @@ fn shortest_route(
     routes: &RouteGrid,
     width: usize,
     height: usize,
+    scratch: &mut RouteScratch,
 ) -> Option<Vec<(usize, usize)>> {
     if start.0 >= width || start.1 >= height || end.0 >= width || end.1 >= height {
         return None;
     }
-    const DIRECTIONS: [(isize, isize); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
-    const START_DIRECTION: usize = 4;
-    const STATE_DIRECTIONS: usize = 5;
-    let state_count = width
-        .saturating_mul(height)
-        .saturating_mul(STATE_DIRECTIONS);
-    let mut distance = vec![usize::MAX; state_count];
-    let mut previous = vec![usize::MAX; state_count];
+    scratch.begin_route();
     let start_state = route_state(start.0, start.1, START_DIRECTION, width);
-    distance[start_state] = 0;
-    let mut queue = BinaryHeap::new();
-    queue.push(Reverse((manhattan(start, end) * 10, 0usize, start_state)));
+    scratch.set(start_state, 0, start_state);
+    scratch
+        .queue
+        .push(Reverse((manhattan(start, end) * 10, 0usize, start_state)));
     let mut end_state = None;
 
-    while let Some(Reverse((_, cost, state))) = queue.pop() {
-        if cost != distance[state] {
+    while let Some(Reverse((_, cost, state))) = scratch.queue.pop() {
+        if cost != scratch.distance(state) {
             continue;
         }
         let (x, y, direction) = route_state_parts(state, width);
@@ -809,7 +868,7 @@ fn shortest_route(
             end_state = Some(state);
             break;
         }
-        for (next_direction, (dx, dy)) in DIRECTIONS.iter().copied().enumerate() {
+        for (next_direction, (dx, dy)) in ROUTE_DIRECTIONS.iter().copied().enumerate() {
             let Some(next_x) = x.checked_add_signed(dx) else {
                 continue;
             };
@@ -831,11 +890,12 @@ fn shortest_route(
             ) * 2;
             let next_cost = cost + 10 + turn_cost + occupied_cost + border_cost;
             let next_state = route_state(next_x, next_y, next_direction, width);
-            if next_cost < distance[next_state] {
-                distance[next_state] = next_cost;
-                previous[next_state] = state;
+            if next_cost < scratch.distance(next_state) {
+                scratch.set(next_state, next_cost, state);
                 let estimate = next_cost + manhattan((next_x, next_y), end) * 10;
-                queue.push(Reverse((estimate, next_cost, next_state)));
+                scratch
+                    .queue
+                    .push(Reverse((estimate, next_cost, next_state)));
             }
         }
     }
@@ -848,22 +908,19 @@ fn shortest_route(
         if state == start_state {
             break;
         }
-        state = previous[state];
-        if state == usize::MAX {
-            return None;
-        }
+        state = scratch.previous(state)?;
     }
     path.reverse();
     Some(path)
 }
 
 fn route_state(x: usize, y: usize, direction: usize, width: usize) -> usize {
-    (y * width + x) * 5 + direction
+    (y * width + x) * STATE_DIRECTIONS + direction
 }
 
 fn route_state_parts(state: usize, width: usize) -> (usize, usize, usize) {
-    let direction = state % 5;
-    let cell = state / 5;
+    let direction = state % STATE_DIRECTIONS;
+    let cell = state / STATE_DIRECTIONS;
     (cell % width, cell / width, direction)
 }
 
@@ -879,8 +936,9 @@ fn place_route_label(
     arrows: &[Arrow],
     width: usize,
     height: usize,
+    ascii: bool,
 ) -> Option<EdgeLabel> {
-    let text = clip_text(label, width.saturating_sub(2));
+    let text = clip_text(label, width.saturating_sub(2), ascii);
     let text_width = text.width();
     let right = end.0.saturating_add(2);
     let left = end.0.saturating_sub(text_width.saturating_add(2));
@@ -1076,7 +1134,7 @@ fn draw_centered_lines(canvas: &mut Canvas, geometry: &NodeBox, top_padding: usi
     }
 }
 
-fn wrap_label(text: &str, width: usize) -> Vec<String> {
+fn wrap_label(text: &str, width: usize, ascii: bool) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current = String::new();
     for word in text.split_whitespace() {
@@ -1091,7 +1149,7 @@ fn wrap_label(text: &str, width: usize) -> Vec<String> {
                 rest = tail;
             }
             if !rest.is_empty() {
-                current = clip_with_ellipsis(rest, width);
+                current = clip_with_ellipsis(rest, width, ascii);
             }
             continue;
         }
@@ -1124,7 +1182,7 @@ fn wrap_label(text: &str, width: usize) -> Vec<String> {
     }
     if text.width() > lines.iter().map(|line| line.width()).sum::<usize>() + lines.len() {
         if let Some(last) = lines.last_mut() {
-            *last = clip_with_ellipsis(last, width);
+            *last = clip_with_ellipsis(last, width, ascii);
         }
     }
     lines
@@ -1148,24 +1206,33 @@ fn split_at_width(text: &str, width: usize) -> (&str, &str) {
     text.split_at(split)
 }
 
-fn clip_with_ellipsis(text: &str, width: usize) -> String {
+fn clip_with_ellipsis(text: &str, width: usize, ascii: bool) -> String {
     if text.width() <= width {
         return text.to_string();
     }
     if width == 0 {
         return String::new();
     }
-    let ellipsis = if width > 1 { "…" } else { "" };
-    let body_width = width.saturating_sub(ellipsis.width());
-    let (body, _) = split_at_width(text, body_width.max(1));
-    format!("{body}{ellipsis}")
+    let marker = if ascii {
+        ".".repeat(width.min(3))
+    } else if width > 1 {
+        "…".to_string()
+    } else {
+        String::new()
+    };
+    let body_width = width.saturating_sub(marker.width());
+    if body_width == 0 {
+        return marker;
+    }
+    let (body, _) = split_at_width(text, body_width);
+    format!("{body}{marker}")
 }
 
-fn clip_text(text: &str, width: usize) -> String {
+fn clip_text(text: &str, width: usize, ascii: bool) -> String {
     if text.width() <= width {
         text.to_string()
     } else {
-        clip_with_ellipsis(text, width)
+        clip_with_ellipsis(text, width, ascii)
     }
 }
 
@@ -1309,15 +1376,16 @@ mod tests {
     #[test]
     fn ascii_mode_keeps_the_spatial_layout_without_unicode_glyphs() {
         let flow = graph::parse(
-            "flowchart TB\n A([Start]) --> B{Ready?}\n B -- yes --> C[Run]\n B -- no --> D[Wait]",
+            "flowchart TB\n A([Start]) --> B{Ready?}\n B -- yes --> C[ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZAB]\n B -- no --> D[Wait]",
         )
         .unwrap();
         let output = render(&flow, 80, true).unwrap().join("\n");
 
         assert!(output.contains("Ready?"));
+        assert!(output.contains("..."));
         assert!(output.contains('+'));
         assert!(output.contains('v'));
-        assert!(!output.contains(['┌', '─', '▼', '╱']));
+        assert!(output.is_ascii());
     }
 
     #[test]
@@ -1331,7 +1399,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_spatial_canvas_uses_the_bounded_outline() {
+    fn oversized_spatial_canvas_uses_the_bounded_chain_fallback() {
         let mut source = String::from("flowchart TB\n");
         for node in 0..100 {
             source.push_str(&format!(" N{node} --> N{}\n", node + 1));
@@ -1339,9 +1407,13 @@ mod tests {
         let flow = graph::parse(&source).unwrap();
 
         assert!(render(&flow, 200, false).is_none());
-        let outline = graph::render(&flow, 200, false);
-        assert!(outline[0].starts_with('◆'));
-        assert!(outline.iter().all(|line| line.width() <= 200));
+        let fallback = graph::render(&flow, 200, false);
+        let text = fallback.join("\n");
+        assert!(text.contains("N0"));
+        assert!(text.contains("N100"));
+        assert!(text.contains('▼'));
+        assert!(!fallback[0].starts_with('◆'));
+        assert!(fallback.iter().all(|line| line.width() <= 200));
     }
 
     #[test]
