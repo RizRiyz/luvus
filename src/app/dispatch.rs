@@ -2449,6 +2449,11 @@ impl App {
                                 "state_source":s.state_source,
                                 "session": session,
                                 "workspace": wi.to_string(), "workspace_name": ws.name,
+                                // The one selector that survives reordering:
+                                // `workspace` is a positional index that shifts
+                                // when an earlier workspace closes, and
+                                // `workspace_name` is user-editable.
+                                "workspace_id": ws.id,
                                 "project": ws.name, "cwd": cwd,
                                 "branch": branch, "repo": repo, "worktree": is_worktree,
                                 "tab": (ti + 1).to_string(), "focused": id == focus,
@@ -6952,6 +6957,72 @@ command = ["true"]
             .dispatch("agent.list", &json!({}))
             .expect("agent.list ok");
         assert_eq!(out["agents"][0]["session"], "sess-42");
+    }
+
+    /// Every `agent.list` row carries its workspace's stable id. `workspace` is a
+    /// positional index that moves when workspaces are reordered or an earlier one
+    /// closes, and `workspace_name` is user-editable, so the id is the only
+    /// selector a consumer can hold across those changes.
+    #[test]
+    fn agent_list_rows_carry_a_stable_workspace_id() {
+        let _env = crate::persist::test_env("agent-list-workspace-id");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        let first_pane = app.layout().focus;
+        app.status.get_mut(&first_pane).unwrap().agent = "claude".into();
+        let first_id = app.workspaces[0].id.clone();
+
+        let second_root = crate::persist::config_dir().join("second-workspace");
+        std::fs::create_dir_all(&second_root).unwrap();
+        assert!(app.create_workspace_at(second_root));
+        let second_pane = app.layout().focus;
+        app.status.get_mut(&second_pane).unwrap().agent = "codex".into();
+        let second_id = app.workspaces[1].id.clone();
+        assert_ne!(first_id, second_id);
+
+        let row_for = |app: &mut App, pane: crate::app::PaneId| -> Value {
+            let out = app.dispatch("agent.list", &json!({})).expect("agent.list");
+            let wanted = pane.0.to_string();
+            out["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["pane"].as_str() == Some(wanted.as_str()))
+                .expect("the agent is listed")
+                .clone()
+        };
+
+        // The id agrees with the one `workspace.get` publishes for that index, so
+        // a consumer can join the two surfaces without guessing.
+        let second_row = row_for(&mut app, second_pane);
+        assert_eq!(second_row["workspace"], "1");
+        assert_eq!(second_row["workspace_id"], second_id.as_str());
+        let published = app
+            .dispatch("workspace.get", &json!({"workspace": 1}))
+            .expect("workspace.get");
+        assert_eq!(published["workspace_id"], second_row["workspace_id"]);
+
+        // Reordering moves the index but not the id. This is the whole point of
+        // the field: an index captured before the move now names the other
+        // workspace, while the id still names this one.
+        app.dispatch("workspace.move", &json!({"workspace": 1, "to": 0}))
+            .expect("workspace.move");
+        let moved = row_for(&mut app, second_pane);
+        assert_eq!(
+            moved["workspace"], "0",
+            "the positional index followed the move"
+        );
+        assert_eq!(
+            moved["workspace_id"],
+            second_id.as_str(),
+            "the stable id survived the move"
+        );
+        assert_eq!(
+            row_for(&mut app, first_pane)["workspace_id"],
+            first_id.as_str(),
+            "the workspace that was displaced keeps its own id"
+        );
     }
 
     /// A live alias set by `agent.name` shows up in `agent.list` and resolves an
