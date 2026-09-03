@@ -1845,13 +1845,20 @@ fn wait_cmd(args: &[String]) -> Result<i32> {
 }
 
 fn agent_wait_needs_stream_fallback(response: &Value, uses_statuses: bool) -> bool {
-    response
-        .get("error")
-        .and_then(|error| error.get("message"))
+    let Some(error) = response.get("error") else {
+        return false;
+    };
+    if error.get("code").and_then(Value::as_str) != Some("invalid_request") {
+        return false;
+    }
+    error
+        .get("message")
         .and_then(Value::as_str)
         .is_some_and(|message| {
             message.starts_with("unknown method")
-                || (uses_statuses && message == "agent.wait contains an unknown parameter")
+                || (uses_statuses
+                    && (message == "agent.wait contains an unknown parameter"
+                        || message.starts_with("agent.wait needs a pane and status")))
         })
 }
 
@@ -2160,31 +2167,61 @@ fn agent_send_cmd(args: &[String]) -> Result<i32> {
     })
 }
 
-/// Current agent status of `pane` (global lookup via `pane.status`).
-fn pane_status(pane: &str) -> Result<Option<String>> {
-    let v = send_request("pane.status", json!({ "pane": pane }))?;
-    Ok(v.get("result")
+fn pane_status_from_response(response: &Value) -> Result<Option<&str>> {
+    if let Some(error) = response.get("error") {
+        let code = error
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("request_failed");
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("pane.status failed");
+        return Err(anyhow!("pane.status {code}: {message}"));
+    }
+    Ok(response
+        .get("result")
         .and_then(|r| r.get("status"))
-        .and_then(|x| x.as_str())
-        .map(String::from))
+        .and_then(Value::as_str))
+}
+
+fn wait_status_poll_with<Request, Pause>(
+    pane: &str,
+    targets: &[String],
+    deadline: Option<Instant>,
+    mut request: Request,
+    mut pause: Pause,
+) -> Result<bool>
+where
+    Request: FnMut(&str) -> Result<Value>,
+    Pause: FnMut(Duration),
+{
+    loop {
+        let response = request(pane)?;
+        if pane_status_from_response(&response)?
+            .is_some_and(|status| targets.iter().any(|target| target == status))
+        {
+            return Ok(true);
+        }
+        if deadline.is_some_and(|end| Instant::now() >= end) {
+            return Ok(false);
+        }
+        pause(Duration::from_millis(25));
+    }
 }
 
 /// Compatibility path for servers without status-set support. Poll the current
 /// status until one target matches (exit 0) or the deadline passes (exit 2).
 /// Keeping the polling synchronous ensures every return closes its connection.
 fn wait_status_poll(pane: &str, targets: &[String], deadline: Option<Instant>) -> Result<i32> {
-    loop {
-        if pane_status(pane)?
-            .as_deref()
-            .is_some_and(|status| targets.iter().any(|target| target == status))
-        {
-            return Ok(0);
-        }
-        if deadline.is_some_and(|end| Instant::now() >= end) {
-            return Ok(2);
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    let matched = wait_status_poll_with(
+        pane,
+        targets,
+        deadline,
+        |pane| send_request("pane.status", json!({ "pane": pane })),
+        std::thread::sleep,
+    )?;
+    Ok(if matched { 0 } else { 2 })
 }
 
 /// Focus + zoom a pane via `attach.pane` (docs/18 WA-2). Used by `luvus attach`.
@@ -4615,12 +4652,78 @@ mod tests {
 
     #[test]
     fn agent_wait_status_sets_fall_back_for_older_servers() {
-        let unknown_method = json!({"error":{"message":"unknown method agent.wait"}});
+        let unknown_method =
+            json!({"error":{"code":"invalid_request","message":"unknown method agent.wait"}});
         assert!(agent_wait_needs_stream_fallback(&unknown_method, false));
 
-        let old_parameter = json!({"error":{"message":"agent.wait contains an unknown parameter"}});
+        let old_parameter = json!({"error":{
+            "code":"invalid_request",
+            "message":"agent.wait contains an unknown parameter"
+        }});
         assert!(agent_wait_needs_stream_fallback(&old_parameter, true));
         assert!(!agent_wait_needs_stream_fallback(&old_parameter, false));
+
+        let message_only = json!({"error":{"message":"agent.wait contains an unknown parameter"}});
+        assert!(!agent_wait_needs_stream_fallback(&message_only, true));
+
+        let needs_status = json!({"error":{
+            "code":"invalid_request",
+            "message":"agent.wait needs a pane and status idle|working|blocked|done"
+        }});
+        assert!(agent_wait_needs_stream_fallback(&needs_status, true));
+        assert!(!agent_wait_needs_stream_fallback(&needs_status, false));
+
+        let unrelated =
+            json!({"error":{"code":"invalid_request","message":"pane must be a pane id"}});
+        assert!(!agent_wait_needs_stream_fallback(&unrelated, true));
+    }
+
+    #[test]
+    fn wait_status_poll_is_bounded_and_propagates_server_errors() {
+        use std::cell::Cell;
+
+        fn poll_once(
+            response: Value,
+            deadline: Option<Instant>,
+        ) -> (Result<bool>, usize, usize, usize) {
+            let requests = Cell::new(0);
+            let in_flight = Cell::new(0);
+            let sleeps = Cell::new(0);
+            let result = wait_status_poll_with(
+                "7",
+                &["working".to_string(), "done".to_string()],
+                deadline,
+                |pane| {
+                    assert_eq!(pane, "7");
+                    requests.set(requests.get() + 1);
+                    in_flight.set(in_flight.get() + 1);
+                    let response = response.clone();
+                    in_flight.set(in_flight.get() - 1);
+                    Ok(response)
+                },
+                |_| sleeps.set(sleeps.get() + 1),
+            );
+            (result, requests.get(), in_flight.get(), sleeps.get())
+        }
+
+        let (matched, requests, in_flight, sleeps) =
+            poll_once(json!({"result":{"status":"working"}}), None);
+        assert!(matched.unwrap());
+        assert_eq!((requests, in_flight, sleeps), (1, 0, 0));
+
+        let (matched, requests, in_flight, sleeps) =
+            poll_once(json!({"result":{"status":"idle"}}), Some(Instant::now()));
+        assert!(!matched.unwrap());
+        assert_eq!((requests, in_flight, sleeps), (1, 0, 0));
+
+        let (error, requests, in_flight, sleeps) = poll_once(
+            json!({"error":{"code":"not_found","message":"pane not found"}}),
+            None,
+        );
+        let error = error.unwrap_err();
+        assert!(error.to_string().contains("not_found"));
+        assert!(error.to_string().contains("pane not found"));
+        assert_eq!((requests, in_flight, sleeps), (1, 0, 0));
     }
 
     #[test]
