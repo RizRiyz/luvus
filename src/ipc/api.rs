@@ -3058,9 +3058,10 @@ mod tests {
 
     #[test]
     fn invalid_agent_wait_requests_do_not_reach_the_app_loop() {
-        let _env = crate::persist::test_env("agent-wait-invalid");
+        // Keep the macOS Unix-domain socket below sockaddr_un::sun_path.
+        let _env = crate::persist::test_env("aw-invalid");
         let root = crate::persist::ensure_config_dir();
-        let path = root.join("agent-wait-invalid.sock");
+        let path = root.join("wait.sock");
         let lock = transport::acquire_server_startup_lock(&root).unwrap();
         let listener = bind_server(&path, &lock).unwrap();
         let (events, rx) = mpsc::channel();
