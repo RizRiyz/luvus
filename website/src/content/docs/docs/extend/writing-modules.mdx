@@ -389,6 +389,8 @@ Each **row** is an object:
 |---|:---:|---|
 | `text` | ✓ | The row label. |
 | `dot` |  | A status dot: `idle` / `working` / `blocked` / `done` (colored like the Agents list). |
+| `tone` |  | Colors the row text with a Luvus Bar tone: `normal` / `muted` / `accent` / `success` / `warning` / `error`. Omit for the default row color. |
+| `spans` |  | Draw the row from segments instead of `text`: `[{"text": "[", "tone": "muted"}, {"text": "━━━", "tone": "success"}]`. Each segment takes its own tone, else the row's. `text` stays the plain version handed to the action. |
 | `action` |  | A module **action id** run when the row is clicked. |
 | `value` |  | An opaque payload for that action, so one action can back every row. |
 | `menu` |  | Extra actions offered when the row is **right-clicked**. See below. |

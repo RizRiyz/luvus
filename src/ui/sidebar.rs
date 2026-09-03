@@ -766,8 +766,31 @@ fn draw_module_dock(f: &mut RenderTarget, area: Rect, id: &str, app: &mut App, t
             spans.push(Span::raw(" "));
             prefix_w = 2;
         }
-        let text = crate::ui::truncate(&row.text, (cw as usize).saturating_sub(prefix_w));
-        spans.push(Span::styled(text, Style::new().fg(t.subtext1)));
+        let tone_of = |name: Option<&str>| {
+            name.and_then(crate::bar::BarTone::from_name)
+                .map_or(t.subtext1, |tone| crate::bar::render::tone_color(tone, t))
+        };
+        let row_color = tone_of(row.tone.as_deref());
+        let mut budget = (cw as usize).saturating_sub(prefix_w);
+        if row.spans.is_empty() {
+            let text = crate::ui::truncate(&row.text, budget);
+            spans.push(Span::styled(text, Style::new().fg(row_color)));
+        } else {
+            for sp in &row.spans {
+                if budget == 0 {
+                    break;
+                }
+                let text = crate::ui::truncate(&sp.text, budget);
+                budget =
+                    budget.saturating_sub(unicode_width::UnicodeWidthStr::width(text.as_str()));
+                let color = if sp.tone.is_some() {
+                    tone_of(sp.tone.as_deref())
+                } else {
+                    row_color
+                };
+                spans.push(Span::styled(text, Style::new().fg(color)));
+            }
+        }
         line_at(f, y, Line::from(spans));
         if row.action.is_some() {
             app.module_dock_rects

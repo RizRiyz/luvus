@@ -143,6 +143,15 @@ pub enum Side {
 pub struct DockRow {
     pub text: String,
     pub dot: Option<String>,
+    /// Optional Luvus Bar tone name (`normal`/`muted`/`accent`/`success`/
+    /// `warning`/`error`) for the row text. Absent keeps the default row
+    /// colour, so every pre-existing module renders exactly as before.
+    pub tone: Option<String>,
+    /// Optional per-segment text with its own tone. When non-empty it is drawn
+    /// instead of `text`, left to right, each span in its tone (or the row's
+    /// `tone`, or the default row colour). `text` stays the plain fallback and
+    /// what a click hands to the action as `LUVUS_MODULE_ROW_TEXT`.
+    pub spans: Vec<DockSpan>,
     /// Action id to invoke when this row is clicked.
     pub action: Option<String>,
     /// Opaque per-row payload handed to that action as `LUVUS_MODULE_ROW_VALUE`
@@ -156,6 +165,13 @@ pub struct DockRow {
     /// module declares one per row: a device row can offer "flash this board"
     /// while a command row in the same dock offers nothing.
     pub menu: Vec<DockRowMenuItem>,
+}
+
+/// One coloured segment of a dock row's text (see [`DockRow::spans`]).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DockSpan {
+    pub text: String,
+    pub tone: Option<String>,
 }
 
 /// One entry in a dock row's right-click menu (docs/52). `destructive` only
@@ -9886,6 +9902,8 @@ mod tests {
         let row = |text: &str, value: &str, menu: Vec<DockRowMenuItem>| DockRow {
             text: text.into(),
             dot: None,
+            tone: None,
+            spans: Vec::new(),
             action: Some("select".into()),
             value: Some(value.into()),
             menu,
@@ -9999,6 +10017,8 @@ mod tests {
                 DockRow {
                     text: "esp32s3".into(),
                     dot: Some("done".into()),
+                    tone: None,
+                    spans: Vec::new(),
                     action: Some("select".into()),
                     value: Some("/dev/ttyA".into()),
                     menu: vec![DockRowMenuItem {
@@ -10011,6 +10031,8 @@ mod tests {
                 DockRow {
                     text: "build".into(),
                     dot: None,
+                    tone: None,
+                    spans: Vec::new(),
                     action: Some("build".into()),
                     value: None,
                     menu: Vec::new(),
@@ -11760,6 +11782,8 @@ mod tests {
             vec![DockRow {
                 text: "build ok".into(),
                 dot: Some("done".into()),
+                tone: None,
+                spans: Vec::new(),
                 action: None,
                 value: None,
                 menu: Vec::new(),

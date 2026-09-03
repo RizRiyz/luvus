@@ -87,6 +87,23 @@ pub enum BarSegmentKind {
     Separator,
 }
 
+impl BarTone {
+    /// Parse a tone name as modules spell it in JSON (`"success"`, `"warning"`,
+    /// ...). `None` for anything unknown, so a typo falls back to the default
+    /// colour instead of failing the push.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "normal" => Some(Self::Normal),
+            "muted" => Some(Self::Muted),
+            "accent" => Some(Self::Accent),
+            "success" => Some(Self::Success),
+            "warning" => Some(Self::Warning),
+            "error" => Some(Self::Error),
+            _ => None,
+        }
+    }
+}
+
 fn default_progress_width() -> u16 {
     8
 }
@@ -1024,6 +1041,15 @@ fn total_width(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn tone_from_name_accepts_the_json_spellings_and_rejects_the_rest() {
+        assert_eq!(BarTone::from_name("success"), Some(BarTone::Success));
+        assert_eq!(BarTone::from_name("error"), Some(BarTone::Error));
+        assert_eq!(BarTone::from_name("muted"), Some(BarTone::Muted));
+        assert_eq!(BarTone::from_name("Success"), None);
+        assert_eq!(BarTone::from_name("red"), None);
+    }
     use super::*;
 
     fn widget(id: &str, full: &str, compact: &str, priority: u8) -> BarWidget {
