@@ -31,10 +31,6 @@ static CHILD_REAPER: OnceLock<Reaper> = OnceLock::new();
 pub(super) static CHILD_REAPER_STARTS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-#[cfg(test)]
-pub(super) static CHILD_REAPER_WAIT_RETURNS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
 /// Hand a child to the process-wide reaper. Pane I/O remains isolated behind
 /// its platform backend; exit is observed from one waiter thread.
 pub(super) fn register_child_reaper(
@@ -91,10 +87,7 @@ fn child_reaper_loop(rx: Receiver<ReaperEntry>, wake: Arc<ReaperWake>) {
             }
         } else {
             match wake.wait_for_exit_or_registration(&children) {
-                Ok(()) => {
-                    #[cfg(test)]
-                    CHILD_REAPER_WAIT_RETURNS.fetch_add(1, Ordering::SeqCst);
-                }
+                Ok(()) => {}
                 Err(_) => {
                     // The wake primitive failed. Block on the next registration
                     // so this thread cannot spin, then try_wait listed children.
@@ -378,7 +371,8 @@ mod tests {
                 .expect("wait for wake");
         });
         ready_rx.recv().unwrap();
-        thread::sleep(Duration::from_millis(80));
+        // Longer than the old 50ms try_wait poll. A timer would return here.
+        thread::sleep(Duration::from_millis(200));
         assert!(
             !thread.is_finished(),
             "the reaper wake returned without a child exit or registration"

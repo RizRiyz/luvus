@@ -130,9 +130,9 @@ mod socket_api_tests {
         app.last_proc_at = now - Duration::from_secs(10);
         app.last_sessions_at = now - Duration::from_secs(10);
         app.detect_tick_with(now, false);
-        assert!(app.cwd_scan_inflight == false, "detached cwd scan");
-        assert!(app.proc_scan_inflight == false, "detached proc scan");
-        assert!(app.sessions_scan_inflight == false, "detached session scan");
+        assert!(!app.cwd_scan_inflight, "detached cwd scan");
+        assert!(!app.proc_scan_inflight, "detached proc scan");
+        assert!(!app.sessions_scan_inflight, "detached session scan");
         assert!(app.runtime_cwd_dirty);
         assert!(app.runtime_proc_dirty);
         assert!(app.runtime_sessions_dirty);
