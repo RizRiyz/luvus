@@ -164,6 +164,10 @@ enum Cond {
     /// (U+2800..=U+28FF, what most CLIs animate) or a moon phase (U+1F311..=
     /// U+1F318, Kimi's background-agent spinner). A running spinner means work.
     Spinner,
+    /// A line starts with one of these branded prefixes and the next character
+    /// is a spinner. Some agents keep their brand before the live state glyph
+    /// in the OSC title, so the generic start-of-line spinner rule cannot see it.
+    SpinnerAfterPrefix(Vec<String>),
 }
 
 impl Cond {
@@ -176,6 +180,14 @@ impl Cond {
             Cond::Spinner => low
                 .lines()
                 .any(|l| l.trim_start().chars().next().is_some_and(is_spinner_glyph)),
+            Cond::SpinnerAfterPrefix(prefixes) => low.lines().any(|line| {
+                let line = line.trim_start();
+                prefixes.iter().any(|prefix| {
+                    line.strip_prefix(prefix)
+                        .and_then(|rest| rest.chars().next())
+                        .is_some_and(is_spinner_glyph)
+                })
+            }),
         }
     }
 }
@@ -308,6 +320,9 @@ fn all(subs: &[&str]) -> Cond {
 fn starts_with(prefixes: &[&str]) -> Cond {
     Cond::StartsWith(prefixes.iter().map(|value| value.to_lowercase()).collect())
 }
+fn spinner_after_prefix(prefixes: &[&str]) -> Cond {
+    Cond::SpinnerAfterPrefix(prefixes.iter().map(|value| value.to_lowercase()).collect())
+}
 
 /// How much of the live terminal grid must reach the rule engine. Most agents
 /// keep state beside their bottom prompt, but fx can pin its transient activity
@@ -412,6 +427,34 @@ fn builtin_rules() -> Vec<Rule> {
             105,
             Region::Screen,
             vec![any(&["ctrl+c to stop"])],
+        ),
+        // OMP 18.x publishes its state in the OSC title as `π <state> label`.
+        // The working separator is a non-blank braille spinner, while `!` means
+        // attention and `>` means the user's turn. Keep these rules scoped to
+        // OMP: the generic spinner rule deliberately requires a spinner at the
+        // start of a line, and weakening it would create false positives for
+        // ordinary branded titles. The explicit idle title outranks retained
+        // screen activity but not a live confirmation panel.
+        per(
+            "omp",
+            State::Blocked,
+            325,
+            Region::Title,
+            vec![starts_with(&["π !"])],
+        ),
+        per(
+            "omp",
+            State::Working,
+            125,
+            Region::Title,
+            vec![spinner_after_prefix(&["π "])],
+        ),
+        per(
+            "omp",
+            State::Idle,
+            210,
+            Region::Title,
+            vec![starts_with(&["π >"])],
         ),
         // fx suppresses its activity row while it needs user input. Its
         // narrowest approval and question hints retain these paired controls,
@@ -1618,6 +1661,50 @@ Would you like to proceed?
                 .detect_agent(None, "", "oh-my-pi")
                 .map(|(agent, _)| agent),
             Some("omp".to_string())
+        );
+    }
+
+    #[test]
+    fn omp_title_states_work_without_the_optional_integration() {
+        let manifests = Manifests::builtin();
+        let omp_process = vec!["bun /Users/me/.bun/bin/omp".to_string()];
+        let detect = |title: &str, screen: &str| {
+            classify(
+                Some(title),
+                screen,
+                false,
+                false,
+                "zsh",
+                "",
+                &omp_process,
+                &manifests,
+            )
+        };
+
+        let working = detect("π ⠋ sudos", "");
+        assert_eq!(working.agent, "omp");
+        assert_eq!(working.identity_source, "process_tree");
+        assert_eq!(working.state, State::Working);
+        assert_eq!(working.state_source, "manifest_rule");
+
+        assert_eq!(detect("π ! sudos", "").state, State::Blocked);
+        assert_eq!(detect("π > sudos", "esc to interrupt").state, State::Idle);
+
+        let pi = classify(
+            Some("π ⠙ sudos"),
+            "",
+            false,
+            false,
+            "zsh",
+            "",
+            &["/usr/local/bin/pi".to_string()],
+            &manifests,
+        );
+        assert_eq!(pi.agent, "pi");
+        assert_eq!(
+            pi.state,
+            State::Idle,
+            "OMP's branded title contract must not change Pi state"
         );
     }
 
