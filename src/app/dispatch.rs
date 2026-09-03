@@ -171,6 +171,23 @@ mod socket_api_tests {
     }
 
     #[test]
+    fn process_api_scans_without_a_tui() {
+        let (_env, mut app) = app("process-api-demand");
+        let pane = app.layout().focus;
+        app.proc_commands.clear();
+        app.proc_scan_inflight = false;
+        app.runtime_proc_dirty = false;
+        let result = app
+            .dispatch("pane.processes", &json!({"pane": pane.0}))
+            .unwrap();
+        assert_eq!(result["scan"], "unavailable");
+        assert!(
+            app.proc_scan_inflight,
+            "UHP process inspection must scan without a TUI attached"
+        );
+    }
+
+    #[test]
     fn detection_considers_changed_panes_between_bounded_audits() {
         let (_env, mut app) = app("dirty-pane-detection");
         let pane = app.layout().focus;
@@ -841,6 +858,35 @@ impl App {
         deadline
     }
 
+    fn start_proc_scan(&mut self) {
+        if self.proc_scan_inflight {
+            return;
+        }
+        self.runtime_proc_dirty = false;
+        self.last_proc_at = Instant::now();
+        self.proc_scan_inflight = true;
+        let pids: Vec<u32> = self
+            .panes
+            .values()
+            .filter_map(|p| {
+                let pid = p.child_pid.load(std::sync::atomic::Ordering::SeqCst);
+                (pid != 0).then_some(pid)
+            })
+            .collect();
+        let tx = self.app_tx.clone();
+        std::thread::spawn(move || {
+            let found = crate::platform::descendant_commands(&pids);
+            let _ = tx.send(AppEvent::ProcScanned(found));
+        });
+    }
+
+    pub(crate) fn request_proc_scan_if_unobserved(&mut self, id: PaneId) {
+        if self.proc_commands.contains_key(&id) {
+            return;
+        }
+        self.start_proc_scan();
+    }
+
     fn schedule_runtime_scans(&mut self, now: Instant, clients_attached: bool) {
         if !clients_attached {
             return;
@@ -923,26 +969,8 @@ impl App {
         }
         // Identity comes from the pane's *processes* (docs/07). One `ps` covers
         // every pane; it runs only after PTY activity, never as a heartbeat.
-        if self.runtime_proc_dirty
-            && !self.proc_scan_inflight
-            && now.duration_since(self.last_proc_at) >= PROC_SCAN_INTERVAL
-        {
-            self.runtime_proc_dirty = false;
-            self.last_proc_at = now;
-            self.proc_scan_inflight = true;
-            let pids: Vec<u32> = self
-                .panes
-                .values()
-                .filter_map(|p| {
-                    let pid = p.child_pid.load(std::sync::atomic::Ordering::SeqCst);
-                    (pid != 0).then_some(pid)
-                })
-                .collect();
-            let tx = self.app_tx.clone();
-            std::thread::spawn(move || {
-                let found = crate::platform::descendant_commands(&pids);
-                let _ = tx.send(AppEvent::ProcScanned(found));
-            });
+        if self.runtime_proc_dirty && now.duration_since(self.last_proc_at) >= PROC_SCAN_INTERVAL {
+            self.start_proc_scan();
         }
     }
 
@@ -1855,6 +1883,7 @@ impl App {
             "pane.processes" => {
                 reject_api_fields(p, &["pane"])?;
                 let id = self.resolve_pane(p).ok_or_else(not_found)?;
+                self.request_proc_scan_if_unobserved(id);
                 Ok(self.pane_processes(id))
             }
             "pane.report_session" => {
@@ -4593,10 +4622,10 @@ impl App {
         })
     }
 
-    /// Cached process identity for a pane. The process scan already runs once
-    /// for all panes off-loop; this endpoint does no spawn or filesystem IO and
-    /// deliberately returns executable names rather than full argv, which may
-    /// contain credentials or prompts.
+    /// Cached process identity for a pane. Callers that need a first observation
+    /// queue `request_proc_scan_if_unobserved` first; this getter itself does no
+    /// IO and returns executable names rather than full argv, which may contain
+    /// credentials or prompts.
     pub(crate) fn pane_processes(&self, id: PaneId) -> Value {
         let runtime = self
             .panes

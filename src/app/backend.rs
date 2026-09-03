@@ -259,7 +259,7 @@ impl App {
         }))
     }
 
-    fn backend_processes(&self, params: &Value) -> BackendResult {
+    fn backend_processes(&mut self, params: &Value) -> BackendResult {
         backend::reject_unknown_fields(
             params,
             &[
@@ -270,6 +270,7 @@ impl App {
             ],
         )?;
         let pane_id = self.resolve_backend_runtime(params, false)?;
+        self.request_proc_scan_if_unobserved(pane_id);
         let process = self.pane_processes(pane_id);
         Ok(json!({
             "type":"terminal_backend_processes",
