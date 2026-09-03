@@ -49,7 +49,10 @@ impl App {
             return;
         };
         let terminal_event = match name {
-            "pane.created" => "terminal.created",
+            "pane.created" => {
+                self.register_backend_terminal(pane_id);
+                return;
+            }
             "pane.moved" => "terminal.moved",
             _ => return,
         };
@@ -1505,6 +1508,42 @@ fn backend_key_bytes(key: &str, application_cursor: bool) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    fn locator(app: &App, pane: PaneId) -> Value {
+        let runtime = app.panes[&pane].terminal_runtime().unwrap();
+        json!({
+            "server_generation":app.backend_server_generation,
+            "terminal_id":runtime.terminal_id,
+            "pane_id":pane.0.to_string(),
+        })
+    }
+
+    fn backend_events_after(app: &App, floor: u64, name: &str) -> Vec<Value> {
+        crate::ipc::api::replayed_events_after(&app.events, floor)
+            .into_iter()
+            .filter(|event| event["event"] == name)
+            .collect()
+    }
+
+    fn assert_capture_succeeds(app: &mut App, mut params: Value) {
+        params["mode"] = json!("visible");
+        params["lines"] = json!(24);
+        params["ansi"] = json!(false);
+        let (reply, response) = std::sync::mpsc::channel();
+        app.start_backend_capture(ApiRequest {
+            id: "capture-sync-pane".into(),
+            method: "terminal.backend.capture".into(),
+            params,
+            reply,
+        });
+        let response: Value = serde_json::from_str(
+            &response
+                .recv_timeout(Duration::from_secs(2))
+                .expect("capture worker replies"),
+        )
+        .unwrap();
+        assert_eq!(response["result"]["type"], "terminal_backend_capture");
+    }
+
     #[test]
     fn inventory_is_global_and_stable_across_a_pane_move() {
         let _env = crate::persist::test_env("backend-global-inventory");
@@ -1515,11 +1554,189 @@ mod tests {
         let before = app.backend_inventory(&json!({})).unwrap();
         assert_eq!(before["terminals"].as_array().unwrap().len(), 1);
         app.run_cmd(crate::app::keys::Cmd::NewTab);
+        let new_pane = app.layout().focus;
+        let original_locator = locator(&app, pane);
+        let new_locator = locator(&app, new_pane);
+        assert_eq!(
+            app.backend_validate(&original_locator).unwrap()["state"],
+            "alive"
+        );
+        assert_eq!(
+            app.backend_validate(&new_locator).unwrap()["state"],
+            "alive"
+        );
         app.workspaces[0].active_tab = 0;
         app.move_pane_to_tab(pane, MoveTarget::Tab(1)).unwrap();
         let after = app.backend_inventory(&json!({})).unwrap();
         assert_eq!(after["terminals"][0]["terminal_id"], runtime.terminal_id);
         assert_eq!(after["terminals"][0]["tab"]["index"], 1);
+        assert_eq!(
+            app.backend_validate(&original_locator).unwrap()["state"],
+            "alive"
+        );
+        assert_eq!(
+            app.backend_validate(&new_locator).unwrap()["state"],
+            "alive"
+        );
+    }
+
+    #[test]
+    fn synchronous_tab_terminal_supports_validate_capture_and_observe() {
+        let _env = crate::persist::test_env("backend-sync-tab");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let startup = app.layout().focus;
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        let pane = app.layout().focus;
+        let target = locator(&app, pane);
+
+        assert_eq!(app.backend_validate(&target).unwrap()["state"], "alive");
+        assert_eq!(
+            app.prepare_backend_observe(&target).unwrap().pane_id,
+            pane.0.to_string()
+        );
+        assert_capture_succeeds(&mut app, target);
+        assert_eq!(
+            app.backend_validate(&locator(&app, startup)).unwrap()["state"],
+            "alive",
+            "the previously registered startup terminal stays addressable"
+        );
+    }
+
+    #[test]
+    fn workspace_open_and_resume_spawn_register_backend_terminals() {
+        let _env = crate::persist::test_env("backend-sync-workspace-resume");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let workspace = crate::persist::config_dir().join("opened-workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        app.dispatch(
+            "workspace.open",
+            &json!({"path":workspace.display().to_string()}),
+        )
+        .unwrap();
+        let opened = app.layout().focus;
+        assert_eq!(
+            app.backend_validate(&locator(&app, opened)).unwrap()["state"],
+            "alive"
+        );
+
+        let resumed = app
+            .spawn_resume_pane(workspace, "")
+            .expect("resume terminal spawns");
+        assert_eq!(
+            app.backend_validate(&locator(&app, resumed)).unwrap()["state"],
+            "alive"
+        );
+    }
+
+    #[test]
+    fn lifecycle_registration_handles_deferred_and_synchronous_panes_once() {
+        let _env = crate::persist::test_env("backend-lifecycle-registration");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let cwd = app.ws().cwd.clone();
+        let valid_shell = crate::platform::resolve_shell(&app.config.shell);
+        app.config.shell = "luvus-backend-test-shell-that-does-not-exist".into();
+        let before = app.backend_terminal_index.clone();
+        let floor = crate::ipc::api::current_sequence(&app.events);
+        let deferred = app
+            .spawn_into_deferred(cwd.clone(), &[])
+            .expect("deferred pane is allocated before spawn");
+        assert!(app.panes[&deferred].terminal_runtime().is_none());
+        assert_eq!(app.backend_terminal_index, before);
+        assert!(backend_events_after(&app, floor, "terminal.created").is_empty());
+
+        let ready = Pane::spawn(
+            deferred,
+            80,
+            24,
+            cwd.clone(),
+            app.app_tx.clone(),
+            None,
+            &valid_shell,
+            app.config.scrollback_bytes(),
+            app.pane_appearance,
+        )
+        .unwrap();
+        app.panes.insert(deferred, ready);
+        app.handle_event(AppEvent::PtyReady { id: deferred, cwd });
+        assert_eq!(
+            app.backend_terminal_index
+                .get(&app.panes[&deferred].terminal_runtime().unwrap().terminal_id),
+            Some(&deferred)
+        );
+        assert_eq!(
+            backend_events_after(&app, floor, "terminal.created").len(),
+            1
+        );
+
+        app.config.shell = valid_shell;
+        let synchronous = app.spawn_into(app.ws().cwd.clone()).unwrap();
+        assert_eq!(
+            app.backend_terminal_index.get(
+                &app.panes[&synchronous]
+                    .terminal_runtime()
+                    .unwrap()
+                    .terminal_id
+            ),
+            Some(&synchronous),
+            "the pane.created lifecycle is the synchronous registration choke point"
+        );
+    }
+
+    #[test]
+    fn missing_existing_and_closed_registration_paths_leave_consistent_state() {
+        let _env = crate::persist::test_env("backend-registration-edges");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let missing = PaneId::alloc();
+        let before = app.backend_terminal_index.clone();
+        let floor = crate::ipc::api::current_sequence(&app.events);
+        app.emit_backend_lifecycle_from_pane_event(
+            "pane.created",
+            &json!({"pane":missing.0.to_string()}),
+        );
+        assert_eq!(app.backend_terminal_index, before);
+        assert!(backend_events_after(&app, floor, "terminal.created").is_empty());
+
+        let existing = app.layout().focus;
+        let existing_runtime = app.panes[&existing].terminal_runtime().unwrap();
+        let before = app.backend_terminal_index.clone();
+        let floor = crate::ipc::api::current_sequence(&app.events);
+        app.emit_backend_lifecycle_from_pane_event(
+            "pane.created",
+            &json!({"pane":existing.0.to_string()}),
+        );
+        assert_eq!(app.backend_terminal_index, before);
+        assert_eq!(
+            app.backend_terminal_index
+                .get(&existing_runtime.terminal_id),
+            Some(&existing)
+        );
+        assert_eq!(
+            backend_events_after(&app, floor, "terminal.created").len(),
+            1
+        );
+
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        let closing = app.layout().focus;
+        let closing_runtime = app.panes[&closing].terminal_runtime().unwrap();
+        assert_eq!(
+            app.backend_terminal_index.get(&closing_runtime.terminal_id),
+            Some(&closing)
+        );
+        let floor = crate::ipc::api::current_sequence(&app.events);
+        app.close_pane(closing);
+        assert!(!app.panes.contains_key(&closing));
+        assert!(!app
+            .backend_terminal_index
+            .contains_key(&closing_runtime.terminal_id));
+        assert_eq!(
+            backend_events_after(&app, floor, "terminal.closed").len(),
+            1
+        );
     }
 
     #[test]
