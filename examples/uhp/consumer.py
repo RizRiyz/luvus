@@ -427,6 +427,10 @@ def valid_global_response(value):
         and ((set(value) == {"id", "result"}) != (set(value) == {"id", "error"}))
     ):
         return False
+    if set(value) == {"id", "result"} and not isinstance(value["result"], dict):
+        return False
+    if set(value) == {"id", "error"} and not isinstance(value["error"], dict):
+        return False
     result = value.get("result")
     if isinstance(result, dict) and result.get("type") == "agent_wait":
         return valid_response(value)

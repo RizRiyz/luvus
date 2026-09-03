@@ -5,6 +5,6 @@
     { "path": "valid/responses.jsonl", "kind": "response", "expect": "valid", "count": 7 },
     { "path": "valid/events.jsonl", "kind": "event", "expect": "valid", "count": 2 },
     { "path": "invalid/requests.jsonl", "kind": "request", "expect": "invalid", "count": 24 },
-    { "path": "invalid/responses.jsonl", "kind": "response", "expect": "invalid", "count": 2 }
+    { "path": "invalid/responses.jsonl", "kind": "response", "expect": "invalid", "count": 4 }
   ]
 }
