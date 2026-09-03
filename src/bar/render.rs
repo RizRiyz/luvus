@@ -155,7 +155,7 @@ fn parse_state(state: &str) -> State {
     }
 }
 
-fn tone_color(tone: BarTone, t: &Theme) -> Color {
+pub fn tone_color(tone: BarTone, t: &Theme) -> Color {
     match tone {
         BarTone::Normal => t.subtext0,
         BarTone::Muted => t.overlay0,
