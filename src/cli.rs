@@ -1703,21 +1703,39 @@ fn parse_wait(args: &[String]) -> Result<WaitSpec> {
 fn parse_wait_statuses(args: &[String]) -> Result<Vec<String>> {
     let usage = "usage: luvus wait agent-status <id> --status idle|working|blocked|done[,STATE...] [--status STATE] [--timeout <s>]";
     let mut statuses = Vec::new();
-    for (index, arg) in args.iter().enumerate() {
-        if arg != "--status" {
-            continue;
-        }
-        let raw = args
-            .get(index + 1)
-            .filter(|value| !value.starts_with("--"))
-            .ok_or_else(|| anyhow!(usage))?;
-        for status in raw.split(',') {
-            if !matches!(status, "idle" | "working" | "blocked" | "done") {
-                return Err(anyhow!(usage));
+    let mut saw_timeout = false;
+    let mut index = 3;
+    if args
+        .get(index)
+        .is_some_and(|value| value.parse::<u32>().is_ok())
+    {
+        index += 1;
+    }
+    while index < args.len() {
+        match args[index].as_str() {
+            "--status" => {
+                let raw = args
+                    .get(index + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or_else(|| anyhow!(usage))?;
+                for status in raw.split(',') {
+                    if !matches!(status, "idle" | "working" | "blocked" | "done") {
+                        return Err(anyhow!(usage));
+                    }
+                    if !statuses.iter().any(|existing| existing == status) {
+                        statuses.push(status.to_string());
+                    }
+                }
+                index += 2;
             }
-            if !statuses.iter().any(|existing| existing == status) {
-                statuses.push(status.to_string());
+            "--timeout" if !saw_timeout => {
+                args.get(index + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or_else(|| anyhow!(usage))?;
+                saw_timeout = true;
+                index += 2;
             }
+            _ => return Err(anyhow!(usage)),
         }
     }
     if statuses.is_empty() {
@@ -1810,7 +1828,7 @@ fn wait_cmd(args: &[String]) -> Result<i32> {
                 return Ok(0);
             }
             if agent_wait_needs_stream_fallback(&response, uses_statuses) {
-                return wait_status_stream(&spec.pane, &statuses, deadline);
+                return wait_status_poll(&spec.pane, &statuses, deadline);
             }
             if let Some(error) = response.get("error") {
                 eprintln!(
@@ -2151,70 +2169,21 @@ fn pane_status(pane: &str) -> Result<Option<String>> {
         .map(String::from))
 }
 
-/// Block until `pane`'s agent reaches `target` (exit 0), or `deadline` passes
-/// (exit 2). Subscribes to the event stream **first**, then polls the current
-/// status — so a transition that happens between the poll and the subscribe is
-/// never missed (it's already buffered on the stream).
-fn wait_status_stream(pane: &str, targets: &[String], deadline: Option<Instant>) -> Result<i32> {
-    let path = crate::persist::cli_socket_path();
-    let stream = crate::ipc::transport::connect(&path).map_err(|_| {
-        anyhow!(
-            "{}",
-            crate::i18n::cli::Context::configured().text("no luvus server running")
-        )
-    })?;
-    let mut writer = stream.clone();
-    writeln!(
-        writer,
-        "{}",
-        json!({"id":"1","method":"events.subscribe","params":{}})
-    )?;
-    let mut reader = BufReader::new(stream);
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    let (pane_s, target_s) = (pane.to_string(), targets.to_vec());
-    std::thread::spawn(move || {
-        while let Ok(Some(l)) = crate::ipc::api::read_stream_frame(&mut reader) {
-            if let Ok(v) = serde_json::from_str::<Value>(&l) {
-                let is_status =
-                    v.get("event").and_then(|e| e.as_str()) == Some("pane.agent_status_changed");
-                let data = v.get("data");
-                let p = data.and_then(|d| d.get("pane")).and_then(|x| x.as_str());
-                let s = data.and_then(|d| d.get("status")).and_then(|x| x.as_str());
-                if is_status
-                    && p == Some(pane_s.as_str())
-                    && s.is_some_and(|status| target_s.iter().any(|target| target == status))
-                {
-                    let _ = tx.send(());
-                    break;
-                }
-            }
+/// Compatibility path for servers without status-set support. Poll the current
+/// status until one target matches (exit 0) or the deadline passes (exit 2).
+/// Keeping the polling synchronous ensures every return closes its connection.
+fn wait_status_poll(pane: &str, targets: &[String], deadline: Option<Instant>) -> Result<i32> {
+    loop {
+        if pane_status(pane)?
+            .as_deref()
+            .is_some_and(|status| targets.iter().any(|target| target == status))
+        {
+            return Ok(0);
         }
-    });
-
-    // Now that we're listening, an initial poll handles the already-there case.
-    if pane_status(pane)?
-        .as_deref()
-        .is_some_and(|status| targets.iter().any(|target| target == status))
-    {
-        return Ok(0);
-    }
-
-    match deadline {
-        Some(d) => {
-            let now = Instant::now();
-            if d <= now {
-                return Ok(2);
-            }
-            match rx.recv_timeout(d - now) {
-                Ok(()) => Ok(0),
-                Err(_) => Ok(2),
-            }
+        if deadline.is_some_and(|end| Instant::now() >= end) {
+            return Ok(2);
         }
-        None => {
-            let _ = rx.recv();
-            Ok(0)
-        }
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -4610,9 +4579,30 @@ mod tests {
                 statuses: vec!["working".into(), "done".into()]
             }
         );
+        let reordered = parse_wait(&argv(
+            "luvus wait agent-status 7 --timeout 5 --status done,done",
+        ))
+        .unwrap();
+        assert_eq!(reordered.timeout, Some(5.0));
+        assert_eq!(
+            reordered.condition,
+            WaitFor::AgentStatus {
+                statuses: vec!["done".into()]
+            }
+        );
         assert!(parse_wait(&argv("luvus wait agent-status 7 --status")).is_err());
+        assert!(parse_wait(&argv("luvus wait agent-status 7 --status done --timeout")).is_err());
         assert!(parse_wait(&argv("luvus wait agent-status 7 --status done,")).is_err());
         assert!(parse_wait(&argv("luvus wait agent-status 7 --status unknown")).is_err());
+        assert!(parse_wait(&argv(
+            "luvus wait agent-status 7 --status done --typo value"
+        ))
+        .is_err());
+        assert!(parse_wait(&argv("luvus wait agent-status 7 unexpected --status done")).is_err());
+        assert!(parse_wait(&argv(
+            "luvus wait agent-status 7 --status done --timeout 1 --timeout 2"
+        ))
+        .is_err());
 
         // missing --match is an error
         assert!(parse_wait(&argv("luvus wait output 3")).is_err());

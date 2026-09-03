@@ -316,6 +316,10 @@ def valid_response(value):
                 type(result["matched"]) is bool
                 and (result["pane"] is None or pane(result["pane"]))
                 and (result["status"] is None or result["status"] in STATES)
+                and (
+                    not result["matched"]
+                    or (pane(result["pane"]) and result["status"] in STATES)
+                )
             )
         return (
             integer(result["sequence"])
@@ -416,12 +420,17 @@ def valid_global_request(value, methods):
 
 
 def valid_global_response(value):
-    return (
+    if not (
         isinstance(value, dict)
         and isinstance(value.get("id"), str)
         and REQUEST_ID.fullmatch(value["id"]) is not None
         and ((set(value) == {"id", "result"}) != (set(value) == {"id", "error"}))
-    )
+    ):
+        return False
+    result = value.get("result")
+    if isinstance(result, dict) and result.get("type") == "agent_wait":
+        return valid_response(value)
+    return True
 
 
 def main():

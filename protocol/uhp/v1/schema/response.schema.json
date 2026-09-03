@@ -15,5 +15,44 @@
       "properties": { "code": { "type": "string" }, "message": { "type": "string" } }
     }
   },
-  "oneOf": [ { "required": ["result"] }, { "required": ["error"] } ]
+  "oneOf": [ { "required": ["result"] }, { "required": ["error"] } ],
+  "allOf": [
+    {
+      "if": {
+        "required": ["result"],
+        "properties": {
+          "result": {
+            "type": "object",
+            "required": ["type"],
+            "properties": { "type": { "const": "agent_wait" } }
+          }
+        }
+      },
+      "then": { "properties": { "result": { "$ref": "#/$defs/agentWaitResult" } } }
+    }
+  ],
+  "$defs": {
+    "agentWaitResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "matched", "pane", "status"],
+      "properties": {
+        "type": { "const": "agent_wait" },
+        "matched": { "type": "boolean" },
+        "pane": { "type": ["string", "null"], "pattern": "^[1-9][0-9]{0,9}$" },
+        "status": { "type": ["string", "null"], "enum": ["idle", "working", "blocked", "done", null] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "matched": { "const": true } }, "required": ["matched"] },
+          "then": {
+            "properties": {
+              "pane": { "type": "string", "pattern": "^[1-9][0-9]{0,9}$" },
+              "status": { "enum": ["idle", "working", "blocked", "done"] }
+            }
+          }
+        }
+      ]
+    }
+  }
 }
