@@ -286,7 +286,7 @@ def agent_key(value):
         return True
     if re.fullmatch(r"(?:ctrl\+|c-)[a-z]", lower) is not None:
         return True
-    return len(value) == 1 and unicodedata.category(value) != "Cc"
+    return len(value) == 1 and unicodedata.category(value) not in {"Cc", "Cs"}
 
 
 def valid_agent_keys_params(params):
