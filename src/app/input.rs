@@ -1788,8 +1788,8 @@ impl App {
                 }
                 // A sidebar-edge drag (docs/29) claims the press first: its seam is
                 // the sidebar's own `│` column (never a pane), and its neighbour is
-                // only grabbed when it isn't pane content, so this can't swallow a
-                // click meant for a pane or a mouse-tracking agent.
+                // only grabbed when it is pane border or gap, so this cannot swallow
+                // text selection or a click meant for a mouse-tracking agent.
                 if self.begin_sidebar_resize(m.column, m.row) {
                     return;
                 }

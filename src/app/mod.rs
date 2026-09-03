@@ -5716,11 +5716,11 @@ impl App {
 
     /// The sidebar whose draggable edge seam is at `(c, r)`, if any (docs/29).
     /// The seam `│` column always grabs; the grab band also reaches
-    /// `SIDEBAR_GRAB_TOL` columns onto the **content side** — but only over cells
-    /// that are *not* a mouse-tracking pane, so an agent's own edge clicks (Claude
-    /// Code expanding a tool result at its left edge) still forward, and a
-    /// split's border/gap stays grabbable. It never reaches into the sidebar body,
-    /// where dock rows own the width, so it can't steal a workspace/agent click.
+    /// `SIDEBAR_GRAB_TOL` columns onto the **content side**, but only across pane
+    /// borders and gaps. A pane's content owns every one of its cells, including
+    /// the first column where text selection or a mouse-tracking TUI may begin.
+    /// The grab band never reaches into the sidebar body either, where dock rows
+    /// own the width, so it cannot steal a workspace or agent click.
     fn sidebar_seam_at(&self, c: u16, r: u16) -> Option<Side> {
         // The seam spans the full frame visually, but only the pane lane is a
         // resize target. The tab and status rows own their cells; in particular,
@@ -5744,11 +5744,7 @@ impl App {
                 Side::Right => seam.x.checked_sub(c),
             };
             let Some(d) = dist else { continue };
-            let over_agent = self
-                .pane_content_at(c, r)
-                .and_then(|(id, _)| self.panes.get(&id))
-                .is_some_and(|p| p.mouse_mode().report);
-            if (1..=SIDEBAR_GRAB_TOL).contains(&d) && !over_agent {
+            if (1..=SIDEBAR_GRAB_TOL).contains(&d) && self.pane_content_at(c, r).is_none() {
                 return Some(side);
             }
         }
@@ -8750,6 +8746,65 @@ mod tests {
             app.sidebar_resize.is_none(),
             "a click inside a pane never grabs the sidebar edge"
         );
+    }
+
+    #[test]
+    fn pane_content_edge_starts_selection_instead_of_sidebar_resize() {
+        let _env = crate::persist::test_env("sidebar-edge-selection");
+        use crate::event::AppEvent;
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let pane = app.layout().focus;
+        app.panes
+            .get(&pane)
+            .expect("focused pane exists")
+            .engine
+            .lock()
+            .expect("terminal engine lock")
+            .advance(b"\x1b[H\x1b[2Jedge");
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let seam = app.left_seam.expect("visible left sidebar has a seam");
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("focused pane has a content rect");
+        let distance = content.x.saturating_sub(seam.x);
+        assert!(
+            (1..=SIDEBAR_GRAB_TOL).contains(&distance),
+            "the first content column exercises the sidebar grab tolerance"
+        );
+
+        let mouse = |kind, column| {
+            AppEvent::Mouse(MouseEvent {
+                kind,
+                column,
+                row: content.y,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), content.x));
+
+        assert!(
+            app.sidebar_resize.is_none(),
+            "pane content must not begin a sidebar resize"
+        );
+        assert!(
+            app.selection.is_some(),
+            "the first content column begins text selection"
+        );
+        app.handle_event(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            content.x + 3,
+        ));
+        app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), content.x + 3));
+        assert_eq!(app.pending_clipboard.as_deref(), Some("edge"));
     }
 
     #[test]
