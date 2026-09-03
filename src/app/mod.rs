@@ -985,6 +985,7 @@ pub enum OrchFormField {
     Gate,
     Prompt,
     Agent,
+    RunIn,
     Start,
     Schedule,
 }
@@ -1010,6 +1011,7 @@ const AUTOMATION_FIELDS: &[OrchFormField] = &[
     OrchFormField::Paths,
     OrchFormField::Gate,
     OrchFormField::Agent,
+    OrchFormField::RunIn,
     OrchFormField::Start,
     OrchFormField::Schedule,
     OrchFormField::Prompt,
@@ -1021,6 +1023,7 @@ pub struct OrchForm {
     pub title: String,
     pub prompt: String,
     pub agent: String,
+    pub mode: crate::orch::TaskWorkerMode,
     pub start: OrchFormStart,
     pub schedule: String,
     /// A generated schedule remains visible but is replaced by the user's
@@ -1145,6 +1148,12 @@ impl OrchForm {
                     [(index + if backwards { choices.len() - 1 } else { 1 }) % choices.len()]
                 .to_string();
             }
+            OrchFormField::RunIn => {
+                self.mode = match self.mode {
+                    crate::orch::TaskWorkerMode::Worktree => crate::orch::TaskWorkerMode::Workspace,
+                    crate::orch::TaskWorkerMode::Workspace => crate::orch::TaskWorkerMode::Worktree,
+                };
+            }
             _ => {}
         }
     }
@@ -1157,7 +1166,7 @@ impl OrchForm {
             OrchFormField::Deps => Some(&mut self.deps),
             OrchFormField::Gate => Some(&mut self.gate),
             OrchFormField::Prompt => Some(&mut self.prompt),
-            OrchFormField::Agent => None,
+            OrchFormField::Agent | OrchFormField::RunIn => None,
             OrchFormField::Schedule => Some(&mut self.schedule),
             OrchFormField::Start => None,
         }
@@ -1192,6 +1201,7 @@ impl OrchForm {
             OrchFormField::Gate => &self.gate,
             OrchFormField::Prompt => &self.prompt,
             OrchFormField::Agent => &self.agent,
+            OrchFormField::RunIn => self.mode.as_str(),
             OrchFormField::Start => self.start.label(),
             OrchFormField::Schedule => &self.schedule,
         }

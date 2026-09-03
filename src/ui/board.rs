@@ -529,23 +529,20 @@ fn schedule_label(trigger: &Trigger) -> String {
     match trigger {
         Trigger::Once { at_utc } => format!("once {}", format_utc(*at_utc)),
         Trigger::Interval { every_seconds, .. } => format!("every {every_seconds}s"),
-        Trigger::Daily {
-            timezone,
-            second_of_day,
-        } => {
-            format!("daily {} {timezone}", wall_time(*second_of_day))
+        Trigger::Daily { second_of_day, .. } => {
+            format!("daily {}", wall_time(*second_of_day))
         }
         Trigger::Weekly {
-            timezone,
             weekdays,
             second_of_day,
+            ..
         } => {
             let days = weekdays
                 .iter()
                 .map(u8::to_string)
                 .collect::<Vec<_>>()
                 .join(",");
-            format!("weekly {days} {} {timezone}", wall_time(*second_of_day))
+            format!("weekly {days} {}", wall_time(*second_of_day))
         }
     }
 }
@@ -1439,6 +1436,7 @@ pub(super) fn draw_form(
             crate::app::OrchFormField::Gate => (cat.board_f_gate, cat.board_h_gate),
             crate::app::OrchFormField::Prompt => (cat.board_f_prompt, cat.board_h_prompt),
             crate::app::OrchFormField::Agent => (cat.board_f_agent, cat.board_h_agent),
+            crate::app::OrchFormField::RunIn => (cat.board_run_in, ""),
             crate::app::OrchFormField::Start => (cat.board_f_start, cat.board_h_start),
             crate::app::OrchFormField::Schedule => (cat.board_f_schedule, cat.board_h_schedule),
         };
@@ -1458,10 +1456,11 @@ pub(super) fn draw_form(
             crate::app::OrchFormStart::Weekly => cat.automation_weekly,
         };
         let value = if field == crate::app::OrchFormField::Start {
-            if form.kind == crate::app::OrchFormKind::Automation {
-                format!("{start_label}  ·  {}", form.timezone)
-            } else {
-                start_label.to_string()
+            start_label.to_string()
+        } else if field == crate::app::OrchFormField::RunIn {
+            match form.mode {
+                crate::orch::TaskWorkerMode::Worktree => cat.board_worktree.to_string(),
+                crate::orch::TaskWorkerMode::Workspace => cat.board_workspace.to_string(),
             }
         } else {
             form.value(field).to_string()

@@ -938,7 +938,9 @@ impl App {
             crate::app::OrchView::Tasks => crate::app::OrchFormKind::Task,
             crate::app::OrchView::Automations => crate::app::OrchFormKind::Automation,
         };
-        self.orch_form = Some(crate::app::OrchForm::for_kind(kind));
+        let mut form = crate::app::OrchForm::for_kind(kind);
+        form.mode = self.orch_flow_mode;
+        self.orch_form = Some(form);
     }
 
     /// Key handling while the new-task form is open.
@@ -966,7 +968,9 @@ impl App {
             KeyCode::Left
                 if matches!(
                     form.field,
-                    crate::app::OrchFormField::Start | crate::app::OrchFormField::Agent
+                    crate::app::OrchFormField::Start
+                        | crate::app::OrchFormField::Agent
+                        | crate::app::OrchFormField::RunIn
                 ) =>
             {
                 form.cycle_choice(true)
@@ -974,7 +978,9 @@ impl App {
             KeyCode::Right | KeyCode::Char(' ')
                 if matches!(
                     form.field,
-                    crate::app::OrchFormField::Start | crate::app::OrchFormField::Agent
+                    crate::app::OrchFormField::Start
+                        | crate::app::OrchFormField::Agent
+                        | crate::app::OrchFormField::RunIn
                 ) =>
             {
                 form.cycle_choice(false)
@@ -987,7 +993,7 @@ impl App {
     /// Create the task from the form (title required; paths/deps whitespace-split).
     /// On error the form stays open showing why.
     fn submit_orch_form(&mut self) {
-        let (kind, title, prompt, agent, start, schedule, timezone, paths, deps, gate) = {
+        let (kind, title, prompt, agent, mode, start, schedule, timezone, paths, deps, gate) = {
             let Some(f) = self.orch_form.as_ref() else {
                 return;
             };
@@ -996,6 +1002,7 @@ impl App {
                 f.title.trim().to_string(),
                 f.prompt.trim().to_string(),
                 f.agent.trim().to_string(),
+                f.mode,
                 f.start,
                 f.schedule.trim().to_string(),
                 f.timezone.clone(),
@@ -1024,7 +1031,7 @@ impl App {
                 gate,
             ),
             crate::app::OrchFormKind::Automation => self.submit_scheduled_orch_task(
-                title, prompt, agent, start, schedule, timezone, paths, gate,
+                title, prompt, agent, mode, start, schedule, timezone, paths, gate,
             ),
         };
         if let Err(message) = result {
@@ -1100,6 +1107,7 @@ impl App {
         title: String,
         prompt: String,
         agent: String,
+        mode: TaskWorkerMode,
         start: crate::app::OrchFormStart,
         schedule: String,
         timezone: String,
@@ -1127,7 +1135,7 @@ impl App {
                 prompt,
                 agent_id: descriptor.id.to_string(),
                 workspace_id,
-                mode: self.orch_flow_mode,
+                mode,
                 paths,
                 gate,
             },
@@ -1220,7 +1228,9 @@ impl App {
                         form.field = field;
                         if matches!(
                             field,
-                            crate::app::OrchFormField::Start | crate::app::OrchFormField::Agent
+                            crate::app::OrchFormField::Start
+                                | crate::app::OrchFormField::Agent
+                                | crate::app::OrchFormField::RunIn
                         ) {
                             form.cycle_choice(false);
                         }
@@ -2917,6 +2927,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         app.open_orch_board();
+        app.orch_flow_mode = TaskWorkerMode::Workspace;
 
         app.open_orch_form();
         let form = app.orch_form.as_ref().unwrap();
@@ -2932,9 +2943,11 @@ mod tests {
         assert_eq!(form.start, crate::app::OrchFormStart::Once);
         assert!(jiff::tz::db().get(&form.timezone).is_ok());
         assert_eq!(form.agent, task_agent_choices()[0]);
+        assert_eq!(form.mode, TaskWorkerMode::Workspace);
         assert!(crate::automation::parse_local_instant(&form.schedule, &form.timezone).is_ok());
         assert_eq!(form.field, crate::app::OrchFormField::Title);
         assert!(!form.fields().contains(&crate::app::OrchFormField::Deps));
+        assert!(form.fields().contains(&crate::app::OrchFormField::RunIn));
         assert!(form.fields().contains(&crate::app::OrchFormField::Schedule));
 
         app.orch_form = None;
@@ -3020,6 +3033,12 @@ mod tests {
             app.orch_form.as_ref().unwrap().agent,
             task_agent_choices()[1]
         );
+        app.orch_form.as_mut().unwrap().field = crate::app::OrchFormField::RunIn;
+        app.handle_orch_form_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(
+            app.orch_form.as_ref().unwrap().mode,
+            TaskWorkerMode::Workspace
+        );
     }
 
     #[test]
@@ -3036,6 +3055,7 @@ mod tests {
             start: crate::app::OrchFormStart::Daily,
             schedule: "08:00".into(),
             timezone: "Asia/Makassar".into(),
+            mode: TaskWorkerMode::Workspace,
             ..crate::app::OrchForm::default()
         });
 
@@ -3045,6 +3065,7 @@ mod tests {
         assert_eq!(app.orch_view, crate::app::OrchView::Automations);
         let automation = app.automation.automation("a1").unwrap();
         assert_eq!(automation.task.agent_id, "codex");
+        assert_eq!(automation.task.mode, TaskWorkerMode::Workspace);
         assert!(matches!(
             &automation.trigger,
             crate::automation::Trigger::Daily { timezone, .. }
@@ -3117,7 +3138,7 @@ mod tests {
     }
 
     #[test]
-    fn automation_form_shows_local_timezone_and_frequency_hint() {
+    fn automation_form_keeps_timezone_internal_and_shows_run_mode() {
         let _env = crate::persist::test_env("orch-automation-form-render");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(100, 30, tx).unwrap();
@@ -3143,7 +3164,10 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
 
-        assert!(rendered.contains("Once later  ·  Asia/Makassar"));
+        assert!(rendered.contains("Once later"));
+        assert!(!rendered.contains("Asia/Makassar"));
+        assert!(rendered.contains("run in"));
+        assert!(rendered.contains("worktree"));
         assert!(rendered.contains("2026-09-03 14:00"));
         assert!(rendered.contains(task_agent_choices()[0]));
         assert!(rendered.contains("switch type"));
@@ -3211,6 +3235,15 @@ mod tests {
         terminal
             .draw(|frame| crate::ui::render(frame, &mut app))
             .unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("daily 00:00"));
+        assert!(!rendered.contains("daily 00:00 UTC"));
         assert!(app
             .orch_hits
             .iter()

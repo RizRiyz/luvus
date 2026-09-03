@@ -19,9 +19,10 @@ pub type TaskId = String;
 
 /// Where an orchestration worker owns its working files. Worktree remains the
 /// default; workspace mode is an explicit shared-checkout choice.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskWorkerMode {
+    #[default]
     Worktree,
     Workspace,
 }

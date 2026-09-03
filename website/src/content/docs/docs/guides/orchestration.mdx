@@ -100,16 +100,18 @@ before an action is chosen.
 The form starts on a compact **Task · Automation** choice. The active board view
 selects its matching type by default. Task shows Title, Paths, Deps, Gate, and a
 `Manual`/`Now` Start choice; Prompt and Agent appear only for `Now`. Automation
-hides concrete dependencies and owns a registry-backed Agent, `Once later`,
+hides concrete dependencies and owns a registry-backed Agent, an explicit
+`Run in` choice for an isolated Worktree or the existing Workspace, `Once later`,
 `Hourly`, `Daily`, or `Weekly`, and Schedule, followed by a three-row Prompt editor. Use
 `Tab` to switch between Task and Automation, Down or Up to move between fields,
-and Left/Right to change the selected Start or Agent value. Agent choices come
+and Left/Right to change the selected Agent, Run in, or Start value. Agent choices come
 from the same built-in launch-capable registry used by ORCH.
 
 `Manual` preserves ordinary task creation. `Now` creates and starts one ORCH
 task. Automations store a template and do not create the concrete task until it
-is due. The form detects and displays the server user's IANA timezone. Schedule
-input is local wall-clock time: `YYYY-MM-DD HH:MM` for Once, a minute from
+is due. The form detects the server user's IANA timezone internally without
+adding it to the compact form. Schedule input uses that local wall-clock time:
+`YYYY-MM-DD HH:MM` for Once, a minute from
 `00` through `59` for Hourly, `HH:MM` for Daily, and `mon,fri HH:MM` for
 Weekly. Changing Start fills Schedule with a valid editable value; the first
 typed character replaces that suggestion. CLI and UHP continue to require
