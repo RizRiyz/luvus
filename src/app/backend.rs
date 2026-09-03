@@ -34,6 +34,9 @@ impl App {
         else {
             return;
         };
+        if self.backend_terminal_index.get(&runtime.terminal_id) == Some(&pane_id) {
+            return;
+        }
         self.backend_terminal_index
             .insert(runtime.terminal_id, pane_id);
         self.emit_backend_terminal_event(pane_id, "terminal.created", json!({}));
@@ -50,6 +53,8 @@ impl App {
         };
         let terminal_event = match name {
             "pane.created" => {
+                // Deferred panes normally have no runtime yet.
+                // They register after their worker reports `PtyReady`.
                 self.register_backend_terminal(pane_id);
                 return;
             }
@@ -868,8 +873,6 @@ impl App {
         let command = pane.command.clone();
         self.panes.insert(pane_id, pane);
         self.status.insert(pane_id, PaneStatus::new(command));
-        self.backend_terminal_index
-            .insert(runtime.terminal_id.clone(), pane_id);
         if let Some(label) = commit.label {
             self.backend_labels.insert(pane_id, label);
         }
@@ -884,6 +887,8 @@ impl App {
             "pane.created",
             json!({"pane":pane_id.0.to_string(),"terminal_id":runtime.terminal_id}),
         );
+        self.backend_terminal_index
+            .insert(runtime.terminal_id.clone(), pane_id);
         let placement_kind = match commit.placement {
             backend::CreatePlacement::Workspace => "workspace",
             backend::CreatePlacement::Sibling(_) => "sibling",
@@ -1673,6 +1678,7 @@ mod tests {
         );
 
         app.config.shell = valid_shell;
+        let floor = crate::ipc::api::current_sequence(&app.events);
         let synchronous = app.spawn_into(app.ws().cwd.clone()).unwrap();
         assert_eq!(
             app.backend_terminal_index.get(
@@ -1683,6 +1689,10 @@ mod tests {
             ),
             Some(&synchronous),
             "the pane.created lifecycle is the synchronous registration choke point"
+        );
+        assert_eq!(
+            backend_events_after(&app, floor, "terminal.created").len(),
+            1
         );
     }
 
@@ -1715,10 +1725,7 @@ mod tests {
                 .get(&existing_runtime.terminal_id),
             Some(&existing)
         );
-        assert_eq!(
-            backend_events_after(&app, floor, "terminal.created").len(),
-            1
-        );
+        assert!(backend_events_after(&app, floor, "terminal.created").is_empty());
 
         app.run_cmd(crate::app::keys::Cmd::NewTab);
         let closing = app.layout().focus;
