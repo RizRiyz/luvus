@@ -1827,8 +1827,16 @@ fn wait_cmd(args: &[String]) -> Result<i32> {
             {
                 return Ok(0);
             }
-            if agent_wait_needs_stream_fallback(&response, uses_statuses) {
-                return wait_status_poll(&spec.pane, &statuses, deadline);
+            match agent_wait_fallback(&response, uses_statuses) {
+                // A single state keeps the subscribe-first stream: it cannot
+                // miss a short `working → done` turn the way polling can.
+                AgentWaitFallback::Stream => {
+                    return wait_status_stream(&spec.pane, &statuses[0], deadline)
+                }
+                AgentWaitFallback::Poll => {
+                    return wait_status_poll(&spec.pane, &statuses, deadline)
+                }
+                AgentWaitFallback::None => {}
             }
             if let Some(error) = response.get("error") {
                 eprintln!(
@@ -1844,22 +1852,46 @@ fn wait_cmd(args: &[String]) -> Result<i32> {
     }
 }
 
-fn agent_wait_needs_stream_fallback(response: &Value, uses_statuses: bool) -> bool {
+/// Which compatibility path a rejected `agent.wait` should take.
+#[derive(Debug, PartialEq, Eq)]
+enum AgentWaitFallback {
+    /// The rejection is a real error: report it instead of waiting again.
+    None,
+    /// No `agent.wait` at all. Subscribe to the event stream, then poll once,
+    /// so a transition between the two is buffered rather than lost.
+    Stream,
+    /// `agent.wait` exists but predates status sets. Poll `pane.status`, which
+    /// is lossy for a transient state but adequate for a terminal set.
+    Poll,
+}
+
+/// Fail closed: only the two envelopes an older server actually produces earn a
+/// fallback. Anything else (`not_found`, a bad pane id, a bare message with no
+/// code) is the server's answer and is reported as such.
+fn agent_wait_fallback(response: &Value, uses_statuses: bool) -> AgentWaitFallback {
     let Some(error) = response.get("error") else {
-        return false;
+        return AgentWaitFallback::None;
     };
     if error.get("code").and_then(Value::as_str) != Some("invalid_request") {
-        return false;
+        return AgentWaitFallback::None;
     }
-    error
-        .get("message")
-        .and_then(Value::as_str)
-        .is_some_and(|message| {
-            message.starts_with("unknown method")
-                || (uses_statuses
-                    && (message == "agent.wait contains an unknown parameter"
-                        || message.starts_with("agent.wait needs a pane and status")))
-        })
+    let Some(message) = error.get("message").and_then(Value::as_str) else {
+        return AgentWaitFallback::None;
+    };
+    if message.starts_with("unknown method") {
+        return if uses_statuses {
+            AgentWaitFallback::Poll
+        } else {
+            AgentWaitFallback::Stream
+        };
+    }
+    if uses_statuses
+        && (message == "agent.wait contains an unknown parameter"
+            || message.starts_with("agent.wait needs a pane and status"))
+    {
+        return AgentWaitFallback::Poll;
+    }
+    AgentWaitFallback::None
 }
 
 #[derive(Debug, PartialEq)]
@@ -2208,6 +2240,90 @@ where
         }
         pause(Duration::from_millis(25));
     }
+}
+
+/// Current agent status of `pane` (global lookup via `pane.status`).
+fn pane_status(pane: &str) -> Result<Option<String>> {
+    let response = send_request("pane.status", json!({ "pane": pane }))?;
+    Ok(pane_status_from_response(&response)?.map(String::from))
+}
+
+/// Compatibility path for servers with no `agent.wait`. Blocks until `pane`'s
+/// agent reaches `target` (exit 0) or `deadline` passes (exit 2).
+///
+/// The subscription is sent **before** the initial status poll, so a transition
+/// that lands between the two is already buffered on the stream instead of
+/// being missed. The reader thread is spawned only after that poll has decided
+/// it must keep waiting, which is what makes it joinable: every remaining exit
+/// leaves the thread either already finishing or bounded by the same deadline
+/// the caller is waiting on, so no reader outlives this call.
+fn wait_status_stream(pane: &str, target: &str, deadline: Option<Instant>) -> Result<i32> {
+    let path = crate::persist::cli_socket_path();
+    let stream = crate::ipc::transport::connect(&path).map_err(|_| {
+        anyhow!(
+            "{}",
+            crate::i18n::cli::Context::configured().text("no luvus server running")
+        )
+    })?;
+    let mut writer = stream.clone();
+    writeln!(
+        writer,
+        "{}",
+        json!({"id":"1","method":"events.subscribe","params":{}})
+    )?;
+
+    // Now that the server is queueing events for us, the already-there case is
+    // answered without ever starting a reader.
+    if pane_status(pane)?.as_deref() == Some(target) {
+        return Ok(0);
+    }
+    let remaining = match deadline {
+        Some(end) => match end.checked_duration_since(Instant::now()) {
+            Some(remaining) if !remaining.is_zero() => Some(remaining),
+            _ => return Ok(2),
+        },
+        None => None,
+    };
+    // Bound the reader's own blocking read by the caller's deadline so the join
+    // below cannot outlast it. A named pipe that reports only a nonblocking
+    // timeout would leave the reader spinning, so degrade to bounded polling.
+    if let Some(remaining) = remaining {
+        match stream.set_recv_timeout(remaining) {
+            Ok(crate::ipc::transport::TimeoutMode::Kernel) => {}
+            _ => return wait_status_poll(pane, &[target.to_string()], deadline),
+        }
+    }
+
+    let mut reader = BufReader::new(stream);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (pane_id, target_state) = (pane.to_string(), target.to_string());
+    let handle = std::thread::spawn(move || {
+        while let Ok(Some(line)) = crate::ipc::api::read_stream_frame(&mut reader) {
+            let Ok(event) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let data = event.get("data");
+            let observed = data.and_then(|d| d.get("pane")).and_then(Value::as_str);
+            let state = data.and_then(|d| d.get("status")).and_then(Value::as_str);
+            if event.get("event").and_then(Value::as_str) == Some("pane.agent_status_changed")
+                && observed == Some(pane_id.as_str())
+                && state == Some(target_state.as_str())
+            {
+                let _ = tx.send(());
+                break;
+            }
+        }
+    });
+
+    let matched = match remaining {
+        Some(remaining) => rx.recv_timeout(remaining).is_ok(),
+        // A disconnected sender means the stream ended, not that it matched.
+        None => rx.recv().is_ok(),
+    };
+    // The reader is either past its `break` or past its receive timeout, so
+    // this join is bounded and no thread is left behind.
+    let _ = handle.join();
+    Ok(if matched { 0 } else { 2 })
 }
 
 /// Compatibility path for servers without status-set support. Poll the current
@@ -4652,30 +4768,75 @@ mod tests {
 
     #[test]
     fn agent_wait_status_sets_fall_back_for_older_servers() {
+        // A server with no `agent.wait` keeps the subscribe-first stream for a
+        // single state; only a set degrades to polling.
         let unknown_method =
             json!({"error":{"code":"invalid_request","message":"unknown method agent.wait"}});
-        assert!(agent_wait_needs_stream_fallback(&unknown_method, false));
+        assert_eq!(
+            agent_wait_fallback(&unknown_method, false),
+            AgentWaitFallback::Stream
+        );
+        assert_eq!(
+            agent_wait_fallback(&unknown_method, true),
+            AgentWaitFallback::Poll
+        );
 
         let old_parameter = json!({"error":{
             "code":"invalid_request",
             "message":"agent.wait contains an unknown parameter"
         }});
-        assert!(agent_wait_needs_stream_fallback(&old_parameter, true));
-        assert!(!agent_wait_needs_stream_fallback(&old_parameter, false));
+        assert_eq!(
+            agent_wait_fallback(&old_parameter, true),
+            AgentWaitFallback::Poll
+        );
+        assert_eq!(
+            agent_wait_fallback(&old_parameter, false),
+            AgentWaitFallback::None
+        );
 
         let message_only = json!({"error":{"message":"agent.wait contains an unknown parameter"}});
-        assert!(!agent_wait_needs_stream_fallback(&message_only, true));
+        assert_eq!(
+            agent_wait_fallback(&message_only, true),
+            AgentWaitFallback::None
+        );
 
         let needs_status = json!({"error":{
             "code":"invalid_request",
             "message":"agent.wait needs a pane and status idle|working|blocked|done"
         }});
-        assert!(agent_wait_needs_stream_fallback(&needs_status, true));
-        assert!(!agent_wait_needs_stream_fallback(&needs_status, false));
+        assert_eq!(
+            agent_wait_fallback(&needs_status, true),
+            AgentWaitFallback::Poll
+        );
+        assert_eq!(
+            agent_wait_fallback(&needs_status, false),
+            AgentWaitFallback::None
+        );
 
         let unrelated =
             json!({"error":{"code":"invalid_request","message":"pane must be a pane id"}});
-        assert!(!agent_wait_needs_stream_fallback(&unrelated, true));
+        assert_eq!(
+            agent_wait_fallback(&unrelated, true),
+            AgentWaitFallback::None
+        );
+
+        // Fail closed: a resolved-but-missing pane is an answer, not an old
+        // server, so neither compatibility path may run.
+        let not_found = json!({"error":{"code":"not_found","message":"pane not found"}});
+        assert_eq!(
+            agent_wait_fallback(&not_found, false),
+            AgentWaitFallback::None
+        );
+        assert_eq!(
+            agent_wait_fallback(&not_found, true),
+            AgentWaitFallback::None
+        );
+
+        // A successful reply never takes a fallback.
+        assert_eq!(
+            agent_wait_fallback(&json!({"result":{"matched":false}}), true),
+            AgentWaitFallback::None
+        );
     }
 
     #[test]
