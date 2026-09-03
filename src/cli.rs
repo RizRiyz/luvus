@@ -2604,16 +2604,19 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             let mut obj = serde_json::Map::new();
             let mut cursor = rest.iter();
             while let Some(argument) = cursor.next() {
-                let (key, canonical) = match argument.as_str() {
-                    "--workspace" | "--node" => ("workspace", "--workspace"),
-                    "--workspace-id" => ("workspace_id", "--workspace-id"),
+                // Diagnostics quote the flag the caller actually typed, so
+                // `--node` never reports itself as `--workspace`.
+                let typed = argument.as_str();
+                let key = match typed {
+                    "--workspace" | "--node" => "workspace",
+                    "--workspace-id" => "workspace_id",
                     other => {
                         return Err(anyhow!("unexpected agent list argument `{other}`. {usage}"))
                     }
                 };
                 let value = cursor
                     .next()
-                    .ok_or_else(|| anyhow!("{canonical} needs a value. {usage}"))?;
+                    .ok_or_else(|| anyhow!("{typed} needs a value. {usage}"))?;
                 if !obj.is_empty() {
                     return Err(anyhow!(
                         "--workspace and --workspace-id cannot be used together. {usage}"
@@ -2622,11 +2625,11 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
                 if key == "workspace" {
                     let index = value
                         .parse::<usize>()
-                        .map_err(|_| anyhow!("{canonical} must be a 0-based number. {usage}"))?;
+                        .map_err(|_| anyhow!("{typed} must be a 0-based number. {usage}"))?;
                     obj.insert(key.into(), json!(index.to_string()));
                 } else {
                     if value.is_empty() {
-                        return Err(anyhow!("{canonical} must not be empty. {usage}"));
+                        return Err(anyhow!("{typed} must not be empty. {usage}"));
                     }
                     obj.insert(key.into(), json!(value));
                 }
@@ -4128,6 +4131,22 @@ mod tests {
             "a mistyped filter must not silently list every workspace"
         );
         assert!(parse(&argv("luvus agent list extra")).is_err());
+
+        // Diagnostics name the flag the caller typed, not its canonical twin.
+        for (raw, flag) in [
+            ("luvus agent list --node docs", "--node"),
+            ("luvus agent list --workspace docs", "--workspace"),
+        ] {
+            let message = parse(&argv(raw)).unwrap_err().to_string();
+            assert!(
+                message.starts_with(&format!("{flag} must be a 0-based number")),
+                "{raw} reported: {message}"
+            );
+        }
+        assert!(parse(&argv("luvus agent list --node"))
+            .unwrap_err()
+            .to_string()
+            .starts_with("--node needs a value"));
     }
 
     #[test]
