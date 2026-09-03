@@ -753,9 +753,15 @@ fn paint_spatial(
         }
     }
     for (end, label) in pending_labels {
-        if let Some(label) =
-            place_route_label(end, label, &blocked, &labels, &arrows, width, height, ascii)
-        {
+        if let Some(label) = place_route_label(
+            end,
+            label,
+            &blocked,
+            &labels,
+            &arrows,
+            (width, height),
+            ascii,
+        ) {
             labels.push(label);
         }
     }
@@ -934,10 +940,10 @@ fn place_route_label(
     blocked: &[bool],
     existing: &[EdgeLabel],
     arrows: &[Arrow],
-    width: usize,
-    height: usize,
+    size: (usize, usize),
     ascii: bool,
 ) -> Option<EdgeLabel> {
+    let (width, height) = size;
     let text = clip_text(label, width.saturating_sub(2), ascii);
     let text_width = text.width();
     let right = end.0.saturating_add(2);
