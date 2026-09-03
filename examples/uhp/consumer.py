@@ -671,6 +671,7 @@ def valid_global_response(value):
 
 
 def main():
+    assert not agent_key("\ud800"), "Unicode surrogates are not valid key scalars"
     manifest = json.loads((PACKAGE / "fixtures" / "manifest.json").read_text())
     assert manifest["protocol"] == {"name": "luvus-uhp", "major": 1, "minor": 0}
     request_schema = json.loads((PACKAGE / "schema" / "request.schema.json").read_text())

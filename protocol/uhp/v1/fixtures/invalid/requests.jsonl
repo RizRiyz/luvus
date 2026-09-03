@@ -32,4 +32,3 @@
 {"id":"bad-agent-keys-mixed","method":"agent.keys","params":{"target":"reviewer","keys":["enter",7]}}
 {"id":"bad-agent-keys-name","method":"agent.keys","params":{"target":"reviewer","keys":["f13"]}}
 {"id":"bad-agent-keys-extra","method":"agent.keys","params":{"target":"reviewer","keys":["enter"],"extra":true}}
-{"id":"bad-agent-keys-surrogate","method":"agent.keys","params":{"target":"reviewer","keys":["\ud800"]}}
