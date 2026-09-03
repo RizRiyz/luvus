@@ -2649,11 +2649,11 @@ impl App {
                         ));
                     }
                 }
-                let id = match self.resolve_agent_pane(p) {
-                    Some(id) => Some(id),
-                    None => self.resolve_pane(p)?,
-                }
-                .ok_or_else(not_found)?;
+                let id = if p.get("target").is_some() {
+                    self.resolve_agent_pane(p).ok_or_else(agent_not_found)?
+                } else {
+                    self.resolve_pane(p)?.ok_or_else(not_found)?
+                };
                 Ok(self.agent_explanation(id))
             }
             "agent.report" => {
@@ -7018,6 +7018,12 @@ command = ["true"]
             assert_eq!(app.layout().focus, focus);
             assert_eq!(app.panes[&pane].content_revision(), revision);
         }
+
+        let error = app
+            .dispatch("agent.explain", &json!({"target": alias_one.to_string()}))
+            .expect_err("an invalid explicit target must not fall back to focus");
+        assert_eq!(error.0, "not_found");
+        assert!(app.panes.contains_key(&pane));
     }
 
     /// A live alias set by `agent.name` shows up in `agent.list` and resolves an
