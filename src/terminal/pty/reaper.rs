@@ -317,22 +317,35 @@ impl WindowsWake {
 
         // WaitForMultipleObjects accepts at most 64 handles. Slot 0 is the
         // registration event; remaining slots are live children. Extra children
-        // are still `try_wait`ed after any wake; they are not wait sources.
+        // and children without a waitable handle are still `try_wait`ed after
+        // any wake. When every child fits, wait infinitely. When the list is
+        // truncated, use a short timeout so omitted exits cannot strand.
         const MAX_WAIT: usize = 64;
+        const OVERFLOW_WAIT_MS: u32 = 250;
         let mut handles = [std::ptr::null_mut::<std::ffi::c_void>(); MAX_WAIT];
         handles[0] = self.event;
         let mut count = 1usize;
+        let mut truncated = false;
+        let mut missing_handle = false;
         for entry in children {
             if count == MAX_WAIT {
+                truncated = true;
                 break;
             }
             if let Some(handle) = entry.child.as_raw_handle() {
                 handles[count] = handle;
                 count += 1;
+            } else {
+                missing_handle = true;
             }
         }
+        let timeout = if truncated || missing_handle {
+            OVERFLOW_WAIT_MS
+        } else {
+            INFINITE
+        };
         let status = unsafe {
-            WaitForMultipleObjects(count as u32, handles.as_ptr() as *const HANDLE, 0, INFINITE)
+            WaitForMultipleObjects(count as u32, handles.as_ptr() as *const HANDLE, 0, timeout)
         };
         if status == WAIT_FAILED {
             Err(io::Error::last_os_error())

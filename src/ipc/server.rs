@@ -459,9 +459,17 @@ pub fn run() -> Result<()> {
                     Err(RecvTimeoutError::Disconnected) => break,
                 },
                 Some(_) => None,
-                None => match rx.recv() {
+                None if shutdown::wake_available() => match rx.recv() {
                     Ok(ev) => Some(ev),
                     Err(_) => break,
+                },
+                None => match rx.recv_timeout(Duration::from_secs(1)) {
+                    Ok(ev) => Some(ev),
+                    Err(RecvTimeoutError::Timeout) => {
+                        LOOP_DEADLINE_WAKES.fetch_add(1, Ordering::Relaxed);
+                        None
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
                 },
             }
         };
@@ -523,7 +531,7 @@ pub fn run() -> Result<()> {
         // Closing the final project bypasses the debounce once. Failed writes
         // retain both flags and retry at the normal cadence instead of hot-looping.
         let immediate_save_due = app.persist_session_now && !immediate_save_attempted;
-        let debounced_save_due = app.session_dirty && last_save.elapsed() > SESSION_SAVE_DEBOUNCE;
+        let debounced_save_due = app.session_dirty && last_save.elapsed() >= SESSION_SAVE_DEBOUNCE;
         if immediate_save_due || debounced_save_due {
             immediate_save_attempted = app.persist_session_now;
             if persist::save(&app) {
@@ -1363,9 +1371,14 @@ mod shutdown {
 
     static FLAG: AtomicBool = AtomicBool::new(false);
     static WRITE_FD: AtomicI32 = AtomicI32::new(-1);
+    static WAKE_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
     pub fn requested() -> bool {
         FLAG.load(Ordering::Relaxed)
+    }
+
+    pub fn wake_available() -> bool {
+        WAKE_AVAILABLE.load(Ordering::Relaxed)
     }
 
     pub fn install(tx: Sender<AppEvent>) {
@@ -1385,9 +1398,13 @@ mod shutdown {
         WRITE_FD.store(fds[1], Ordering::Relaxed);
         let read_fd = fds[0];
         install_handler();
-        let _ = thread::Builder::new()
+        if thread::Builder::new()
             .name("luvus-signal".into())
-            .spawn(move || wait_for_signal(read_fd, tx));
+            .spawn(move || wait_for_signal(read_fd, tx))
+            .is_ok()
+        {
+            WAKE_AVAILABLE.store(true, Ordering::Relaxed);
+        }
     }
 
     fn wait_for_signal(read_fd: RawFd, tx: Sender<AppEvent>) {
@@ -1455,6 +1472,11 @@ mod shutdown {
 
     pub fn requested() -> bool {
         false
+    }
+
+    pub fn wake_available() -> bool {
+        // Stop arrives as an API event, not a POSIX signal.
+        true
     }
 
     pub fn install(_tx: Sender<AppEvent>) {}

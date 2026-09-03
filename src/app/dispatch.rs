@@ -115,6 +115,38 @@ mod socket_api_tests {
     }
 
     #[test]
+    fn overdue_blocked_audit_still_wakes_the_loop() {
+        let (_env, mut app) = app("blocked-audit-deadline");
+        let now = Instant::now();
+        for status in app.status.values_mut() {
+            status.force_detect = false;
+            status.state = State::Blocked;
+            status.candidate = State::Blocked;
+            status.last_activity = now - ACTIVITY_WINDOW - QUIET_DWELL - Duration::from_secs(1);
+            status.agent_report = None;
+            status.last_resize = None;
+        }
+        app.runtime_cwd_dirty = false;
+        app.runtime_proc_dirty = false;
+        app.runtime_sessions_dirty = false;
+        app.last_detection_audit_at = now - DETECTION_AUDIT_INTERVAL - Duration::from_millis(1);
+
+        app.last_detect_at = now;
+        let cooling = app
+            .next_runtime_deadline(now, true)
+            .expect("a quiet Blocked pane must not block the loop forever");
+        assert!(cooling > now);
+        assert!(cooling <= now + DETECTION_INTERVAL);
+
+        app.last_detect_at = now - DETECTION_INTERVAL;
+        assert_eq!(
+            app.next_runtime_deadline(now, true),
+            Some(now),
+            "an overdue Blocked audit must wake this iteration once detection can run"
+        );
+    }
+
+    #[test]
     fn detached_runtime_skips_heartbeat_scans() {
         let (_env, mut app) = app("detached-heartbeat-scans");
         let now = Instant::now();
@@ -742,10 +774,12 @@ impl App {
             consider(self.last_detect_at + DETECTION_INTERVAL, true);
         }
         if self.detection_audit_needed() {
-            consider(
-                self.last_detection_audit_at + DETECTION_AUDIT_INTERVAL,
-                false,
-            );
+            // Overdue audits must still wake the loop. Dropping a past Instant
+            // here would `recv()` forever on a quiet Blocked pane. Cap the wake
+            // at the next detection tick so this cannot busy-loop at 1 ms.
+            let audit_at = self.last_detection_audit_at + DETECTION_AUDIT_INTERVAL;
+            let detect_at = self.last_detect_at + DETECTION_INTERVAL;
+            consider(audit_at.max(detect_at), true);
         }
         for status in self.status.values() {
             if status.candidate != status.state {
