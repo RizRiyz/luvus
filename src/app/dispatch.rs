@@ -2670,11 +2670,10 @@ impl App {
                         "ttl_s",
                     ],
                 )?;
-                let id = match self.resolve_agent_pane(p) {
-                    Some(id) => Some(id),
-                    None => self.resolve_pane(p)?,
-                }
-                .ok_or_else(not_found)?;
+                // `target` is not an accepted field here, so `pane` is the only
+                // explicit target and a miss is terminal — the same rule
+                // `agent.explain` applies, with no fallback to the focused pane.
+                let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 let source = required_report_source(p)?;
                 let agent = p.get("agent").and_then(Value::as_str).ok_or_else(|| {
                     (
@@ -2800,11 +2799,10 @@ impl App {
             }
             "agent.release" => {
                 reject_api_fields(p, &["pane", "source"])?;
-                let id = match self.resolve_agent_pane(p) {
-                    Some(id) => Some(id),
-                    None => self.resolve_pane(p)?,
-                }
-                .ok_or_else(not_found)?;
+                // `target` is not an accepted field here, so `pane` is the only
+                // explicit target and a miss is terminal — the same rule
+                // `agent.explain` applies, with no fallback to the focused pane.
+                let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 let source = required_report_source(p)?;
                 let status = self.status.get_mut(&id).ok_or_else(not_found)?;
                 let Some(report) = status.agent_report.as_ref() else {
@@ -7024,6 +7022,58 @@ command = ["true"]
             .expect_err("an invalid explicit target must not fall back to focus");
         assert_eq!(error.0, "not_found");
         assert!(app.panes.contains_key(&pane));
+    }
+
+    /// `agent.report` and `agent.release` take their target only as `pane`, so an
+    /// explicit one that misses must be terminal rather than quietly acting on
+    /// the focused pane — the same rule `agent.explain` applies to `target`.
+    #[test]
+    fn explicit_agent_report_targets_never_fall_back_to_focus() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let missing = (pane.0 + 4321).to_string();
+        let report = json!({
+            "pane": missing, "source": "hook", "agent": "claude", "status": "working",
+        });
+        let release = json!({ "pane": missing, "source": "hook" });
+
+        for (method, params) in [
+            ("agent.report", report.clone()),
+            ("agent.release", release.clone()),
+        ] {
+            let error = app
+                .dispatch(method, &params)
+                .expect_err("a missing explicit pane is terminal");
+            assert_eq!(error.0, "not_found", "{method}");
+            assert!(
+                app.status
+                    .get(&pane)
+                    .is_none_or(|s| s.agent_report.is_none()),
+                "{method} must not have written authority to the focused pane"
+            );
+        }
+
+        // `target` is not part of either signature, so it stays an unknown field
+        // instead of opening a second resolution path.
+        for (method, extra) in [("agent.report", report), ("agent.release", release)] {
+            let mut params = extra;
+            params["target"] = json!("reviewer");
+            params.as_object_mut().unwrap().remove("pane");
+            let error = app
+                .dispatch(method, &params)
+                .expect_err("target is not an accepted field");
+            assert_eq!(error.0, "invalid_request", "{method}");
+        }
+
+        // A malformed explicit pane fails validation before any lookup.
+        let error = app
+            .dispatch(
+                "agent.release",
+                &json!({"pane": u64::from(u32::MAX) + 2, "source": "hook"}),
+            )
+            .expect_err("an out-of-range pane id must not wrap");
+        assert_eq!(error.0, "invalid_request");
     }
 
     /// A live alias set by `agent.name` shows up in `agent.list` and resolves an
