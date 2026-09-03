@@ -118,6 +118,17 @@ mod tests {
             "agent.authority_released",
             "agent.authority_reported",
             "agent.hook",
+            "automation.created",
+            "automation.deleted",
+            "automation.disabled",
+            "automation.enabled",
+            "automation.run_failed",
+            "automation.run_finished",
+            "automation.run_materialized",
+            "automation.run_queued",
+            "automation.run_started",
+            "automation.run_updated",
+            "automation.updated",
             "config.changed",
             "events.resync_required",
             "layout.applied",
@@ -196,6 +207,23 @@ mod tests {
         assert_eq!(
             catalog["pane.agent_status_changed"]["$ref"],
             "#/$defs/agent_status"
+        );
+
+        let automation_definition = &bundle["event_catalog"]["$defs"]["automation_definition"];
+        assert_eq!(automation_definition["additionalProperties"], false);
+        assert_eq!(
+            automation_definition["properties"]["task"]["additionalProperties"],
+            false
+        );
+        assert!(
+            automation_definition["properties"]["task"]["properties"]
+                .get("prompt")
+                .is_none(),
+            "automation events must not expose stored prompts"
+        );
+        assert_eq!(
+            bundle["event_catalog"]["$defs"]["automation_run"]["additionalProperties"],
+            false
         );
 
         fn assert_refs_resolve(root: &Value, documents: &Value, value: &Value) {

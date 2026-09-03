@@ -22,10 +22,11 @@ use crate::persist::{self, SessionSnapshot};
 use crate::terminal::pty::Pane;
 use crate::ui::theme::{State, Theme};
 
+mod automation;
 mod backend;
 mod board;
 mod cwd;
-pub use board::agent_choices;
+pub use board::{agent_choices, task_agent_choices};
 pub(crate) mod diff;
 mod dispatch;
 pub(crate) mod files;
@@ -944,33 +945,278 @@ const PANE_NAME_MAX: usize = 32;
 
 /// The in-TUI **new-task form** (ORCH-7): create an orchestration task without the
 /// CLI. Fields are plain text; `paths`/`deps` are whitespace-split on submit.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum OrchFormStart {
+    #[default]
+    Manual,
+    Now,
+    Once,
+    Hourly,
+    Daily,
+    Weekly,
+}
+
+impl OrchFormStart {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "Manual",
+            Self::Now => "Now",
+            Self::Once => "Once later",
+            Self::Hourly => "Hourly",
+            Self::Daily => "Daily",
+            Self::Weekly => "Weekly",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum OrchFormKind {
+    #[default]
+    Task,
+    Automation,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum OrchFormField {
+    #[default]
+    Title,
+    Paths,
+    Deps,
+    Gate,
+    Prompt,
+    Agent,
+    Start,
+    Schedule,
+}
+
+const TASK_MANUAL_FIELDS: &[OrchFormField] = &[
+    OrchFormField::Title,
+    OrchFormField::Paths,
+    OrchFormField::Deps,
+    OrchFormField::Gate,
+    OrchFormField::Start,
+];
+const TASK_NOW_FIELDS: &[OrchFormField] = &[
+    OrchFormField::Title,
+    OrchFormField::Paths,
+    OrchFormField::Deps,
+    OrchFormField::Gate,
+    OrchFormField::Start,
+    OrchFormField::Agent,
+    OrchFormField::Prompt,
+];
+const AUTOMATION_FIELDS: &[OrchFormField] = &[
+    OrchFormField::Title,
+    OrchFormField::Paths,
+    OrchFormField::Gate,
+    OrchFormField::Agent,
+    OrchFormField::Start,
+    OrchFormField::Schedule,
+    OrchFormField::Prompt,
+];
+
 #[derive(Default)]
 pub struct OrchForm {
+    pub kind: OrchFormKind,
     pub title: String,
+    pub prompt: String,
+    pub agent: String,
+    pub start: OrchFormStart,
+    pub schedule: String,
+    /// A generated schedule remains visible but is replaced by the user's
+    /// first edit instead of forcing them to erase it character by character.
+    pub schedule_prefilled: bool,
+    pub timezone: String,
     pub paths: String,
     pub deps: String,
     pub gate: String,
-    /// Active field: 0=title · 1=paths · 2=deps · 3=gate.
-    pub field: usize,
+    pub field: OrchFormField,
     pub error: Option<String>,
 }
 
 impl OrchForm {
-    pub const FIELDS: usize = 4;
+    pub fn for_kind(kind: OrchFormKind) -> Self {
+        let mut form = Self {
+            kind,
+            start: match kind {
+                OrchFormKind::Task => OrchFormStart::Manual,
+                OrchFormKind::Automation => OrchFormStart::Once,
+            },
+            timezone: match kind {
+                OrchFormKind::Task => String::new(),
+                OrchFormKind::Automation => crate::automation::system_timezone_name(),
+            },
+            ..Self::default()
+        };
+        if kind == OrchFormKind::Automation {
+            form.agent = default_task_agent();
+            form.schedule = default_schedule(form.start, &form.timezone);
+            form.schedule_prefilled = true;
+        }
+        form
+    }
 
-    /// The currently-edited field's text.
-    pub fn active_mut(&mut self) -> &mut String {
-        match self.field {
-            0 => &mut self.title,
-            1 => &mut self.paths,
-            2 => &mut self.deps,
-            _ => &mut self.gate,
+    pub fn fields(&self) -> &'static [OrchFormField] {
+        match (self.kind, self.start) {
+            (OrchFormKind::Task, OrchFormStart::Now) => TASK_NOW_FIELDS,
+            (OrchFormKind::Task, _) => TASK_MANUAL_FIELDS,
+            (OrchFormKind::Automation, _) => AUTOMATION_FIELDS,
         }
     }
 
-    /// The four fields' current values, in order, for rendering.
-    pub fn values(&self) -> [&String; 4] {
-        [&self.title, &self.paths, &self.deps, &self.gate]
+    pub fn set_kind(&mut self, kind: OrchFormKind) {
+        if self.kind == kind {
+            return;
+        }
+        self.kind = kind;
+        self.start = match kind {
+            OrchFormKind::Task => OrchFormStart::Manual,
+            OrchFormKind::Automation => OrchFormStart::Once,
+        };
+        if kind == OrchFormKind::Automation && self.timezone.is_empty() {
+            self.timezone = crate::automation::system_timezone_name();
+        }
+        if kind == OrchFormKind::Automation {
+            if self.agent.is_empty() {
+                self.agent = default_task_agent();
+            }
+            self.schedule = default_schedule(self.start, &self.timezone);
+            self.schedule_prefilled = true;
+        }
+        if !self.fields().contains(&self.field) {
+            self.field = OrchFormField::Title;
+        }
+        self.error = None;
+    }
+
+    pub fn toggle_kind(&mut self) {
+        let kind = match self.kind {
+            OrchFormKind::Task => OrchFormKind::Automation,
+            OrchFormKind::Automation => OrchFormKind::Task,
+        };
+        self.set_kind(kind);
+    }
+
+    pub fn cycle_field(&mut self, backwards: bool) {
+        let fields = self.fields();
+        let index = fields
+            .iter()
+            .position(|field| *field == self.field)
+            .unwrap_or(0);
+        self.field = fields[(index + if backwards { fields.len() - 1 } else { 1 }) % fields.len()];
+    }
+
+    pub fn cycle_choice(&mut self, backwards: bool) {
+        match self.field {
+            OrchFormField::Start => {
+                let choices: &[OrchFormStart] = match self.kind {
+                    OrchFormKind::Task => &[OrchFormStart::Manual, OrchFormStart::Now],
+                    OrchFormKind::Automation => &[
+                        OrchFormStart::Once,
+                        OrchFormStart::Hourly,
+                        OrchFormStart::Daily,
+                        OrchFormStart::Weekly,
+                    ],
+                };
+                let index = choices
+                    .iter()
+                    .position(|choice| *choice == self.start)
+                    .unwrap_or(0);
+                self.start = choices
+                    [(index + if backwards { choices.len() - 1 } else { 1 }) % choices.len()];
+                if self.start == OrchFormStart::Now && self.agent.is_empty() {
+                    self.agent = default_task_agent();
+                }
+                if self.kind == OrchFormKind::Automation {
+                    self.schedule = default_schedule(self.start, &self.timezone);
+                    self.schedule_prefilled = true;
+                }
+            }
+            OrchFormField::Agent => {
+                let choices = crate::app::task_agent_choices();
+                if choices.is_empty() {
+                    return;
+                }
+                let index = choices
+                    .iter()
+                    .position(|choice| choice.eq_ignore_ascii_case(&self.agent))
+                    .unwrap_or(0);
+                self.agent = choices
+                    [(index + if backwards { choices.len() - 1 } else { 1 }) % choices.len()]
+                .to_string();
+            }
+            _ => {}
+        }
+    }
+
+    /// The currently-edited field's text.
+    pub fn active_mut(&mut self) -> Option<&mut String> {
+        match self.field {
+            OrchFormField::Title => Some(&mut self.title),
+            OrchFormField::Paths => Some(&mut self.paths),
+            OrchFormField::Deps => Some(&mut self.deps),
+            OrchFormField::Gate => Some(&mut self.gate),
+            OrchFormField::Prompt => Some(&mut self.prompt),
+            OrchFormField::Agent => None,
+            OrchFormField::Schedule => Some(&mut self.schedule),
+            OrchFormField::Start => None,
+        }
+    }
+
+    pub fn push_char(&mut self, value: char) {
+        if self.field == OrchFormField::Schedule && self.schedule_prefilled {
+            self.schedule.clear();
+            self.schedule_prefilled = false;
+        }
+        if let Some(field) = self.active_mut() {
+            field.push(value);
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        if self.field == OrchFormField::Schedule && self.schedule_prefilled {
+            self.schedule.clear();
+            self.schedule_prefilled = false;
+            return;
+        }
+        if let Some(field) = self.active_mut() {
+            field.pop();
+        }
+    }
+
+    pub fn value(&self, field: OrchFormField) -> &str {
+        match field {
+            OrchFormField::Title => &self.title,
+            OrchFormField::Paths => &self.paths,
+            OrchFormField::Deps => &self.deps,
+            OrchFormField::Gate => &self.gate,
+            OrchFormField::Prompt => &self.prompt,
+            OrchFormField::Agent => &self.agent,
+            OrchFormField::Start => self.start.label(),
+            OrchFormField::Schedule => &self.schedule,
+        }
+    }
+}
+
+fn default_task_agent() -> String {
+    crate::app::task_agent_choices()
+        .first()
+        .copied()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn default_schedule(start: OrchFormStart, timezone: &str) -> String {
+    match start {
+        OrchFormStart::Once => crate::automation::format_local_instant(
+            crate::automation::unix_now().saturating_add(3_600),
+            timezone,
+        )
+        .unwrap_or_default(),
+        OrchFormStart::Hourly => "00".to_string(),
+        OrchFormStart::Daily => "09:00".to_string(),
+        OrchFormStart::Weekly => "mon 09:00".to_string(),
+        OrchFormStart::Manual | OrchFormStart::Now => String::new(),
     }
 }
 
@@ -993,6 +1239,13 @@ pub enum OrchStartStep {
     Agent,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum OrchView {
+    #[default]
+    Tasks,
+    Automations,
+}
+
 pub struct OrchStart {
     /// The task a worker is being started for.
     pub task: String,
@@ -1008,10 +1261,13 @@ pub struct OrchStart {
 /// frame, so hit testing never derives a task index from stale screen math.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum OrchHit {
+    View(OrchView),
     Task(String),
+    Automation(String),
     Worker(String),
     NewTask,
-    FormField(usize),
+    FormKind(OrchFormKind),
+    FormField(OrchFormField),
     FormCreate,
     FormCancel,
     /// The new-task form surface. Kept behind the form's actionable hit
@@ -1655,12 +1911,18 @@ pub struct App {
     /// Multi-agent orchestration ledger + path leases (docs/22, ORCH-1/2). Kept
     /// in its own file (`orch.json`), independent of the session snapshot.
     pub orch: crate::orch::OrchState,
+    /// Durable agent automation definitions and bounded run history. The app
+    /// event loop remains their only mutable owner.
+    pub automation: crate::automation::AutomationState,
     /// Scroll offset of the orchestration board tab (docs/22, ORCH-7).
     pub orch_scroll: usize,
+    /// Active ORCH dashboard projection: concrete tasks or future definitions.
+    pub orch_view: OrchView,
     /// Informational lifecycle selected in the empty-board Flow panel.
     pub orch_flow_mode: crate::orch::TaskWorkerMode,
     /// Selected task row on the board (for keyboard/mouse actions).
     pub orch_cursor: usize,
+    pub orch_automation_cursor: usize,
     /// The in-TUI new-task form, when open (ORCH-7).
     pub orch_form: Option<OrchForm>,
     /// The board's "start worker with…" agent picker, when open.
@@ -2218,9 +2480,12 @@ impl App {
             session_dirty: true,
             events: api::new_bus(),
             orch: crate::orch::OrchState::load(),
+            automation: crate::automation::AutomationState::load(),
             orch_scroll: 0,
+            orch_view: OrchView::Tasks,
             orch_flow_mode: crate::orch::TaskWorkerMode::Worktree,
             orch_cursor: 0,
+            orch_automation_cursor: 0,
             orch_form: None,
             orch_start: None,
             orch_detail: None,
@@ -2835,9 +3100,12 @@ impl App {
             session_dirty: false,
             events: api::new_bus(),
             orch: crate::orch::OrchState::load(),
+            automation: crate::automation::AutomationState::load(),
             orch_scroll: 0,
+            orch_view: OrchView::Tasks,
             orch_flow_mode: crate::orch::TaskWorkerMode::Worktree,
             orch_cursor: 0,
+            orch_automation_cursor: 0,
             orch_form: None,
             orch_start: None,
             orch_detail: None,

@@ -26,7 +26,7 @@ impl AccessMode {
     pub(super) fn scopes(self) -> &'static [&'static str] {
         match self {
             Self::ReadOnly => &["read"],
-            Self::Control => &["read", "workspace", "agent", "terminal"],
+            Self::Control => &["read", "workspace", "agent", "terminal", "orchestration"],
         }
     }
 }
@@ -478,7 +478,7 @@ mod tests {
         assert_eq!(AccessMode::ReadOnly.scopes(), &["read"]);
         assert_eq!(
             AccessMode::Control.scopes(),
-            &["read", "workspace", "agent", "terminal"]
+            &["read", "workspace", "agent", "terminal", "orchestration"]
         );
     }
 

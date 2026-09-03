@@ -411,6 +411,12 @@ fn allowed_method(mode: AccessMode, method: &str) -> bool {
                     | "tab.focus"
                     | "pane.focus"
                     | "agent.prompt"
+                    | "automation.create"
+                    | "automation.update"
+                    | "automation.enable"
+                    | "automation.disable"
+                    | "automation.delete"
+                    | "automation.run"
                     | "terminal.backend.control"
             ))
 }
@@ -918,6 +924,18 @@ mod tests {
         assert!(allowed_method(AccessMode::Control, "tab.focus"));
         assert!(allowed_method(AccessMode::Control, "pane.focus"));
         assert!(allowed_method(AccessMode::Control, "agent.prompt"));
+        assert!(!allowed_method(AccessMode::ReadOnly, "automation.create"));
+        assert!(allowed_method(AccessMode::ReadOnly, "automation.health"));
+        for method in [
+            "automation.create",
+            "automation.update",
+            "automation.enable",
+            "automation.disable",
+            "automation.delete",
+            "automation.run",
+        ] {
+            assert!(allowed_method(AccessMode::Control, method), "{method}");
+        }
         assert!(allowed_method(
             AccessMode::ReadOnly,
             "terminal.backend.observe"
@@ -1064,7 +1082,7 @@ mod tests {
         let paired = exchange(gateway.address(), &json!({"type":"pair","code":code}));
         assert_eq!(
             paired["scopes"],
-            json!(["read", "workspace", "agent", "terminal"])
+            json!(["read", "workspace", "agent", "terminal", "orchestration"])
         );
 
         // An allowlisted focus reaches the unavailable local endpoint. A raw

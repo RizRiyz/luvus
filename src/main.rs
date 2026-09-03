@@ -5,6 +5,7 @@
 mod agent;
 mod api;
 mod app;
+mod automation;
 mod bar;
 mod changelog;
 mod cli;

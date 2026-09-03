@@ -214,9 +214,9 @@ orchestration (multiple agents on one project, docs/22):
   task list                  list all tasks + their status/assignee
   task get <id>              show one task
   task claim <id>            claim a task for this pane (deps must be done)
-  task next [--start] [--agent <cmd>] [--mode worktree|workspace]
+  task next [--start] [--agent <cmd>] [--mode worktree|workspace] [--workspace-id <id>]
                              claim the next ready task (--start creates a worker)
-  task start <id> [--branch <b>] [--agent <cmd>] [--mode worktree|workspace]
+  task start <id> [--branch <b>] [--agent <cmd>] [--mode worktree|workspace] [--workspace-id <id>]
                              start a worker (worktree default; workspace shares checkout)
   task heartbeat <id> --context <0..1>   report context usage (blocks done at >85%)
   task update <id> [--status <s>] [--output <o>] [--note <n>]
@@ -229,6 +229,19 @@ orchestration (multiple agents on one project, docs/22):
                              (denied if they overlap another task)
   lease release <id>         release a lease
   lease list                 list active path leases
+
+agent automation (scheduled ORCH tasks):
+  automation create "<name>" --title <title> --prompt <text> --agent <id> --workspace-id <id>
+                             (--once <UTC>|--every <seconds>|--daily <HH:MM>|--weekly <days> --at <HH:MM>)
+                             [--timezone <IANA>] [--mode workspace|worktree] [--paths <glob>...] [--gate <cmd>]
+  automation list            list definitions and their next UTC deadlines
+  automation get <id>        show one definition
+  automation update <id> --name <name> <same required task and schedule options as create>
+  automation enable|disable <id>
+  automation run <id> [--idempotency-key <key>]   run once without advancing its schedule
+  automation history [<id>] [--limit <1-200>]     show bounded run history
+  automation preview (--once <UTC>|--every <seconds>|--daily <HH:MM>|--weekly <days> --at <HH:MM>)
+  automation delete <id>     remove an idle definition
 
 events:
   events                     stream live status changes

@@ -8,6 +8,7 @@
 //! All mutation happens on the single-writer app loop (via `app/dispatch.rs`), so
 //! claims and leases are race-free by construction; this module holds no locks.
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -49,6 +50,16 @@ pub struct WorkspaceWorkerBinding {
     pub workspace_id: String,
     pub tab_id: String,
     pub root: String,
+}
+
+/// Durable link from one concrete ORCH task to the automation occurrence that
+/// created it. The run id is unique, so restart reconciliation can never create
+/// a second task for the same occurrence.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct AutomationProvenance {
+    pub automation_id: String,
+    pub run_id: String,
+    pub scheduled_at: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -99,6 +110,9 @@ impl TaskStatus {
 pub struct Task {
     pub id: TaskId,
     pub title: String,
+    /// Optional detailed briefing. Manual legacy tasks continue to use `title`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
     pub status: TaskStatus,
     /// Owning pane's raw id (`PaneId.0`), once claimed.
     pub assignee: Option<u32>,
@@ -132,6 +146,9 @@ pub struct Task {
     /// gate). Above the threshold, completion is blocked until it compacts.
     #[serde(default)]
     pub context: Option<f64>,
+    /// Present only when this task was materialized by Agent Automation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation: Option<AutomationProvenance>,
     pub created: u64,
     pub updated: u64,
 }
@@ -233,6 +250,7 @@ impl OrchState {
         let task = Task {
             id: format!("t{}", self.next_task),
             title,
+            prompt: None,
             status: TaskStatus::Queued,
             assignee: None,
             deps,
@@ -245,6 +263,7 @@ impl OrchState {
             worker_mode: None,
             workspace_worker: None,
             context: None,
+            automation: None,
             created: now,
             updated: now,
         };
@@ -252,8 +271,59 @@ impl OrchState {
         Ok(task)
     }
 
+    /// Attach the immutable automation briefing and occurrence provenance to a
+    /// freshly added task. Reusing `run_id` is rejected to preserve exactly-once
+    /// materialization across retries and restarts.
+    pub fn attach_automation(
+        &mut self,
+        id: &str,
+        prompt: String,
+        provenance: AutomationProvenance,
+    ) -> OrchResult<Task> {
+        if self.tasks.iter().any(|task| {
+            task.id != id
+                && task
+                    .automation
+                    .as_ref()
+                    .is_some_and(|existing| existing.run_id == provenance.run_id)
+        }) {
+            return Err(Reject::new(
+                "duplicate_automation_run",
+                format!("automation run {} already has a task", provenance.run_id),
+            ));
+        }
+        let task = self
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+            .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        task.prompt = Some(prompt);
+        task.automation = Some(provenance);
+        task.updated = unix_now();
+        Ok(task.clone())
+    }
+
+    pub fn task_for_automation_run(&self, run_id: &str) -> Option<&Task> {
+        self.tasks.iter().find(|task| {
+            task.automation
+                .as_ref()
+                .is_some_and(|automation| automation.run_id == run_id)
+        })
+    }
+
     pub fn task(&self, id: &str) -> Option<&Task> {
         self.tasks.iter().find(|t| t.id == id)
+    }
+
+    pub fn set_prompt(&mut self, id: &str, prompt: Option<String>) -> OrchResult<Task> {
+        let task = self
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+            .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        task.prompt = prompt.filter(|value| !value.trim().is_empty());
+        task.updated = unix_now();
+        Ok(task.clone())
     }
 
     /// A task is *ready* to claim when every dependency is available in the
@@ -769,19 +839,26 @@ impl OrchState {
     /// Atomic save (temp + rename), best-effort — a failed write never breaks
     /// the app; the ledger is a convenience layer, not core session state.
     pub fn save(&self) {
+        let _ = self.try_save();
+    }
+
+    /// Fallible persistence used by Agent Automation before it launches work.
+    /// A scheduled occurrence must not start unless its ORCH provenance reached
+    /// disk, otherwise a restart could materialize it twice.
+    pub fn try_save(&self) -> std::io::Result<()> {
         let Some(path) = self.persist_path.as_ref() else {
-            return;
+            return Ok(());
         };
         if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            std::fs::create_dir_all(dir)?;
         }
-        let Ok(json) = serde_json::to_string_pretty(self) else {
-            return;
-        };
+        let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, json).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
-        }
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        crate::platform::atomic_replace_file(&tmp, path)
     }
 
     fn recover_interrupted_merges(&mut self) {

@@ -37,6 +37,7 @@ pub fn is_cli(args: &[String]) -> bool {
                 | "worktree"
                 | "task"
                 | "lease"
+                | "automation"
                 | "wait"
                 | "search"
                 | "help"
@@ -68,6 +69,7 @@ Commands:
   diff         Review Git diffs, notes, and agent feedback
   worktree     Create, open, list, and remove Git worktrees
   task         Coordinate work across multiple coding agents
+  automation   Schedule agents through the ORCH task engine
   lease        Reserve file paths for active tasks
   module       Find, install, configure, and run extensions
   theme        List, create, validate, install, and select themes
@@ -85,7 +87,6 @@ Commands:
   doctor       Check optional external tools
   update       Check for and install a newer Luvus release
   ping         Check whether the selected server responds
-
 Examples:
   luvus agent list                       See every active coding agent
   luvus pane split --down                Add a pane below the focused pane
@@ -273,9 +274,9 @@ orchestration (multiple agents on one project, docs/22):
   task list                  list all tasks + their status/assignee
   task get <id>              show one task
   task claim <id>            claim a task for this pane (deps must be done)
-  task next [--start] [--agent <cmd>] [--mode worktree|workspace]
+  task next [--start] [--agent <cmd>] [--mode worktree|workspace] [--workspace-id <id>]
                              claim the next ready task (--start creates a worker)
-  task start <id> [--branch <b>] [--agent <cmd>] [--mode worktree|workspace]
+  task start <id> [--branch <b>] [--agent <cmd>] [--mode worktree|workspace] [--workspace-id <id>]
                              start a worker (worktree default; workspace shares checkout)
   task heartbeat <id> --context <0..1>   report context usage (blocks done at >85%)
   task update <id> [--status <s>] [--output <o>] [--note <n>]
@@ -288,6 +289,19 @@ orchestration (multiple agents on one project, docs/22):
                              (denied if they overlap another task)
   lease release <id>         release a lease
   lease list                 list active path leases
+
+agent automation (scheduled ORCH tasks):
+  automation create \"<name>\" --title <title> --prompt <text> --agent <id> --workspace-id <id>
+                             (--once <UTC>|--every <seconds>|--daily <HH:MM>|--weekly <days> --at <HH:MM>)
+                             [--timezone <IANA>] [--mode workspace|worktree] [--paths <glob>...] [--gate <cmd>]
+  automation list            list definitions and their next UTC deadlines
+  automation get <id>        show one definition
+  automation update <id> --name <name> <same required task and schedule options as create>
+  automation enable|disable <id>
+  automation run <id> [--idempotency-key <key>]   run once without advancing its schedule
+  automation history [<id>] [--limit <1-200>]     show bounded run history
+  automation preview (--once <UTC>|--every <seconds>|--daily <HH:MM>|--weekly <days> --at <HH:MM>)
+  automation delete <id>     remove an idle definition
 
 events:
   events                     stream live status changes
@@ -579,6 +593,7 @@ fn help_topic_has_subcommands(topic: &str) -> bool {
             | "worktree"
             | "task"
             | "lease"
+            | "automation"
             | "module"
             | "theme"
             | "bar"
@@ -595,9 +610,9 @@ fn help_topic_has_subcommands(topic: &str) -> bool {
 fn normalize_help_topic(topic: &str) -> Option<&str> {
     match topic {
         "workspace" | "tab" | "pane" | "agent" | "files" | "git" | "mission" | "worktree"
-        | "task" | "lease" | "module" | "theme" | "bar" | "ui" | "session" | "server"
-        | "integration" | "diff" | "skill" | "wait" | "search" | "events" | "uhp" | "ping"
-        | "doctor" | "update" | "attach" => Some(topic),
+        | "task" | "lease" | "automation" | "module" | "theme" | "bar" | "ui" | "session"
+        | "server" | "integration" | "diff" | "skill" | "wait" | "search" | "events" | "uhp"
+        | "ping" | "doctor" | "update" | "attach" => Some(topic),
         "node" => Some("pane"),
         "remote" | "--remote" => Some("remote"),
         _ => None,
@@ -766,6 +781,10 @@ fn write_topic_help_english(
                 "orchestration (multiple agents on one project, docs/22):\n",
                 "\nevents:\n",
             ),
+        ),
+        "automation" => (
+            "luvus automation <command> [args]",
+            detailed_section("agent automation (scheduled ORCH tasks):\n", "\nevents:\n"),
         ),
         "lease" => (
             "luvus lease <acquire|release|list> [args]",
@@ -3443,6 +3462,69 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         ("worktree", "remove") => ("worktree.remove".into(), one("path", arg0())),
         ("worktree", _) => ("worktree.list".into(), json!({})),
 
+        ("automation", "create") => {
+            let name = rest
+                .first()
+                .filter(|value| !value.starts_with("--"))
+                .cloned()
+                .ok_or_else(|| anyhow!("automation create requires a name"))?;
+            (
+                "automation.create".into(),
+                automation_definition_params(args, name, None)?,
+            )
+        }
+        ("automation", "update") => {
+            let id = rest
+                .first()
+                .filter(|value| !value.starts_with("--"))
+                .cloned()
+                .ok_or_else(|| anyhow!("automation update requires an id"))?;
+            let name =
+                flag(args, "--name").ok_or_else(|| anyhow!("automation update requires --name"))?;
+            (
+                "automation.update".into(),
+                automation_definition_params(args, name, Some(id))?,
+            )
+        }
+        ("automation", "get") => ("automation.get".into(), one("id", arg0())),
+        ("automation", "enable") => ("automation.enable".into(), one("id", arg0())),
+        ("automation", "disable") => ("automation.disable".into(), one("id", arg0())),
+        ("automation", "delete") => ("automation.delete".into(), one("id", arg0())),
+        ("automation", "run") => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("id".into(), json!(arg0().unwrap_or_default()));
+            if let Some(key) = flag(args, "--idempotency-key") {
+                obj.insert("idempotency_key".into(), json!(key));
+            }
+            ("automation.run".into(), Value::Object(obj))
+        }
+        ("automation", "history") => {
+            let mut obj = serde_json::Map::new();
+            if let Some(id) = arg0() {
+                obj.insert("id".into(), json!(id));
+            }
+            if let Some(limit) = flag(args, "--limit") {
+                let limit = limit
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|limit| (1..=200).contains(limit))
+                    .ok_or_else(|| anyhow!("--limit must be between 1 and 200"))?;
+                obj.insert("limit".into(), json!(limit));
+            }
+            ("automation.history".into(), Value::Object(obj))
+        }
+        ("automation", "preview") => (
+            "automation.preview".into(),
+            json!({"trigger": automation_trigger_args(args)?}),
+        ),
+        ("automation", "health") => ("automation.health".into(), json!({})),
+        ("automation", "list" | "") => ("automation.list".into(), json!({})),
+        ("automation", other) => {
+            return Err(anyhow!(
+                "unknown automation command `{other}`. Try `luvus help automation`."
+            ))
+        }
+
         // ── orchestration (docs/22, M0): task ledger + path leases ──────────
         ("task", "add") => {
             let title = rest.iter().find(|a| !a.starts_with("--")).cloned();
@@ -3589,6 +3671,139 @@ fn multi_flag(args: &[String], name: &str) -> Vec<String> {
     out
 }
 
+fn automation_definition_params(
+    args: &[String],
+    name: String,
+    id: Option<String>,
+) -> Result<Value> {
+    let required = |flag_name: &str| {
+        flag(args, flag_name)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow!("{flag_name} is required"))
+    };
+    let mode = flag(args, "--mode").unwrap_or_else(|| "worktree".to_string());
+    if !matches!(mode.as_str(), "workspace" | "worktree") {
+        return Err(anyhow!("--mode must be workspace or worktree"));
+    }
+    let misfire = flag(args, "--misfire").unwrap_or_else(|| "run_latest".to_string());
+    if !matches!(misfire.as_str(), "skip" | "run_latest") {
+        return Err(anyhow!("--misfire must be skip or run_latest"));
+    }
+    let overlap = flag(args, "--overlap").unwrap_or_else(|| "skip".to_string());
+    if !matches!(overlap.as_str(), "skip" | "queue_one") {
+        return Err(anyhow!("--overlap must be skip or queue_one"));
+    }
+    let grace = flag(args, "--misfire-grace")
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| anyhow!("--misfire-grace must be seconds"))
+        })
+        .transpose()?
+        .unwrap_or(3600);
+    let mut obj = serde_json::Map::new();
+    if let Some(id) = id {
+        obj.insert("id".into(), json!(id));
+    }
+    obj.insert("name".into(), json!(name));
+    obj.insert(
+        "enabled".into(),
+        json!(!args.iter().any(|arg| arg == "--disabled")),
+    );
+    obj.insert("trigger".into(), automation_trigger_args(args)?);
+    obj.insert(
+        "task".into(),
+        json!({
+            "title": required("--title")?,
+            "prompt": required("--prompt")?,
+            "agent_id": required("--agent")?,
+            "workspace_id": required("--workspace-id")?,
+            "mode": mode,
+            "paths": multi_flag(args, "--paths"),
+            "gate": flag(args, "--gate"),
+        }),
+    );
+    obj.insert(
+        "policy".into(),
+        json!({
+            "misfire":misfire,
+            "overlap":overlap,
+            "misfire_grace_seconds":grace,
+        }),
+    );
+    if let Some(key) = flag(args, "--idempotency-key") {
+        obj.insert("idempotency_key".into(), json!(key));
+    }
+    Ok(Value::Object(obj))
+}
+
+fn automation_trigger_args(args: &[String]) -> Result<Value> {
+    let kinds = ["--once", "--every", "--daily", "--weekly"];
+    let selected = kinds
+        .iter()
+        .filter_map(|name| flag(args, name).map(|value| (*name, value)))
+        .collect::<Vec<_>>();
+    if selected.len() != 1 {
+        return Err(anyhow!(
+            "pass exactly one of --once, --every, --daily, or --weekly"
+        ));
+    }
+    let (kind, value) = &selected[0];
+    match *kind {
+        "--once" => Ok(json!({"kind":"once", "at_utc":parse_utc_instant(value)?})),
+        "--every" => {
+            let every_seconds = value
+                .parse::<u64>()
+                .ok()
+                .filter(|seconds| *seconds >= crate::automation::MIN_INTERVAL_SECONDS)
+                .ok_or_else(|| anyhow!("--every must be at least 60 seconds"))?;
+            let anchor_utc = flag(args, "--anchor-utc")
+                .map(|value| parse_utc_instant(&value))
+                .transpose()?
+                .unwrap_or_else(crate::automation::unix_now);
+            Ok(json!({"kind":"interval", "every_seconds":every_seconds, "anchor_utc":anchor_utc}))
+        }
+        "--daily" => {
+            let timezone = flag(args, "--timezone")
+                .ok_or_else(|| anyhow!("--timezone is required for daily schedules"))?;
+            Ok(json!({
+                "kind":"daily",
+                "timezone":timezone,
+                "second_of_day":parse_wall_time(value)?,
+            }))
+        }
+        "--weekly" => {
+            let timezone = flag(args, "--timezone")
+                .ok_or_else(|| anyhow!("--timezone is required for weekly schedules"))?;
+            let at = flag(args, "--at")
+                .ok_or_else(|| anyhow!("--at HH:MM is required for weekly schedules"))?;
+            let weekdays = value
+                .split(',')
+                .map(parse_weekday)
+                .collect::<Result<Vec<_>>>()?;
+            Ok(json!({
+                "kind":"weekly",
+                "timezone":timezone,
+                "weekdays":weekdays,
+                "second_of_day":parse_wall_time(&at)?,
+            }))
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn parse_utc_instant(value: &str) -> Result<u64> {
+    crate::automation::parse_utc_instant(value).map_err(|error| anyhow!(error.message))
+}
+
+fn parse_wall_time(value: &str) -> Result<u32> {
+    crate::automation::parse_wall_time(value).map_err(|error| anyhow!(error.message))
+}
+
+fn parse_weekday(value: &str) -> Result<u8> {
+    crate::automation::parse_weekday(value).map_err(|error| anyhow!(error.message))
+}
+
 /// Value following `--name` in argv, if present.
 fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter()
@@ -3675,6 +3890,7 @@ mod tests {
                             | "module"
                             | "diff"
                             | "task"
+                            | "automation"
                             | "integration"
                     )
                 ) && !trimmed.contains("  ");
@@ -3682,6 +3898,8 @@ mod tests {
                     || trimmed.starts_with("[--limit ")
                     || trimmed.starts_with("[--placement ")
                     || trimmed.starts_with("[--end-line ")
+                    || trimmed.starts_with("(--once ")
+                    || trimmed.starts_with("[--timezone ")
                     || command_without_description
                     || trimmed.starts_with("session attach <name>")
                     || trimmed == "(applies live if the server is up; else on next start)"
@@ -4502,6 +4720,60 @@ mod tests {
         let (m, p) = parse(&argv("luvus task merge t1")).unwrap();
         assert_eq!(m, "task.merge");
         assert_eq!(p.get("id").and_then(|v| v.as_str()), Some("t1"));
+    }
+
+    #[test]
+    fn maps_agent_automation_commands() {
+        assert!(is_cli(&argv("luvus automation list")));
+        let args = vec![
+            "luvus",
+            "automation",
+            "create",
+            "morning",
+            "--title",
+            "review",
+            "--prompt",
+            "check changes",
+            "--agent",
+            "codex",
+            "--workspace-id",
+            "workspace-a",
+            "--daily",
+            "08:30",
+            "--timezone",
+            "Asia/Makassar",
+            "--mode",
+            "workspace",
+            "--idempotency-key",
+            "create-1",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let (method, params) = parse(&args).unwrap();
+        assert_eq!(method, "automation.create");
+        assert_eq!(params["name"], "morning");
+        assert_eq!(params["trigger"]["kind"], "daily");
+        assert_eq!(params["trigger"]["second_of_day"], 30_600);
+        assert_eq!(params["trigger"]["timezone"], "Asia/Makassar");
+        assert_eq!(params["task"]["prompt"], "check changes");
+        assert_eq!(params["idempotency_key"], "create-1");
+
+        let (method, params) = parse(&argv(
+            "luvus automation preview --weekly mon,fri --at 09:00 --timezone UTC",
+        ))
+        .unwrap();
+        assert_eq!(method, "automation.preview");
+        assert_eq!(params["trigger"]["weekdays"], json!([1, 5]));
+
+        for bad in [
+            "luvus automation create morning --title review",
+            "luvus automation preview --daily 09:00",
+            "luvus automation preview --once 100 --every 60",
+            "luvus automation preview --weekly moons --at 09:00 --timezone UTC",
+        ] {
+            assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
+        }
     }
 
     #[test]

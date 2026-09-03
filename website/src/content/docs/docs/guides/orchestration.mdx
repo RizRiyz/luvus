@@ -13,7 +13,7 @@ worktree branches without touching your checkout.
 :::tip[TL;DR]
 Open the board (`Ctrl+Space o`), press `a` to add a task, then `s` to choose
 worktree or workspace mode and an agent. Press `d` to finish; worktree tasks
-can then use `m` to merge.
+can then use `m` to merge. Press `Tab` to manage scheduled agent automations.
 :::
 
 ## The concepts
@@ -21,6 +21,7 @@ can then use `m` to merge.
 | Concept | What it is |
 |---|---|
 | **Task** | A unit of work: title, the file globs it will touch, dependencies, and an optional quality-gate command. Gets an id like `t1`. |
+| **Automation** | A durable one-time or recurring definition. Each due occurrence creates a fresh ORCH task and starts its configured agent. Future work owns no pane, lease, or worktree before it is due. |
 | **Lease** | A reservation on file paths. Two workers can't hold overlapping globs, so conflicting work can't be assigned. |
 | **Worker** | A task-owned pane. Worktree mode uses a dedicated branch and checkout; workspace mode uses a dedicated task tab in an existing shared checkout. |
 | **Quality gate** | A command (e.g. `cargo test`) that runs when a task is marked done. It must pass before the task can merge. |
@@ -34,6 +35,12 @@ integrates at a time. An interrupted integration restores its prior `done` or
 `blocked` state after restart. Branch-backed dependents wait for `merged`, so
 they never start before their dependency is available in the integration
 history. The ledger lives in `~/.luvus/orch.json`, separate from your session.
+
+Automation definitions and bounded run history live in the selected server
+session's `automations.json`. The detached server owns their deadlines, so
+closing the TUI does not pause them. Stopping the server does; on restart Luvus
+reconciles persisted ORCH provenance before starting anything and applies the
+definition's missed-run policy.
 
 `task start` validates the task's path lease before it creates a worktree or
 workspace worker pane. If another task already holds an overlapping path, start
@@ -51,6 +58,15 @@ leases, live. Navigate with `j`/`k`, the wheel, or click a row. On a wide
 terminal, the selected task's branch, paths, gate, output, and notes stay visible
 in a detail panel.
 
+The header switches between **Tasks** and **Automations**. The automation view
+shows the definition state, retained schedule, next UTC deadline, target agent,
+and target workspace. Use `e` to pause or re-enable the selected definition,
+`r` to request one run without advancing its schedule, and `D` to delete an
+idle definition. Armed definitions also appear in the sidebar's Active agents
+section as `scheduled`; the placeholder is replaced by the normal live agent
+row when its ORCH task starts. Mission Control shows aggregate armed, live,
+review, and failed automation health without polling usage data.
+
 Mouse controls follow the same validated actions as the keyboard and CLI:
 
 - click a task to select it;
@@ -59,7 +75,8 @@ Mouse controls follow the same validated actions as the keyboard and CLI:
 - use `o` or **Details** in the context menu for longer output and note history;
 - click its worker label to jump to the worker pane;
 - right click a task for the actions valid in its current state;
-- click **New task** to open the form, then click fields and form actions;
+- click **New task** or **New automation** to open the contextual form, then
+  click the Task/Automation tab, fields, and form actions;
 - choose **worktree** or **workspace** in the first start-worker step, then
   choose an agent in the second step;
 - when the board is empty, click the Worktree/Workspace labels in the Flow
@@ -71,13 +88,42 @@ before an action is chosen.
 
 | Key | Action |
 |-----|--------|
-| `a` | **new task**: a Title / Paths / Deps / Gate form (`⇥` between fields, `⏎` creates) |
+| `Tab` | switch between the Tasks and Automations views |
+| `a` | **new**: open Task creation from Tasks or Automation creation from Automations (`Tab` switches type, `↑`/`↓` moves fields, `⏎` creates) |
 | `s` | **start**: choose worktree/workspace mode, then choose an agent |
 | `d` | **done**: runs its quality gate (pass → done, fail → held at review) |
 | `m` | **merge** into `luvus/integration` |
 | `⏎` | **jump** to its worker pane |
 | `x` | **release** an active task and its path leases |
 | `q` | close the board without stopping tasks or workers |
+
+The form starts on a compact **Task · Automation** choice. The active board view
+selects its matching type by default. Task shows Title, Paths, Deps, Gate, and a
+`Manual`/`Now` Start choice; Prompt and Agent appear only for `Now`. Automation
+hides concrete dependencies and owns a registry-backed Agent, `Once later`,
+`Hourly`, `Daily`, or `Weekly`, and Schedule, followed by a three-row Prompt editor. Use
+`Tab` to switch between Task and Automation, Down or Up to move between fields,
+and Left/Right to change the selected Start or Agent value. Agent choices come
+from the same built-in launch-capable registry used by ORCH.
+
+`Manual` preserves ordinary task creation. `Now` creates and starts one ORCH
+task. Automations store a template and do not create the concrete task until it
+is due. The form detects and displays the server user's IANA timezone. Schedule
+input is local wall-clock time: `YYYY-MM-DD HH:MM` for Once, a minute from
+`00` through `59` for Hourly, `HH:MM` for Daily, and `mon,fri HH:MM` for
+Weekly. Changing Start fills Schedule with a valid editable value; the first
+typed character replaces that suggestion. CLI and UHP continue to require
+explicit UTC or timezone fields.
+
+Calendar schedules retain their IANA timezone but persist each execution
+deadline as UTC. Across daylight-saving changes, Luvus keeps the requested
+wall-clock time, shifts a nonexistent time forward by the transition gap, and
+uses only the first occurrence of a repeated time. Preview deadlines before
+arming remote definitions when timezone behavior matters.
+
+The current beta is time-triggered. ORCH task dependencies can make a task
+ready after another task completes, but they do not automatically trigger an
+Automation definition.
 
 ## A worked example
 
@@ -126,6 +172,17 @@ luvus task merge t1
 # leases (usually automatic via task start)
 luvus lease acquire "src/auth/**" --task t1
 
+# schedule a weekday agent in a retained IANA timezone
+luvus automation create "Morning review" \
+  --title "Review changes" --prompt "Review and report risks" \
+  --agent codex --workspace-id workspace_example \
+  --weekly mon,tue,wed,thu,fri --at 08:00 --timezone Asia/Makassar \
+  --mode workspace
+
+luvus automation list
+luvus automation preview --daily 08:00 --timezone America/New_York
+luvus automation run a1 --idempotency-key manual-review-1
+
 # react to everything, live (newline-delimited JSON)
 luvus events
 ```
@@ -137,12 +194,24 @@ Events on the bus: `task.added` · `task.claimed` · `task.started` ·
 `task.ready` · `task.gate_running` · `task.gate_passed` · `task.gate_failed` ·
 `task.needs_compaction` · `task.done` · `task.merge_started` · `task.merged` ·
 `task.merge_conflict` · `task.merge_failed` · `task.released` ·
-`lease.acquired` · `lease.released`.
+`lease.acquired` · `lease.released` · `automation.created` ·
+`automation.updated` · `automation.enabled` · `automation.disabled` ·
+`automation.deleted` · `automation.run_queued` ·
+`automation.run_materialized` · `automation.run_started` ·
+`automation.run_updated` · `automation.run_finished` ·
+`automation.run_failed`.
 
 ## The safety model
 
-- **Nothing spawns unattended.** Workers start only when you press `s` or run
-  `task start`.
+- **Only armed agent automations spawn unattended.** Manual tasks still start
+  only when you press `s` or run `task start`. Every automation stores one
+  explicit agent, workspace, prompt, worker mode, and bounded schedule.
+- **No arbitrary scheduled shell action.** The scheduler launches only a
+  reviewed built-in agent adapter through ORCH; detection-only manifests do not
+  gain execution authority.
+- **No background poller.** Definitions cache the nearest UTC deadline and use
+  the existing server wake path. No thread, timer, network request, or process
+  scan is created per automation.
 - **Worktree mode is isolated by default.** Workers edit in their own worktrees
   and merges happen in a dedicated integration worktree.
 - **Workspace mode is intentionally shared.** It creates a task tab without a

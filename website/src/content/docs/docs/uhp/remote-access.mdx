@@ -56,7 +56,7 @@ pipe. Validate it against the access descriptor schema emitted by
 | Command | Mode | Scopes | Pairing | Authority |
 |---|---|---|---|---|
 | `luvus uhp access` | Read-only | `read` | One use, at most 5 minutes | 24 hours by default; `--ttl` accepts 1 second to 24 hours |
-| `luvus uhp access --control` | Bounded control | `read`, `workspace`, `agent`, `terminal` | One use, at most 5 minutes | 24 hours by default; `--ttl` accepts 1 second to 24 hours |
+| `luvus uhp access --control` | Bounded control | `read`, `workspace`, `agent`, `terminal`, `orchestration` | One use, at most 5 minutes | 24 hours by default; `--ttl` accepts 1 second to 24 hours |
 | Either mode with `--no-expiry` | Same scopes as selected mode | Unchanged | One use, at most 5 minutes | Until the foreground access command closes |
 
 Finite descriptors expose `authority.expires_at` as a Unix timestamp.
@@ -65,9 +65,12 @@ its upstream server tokens bounded and rotates them internally, so
 `--no-expiry` does not create a permanent token in the server.
 
 Control mode does not expose every local mutation. The gateway allows the
-advertised read surface plus selected focus, prompt, and terminal-control
-methods. Discover the exact live method set after pairing rather than treating
-a scope name as permission to call every method in that namespace.
+advertised read surface plus selected focus, prompt, terminal-control, and
+automation methods. An automation created remotely is durable and can run
+after the pairing token or access command expires; disable or delete it
+explicitly when that is not intended. Discover the exact live method set after
+pairing rather than treating a scope name as permission to call every method in
+that namespace.
 
 ## Connection sequence
 

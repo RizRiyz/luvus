@@ -375,6 +375,13 @@ surface:
   retrying. Leases coordinate declared paths but do not sandbox a shared
   checkout. `task release` requeues an
   active task and releases its path leases; it does not stop the worker pane.
+- Inspect `automation.list`, `automation.get`, and `automation.history` before
+  changing an agent schedule. Creating, updating, enabling, disabling,
+  deleting, or manually running an automation requires explicit authorization.
+  Preview calendar triggers first, retain the user's IANA timezone, use an
+  idempotency key for retryable create/run requests, and never turn an
+  automation into an arbitrary scheduled shell command. Disabling prevents
+  future occurrences; it does not stop a live ORCH task or pane.
 - Inspect module metadata, actions, settings, and logs before changing module
   state. Installation, uninstallation, and consequential setting changes need
   clear authorization.

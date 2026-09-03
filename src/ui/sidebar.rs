@@ -558,11 +558,36 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     if !app.pinned_agents.is_empty() {
         live.sort_by_key(|(id, _)| !app.pinned_agents.contains(id));
     }
+    // Armed definitions appear in Active as lightweight placeholders. They are
+    // not panes and therefore have no hit target. As soon as a due occurrence
+    // owns a live ORCH task, the normal pane row replaces this projection.
+    let mut scheduled: Vec<(String, String, u64)> = app
+        .automation
+        .automations
+        .iter()
+        .filter(|automation| {
+            automation.enabled
+                && automation.next_run_at.is_some()
+                && !app.automation.has_live_run(&automation.id)
+        })
+        .filter_map(|automation| {
+            let workspace = app
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == automation.task.workspace_id)?;
+            Some((
+                automation.task.agent_id.clone(),
+                workspace.name.clone(),
+                automation.next_run_at?,
+            ))
+        })
+        .collect();
+    scheduled.sort_by_key(|item| item.2);
     // In "Active" mode, hide the on-disk resumable session history.
     let atotal = if active_only {
-        live.len()
+        live.len() + scheduled.len()
     } else {
-        live.len() + app.resumable.len()
+        live.len() + scheduled.len() + app.resumable.len()
     };
     app.agents_scroll = app.agents_scroll.min(atotal.saturating_sub(acap));
     let ascroll = app.agents_scroll;
@@ -652,9 +677,37 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                         }
                     }
                 }
+            } else if let Some((agent, workspace, deadline)) =
+                scheduled.get(k.saturating_sub(live.len()))
+            {
+                let label = format!(" {}  ", cat.automation_scheduled);
+                let prefix_w = 1 + crate::ui::display_width(&label);
+                line_at(
+                    f,
+                    y,
+                    Line::from(vec![
+                        Span::styled("◷", Style::new().fg(t.accent)),
+                        Span::styled(label, Style::new().fg(t.accent)),
+                        Span::styled(
+                            crate::ui::truncate(agent, (cw as usize).saturating_sub(prefix_w)),
+                            Style::new().fg(t.subtext1).bold(),
+                        ),
+                    ]),
+                );
+                line_at(
+                    f,
+                    y + 1,
+                    Line::from(Span::styled(
+                        crate::ui::truncate(
+                            &format!("  {workspace} · UTC {deadline}"),
+                            cw as usize,
+                        ),
+                        Style::new().fg(t.overlay0),
+                    )),
+                );
             } else {
                 // A resumable session discovered on disk — click to reopen.
-                let si = k - live.len();
+                let si = k - live.len() - scheduled.len();
                 let s = &app.resumable[si];
                 let proj = s
                     .cwd

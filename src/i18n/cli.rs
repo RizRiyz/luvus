@@ -387,6 +387,17 @@ static HELP: &[Translation] = &[
         "오케스트레이션 (한 프로젝트에서 여러 에이전트 운용, docs/22):"
     ),
     tr!(
+        "agent automation (scheduled ORCH tasks):",
+        "automatización de agentes (tareas ORCH programadas):",
+        "automação de agentes (tarefas ORCH agendadas):",
+        "automatisation des agents (tâches ORCH planifiées) :",
+        "Agentenautomatisierung (geplante ORCH-Aufgaben):",
+        "otomatisasi agen (tugas ORCH terjadwal):",
+        "智能体自动化（计划的 ORCH 任务）：",
+        "エージェント自動化（スケジュール済み ORCH タスク）：",
+        "에이전트 자동화 (예약된 ORCH 작업):"
+    ),
+    tr!(
         "events:",
         "eventos:",
         "eventos:",
@@ -605,6 +616,17 @@ static HELP: &[Translation] = &[
         "协调多个编程智能体的工作",
         "複数エージェントの作業を調整",
         "여러 코딩 에이전트 간 작업 조율"
+    ),
+    tr!(
+        "Schedule agents through the ORCH task engine",
+        "Programar agentes mediante el motor de tareas ORCH",
+        "Agendar agentes pelo mecanismo de tarefas ORCH",
+        "Planifier des agents via le moteur de tâches ORCH",
+        "Agenten über die ORCH-Aufgabenverwaltung planen",
+        "Jadwalkan agen melalui mesin tugas ORCH",
+        "通过 ORCH 任务引擎调度智能体",
+        "ORCH タスクエンジンでエージェントをスケジュール",
+        "ORCH 작업 엔진으로 에이전트 예약"
     ),
     tr!(
         "Reserve file paths for active tasks",
@@ -2288,6 +2310,61 @@ static HELP: &[Translation] = &[
         "列出活动路径租约",
         "有効なパス予約を一覧表示",
         "활성 경로 임대 나열"
+    ),
+    tr!(
+        "list definitions and their next UTC deadlines",
+        "listar definiciones y sus próximos plazos UTC",
+        "listar definições e seus próximos prazos UTC",
+        "lister les définitions et leurs prochaines échéances UTC",
+        "Definitionen und ihre nächsten UTC-Termine auflisten",
+        "daftar definisi dan tenggat UTC berikutnya",
+        "列出定义及其下一个 UTC 截止时间",
+        "定義と次の UTC 実行時刻を一覧表示",
+        "정의와 다음 UTC 실행 시각 나열"
+    ),
+    tr!(
+        "show one definition",
+        "mostrar una definición",
+        "mostrar uma definição",
+        "afficher une définition",
+        "eine Definition anzeigen",
+        "tampilkan satu definisi",
+        "显示一个定义",
+        "1件の定義を表示",
+        "정의 하나 표시"
+    ),
+    tr!(
+        "run once without advancing its schedule",
+        "ejecutar una vez sin avanzar su programación",
+        "executar uma vez sem avançar o agendamento",
+        "exécuter une fois sans avancer la planification",
+        "einmal ausführen, ohne den Zeitplan vorzustellen",
+        "jalankan sekali tanpa memajukan jadwalnya",
+        "运行一次而不推进其计划",
+        "スケジュールを進めずに1回実行",
+        "일정을 진행하지 않고 한 번 실행"
+    ),
+    tr!(
+        "show bounded run history",
+        "mostrar el historial limitado de ejecuciones",
+        "mostrar o histórico limitado de execuções",
+        "afficher l'historique borné des exécutions",
+        "begrenzten Ausführungsverlauf anzeigen",
+        "tampilkan riwayat proses terbatas",
+        "显示有界运行历史",
+        "上限付きの実行履歴を表示",
+        "제한된 실행 기록 표시"
+    ),
+    tr!(
+        "remove an idle definition",
+        "eliminar una definición inactiva",
+        "remover uma definição inativa",
+        "supprimer une définition inactive",
+        "eine inaktive Definition entfernen",
+        "hapus definisi yang tidak aktif",
+        "删除空闲定义",
+        "待機中の定義を削除",
+        "유휴 정의 제거"
     ),
     tr!(
         "stream live status changes",

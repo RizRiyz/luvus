@@ -6,6 +6,8 @@
 
 use super::*;
 use crate::app::OrchForm;
+use crate::app::OrchView;
+use crate::automation::{AutomationState, RunStatus, Trigger};
 use crate::i18n::Catalog;
 use crate::orch::{OrchState, Task, TaskStatus};
 use ratatui::widgets::{Borders, Clear, Wrap};
@@ -64,8 +66,11 @@ pub(super) fn render(
     f: &mut RenderTarget,
     area: Rect,
     orch: &OrchState,
+    automation: &AutomationState,
     scroll: usize,
     cursor: usize,
+    automation_cursor: usize,
+    view: OrchView,
     flow_mode: crate::orch::TaskWorkerMode,
     compact: bool,
     hover: Option<(u16, u16)>,
@@ -91,15 +96,9 @@ pub(super) fn render(
         action_w,
         1,
     );
+    let title = format!(" ◎ {}  ", cat.board_title);
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" ◎ ", Style::new().fg(t.accent).bold()),
-            Span::styled(cat.board_title, Style::new().fg(t.text).bold()),
-            Span::styled(
-                format!("  //  {}", cat.board_tasks.to_uppercase()),
-                Style::new().fg(t.overlay1),
-            ),
-        ])),
+        Paragraph::new(Span::styled(title.clone(), Style::new().fg(t.text).bold())),
         Rect::new(
             area.x,
             area.y,
@@ -107,6 +106,32 @@ pub(super) fn render(
             1,
         ),
     );
+    let mut view_x = area.x.saturating_add(display_width(&title) as u16);
+    for (kind, label) in [
+        (OrchView::Tasks, cat.board_tasks.to_uppercase()),
+        (OrchView::Automations, cat.board_automations.to_uppercase()),
+    ] {
+        let text = format!(" {label} ");
+        let width =
+            (display_width(&text) as u16).min(action.x.saturating_sub(view_x).saturating_sub(1));
+        if width == 0 {
+            break;
+        }
+        let rect = Rect::new(view_x, area.y, width, 1);
+        let selected = kind == view;
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                truncate(&text, width as usize),
+                Style::new()
+                    .fg(if selected { t.crust } else { t.overlay1 })
+                    .bg(if selected { t.accent } else { t.mantle })
+                    .bold(),
+            )),
+            rect,
+        );
+        hits.push((crate::app::OrchHit::View(kind), rect));
+        view_x = view_x.saturating_add(width).saturating_add(1);
+    }
     let action_hot = row_is_hovered(action, hover);
     f.render_widget(
         Paragraph::new(Span::styled(
@@ -156,6 +181,21 @@ pub(super) fn render(
         Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
     );
     hline(f, area.x + 1, area.y + 2, area.width.saturating_sub(2), t);
+
+    if view == OrchView::Automations {
+        return render_automations(
+            f,
+            area,
+            AutomationRender {
+                state: automation,
+                cursor: automation_cursor,
+                compact,
+                catalog: cat,
+                theme: t,
+            },
+            hits,
+        );
+    }
 
     let footer_h = u16::from(!compact && area.height >= 10);
     let body_y = area.y.saturating_add(3);
@@ -318,6 +358,208 @@ pub(super) fn render(
     }
 
     BoardRender { scroll, hits }
+}
+
+struct AutomationRender<'a> {
+    state: &'a AutomationState,
+    cursor: usize,
+    compact: bool,
+    catalog: &'a Catalog,
+    theme: &'a Theme,
+}
+
+fn render_automations(
+    f: &mut RenderTarget,
+    area: Rect,
+    panel: AutomationRender<'_>,
+    mut hits: Vec<(crate::app::OrchHit, Rect)>,
+) -> BoardRender {
+    let AutomationRender {
+        state,
+        cursor,
+        compact,
+        catalog: cat,
+        theme: t,
+    } = panel;
+    let footer_h = u16::from(!compact && area.height >= 10);
+    let body = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(3),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(3 + footer_h),
+    );
+    let header = if body.width >= 80 {
+        "   ID     STATE       NAME                    SCHEDULE                  NEXT UTC             AGENT"
+    } else {
+        "   ID     STATE       NAME                    NEXT UTC"
+    };
+    if body.height > 0 {
+        f.render_widget(
+            Paragraph::new(Span::styled(header, Style::new().fg(t.overlay0).bold())),
+            Rect::new(body.x, body.y, body.width, 1),
+        );
+    }
+    if state.automations.is_empty() && body.height > 1 {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!("{}: {}", cat.board_automations, cat.board_none),
+                Style::new().fg(t.overlay1),
+            )),
+            Rect::new(
+                body.x.saturating_add(3),
+                body.y + 2,
+                body.width.saturating_sub(3),
+                1,
+            ),
+        );
+    }
+    let cursor = cursor.min(state.automations.len().saturating_sub(1));
+    let capacity = body.height.saturating_sub(1) as usize;
+    let scroll = cursor.saturating_sub(capacity.saturating_sub(1));
+    for (visible, automation) in state
+        .automations
+        .iter()
+        .skip(scroll)
+        .take(capacity)
+        .enumerate()
+    {
+        let index = scroll + visible;
+        let row = Rect::new(body.x, body.y + 1 + visible as u16, body.width, 1);
+        let selected = index == cursor;
+        if selected {
+            fill_bg(f, row, t.sel_bg);
+        }
+        let (status, color) = automation_status(state, &automation.id, cat, t);
+        let next = automation
+            .next_run_at
+            .map(format_utc)
+            .unwrap_or_else(|| "—".into());
+        let name = pad(&automation.name, 23);
+        let line = if body.width >= 80 {
+            format!(
+                "{} {:<6} {:<11} {} {:<25} {:<20} {}",
+                if selected { "▸" } else { " " },
+                automation.id,
+                status,
+                name,
+                schedule_label(&automation.trigger),
+                next,
+                automation.task.agent_id
+            )
+        } else {
+            format!(
+                "{} {:<6} {:<11} {} {}",
+                if selected { "▸" } else { " " },
+                automation.id,
+                status,
+                name,
+                next
+            )
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    truncate(&line, body.width as usize),
+                    Style::new().fg(t.subtext1),
+                ),
+                Span::styled("", Style::new().fg(color)),
+            ])),
+            row,
+        );
+        // Paint the state column after the base row so its status remains easy
+        // to scan without constructing a per-cell table model.
+        if row.width > 9 {
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    truncate(status, 11),
+                    Style::new()
+                        .fg(color)
+                        .bg(if selected { t.sel_bg } else { t.mantle }),
+                )),
+                Rect::new(row.x + 9, row.y, 11.min(row.width.saturating_sub(9)), 1),
+            );
+        }
+        hits.push((crate::app::OrchHit::Automation(automation.id.clone()), row));
+    }
+    if footer_h > 0 {
+        f.render_widget(
+            Paragraph::new(super::hint_line(
+                &[
+                    ("↑↓", "navigate"),
+                    ("tab", "view"),
+                    ("e", "enable / pause"),
+                    ("r", "run now"),
+                    ("D", "delete"),
+                    ("q", "close"),
+                ],
+                t,
+            )),
+            Rect::new(area.x, area.bottom() - 1, area.width, 1),
+        );
+    }
+    BoardRender { scroll, hits }
+}
+
+fn automation_status<'a>(
+    state: &AutomationState,
+    id: &str,
+    cat: &'a Catalog,
+    t: &'a Theme,
+) -> (&'a str, Color) {
+    match state.latest_run(id).map(|run| run.status) {
+        Some(RunStatus::Pending | RunStatus::Starting | RunStatus::Running) => {
+            (cat.task_running, t.mint)
+        }
+        Some(RunStatus::Review) => (cat.task_review, t.amber),
+        Some(RunStatus::Failed) => (cat.task_failed, t.coral),
+        _ if state.automation(id).is_some_and(|item| item.enabled) => {
+            (cat.automation_scheduled, t.accent)
+        }
+        _ if state
+            .automation(id)
+            .is_some_and(|item| matches!(item.trigger, Trigger::Once { .. })) =>
+        {
+            (cat.automation_completed, t.green)
+        }
+        _ => (cat.automation_paused, t.overlay1),
+    }
+}
+
+fn schedule_label(trigger: &Trigger) -> String {
+    match trigger {
+        Trigger::Once { at_utc } => format!("once {}", format_utc(*at_utc)),
+        Trigger::Interval { every_seconds, .. } => format!("every {every_seconds}s"),
+        Trigger::Daily {
+            timezone,
+            second_of_day,
+        } => {
+            format!("daily {} {timezone}", wall_time(*second_of_day))
+        }
+        Trigger::Weekly {
+            timezone,
+            weekdays,
+            second_of_day,
+        } => {
+            let days = weekdays
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("weekly {days} {} {timezone}", wall_time(*second_of_day))
+        }
+    }
+}
+
+fn wall_time(seconds: u32) -> String {
+    format!("{:02}:{:02}", seconds / 3600, (seconds % 3600) / 60)
+}
+
+fn format_utc(seconds: u64) -> String {
+    i64::try_from(seconds)
+        .ok()
+        .and_then(|seconds| jiff::Timestamp::from_second(seconds).ok())
+        .map(|instant| instant.to_string())
+        .unwrap_or_else(|| seconds.to_string())
 }
 
 fn row_is_hovered(row: Rect, hover: Option<(u16, u16)>) -> bool {
@@ -1097,8 +1339,9 @@ fn fill_bg(f: &mut RenderTarget, rect: Rect, color: Color) {
     }
 }
 
-/// The in-TUI new-task form (ORCH-7): a small modal with Title/Paths/Deps/Gate
-/// fields; the active field is highlighted with a cursor. Drawn last, over a
+/// The in-TUI creation form. Task and automation tabs share the common fields,
+/// while keeping task dependencies and automation timing out of each other's
+/// workflow. The active field is highlighted with a cursor. Drawn last, over a
 /// dimmed backdrop, like the other modals.
 pub(super) fn draw_form(
     f: &mut RenderTarget,
@@ -1107,10 +1350,21 @@ pub(super) fn draw_form(
     cat: &Catalog,
     t: &Theme,
 ) -> Vec<(crate::app::OrchHit, Rect)> {
-    let mut hits = Vec::with_capacity(7);
+    let mut hits = Vec::with_capacity(12);
     dim_backdrop(f, area, t);
     let w = area.width.saturating_sub(6).clamp(44, 76).min(area.width);
-    let modal = centered_rect(area, w, 10);
+    let row_count = form
+        .fields()
+        .iter()
+        .map(|field| {
+            if *field == crate::app::OrchFormField::Prompt {
+                3
+            } else {
+                1
+            }
+        })
+        .sum::<u16>();
+    let modal = centered_rect(area, w, row_count.saturating_add(7).min(area.height));
     f.render_widget(Clear, modal);
     let block = Block::new()
         .borders(Borders::ALL)
@@ -1121,47 +1375,158 @@ pub(super) fn draw_form(
 
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!(" {}", cat.board_new_task),
+            format!(
+                " {}",
+                match form.kind {
+                    crate::app::OrchFormKind::Task => cat.board_new_task,
+                    crate::app::OrchFormKind::Automation => cat.board_new_automation,
+                }
+            ),
             Style::new().fg(t.text).bold(),
         )),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
-    let vals = form.values();
-    let labels = [
-        cat.board_f_title,
-        cat.board_f_paths,
-        cat.board_f_deps,
-        cat.board_f_gate,
-    ];
-    let hints = [
-        cat.board_h_title,
-        cat.board_h_paths,
-        cat.board_h_deps,
-        cat.board_h_gate,
-    ];
-    for (i, label) in labels.iter().enumerate() {
-        let active = i == form.field;
+
+    let tab_y = inner.y.saturating_add(2);
+    let task_label = format!(" {} ", cat.board_tasks.to_uppercase());
+    let automation_label = format!(" {} ", cat.board_automations.to_uppercase());
+    let task_w = super::display_width(&task_label) as u16;
+    let automation_w = super::display_width(&automation_label) as u16;
+    let task_rect = Rect::new(inner.x.saturating_add(1), tab_y, task_w.min(inner.width), 1);
+    let automation_rect = Rect::new(
+        task_rect.right().saturating_add(1),
+        tab_y,
+        automation_w.min(inner.right().saturating_sub(task_rect.right() + 1)),
+        1,
+    );
+    let tab = |label: String, selected: bool| {
+        Span::styled(
+            label,
+            if selected {
+                Style::new().fg(t.base).bg(t.accent).bold()
+            } else {
+                Style::new().fg(t.subtext0)
+            },
+        )
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" "),
+            tab(task_label, form.kind == crate::app::OrchFormKind::Task),
+            Span::raw(" "),
+            tab(
+                automation_label,
+                form.kind == crate::app::OrchFormKind::Automation,
+            ),
+        ])),
+        Rect::new(inner.x, tab_y, inner.width, 1),
+    );
+    hits.push((
+        crate::app::OrchHit::FormKind(crate::app::OrchFormKind::Task),
+        task_rect,
+    ));
+    hits.push((
+        crate::app::OrchHit::FormKind(crate::app::OrchFormKind::Automation),
+        automation_rect,
+    ));
+
+    let mut field_y = inner.y.saturating_add(4);
+    for field in form.fields().iter().copied() {
+        let (label, base_hint) = match field {
+            crate::app::OrchFormField::Title => (cat.board_f_title, cat.board_h_title),
+            crate::app::OrchFormField::Paths => (cat.board_f_paths, cat.board_h_paths),
+            crate::app::OrchFormField::Deps => (cat.board_f_deps, cat.board_h_deps),
+            crate::app::OrchFormField::Gate => (cat.board_f_gate, cat.board_h_gate),
+            crate::app::OrchFormField::Prompt => (cat.board_f_prompt, cat.board_h_prompt),
+            crate::app::OrchFormField::Agent => (cat.board_f_agent, cat.board_h_agent),
+            crate::app::OrchFormField::Start => (cat.board_f_start, cat.board_h_start),
+            crate::app::OrchFormField::Schedule => (cat.board_f_schedule, cat.board_h_schedule),
+        };
+        let active = field == form.field;
         let label_style = if active {
             Style::new().fg(t.accent).bold()
         } else {
             Style::new().fg(t.subtext0)
         };
         // A subtle hint of what each field expects, shown when it's empty.
-        let body = if vals[i].is_empty() && !active {
-            Span::styled(hints[i], Style::new().fg(t.overlay0))
-        } else {
-            Span::styled(vals[i].clone(), Style::new().fg(t.text))
+        let start_label = match form.start {
+            crate::app::OrchFormStart::Manual => cat.automation_manual,
+            crate::app::OrchFormStart::Now => cat.automation_now,
+            crate::app::OrchFormStart::Once => cat.automation_once,
+            crate::app::OrchFormStart::Hourly => cat.automation_hourly,
+            crate::app::OrchFormStart::Daily => cat.automation_daily,
+            crate::app::OrchFormStart::Weekly => cat.automation_weekly,
         };
-        let field_rect = Rect::new(inner.x, inner.y + 2 + i as u16, inner.width, 1);
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!(" {label:<6}: "), label_style),
-                body,
-                Span::styled(if active { "▏" } else { "" }, Style::new().fg(t.accent)),
-            ])),
-            field_rect,
-        );
-        hits.push((crate::app::OrchHit::FormField(i), field_rect));
+        let value = if field == crate::app::OrchFormField::Start {
+            if form.kind == crate::app::OrchFormKind::Automation {
+                format!("{start_label}  ·  {}", form.timezone)
+            } else {
+                start_label.to_string()
+            }
+        } else {
+            form.value(field).to_string()
+        };
+        let hint = if field == crate::app::OrchFormField::Schedule
+            && form.kind == crate::app::OrchFormKind::Automation
+        {
+            match form.start {
+                crate::app::OrchFormStart::Once => "YYYY-MM-DD HH:MM",
+                crate::app::OrchFormStart::Hourly => "MM (00-59)",
+                crate::app::OrchFormStart::Daily => "HH:MM",
+                crate::app::OrchFormStart::Weekly => "mon,fri HH:MM",
+                crate::app::OrchFormStart::Manual | crate::app::OrchFormStart::Now => base_hint,
+            }
+        } else {
+            base_hint
+        };
+        let field_height = if field == crate::app::OrchFormField::Prompt {
+            3
+        } else {
+            1
+        };
+        let field_rect = Rect::new(inner.x, field_y, inner.width, field_height);
+        let body = if value.is_empty() && !active {
+            Span::styled(hint, Style::new().fg(t.overlay0))
+        } else {
+            Span::styled(value, Style::new().fg(t.text))
+        };
+        if field == crate::app::OrchFormField::Prompt {
+            const LABEL_WIDTH: u16 = 11;
+            f.render_widget(
+                Paragraph::new(Span::styled(format!(" {label:<8}: "), label_style)),
+                Rect::new(
+                    field_rect.x,
+                    field_rect.y,
+                    LABEL_WIDTH.min(field_rect.width),
+                    1,
+                ),
+            );
+            let body_rect = Rect::new(
+                field_rect.x.saturating_add(LABEL_WIDTH),
+                field_rect.y,
+                field_rect.width.saturating_sub(LABEL_WIDTH),
+                field_rect.height,
+            );
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    body,
+                    Span::styled(if active { "▏" } else { "" }, Style::new().fg(t.accent)),
+                ]))
+                .wrap(Wrap { trim: false }),
+                body_rect,
+            );
+        } else {
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(format!(" {label:<8}: "), label_style),
+                    body,
+                    Span::styled(if active { "▏" } else { "" }, Style::new().fg(t.accent)),
+                ])),
+                field_rect,
+            );
+        }
+        hits.push((crate::app::OrchHit::FormField(field), field_rect));
+        field_y = field_y.saturating_add(field_height);
     }
 
     let bottom = inner.bottom().saturating_sub(1);
@@ -1175,7 +1540,9 @@ pub(super) fn draw_form(
             Paragraph::new(super::hint_line(
                 &[
                     ("⏎", cat.act_create),
-                    ("⇥", cat.board_next_field),
+                    ("⇥", cat.board_switch_type),
+                    ("↑↓", cat.board_move_field),
+                    ("←→", cat.act_select),
                     ("esc", cat.act_cancel),
                 ],
                 t,

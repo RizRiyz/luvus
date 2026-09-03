@@ -678,8 +678,11 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
             f,
             pane_area,
             &app.orch,
+            &app.automation,
             app.orch_scroll,
             app.orch_cursor,
+            app.orch_automation_cursor,
+            app.orch_view,
             app.orch_flow_mode,
             compact,
             app.hover,
@@ -695,6 +698,8 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         // drawn; the scroll offset is written back.
         app.mission_area = pane_area;
         let rows = app.build_mission_rows();
+        let automation_health = app.automation.health();
+        let automation_rows = app.automation_views();
         let rendered = mission::render(
             f,
             pane_area,
@@ -705,6 +710,8 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
             app.mission_usage_refreshing(),
             app.mission_burn,
             app.config.mission_budget,
+            automation_health,
+            &automation_rows,
             compact,
             cat,
             &t,

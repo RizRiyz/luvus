@@ -69,6 +69,10 @@ read current state and reconcile instead of blindly retrying.
 - Mission Control: read with `mission.snapshot`, refresh usage on demand with
   `mission.refresh`, and change the visible UI only with `mission.open`
 - Worktrees and orchestration: `worktree.*`, `task.*`, and `lease.*`
+- Agent scheduling: inspect with `automation.list`, `automation.get`,
+  `automation.history`, `automation.preview`, and `automation.health`; mutate
+  with `automation.create`, `automation.update`, `automation.enable`,
+  `automation.disable`, `automation.run`, and `automation.delete`
 - Extensions: `module.*`
 - Themes and configuration: `theme.*`, `config.*`, and `manifest.reload`
 - UI surfaces: `ui.sidebar`, `ui.dock.*`, `ui.bar.*`,

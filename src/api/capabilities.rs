@@ -130,6 +130,17 @@ pub const METHODS: &[&str] = &[
     "task.merge",
     "task.release",
     "task.delete",
+    "automation.create",
+    "automation.list",
+    "automation.get",
+    "automation.update",
+    "automation.enable",
+    "automation.disable",
+    "automation.delete",
+    "automation.run",
+    "automation.history",
+    "automation.preview",
+    "automation.health",
     "lease.acquire",
     "lease.list",
     "lease.release",
@@ -241,6 +252,11 @@ const READ_ONLY_METHODS: &[&str] = &[
     "task.list",
     "task.get",
     "task.next",
+    "automation.list",
+    "automation.get",
+    "automation.history",
+    "automation.preview",
+    "automation.health",
     "lease.list",
     "module.list",
     "module.info",
@@ -292,7 +308,10 @@ pub fn required_scope(method: &str) -> &'static str {
         "terminal"
     } else if method.starts_with("agent.") || method.starts_with("pane.report_") {
         "agent"
-    } else if method.starts_with("task.") || method.starts_with("lease.") {
+    } else if method.starts_with("task.")
+        || method.starts_with("lease.")
+        || method.starts_with("automation.")
+    {
         "orchestration"
     } else if method.starts_with("module.") {
         "extensions"
@@ -376,6 +395,11 @@ pub fn capabilities(event_sequence: u64) -> Value {
             "event_wait_timeout_s":super::topology::MAX_EVENT_WAIT_S,
             "layout_depth":super::topology::MAX_LAYOUT_DEPTH,
             "workspace_move_block":super::topology::MAX_WORKSPACE_MOVE_BLOCK,
+            "automations":crate::automation::MAX_AUTOMATIONS,
+            "automation_runs":crate::automation::MAX_RUNS,
+            "automation_prompt_bytes":crate::automation::MAX_PROMPT_BYTES,
+            "automation_gate_bytes":crate::automation::MAX_GATE_BYTES,
+            "automation_min_interval_s":crate::automation::MIN_INTERVAL_SECONDS,
         },
         "identity":{"workspace":"stable","tab":"stable","terminal":"pty_lifetime"},
         "events":{"resume":"after_sequence","loss":"resync_required"},
@@ -388,7 +412,8 @@ pub fn capabilities(event_sequence: u64) -> Value {
         "authorization":{"default":"local_owner","delegation":"scoped_ephemeral_token",
             "scopes":["read","workspace","agent","terminal","orchestration","extensions","admin","all"]},
         "concurrency":{"mutation_guard":"if_revision"},
-        "atomic_methods":["agent.start","agent.prompt","workspace.move_block","layout.apply","diff.note.apply"],
+        "atomic_methods":["agent.start","agent.prompt","automation.create","automation.run","workspace.move_block","layout.apply","diff.note.apply"],
+        "idempotency_keys":{"methods":["automation.create","automation.run"],"max_bytes":128},
         "graphics":false,
     })
 }
@@ -411,6 +436,8 @@ mod tests {
             "events.wait",
             "terminal.backend.observe",
             "terminal.backend.control",
+            "automation.create",
+            "automation.health",
         ] {
             assert!(unique.contains(required), "missing {required}");
         }
@@ -432,6 +459,9 @@ mod tests {
         assert_eq!(required_scope("mission.open"), "workspace");
         assert_eq!(required_scope("session.snapshot"), "read");
         assert_eq!(required_scope("events.subscribe"), "read");
+        assert_eq!(required_scope("automation.create"), "orchestration");
+        assert!(!is_read_only("automation.create"));
+        assert!(is_read_only("automation.preview"));
         for stream in [
             "events.subscribe",
             "terminal.backend.events.subscribe",

@@ -303,13 +303,21 @@ session IDs. List sessions and use the exact returned identifier.
 
 Universal Harness Protocol 1.0 is Luvus's public automation contract for
 workspaces, tabs, panes, agents, terminals, files, Git, DIFF, Mission Control,
-tasks, leases, modules, bars, configuration, and events.
+tasks, agent schedules, leases, modules, bars, configuration, and events.
 
 Open Mission Control in the active workspace with `luvus mission open`, target
 a zero-based workspace with `luvus mission open <workspace>`, or call the
 workspace-scoped UHP method `mission.open`. Use `mission.snapshot` to read agent
 and usage data without changing the UI. `mission.refresh` requests one explicit
 off-render-path usage scan rather than enabling background polling.
+
+Use `automation.preview` before storing a calendar trigger, then
+`automation.create` with a canonical built-in agent, stable workspace ID,
+explicit prompt, and IANA timezone. Read definitions with `automation.list`,
+runs with `automation.history`, and fleet health with `automation.health`.
+Create and manual-run requests accept idempotency keys for safe retries.
+Disabling a definition prevents future occurrences but never kills its current
+ORCH task or pane. Detection-only manifest agents cannot be scheduled.
 
 Start with capability discovery and validate against the installed JSON Schema
 bundle. Do not infer method support from a release number alone.

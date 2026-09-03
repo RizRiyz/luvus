@@ -49,7 +49,7 @@
         "mode": { "enum": ["read_only", "control"] },
         "scopes": {
           "type": "array",
-          "items": { "enum": ["read", "workspace", "agent", "terminal"] },
+          "items": { "enum": ["read", "workspace", "agent", "terminal", "orchestration"] },
           "minItems": 1,
           "uniqueItems": true
         },
@@ -72,7 +72,7 @@
     },
     {
       "if": { "properties": { "authority": { "properties": { "mode": { "const": "control" } }, "required": ["mode"] } } },
-      "then": { "properties": { "authority": { "properties": { "scopes": { "const": ["read", "workspace", "agent", "terminal"] } } } } }
+      "then": { "properties": { "authority": { "properties": { "scopes": { "const": ["read", "workspace", "agent", "terminal", "orchestration"] } } } } }
     }
   ],
   "additionalProperties": false

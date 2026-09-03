@@ -15,3 +15,5 @@
 {"id":"bad-session-extra","method":"session.start","params":{"name":"review","extra":true}}
 {"id":"bad-session-name","method":"session.start","params":{"name":"."}}
 {"id":"bad-integration-status","method":"integration.status","params":{"agent":"claude"}}
+{"id":"bad-automation-fast","method":"automation.preview","params":{"trigger":{"kind":"interval","every_seconds":1,"anchor_utc":1788393600}}}
+{"id":"bad-automation-extra","method":"automation.health","params":{"workspace":0}}

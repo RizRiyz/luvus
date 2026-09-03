@@ -3171,6 +3171,11 @@ mod tests {
         let secret = created["result"]["token"].as_str().unwrap();
         let token_id = created["result"]["id"].as_str().unwrap();
         assert!(authorize_request("workspace.get", Some(secret)).is_ok());
+        assert!(authorize_request("automation.preview", Some(secret)).is_ok());
+        assert_eq!(
+            authorize_request("automation.create", Some(secret)),
+            Err("auth token scope denied")
+        );
         assert_eq!(
             authorize_request("workspace.close", Some(secret)),
             Err("auth token scope denied")

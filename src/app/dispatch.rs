@@ -439,6 +439,110 @@ mod socket_api_tests {
     }
 
     #[test]
+    fn automation_api_validates_targets_and_is_idempotent() {
+        let (_env, mut app) = app("socket-automation");
+        let workspace_id = app.workspaces[0].id.clone();
+        let params = json!({
+            "name":"Morning review",
+            "idempotency_key":"create-1",
+            "trigger":{"kind":"daily","timezone":"Asia/Makassar","second_of_day":28800},
+            "task":{
+                "title":"Review changes",
+                "prompt":"Review the current changes and report risks.",
+                "agent_id":"codex",
+                "workspace_id":workspace_id.clone(),
+                "mode":"workspace"
+            }
+        });
+        let first = app.dispatch("automation.create", &params).unwrap();
+        let again = app.dispatch("automation.create", &params).unwrap();
+        assert_eq!(first["automation"]["id"], again["automation"]["id"]);
+        assert_eq!(first["automation"]["task"]["agent_id"], "codex");
+        assert!(first["automation"]["next_run_at"].is_u64());
+
+        let list = app.dispatch("automation.list", &json!({})).unwrap();
+        assert_eq!(list["automations"].as_array().unwrap().len(), 1);
+        let preview = app
+            .dispatch(
+                "automation.preview",
+                &json!({
+                    "from_utc":0,
+                    "trigger":{"kind":"weekly","timezone":"UTC","weekdays":[1,5],"second_of_day":0}
+                }),
+            )
+            .unwrap();
+        assert_eq!(preview["occurrences_utc"].as_array().unwrap().len(), 5);
+
+        let bad = app.dispatch(
+            "automation.create",
+            &json!({
+                "name":"bad",
+                "trigger":{"kind":"daily","timezone":"Mars/Olympus","second_of_day":0},
+                "task":{
+                    "title":"bad", "prompt":"bad", "agent_id":"codex",
+                    "workspace_id":workspace_id
+                }
+            }),
+        );
+        assert_eq!(bad.unwrap_err().0, "invalid_timezone");
+
+        app.workspaces.clear();
+        let retry_after_workspace_closed = app.dispatch("automation.create", &params).unwrap();
+        assert_eq!(
+            retry_after_workspace_closed["automation"]["id"],
+            first["automation"]["id"]
+        );
+        let (reply, _rx) = std::sync::mpsc::channel();
+        let list_without_workspace: Value = serde_json::from_str(&app.handle_api(&ApiRequest {
+            id: "list-without-workspace".into(),
+            method: "automation.list".into(),
+            params: json!({}),
+            reply,
+        }))
+        .unwrap();
+        assert_eq!(
+            list_without_workspace["result"]["automations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let automation_id = first["automation"]["id"].as_str().unwrap();
+        let run_params = json!({"id":automation_id, "idempotency_key":"run-1"});
+        let first_run = app.dispatch("automation.run", &run_params).unwrap();
+        let retry_run = app.dispatch("automation.run", &run_params).unwrap();
+        assert_eq!(first_run["run"]["id"], retry_run["run"]["id"]);
+        assert_eq!(app.automation.runs.len(), 1);
+    }
+
+    #[test]
+    fn task_api_projection_does_not_expose_automation_briefings() {
+        let (_env, mut app) = app("socket-task-projection");
+        let task = app
+            .orch
+            .add_task("review".into(), vec!["src/**".into()], vec![], None)
+            .unwrap();
+        app.orch
+            .attach_automation(
+                &task.id,
+                "private agent briefing".into(),
+                crate::orch::AutomationProvenance {
+                    automation_id: "a1".into(),
+                    run_id: "r1".into(),
+                    scheduled_at: 100,
+                },
+            )
+            .unwrap();
+
+        let list = app.dispatch("task.list", &json!({})).unwrap();
+        let encoded = list.to_string();
+        assert!(!encoded.contains("private agent briefing"));
+        assert!(!encoded.contains("scheduled_at"));
+        assert_eq!(list["tasks"][0]["title"], "review");
+    }
+
+    #[test]
     fn socket_mutations_support_optimistic_revision_guards() {
         let (_env, mut app) = app("socket-revision-guard");
         let (reply, _) = std::sync::mpsc::channel();
@@ -1211,6 +1315,17 @@ impl App {
             "theme.list",
             "theme.use",
             "theme.path",
+            "automation.create",
+            "automation.list",
+            "automation.get",
+            "automation.update",
+            "automation.enable",
+            "automation.disable",
+            "automation.delete",
+            "automation.run",
+            "automation.history",
+            "automation.preview",
+            "automation.health",
         ];
         if self.workspaces.is_empty() && !WITHOUT_NODE.contains(&req.method.as_str()) {
             return json!({ "id": req.id, "error": { "code": "no_session", "message": "no active session" } }).to_string();
@@ -4001,6 +4116,186 @@ impl App {
                 }
                 Ok(json!({"type":"ok"}))
             }
+            // ── Agent Automation (docs/118): durable schedules over ORCH ───
+            "automation.create" | "automation.update" => {
+                reject_api_fields(
+                    p,
+                    if method == "automation.create" {
+                        &[
+                            "name",
+                            "enabled",
+                            "trigger",
+                            "task",
+                            "policy",
+                            "idempotency_key",
+                        ]
+                    } else {
+                        &["id", "name", "enabled", "trigger", "task", "policy"]
+                    },
+                )?;
+                let now = crate::automation::unix_now();
+                let mut input = automation_input(p)?;
+                if method == "automation.create" {
+                    if let Some(descriptor) = crate::agent::registry::find(&input.task.agent_id) {
+                        input.task.agent_id = descriptor.id.to_string();
+                    }
+                    if let Some(automation) = self
+                        .automation
+                        .create_retry(&input, opt_borrowed_str(p, "idempotency_key"))
+                        .map_err(automation_err)?
+                    {
+                        return Ok(json!({"type":"automation", "automation":automation}));
+                    }
+                }
+                validate_automation_target(self, &mut input)?;
+                let before = self.automation.clone();
+                let automation = if method == "automation.create" {
+                    self.automation
+                        .create(input, opt_borrowed_str(p, "idempotency_key"), now)
+                        .map_err(automation_err)?
+                } else {
+                    let id = req_str(p, "id")?;
+                    self.automation
+                        .update(id, input, now)
+                        .map_err(automation_err)?
+                };
+                if let Err(error) = self.automation.save() {
+                    self.automation = before;
+                    return Err((
+                        "persistence_failed".into(),
+                        format!("could not persist automation: {error}"),
+                    ));
+                }
+                self.emit_event(
+                    if method == "automation.create" {
+                        "automation.created"
+                    } else {
+                        "automation.updated"
+                    },
+                    crate::automation::definition_event(&automation),
+                );
+                Ok(json!({"type":"automation", "automation":automation}))
+            }
+            "automation.list" => {
+                reject_api_fields(p, &[])?;
+                Ok(json!({
+                    "type":"automation_list",
+                    "automations": self.automation.automations,
+                }))
+            }
+            "automation.get" => {
+                reject_api_fields(p, &["id"])?;
+                let id = req_str(p, "id")?;
+                let automation = self
+                    .automation
+                    .automation(id)
+                    .ok_or_else(|| ("not_found".into(), format!("no such automation: {id}")))?;
+                Ok(json!({"type":"automation", "automation":automation}))
+            }
+            "automation.enable" | "automation.disable" => {
+                reject_api_fields(p, &["id"])?;
+                let id = req_str(p, "id")?;
+                let before = self.automation.clone();
+                let automation = self
+                    .automation
+                    .set_enabled(
+                        id,
+                        method == "automation.enable",
+                        crate::automation::unix_now(),
+                    )
+                    .map_err(automation_err)?;
+                if let Err(error) = self.automation.save() {
+                    self.automation = before;
+                    return Err(("persistence_failed".into(), error.to_string()));
+                }
+                self.emit_event(
+                    if automation.enabled {
+                        "automation.enabled"
+                    } else {
+                        "automation.disabled"
+                    },
+                    crate::automation::definition_event(&automation),
+                );
+                Ok(json!({"type":"automation", "automation":automation}))
+            }
+            "automation.delete" => {
+                reject_api_fields(p, &["id"])?;
+                let id = req_str(p, "id")?;
+                let before = self.automation.clone();
+                let automation = self.automation.delete(id).map_err(automation_err)?;
+                if let Err(error) = self.automation.save() {
+                    self.automation = before;
+                    return Err(("persistence_failed".into(), error.to_string()));
+                }
+                self.emit_event("automation.deleted", json!({"id":id}));
+                Ok(json!({"type":"automation", "automation":automation}))
+            }
+            "automation.run" => {
+                reject_api_fields(p, &["id", "idempotency_key"])?;
+                let id = req_str(p, "id")?.to_string();
+                let now = crate::automation::unix_now();
+                if let Some(run) = self
+                    .automation
+                    .run_retry(&id, opt_borrowed_str(p, "idempotency_key"))
+                    .map_err(automation_err)?
+                {
+                    return Ok(json!({"type":"automation_run", "run":run}));
+                }
+                let before = self.automation.clone();
+                let run = self
+                    .automation
+                    .request_run(&id, opt_borrowed_str(p, "idempotency_key"), now)
+                    .map_err(automation_err)?;
+                if let Err(error) = self.automation.save() {
+                    self.automation = before;
+                    return Err(("persistence_failed".into(), error.to_string()));
+                }
+                self.emit_event(
+                    "automation.run_queued",
+                    json!({"automation_id":run.automation_id, "run_id":run.id, "scheduled_at":run.scheduled_at}),
+                );
+                self.start_automation_run(&run.id, now);
+                let run = self.automation.run(&run.id).cloned().unwrap_or(run);
+                Ok(json!({"type":"automation_run", "run":run}))
+            }
+            "automation.history" => {
+                reject_api_fields(p, &["id", "limit"])?;
+                let id = opt_borrowed_str(p, "id");
+                let limit = p
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(50)
+                    .clamp(1, 200) as usize;
+                let runs = self
+                    .automation
+                    .runs
+                    .iter()
+                    .rev()
+                    .filter(|run| id.is_none_or(|id| run.automation_id == id))
+                    .take(limit)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                Ok(json!({"type":"automation_history", "runs":runs}))
+            }
+            "automation.preview" => {
+                reject_api_fields(p, &["trigger", "from_utc"])?;
+                let trigger = automation_trigger(p.get("trigger"))?;
+                let now = p
+                    .get("from_utc")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_else(crate::automation::unix_now);
+                let occurrences = crate::automation::AutomationState::preview(&trigger, now, 5)
+                    .map_err(automation_err)?;
+                Ok(json!({"type":"automation_preview", "occurrences_utc":occurrences}))
+            }
+            "automation.health" => {
+                reject_api_fields(p, &[])?;
+                Ok(json!({
+                    "type":"automation_health",
+                    "summary":self.automation.health(),
+                    "automations":self.automation_views(),
+                }))
+            }
             // ── ORCH-1/2: task ledger + path leases (docs/22, M0) ──────────
             "task.add" => {
                 let title = req_str(p, "title")?.to_string();
@@ -4019,7 +4314,7 @@ impl App {
             }
             "task.list" => Ok(json!({
                 "type": "task_list",
-                "tasks": serde_json::to_value(&self.orch.tasks).unwrap_or(Value::Null),
+                "tasks": self.orch.tasks.iter().map(task_json).collect::<Vec<_>>(),
             })),
             "task.get" => {
                 let id = req_str(p, "id")?;
@@ -4103,6 +4398,7 @@ impl App {
                 let t = self.orch.task(&id).cloned();
                 let jv = t.as_ref().map(task_json).unwrap_or(Value::Null);
                 self.emit_event("task.updated", jv.clone());
+                self.sync_automation_task(&id);
                 Ok(json!({ "type": "task", "task": jv }))
             }
             "task.done" => {
@@ -4191,6 +4487,7 @@ impl App {
                 let released = self.orch.release_task_leases(&id);
                 self.orch.save();
                 self.emit_event("task.released", task_json(&task));
+                self.sync_automation_task(&id);
                 Ok(json!({ "type": "task", "task": task_json(&task), "released_leases": released }))
             }
             "lease.acquire" => {
@@ -5788,6 +6085,10 @@ fn opt_str(p: &Value, key: &str) -> Option<String> {
     p.get(key).and_then(|v| v.as_str()).map(String::from)
 }
 
+fn opt_borrowed_str<'a>(p: &'a Value, key: &str) -> Option<&'a str> {
+    p.get(key).and_then(Value::as_str)
+}
+
 /// A `["a","b"]` string-array param (missing/wrong-typed → empty).
 fn str_array(p: &Value, key: &str) -> Vec<String> {
     p.get(key)
@@ -5803,6 +6104,222 @@ fn str_array(p: &Value, key: &str) -> Vec<String> {
 /// An orchestration `Reject` → the API `(code, message)` error shape.
 fn orch_err(r: crate::orch::Reject) -> (String, String) {
     (r.code.to_string(), r.message)
+}
+
+fn automation_err(r: crate::automation::Reject) -> (String, String) {
+    (r.code.to_string(), r.message)
+}
+
+fn automation_trigger(
+    value: Option<&Value>,
+) -> Result<crate::automation::Trigger, (String, String)> {
+    let value = value.ok_or_else(|| {
+        (
+            "invalid_request".to_string(),
+            "trigger is required".to_string(),
+        )
+    })?;
+    let kind = value.get("kind").and_then(Value::as_str).ok_or_else(|| {
+        (
+            "invalid_schedule".to_string(),
+            "trigger.kind is required".to_string(),
+        )
+    })?;
+    reject_api_fields(
+        value,
+        match kind {
+            "once" => &["kind", "at_utc"],
+            "interval" => &["kind", "every_seconds", "anchor_utc"],
+            "daily" => &["kind", "timezone", "second_of_day"],
+            "weekly" => &["kind", "timezone", "weekdays", "second_of_day"],
+            _ => {
+                return Err((
+                    "invalid_schedule".to_string(),
+                    format!("unknown trigger kind: {kind}"),
+                ))
+            }
+        },
+    )?;
+    serde_json::from_value(value.clone()).map_err(|error| {
+        (
+            "invalid_schedule".to_string(),
+            format!("invalid trigger: {error}"),
+        )
+    })
+}
+
+fn automation_input(p: &Value) -> Result<crate::automation::CreateAutomation, (String, String)> {
+    let task = p.get("task").and_then(Value::as_object).ok_or_else(|| {
+        (
+            "invalid_request".to_string(),
+            "task object is required".to_string(),
+        )
+    })?;
+    reject_api_fields(
+        p.get("task").expect("task was just validated"),
+        &[
+            "title",
+            "prompt",
+            "agent_id",
+            "workspace_id",
+            "mode",
+            "paths",
+            "gate",
+        ],
+    )?;
+    if let Some(policy) = p.get("policy") {
+        reject_api_fields(policy, &["misfire", "overlap", "misfire_grace_seconds"])?;
+    }
+    let policy = p
+        .get("policy")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| ("invalid_policy".to_string(), error.to_string()))?
+        .unwrap_or_default();
+    let mode = match task.get("mode") {
+        None => crate::orch::TaskWorkerMode::Worktree,
+        Some(Value::String(mode)) => crate::orch::TaskWorkerMode::parse(mode).ok_or_else(|| {
+            (
+                "invalid_request".to_string(),
+                "task.mode must be worktree or workspace".to_string(),
+            )
+        })?,
+        Some(_) => {
+            return Err((
+                "invalid_request".to_string(),
+                "task.mode must be a string".to_string(),
+            ))
+        }
+    };
+    let enabled = match p.get("enabled") {
+        None => true,
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(_) => {
+            return Err((
+                "invalid_request".to_string(),
+                "enabled must be a boolean".to_string(),
+            ))
+        }
+    };
+    let paths = match task.get("paths") {
+        None => Vec::new(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value.as_str().map(str::to_string).ok_or_else(|| {
+                    (
+                        "invalid_request".to_string(),
+                        "task.paths must contain only strings".to_string(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => {
+            return Err((
+                "invalid_request".to_string(),
+                "task.paths must be an array".to_string(),
+            ))
+        }
+    };
+    let gate = match task.get("gate") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(gate)) => Some(gate.trim().to_string()).filter(|gate| !gate.is_empty()),
+        Some(_) => {
+            return Err((
+                "invalid_request".to_string(),
+                "task.gate must be a string or null".to_string(),
+            ))
+        }
+    };
+    Ok(crate::automation::CreateAutomation {
+        name: req_str(p, "name")?.to_string(),
+        enabled,
+        trigger: automation_trigger(p.get("trigger"))?,
+        task: crate::automation::TaskTemplate {
+            title: task
+                .get("title")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    (
+                        "invalid_request".to_string(),
+                        "task.title is required".to_string(),
+                    )
+                })?
+                .to_string(),
+            prompt: task
+                .get("prompt")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    (
+                        "invalid_request".to_string(),
+                        "task.prompt is required".to_string(),
+                    )
+                })?
+                .to_string(),
+            agent_id: task
+                .get("agent_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    (
+                        "invalid_request".to_string(),
+                        "task.agent_id is required".to_string(),
+                    )
+                })?
+                .to_string(),
+            workspace_id: task
+                .get("workspace_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    (
+                        "invalid_request".to_string(),
+                        "task.workspace_id is required".to_string(),
+                    )
+                })?
+                .to_string(),
+            mode,
+            paths,
+            gate,
+        },
+        policy,
+    })
+}
+
+fn validate_automation_target(
+    app: &App,
+    input: &mut crate::automation::CreateAutomation,
+) -> Result<(), (String, String)> {
+    let descriptor = crate::agent::registry::find(&input.task.agent_id).ok_or_else(|| {
+        (
+            "unsupported_agent".to_string(),
+            format!(
+                "{} is not a launch-capable built-in agent",
+                input.task.agent_id
+            ),
+        )
+    })?;
+    input.task.agent_id = descriptor.id.to_string();
+    if !app
+        .workspaces
+        .iter()
+        .any(|workspace| workspace.id == input.task.workspace_id)
+    {
+        return Err((
+            "workspace_not_found".to_string(),
+            format!("workspace id {} not found", input.task.workspace_id),
+        ));
+    }
+    // Reuse ORCH's title/path/gate validation without mutating the live ledger.
+    let mut probe = crate::orch::OrchState::default();
+    probe
+        .add_task(
+            input.task.title.clone(),
+            input.task.paths.clone(),
+            Vec::new(),
+            input.task.gate.clone(),
+        )
+        .map_err(orch_err)?;
+    Ok(())
 }
 
 fn task_worker_mode(
@@ -5826,7 +6343,29 @@ fn task_worker_mode(
 
 /// A `Task` as a JSON value for API results + bus events.
 fn task_json(t: &crate::orch::Task) -> Value {
-    serde_json::to_value(t).unwrap_or(Value::Null)
+    let mut value = json!({
+        "id": t.id,
+        "title": t.title,
+        "status": t.status,
+        "assignee": t.assignee,
+        "deps": t.deps,
+        "paths": t.paths,
+        "gate": t.gate,
+        "outputs": t.outputs,
+        "notes": t.notes,
+        "worktree": t.worktree,
+        "branch": t.branch,
+        "context": t.context,
+        "created": t.created,
+        "updated": t.updated,
+    });
+    if let Some(mode) = t.worker_mode {
+        value["mode"] = json!(mode);
+    }
+    if let Some(workspace) = &t.workspace_worker {
+        value["workspace_worker"] = json!(workspace);
+    }
+    value
 }
 
 /// A trimmed JSON view of an installed module for `module.list`.

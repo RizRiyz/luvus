@@ -7,6 +7,54 @@ use super::*;
 use crate::mission::{MissionRow, MissionRowView, MissionScope, MissionUsageRequest};
 
 impl App {
+    pub(crate) fn automation_views(&self) -> Vec<crate::automation::AutomationView> {
+        self.automation
+            .automations
+            .iter()
+            .map(|automation| {
+                let latest = self.automation.latest_run(&automation.id);
+                let current = latest.filter(|run| run.status.is_live());
+                let available = crate::agent::registry::find(&automation.task.agent_id).is_some()
+                    && self
+                        .workspaces
+                        .iter()
+                        .any(|workspace| workspace.id == automation.task.workspace_id);
+                let state = match current.map(|run| run.status) {
+                    Some(crate::automation::RunStatus::Review) => "review",
+                    Some(_) => "running",
+                    None if latest
+                        .is_some_and(|run| run.status == crate::automation::RunStatus::Failed) =>
+                    {
+                        "failed"
+                    }
+                    None if !automation.enabled
+                        && matches!(
+                            automation.trigger,
+                            crate::automation::Trigger::Once { .. }
+                        ) =>
+                    {
+                        "completed"
+                    }
+                    None if !automation.enabled => "paused",
+                    None if !available => "unavailable",
+                    None => "scheduled",
+                };
+                crate::automation::AutomationView {
+                    id: automation.id.clone(),
+                    name: automation.name.clone(),
+                    state: state.into(),
+                    next_run_at: automation.next_run_at,
+                    current_run_id: current.map(|run| run.id.clone()),
+                    latest_run_id: latest.map(|run| run.id.clone()),
+                    latest_status: latest.map(|run| run.status),
+                    latest_error: latest.and_then(|run| run.error.clone()),
+                    agent_id: automation.task.agent_id.clone(),
+                    workspace_id: automation.task.workspace_id.clone(),
+                }
+            })
+            .collect()
+    }
+
     /// Remove integration usage whose owning pane is gone or no longer bound
     /// to the same agent session. This is event-driven and bounded by the
     /// reported cache size; it adds no idle scan or timer.
@@ -90,6 +138,8 @@ impl App {
             .iter()
             .filter_map(|row| row["usage"]["total_tokens"].as_u64())
             .sum::<u64>();
+        let automation = self.automation.health();
+        let automation_rows = self.automation_views();
         serde_json::json!({
             "type": "mission_snapshot",
             "scope": match scope { MissionScope::Workspace => "workspace", MissionScope::All => "all" },
@@ -102,6 +152,7 @@ impl App {
                 "cost_usd": total_cost,
                 "burn_usd_per_hour": self.mission_burn,
             },
+            "automation": {"summary": automation, "rows": automation_rows},
             "rows": rows,
         })
     }

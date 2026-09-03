@@ -90,6 +90,7 @@ Luvus release number.
 | terminal | `terminal.backend.inventory` · `terminal.backend.snapshot` · `terminal.backend.validate` · `terminal.backend.processes` · `terminal.backend.capture` · `terminal.backend.observe` · `terminal.backend.control` · `terminal.backend.type_literal` · `terminal.backend.submit_text` · `terminal.backend.send_key` · `terminal.backend.set_title` · `terminal.backend.notify` · `terminal.backend.create` · `terminal.backend.close` · `terminal.backend.wait_change` · `terminal.backend.wait_output` · `terminal.backend.events.subscribe` |
 | worktrees | `worktree.list` · `worktree.create` · `worktree.open` · `worktree.remove` |
 | orchestration | `task.add` · `task.list` · `task.get` · `task.claim` · `task.next` · `task.start` · `task.heartbeat` · `task.update` · `task.done` · `task.merge` · `task.release` · `lease.acquire` · `lease.list` · `lease.release` |
+| agent automation | `automation.create` · `automation.list` · `automation.get` · `automation.update` · `automation.enable` · `automation.disable` · `automation.delete` · `automation.run` · `automation.history` · `automation.preview` · `automation.health` |
 | modules | `module.list` · `module.info` · `module.link` · `module.unlink` · `module.enable` · `module.disable` · `module.action.list` · `module.action.invoke` · `module.pane.open` · `module.pane.focus` · `module.pane.close` · `module.config_dir` · `module.settings.list` · `module.settings.get` · `module.settings.set` · `module.log.list` |
 | themes | `theme.list` · `theme.path` · `theme.use` · `theme.reload` |
 | ui / server | `ui.sidebar` · `ui.dock.push` · `ui.dock.list` · `ui.dock.move` · `ui.bar.push` · `ui.bar.list` · `ui.bar.move` · `ui.bar.remove` · `ui.notification.push` · `ui.notification.clear` · `ui.toast` · `ping` · `server.stop` · `events.subscribe` · `events.wait` |
@@ -117,14 +118,65 @@ pane owns that exact session.
 ```
 
 `task.start` and `task.next` with `start: true` accept `mode: "worktree"` or
-`mode: "workspace"`; omitted mode means worktree. Workspace mode may include a
-stable `workspace_id` and creates a dedicated branchless task tab in that
-workspace. `branch` is valid only in worktree mode, and `task.merge` returns
+`mode: "workspace"`; omitted mode means worktree. Either mode may include a
+stable `workspace_id`; worktree mode creates its branch from that workspace's
+repository, while workspace mode creates a dedicated branchless task tab there.
+`branch` is valid only in worktree mode, and `task.merge` returns
 `merge_unavailable` for a workspace worker.
 
 ```json
 {"id":"1","method":"task.start","params":{"id":"t3","mode":"workspace","workspace_id":"workspace_example","agent":"codex"}}
 ```
+
+## Agent automation
+
+Automations are durable agent-task templates owned by one named Luvus server.
+Each due occurrence is persisted before Luvus creates a fresh ORCH task, takes
+leases, creates a workspace tab or worktree, and starts the exact built-in
+agent adapter. Disabling a definition prevents later occurrences but never
+kills a running pane. Detection-only manifest agents cannot be scheduled.
+Omitted `task.mode` defaults to the isolated `worktree` mode; shared
+`workspace` mode must be explicit.
+
+All durable deadlines and occurrence keys are UTC Unix seconds. Calendar
+triggers retain an IANA timezone and a local `second_of_day`, so `08:00` stays
+08:00 through daylight-saving changes. ISO weekdays use Monday `1` through
+Sunday `7`. Intervals must be at least 60 seconds. `automation.preview` returns
+the next five UTC deadlines without storing or launching anything.
+
+```json
+→ {"id":"preview","method":"automation.preview","params":{"trigger":{"kind":"daily","timezone":"Asia/Makassar","second_of_day":28800}}}
+← {"id":"preview","result":{"type":"automation_preview","occurrences_utc":[1788393600,1788480000,1788566400,1788652800,1788739200]}}
+```
+
+```json
+→ {"id":"create","method":"automation.create","params":{"name":"Morning review","trigger":{"kind":"weekly","timezone":"Asia/Makassar","weekdays":[1,2,3,4,5],"second_of_day":28800},"task":{"title":"Review changes","prompt":"Review the workspace and report risks.","agent_id":"codex","workspace_id":"workspace_example","mode":"workspace"},"policy":{"misfire":"run_latest","overlap":"skip"},"idempotency_key":"morning-review-v1"}}
+```
+
+| Method | Params | Access |
+|---|---|---|
+| `automation.create` | `{name, enabled?, trigger, task, policy?, idempotency_key?}` | orchestration write |
+| `automation.list` | `{}` | read |
+| `automation.get` | `{id}` | read |
+| `automation.update` | `{id, name, enabled?, trigger, task, policy?}` | orchestration write |
+| `automation.enable` / `automation.disable` | `{id}` | orchestration write |
+| `automation.delete` | `{id}`; rejected while a run is live | orchestration write |
+| `automation.run` | `{id, idempotency_key?}`; does not advance the schedule | orchestration write |
+| `automation.history` | `{id?, limit?}`; limit is 1–200 | read |
+| `automation.preview` | `{trigger, from_utc?}` | read |
+| `automation.health` | `{}` | read |
+
+`automation.create` and `automation.run` support retry-safe idempotency keys.
+Reusing a key with identical input returns the original object; reusing it with
+different input returns `idempotency_conflict`. Definitions are capped at 256,
+run history at 2,048, and idempotency records at 256. Missed occurrences use
+`skip` or `run_latest`; overlap uses `skip` or one bounded `queue_one` run.
+
+The read-only methods require the `read` scope. Every mutating automation
+method requires `orchestration`. A remote client should discover this contract
+through `uhp.capabilities`, subscribe from its returned sequence fence, and
+reconcile with `automation.list`, `automation.history`, and
+`automation.health` after reconnecting.
 
 All families belong to the same
 [Universal Harness Protocol](/docs/uhp/). Terminal methods do not
@@ -388,7 +440,9 @@ Luvus during named-session handoff. Invalid or stale targets return a structured
 ## Mission Control data and UI
 
 `mission.snapshot` returns the dashboard's live and resumable agent rows,
-states, locations, structured usage counters, and aggregate tokens and cost.
+states, locations, structured usage counters, aggregate tokens and cost, and a
+read-only `automation` health object with definition, scheduled, live, review,
+failed, and next-run counts/deadline.
 It deliberately omits native session IDs and blocked-output snippets. It does
 not open Mission Control or change focus.
 
@@ -399,7 +453,7 @@ optional zero-based `workspace` or stable `workspace_id`.
 
 ```json
 → {"id":"m1","method":"mission.snapshot","params":{"scope":"all"}}
-← {"id":"m1","result":{"type":"mission_snapshot","scope":"all","refreshing":false,"summary":{"agents":0,"tokens":0,"cost_usd":0.0,"burn_usd_per_hour":0.0},"rows":[]}}
+← {"id":"m1","result":{"type":"mission_snapshot","scope":"all","refreshing":false,"summary":{"agents":0,"tokens":0,"cost_usd":0.0,"burn_usd_per_hour":0.0},"automation":{"summary":{"definitions":0,"enabled":0,"scheduled":0,"running":0,"review":0,"failed":0,"next_run_at":null},"rows":[]},"rows":[]}}
 ```
 
 `mission.open` opens Mission Control in the active workspace. Pass a zero-based

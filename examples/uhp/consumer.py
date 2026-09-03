@@ -106,6 +106,105 @@ def session_name(value):
     )
 
 
+def valid_automation_trigger(value):
+    if not isinstance(value, dict) or not isinstance(value.get("kind"), str):
+        return False
+    kind = value["kind"]
+    if kind == "once":
+        return set(value) == {"kind", "at_utc"} and integer(value["at_utc"]) and value["at_utc"] >= 1
+    if kind == "interval":
+        return (
+            set(value) == {"kind", "every_seconds", "anchor_utc"}
+            and integer(value["every_seconds"])
+            and value["every_seconds"] >= 60
+            and integer(value["anchor_utc"])
+            and value["anchor_utc"] >= 1
+        )
+    if kind == "daily":
+        return (
+            set(value) == {"kind", "timezone", "second_of_day"}
+            and bounded_string(value["timezone"], 128, allow_empty=False)
+            and integer(value["second_of_day"])
+            and 0 <= value["second_of_day"] <= 86399
+        )
+    if kind == "weekly":
+        weekdays = value.get("weekdays")
+        return (
+            set(value) == {"kind", "timezone", "weekdays", "second_of_day"}
+            and bounded_string(value["timezone"], 128, allow_empty=False)
+            and isinstance(weekdays, list)
+            and 1 <= len(weekdays) <= 7
+            and len(set(weekdays)) == len(weekdays)
+            and all(integer(day) and 1 <= day <= 7 for day in weekdays)
+            and integer(value["second_of_day"])
+            and 0 <= value["second_of_day"] <= 86399
+        )
+    return False
+
+
+def valid_automation_task(value):
+    allowed = {"title", "prompt", "agent_id", "workspace_id", "mode", "paths", "gate"}
+    required = {"title", "prompt", "agent_id", "workspace_id"}
+    if not isinstance(value, dict) or not required <= set(value) or not set(value) <= allowed:
+        return False
+    if not bounded_string(value["title"], 256, allow_empty=False):
+        return False
+    if not bounded_string(value["prompt"], 32768, allow_empty=False):
+        return False
+    if not bounded_string(value["agent_id"], 64, allow_empty=False):
+        return False
+    if not bounded_string(value["workspace_id"], 128, allow_empty=False):
+        return False
+    if "mode" in value and value["mode"] not in {"worktree", "workspace"}:
+        return False
+    if "gate" in value and value["gate"] is not None and not bounded_string(value["gate"], 4096):
+        return False
+    paths = value.get("paths", [])
+    return (
+        isinstance(paths, list)
+        and len(paths) <= 64
+        and len(set(paths)) == len(paths)
+        and all(bounded_string(path, 1024, allow_empty=False) for path in paths)
+    )
+
+
+def valid_automation_policy(value):
+    if not isinstance(value, dict) or not set(value) <= {
+        "misfire", "overlap", "misfire_grace_seconds"
+    }:
+        return False
+    if "misfire" in value and value["misfire"] not in {"skip", "run_latest"}:
+        return False
+    if "overlap" in value and value["overlap"] not in {"skip", "queue_one"}:
+        return False
+    grace = value.get("misfire_grace_seconds", 0)
+    return integer(grace) and 0 <= grace <= 31536000
+
+
+def valid_automation_definition(params, *, update):
+    allowed = {"id", "name", "enabled", "trigger", "task", "policy", "idempotency_key"}
+    required = {"name", "trigger", "task"} | ({"id"} if update else set())
+    if not required <= set(params) or not set(params) <= allowed:
+        return False
+    if (update and "idempotency_key" in params) or (not update and "id" in params):
+        return False
+    if "id" in params and not bounded_string(params["id"], 128, allow_empty=False):
+        return False
+    if not bounded_string(params["name"], 128, allow_empty=False):
+        return False
+    if "enabled" in params and type(params["enabled"]) is not bool:
+        return False
+    if not valid_automation_trigger(params["trigger"]):
+        return False
+    if not valid_automation_task(params["task"]):
+        return False
+    if "policy" in params and not valid_automation_policy(params["policy"]):
+        return False
+    return "idempotency_key" not in params or bounded_string(
+        params["idempotency_key"], 128, allow_empty=False
+    )
+
+
 def valid_request(value):
     if not isinstance(value, dict) or set(value) != {"id", "method", "params"}:
         return False
@@ -390,6 +489,57 @@ def valid_global_request(value, methods):
             return False
         if mode == "worktree" and "workspace_id" in params:
             return False
+    if value["method"] in {"automation.list", "automation.health"}:
+        return not value["params"]
+    if value["method"] in {
+        "automation.get", "automation.enable", "automation.disable", "automation.delete"
+    }:
+        params = value["params"]
+        return (
+            set(params) == {"id"}
+            and bounded_string(params["id"], 128, allow_empty=False)
+        )
+    if value["method"] == "automation.run":
+        params = value["params"]
+        return (
+            set(params) <= {"id", "idempotency_key"}
+            and "id" in params
+            and bounded_string(params["id"], 128, allow_empty=False)
+            and (
+                "idempotency_key" not in params
+                or bounded_string(params["idempotency_key"], 128, allow_empty=False)
+            )
+        )
+    if value["method"] == "automation.history":
+        params = value["params"]
+        return (
+            set(params) <= {"id", "limit"}
+            and (
+                "id" not in params
+                or bounded_string(params["id"], 128, allow_empty=False)
+            )
+            and (
+                "limit" not in params
+                or integer(params["limit"])
+                and 1 <= params["limit"] <= 200
+            )
+        )
+    if value["method"] == "automation.preview":
+        params = value["params"]
+        return (
+            set(params) <= {"trigger", "from_utc"}
+            and "trigger" in params
+            and valid_automation_trigger(params["trigger"])
+            and (
+                "from_utc" not in params
+                or integer(params["from_utc"])
+                and params["from_utc"] >= 0
+            )
+        )
+    if value["method"] == "automation.create":
+        return valid_automation_definition(value["params"], update=False)
+    if value["method"] == "automation.update":
+        return valid_automation_definition(value["params"], update=True)
     return True
 
 
