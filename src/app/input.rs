@@ -706,15 +706,23 @@ impl App {
             } => {
                 let params = json!({ "pane": pane });
                 match self.resolve_pane(&params) {
-                    Some(id) => {
+                    Ok(Some(id)) => {
                         self.register_output_wait(
                             id, request_id, needle, reply, timeout, cancelled,
                         );
                     }
-                    None => {
+                    Ok(None) => {
                         let _ = reply.send(
                             json!({ "id": request_id, "error": {
                                 "code": "not_found", "message": "pane not found"
+                            }})
+                            .to_string(),
+                        );
+                    }
+                    Err((code, message)) => {
+                        let _ = reply.send(
+                            json!({ "id": request_id, "error": {
+                                "code": code, "message": message
                             }})
                             .to_string(),
                         );
@@ -735,18 +743,24 @@ impl App {
                     self.resolve_pane(&params),
                     crate::app::dispatch::parse_agent_wait_state(&state),
                 ) {
-                    (Some(id), Some(state)) => {
+                    (Ok(Some(id)), Some(state)) => {
                         self.register_agent_wait(id, request_id, state, reply, timeout, cancelled);
                     }
-                    (None, _) => {
+                    (Ok(None), _) => {
                         let _ = reply.send(
                             json!({"id":request_id,"error":{"code":"not_found","message":"pane not found"}})
                                 .to_string(),
                         );
                     }
-                    (_, None) => {
+                    (Ok(Some(_)), None) => {
                         let _ = reply.send(
                             json!({"id":request_id,"error":{"code":"invalid_request","message":"status must be idle, working, blocked, or done"}})
+                                .to_string(),
+                        );
+                    }
+                    (Err((code, message)), _) => {
+                        let _ = reply.send(
+                            json!({"id":request_id,"error":{"code":code,"message":message}})
                                 .to_string(),
                         );
                     }
