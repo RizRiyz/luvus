@@ -266,6 +266,7 @@ luvus pane split --down
 luvus pane run <pane-id> <command> [args...]
 luvus agent start reviewer --kind codex --anchor <pane-id> --timeout 60
 luvus agent prompt reviewer "Review the current diff" --wait --timeout 600
+luvus agent keys reviewer esc
 luvus wait agent-status <pane-id> --status done,blocked --timeout 600
 ```
 
@@ -276,6 +277,10 @@ user named a specific project.
 `agent prompt` submits one complete prompt and can wait semantically. Prefer it
 to separate text and Enter operations. A timeout does not prove that an agent
 failed or stopped. Inspect it before deciding what to do next.
+
+`agent keys` refuses plain shells, validates every named key before sending any
+bytes, and queues a valid list as one ordered action. A closed target returns a
+structured `send_failed` error.
 
 Identity, live state, lifecycle hooks, usage, native resume, and fork support
 are separate capabilities. An agent can be detected without supporting every

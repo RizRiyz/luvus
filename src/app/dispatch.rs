@@ -3543,33 +3543,43 @@ impl App {
             // Send named control keys (enter, esc, ctrl+c, up, …) to a target agent,
             // e.g. to answer a blocked approval prompt. All keys validate first.
             "agent.keys" => {
+                reject_api_fields(p, &["target", "keys"])?;
                 let id = self.resolve_agent_target(p)?;
-                let keys: Vec<String> = p
-                    .get("keys")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|k| k.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                if !self.is_agent_pane(id) {
+                    return Err((
+                        "agent_not_ready".to_string(),
+                        "target pane is not a running agent".to_string(),
+                    ));
+                }
+                let keys = p.get("keys").and_then(|v| v.as_array()).ok_or_else(|| {
+                    (
+                        "invalid_request".to_string(),
+                        "agent keys must be a non-empty array".to_string(),
+                    )
+                })?;
                 if keys.is_empty() {
                     return Err((
                         "invalid_request".to_string(),
-                        "agent keys needs at least one key".to_string(),
+                        "agent keys must be a non-empty array".to_string(),
                     ));
                 }
-                let mut seqs = Vec::with_capacity(keys.len());
-                for k in &keys {
-                    seqs.push(key_to_bytes(k).ok_or_else(|| {
-                        ("invalid_request".to_string(), format!("unknown key: {k}"))
+                let mut bytes = Vec::new();
+                for key in keys {
+                    let key = key.as_str().ok_or_else(|| {
+                        (
+                            "invalid_request".to_string(),
+                            "every agent key must be a string".to_string(),
+                        )
+                    })?;
+                    bytes.extend(key_to_bytes(key).ok_or_else(|| {
+                        ("invalid_request".to_string(), format!("unknown key: {key}"))
                     })?);
                 }
-                if let Some(pane) = self.panes.get(&id) {
-                    for b in seqs {
-                        pane.send(&b);
-                    }
-                }
+                self.panes
+                    .get(&id)
+                    .ok_or_else(not_found)?
+                    .try_send(&bytes)
+                    .map_err(|message| ("send_failed".to_string(), message))?;
                 Ok(json!({"type":"ok","pane": id.0.to_string()}))
             }
             // Read a target agent's output, addressed by name or pane id.
@@ -6854,7 +6864,7 @@ fn key_to_bytes(name: &str) -> Option<Vec<u8>> {
             }
             let mut cs = name.chars();
             return match (cs.next(), cs.next()) {
-                (Some(c), None) => Some(c.to_string().into_bytes()),
+                (Some(c), None) if !c.is_control() => Some(c.to_string().into_bytes()),
                 _ => None,
             };
         }
@@ -9180,38 +9190,145 @@ command = ["true"]
     }
 
     #[test]
-    fn agent_keys_validates_before_sending() {
+    fn agent_keys_requires_a_recognized_agent_before_sending() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let t = pane.0.to_string();
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+
+        let error = app
+            .dispatch("agent.keys", &json!({"target": t, "keys": ["enter"]}))
+            .expect_err("plain shells are not agent targets");
+        assert_eq!(error.0, "agent_not_ready");
+        assert!(input_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn agent_keys_validates_the_entire_array_before_sending() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let pane = app.layout().focus;
         app.status.get_mut(&pane).unwrap().agent = "claude".into();
         let t = pane.0.to_string();
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
 
-        app.dispatch("agent.keys", &json!({"target": t, "keys": ["enter"]}))
-            .expect("known keys ok");
-        // A bad key in the batch fails the whole call.
-        assert!(app
+        for keys in [
+            json!([]),
+            Value::Null,
+            json!("enter"),
+            json!(["enter", 7]),
+            json!(["enter", "not-a-key"]),
+        ] {
+            let error = app
+                .dispatch("agent.keys", &json!({"target": t, "keys": keys}))
+                .expect_err("invalid arrays must fail atomically");
+            assert_eq!(error.0, "invalid_request");
+            assert!(input_rx.try_recv().is_err(), "no prefix may be queued");
+        }
+        let error = app
             .dispatch(
                 "agent.keys",
-                &json!({"target": t, "keys": ["enter", "nope"]})
+                &json!({"target": t, "keys": ["enter"], "extra": true}),
             )
-            .is_err());
-        // No keys is a bad request.
-        assert!(app
-            .dispatch("agent.keys", &json!({"target": t, "keys": []}))
-            .is_err());
+            .expect_err("unknown fields must fail before delivery");
+        assert_eq!(error.0, "invalid_request");
+        assert!(input_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn agent_keys_queues_valid_bytes_once_in_request_order() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "claude".into();
+        let t = pane.0.to_string();
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+
+        app.dispatch(
+            "agent.keys",
+            &json!({"target": t, "keys": ["up", "enter", "ctrl+c"]}),
+        )
+        .expect("known keys queue");
+        let crate::terminal::pty::InputAction::Bytes(bytes) = input_rx.recv().unwrap() else {
+            panic!("agent.keys must enqueue bytes")
+        };
+        assert_eq!(bytes, b"\x1b[A\r\x03");
+        assert!(input_rx.try_recv().is_err(), "the batch is one queue item");
+    }
+
+    #[test]
+    fn agent_keys_reports_a_closed_writer() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "claude".into();
+        let t = pane.0.to_string();
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        drop(input_rx);
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+
+        let error = app
+            .dispatch(
+                "agent.keys",
+                &json!({"target": t, "keys": ["enter", "esc"]}),
+            )
+            .expect_err("a closed input queue is a delivery failure");
+        assert_eq!(error.0, "send_failed");
     }
 
     #[test]
     fn key_names_map_to_terminal_bytes() {
-        assert_eq!(key_to_bytes("enter").as_deref(), Some(&b"\r"[..]));
-        assert_eq!(key_to_bytes("esc").as_deref(), Some(&b"\x1b"[..]));
-        assert_eq!(key_to_bytes("up").as_deref(), Some(&b"\x1b[A"[..]));
+        for name in [
+            "enter",
+            "ENTER",
+            "return",
+            "cr",
+            "esc",
+            "escape",
+            "tab",
+            "space",
+            "backspace",
+            "bs",
+            "delete",
+            "del",
+            "up",
+            "down",
+            "right",
+            "left",
+            "home",
+            "end",
+            "pageup",
+            "pgup",
+            "pagedown",
+            "pgdn",
+            "a",
+            "é",
+            "🙂",
+        ] {
+            assert!(key_to_bytes(name).is_some(), "previously valid key {name}");
+        }
         assert_eq!(key_to_bytes("ctrl+c").as_deref(), Some(&[0x03u8][..]));
+        assert_eq!(key_to_bytes("CTRL+Z").as_deref(), Some(&[0x1au8][..]));
         assert_eq!(key_to_bytes("C-d").as_deref(), Some(&[0x04u8][..]));
-        assert_eq!(key_to_bytes("a").as_deref(), Some(&b"a"[..]));
         assert!(key_to_bytes("f13").is_none());
         assert!(key_to_bytes("ctrl+1").is_none());
+        assert!(key_to_bytes("\n").is_none());
     }
 
     #[test]

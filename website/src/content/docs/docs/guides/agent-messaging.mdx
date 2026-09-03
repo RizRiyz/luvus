@@ -31,6 +31,11 @@ A `<target>` is one of three things:
 
 `agent prompt` and `agent keys` only target a pane that is actually running an agent, so a plain shell is refused. `agent send` remains a compatibility alias.
 
+`agent.keys` requires a non-empty array of named keys. Luvus validates every
+entry before it queues one ordered byte sequence, so a mixed-type or unknown-key
+batch sends no prefix. A closed PTY input queue returns `send_failed` instead of
+reporting delivery.
+
 For line-specific feedback, the native [DIFF review](/docs/guides/diff/) uses
 the same target validation. It groups selected local notes into one bounded
 message, quotes source context as untrusted review data, and records delivery

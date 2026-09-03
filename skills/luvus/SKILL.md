@@ -262,6 +262,10 @@ For a blocked agent:
 3. Identify the exact approval or question.
 4. Send `agent keys` only when the user's request authorizes that effect.
 
+`agent keys` accepts only a recognized agent pane and a non-empty list of known
+key names. It validates the entire list before queuing one ordered action; any
+invalid entry sends nothing, and a closed target returns `send_failed`.
+
 ## Control panes, tabs, and workspaces
 
 Use these read routes before a write whose target is not already known:

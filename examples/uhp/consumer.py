@@ -5,6 +5,7 @@ import json
 import pathlib
 import re
 import sys
+import unicodedata
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "protocol" / "uhp" / "v1"
@@ -22,6 +23,11 @@ SESSION_TARGET_METHODS = {
     "session.status", "session.start", "session.stop", "session.restart",
 }
 STATES = {"idle", "working", "blocked", "done"}
+KEY_NAMES = {
+    "enter", "return", "cr", "esc", "escape", "tab", "space", "backspace", "bs",
+    "delete", "del", "up", "down", "right", "left", "home", "end", "pageup",
+    "pgup", "pagedown", "pgdn",
+}
 RESULT_TYPES = {
     "uhp_capabilities",
     "session_snapshot",
@@ -69,6 +75,7 @@ FIELDS = {
     "agent.start": {"name", "kind", "pane", "anchor", "direction", "args", "timeout_s"},
     "agent.prompt": {"target", "text", "wait", "until", "timeout_s"},
     "agent.wait": {"pane", "status", "statuses", "timeout_s"},
+    "agent.keys": {"target", "keys"},
     "events.subscribe": set(),
 }
 
@@ -271,6 +278,27 @@ def valid_automation_definition(params, *, update):
     )
 
 
+def agent_key(value):
+    if not isinstance(value, str):
+        return False
+    lower = value.lower()
+    if lower in KEY_NAMES:
+        return True
+    if re.fullmatch(r"(?:ctrl\+|c-)[a-z]", lower) is not None:
+        return True
+    return len(value) == 1 and unicodedata.category(value) != "Cc"
+
+
+def valid_agent_keys_params(params):
+    return (
+        set(params) == {"target", "keys"}
+        and bounded_string(params["target"], 128, allow_empty=False)
+        and isinstance(params["keys"], list)
+        and bool(params["keys"])
+        and all(agent_key(key) for key in params["keys"])
+    )
+
+
 def valid_request(value):
     if not isinstance(value, dict) or set(value) != {"id", "method", "params"}:
         return False
@@ -361,6 +389,8 @@ def valid_request(value):
         return type(timeout) in {int, float} and 0 <= timeout <= 3600
     if method == "agent.wait":
         return valid_agent_wait_params(params)
+    if method == "agent.keys":
+        return valid_agent_keys_params(params)
     return False
 
 
@@ -515,6 +545,8 @@ def valid_global_request(value, methods):
         return integer(after) and after >= 0
     if value["method"] == "agent.wait":
         return valid_agent_wait_params(value["params"])
+    if value["method"] == "agent.keys":
+        return valid_agent_keys_params(value["params"])
     if value["method"] in EMPTY_HOST_METHODS:
         return not value["params"]
     if value["method"] in SESSION_TARGET_METHODS:
