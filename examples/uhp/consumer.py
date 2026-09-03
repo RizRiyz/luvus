@@ -68,7 +68,7 @@ FIELDS = {
     "agent.release": {"pane", "source"},
     "agent.start": {"name", "kind", "pane", "anchor", "direction", "args", "timeout_s"},
     "agent.prompt": {"target", "text", "wait", "until", "timeout_s"},
-    "agent.wait": {"pane", "status", "timeout_s"},
+    "agent.wait": {"pane", "status", "statuses", "timeout_s"},
     "events.subscribe": set(),
 }
 
@@ -104,6 +104,29 @@ def session_name(value):
         and value not in {".", ".."}
         and SESSION_NAME.fullmatch(value) is not None
     )
+
+
+def valid_agent_wait_params(params):
+    if not isinstance(params, dict) or not set(params) <= FIELDS["agent.wait"]:
+        return False
+    if not pane(params.get("pane")):
+        return False
+    has_status = "status" in params
+    has_statuses = "statuses" in params
+    if has_status == has_statuses:
+        return False
+    if has_status and params["status"] not in STATES:
+        return False
+    if has_statuses:
+        statuses = params["statuses"]
+        if not isinstance(statuses, list) or not 1 <= len(statuses) <= len(STATES):
+            return False
+        if any(not isinstance(status, str) for status in statuses):
+            return False
+        if len(set(statuses)) != len(statuses) or not set(statuses) <= STATES:
+            return False
+    timeout = params.get("timeout_s", 0)
+    return type(timeout) in {int, float} and 0 <= timeout <= 3600
 
 
 def valid_request(value):
@@ -195,10 +218,7 @@ def valid_request(value):
         timeout = params.get("timeout_s", 300)
         return type(timeout) in {int, float} and 0 <= timeout <= 3600
     if method == "agent.wait":
-        if not pane(params.get("pane")) or not {"pane", "status"} <= set(params) or params["status"] not in STATES:
-            return False
-        timeout = params.get("timeout_s", 0)
-        return type(timeout) in {int, float} and 0 <= timeout <= 3600
+        return valid_agent_wait_params(params)
     return False
 
 
@@ -347,6 +367,8 @@ def valid_global_request(value, methods):
     if value["method"] == "events.subscribe":
         after = value["params"].get("after_sequence", 0)
         return integer(after) and after >= 0
+    if value["method"] == "agent.wait":
+        return valid_agent_wait_params(value["params"])
     if value["method"] in EMPTY_HOST_METHODS:
         return not value["params"]
     if value["method"] in SESSION_TARGET_METHODS:

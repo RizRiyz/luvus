@@ -2179,7 +2179,7 @@ fn handle_conn(
         if params.as_object().is_none_or(|object| {
             object
                 .keys()
-                .any(|key| !matches!(key.as_str(), "pane" | "status" | "timeout_s"))
+                .any(|key| !matches!(key.as_str(), "pane" | "status" | "statuses" | "timeout_s"))
         }) {
             let response = json!({"id":id,"error":{"code":"invalid_request",
                     "message":"agent.wait contains an unknown parameter"}})
@@ -2188,7 +2188,16 @@ fn handle_conn(
             return;
         }
         let pane = params.get("pane").and_then(Value::as_str).unwrap_or("");
-        let state = params.get("status").and_then(Value::as_str).unwrap_or("");
+        let states = match parse_agent_wait_states(&params) {
+            Ok(states) => states,
+            Err(message) => {
+                let response =
+                    json!({"id":id,"error":{"code":"invalid_request","message":message}})
+                        .to_string();
+                let _ = write_response(&mut writer, &id, &response);
+                return;
+            }
+        };
         let timeout = match parse_timeout_s(&params) {
             Ok(timeout) => timeout,
             Err(message) => {
@@ -2199,9 +2208,16 @@ fn handle_conn(
                 return;
             }
         };
-        if pane.is_empty() || !matches!(state, "idle" | "working" | "blocked" | "done") {
+        if timeout.is_some_and(|timeout| timeout > std::time::Duration::from_secs(3600)) {
             let response = json!({"id":id,"error":{"code":"invalid_request",
-                    "message":"agent.wait needs a pane and status idle|working|blocked|done"}})
+                    "message":"timeout_s must be between 0 and 3600 seconds"}})
+            .to_string();
+            let _ = write_response(&mut writer, &id, &response);
+            return;
+        }
+        if pane.is_empty() {
+            let response = json!({"id":id,"error":{"code":"invalid_request",
+                    "message":"agent.wait needs a pane"}})
             .to_string();
             let _ = write_response(&mut writer, &id, &response);
             return;
@@ -2212,7 +2228,7 @@ fn handle_conn(
             .send(AppEvent::AgentWait {
                 id: id.clone(),
                 pane: pane.to_string(),
-                state: state.to_string(),
+                states,
                 timeout,
                 reply,
                 cancelled: cancelled.clone(),
@@ -2391,6 +2407,38 @@ fn parse_timeout_s(params: &Value) -> Result<Option<std::time::Duration>, &'stat
         Ok(d) => Ok(Some(d)),
         Err(_) => Err("timeout_s must be a non-negative finite number of seconds"),
     }
+}
+
+fn parse_agent_wait_states(params: &Value) -> Result<Vec<String>, &'static str> {
+    let state = params.get("status");
+    let states = params.get("statuses");
+    let values: Vec<&str> = match (state, states) {
+        (Some(Value::String(state)), None) => vec![state.as_str()],
+        (None, Some(Value::Array(states))) if (1..=4).contains(&states.len()) => states
+            .iter()
+            .map(Value::as_str)
+            .collect::<Option<Vec<_>>>()
+            .ok_or("statuses must contain only strings")?,
+        (Some(_), Some(_)) => return Err("agent.wait accepts status or statuses, not both"),
+        (None, Some(Value::Array(_))) => {
+            return Err("statuses must contain between 1 and 4 states")
+        }
+        _ => return Err("agent.wait needs status or statuses"),
+    };
+    if values
+        .iter()
+        .any(|state| !matches!(*state, "idle" | "working" | "blocked" | "done"))
+    {
+        return Err("statuses must contain only idle, working, blocked, or done");
+    }
+    let mut unique: Vec<String> = Vec::with_capacity(values.len());
+    for state in values {
+        if unique.iter().any(|existing| existing == state) {
+            return Err("statuses must not contain duplicates");
+        }
+        unique.push(state.to_string());
+    }
+    Ok(unique)
 }
 
 #[cfg(test)]
@@ -2956,7 +3004,7 @@ mod tests {
             writeln!(
                 stream,
                 "{}",
-                json!({"id":"agent-wait-1","method":"agent.wait","params":{"pane":"7","status":"blocked","timeout_s":1.5}})
+                json!({"id":"agent-wait-1","method":"agent.wait","params":{"pane":"7","statuses":["working","blocked"],"timeout_s":1.5}})
             )
             .unwrap();
             let mut response = String::new();
@@ -2966,7 +3014,7 @@ mod tests {
         let AppEvent::AgentWait {
             id,
             pane,
-            state,
+            states,
             timeout,
             reply,
             ..
@@ -2976,12 +3024,78 @@ mod tests {
         };
         assert_eq!(id, "agent-wait-1");
         assert_eq!(pane, "7");
-        assert_eq!(state, "blocked");
+        assert_eq!(states, vec!["working", "blocked"]);
         assert_eq!(timeout, Some(std::time::Duration::from_millis(1500)));
         reply
             .send(json!({"id":id,"result":{"type":"agent_wait","matched":true}}).to_string())
             .unwrap();
         assert!(client.join().unwrap().contains("\"matched\":true"));
+    }
+
+    #[test]
+    fn agent_wait_status_sets_are_nonempty_unique_and_known() {
+        for state in ["idle", "working", "blocked", "done"] {
+            assert_eq!(
+                parse_agent_wait_states(&json!({"status":state})).unwrap(),
+                vec![state]
+            );
+        }
+        assert_eq!(
+            parse_agent_wait_states(&json!({"statuses":["working","done"]})).unwrap(),
+            vec!["working", "done"]
+        );
+        for invalid in [
+            json!({}),
+            json!({"statuses":[]}),
+            json!({"statuses":["done","done"]}),
+            json!({"statuses":["done",7]}),
+            json!({"statuses":["unknown"]}),
+            json!({"status":"done","statuses":["done"]}),
+        ] {
+            assert!(parse_agent_wait_states(&invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn invalid_agent_wait_requests_do_not_reach_the_app_loop() {
+        let _env = crate::persist::test_env("agent-wait-invalid");
+        let root = crate::persist::ensure_config_dir();
+        let path = root.join("agent-wait-invalid.sock");
+        let lock = transport::acquire_server_startup_lock(&root).unwrap();
+        let listener = bind_server(&path, &lock).unwrap();
+        let (events, rx) = mpsc::channel();
+        start_server(listener, events, new_bus());
+        drop(lock);
+
+        let invalid = [
+            json!({"pane":"7"}),
+            json!({"pane":"7","status":"unknown"}),
+            json!({"pane":"7","statuses":[]}),
+            json!({"pane":"7","statuses":["done","done"]}),
+            json!({"pane":"7","statuses":["done",7]}),
+            json!({"pane":"7","status":"done","statuses":["done"]}),
+            json!({"status":"done"}),
+            json!({"pane":7,"status":"done"}),
+            json!({"pane":"7","status":"done","timeout_s":3600.1}),
+            json!({"pane":"7","status":"done","extra":true}),
+        ];
+        for (index, params) in invalid.into_iter().enumerate() {
+            let mut client = transport::connect(&path).unwrap();
+            writeln!(
+                client,
+                "{}",
+                json!({"id":format!("invalid-{index}"),"method":"agent.wait","params":params})
+            )
+            .unwrap();
+            let mut response = String::new();
+            BufReader::new(client).read_line(&mut response).unwrap();
+            let value: Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(value["error"]["code"], "invalid_request", "{params}");
+            assert!(
+                matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+                "{params}"
+            );
+        }
     }
 
     #[test]

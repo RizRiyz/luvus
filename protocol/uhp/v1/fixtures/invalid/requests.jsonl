@@ -15,3 +15,10 @@
 {"id":"bad-session-extra","method":"session.start","params":{"name":"review","extra":true}}
 {"id":"bad-session-name","method":"session.start","params":{"name":"."}}
 {"id":"bad-integration-status","method":"integration.status","params":{"agent":"claude"}}
+{"id":"bad-agent-wait-empty","method":"agent.wait","params":{"pane":"7","statuses":[]}}
+{"id":"bad-agent-wait-both","method":"agent.wait","params":{"pane":"7","status":"done","statuses":["done"]}}
+{"id":"bad-agent-wait-duplicate","method":"agent.wait","params":{"pane":"7","statuses":["done","done"]}}
+{"id":"bad-agent-wait-unknown","method":"agent.wait","params":{"pane":"7","statuses":["unknown"]}}
+{"id":"bad-agent-wait-mixed","method":"agent.wait","params":{"pane":"7","statuses":["done",7]}}
+{"id":"bad-agent-wait-too-many","method":"agent.wait","params":{"pane":"7","statuses":["idle","working","blocked","done","idle"]}}
+{"id":"bad-agent-wait-missing","method":"agent.wait","params":{"pane":"7"}}

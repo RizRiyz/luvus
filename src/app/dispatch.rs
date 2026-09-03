@@ -467,7 +467,7 @@ mod socket_api_tests {
 /// the app loop; no client polling and no subscribe-then-snapshot race.
 pub struct AgentWait {
     pub request_id: String,
-    pub state: State,
+    pub states: Vec<State>,
     pub reply: Sender<String>,
     pub deadline: Instant,
     pub cancelled: Arc<AtomicBool>,
@@ -4964,7 +4964,7 @@ impl App {
         &mut self,
         id: PaneId,
         request_id: String,
-        state: State,
+        states: Vec<State>,
         reply: Sender<String>,
         timeout: Option<Duration>,
         cancelled: Arc<AtomicBool>,
@@ -4973,7 +4973,7 @@ impl App {
             return;
         }
         let current = self.status.get(&id).map(|status| status.state);
-        if current == Some(state) {
+        if current.is_some_and(|state| states.contains(&state)) {
             let _ = reply.send(agent_wait_response(&request_id, true, Some(id), current));
             return;
         }
@@ -4992,7 +4992,7 @@ impl App {
         }
         self.agent_waits.entry(id).or_default().push(AgentWait {
             request_id,
-            state,
+            states,
             reply,
             deadline: Instant::now() + timeout.unwrap_or(MAX_AGENT_WAIT).min(MAX_AGENT_WAIT),
             cancelled,
@@ -5009,7 +5009,7 @@ impl App {
         waiters.retain(|waiter| {
             if waiter.cancelled.load(Ordering::Acquire) {
                 false
-            } else if waiter.state == current {
+            } else if waiter.states.contains(&current) {
                 let _ = waiter.reply.send(agent_wait_response(
                     &waiter.request_id,
                     true,
@@ -7234,7 +7234,7 @@ command = ["true"]
         app.register_agent_wait(
             pane,
             "wait-1".into(),
-            State::Blocked,
+            vec![State::Blocked],
             reply,
             Some(Duration::from_secs(1)),
             Arc::new(AtomicBool::new(false)),
@@ -8387,7 +8387,7 @@ command = ["true"]
         app.register_agent_wait(
             pane,
             "agent-disconnect".into(),
-            State::Blocked,
+            vec![State::Blocked],
             agent_reply,
             None,
             agent_cancelled.clone(),
@@ -8403,6 +8403,87 @@ command = ["true"]
         assert!(app.agent_waits.is_empty());
         assert_eq!(output_rx.try_recv(), Err(TryRecvError::Disconnected));
         assert_eq!(agent_rx.try_recv(), Err(TryRecvError::Disconnected));
+    }
+
+    #[test]
+    fn agent_wait_matches_each_state_and_reports_the_actual_transition() {
+        let _env = crate::persist::test_env("agent-wait-state-set");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+
+        for target in [State::Idle, State::Working, State::Blocked, State::Done] {
+            app.status.get_mut(&pane).unwrap().state = if target == State::Idle {
+                State::Working
+            } else {
+                State::Idle
+            };
+            let (reply, response) = std::sync::mpsc::channel();
+            app.register_agent_wait(
+                pane,
+                format!("wait-{target:?}"),
+                vec![target],
+                reply,
+                Some(Duration::from_secs(1)),
+                Arc::new(AtomicBool::new(false)),
+            );
+            app.status.get_mut(&pane).unwrap().state = target;
+            app.check_agent_waits(pane);
+            let value: Value = serde_json::from_str(&response.recv().unwrap()).unwrap();
+            assert_eq!(value["result"]["matched"], true);
+            assert_eq!(value["result"]["status"], state_str(target));
+        }
+
+        app.status.get_mut(&pane).unwrap().state = State::Idle;
+        let (reply, response) = std::sync::mpsc::channel();
+        app.register_agent_wait(
+            pane,
+            "wait-terminal".into(),
+            vec![State::Working, State::Done],
+            reply,
+            Some(Duration::from_secs(1)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        app.status.get_mut(&pane).unwrap().state = State::Done;
+        app.check_agent_waits(pane);
+        let value: Value = serde_json::from_str(&response.recv().unwrap()).unwrap();
+        assert_eq!(value["result"]["status"], "done");
+    }
+
+    #[test]
+    fn agent_wait_status_set_matches_current_state_and_times_out_bounded() {
+        let _env = crate::persist::test_env("agent-wait-current-timeout");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().state = State::Done;
+
+        let (reply, response) = std::sync::mpsc::channel();
+        app.register_agent_wait(
+            pane,
+            "already-done".into(),
+            vec![State::Working, State::Done],
+            reply,
+            Some(Duration::from_secs(1)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let value: Value = serde_json::from_str(&response.recv().unwrap()).unwrap();
+        assert_eq!(value["result"]["matched"], true);
+        assert_eq!(value["result"]["status"], "done");
+
+        let (reply, response) = std::sync::mpsc::channel();
+        app.register_agent_wait(
+            pane,
+            "timeout".into(),
+            vec![State::Working, State::Blocked],
+            reply,
+            Some(Duration::ZERO),
+            Arc::new(AtomicBool::new(false)),
+        );
+        app.tick_agent_waits(Instant::now());
+        let value: Value = serde_json::from_str(&response.recv().unwrap()).unwrap();
+        assert_eq!(value["result"]["matched"], false);
+        assert_eq!(value["result"]["status"], "done");
     }
 
     /// Every pane-close path funnels through `drop_leaf_runtime`, so closing a

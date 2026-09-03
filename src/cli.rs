@@ -175,7 +175,7 @@ panes / agents:
   skill disable              remove unchanged Luvus-managed installations
   skill show                 print the bundled, version-matched SKILL.md
   wait output <id> --match <text> [--timeout <s>]    block until output appears
-  wait agent-status <id> --status done|blocked|working|idle [--timeout <s>]
+  wait agent-status <id> --status <state[,state...]> [--status <state>] [--timeout <s>]
   attach <id>                open the TUI into a single fullscreen pane
 
 search:
@@ -1648,8 +1648,8 @@ fn module_search(args: &[String], context: crate::i18n::cli::Context) -> Result<
 enum WaitFor {
     /// `wait output <id> --match <text>`: the pane's recent output contains `text`.
     Output { needle: String },
-    /// `wait agent-status <id> --status <s>`: the pane's agent reaches `status`.
-    AgentStatus { status: String },
+    /// `wait agent-status <id> --status <s>`: the pane's agent reaches any status.
+    AgentStatus { statuses: Vec<String> },
 }
 
 #[derive(Debug, PartialEq)]
@@ -1689,9 +1689,7 @@ fn parse_wait(args: &[String]) -> Result<WaitSpec> {
             })?,
         },
         "agent-status" => WaitFor::AgentStatus {
-            status: flag(args, "--status").ok_or_else(|| {
-                anyhow!("usage: luvus wait agent-status <id> --status done|blocked|working|idle [--timeout <s>]")
-            })?,
+            statuses: parse_wait_statuses(args)?,
         },
         _ => return Err(anyhow!("usage: luvus wait output|agent-status <id> …")),
     };
@@ -1700,6 +1698,32 @@ fn parse_wait(args: &[String]) -> Result<WaitSpec> {
         condition,
         timeout,
     })
+}
+
+fn parse_wait_statuses(args: &[String]) -> Result<Vec<String>> {
+    let usage = "usage: luvus wait agent-status <id> --status idle|working|blocked|done[,STATE...] [--status STATE] [--timeout <s>]";
+    let mut statuses = Vec::new();
+    for (index, arg) in args.iter().enumerate() {
+        if arg != "--status" {
+            continue;
+        }
+        let raw = args
+            .get(index + 1)
+            .filter(|value| !value.starts_with("--"))
+            .ok_or_else(|| anyhow!(usage))?;
+        for status in raw.split(',') {
+            if !matches!(status, "idle" | "working" | "blocked" | "done") {
+                return Err(anyhow!(usage));
+            }
+            if !statuses.iter().any(|existing| existing == status) {
+                statuses.push(status.to_string());
+            }
+        }
+    }
+    if statuses.is_empty() {
+        return Err(anyhow!(usage));
+    }
+    Ok(statuses)
 }
 
 /// `luvus wait …` — block until the condition holds (exit 0) or the timeout
@@ -1766,8 +1790,13 @@ fn wait_cmd(args: &[String]) -> Result<i32> {
             }
             Ok(2)
         }
-        WaitFor::AgentStatus { status } => {
-            let mut params = json!({"pane":spec.pane, "status":status});
+        WaitFor::AgentStatus { statuses } => {
+            let uses_statuses = statuses.len() > 1;
+            let mut params = if uses_statuses {
+                json!({"pane":spec.pane, "statuses":statuses})
+            } else {
+                json!({"pane":spec.pane, "status":statuses[0]})
+            };
             if let Some(timeout) = spec.timeout {
                 params["timeout_s"] = json!(timeout);
             }
@@ -1780,13 +1809,8 @@ fn wait_cmd(args: &[String]) -> Result<i32> {
             {
                 return Ok(0);
             }
-            let unknown = response
-                .get("error")
-                .and_then(|error| error.get("message"))
-                .and_then(Value::as_str)
-                .is_some_and(|message| message.starts_with("unknown method"));
-            if unknown {
-                return wait_status_stream(&spec.pane, &status, deadline);
+            if agent_wait_needs_stream_fallback(&response, uses_statuses) {
+                return wait_status_stream(&spec.pane, &statuses, deadline);
             }
             if let Some(error) = response.get("error") {
                 eprintln!(
@@ -1800,6 +1824,17 @@ fn wait_cmd(args: &[String]) -> Result<i32> {
             Ok(2)
         }
     }
+}
+
+fn agent_wait_needs_stream_fallback(response: &Value, uses_statuses: bool) -> bool {
+    response
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .is_some_and(|message| {
+            message.starts_with("unknown method")
+                || (uses_statuses && message == "agent.wait contains an unknown parameter")
+        })
 }
 
 #[derive(Debug, PartialEq)]
@@ -2120,7 +2155,7 @@ fn pane_status(pane: &str) -> Result<Option<String>> {
 /// (exit 2). Subscribes to the event stream **first**, then polls the current
 /// status — so a transition that happens between the poll and the subscribe is
 /// never missed (it's already buffered on the stream).
-fn wait_status_stream(pane: &str, target: &str, deadline: Option<Instant>) -> Result<i32> {
+fn wait_status_stream(pane: &str, targets: &[String], deadline: Option<Instant>) -> Result<i32> {
     let path = crate::persist::cli_socket_path();
     let stream = crate::ipc::transport::connect(&path).map_err(|_| {
         anyhow!(
@@ -2137,7 +2172,7 @@ fn wait_status_stream(pane: &str, target: &str, deadline: Option<Instant>) -> Re
     let mut reader = BufReader::new(stream);
 
     let (tx, rx) = std::sync::mpsc::channel();
-    let (pane_s, target_s) = (pane.to_string(), target.to_string());
+    let (pane_s, target_s) = (pane.to_string(), targets.to_vec());
     std::thread::spawn(move || {
         while let Ok(Some(l)) = crate::ipc::api::read_stream_frame(&mut reader) {
             if let Ok(v) = serde_json::from_str::<Value>(&l) {
@@ -2146,7 +2181,10 @@ fn wait_status_stream(pane: &str, target: &str, deadline: Option<Instant>) -> Re
                 let data = v.get("data");
                 let p = data.and_then(|d| d.get("pane")).and_then(|x| x.as_str());
                 let s = data.and_then(|d| d.get("status")).and_then(|x| x.as_str());
-                if is_status && p == Some(pane_s.as_str()) && s == Some(target_s.as_str()) {
+                if is_status
+                    && p == Some(pane_s.as_str())
+                    && s.is_some_and(|status| target_s.iter().any(|target| target == status))
+                {
                     let _ = tx.send(());
                     break;
                 }
@@ -2155,7 +2193,10 @@ fn wait_status_stream(pane: &str, target: &str, deadline: Option<Instant>) -> Re
     });
 
     // Now that we're listening, an initial poll handles the already-there case.
-    if pane_status(pane)?.as_deref() == Some(target) {
+    if pane_status(pane)?
+        .as_deref()
+        .is_some_and(|status| targets.iter().any(|target| target == status))
+    {
         return Ok(0);
     }
 
@@ -4548,9 +4589,30 @@ mod tests {
         assert_eq!(
             s.condition,
             WaitFor::AgentStatus {
-                status: "blocked".into()
+                statuses: vec!["blocked".into()]
             }
         );
+
+        let repeated = parse_wait(&argv(
+            "luvus wait agent-status 7 --status working --status done,blocked",
+        ))
+        .unwrap();
+        assert_eq!(
+            repeated.condition,
+            WaitFor::AgentStatus {
+                statuses: vec!["working".into(), "done".into(), "blocked".into()]
+            }
+        );
+        let comma = parse_wait(&argv("luvus wait agent-status 7 --status working,done")).unwrap();
+        assert_eq!(
+            comma.condition,
+            WaitFor::AgentStatus {
+                statuses: vec!["working".into(), "done".into()]
+            }
+        );
+        assert!(parse_wait(&argv("luvus wait agent-status 7 --status")).is_err());
+        assert!(parse_wait(&argv("luvus wait agent-status 7 --status done,")).is_err());
+        assert!(parse_wait(&argv("luvus wait agent-status 7 --status unknown")).is_err());
 
         // missing --match is an error
         assert!(parse_wait(&argv("luvus wait output 3")).is_err());
@@ -4559,6 +4621,16 @@ mod tests {
         let s = parse_wait(&argv("luvus wait output --match hi")).unwrap();
         assert_eq!(s.pane, "9");
         std::env::remove_var("LUVUS_PANE_ID");
+    }
+
+    #[test]
+    fn agent_wait_status_sets_fall_back_for_older_servers() {
+        let unknown_method = json!({"error":{"message":"unknown method agent.wait"}});
+        assert!(agent_wait_needs_stream_fallback(&unknown_method, false));
+
+        let old_parameter = json!({"error":{"message":"agent.wait contains an unknown parameter"}});
+        assert!(agent_wait_needs_stream_fallback(&old_parameter, true));
+        assert!(!agent_wait_needs_stream_fallback(&old_parameter, false));
     }
 
     #[test]

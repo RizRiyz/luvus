@@ -34,3 +34,5 @@
 {"id":"34","method":"integration.status","params":{}}
 {"id":"35","method":"integration.install","params":{"agent":"claude","confirm":true}}
 {"id":"36","method":"integration.uninstall","params":{"agent":"claude","confirm":true}}
+{"id":"37","method":"agent.wait","params":{"pane":"7","statuses":["idle","working","blocked","done"],"timeout_s":30}}
+{"id":"38","method":"agent.wait","params":{"pane":"7","status":"done"}}

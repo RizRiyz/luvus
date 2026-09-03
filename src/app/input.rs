@@ -725,18 +725,23 @@ impl App {
             AppEvent::AgentWait {
                 id: request_id,
                 pane,
-                state,
+                states,
                 reply,
                 timeout,
                 cancelled,
             } => {
                 let params = json!({"pane":pane});
-                match (
-                    self.resolve_pane(&params),
-                    crate::app::dispatch::parse_agent_wait_state(&state),
-                ) {
-                    (Some(id), Some(state)) => {
-                        self.register_agent_wait(id, request_id, state, reply, timeout, cancelled);
+                let parsed_states: Option<Vec<_>> = (!states.is_empty())
+                    .then(|| {
+                        states
+                            .iter()
+                            .map(|state| crate::app::dispatch::parse_agent_wait_state(state))
+                            .collect()
+                    })
+                    .flatten();
+                match (self.resolve_pane(&params), parsed_states) {
+                    (Some(id), Some(states)) => {
+                        self.register_agent_wait(id, request_id, states, reply, timeout, cancelled);
                     }
                     (None, _) => {
                         let _ = reply.send(
@@ -746,7 +751,7 @@ impl App {
                     }
                     (_, None) => {
                         let _ = reply.send(
-                            json!({"id":request_id,"error":{"code":"invalid_request","message":"status must be idle, working, blocked, or done"}})
+                            json!({"id":request_id,"error":{"code":"invalid_request","message":"statuses must be a non-empty set of idle, working, blocked, or done"}})
                                 .to_string(),
                         );
                     }
