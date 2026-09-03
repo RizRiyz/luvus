@@ -116,6 +116,16 @@ pane owns that exact session.
 {"id":"usage","method":"pane.report_session","params":{"pane":"9","agent":"opencode","session_id":"ses_123","usage":{"model":"anthropic/claude-sonnet-4","tokens_in":1200,"tokens_out":340,"cache_read":800,"cache_write":40,"cost":0.42,"updated_at":1788330000000}}}
 ```
 
+`agent.list` returns every agent in the session unless it is scoped to one
+workspace with a 0-based `workspace` (`node` is an accepted alias) or a stable
+`workspace_id`. The two selectors cannot be combined, an unknown index or id is
+`not_found`, and an unknown parameter is `invalid_request` so a mistyped filter
+cannot silently widen back to the whole fleet.
+
+```json
+{"id":"agents","method":"agent.list","params":{"workspace":"1"}}
+```
+
 `task.start` and `task.next` with `start: true` accept `mode: "worktree"` or
 `mode: "workspace"`; omitted mode means worktree. Workspace mode may include a
 stable `workspace_id` and creates a dedicated branchless task tab in that

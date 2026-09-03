@@ -2402,9 +2402,26 @@ impl App {
                 Ok(json!({"type":"ok","pane": id.0.to_string()}))
             }
             "agent.list" => {
+                // Optional scope. Unknown fields are rejected so a typo'd filter
+                // fails loudly instead of silently widening back to the whole
+                // fleet — the dangerous failure mode for a caller that meant to
+                // address one workspace.
+                reject_api_fields(p, &["workspace", "workspace_id", "node"])?;
+                let only = self.optional_socket_workspace(p)?;
+                // An index past the end is a caller mistake, not "no agents":
+                // report it like every other workspace selector does.
+                if let Some(scope) = only.filter(|scope| *scope >= self.workspaces.len()) {
+                    return Err(workspace_update_error(
+                        scope,
+                        WorkspaceUpdateError::NotFound,
+                    ));
+                }
                 let focus = self.layout().focus;
                 let mut arr = Vec::new();
                 for (wi, ws) in self.workspaces.iter().enumerate() {
+                    if only.is_some_and(|scope| scope != wi) {
+                        continue;
+                    }
                     // Node-level context, identical for every pane in the node.
                     // `project` deliberately repeats `workspace_name` so a consumer
                     // can use one field name across `agent.list` *and*
@@ -6952,6 +6969,87 @@ command = ["true"]
             .dispatch("agent.list", &json!({}))
             .expect("agent.list ok");
         assert_eq!(out["agents"][0]["session"], "sess-42");
+    }
+
+    /// `agent.list` scopes to one workspace by index or by stable id, and a
+    /// mistyped filter fails loudly instead of silently listing the whole fleet.
+    #[test]
+    fn agent_list_scopes_to_one_workspace_and_rejects_bad_filters() {
+        let _env = crate::persist::test_env("agent-list-workspace-filter");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        let first_ws = app.active_ws;
+        let first_pane = app.layout().focus;
+        app.status.get_mut(&first_pane).unwrap().agent = "claude".into();
+
+        let second_root = crate::persist::config_dir().join("second-workspace");
+        std::fs::create_dir_all(&second_root).unwrap();
+        assert!(app.create_workspace_at(second_root));
+        let second_ws = app.active_ws;
+        assert_ne!(first_ws, second_ws);
+        let second_pane = app.layout().focus;
+        app.status.get_mut(&second_pane).unwrap().agent = "codex".into();
+
+        let panes_of = |value: &Value| -> Vec<String> {
+            value["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["pane"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        // Unscoped keeps the historical contract: every agent in the session.
+        let all = app.dispatch("agent.list", &json!({})).unwrap();
+        assert_eq!(
+            panes_of(&all),
+            vec![first_pane.0.to_string(), second_pane.0.to_string()]
+        );
+
+        // 0-based index, the public workspace convention.
+        let scoped = app
+            .dispatch("agent.list", &json!({"workspace": second_ws.to_string()}))
+            .unwrap();
+        assert_eq!(panes_of(&scoped), vec![second_pane.0.to_string()]);
+        assert_eq!(scoped["agents"][0]["workspace"], second_ws.to_string());
+
+        // `node` stays an accepted alias for the same selector.
+        let aliased = app
+            .dispatch("agent.list", &json!({"node": first_ws}))
+            .unwrap();
+        assert_eq!(panes_of(&aliased), vec![first_pane.0.to_string()]);
+
+        // A stable id survives reordering, so automation can pin one workspace.
+        let id = app.workspaces[second_ws].id.clone();
+        let by_id = app
+            .dispatch("agent.list", &json!({"workspace_id": id}))
+            .unwrap();
+        assert_eq!(panes_of(&by_id), vec![second_pane.0.to_string()]);
+
+        // A workspace with no agent is an empty list, not an error.
+        app.status.remove(&second_pane);
+        let empty = app
+            .dispatch("agent.list", &json!({"workspace": second_ws.to_string()}))
+            .unwrap();
+        assert_eq!(empty["agents"].as_array().unwrap().len(), 0);
+
+        // Bad scopes are refused rather than widened.
+        let missing = app
+            .dispatch("agent.list", &json!({"workspace": "99"}))
+            .expect_err("an out-of-range workspace is not found");
+        assert_eq!(missing.0, "not_found");
+        let both = app
+            .dispatch(
+                "agent.list",
+                &json!({"workspace": "0", "workspace_id": app.workspaces[second_ws].id.clone()}),
+            )
+            .expect_err("index and id cannot be combined");
+        assert_eq!(both.0, "invalid_request");
+        let typo = app
+            .dispatch("agent.list", &json!({"workspace_name": "docs"}))
+            .expect_err("an unknown filter must not silently list everything");
+        assert_eq!(typo.0, "invalid_request");
     }
 
     /// A live alias set by `agent.name` shows up in `agent.list` and resolves an

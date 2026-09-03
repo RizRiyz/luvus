@@ -191,8 +191,12 @@ Resolve existing agents with:
 
 ```sh
 luvus agent list
+luvus agent list --workspace <i>
 luvus agent get <target>
 ```
+
+`agent list` covers the whole session. Scope it with `--workspace <i>` (0-based)
+or `--workspace-id <id>` when only one project's agents matter.
 
 Targets are a live name, pane id, or unique agent kind. If a kind is ambiguous,
 ask the user to choose or name the panes. Never guess.

@@ -92,7 +92,8 @@ panes / agents:
   pane processes [<id>]      list cached executable identities without exposing arguments
   pane name <name>           name a pane so you can mention it (--pane <id>; --clear)
   pane close [<id>]          close a pane
-  agent list                 list every agent across all workspaces/tabs
+  agent list [--workspace <i> | --workspace-id <id>]
+                             list agents in every workspace/tab, or one workspace
   agent start <name> --kind <k> [--pane <id> | --anchor <id>] [--down] [--timeout <s>] [-- <args>]
                              spawn beside an anchor or reuse a pane, wait until ready, name it
   agent fork <target> [--name <alias>] [--no-focus]

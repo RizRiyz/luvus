@@ -115,6 +115,19 @@
         }
       }
     },
+    "agentListParams": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "workspace": { "oneOf": [{ "type": "string", "pattern": "^[0-9]+$" }, { "type": "integer", "minimum": 0 }] },
+        "node": { "oneOf": [{ "type": "string", "pattern": "^[0-9]+$" }, { "type": "integer", "minimum": 0 }] },
+        "workspace_id": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "allOf": [
+        { "not": { "required": ["workspace", "workspace_id"] } },
+        { "not": { "required": ["node", "workspace_id"] } },
+        { "not": { "required": ["workspace", "node"] } }
+      ]
+    },
     "taskStartParams": {
       "type": "object", "additionalProperties": false, "required": ["id"],
       "properties": {
@@ -165,6 +178,8 @@
       "then": { "properties": { "params": { "$ref": "#/$defs/integrationChangeParams" } } } },
     { "if": { "properties": { "method": { "const": "pane.report_session" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/paneReportSessionParams" } } } },
+    { "if": { "properties": { "method": { "const": "agent.list" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/agentListParams" } } } },
     { "if": { "properties": { "method": { "const": "task.start" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/taskStartParams" } } } },
     { "if": { "properties": { "method": { "const": "task.next" } } },

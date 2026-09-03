@@ -249,6 +249,7 @@ Discover the exact target first:
 ```sh
 luvus pane list
 luvus agent list
+luvus agent list --workspace <i>   # or --workspace-id <id>, one workspace only
 luvus agent get <target>
 luvus agent explain <target>
 luvus agent read <target> --lines 100

@@ -14,6 +14,7 @@ AGENT = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 SESSION_NAME = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 INTEGRATION_AGENT = re.compile(r"^[a-z0-9._-]{1,64}$")
+WORKSPACE_INDEX = re.compile(r"^[0-9]+$")
 EMPTY_HOST_METHODS = {
     "host.capabilities", "host.info", "host.doctor", "host.update.check",
     "session.list", "skill.status", "integration.status",
@@ -369,6 +370,26 @@ def valid_global_request(value, methods):
             and params["confirm"] is True
             and session_name(params["name"])
         )
+    if value["method"] == "agent.list":
+        params = value["params"]
+        if not set(params) <= {"workspace", "node", "workspace_id"}:
+            return False
+        for key in ("workspace", "node"):
+            if key not in params:
+                continue
+            scope = params[key]
+            if integer(scope):
+                if scope < 0:
+                    return False
+            elif not (isinstance(scope, str) and WORKSPACE_INDEX.fullmatch(scope)):
+                return False
+        if "workspace_id" in params and not bounded_string(
+            params["workspace_id"], 128, allow_empty=False
+        ):
+            return False
+        # One selector at a time: index, alias, or stable id.
+        if len(set(params) & {"workspace", "node", "workspace_id"}) > 1:
+            return False
     if value["method"] == "task.start":
         params = value["params"]
         if not set(params) <= {"id", "branch", "agent", "mode", "workspace_id"}:

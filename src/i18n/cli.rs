@@ -1322,15 +1322,15 @@ static HELP: &[Translation] = &[
         "패널 닫기"
     ),
     tr!(
-        "list every agent across all workspaces/tabs",
-        "listar todos los agentes de todos los espacios/pestañas",
-        "listar todos os agentes em todos os espaços/abas",
-        "lister tous les agents de tous les espaces/onglets",
-        "alle Agenten in allen Arbeitsbereichen/Tabs auflisten",
-        "daftar semua agen di seluruh ruang kerja/tab",
-        "列出所有工作区/标签页中的全部智能体",
-        "全ワークスペース/タブのエージェントを一覧表示",
-        "모든 작업 공간/탭의 에이전트 나열"
+        "list agents in every workspace/tab, or one workspace",
+        "listar agentes de todos los espacios/pestañas o de uno solo",
+        "listar agentes em todos os espaços/abas ou em apenas um",
+        "lister les agents de tous les espaces/onglets ou d'un seul",
+        "Agenten aus allen Arbeitsbereichen/Tabs oder nur einem auflisten",
+        "daftar agen di semua ruang kerja/tab atau hanya satu",
+        "列出所有工作区/标签页或单个工作区中的智能体",
+        "全ワークスペース/タブ、または 1 つのワークスペースのエージェントを一覧表示",
+        "모든 작업 공간/탭 또는 특정 작업 공간의 에이전트 나열"
     ),
     tr!(
         "spawn beside an anchor or reuse a pane, wait until ready, name it",

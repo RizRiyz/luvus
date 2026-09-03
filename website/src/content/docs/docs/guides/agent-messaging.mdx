@@ -17,6 +17,7 @@ commands you would type yourself.
 
 ```sh
 luvus agent list                       # every live agent: name, pane, kind, status, cwd
+luvus agent list --workspace 1         # only that workspace's agents (--workspace-id also works)
 luvus agent name reviewer              # alias the current agent (or --pane <id>)
 luvus agent prompt reviewer "Review the diff" --wait --until idle --timeout 600
 luvus agent read reviewer --lines 120  # read what it produced

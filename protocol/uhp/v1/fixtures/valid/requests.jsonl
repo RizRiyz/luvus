@@ -34,3 +34,6 @@
 {"id":"34","method":"integration.status","params":{}}
 {"id":"35","method":"integration.install","params":{"agent":"claude","confirm":true}}
 {"id":"36","method":"integration.uninstall","params":{"agent":"claude","confirm":true}}
+{"id":"37","method":"agent.list","params":{}}
+{"id":"38","method":"agent.list","params":{"workspace":"1"}}
+{"id":"39","method":"agent.list","params":{"workspace_id":"workspace_example"}}

@@ -151,7 +151,8 @@ panes / agents:
   pane processes [<id>]      list cached executable identities without exposing arguments
   pane name <name>           name a pane so you can mention it (--pane <id>; --clear)
   pane close [<id>]          close a pane
-  agent list                 list every agent across all workspaces/tabs
+  agent list [--workspace <i> | --workspace-id <id>]
+                             list agents in every workspace/tab, or one workspace
   agent start <name> --kind <k> [--pane <id> | --anchor <id>] [--down] [--timeout <s>] [-- <args>]
                              spawn beside an anchor or reuse a pane, wait until ready, name it
   agent fork <target> [--name <alias>] [--no-focus]
@@ -2594,7 +2595,44 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             }
             ("agent.read".into(), Value::Object(obj))
         }
-        ("agent", _) => ("agent.list".into(), json!({})),
+        ("agent", _) => {
+            // `agent list [--workspace <i> | --node <i> | --workspace-id <id>]`.
+            // Unscoped stays the default: every agent in the session. Every
+            // token is consumed explicitly so a mistyped flag is refused here
+            // instead of quietly listing the whole fleet.
+            let usage = "usage: luvus agent list [--workspace <i> | --workspace-id <id>]";
+            let mut obj = serde_json::Map::new();
+            let mut cursor = rest.iter();
+            while let Some(argument) = cursor.next() {
+                let (key, canonical) = match argument.as_str() {
+                    "--workspace" | "--node" => ("workspace", "--workspace"),
+                    "--workspace-id" => ("workspace_id", "--workspace-id"),
+                    other => {
+                        return Err(anyhow!("unexpected agent list argument `{other}`. {usage}"))
+                    }
+                };
+                let value = cursor
+                    .next()
+                    .ok_or_else(|| anyhow!("{canonical} needs a value. {usage}"))?;
+                if !obj.is_empty() {
+                    return Err(anyhow!(
+                        "--workspace and --workspace-id cannot be used together. {usage}"
+                    ));
+                }
+                if key == "workspace" {
+                    let index = value
+                        .parse::<usize>()
+                        .map_err(|_| anyhow!("{canonical} must be a 0-based number. {usage}"))?;
+                    obj.insert(key.into(), json!(index.to_string()));
+                } else {
+                    if value.is_empty() {
+                        return Err(anyhow!("{canonical} must not be empty. {usage}"));
+                    }
+                    obj.insert(key.into(), json!(value));
+                }
+            }
+            ("agent.list".into(), Value::Object(obj))
+        }
 
         ("ui", "sidebar") => {
             let mut obj = serde_json::Map::new();
@@ -4061,8 +4099,35 @@ mod tests {
         assert_eq!(p.get("workspace").and_then(|v| v.as_str()), Some("2"));
         let (m, _) = parse(&argv("luvus tab new")).unwrap();
         assert_eq!(m, "tab.new");
-        let (m, _) = parse(&argv("luvus agent list")).unwrap();
+        let (m, p) = parse(&argv("luvus agent list")).unwrap();
         assert_eq!(m, "agent.list");
+        assert_eq!(p, json!({}), "an unscoped listing sends no filter");
+    }
+
+    #[test]
+    fn agent_list_accepts_one_workspace_scope() {
+        let (method, params) = parse(&argv("luvus agent list --workspace 2")).unwrap();
+        assert_eq!(method, "agent.list");
+        assert_eq!(params, json!({"workspace": "2"}));
+
+        // `--node` is the same 0-based selector under the other vocabulary.
+        let (_, params) = parse(&argv("luvus agent list --node 0")).unwrap();
+        assert_eq!(params, json!({"workspace": "0"}));
+
+        let (_, params) = parse(&argv("luvus agent list --workspace-id workspace-a")).unwrap();
+        assert_eq!(params, json!({"workspace_id": "workspace-a"}));
+
+        // A non-numeric index, a missing value, an unknown token, or two
+        // selectors at once all fail before any socket connection.
+        assert!(parse(&argv("luvus agent list --workspace docs")).is_err());
+        assert!(parse(&argv("luvus agent list --workspace")).is_err());
+        assert!(parse(&argv("luvus agent list --workspace-id")).is_err());
+        assert!(parse(&argv("luvus agent list --workspace 1 --workspace-id b")).is_err());
+        assert!(
+            parse(&argv("luvus agent list --workspace-nmae docs")).is_err(),
+            "a mistyped filter must not silently list every workspace"
+        );
+        assert!(parse(&argv("luvus agent list extra")).is_err());
     }
 
     #[test]
