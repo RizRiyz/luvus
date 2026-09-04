@@ -63,7 +63,8 @@ shows the definition state, retained schedule, next UTC deadline, target agent,
 and target workspace. Use `e` to pause or re-enable the selected definition,
 `r` to request one run without advancing its schedule, and `D` to delete an
 idle definition. Press `o` or `Enter` to inspect its trigger, timezone, next five
-occurrences, execution policy, task template, and bounded run history. Armed
+occurrences, execution policy, task template, and bounded run history; click
+outside that detail popup or press `Esc` to close it. Armed
 definitions also appear in the sidebar's Active agents section as `scheduled`;
 the placeholder is replaced by the normal live agent row when its ORCH task
 starts. Clicking a scheduled placeholder or a Mission Control automation row
@@ -109,12 +110,14 @@ hides concrete dependencies and owns a registry-backed Agent, an explicit
 `Hourly`, `Daily`, or `Weekly`, and Schedule, followed by a three-row Prompt editor. Use
 `Tab` to switch between Task and Automation, Down or Up to move between fields,
 and Left/Right to change the selected Agent, Run in, or Start value. Agent choices come
-from the same built-in launch-capable registry used by ORCH.
+from the same built-in launch-capable registry used by ORCH. Task and Automation
+retain independent drafts while the modal is open, so switching type and returning
+restores that type's inputs, selections, and focused field.
 
 `Manual` preserves ordinary task creation. `Now` creates and starts one ORCH
 task. Automations store a template and do not create the concrete task until it
-is due. The form detects the server user's IANA timezone internally without
-adding it to the compact form. Schedule input uses that local wall-clock time:
+is due. The form detects the server user's IANA timezone and shows it beside the
+Automation Start choice. Schedule input uses that local wall-clock time:
 `YYYY-MM-DD HH:MM` for Once, a minute from
 `00` through `59` for Hourly, `HH:MM` for Daily, and `mon,fri HH:MM` for
 Weekly. Changing Start fills Schedule with a valid editable value; the first

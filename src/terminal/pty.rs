@@ -1181,6 +1181,35 @@ mod reap_tests {
     use super::*;
     use crate::ids::PaneId;
 
+    struct SignalMaskGuard(libc::sigset_t);
+
+    impl SignalMaskGuard {
+        fn block_sigchld() -> Self {
+            unsafe {
+                let mut sigchld: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut sigchld);
+                libc::sigaddset(&mut sigchld, libc::SIGCHLD);
+                let mut previous: libc::sigset_t = std::mem::zeroed();
+                let result = libc::pthread_sigmask(libc::SIG_BLOCK, &sigchld, &mut previous);
+                assert_eq!(
+                    result,
+                    0,
+                    "block SIGCHLD: {}",
+                    std::io::Error::from_raw_os_error(result)
+                );
+                Self(previous)
+            }
+        }
+    }
+
+    impl Drop for SignalMaskGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = libc::pthread_sigmask(libc::SIG_SETMASK, &self.0, std::ptr::null_mut());
+            }
+        }
+    }
+
     fn alive(pid: u32) -> bool {
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
     }
@@ -1219,6 +1248,80 @@ mod reap_tests {
         assert_eq!(CHILD_REAPER_STARTS.load(Ordering::SeqCst), 1);
         drop(first);
         drop(second);
+    }
+    #[test]
+    fn inherited_blocked_sigchld_still_reaps_natural_exit() {
+        const CHILD_RUN: &str = "LUVUS_BLOCKED_SIGCHLD_REAPER_TEST";
+        if std::env::var_os(CHILD_RUN).is_none() {
+            // Run this case alone in a fresh process so SIGCHLD is blocked
+            // before the process-wide OnceLock and handler are first touched.
+            // The child's process-global handler disappears with the child, so
+            // parallel tests cannot observe a temporary action.
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "terminal::pty::reap_tests::inherited_blocked_sigchld_still_reaps_natural_exit",
+                    "--nocapture",
+                ])
+                .env(CHILD_RUN, "1")
+                .output()
+                .expect("run isolated blocked-SIGCHLD test");
+            assert!(
+                output.status.success(),
+                "isolated blocked-SIGCHLD test failed:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let _mask = SignalMaskGuard::block_sigchld();
+        assert_eq!(
+            CHILD_REAPER_STARTS.load(Ordering::SeqCst),
+            0,
+            "the isolated process must block SIGCHLD before reaper setup"
+        );
+
+        let (tx, rx) = mpsc::channel();
+        let id = PaneId::alloc();
+        let pane = Pane::spawn(
+            id,
+            80,
+            24,
+            std::env::temp_dir(),
+            tx,
+            None,
+            "/bin/sh",
+            500,
+            PaneAppearance::default(),
+        )
+        .expect("spawn shell with inherited blocked SIGCHLD");
+        let pid = pane.child_pid.load(Ordering::SeqCst);
+        assert_ne!(pid, 0);
+
+        // Let the reaper reach its infinite poll before the child exits. With
+        // SIGCHLD inherited as blocked, the old design stranded here forever.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        pane.send(b"exit\r");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !pane.child_exited.load(Ordering::SeqCst) {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "natural child exit never woke the reaper"
+            );
+            // The PTY actor may publish PtyExit before the child waiter. Keep
+            // waiting until the reaper sets child_exited, which is the behavior
+            // this blocked-signal regression is proving.
+            match rx.recv_timeout(remaining.min(std::time::Duration::from_millis(50))) {
+                Ok(AppEvent::PtyExit(exited)) if exited == id => {}
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(error) => panic!("natural child exit never woke the reaper: {error}"),
+            }
+        }
+        assert!(wait_gone(pid), "naturally exited child was not reaped");
+        drop(pane);
     }
 
     #[test]

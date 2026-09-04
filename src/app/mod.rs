@@ -1088,6 +1088,56 @@ const AUTOMATION_FIELDS: &[OrchFormField] = &[
     OrchFormField::Prompt,
 ];
 
+struct OrchFormDraft {
+    title: String,
+    prompt: String,
+    agent: String,
+    mode: crate::orch::TaskWorkerMode,
+    start: OrchFormStart,
+    schedule: String,
+    schedule_prefilled: bool,
+    timezone: String,
+    paths: String,
+    deps: String,
+    gate: String,
+    field: OrchFormField,
+}
+
+impl OrchFormDraft {
+    fn for_kind(kind: OrchFormKind, mode: crate::orch::TaskWorkerMode) -> Self {
+        let start = match kind {
+            OrchFormKind::Task => OrchFormStart::Manual,
+            OrchFormKind::Automation => OrchFormStart::Once,
+        };
+        let timezone = match kind {
+            OrchFormKind::Task => String::new(),
+            OrchFormKind::Automation => crate::automation::system_timezone_name(),
+        };
+        Self {
+            title: String::new(),
+            prompt: String::new(),
+            agent: if kind == OrchFormKind::Automation {
+                default_task_agent()
+            } else {
+                String::new()
+            },
+            mode,
+            start,
+            schedule: if kind == OrchFormKind::Automation {
+                default_schedule(start, &timezone)
+            } else {
+                String::new()
+            },
+            schedule_prefilled: kind == OrchFormKind::Automation,
+            timezone,
+            paths: String::new(),
+            deps: String::new(),
+            gate: String::new(),
+            field: OrchFormField::Title,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct OrchForm {
     pub kind: OrchFormKind,
@@ -1106,28 +1156,50 @@ pub struct OrchForm {
     pub gate: String,
     pub field: OrchFormField,
     pub error: Option<String>,
+    task_draft: Option<OrchFormDraft>,
+    automation_draft: Option<OrchFormDraft>,
 }
 
 impl OrchForm {
     pub fn for_kind(kind: OrchFormKind) -> Self {
         let mut form = Self {
             kind,
-            start: match kind {
-                OrchFormKind::Task => OrchFormStart::Manual,
-                OrchFormKind::Automation => OrchFormStart::Once,
-            },
-            timezone: match kind {
-                OrchFormKind::Task => String::new(),
-                OrchFormKind::Automation => crate::automation::system_timezone_name(),
-            },
             ..Self::default()
         };
-        if kind == OrchFormKind::Automation {
-            form.agent = default_task_agent();
-            form.schedule = default_schedule(form.start, &form.timezone);
-            form.schedule_prefilled = true;
-        }
+        form.restore_draft(OrchFormDraft::for_kind(kind, form.mode));
         form
+    }
+
+    fn take_draft(&mut self) -> OrchFormDraft {
+        OrchFormDraft {
+            title: std::mem::take(&mut self.title),
+            prompt: std::mem::take(&mut self.prompt),
+            agent: std::mem::take(&mut self.agent),
+            mode: self.mode,
+            start: self.start,
+            schedule: std::mem::take(&mut self.schedule),
+            schedule_prefilled: self.schedule_prefilled,
+            timezone: std::mem::take(&mut self.timezone),
+            paths: std::mem::take(&mut self.paths),
+            deps: std::mem::take(&mut self.deps),
+            gate: std::mem::take(&mut self.gate),
+            field: self.field,
+        }
+    }
+
+    fn restore_draft(&mut self, draft: OrchFormDraft) {
+        self.title = draft.title;
+        self.prompt = draft.prompt;
+        self.agent = draft.agent;
+        self.mode = draft.mode;
+        self.start = draft.start;
+        self.schedule = draft.schedule;
+        self.schedule_prefilled = draft.schedule_prefilled;
+        self.timezone = draft.timezone;
+        self.paths = draft.paths;
+        self.deps = draft.deps;
+        self.gate = draft.gate;
+        self.field = draft.field;
     }
 
     pub fn fields(&self) -> &'static [OrchFormField] {
@@ -1142,24 +1214,18 @@ impl OrchForm {
         if self.kind == kind {
             return;
         }
+        let outgoing = self.take_draft();
+        match self.kind {
+            OrchFormKind::Task => self.task_draft = Some(outgoing),
+            OrchFormKind::Automation => self.automation_draft = Some(outgoing),
+        }
+        let incoming = match kind {
+            OrchFormKind::Task => self.task_draft.take(),
+            OrchFormKind::Automation => self.automation_draft.take(),
+        }
+        .unwrap_or_else(|| OrchFormDraft::for_kind(kind, self.mode));
         self.kind = kind;
-        self.start = match kind {
-            OrchFormKind::Task => OrchFormStart::Manual,
-            OrchFormKind::Automation => OrchFormStart::Once,
-        };
-        if kind == OrchFormKind::Automation && self.timezone.is_empty() {
-            self.timezone = crate::automation::system_timezone_name();
-        }
-        if kind == OrchFormKind::Automation {
-            if self.agent.is_empty() {
-                self.agent = default_task_agent();
-            }
-            self.schedule = default_schedule(self.start, &self.timezone);
-            self.schedule_prefilled = true;
-        }
-        if !self.fields().contains(&self.field) {
-            self.field = OrchFormField::Title;
-        }
+        self.restore_draft(incoming);
         self.error = None;
     }
 
@@ -1360,6 +1426,9 @@ pub enum OrchHit {
     StartCommit,
     StartCancel,
     DetailClose,
+    /// The inert task/automation detail surface. Its backdrop closes the
+    /// overlay without allowing the click to reach the board behind it.
+    DetailModal,
     DetailOpenOrch,
 }
 
@@ -1626,11 +1695,6 @@ pub struct ResizeDrag {
 /// between panes puts the two visible border lines ~2 cells apart, so a ±2 zone
 /// makes the seam comfortably grabbable without stealing clicks from content.
 const RESIZE_GRAB_TOL: u16 = 2;
-
-/// How many columns onto the content side of a sidebar's edge still grab it for a
-/// resize (docs/29). Widens the 1-column seam into a comfortable target without
-/// reaching into the sidebar body (where dock rows own the width).
-const SIDEBAR_GRAB_TOL: u16 = 2;
 
 /// Rows a dock keeps no matter how far its divider is dragged: enough for the
 /// header plus one line of content, so a dock can be made small but never
@@ -2108,6 +2172,8 @@ pub struct App {
     /// Active mouse text selection in a pane (drag to select). Cleared on a new
     /// click; on release its text is queued to `pending_clipboard`.
     pub selection: Option<Selection>,
+    /// When set, a copied mouse selection stays highlighted until this instant.
+    selection_clear_at: Option<Instant>,
     /// Keyboard copy selection. This deliberately owns navigation keys so they
     /// cannot reach the child while text is being selected.
     pub copy_mode: Option<CopyMode>,
@@ -2165,6 +2231,23 @@ pub struct App {
     pub(crate) proc_commands: HashMap<PaneId, Vec<String>>,
     /// One process scan at a time, same guard as the session scan.
     proc_scan_inflight: bool,
+    /// A one-shot process scan explicitly requested by an API or by the first
+    /// confirmed absence of a bound agent. Unlike PTY dirtiness, this demand
+    /// survives detach and is consumed only by a successful scan.
+    proc_scan_requested: bool,
+    /// Whether the in-flight worker consumed an explicit one-shot demand.
+    proc_scan_demand_inflight: bool,
+    /// Panes whose explicit process request must be represented by the next
+    /// successful snapshot. Keeping the identities avoids treating an older
+    /// in-flight snapshot as satisfying a request for a newly created pane.
+    proc_scan_requested_panes: HashSet<PaneId>,
+    /// Requested panes assigned to the current process snapshot. Requests that
+    /// arrive while it runs join this set and are retried when absent.
+    proc_scan_demand_panes_inflight: HashSet<PaneId>,
+    /// Remaining retries after a demanded worker cannot read the process table
+    /// or its snapshot predates a requested pane. Bounded so a persistent
+    /// platform failure cannot become an idle heartbeat.
+    proc_scan_failure_retries: u8,
     /// Session ids the user removed from the sidebar list (hidden, not deleted).
     pub dismissed_sessions: HashSet<String>,
     /// Throttle for rescanning the agents' on-disk session stores.
@@ -2172,7 +2255,7 @@ pub struct App {
     last_proc_at: Instant,
     /// CWD/git follow-up is scheduled from PTY activity, not a 1s heartbeat.
     runtime_cwd_dirty: bool,
-    /// Process-table identity is scheduled from PTY activity, not a 2s `ps`.
+    /// Attached PTY activity dirties process identity without creating a heartbeat.
     runtime_proc_dirty: bool,
     /// Resumable-session disk scans run on attach/demand, not a 4s walk.
     runtime_sessions_dirty: bool,
@@ -2635,6 +2718,7 @@ impl App {
             pending_notify: Vec::new(),
             pending_sound: None,
             selection: None,
+            selection_clear_at: None,
             copy_mode: None,
             mouse_grab: None,
             pending_clipboard: None,
@@ -2653,6 +2737,11 @@ impl App {
             sessions_scan_inflight: false,
             proc_commands: HashMap::new(),
             proc_scan_inflight: false,
+            proc_scan_requested: false,
+            proc_scan_demand_inflight: false,
+            proc_scan_requested_panes: HashSet::new(),
+            proc_scan_demand_panes_inflight: HashSet::new(),
+            proc_scan_failure_retries: 0,
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
             mission_usage_requested: None,
@@ -2797,6 +2886,7 @@ impl App {
         // previous server run, so rebind/clear them (same as `from_snapshot`).
         app.orch_reconcile();
         app.refresh_core_bar_widgets();
+        app.mark_runtime_scans_dirty();
         Ok(app)
     }
 
@@ -2806,6 +2896,7 @@ impl App {
             if let Some(mut app) = App::from_snapshot(snap, app_tx.clone()) {
                 // Kick off the async fetch for any restored git tabs.
                 app.refetch_git_tabs();
+                app.mark_runtime_scans_dirty();
                 return Ok(app);
             }
         }
@@ -3263,6 +3354,7 @@ impl App {
             pending_notify: Vec::new(),
             pending_sound: None,
             selection: None,
+            selection_clear_at: None,
             copy_mode: None,
             mouse_grab: None,
             pending_clipboard: None,
@@ -3281,6 +3373,11 @@ impl App {
             sessions_scan_inflight: false,
             proc_commands: HashMap::new(),
             proc_scan_inflight: false,
+            proc_scan_requested: false,
+            proc_scan_demand_inflight: false,
+            proc_scan_requested_panes: HashSet::new(),
+            proc_scan_demand_panes_inflight: HashSet::new(),
+            proc_scan_failure_retries: 0,
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
             mission_usage_requested: None,
@@ -5662,13 +5759,40 @@ impl App {
     /// agent back to text-only detection.
     pub(crate) fn apply_proc_scan(&mut self, found: Option<HashMap<u32, Vec<String>>>) -> bool {
         self.proc_scan_inflight = false;
-        let Some(by_pid) = found else { return false };
+        let demand_inflight = std::mem::take(&mut self.proc_scan_demand_inflight);
+        let demanded_panes = std::mem::take(&mut self.proc_scan_demand_panes_inflight);
+        let Some(by_pid) = found else {
+            if demand_inflight && self.proc_scan_failure_retries > 0 {
+                self.proc_scan_failure_retries -= 1;
+                self.proc_scan_requested = true;
+                self.proc_scan_requested_panes.extend(
+                    demanded_panes
+                        .into_iter()
+                        .filter(|id| self.panes.contains_key(id)),
+                );
+            } else {
+                self.proc_scan_failure_retries = 0;
+            }
+            return false;
+        };
         let mut next: HashMap<PaneId, Vec<String>> = HashMap::new();
         for (id, pane) in self.panes.iter() {
             let pid = pane.child_pid.load(std::sync::atomic::Ordering::SeqCst);
             if let Some(cmds) = (pid != 0).then(|| by_pid.get(&pid)).flatten() {
                 next.insert(*id, cmds.clone());
             }
+        }
+        let missing_demanded_panes: Vec<PaneId> = demanded_panes
+            .into_iter()
+            .filter(|id| self.panes.contains_key(id) && !next.contains_key(id))
+            .collect();
+        if !missing_demanded_panes.is_empty() && self.proc_scan_failure_retries > 0 {
+            self.proc_scan_failure_retries -= 1;
+            self.proc_scan_requested = true;
+            self.proc_scan_requested_panes
+                .extend(missing_demanded_panes);
+        } else if demand_inflight {
+            self.proc_scan_failure_retries = 0;
         }
         let mut lifecycle_changed = false;
         for (id, cmds) in &next {
@@ -5697,6 +5821,8 @@ impl App {
 
             st.agent_absent_scans = st.agent_absent_scans.saturating_add(1);
             if st.agent_absent_scans < 2 {
+                self.proc_scan_requested = true;
+                self.proc_scan_failure_retries = dispatch::PROC_SCAN_FAILURE_RETRIES;
                 continue;
             }
 
@@ -6020,12 +6146,10 @@ impl App {
     }
 
     /// The sidebar whose draggable edge seam is at `(c, r)`, if any (docs/29).
-    /// The seam `│` column always grabs; the grab band also reaches
-    /// `SIDEBAR_GRAB_TOL` columns onto the **content side** — but only over cells
-    /// that are *not* a mouse-tracking pane, so an agent's own edge clicks (Claude
-    /// Code expanding a tool result at its left edge) still forward, and a
-    /// split's border/gap stays grabbable. It never reaches into the sidebar body,
-    /// where dock rows own the width, so it can't steal a workspace/agent click.
+    /// Only the rendered `│` rule grabs. Pane borders and content remain owned by
+    /// the pane, while the sidebar body remains owned by its docks. Keeping one
+    /// exact visual target makes the hover affordance match the drag behavior on
+    /// both sides and prevents an invisible grab band from stealing edge input.
     fn sidebar_seam_at(&self, c: u16, r: u16) -> Option<Side> {
         // The seam spans the full frame visually, but only the pane lane is a
         // resize target. The tab and status rows own their cells; in particular,
@@ -6040,20 +6164,6 @@ impl App {
                 continue;
             }
             if c == seam.x {
-                return Some(side);
-            }
-            // Distance onto the content side (right of a left seam, left of a
-            // right seam); `None` when the cursor is on the sidebar side.
-            let dist = match side {
-                Side::Left => c.checked_sub(seam.x),
-                Side::Right => seam.x.checked_sub(c),
-            };
-            let Some(d) = dist else { continue };
-            let over_agent = self
-                .pane_content_at(c, r)
-                .and_then(|(id, _)| self.panes.get(&id))
-                .is_some_and(|p| p.mouse_mode().report);
-            if (1..=SIDEBAR_GRAB_TOL).contains(&d) && !over_agent {
                 return Some(side);
             }
         }
@@ -7863,12 +7973,30 @@ mod tests {
         // One shell-only observation is not enough: an agent may be starting or
         // re-execing. Seeing it again resets the exit candidate, even when a
         // different recognised agent appears earlier in the same process tree.
+        let first_absence_at = Instant::now();
+        app.last_proc_at = first_absence_at;
         assert!(
             !app.apply_proc_scan(scan(&[&shell])),
             "the first missing scan only updates the process cache"
         );
         assert!(app.status.get(&id).unwrap().agent_session.is_some());
         assert_eq!(app.status.get(&id).unwrap().agent_absent_scans, 1);
+        assert!(
+            app.proc_scan_requested,
+            "the first confirmed absence queues exactly one follow-up scan"
+        );
+        for status in app.status.values_mut() {
+            status.force_detect = false;
+            status.candidate = status.state;
+            status.last_activity = first_absence_at - Duration::from_secs(60);
+        }
+        app.last_detection_audit_at = first_absence_at;
+        let follow_up = app
+            .next_runtime_deadline(first_absence_at, false)
+            .expect("the follow-up scan must wake a detached server");
+        assert!(follow_up > first_absence_at);
+        assert!(follow_up <= first_absence_at + Duration::from_secs(2));
+        app.proc_scan_requested = false;
         assert!(
             !app.apply_proc_scan(scan(&[&shell, "codex", "claude"])),
             "seeing the bound agent again does not change visible lifecycle state"
@@ -7882,6 +8010,11 @@ mod tests {
         app.session_dirty = false;
         assert!(!app.handle_event(AppEvent::ProcScanned(scan(&[&shell]))));
         assert!(app.status.get(&id).unwrap().agent_session.is_some());
+        assert!(
+            app.proc_scan_requested,
+            "the first absence re-arms confirmation"
+        );
+        app.proc_scan_requested = false;
         assert!(
             app.handle_event(AppEvent::ProcScanned(scan(&[&shell]))),
             "the confirmed exit dirties the sidebar through the event path"
@@ -9055,6 +9188,121 @@ mod tests {
             app.sidebar_resize.is_none(),
             "a click inside a pane never grabs the sidebar edge"
         );
+    }
+
+    #[test]
+    fn pane_content_edge_starts_selection_instead_of_sidebar_resize() {
+        let _env = crate::persist::test_env("sidebar-edge-selection");
+        use crate::event::AppEvent;
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let pane = app.layout().focus;
+        app.panes
+            .get(&pane)
+            .expect("focused pane exists")
+            .engine
+            .lock()
+            .expect("terminal engine lock")
+            .advance(b"\x1b[H\x1b[2Jedge");
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let seam = app.left_seam.expect("visible left sidebar has a seam");
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("focused pane has a content rect");
+        assert!(
+            content.x > seam.x,
+            "the first content column is on the pane side of the rule"
+        );
+
+        let mouse = |kind, column| {
+            AppEvent::Mouse(MouseEvent {
+                kind,
+                column,
+                row: content.y,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), content.x));
+
+        assert!(
+            app.sidebar_resize.is_none(),
+            "pane content must not begin a sidebar resize"
+        );
+        assert!(
+            app.selection.is_some(),
+            "the first content column begins text selection"
+        );
+        app.handle_event(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            content.x + 3,
+        ));
+        app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), content.x + 3));
+        assert_eq!(app.pending_clipboard.as_deref(), Some("edge"));
+    }
+
+    #[test]
+    fn only_the_rendered_sidebar_rules_resize_and_highlight() {
+        let _env = crate::persist::test_env("sidebar-exact-resize-rule");
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.move_dock(&DockKind::Agents, Side::Right);
+        app.sidebars.right.visible = true;
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let pane = app.layout().focus;
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("focused pane has a content rect");
+        let row = content.y + 1;
+        let left = app.left_seam.expect("left rule is rendered");
+        let right = app.right_seam.expect("right rule is rendered");
+        let cases = [
+            (Side::Left, left.x, left.x + 1, content.x),
+            (
+                Side::Right,
+                right.x,
+                right.x.saturating_sub(1),
+                content.right().saturating_sub(1),
+            ),
+        ];
+
+        for (side, rule, pane_border, content_edge) in cases {
+            app.update_hover_sidebar(rule, row);
+            assert_eq!(app.hover_sidebar, Some(side), "{side:?} rule highlights");
+            assert!(
+                app.begin_sidebar_resize(rule, row),
+                "{side:?} rule begins resizing"
+            );
+            assert_eq!(app.sidebar_resize, Some(side));
+            app.end_sidebar_resize();
+
+            for column in [pane_border, content_edge] {
+                app.update_hover_sidebar(column, row);
+                assert_eq!(
+                    app.hover_sidebar, None,
+                    "{side:?} pane column {column} does not highlight the sidebar rule"
+                );
+                assert!(
+                    !app.begin_sidebar_resize(column, row),
+                    "{side:?} pane column {column} does not begin sidebar resizing"
+                );
+            }
+        }
     }
 
     #[test]
@@ -11883,7 +12131,7 @@ mod tests {
     // burst must not flip an idle pane to a lingering "working". Detection is
     // frozen for `RESIZE_GRACE` after a resize, then resumes normally.
     #[test]
-    fn resize_grace_suppresses_a_transient_working_after_a_switch() {
+    fn resize_grace_expiry_wakes_and_reclassifies_once() {
         use crate::ui::theme::State;
         let _env = crate::persist::test_env("resize-grace");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -11908,6 +12156,8 @@ mod tests {
             "a repaint right after a resize must not flip the pane to working"
         );
 
+        let considered = app.detection_panes_considered;
+
         // Past the grace window the same reading commits normally.
         let t1 = t0 + RESIZE_GRACE + std::time::Duration::from_millis(150);
         {
@@ -11915,13 +12165,19 @@ mod tests {
             s.last_activity = t1;
             s.last_input = t1 - std::time::Duration::from_secs(5);
         }
-        app.detection_dirty.insert(id);
+        assert_eq!(
+            app.next_runtime_deadline(t1, false),
+            Some(t1),
+            "expired resize grace is a due event even without a TUI"
+        );
         app.detect_tick(t1);
         assert_eq!(
             app.status.get(&id).unwrap().state,
             State::Working,
             "once the grid settles, a genuinely active pane reads working again"
         );
+        assert_eq!(app.status.get(&id).unwrap().last_resize, None);
+        assert_eq!(app.detection_panes_considered, considered + 1);
     }
 
     // docs/29: config with no `sidebars` migrates to today's default layout.

@@ -1282,6 +1282,7 @@ impl App {
             }
             crate::app::OrchHit::StartCancel => self.orch_start = None,
             crate::app::OrchHit::DetailClose => self.orch_detail = None,
+            crate::app::OrchHit::DetailModal => {}
             crate::app::OrchHit::DetailOpenOrch => self.open_automation_detail_in_orch(),
             crate::app::OrchHit::Task(_) => {}
         }
@@ -3202,13 +3203,13 @@ mod tests {
         app.handle_orch_form_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         let form = app.orch_form.as_ref().unwrap();
         assert_eq!(form.kind, crate::app::OrchFormKind::Automation);
-        assert_eq!(form.field, crate::app::OrchFormField::Paths);
+        assert_eq!(form.field, crate::app::OrchFormField::Title);
 
         app.orch_form.as_mut().unwrap().field = crate::app::OrchFormField::Schedule;
         app.handle_orch_form_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         let form = app.orch_form.as_ref().unwrap();
         assert_eq!(form.kind, crate::app::OrchFormKind::Task);
-        assert_eq!(form.field, crate::app::OrchFormField::Title);
+        assert_eq!(form.field, crate::app::OrchFormField::Paths);
 
         app.orch_form.as_mut().unwrap().field = crate::app::OrchFormField::Start;
         app.handle_orch_form_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
@@ -3252,6 +3253,53 @@ mod tests {
             app.orch_form.as_ref().unwrap().mode,
             TaskWorkerMode::Workspace
         );
+    }
+
+    #[test]
+    fn creation_form_preserves_independent_task_and_automation_drafts() {
+        let mut form = crate::app::OrchForm::for_kind(crate::app::OrchFormKind::Automation);
+        form.title = "scheduled review".into();
+        form.prompt = "Review the release.".into();
+        form.agent = "codex".into();
+        form.mode = TaskWorkerMode::Workspace;
+        form.start = crate::app::OrchFormStart::Daily;
+        form.schedule = "08:30".into();
+        form.schedule_prefilled = false;
+        form.timezone = "Asia/Makassar".into();
+        form.paths = "src/**".into();
+        form.gate = "cargo test".into();
+        form.field = crate::app::OrchFormField::Agent;
+
+        form.set_kind(crate::app::OrchFormKind::Task);
+        form.title = "manual fix".into();
+        form.paths = "tests/**".into();
+        form.deps = "t1".into();
+        form.start = crate::app::OrchFormStart::Now;
+        form.agent = "claude".into();
+        form.prompt = "Fix the regression.".into();
+        form.field = crate::app::OrchFormField::Prompt;
+
+        form.set_kind(crate::app::OrchFormKind::Automation);
+        assert_eq!(form.title, "scheduled review");
+        assert_eq!(form.prompt, "Review the release.");
+        assert_eq!(form.agent, "codex");
+        assert_eq!(form.mode, TaskWorkerMode::Workspace);
+        assert_eq!(form.start, crate::app::OrchFormStart::Daily);
+        assert_eq!(form.schedule, "08:30");
+        assert!(!form.schedule_prefilled);
+        assert_eq!(form.timezone, "Asia/Makassar");
+        assert_eq!(form.paths, "src/**");
+        assert_eq!(form.gate, "cargo test");
+        assert_eq!(form.field, crate::app::OrchFormField::Agent);
+
+        form.set_kind(crate::app::OrchFormKind::Task);
+        assert_eq!(form.title, "manual fix");
+        assert_eq!(form.paths, "tests/**");
+        assert_eq!(form.deps, "t1");
+        assert_eq!(form.start, crate::app::OrchFormStart::Now);
+        assert_eq!(form.agent, "claude");
+        assert_eq!(form.prompt, "Fix the regression.");
+        assert_eq!(form.field, crate::app::OrchFormField::Prompt);
     }
 
     #[test]
@@ -3351,7 +3399,7 @@ mod tests {
     }
 
     #[test]
-    fn automation_form_keeps_timezone_internal_and_shows_run_mode() {
+    fn automation_form_shows_detected_timezone_beside_start() {
         let _env = crate::persist::test_env("orch-automation-form-render");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(100, 30, tx).unwrap();
@@ -3378,7 +3426,7 @@ mod tests {
             .collect();
 
         assert!(rendered.contains("Once later"));
-        assert!(!rendered.contains("Asia/Makassar"));
+        assert!(rendered.contains("Once later · Asia/Makassar"));
         assert!(rendered.contains("run in"));
         assert!(rendered.contains("worktree"));
         assert!(rendered.contains("2026-09-03 14:00"));
@@ -3492,7 +3540,38 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         }));
         assert_eq!(app.orch_detail.as_deref(), Some("a1"));
-        app.handle_orch_detail_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        assert!(!app
+            .orch_hits
+            .iter()
+            .any(|(hit, _)| matches!(hit, crate::app::OrchHit::DetailClose)));
+        let modal = app
+            .orch_hits
+            .iter()
+            .find_map(|(hit, rect)| {
+                matches!(hit, crate::app::OrchHit::DetailModal).then_some(*rect)
+            })
+            .expect("automation detail surface is published");
+        app.handle_event(AppEvent::Mouse(ratatui::crossterm::event::MouseEvent {
+            kind: ratatui::crossterm::event::MouseEventKind::Down(
+                ratatui::crossterm::event::MouseButton::Left,
+            ),
+            column: modal.x + 1,
+            row: modal.y + 1,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(app.orch_detail.as_deref(), Some("a1"));
+        app.handle_event(AppEvent::Mouse(ratatui::crossterm::event::MouseEvent {
+            kind: ratatui::crossterm::event::MouseEventKind::Down(
+                ratatui::crossterm::event::MouseButton::Left,
+            ),
+            column: modal.x.saturating_sub(1),
+            row: modal.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.orch_detail.is_none());
         app.handle_orch_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
         assert!(!app.automation.automation("a1").unwrap().enabled);
     }

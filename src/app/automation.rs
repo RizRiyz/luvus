@@ -76,11 +76,17 @@ impl App {
     /// O(1) on ordinary server ticks. Definition scans happen only when the
     /// cached nearest UTC deadline is due.
     pub fn tick_automations(&mut self, now: u64) -> bool {
-        let created = self.automation.collect_due(now);
-        if created.is_empty() {
+        let due = self
+            .automation
+            .next_deadline()
+            .is_some_and(|deadline| deadline <= now);
+        if !due {
             return false;
         }
-        // Persist occurrence keys before any ORCH task or PTY can be created.
+        let created = self.automation.collect_due(now);
+        // Persist the advanced deadline and every occurrence outcome before an
+        // ORCH task or PTY can be created. A skipped overlap has no pending run
+        // to launch, but its occurrence key and next deadline are still durable.
         if let Err(error) = self.automation.save() {
             for run_id in created {
                 let _ = self.automation.set_run_status(
@@ -113,6 +119,24 @@ impl App {
             return false;
         }
 
+        if self.workspaces.is_empty() {
+            let message = "no active session".to_string();
+            let _ = self.automation.set_run_status(
+                run_id,
+                RunStatus::Failed,
+                Some(message.clone()),
+                now,
+            );
+            let _ = self.automation.save();
+            self.emit_event(
+                "automation.run_failed",
+                json!({"run_id": run_id, "automation_id": run.automation_id, "code": "no_session"}),
+            );
+            self.pending_notify
+                .push(format!("Automation {} could not start", run.automation_id));
+            return true;
+        }
+
         let task_id = match self.ensure_automation_task(&run, now) {
             Ok(task_id) => task_id,
             Err((code, message)) => {
@@ -132,24 +156,6 @@ impl App {
                 return true;
             }
         };
-
-        if self.workspaces.is_empty() {
-            let message = "no active session".to_string();
-            let _ = self.automation.set_run_status(
-                run_id,
-                RunStatus::Failed,
-                Some(message.clone()),
-                now,
-            );
-            let _ = self.automation.save();
-            self.emit_event(
-                "automation.run_failed",
-                json!({"run_id": run_id, "automation_id": run.automation_id, "code": "no_session"}),
-            );
-            self.pending_notify
-                .push(format!("Automation {} could not start", run.automation_id));
-            return true;
-        }
 
         // A scheduled launch must not steal the attached client's workspace or
         // active tab. Snapshot presentation selection and restore it afterwards.
@@ -351,6 +357,27 @@ fn persistence_err(error: std::io::Error) -> (String, String) {
 mod tests {
     use super::*;
 
+    fn automation_input(
+        workspace_id: String,
+        trigger: crate::automation::Trigger,
+    ) -> crate::automation::CreateAutomation {
+        crate::automation::CreateAutomation {
+            name: "review".into(),
+            enabled: true,
+            trigger,
+            task: crate::automation::TaskTemplate {
+                title: "review".into(),
+                prompt: "review the changes".into(),
+                agent_id: "codex".into(),
+                workspace_id,
+                mode: crate::orch::TaskWorkerMode::Workspace,
+                paths: Vec::new(),
+                gate: None,
+            },
+            policy: crate::automation::AutomationPolicy::default(),
+        }
+    }
+
     #[test]
     fn reconciliation_recovers_orch_provenance_without_duplicate_task() {
         let _env = crate::persist::test_env("automation-reconcile");
@@ -467,5 +494,79 @@ mod tests {
             RunStatus::Running
         );
         assert!(app.orch.task("t1").unwrap().assignee.is_some());
+    }
+
+    #[test]
+    fn skipped_overlap_and_advanced_deadline_are_persisted() {
+        let _env = crate::persist::test_env("automation-persist-skipped-overlap");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let path = crate::persist::session_dir().join("automations.json");
+        app.automation.persist_path = Some(path.clone());
+        let workspace_id = app.workspaces[0].id.clone();
+        let automation = app
+            .automation
+            .create(
+                automation_input(
+                    workspace_id,
+                    crate::automation::Trigger::Interval {
+                        every_seconds: 60,
+                        anchor_utc: 100,
+                    },
+                ),
+                None,
+                10,
+            )
+            .unwrap();
+        let first = app.automation.collect_due(100).pop().unwrap();
+        app.automation
+            .set_run_status(&first, RunStatus::Running, None, 100)
+            .unwrap();
+        app.automation.save().unwrap();
+
+        assert!(app.tick_automations(160));
+
+        let persisted: crate::automation::AutomationState =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            persisted.automation(&automation.id).unwrap().next_run_at,
+            Some(220)
+        );
+        assert_eq!(persisted.runs.last().unwrap().status, RunStatus::Skipped);
+    }
+
+    #[test]
+    fn scheduled_run_without_workspace_does_not_create_orch_task() {
+        let _env = crate::persist::test_env("automation-no-workspace");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let workspace_id = app.workspaces[0].id.clone();
+        let automation = app
+            .automation
+            .create(
+                automation_input(
+                    workspace_id,
+                    crate::automation::Trigger::Once { at_utc: 100 },
+                ),
+                None,
+                10,
+            )
+            .unwrap();
+        let run = app
+            .automation
+            .request_run(&automation.id, None, 20)
+            .unwrap();
+        app.workspaces.clear();
+
+        assert!(app.start_automation_run(&run.id, 20));
+        assert!(app.orch.tasks.is_empty());
+        assert_eq!(
+            app.automation.run(&run.id).unwrap().status,
+            RunStatus::Failed
+        );
+        assert_eq!(
+            app.automation.run(&run.id).unwrap().error.as_deref(),
+            Some("no active session")
+        );
     }
 }

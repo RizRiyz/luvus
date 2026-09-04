@@ -395,19 +395,15 @@ fn render_automations(
     if body.height > 0 {
         draw_automation_header(f, header, body.width >= 80, cat, t);
     }
-    if state.automations.is_empty() && body.height > 1 {
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                format!("{}: {}", cat.board_automations, cat.board_none),
-                Style::new().fg(t.overlay1),
-            )),
-            Rect::new(
-                body.x.saturating_add(3),
-                body.y + 2,
-                body.width.saturating_sub(3),
-                1,
-            ),
+    if state.automations.is_empty() {
+        let empty = Rect::new(
+            body.x,
+            body.y.saturating_add(1),
+            body.width,
+            body.height.saturating_sub(1),
         );
+        draw_automation_empty(f, empty, cat, t);
+        return BoardRender { scroll: 0, hits };
     }
     let cursor = cursor.min(state.automations.len().saturating_sub(1));
     let capacity = body.height.saturating_sub(1) as usize;
@@ -697,12 +693,11 @@ fn draw_empty(f: &mut RenderTarget, area: Rect, cat: &Catalog, t: &Theme) {
     let text = |value: String| Span::styled(value, Style::new().fg(t.subtext0));
     let mut lines = vec![
         Line::from(Span::styled(
-            format!("  {}", cat.board_empty),
+            cat.board_empty,
             Style::new().fg(t.text).bold(),
         )),
         Line::from(""),
         Line::from(vec![
-            Span::raw("  "),
             key("a"),
             text(format!(" {}  ·  ", cat.act_new)),
             key("s"),
@@ -717,12 +712,68 @@ fn draw_empty(f: &mut RenderTarget, area: Rect, cat: &Catalog, t: &Theme) {
         lines.extend([
             Line::from(""),
             Line::from(Span::styled(
-                "  luvus task add \"…\" --paths src/x/** --gate \"cargo test\"",
+                "luvus task add \"…\" --paths src/x/** --gate \"cargo test\"",
                 Style::new().fg(t.overlay0),
             )),
         ]);
     }
-    f.render_widget(Paragraph::new(lines), area);
+    draw_centered_empty(f, area, lines);
+}
+
+fn draw_automation_empty(f: &mut RenderTarget, area: Rect, cat: &Catalog, t: &Theme) {
+    if area.height == 0 {
+        return;
+    }
+    let key = |key: &'static str| {
+        Span::styled(
+            format!(" {key} "),
+            Style::new().fg(t.base).bg(t.accent).bold(),
+        )
+    };
+    let text = |value: String| Span::styled(value, Style::new().fg(t.subtext0));
+    let mut lines = vec![
+        Line::from(Span::styled(
+            cat.automation_empty,
+            Style::new().fg(t.text).bold(),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            key("a"),
+            text(format!(" {}  ·  ", cat.act_new)),
+            key("e"),
+            text(format!(" {}  ·  ", cat.board_automation_toggle)),
+            key("r"),
+            text(format!(" {}  ·  ", cat.board_start)),
+            key("o"),
+            text(format!(" {}", cat.board_details)),
+        ]),
+    ];
+    if area.height >= 5 {
+        lines.extend([
+            Line::from(""),
+            Line::from(Span::styled(
+                "luvus automation create --help",
+                Style::new().fg(t.overlay0),
+            )),
+        ]);
+    }
+    draw_centered_empty(f, area, lines);
+}
+
+fn draw_centered_empty(f: &mut RenderTarget, area: Rect, lines: Vec<Line<'_>>) {
+    let rows = centered_rows(area, lines.len() as u16);
+    f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), rows);
+}
+
+fn centered_rows(area: Rect, height: u16) -> Rect {
+    let height = height.min(area.height);
+    Rect::new(
+        area.x,
+        area.y
+            .saturating_add(area.height.saturating_sub(height) / 2),
+        area.width,
+        height,
+    )
 }
 
 /// Explain the orchestration lifecycle in the detail column while the board is
@@ -992,7 +1043,11 @@ fn draw_flow(
                     prefix(13),
                     Span::styled("└─ ", border),
                     Span::styled(cat.board_quality_gate.to_uppercase(), text),
-                    Span::styled(format!("  ↺ {}", cat.task_failed), Style::new().fg(t.coral)),
+                ]),
+                Line::from(vec![
+                    prefix(16),
+                    Span::styled("├─ ", border),
+                    Span::styled(format!("↺ {}", cat.task_failed), Style::new().fg(t.coral)),
                 ]),
                 Line::from(vec![
                     prefix(16),
@@ -1201,7 +1256,11 @@ fn draw_flow(
                 prefix(10),
                 Span::styled("└─ ", border),
                 Span::styled(cat.board_quality_gate.to_uppercase(), text),
-                Span::styled(format!("  ↺ {}", cat.task_failed), Style::new().fg(t.coral)),
+            ]),
+            Line::from(vec![
+                prefix(13),
+                Span::styled("├─ ", border),
+                Span::styled(format!("↺ {}", cat.task_failed), Style::new().fg(t.coral)),
             ]),
             Line::from(vec![
                 prefix(13),
@@ -1470,7 +1529,11 @@ pub(super) fn draw_form(
             crate::app::OrchFormStart::Weekly => cat.automation_weekly,
         };
         let value = if field == crate::app::OrchFormField::Start {
-            start_label.to_string()
+            if form.kind == crate::app::OrchFormKind::Automation && !form.timezone.is_empty() {
+                format!("{start_label} · {}", form.timezone)
+            } else {
+                start_label.to_string()
+            }
         } else if field == crate::app::OrchFormField::RunIn {
             match form.mode {
                 crate::orch::TaskWorkerMode::Worktree => cat.board_worktree.to_string(),
@@ -2063,7 +2126,10 @@ pub(super) fn draw_detail(
     );
     DetailRender {
         scroll,
-        hits: vec![(crate::app::OrchHit::DetailClose, close)],
+        hits: vec![
+            (crate::app::OrchHit::DetailClose, close),
+            (crate::app::OrchHit::DetailModal, modal),
+        ],
     }
 }
 
@@ -2097,12 +2163,6 @@ pub(super) fn draw_automation_detail(
         .style(Style::new().bg(t.surface0));
     let inner = block.inner(modal);
     f.render_widget(block, modal);
-
-    let close = Rect::new(modal.right().saturating_sub(3), modal.y, 2, 1);
-    f.render_widget(
-        Paragraph::new(Span::styled("×", Style::new().fg(t.subtext0).bold())),
-        close,
-    );
 
     let (status, color) = automation_status(state, &automation.id, cat, t);
     let mut lines = vec![
@@ -2273,8 +2333,8 @@ pub(super) fn draw_automation_detail(
     DetailRender {
         scroll,
         hits: vec![
-            (crate::app::OrchHit::DetailClose, close),
             (crate::app::OrchHit::DetailOpenOrch, open_rect),
+            (crate::app::OrchHit::DetailModal, modal),
         ],
     }
 }
@@ -2370,6 +2430,102 @@ fn pad(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_task_and_automation_messages_share_centered_emphasis() {
+        let theme = Theme::quattro_rally();
+
+        let task_area = Rect::new(0, 0, 80, 15);
+        let mut task_buffer = Buffer::empty(task_area);
+        let mut task_target = RenderTarget::new(&mut task_buffer, task_area);
+        draw_empty(&mut task_target, task_area, &crate::i18n::EN, &theme);
+        let task_y = 5;
+        let task_x =
+            (task_area.width as usize - super::display_width(crate::i18n::EN.board_empty)) / 2;
+        let task_cell = &task_buffer[(task_x as u16, task_y)];
+        assert_eq!(task_cell.symbol(), "N");
+        assert_eq!(task_cell.fg, theme.text);
+        assert!(task_cell.modifier.contains(ratatui::style::Modifier::BOLD));
+
+        let automation_area = Rect::new(0, 0, 80, 20);
+        let mut automation_buffer = Buffer::empty(automation_area);
+        let mut automation_target = RenderTarget::new(&mut automation_buffer, automation_area);
+        render_automations(
+            &mut automation_target,
+            automation_area,
+            AutomationRender {
+                state: &AutomationState::default(),
+                cursor: 0,
+                compact: false,
+                catalog: &crate::i18n::EN,
+                theme: &theme,
+            },
+            Vec::new(),
+        );
+        let automation_text = crate::i18n::EN.automation_empty;
+        let automation_row: String = (0..automation_area.width)
+            .map(|x| automation_buffer[(x, 9)].symbol())
+            .collect();
+        assert_eq!(automation_row.trim(), automation_text);
+        let automation_x = automation_row.find('N').expect("centered automation text");
+        let trailing =
+            automation_area.width as usize - automation_x - super::display_width(automation_text);
+        assert!(automation_x.abs_diff(trailing) <= 1);
+        let automation_cell = &automation_buffer[(automation_x as u16, 9)];
+        assert_eq!(automation_cell.symbol(), "N");
+        assert_eq!(automation_cell.fg, theme.text);
+        assert!(automation_cell
+            .modifier
+            .contains(ratatui::style::Modifier::BOLD));
+        let command_row: String = (0..automation_area.width)
+            .map(|x| automation_buffer[(x, 13)].symbol())
+            .collect();
+        assert_eq!(command_row.trim(), "luvus automation create --help");
+    }
+
+    #[test]
+    fn compact_flow_keeps_gate_failure_and_success_branches_visible() {
+        for mode in [
+            crate::orch::TaskWorkerMode::Worktree,
+            crate::orch::TaskWorkerMode::Workspace,
+        ] {
+            let area = Rect::new(0, 0, 31, 18);
+            let mut buffer = Buffer::empty(area);
+            let mut target = RenderTarget::new(&mut buffer, area);
+            draw_flow(
+                &mut target,
+                area,
+                mode,
+                &crate::i18n::EN,
+                &Theme::quattro_rally(),
+            );
+            let rows = (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            let gate_row = rows
+                .iter()
+                .position(|row| row.contains("QUALITY GATE"))
+                .expect("quality gate remains visible after narrowing");
+            let failure_row = rows
+                .iter()
+                .position(|row| row.contains("↺ failed"))
+                .expect("complete failure branch remains visible after narrowing");
+            assert_ne!(gate_row, failure_row);
+            match mode {
+                crate::orch::TaskWorkerMode::Worktree => {
+                    assert!(rows.iter().any(|row| row.contains("MERGE")));
+                    assert!(rows.iter().any(|row| row.contains("◆ MERGED")));
+                }
+                crate::orch::TaskWorkerMode::Workspace => {
+                    assert!(rows.iter().any(|row| row.contains("◆ DONE")));
+                }
+            }
+        }
+    }
 
     #[test]
     fn short_mode_picker_registers_hits_only_inside_its_body() {
