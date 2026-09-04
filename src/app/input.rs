@@ -1161,10 +1161,15 @@ impl App {
         let first = |rects: &[Rect]| rects.iter().copied().find(|rect| hit(*rect));
 
         if self.named_session_menu.is_some() {
-            if let Some(menu) = &self.session_menu {
-                if let Some(rect) = menu.items.iter().map(|(_, r)| *r).find(|r| hit(*r)) {
-                    return Some(rect);
+            if self.session_menu.is_some() {
+                if let Some(menu) = &self.session_menu {
+                    if let Some(rect) = menu.items.iter().map(|(_, r)| *r).find(|r| hit(*r)) {
+                        return Some(rect);
+                    }
                 }
+                // Hover stays inside the Stop menu while it is open — do not
+                // highlight the session list behind it when moving the mouse.
+                return self.named_session_close_rect.filter(|rect| hit(*rect));
             }
             return self
                 .named_session_close_rect
@@ -1422,11 +1427,8 @@ impl App {
                             self.session_menu = None;
                         }
                     }
-                    MouseEventKind::ScrollUp if !self.menu_scroll.wheel(m.column, m.row, -1) => {
-                        self.move_named_session_cursor(-1);
-                    }
-                    MouseEventKind::ScrollDown if !self.menu_scroll.wheel(m.column, m.row, 1) => {
-                        self.move_named_session_cursor(1);
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                        let _ = self.menu_scroll.wheel(m.column, m.row, 0);
                     }
                     _ => {}
                 }

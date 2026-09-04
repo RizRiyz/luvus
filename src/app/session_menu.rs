@@ -603,7 +603,7 @@ mod tests {
         assert!(row.running && !row.current);
         assert!(menu.preparing);
         assert!(!(row.running && !row.current && !menu.preparing));
-        // Direct guard on open_session_menu: ineligible rows must clear stale menu.
+        // Ineligible rows must clear stale menu.
         app.session_menu = Some(crate::app::SessionMenu {
             name: "old".into(),
             anchor: (0, 0),
@@ -624,7 +624,6 @@ mod tests {
             app.session_menu.is_none(),
             "stopped row must clear stale Stop menu"
         );
-        // Eligible row still opens.
         app.open_session_menu("other".into(), 5, 6, true, false);
         assert!(app.session_menu.is_some());
         assert_eq!(app.session_menu.as_ref().unwrap().name, "other");
