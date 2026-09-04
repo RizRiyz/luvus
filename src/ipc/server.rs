@@ -569,6 +569,9 @@ pub fn run() -> Result<()> {
         if app.tick_toast(Instant::now()) {
             render_request.record(RenderCause::Metadata);
         }
+        if app.tick_copy_highlight(Instant::now()) {
+            render_request.record(RenderCause::Metadata);
+        }
         // Likewise for an expired search-jump flash (docs/63).
         if app.tick_search_flash(Instant::now()) {
             render_request.record(RenderCause::Metadata);
