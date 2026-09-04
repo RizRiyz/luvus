@@ -1418,15 +1418,11 @@ impl App {
                             self.session_menu = None;
                         }
                     }
-                    MouseEventKind::ScrollUp => {
-                        if !self.menu_scroll.wheel(m.column, m.row, -1) {
-                            self.move_named_session_cursor(-1);
-                        }
+                    MouseEventKind::ScrollUp if !self.menu_scroll.wheel(m.column, m.row, -1) => {
+                        self.move_named_session_cursor(-1);
                     }
-                    MouseEventKind::ScrollDown => {
-                        if !self.menu_scroll.wheel(m.column, m.row, 1) {
-                            self.move_named_session_cursor(1);
-                        }
+                    MouseEventKind::ScrollDown if !self.menu_scroll.wheel(m.column, m.row, 1) => {
+                        self.move_named_session_cursor(1);
                     }
                     _ => {}
                 }
