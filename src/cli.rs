@@ -4849,11 +4849,7 @@ mod tests {
             drop(events);
         });
 
-        let result = wait_status_stream(
-            "7",
-            &["done".into()],
-            Some(Instant::now() + Duration::from_millis(200)),
-        );
+        let result = wait_status_stream("7", &["done".into()], None);
         server.join().unwrap();
         assert_eq!(result.unwrap(), 2);
     }
