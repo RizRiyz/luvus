@@ -5356,7 +5356,7 @@ impl App {
         }))
     }
 
-    fn reorder_workspace_block(
+    pub(crate) fn reorder_workspace_block(
         &mut self,
         block: &[usize],
         to: usize,

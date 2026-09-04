@@ -1311,6 +1311,178 @@ impl App {
             .map(|(pane, note_id, _)| (*pane, note_id.clone()))
     }
 
+    fn begin_workspace_drag(&mut self, column: u16, row: u16) -> bool {
+        let Some((workspace, _)) = self.ws_rects.iter().find(|(_, rect)| {
+            column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
+        }) else {
+            return false;
+        };
+        let workspace = *workspace;
+        let Some(workspace_id) = self
+            .workspaces
+            .get(workspace)
+            .map(|workspace| workspace.id.clone())
+        else {
+            return false;
+        };
+        // Preserve the existing click contract: a workspace focuses on press.
+        // If this becomes a drag, reorder keeps that same stable identity active.
+        self.active_ws = workspace;
+        self.workspace_drag = Some(WorkspaceDrag {
+            workspace_id,
+            origin: (column, row),
+            target_workspace_id: None,
+            target_after: false,
+            moved: false,
+        });
+        true
+    }
+
+    fn update_workspace_drag(&mut self, column: u16, row: u16) {
+        let Some((source_id, origin, was_moved)) = self
+            .workspace_drag
+            .as_ref()
+            .map(|drag| (drag.workspace_id.clone(), drag.origin, drag.moved))
+        else {
+            return;
+        };
+        let moved = was_moved || (column, row) != origin;
+        if !moved {
+            return;
+        }
+
+        // Reaching an edge scrolls one workspace at a time. Geometry is rebuilt
+        // by the requested frame; the next drag event then resolves the newly
+        // visible row without doing any work on the render path.
+        if row <= self.workspaces_area.y && self.workspaces_scroll > 0 {
+            self.workspaces_scroll -= 1;
+        } else if row.saturating_add(1) >= self.workspaces_area.bottom() {
+            self.workspaces_scroll = self.workspaces_scroll.saturating_add(1);
+        }
+
+        let source = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == source_id);
+        let inside = column >= self.workspaces_area.x
+            && column < self.workspaces_area.right()
+            && row >= self.workspaces_area.y
+            && row < self.workspaces_area.bottom();
+        let target = source.filter(|_| inside).and_then(|source| {
+            let (target, _) = self.ws_rects.iter().min_by_key(|(_, rect)| {
+                if row < rect.y {
+                    rect.y - row
+                } else if row >= rect.bottom() {
+                    row - rect.bottom() + 1
+                } else {
+                    0
+                }
+            })?;
+            let target = *target;
+            let source_group = self.workspace_display_group(source);
+            let target_group = self.workspace_display_group(target);
+            if source_group.is_empty()
+                || target_group.is_empty()
+                || source_group == target_group
+                || source_group
+                    .iter()
+                    .any(|workspace| self.workspaces[*workspace].pinned)
+                    != target_group
+                        .iter()
+                        .any(|workspace| self.workspaces[*workspace].pinned)
+            {
+                return None;
+            }
+
+            let visible: Vec<_> = self
+                .ws_rects
+                .iter()
+                .filter(|(workspace, _)| target_group.contains(workspace))
+                .map(|(_, rect)| *rect)
+                .collect();
+            let top = visible.iter().map(|rect| rect.y).min()?;
+            let bottom = visible.iter().map(|rect| rect.bottom()).max()?;
+            let after = row >= top + bottom.saturating_sub(top) / 2;
+            let leader = self.workspaces.get(target_group[0])?.id.clone();
+            Some((leader, after))
+        });
+
+        if let Some(drag) = self.workspace_drag.as_mut() {
+            drag.moved = moved;
+            drag.target_workspace_id = target.as_ref().map(|(id, _)| id.clone());
+            drag.target_after = target.is_some_and(|(_, after)| after);
+        }
+    }
+
+    fn finish_workspace_drag(&mut self) {
+        let Some(drag) = self.workspace_drag.take() else {
+            return;
+        };
+        let Some(source) = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == drag.workspace_id)
+        else {
+            return;
+        };
+        if !drag.moved {
+            self.active_ws = source;
+            return;
+        }
+        let Some(target) = drag.target_workspace_id.and_then(|id| {
+            self.workspaces
+                .iter()
+                .position(|workspace| workspace.id == id)
+        }) else {
+            return;
+        };
+        self.reorder_workspace_drag_group(source, target, drag.target_after);
+    }
+
+    fn reorder_workspace_drag_group(&mut self, source: usize, target: usize, after: bool) {
+        let block = self.workspace_display_group(source);
+        let target_group = self.workspace_display_group(target);
+        if block.is_empty() || target_group.is_empty() || block == target_group {
+            return;
+        }
+        let source_pinned = block
+            .iter()
+            .any(|workspace| self.workspaces[*workspace].pinned);
+        let target_pinned = target_group
+            .iter()
+            .any(|workspace| self.workspaces[*workspace].pinned);
+        if source_pinned != target_pinned {
+            return;
+        }
+
+        let selected: std::collections::HashSet<_> = block.iter().copied().collect();
+        let survivors: Vec<_> = (0..self.workspaces.len())
+            .filter(|workspace| !selected.contains(workspace))
+            .collect();
+        // Insert relative to the group's leader, not its last raw member. Linked
+        // children may be scattered later in storage but the display projection
+        // pulls them beside their leader; placing after that leader therefore
+        // produces the exact visual slot immediately after the complete group.
+        let Some(target_position) = survivors
+            .iter()
+            .position(|workspace| *workspace == target_group[0])
+        else {
+            return;
+        };
+        let to = if after {
+            target_position + 1
+        } else {
+            target_position
+        };
+        let original = block.clone();
+        if let Ok(positions) = self.reorder_workspace_block(&block, to) {
+            self.emit_event(
+                "workspace.block_moved",
+                serde_json::json!({"workspaces":original,"positions":positions}),
+            );
+        }
+    }
+
     fn apply_mouse(&mut self, m: ratatui::crossterm::event::MouseEvent) {
         use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
         // A new primary-button gesture replaces any copied mouse selection,
@@ -1319,6 +1491,7 @@ impl App {
         // click through one of those early-return paths.
         if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
             self.clear_selection();
+            self.workspace_drag = None;
         }
         // Track the cursor for hover affordances (e.g. the session delete ✕).
         self.hover = Some((m.column, m.row));
@@ -1807,6 +1980,12 @@ impl App {
                 if self.begin_dock_resize(m.column, m.row) {
                     return;
                 }
+                // A WORKSPACES row owns the complete gesture. A stationary
+                // release keeps click-to-focus; movement turns it into a group
+                // reorder without leaking selection into a pane underneath.
+                if self.begin_workspace_drag(m.column, m.row) {
+                    return;
+                }
                 // Pane resize (docs/27) takes priority over selection: a divider
                 // sits on borders/gaps, outside any content rect, so grabbing one
                 // never conflicts. RESIZE-2 = drag the divider directly;
@@ -1910,6 +2089,12 @@ impl App {
                 return;
             }
             MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Middle) => {
+                if matches!(m.kind, MouseEventKind::Drag(MouseButton::Left))
+                    && self.workspace_drag.is_some()
+                {
+                    self.update_workspace_drag(m.column, m.row);
+                    return;
+                }
                 // A `Ctrl`+press that began on a link turns into a divider grab
                 // the moment it moves; a link only opens on a release that never
                 // left its cell.
@@ -1951,6 +2136,13 @@ impl App {
                 return;
             }
             MouseEventKind::Up(MouseButton::Left) | MouseEventKind::Up(MouseButton::Middle) => {
+                if matches!(m.kind, MouseEventKind::Up(MouseButton::Left))
+                    && self.workspace_drag.is_some()
+                {
+                    self.update_workspace_drag(m.column, m.row);
+                    self.finish_workspace_drag();
+                    return;
+                }
                 // A double-click already copied and scheduled its highlight
                 // expiry on press. Its release only closes the gesture.
                 if self.dbl_click_release {

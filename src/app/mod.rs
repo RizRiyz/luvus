@@ -1141,6 +1141,17 @@ pub struct Workspace {
     pub pinned: bool,
 }
 
+/// A left-button gesture armed on a WORKSPACES row. Identities stay stable while
+/// the underlying workspace vector is reordered; the target is the leader of a
+/// complete workspace/worktree display group.
+pub struct WorkspaceDrag {
+    pub workspace_id: String,
+    pub origin: (u16, u16),
+    pub target_workspace_id: Option<String>,
+    pub target_after: bool,
+    pub moved: bool,
+}
+
 /// A native agent session reported by an integration hook (M6), used to resume
 /// the agent after a restart (e.g. `claude --resume <id>`).
 #[derive(Clone)]
@@ -2082,6 +2093,9 @@ pub struct App {
     pub tab_rects: Vec<(usize, Rect)>,
     pub tab_close_rects: Vec<(usize, Rect)>,
     pub ws_rects: Vec<(usize, Rect)>,
+    /// Workspace row gesture currently being clicked or dragged. A press and
+    /// release without movement remains the ordinary focus action.
+    pub workspace_drag: Option<WorkspaceDrag>,
     /// Clickable view-selector tabs in the active git tab (Commits/Flow/…).
     pub git_section_rects: Vec<(crate::git::Section, Rect)>,
     /// The All/Active filter toggle in the AGENTS header (`bool` = active_only).
@@ -2461,6 +2475,7 @@ impl App {
             last_main_area: Rect::ZERO,
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
+            workspace_drag: None,
             git_section_rects: Vec::new(),
             agents_filter_rects: Vec::new(),
             agent_rects: Vec::new(),
@@ -3081,6 +3096,7 @@ impl App {
             last_main_area: Rect::ZERO,
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
+            workspace_drag: None,
             git_section_rects: Vec::new(),
             agents_filter_rects: Vec::new(),
             agent_rects: Vec::new(),
@@ -4072,6 +4088,27 @@ impl App {
         self.workspace_display_order()
             .iter()
             .position(|&(workspace, _)| workspace == index)
+    }
+
+    /// The complete display group containing `index`: a root workspace followed
+    /// by each linked worktree nested beneath it. Drag reordering uses the group
+    /// as its smallest movable unit so the sidebar hierarchy cannot be split.
+    pub fn workspace_display_group(&self, index: usize) -> Vec<usize> {
+        let order = self.workspace_display_order();
+        let Some(mut start) = order.iter().position(|&(workspace, _)| workspace == index) else {
+            return Vec::new();
+        };
+        while start > 0 && order[start].1 {
+            start -= 1;
+        }
+        let mut end = start + 1;
+        while end < order.len() && order[end].1 {
+            end += 1;
+        }
+        order[start..end]
+            .iter()
+            .map(|&(workspace, _)| workspace)
+            .collect()
     }
 
     /// Create a git worktree for `branch` off `repo` and open it as a workspace
@@ -10951,6 +10988,267 @@ mod tests {
         assert!(
             app.workspaces_scroll > 0,
             "the active workspace was scrolled into view"
+        );
+    }
+
+    #[test]
+    fn workspace_row_click_focuses_but_drag_reorders_and_persists() {
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let _env = crate::persist::test_env("workspace-row-drag");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.new_workspace();
+        app.new_workspace();
+        for (workspace, name) in app.workspaces.iter_mut().zip(["alpha", "beta", "gamma"]) {
+            workspace.name = name.into();
+            workspace.worktree = None;
+        }
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let draw = |app: &mut App, term: &mut Terminal<TestBackend>| {
+            term.draw(|frame| crate::ui::render(frame, app)).unwrap();
+        };
+        let mouse = |kind, at: (u16, u16)| {
+            AppEvent::Mouse(MouseEvent {
+                kind,
+                column: at.0,
+                row: at.1,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+
+        draw(&mut app, &mut term);
+        let alpha = app
+            .ws_rects
+            .iter()
+            .find(|(index, _)| *index == 0)
+            .unwrap()
+            .1;
+        let alpha_at = (alpha.x + 2, alpha.y);
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), alpha_at));
+        assert!(
+            app.workspace_drag.is_some(),
+            "the row press owns the gesture"
+        );
+        app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), alpha_at));
+        assert_eq!(
+            app.ws().name,
+            "alpha",
+            "a stationary gesture remains a click"
+        );
+
+        draw(&mut app, &mut term);
+        let gamma = app
+            .ws_rects
+            .iter()
+            .find(|(index, _)| *index == 2)
+            .unwrap()
+            .1;
+        let alpha = app
+            .ws_rects
+            .iter()
+            .find(|(index, _)| *index == 0)
+            .unwrap()
+            .1;
+        let gamma_at = (gamma.x + 2, gamma.y);
+        let before_alpha = (alpha.x + 2, alpha.y);
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), gamma_at));
+        app.handle_event(mouse(MouseEventKind::Drag(MouseButton::Left), before_alpha));
+        draw(&mut app, &mut term);
+        assert_eq!(
+            term.backend()
+                .buffer()
+                .cell((alpha.x + 1, alpha.y))
+                .unwrap()
+                .symbol(),
+            "▲",
+            "dragging above a row publishes a visible insertion marker"
+        );
+        app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), before_alpha));
+
+        assert_eq!(
+            app.workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_str())
+                .collect::<Vec<_>>(),
+            ["gamma", "alpha", "beta"]
+        );
+        assert_eq!(
+            app.ws().name,
+            "gamma",
+            "the active workspace keeps its identity"
+        );
+        assert!(app.workspace_drag.is_none());
+        assert!(app.session_dirty);
+        assert_eq!(
+            crate::persist::snapshot(&app)
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_str())
+                .collect::<Vec<_>>(),
+            ["gamma", "alpha", "beta"],
+            "the session snapshot preserves the dragged order"
+        );
+    }
+
+    #[test]
+    fn workspace_drag_moves_a_linked_worktree_group_as_one_unit() {
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let _env = crate::persist::test_env("workspace-worktree-group-drag");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.new_workspace();
+        app.new_workspace();
+        for (workspace, name) in app.workspaces.iter_mut().zip(["parent", "other", "child"]) {
+            workspace.name = name.into();
+            workspace.worktree = None;
+        }
+        let common_dir = PathBuf::from("/repo/group/.git");
+        app.workspaces[0].worktree = Some(crate::git::WorktreeMembership {
+            common_dir: common_dir.clone(),
+            linked: false,
+        });
+        app.workspaces[2].worktree = Some(crate::git::WorktreeMembership {
+            common_dir,
+            linked: true,
+        });
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let child = app
+            .ws_rects
+            .iter()
+            .find(|(index, _)| *index == 2)
+            .unwrap()
+            .1;
+        let other = app
+            .ws_rects
+            .iter()
+            .find(|(index, _)| *index == 1)
+            .unwrap()
+            .1;
+        let event = |kind, at: (u16, u16)| {
+            AppEvent::Mouse(MouseEvent {
+                kind,
+                column: at.0,
+                row: at.1,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let child_at = (child.x + 2, child.y);
+        let after_other = (other.x + 2, other.y + 1);
+
+        app.handle_event(event(MouseEventKind::Down(MouseButton::Left), child_at));
+        app.handle_event(event(MouseEventKind::Drag(MouseButton::Left), after_other));
+        app.handle_event(event(MouseEventKind::Up(MouseButton::Left), after_other));
+
+        assert_eq!(
+            app.workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_str())
+                .collect::<Vec<_>>(),
+            ["other", "parent", "child"],
+            "dragging either member moves the complete display group"
+        );
+        assert_eq!(
+            app.workspace_display_order()
+                .into_iter()
+                .map(|(index, nested)| (app.workspaces[index].name.as_str(), nested))
+                .collect::<Vec<_>>(),
+            [("other", false), ("parent", false), ("child", true)]
+        );
+
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let other = app
+            .ws_rects
+            .iter()
+            .find(|(index, _)| app.workspaces[*index].name == "other")
+            .unwrap()
+            .1;
+        let child = app
+            .ws_rects
+            .iter()
+            .find(|(index, _)| app.workspaces[*index].name == "child")
+            .unwrap()
+            .1;
+        let other_at = (other.x + 2, other.y);
+        let after_group = (child.x + 2, child.y + 1);
+        app.handle_event(event(MouseEventKind::Down(MouseButton::Left), other_at));
+        app.handle_event(event(MouseEventKind::Drag(MouseButton::Left), after_group));
+        app.handle_event(event(MouseEventKind::Up(MouseButton::Left), after_group));
+        assert_eq!(
+            app.workspace_display_order()
+                .into_iter()
+                .map(|(index, nested)| (app.workspaces[index].name.as_str(), nested))
+                .collect::<Vec<_>>(),
+            [("parent", false), ("child", true), ("other", false)],
+            "dropping after a group uses its visual edge even when the linked child was non-contiguous in storage"
+        );
+    }
+
+    #[test]
+    fn workspace_drag_does_not_cross_the_pinned_boundary() {
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let _env = crate::persist::test_env("workspace-pinned-drag-boundary");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.new_workspace();
+        app.new_workspace();
+        for (workspace, name) in app.workspaces.iter_mut().zip(["alpha", "pinned", "gamma"]) {
+            workspace.name = name.into();
+            workspace.worktree = None;
+        }
+        app.workspaces[1].pinned = true;
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let gamma = app
+            .ws_rects
+            .iter()
+            .find(|(index, _)| *index == 2)
+            .unwrap()
+            .1;
+        let pinned = app
+            .ws_rects
+            .iter()
+            .find(|(index, _)| *index == 1)
+            .unwrap()
+            .1;
+        let event = |kind, at: (u16, u16)| {
+            AppEvent::Mouse(MouseEvent {
+                kind,
+                column: at.0,
+                row: at.1,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let gamma_at = (gamma.x + 2, gamma.y);
+        let pinned_at = (pinned.x + 2, pinned.y);
+
+        app.handle_event(event(MouseEventKind::Down(MouseButton::Left), gamma_at));
+        app.handle_event(event(MouseEventKind::Drag(MouseButton::Left), pinned_at));
+        assert!(
+            app.workspace_drag
+                .as_ref()
+                .is_some_and(|drag| drag.target_workspace_id.is_none()),
+            "a different pin cohort is not a valid drop target"
+        );
+        app.handle_event(event(MouseEventKind::Up(MouseButton::Left), pinned_at));
+        assert_eq!(
+            app.workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "pinned", "gamma"]
         );
     }
 
