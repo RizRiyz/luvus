@@ -8,6 +8,7 @@ mod model;
 mod persist;
 mod schedule;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -545,6 +546,8 @@ impl AutomationState {
             status,
             attempt: 1,
             error,
+            trigger: Some(automation.trigger.clone()),
+            policy: automation.policy.clone(),
             task: automation.task.clone(),
         };
         self.runs.push(run.clone());
@@ -629,6 +632,84 @@ impl AutomationState {
                 .drain(..self.idempotency.len() - MAX_IDEMPOTENCY_KEYS);
         }
         self.refresh_deadline();
+    }
+
+    pub(super) fn validate_loaded(&self) -> Result<(), Reject> {
+        if self.automations.len() > MAX_AUTOMATIONS {
+            return Err(Reject::new(
+                "automation_limit",
+                format!("at most {MAX_AUTOMATIONS} automations are allowed"),
+            ));
+        }
+
+        let mut automation_ids = HashSet::with_capacity(self.automations.len());
+        for automation in &self.automations {
+            validate_identifier("automation.id", &automation.id)?;
+            if !automation_ids.insert(automation.id.as_str()) {
+                return Err(Reject::new(
+                    "invalid_ledger",
+                    format!("duplicate automation id: {}", automation.id),
+                ));
+            }
+            validate_definition(
+                &automation.name,
+                &automation.trigger,
+                &automation.task,
+                &automation.policy,
+            )?;
+            if automation.enabled != automation.next_run_at.is_some() {
+                return Err(Reject::new(
+                    "invalid_ledger",
+                    format!(
+                        "automation {} has inconsistent enabled and next-run state",
+                        automation.id
+                    ),
+                ));
+            }
+            if let Some(next_run_at) = automation.next_run_at {
+                let valid_occurrence =
+                    schedule::first_at_or_after(&automation.trigger, next_run_at)
+                        == Some(next_run_at);
+                if !valid_occurrence {
+                    return Err(Reject::new(
+                        "invalid_ledger",
+                        format!(
+                            "automation {} has a next run outside its schedule",
+                            automation.id
+                        ),
+                    ));
+                }
+            }
+        }
+
+        let mut run_ids = HashSet::with_capacity(self.runs.len().min(MAX_RUNS));
+        for run in &self.runs {
+            validate_identifier("run.id", &run.id)?;
+            validate_identifier("run.automation_id", &run.automation_id)?;
+            if !run_ids.insert(run.id.as_str()) {
+                return Err(Reject::new(
+                    "invalid_ledger",
+                    format!("duplicate automation run id: {}", run.id),
+                ));
+            }
+            validate_task(&run.task)?;
+            if let Some(trigger) = run.trigger.as_ref() {
+                schedule::validate(trigger)?;
+            }
+            validate_policy(&run.policy)?;
+            if run
+                .error
+                .as_ref()
+                .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+            {
+                return Err(Reject::new(
+                    "field_limit",
+                    format!("run.error must be at most {MAX_ERROR_BYTES} bytes"),
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     fn refresh_deadline(&mut self) {
@@ -832,13 +913,66 @@ pub fn parse_weekday(value: &str) -> Result<u8, Reject> {
 }
 
 fn validate_create(input: &CreateAutomation, now: u64) -> Result<(), Reject> {
-    validate_text("name", &input.name, MAX_NAME_BYTES)?;
-    validate_text("task.title", &input.task.title, MAX_TITLE_BYTES)?;
-    validate_text("task.prompt", &input.task.prompt, MAX_PROMPT_BYTES)?;
-    validate_text("task.agent_id", &input.task.agent_id, 64)?;
-    validate_text("task.workspace_id", &input.task.workspace_id, 128)?;
-    if input
-        .task
+    validate_definition(&input.name, &input.trigger, &input.task, &input.policy)?;
+    if input.enabled && schedule::first_at_or_after(&input.trigger, now).is_none() {
+        return Err(Reject::new(
+            "schedule_expired",
+            "the schedule has no occurrence at or after the current UTC time",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_definition(
+    name: &str,
+    trigger: &Trigger,
+    task: &TaskTemplate,
+    policy: &AutomationPolicy,
+) -> Result<(), Reject> {
+    validate_text("name", name, MAX_NAME_BYTES)?;
+    validate_task(task)?;
+    validate_policy(policy)?;
+    schedule::validate(trigger)
+}
+
+fn validate_task(task: &TaskTemplate) -> Result<(), Reject> {
+    validate_text("task.title", &task.title, MAX_TITLE_BYTES)?;
+    validate_text("task.prompt", &task.prompt, MAX_PROMPT_BYTES)?;
+    if crate::orch::contains_terminal_control(&task.prompt) {
+        return Err(Reject::new(
+            "invalid_prompt",
+            "task.prompt must not contain terminal control characters",
+        ));
+    }
+    validate_text("task.agent_id", &task.agent_id, 64)?;
+    validate_text("task.workspace_id", &task.workspace_id, 128)?;
+    if task.paths.len() > crate::orch::MAX_LEASE_PATHS {
+        return Err(Reject::new(
+            "path_limit",
+            format!(
+                "task.paths must contain at most {} entries",
+                crate::orch::MAX_LEASE_PATHS
+            ),
+        ));
+    }
+    for path in &task.paths {
+        if path.trim().is_empty() {
+            return Err(Reject::new(
+                "bad_request",
+                "task.paths cannot contain blanks",
+            ));
+        }
+        if path.len() > crate::orch::MAX_LEASE_PATH_BYTES {
+            return Err(Reject::new(
+                "path_limit",
+                format!(
+                    "each task path must be at most {} bytes",
+                    crate::orch::MAX_LEASE_PATH_BYTES
+                ),
+            ));
+        }
+    }
+    if task
         .gate
         .as_ref()
         .is_some_and(|gate| gate.len() > MAX_GATE_BYTES)
@@ -848,17 +982,25 @@ fn validate_create(input: &CreateAutomation, now: u64) -> Result<(), Reject> {
             format!("task.gate must be at most {MAX_GATE_BYTES} bytes"),
         ));
     }
-    if input.policy.misfire_grace_seconds > 31_536_000 {
+    Ok(())
+}
+
+fn validate_policy(policy: &AutomationPolicy) -> Result<(), Reject> {
+    if policy.misfire_grace_seconds > 31_536_000 {
         return Err(Reject::new(
             "invalid_policy",
             "misfire_grace_seconds must not exceed one year",
         ));
     }
-    schedule::validate(&input.trigger)?;
-    if input.enabled && schedule::first_at_or_after(&input.trigger, now).is_none() {
+    Ok(())
+}
+
+fn validate_identifier(field: &str, value: &str) -> Result<(), Reject> {
+    validate_text(field, value, 128)?;
+    if value.chars().any(char::is_control) {
         return Err(Reject::new(
-            "schedule_expired",
-            "the schedule has no occurrence at or after the current UTC time",
+            "invalid_ledger",
+            format!("{field} must not contain control characters"),
         ));
     }
     Ok(())
@@ -954,6 +1096,18 @@ mod tests {
     }
 
     #[test]
+    fn create_rejects_terminal_controls_in_prompt() {
+        let mut state = AutomationState::default();
+        let mut definition = input(Trigger::Once { at_utc: 100 });
+        definition.task.prompt = "review this\nthen run something".into();
+
+        let error = state.create(definition, None, 10).unwrap_err();
+
+        assert_eq!(error.code, "invalid_prompt");
+        assert!(state.automations.is_empty());
+    }
+
+    #[test]
     fn run_retry_returns_the_original_occurrence() {
         let mut state = AutomationState::default();
         let automation = state
@@ -979,6 +1133,28 @@ mod tests {
                 .code,
             "idempotency_conflict"
         );
+    }
+
+    #[test]
+    fn run_snapshots_trigger_policy_and_task_before_definition_edits() {
+        let mut state = AutomationState::default();
+        let original_trigger = Trigger::Interval {
+            every_seconds: 60,
+            anchor_utc: 100,
+        };
+        let mut original = input(original_trigger.clone());
+        original.policy.overlap = OverlapPolicy::QueueOne;
+        let automation = state.create(original.clone(), None, 10).unwrap();
+        let run = state.request_run(&automation.id, None, 20).unwrap();
+
+        let mut changed = input(Trigger::Once { at_utc: 500 });
+        changed.task.prompt = "A later briefing".into();
+        state.update(&automation.id, changed, 30).unwrap();
+
+        let persisted = state.run(&run.id).unwrap();
+        assert_eq!(persisted.trigger.as_ref(), Some(&original_trigger));
+        assert_eq!(persisted.policy, original.policy);
+        assert_eq!(persisted.task.prompt, original.task.prompt);
     }
 
     #[test]

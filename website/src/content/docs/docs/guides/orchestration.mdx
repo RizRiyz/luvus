@@ -58,13 +58,16 @@ leases, live. Navigate with `j`/`k`, the wheel, or click a row. On a wide
 terminal, the selected task's branch, paths, gate, output, and notes stay visible
 in a detail panel.
 
-The header switches between **Tasks** and **Automations**. The automation view
+The header switches between **Tasks** and **Automations BETA**. The automation view
 shows the definition state, retained schedule, next UTC deadline, target agent,
 and target workspace. Use `e` to pause or re-enable the selected definition,
 `r` to request one run without advancing its schedule, and `D` to delete an
-idle definition. Armed definitions also appear in the sidebar's Active agents
-section as `scheduled`; the placeholder is replaced by the normal live agent
-row when its ORCH task starts. Mission Control shows aggregate armed, live,
+idle definition. Press `o` or `Enter` to inspect its trigger, timezone, next five
+occurrences, execution policy, task template, and bounded run history. Armed
+definitions also appear in the sidebar's Active agents section as `scheduled`;
+the placeholder is replaced by the normal live agent row when its ORCH task
+starts. Clicking a scheduled placeholder or a Mission Control automation row
+opens the same read-only detail. Mission Control shows aggregate armed, live,
 review, and failed automation health without polling usage data.
 
 Mouse controls follow the same validated actions as the keyboard and CLI:
@@ -90,6 +93,7 @@ before an action is chosen.
 |-----|--------|
 | `Tab` | switch between the Tasks and Automations views |
 | `a` | **new**: open Task creation from Tasks or Automation creation from Automations (`Tab` switches type, `↑`/`↓` moves fields, `⏎` creates) |
+| `o` / `Enter` | inspect the selected automation when the Automations view is active |
 | `s` | **start**: choose worktree/workspace mode, then choose an agent |
 | `d` | **done**: runs its quality gate (pass → done, fail → held at review) |
 | `m` | **merge** into `luvus/integration` |

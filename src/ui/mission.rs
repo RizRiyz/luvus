@@ -14,9 +14,9 @@ fn draw_automation_health(
     health: crate::automation::AutomationHealth,
     rows: &[crate::automation::AutomationView],
     t: &Theme,
-) {
+) -> Vec<(String, Rect)> {
     if area.height == 0 {
-        return;
+        return Vec::new();
     }
     let state = if health.review > 0 || health.failed > 0 {
         ("ATTENTION", t.coral)
@@ -46,13 +46,13 @@ fn draw_automation_health(
             ])),
             area,
         );
-        return;
+        return Vec::new();
     }
     let block = deck_block("AUTOMATIONS", t, false);
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height == 0 {
-        return;
+        return Vec::new();
     }
     f.render_widget(
         Paragraph::new(Span::styled(
@@ -61,6 +61,7 @@ fn draw_automation_health(
         )),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
+    let mut hits = Vec::new();
     for (index, row) in rows
         .iter()
         .take(inner.height.saturating_sub(1) as usize)
@@ -79,6 +80,7 @@ fn draw_automation_health(
             .and_then(|seconds| jiff::Timestamp::from_second(seconds).ok())
             .map(|value| value.to_string())
             .unwrap_or_else(|| "—".into());
+        let rect = Rect::new(inner.x, inner.y + 1 + index as u16, inner.width, 1);
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
@@ -94,9 +96,11 @@ fn draw_automation_health(
                     Style::new().fg(t.overlay1),
                 ),
             ])),
-            Rect::new(inner.x, inner.y + 1 + index as u16, inner.width, 1),
+            rect,
         );
+        hits.push((row.id.clone(), rect));
     }
+    hits
 }
 
 /// Format a token count compactly: `945`, `12.3k`, `1.2M`.
@@ -902,6 +906,7 @@ pub(super) fn render(
             scroll: 0,
             scope_rects: Vec::new(),
             refresh_rect: None,
+            automation_rects: Vec::new(),
             row_rects: Vec::new(),
         };
     }
@@ -924,7 +929,8 @@ pub(super) fn render(
     draw_header(f, header, rows, scope, cat, t);
     let (scope_rects, refresh_rect) = draw_scope_tabs(f, scopes, scope, refreshing, cat, t);
     draw_metrics(f, metrics, rows, burn, budget, cat, t);
-    draw_automation_health(f, automation_area, automation, automation_rows, t);
+    let automation_rects =
+        draw_automation_health(f, automation_area, automation, automation_rows, t);
 
     let cursor = cursor.min(rows.len().saturating_sub(1));
     let rendered = if body.width >= 78 && body.height >= 14 {
@@ -968,6 +974,7 @@ pub(super) fn render(
         scroll: rendered.scroll,
         scope_rects,
         refresh_rect,
+        automation_rects,
         row_rects: rendered.row_rects,
     }
 }
@@ -976,6 +983,7 @@ pub(super) struct MissionRender {
     pub scroll: usize,
     pub scope_rects: Vec<(MissionScope, Rect)>,
     pub refresh_rect: Option<Rect>,
+    pub automation_rects: Vec<(String, Rect)>,
     pub row_rects: Vec<(usize, Rect)>,
 }
 

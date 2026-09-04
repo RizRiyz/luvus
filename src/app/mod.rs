@@ -1360,6 +1360,7 @@ pub enum OrchHit {
     StartCommit,
     StartCancel,
     DetailClose,
+    DetailOpenOrch,
 }
 
 /// ORCH shows the selected task beside the fleet at this viewport size.
@@ -2016,6 +2017,9 @@ pub struct App {
     /// Task whose detail overlay is open on the board (`o`), plus its scroll.
     pub orch_detail: Option<String>,
     pub orch_detail_scroll: usize,
+    /// Next automation occurrences captured when its detail is opened. Keeping
+    /// this bounded preview out of rendering avoids calendar work per frame.
+    pub orch_automation_preview: Vec<u64>,
     /// Last agent chosen in the start picker — the next picker opens on it.
     pub orch_last_agent: usize,
     /// The board's content rect, for mouse-wheel hit-testing.
@@ -2037,6 +2041,8 @@ pub struct App {
     pub mission_scope: crate::mission::MissionScope,
     /// Click targets for the two scope tabs and visible agent rows.
     pub mission_scope_rects: Vec<(crate::mission::MissionScope, Rect)>,
+    /// Read-only automation rows in Mission Control, keyed by stable definition ID.
+    pub mission_automation_rects: Vec<(String, Rect)>,
     pub mission_row_rects: Vec<(usize, Rect)>,
     /// Click target for the explicit Mission Control usage refresh action.
     pub mission_refresh_rect: Option<Rect>,
@@ -2368,6 +2374,9 @@ pub struct App {
     /// The All/Active filter toggle in the AGENTS header (`bool` = active_only).
     pub agents_filter_rects: Vec<(bool, Rect)>,
     pub agent_rects: Vec<(PaneId, Rect)>,
+    /// Armed automation placeholders in the AGENTS dock. Their stable IDs open
+    /// read-only detail because no pane exists to focus yet.
+    pub automation_rects: Vec<(String, Rect)>,
     /// Resumable-session rows in the sidebar (index into `resumable`).
     pub session_rects: Vec<(usize, Rect)>,
     /// The ✕ delete buttons on hovered resumable rows (index into `resumable`).
@@ -2590,6 +2599,7 @@ impl App {
             orch_start: None,
             orch_detail: None,
             orch_detail_scroll: 0,
+            orch_automation_preview: Vec::new(),
             orch_last_agent: 0,
             orch_area: Rect::ZERO,
             orch_hits: Vec::new(),
@@ -2599,6 +2609,7 @@ impl App {
             mission_cursor: 0,
             mission_scope: crate::mission::MissionScope::Workspace,
             mission_scope_rects: Vec::new(),
+            mission_automation_rects: Vec::new(),
             mission_row_rects: Vec::new(),
             mission_refresh_rect: None,
             mission_area: Rect::ZERO,
@@ -2750,6 +2761,7 @@ impl App {
             git_section_rects: Vec::new(),
             agents_filter_rects: Vec::new(),
             agent_rects: Vec::new(),
+            automation_rects: Vec::new(),
             session_rects: Vec::new(),
             tab_close_rects: Vec::new(),
             new_ws_rect: None,
@@ -3215,6 +3227,7 @@ impl App {
             orch_start: None,
             orch_detail: None,
             orch_detail_scroll: 0,
+            orch_automation_preview: Vec::new(),
             orch_last_agent: 0,
             orch_area: Rect::ZERO,
             orch_hits: Vec::new(),
@@ -3224,6 +3237,7 @@ impl App {
             mission_cursor: 0,
             mission_scope: crate::mission::MissionScope::Workspace,
             mission_scope_rects: Vec::new(),
+            mission_automation_rects: Vec::new(),
             mission_row_rects: Vec::new(),
             mission_refresh_rect: None,
             mission_area: Rect::ZERO,
@@ -3375,6 +3389,7 @@ impl App {
             git_section_rects: Vec::new(),
             agents_filter_rects: Vec::new(),
             agent_rects: Vec::new(),
+            automation_rects: Vec::new(),
             session_rects: Vec::new(),
             tab_close_rects: Vec::new(),
             new_ws_rect: None,

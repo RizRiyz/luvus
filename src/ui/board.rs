@@ -7,7 +7,7 @@
 use super::*;
 use crate::app::OrchForm;
 use crate::app::OrchView;
-use crate::automation::{AutomationState, RunStatus, Trigger};
+use crate::automation::{Automation, AutomationState, RunStatus, Trigger};
 use crate::i18n::Catalog;
 use crate::orch::{OrchState, Task, TaskStatus};
 use ratatui::widgets::{Borders, Clear, Wrap};
@@ -109,7 +109,10 @@ pub(super) fn render(
     let mut view_x = area.x.saturating_add(display_width(&title) as u16);
     for (kind, label) in [
         (OrchView::Tasks, cat.board_tasks.to_uppercase()),
-        (OrchView::Automations, cat.board_automations.to_uppercase()),
+        (
+            OrchView::Automations,
+            format!("{} BETA", cat.board_automations.to_uppercase()),
+        ),
     ] {
         let text = format!(" {label} ");
         let width =
@@ -482,6 +485,7 @@ fn render_automations(
                     ("tab", cat.board_switch_type),
                     ("e", cat.board_automation_toggle),
                     ("r", cat.board_start),
+                    ("o", cat.board_details),
                     ("D", cat.act_delete),
                     ("q", cat.act_close),
                 ],
@@ -2060,6 +2064,255 @@ pub(super) fn draw_detail(
     DetailRender {
         scroll,
         hits: vec![(crate::app::OrchHit::DetailClose, close)],
+    }
+}
+
+pub(super) struct AutomationDetail<'a> {
+    pub automation: &'a Automation,
+    pub state: &'a AutomationState,
+    pub preview: &'a [u64],
+}
+
+pub(super) fn draw_automation_detail(
+    f: &mut RenderTarget,
+    area: Rect,
+    detail: AutomationDetail<'_>,
+    scroll: usize,
+    cat: &Catalog,
+    t: &Theme,
+) -> DetailRender {
+    let AutomationDetail {
+        automation,
+        state,
+        preview,
+    } = detail;
+    dim_backdrop(f, area, t);
+    let w = area.width.saturating_sub(6).clamp(44, 84).min(area.width);
+    let h = area.height.saturating_sub(4).clamp(10, 28).min(area.height);
+    let modal = centered_rect(area, w, h);
+    f.render_widget(Clear, modal);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(t.border_focus).bg(t.surface0))
+        .style(Style::new().bg(t.surface0));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+
+    let close = Rect::new(modal.right().saturating_sub(3), modal.y, 2, 1);
+    f.render_widget(
+        Paragraph::new(Span::styled("×", Style::new().fg(t.subtext0).bold())),
+        close,
+    );
+
+    let (status, color) = automation_status(state, &automation.id, cat, t);
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!(" {} ", automation.id),
+                Style::new().fg(t.subtext1).bold(),
+            ),
+            Span::styled(status, Style::new().fg(color)),
+            Span::styled(
+                format!("  {}", automation.name),
+                Style::new().fg(t.text).bold(),
+            ),
+        ]),
+        Line::from(""),
+    ];
+    let kv = |key: &str, value: String, lines: &mut Vec<Line>| {
+        if !value.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {}", pad(key, 12)), Style::new().fg(t.subtext0)),
+                Span::styled(value, Style::new().fg(t.text)),
+            ]));
+        }
+    };
+    kv(
+        cat.board_f_schedule,
+        schedule_label(&automation.trigger),
+        &mut lines,
+    );
+    if let Trigger::Daily { timezone, .. } | Trigger::Weekly { timezone, .. } = &automation.trigger
+    {
+        kv(cat.automation_timezone, timezone.clone(), &mut lines);
+    }
+    kv(
+        cat.col_next_utc,
+        automation
+            .next_run_at
+            .map(super::format_utc)
+            .unwrap_or_else(|| "—".into()),
+        &mut lines,
+    );
+    kv(
+        cat.board_f_agent,
+        automation.task.agent_id.clone(),
+        &mut lines,
+    );
+    kv(
+        cat.board_workspace,
+        automation.task.workspace_id.clone(),
+        &mut lines,
+    );
+    kv(
+        cat.board_run_in,
+        match automation.task.mode {
+            crate::orch::TaskWorkerMode::Worktree => cat.board_worktree,
+            crate::orch::TaskWorkerMode::Workspace => cat.board_workspace,
+        }
+        .to_string(),
+        &mut lines,
+    );
+    kv(
+        cat.board_f_paths,
+        automation.task.paths.join(" "),
+        &mut lines,
+    );
+    kv(
+        cat.board_f_gate,
+        automation.task.gate.clone().unwrap_or_default(),
+        &mut lines,
+    );
+    kv(
+        cat.automation_policy,
+        format!(
+            "misfire={} · overlap={} · grace={}s",
+            misfire_label(automation.policy.misfire),
+            overlap_label(automation.policy.overlap),
+            automation.policy.misfire_grace_seconds
+        ),
+        &mut lines,
+    );
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(" {} · {}", cat.board_f_schedule, cat.automation_next_five),
+        Style::new().fg(t.subtext1).bold(),
+    )));
+    for deadline in preview {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", super::format_utc(*deadline)),
+            Style::new().fg(t.overlay1),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(" {}", cat.board_f_prompt),
+        Style::new().fg(t.subtext1).bold(),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("  {}", automation.task.prompt),
+        Style::new().fg(t.text),
+    )));
+
+    let runs = state
+        .runs
+        .iter()
+        .rev()
+        .filter(|run| run.automation_id == automation.id)
+        .take(20)
+        .collect::<Vec<_>>();
+    if !runs.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" {}", cat.automation_history),
+            Style::new().fg(t.subtext1).bold(),
+        )));
+        for run in runs {
+            let task = run.task_id.as_deref().unwrap_or("—");
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {}", pad(run_status_label(run.status, cat), 10)),
+                    Style::new().fg(run_status_color(run.status, t)),
+                ),
+                Span::styled(
+                    format!("{} · {task}", super::format_utc(run.scheduled_at)),
+                    Style::new().fg(t.overlay1),
+                ),
+            ]));
+            if let Some(error) = &run.error {
+                lines.push(Line::from(Span::styled(
+                    format!("    {error}"),
+                    Style::new().fg(t.coral),
+                )));
+            }
+        }
+    }
+
+    let body = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
+    let visible = body.height as usize;
+    let scroll = scroll.min(lines.len().saturating_sub(visible));
+    f.render_widget(
+        Paragraph::new(lines)
+            .scroll((scroll as u16, 0))
+            .wrap(Wrap { trim: false }),
+        body,
+    );
+    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    let open_label = format!(" ⏎ {} ", cat.automation_open_orch);
+    let open_rect = Rect::new(
+        footer.x,
+        footer.y,
+        (super::display_width(&open_label) as u16).min(footer.width),
+        1,
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(open_label, Style::new().fg(t.accent).bold()),
+            Span::styled(
+                format!("  j/k {}  ·  esc {}", cat.act_select, cat.act_close),
+                Style::new().fg(t.overlay0),
+            ),
+        ])),
+        footer,
+    );
+    DetailRender {
+        scroll,
+        hits: vec![
+            (crate::app::OrchHit::DetailClose, close),
+            (crate::app::OrchHit::DetailOpenOrch, open_rect),
+        ],
+    }
+}
+
+fn misfire_label(policy: crate::automation::MisfirePolicy) -> &'static str {
+    match policy {
+        crate::automation::MisfirePolicy::Skip => "skip",
+        crate::automation::MisfirePolicy::RunLatest => "run_latest",
+    }
+}
+
+fn overlap_label(policy: crate::automation::OverlapPolicy) -> &'static str {
+    match policy {
+        crate::automation::OverlapPolicy::Skip => "skip",
+        crate::automation::OverlapPolicy::QueueOne => "queue_one",
+    }
+}
+
+fn run_status_label(status: RunStatus, cat: &Catalog) -> &str {
+    match status {
+        RunStatus::Pending => cat.task_queued,
+        RunStatus::Starting => cat.automation_starting,
+        RunStatus::Running => cat.task_running,
+        RunStatus::Review => cat.task_review,
+        RunStatus::Succeeded => cat.task_done,
+        RunStatus::Failed => cat.task_failed,
+        RunStatus::Skipped => cat.automation_skipped,
+        RunStatus::Cancelled => cat.automation_cancelled,
+    }
+}
+
+fn run_status_color(status: RunStatus, t: &Theme) -> Color {
+    match status {
+        RunStatus::Pending | RunStatus::Starting => t.accent,
+        RunStatus::Running | RunStatus::Succeeded => t.green,
+        RunStatus::Review => t.amber,
+        RunStatus::Failed => t.coral,
+        RunStatus::Skipped | RunStatus::Cancelled => t.overlay1,
     }
 }
 

@@ -171,6 +171,9 @@ Reusing a key with identical input returns the original object; reusing it with
 different input returns `idempotency_conflict`. Definitions are capped at 256,
 run history at 2,048, and idempotency records at 256. Missed occurrences use
 `skip` or `run_latest`; overlap uses `skip` or one bounded `queue_one` run.
+Task prompts are bounded to 32 KiB and reject terminal control characters
+because Luvus eventually delivers the generated briefing to an interactive
+agent pane.
 
 The read-only methods require the `read` scope. Every mutating automation
 method requires `orchestration`. A remote client should discover this contract

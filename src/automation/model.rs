@@ -145,6 +145,12 @@ pub struct AutomationRun {
     pub status: RunStatus,
     pub attempt: u8,
     pub error: Option<String>,
+    /// Snapshot the effective schedule and execution policy for auditability.
+    /// Older ledgers predate this field and therefore retain no trigger snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<Trigger>,
+    #[serde(default)]
+    pub policy: AutomationPolicy,
     /// Snapshot the work contract so later definition edits cannot mutate a run.
     pub task: TaskTemplate,
 }

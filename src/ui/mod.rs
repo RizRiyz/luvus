@@ -160,6 +160,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     let git_section_rects = std::mem::take(&mut app.git_section_rects);
     let agents_filter_rects = std::mem::take(&mut app.agents_filter_rects);
     let agent_rects = std::mem::take(&mut app.agent_rects);
+    let automation_rects = std::mem::take(&mut app.automation_rects);
     let session_rects = std::mem::take(&mut app.session_rects);
     let file_tree_rects = std::mem::take(&mut app.file_tree_rects);
     let files_mode_rects = std::mem::take(&mut app.files_mode_rects);
@@ -181,6 +182,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     let named_session_row_rects = std::mem::take(&mut app.named_session_row_rects);
     let mission_rows = std::mem::take(&mut app.mission_rows);
     let mission_scope_rects = std::mem::take(&mut app.mission_scope_rects);
+    let mission_automation_rects = std::mem::take(&mut app.mission_automation_rects);
     let mission_row_rects = std::mem::take(&mut app.mission_row_rects);
     let bar_hits = std::mem::take(&mut app.bar.hits);
     let bar_overflow_hits = std::mem::take(&mut app.bar.overflow_hits);
@@ -299,6 +301,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     app.git_section_rects = git_section_rects;
     app.agents_filter_rects = agents_filter_rects;
     app.agent_rects = agent_rects;
+    app.automation_rects = automation_rects;
     app.session_rects = session_rects;
     app.file_tree_rects = file_tree_rects;
     app.files_mode_rects = files_mode_rects;
@@ -320,6 +323,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     app.named_session_row_rects = named_session_row_rects;
     app.mission_rows = mission_rows;
     app.mission_scope_rects = mission_scope_rects;
+    app.mission_automation_rects = mission_automation_rects;
     app.mission_row_rects = mission_row_rects;
     app.bar.hits = bar_hits;
     app.bar.overflow_hits = bar_overflow_hits;
@@ -464,6 +468,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.bar.overflow_hits.clear();
     app.menu_scroll.begin_frame();
     app.mission_row_rects.clear();
+    app.mission_automation_rects.clear();
     app.orch_hits.clear();
     // Cleared with the other per-frame hit geometry, above every early return:
     // a frame that bails out (window too small, no workspace yet) must not
@@ -499,6 +504,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         app.tab_close_rects.clear();
         app.ws_rects.clear();
         app.agent_rects.clear();
+        app.automation_rects.clear();
         app.session_rects.clear();
         app.new_ws_rect = None;
         app.last_cursor = None;
@@ -633,13 +639,15 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.diff_note_rects.clear();
     let mut ws_rects = Vec::new();
     let mut agent_rects = Vec::new();
+    let mut automation_rects = Vec::new();
     let mut session_rects = Vec::new();
     let mut new_ws_rect = None;
     for (opt, side) in [(sidebar_left, Side::Left), (sidebar_right, Side::Right)] {
         if let Some(s) = opt {
-            let (w, a, se, n) = sidebar::draw_sidebar(f, side, s, app, &t);
+            let (w, a, scheduled, se, n) = sidebar::draw_sidebar(f, side, s, app, &t);
             ws_rects.extend(w);
             agent_rects.extend(a);
+            automation_rects.extend(scheduled);
             session_rects.extend(se);
             new_ws_rect = new_ws_rect.or(n);
         }
@@ -726,6 +734,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         app.mission_scroll = rendered.scroll;
         app.mission_scope_rects = rendered.scope_rects;
         app.mission_refresh_rect = rendered.refresh_rect;
+        app.mission_automation_rects = rendered.automation_rects;
         app.mission_row_rects = rendered.row_rects;
         app.mission_rows = rows;
         None
@@ -935,7 +944,23 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
             .tasks
             .iter()
             .find(|task| &task.id == id)
-            .map(|task| board::draw_detail(f, area, task, app.orch_detail_scroll, cat, &t));
+            .map(|task| board::draw_detail(f, area, task, app.orch_detail_scroll, cat, &t))
+            .or_else(|| {
+                app.automation.automation(id).map(|automation| {
+                    board::draw_automation_detail(
+                        f,
+                        area,
+                        board::AutomationDetail {
+                            automation,
+                            state: &app.automation,
+                            preview: &app.orch_automation_preview,
+                        },
+                        app.orch_detail_scroll,
+                        cat,
+                        &t,
+                    )
+                })
+            });
         if let Some(rendered) = clamped {
             app.orch_detail_scroll = rendered.scroll;
             app.orch_hits = rendered.hits;
@@ -1022,6 +1047,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.tab_next_rect = tab_next;
     app.ws_rects = ws_rects;
     app.agent_rects = agent_rects;
+    app.automation_rects = automation_rects;
     app.session_rects = session_rects;
     app.new_ws_rect = new_ws_rect;
 }

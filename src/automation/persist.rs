@@ -14,7 +14,10 @@ pub(super) fn load(path: PathBuf) -> AutomationState {
             Ok(metadata) if metadata.len() <= MAX_LEDGER_BYTES => {
                 match std::fs::read_to_string(&path) {
                     Ok(json) => match serde_json::from_str::<AutomationState>(&json) {
-                        Ok(state) if state.format_version <= super::AUTOMATION_FORMAT_VERSION => {
+                        Ok(state)
+                            if state.format_version <= super::AUTOMATION_FORMAT_VERSION
+                                && state.validate_loaded().is_ok() =>
+                        {
                             state
                         }
                         _ => {
@@ -84,13 +87,49 @@ pub(super) fn save(state: &AutomationState, path: &Path) -> std::io::Result<()> 
     file.write_all(&json)?;
     file.sync_all()?;
     drop(file);
-    crate::platform::atomic_replace_file(&temporary, path)
+    crate::platform::atomic_replace_file(&temporary, path)?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automation::AutomationState;
+    use crate::automation::{
+        AutomationPolicy, AutomationState, CreateAutomation, TaskTemplate, Trigger, MAX_AUTOMATIONS,
+    };
+
+    fn valid_input() -> CreateAutomation {
+        CreateAutomation {
+            name: "Nightly review".into(),
+            enabled: true,
+            trigger: Trigger::Once { at_utc: 100 },
+            task: TaskTemplate {
+                title: "Review changes".into(),
+                prompt: "Review the current changes.".into(),
+                agent_id: "codex".into(),
+                workspace_id: "workspace-1".into(),
+                mode: crate::orch::TaskWorkerMode::Workspace,
+                paths: Vec::new(),
+                gate: None,
+            },
+            policy: AutomationPolicy::default(),
+        }
+    }
+
+    fn write_ledger(path: &Path, state: &AutomationState) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("session dir");
+        }
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(state).expect("serialize ledger"),
+        )
+        .expect("seed ledger");
+    }
 
     #[test]
     fn corrupt_ledger_is_quarantined_before_default_load() {
@@ -123,5 +162,45 @@ mod tests {
             .save()
             .expect("fresh ledger saves to the original path");
         assert!(path.exists());
+    }
+
+    #[test]
+    fn syntactically_valid_unsafe_ledger_is_quarantined() {
+        let _env = crate::persist::test_env("automation-invalid-definition");
+        let path = crate::persist::session_dir().join("automations-invalid-definition.json");
+        let mut state = AutomationState::default();
+        state
+            .create(valid_input(), None, 10)
+            .expect("valid automation");
+        state.automations[0].task.prompt = "review\nthen execute".into();
+        write_ledger(&path, &state);
+
+        let loaded = load(path.clone());
+
+        assert!(loaded.automations.is_empty());
+        assert!(!path.exists(), "unsafe ledger must move aside");
+    }
+
+    #[test]
+    fn oversized_definition_set_is_quarantined_instead_of_truncated() {
+        let _env = crate::persist::test_env("automation-definition-limit");
+        let path = crate::persist::session_dir().join("automations-definition-limit.json");
+        let mut state = AutomationState::default();
+        let seed = state
+            .create(valid_input(), None, 10)
+            .expect("valid automation");
+        state.automations = (0..=MAX_AUTOMATIONS)
+            .map(|index| {
+                let mut automation = seed.clone();
+                automation.id = format!("a{}", index + 1);
+                automation
+            })
+            .collect();
+        write_ledger(&path, &state);
+
+        let loaded = load(path.clone());
+
+        assert!(loaded.automations.is_empty());
+        assert!(!path.exists(), "oversized ledger must move aside");
     }
 }

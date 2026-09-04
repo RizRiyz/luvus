@@ -34,17 +34,18 @@ fn rollup(app: &App, ws_index: usize) -> State {
 
 // ── sidebar ───────────────────────────────────────────────────────────────
 
-/// (workspace rows, live-agent rows, resumable-session rows, new-workspace button).
+/// Workspace, live-agent, scheduled-automation, resumable-session, and new-workspace hits.
 pub(super) type SidebarHits = (
     Vec<(usize, Rect)>,
     Vec<(PaneId, Rect)>,
+    Vec<(String, Rect)>,
     Vec<(usize, Rect)>,
     Option<Rect>,
 );
 
 /// Clickable geometry a single dock reports back to the container.
 type WorkspaceHits = (Vec<(usize, Rect)>, Option<Rect>);
-type AgentHits = (Vec<(PaneId, Rect)>, Vec<(usize, Rect)>);
+type AgentHits = (Vec<(PaneId, Rect)>, Vec<(String, Rect)>, Vec<(usize, Rect)>);
 
 /// Rows of sidebar chrome above the dock stack: the brand/menu row plus one
 /// blank separator row. The dock body, and therefore dock-height measurement
@@ -226,6 +227,7 @@ pub(super) fn draw_sidebar(
 
     let mut ws_rects = Vec::new();
     let mut agent_rects = Vec::new();
+    let mut automation_rects = Vec::new();
     let mut session_rects = Vec::new();
     let mut new_ws_rect = None;
     for (kind, slot) in docks.iter().zip(slots) {
@@ -236,8 +238,9 @@ pub(super) fn draw_sidebar(
                 new_ws_rect = n;
             }
             DockKind::Agents => {
-                let (a, s) = draw_agents_dock(f, slot, app, t);
+                let (a, scheduled, s) = draw_agents_dock(f, slot, app, t);
                 agent_rects = a;
+                automation_rects = scheduled;
                 session_rects = s;
             }
             DockKind::Files => super::files::draw_files_dock(f, slot, app, t),
@@ -245,7 +248,13 @@ pub(super) fn draw_sidebar(
         }
     }
 
-    (ws_rects, agent_rects, session_rects, new_ws_rect)
+    (
+        ws_rects,
+        agent_rects,
+        automation_rects,
+        session_rects,
+        new_ws_rect,
+    )
 }
 
 /// The left sidebar's chrome, all on the **top row** (`area.y`, aligned with the
@@ -533,6 +542,7 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
         }
     };
     let mut agent_rects = Vec::new();
+    let mut automation_rects = Vec::new();
     let mut session_rects = Vec::new();
 
     let aheader = area.y;
@@ -595,31 +605,58 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     if !app.pinned_agents.is_empty() {
         live.sort_by_key(|(id, _)| !app.pinned_agents.contains(id));
     }
-    // Armed definitions appear in Active as lightweight placeholders. They are
-    // not panes and therefore have no hit target. As soon as a due occurrence
-    // owns a live ORCH task, the normal pane row replaces this projection.
-    let mut scheduled: Vec<(String, String, u64)> = app
+    // Armed definitions appear in Active as lightweight placeholders. Their
+    // hit target opens read-only automation detail rather than focusing a pane.
+    // As soon as a due occurrence owns a live ORCH task, the ordinary pane row
+    // replaces this projection.
+    let mut scheduled: Vec<(String, String, String, u64, bool)> = app
         .automation
         .automations
         .iter()
-        .filter(|automation| {
-            automation.enabled
-                && automation.next_run_at.is_some()
-                && !app.automation.has_live_run(&automation.id)
-        })
         .filter_map(|automation| {
+            if !automation.enabled {
+                return None;
+            }
             let workspace = app
                 .workspaces
                 .iter()
                 .find(|workspace| workspace.id == automation.task.workspace_id)?;
+            let live_run = app
+                .automation
+                .runs
+                .iter()
+                .rev()
+                .find(|run| run.automation_id == automation.id && run.status.is_live());
+            let pane_backed = live_run
+                .and_then(|run| run.task_id.as_deref())
+                .and_then(|task| app.orch.task(task))
+                .and_then(|task| task.assignee)
+                .is_some_and(|pane| app.panes.contains_key(&PaneId(pane)));
+            if pane_backed
+                || live_run.is_some_and(|run| {
+                    matches!(
+                        run.status,
+                        crate::automation::RunStatus::Running
+                            | crate::automation::RunStatus::Review
+                    )
+                })
+            {
+                return None;
+            }
+            let starting = live_run.is_some();
+            let deadline = live_run
+                .map(|run| run.scheduled_at)
+                .or(automation.next_run_at)?;
             Some((
+                automation.id.clone(),
                 automation.task.agent_id.clone(),
                 workspace.name.clone(),
-                automation.next_run_at?,
+                deadline,
+                starting,
             ))
         })
         .collect();
-    scheduled.sort_by_key(|item| item.2);
+    scheduled.sort_by_key(|item| item.3);
     // In "Active" mode, hide the on-disk resumable session history.
     let atotal = if active_only {
         live.len() + scheduled.len()
@@ -714,10 +751,21 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                         }
                     }
                 }
-            } else if let Some((agent, workspace, deadline)) =
+            } else if let Some((automation, agent, workspace, deadline, starting)) =
                 scheduled.get(k.saturating_sub(live.len()))
             {
-                let label = format!(" {}  ", cat.automation_scheduled);
+                automation_rects.push((
+                    automation.clone(),
+                    Rect::new(area.x, y, area.width, ROW_STRIDE),
+                ));
+                let label = format!(
+                    " {}  ",
+                    if *starting {
+                        cat.automation_starting
+                    } else {
+                        cat.automation_scheduled
+                    }
+                );
                 let prefix_w = 1 + crate::ui::display_width(&label);
                 line_at(
                     f,
@@ -787,7 +835,7 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
         );
     }
 
-    (agent_rects, session_rects)
+    (agent_rects, automation_rects, session_rects)
 }
 
 /// A module-contributed dock (docs/29, DOCK-4): a header (its cached title) and

@@ -174,6 +174,13 @@ pub const MAX_LEASE_PATHS: usize = 64;
 /// Maximum UTF-8 byte length of one path pattern.
 pub const MAX_LEASE_PATH_BYTES: usize = 1024;
 
+/// Task briefings are sent to a live shell as terminal input. Reject control
+/// characters before launch so restored or remotely supplied task text cannot
+/// synthesize Enter, Escape, or another terminal action.
+pub(crate) fn contains_terminal_control(value: &str) -> bool {
+    value.chars().any(char::is_control)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Lease {
     pub id: String,
