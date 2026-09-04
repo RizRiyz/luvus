@@ -1385,19 +1385,23 @@ impl App {
                             .map(|(i, _)| *i)
                         {
                             if idx != 0 {
-                                if let Some(row) = self
-                                    .named_session_menu
-                                    .as_ref()
-                                    .and_then(|menu| menu.rows.get(idx - 1))
-                                {
-                                    if row.running && !row.current {
-                                        self.open_session_menu(
-                                            row.name.clone(),
-                                            m.column,
-                                            m.row,
-                                            row.running,
-                                            row.current,
-                                        );
+                                // Keep `menu` bound here so `menu.preparing` is in scope.
+                                // The previous `.and_then(|menu| menu.rows.get(..))` moves
+                                // `menu` into the closure, so a naive `&& !menu.preparing`
+                                // at the row check would not compile.
+                                if let Some(menu) = self.named_session_menu.as_ref() {
+                                    if let Some(row) = menu.rows.get(idx - 1) {
+                                        if row.running && !row.current && !menu.preparing {
+                                            self.open_session_menu(
+                                                row.name.clone(),
+                                                m.column,
+                                                m.row,
+                                                row.running,
+                                                row.current,
+                                            );
+                                        } else {
+                                            self.session_menu = None;
+                                        }
                                     } else {
                                         self.session_menu = None;
                                     }
@@ -1446,19 +1450,19 @@ impl App {
                         .map(|(i, _)| *i)
                     {
                         if idx != 0 {
-                            if let Some(row) = self
-                                .named_session_menu
-                                .as_ref()
-                                .and_then(|menu| menu.rows.get(idx - 1))
-                            {
-                                if row.running && !row.current {
-                                    self.open_session_menu(
-                                        row.name.clone(),
-                                        m.column,
-                                        m.row,
-                                        row.running,
-                                        row.current,
-                                    );
+                            // Same reason as the guard above: bind `menu` first so
+                            // `!menu.preparing` is available (`.and_then` would hide it).
+                            if let Some(menu) = self.named_session_menu.as_ref() {
+                                if let Some(row) = menu.rows.get(idx - 1) {
+                                    if row.running && !row.current && !menu.preparing {
+                                        self.open_session_menu(
+                                            row.name.clone(),
+                                            m.column,
+                                            m.row,
+                                            row.running,
+                                            row.current,
+                                        );
+                                    }
                                 }
                             }
                         }

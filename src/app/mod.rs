@@ -5352,6 +5352,7 @@ impl App {
         // Guard: only running non-current sessions are stoppable; opening on a
         // stopped/current row would show an empty menu, so treat as no-op.
         if !running || current {
+            self.session_menu = None;
             return;
         }
         self.session_menu = Some(SessionMenu {

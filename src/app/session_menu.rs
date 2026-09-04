@@ -577,4 +577,56 @@ mod tests {
         assert!(app.pending_session_switch.is_none());
         assert!(app.named_session_menu.is_some());
     }
+
+    #[test]
+    fn open_session_menu_creating_flag_blocks_stop_until_ready() {
+        let _env = crate::persist::test_env("named-session-menu-preparing-guard");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(100, 30, tx).unwrap();
+        app.named_session_menu = Some(NamedSessionMenu {
+            generation: 1,
+            rows: vec![NamedSessionRow {
+                name: "other".into(),
+                running: true,
+                current: false,
+            }],
+            cursor: 1,
+            scroll: 0,
+            loading: false,
+            prompt: None,
+            error: None,
+            preparing: true,
+        });
+        // Right-click guard is row.running && !row.current && !menu.preparing.
+        let menu = app.named_session_menu.as_ref().unwrap();
+        let row = &menu.rows[0];
+        assert!(row.running && !row.current);
+        assert!(menu.preparing);
+        assert!(!(row.running && !row.current && !menu.preparing));
+        // Direct guard on open_session_menu: ineligible rows must clear stale menu.
+        app.session_menu = Some(crate::app::SessionMenu {
+            name: "old".into(),
+            anchor: (0, 0),
+            items: Vec::new(),
+        });
+        app.open_session_menu("current".into(), 0, 0, true, true);
+        assert!(
+            app.session_menu.is_none(),
+            "current row must clear stale Stop menu"
+        );
+        app.session_menu = Some(crate::app::SessionMenu {
+            name: "old".into(),
+            anchor: (0, 0),
+            items: Vec::new(),
+        });
+        app.open_session_menu("stopped".into(), 0, 0, false, false);
+        assert!(
+            app.session_menu.is_none(),
+            "stopped row must clear stale Stop menu"
+        );
+        // Eligible row still opens.
+        app.open_session_menu("other".into(), 5, 6, true, false);
+        assert!(app.session_menu.is_some());
+        assert_eq!(app.session_menu.as_ref().unwrap().name, "other");
+    }
 }
