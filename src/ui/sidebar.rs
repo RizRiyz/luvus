@@ -699,7 +699,7 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                     y + 1,
                     Line::from(Span::styled(
                         crate::ui::truncate(
-                            &format!("  {workspace} · UTC {deadline}"),
+                            &format!("  {workspace} · UTC {}", super::format_utc(*deadline)),
                             cw as usize,
                         ),
                         Style::new().fg(t.overlay0),

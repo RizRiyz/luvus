@@ -29,7 +29,7 @@ fn draw_automation_health(
     };
     let next = health
         .next_run_at
-        .map(|deadline| format!("NEXT UTC {deadline}"))
+        .map(|deadline| format!("NEXT UTC {}", super::format_utc(deadline)))
         .unwrap_or_else(|| "NO UPCOMING RUN".into());
     if area.height == 1 {
         f.render_widget(

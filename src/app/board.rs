@@ -178,6 +178,18 @@ impl App {
         branch: Option<String>,
         requested_workspace: Option<&str>,
     ) -> Result<TaskStartResult, (String, String)> {
+        if let Some(id) = requested_workspace {
+            self.active_ws = self
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.id == id)
+                .ok_or_else(|| {
+                    (
+                        "workspace_not_found".to_string(),
+                        format!("workspace id {id} not found"),
+                    )
+                })?;
+        }
         let branch = branch
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
@@ -220,18 +232,6 @@ impl App {
             }
             path
         } else {
-            if let Some(id) = requested_workspace {
-                self.active_ws = self
-                    .workspaces
-                    .iter()
-                    .position(|workspace| workspace.id == id)
-                    .ok_or_else(|| {
-                        (
-                            "workspace_not_found".to_string(),
-                            format!("workspace id {id} not found"),
-                        )
-                    })?;
-            }
             let repo = self.ws().cwd.clone();
             if !crate::git::local::is_repo(&repo) {
                 return Err((
@@ -843,7 +843,7 @@ impl App {
         let tj = self
             .orch
             .task(id)
-            .and_then(|t| serde_json::to_value(t).ok())
+            .map(super::dispatch::task_json)
             .unwrap_or(serde_json::Value::Null);
         self.emit_event("task.done", tj);
         for rid in ready {
@@ -1077,10 +1077,7 @@ impl App {
             return Err(format!("could not save task: {error}"));
         }
         let id = task.id.clone();
-        self.emit_event(
-            "task.added",
-            serde_json::to_value(&task).unwrap_or(serde_json::Value::Null),
-        );
+        self.emit_event("task.added", super::dispatch::task_json(&task));
         self.orch_form = None;
         self.orch_view = crate::app::OrchView::Tasks;
         self.orch_cursor = self.orch.tasks.len().saturating_sub(1);

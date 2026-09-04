@@ -486,6 +486,13 @@ mod socket_api_tests {
         );
         assert_eq!(bad.unwrap_err().0, "invalid_timezone");
 
+        let automation_id = first["automation"]["id"].as_str().unwrap();
+        let run_params = json!({"id":automation_id, "idempotency_key":"run-1"});
+        let first_run = app.dispatch("automation.run", &run_params).unwrap();
+        let retry_run = app.dispatch("automation.run", &run_params).unwrap();
+        assert_eq!(first_run["run"]["id"], retry_run["run"]["id"]);
+        assert_eq!(app.automation.runs.len(), 1);
+
         app.workspaces.clear();
         let retry_after_workspace_closed = app.dispatch("automation.create", &params).unwrap();
         assert_eq!(
@@ -507,13 +514,10 @@ mod socket_api_tests {
                 .len(),
             1
         );
-
-        let automation_id = first["automation"]["id"].as_str().unwrap();
-        let run_params = json!({"id":automation_id, "idempotency_key":"run-1"});
-        let first_run = app.dispatch("automation.run", &run_params).unwrap();
-        let retry_run = app.dispatch("automation.run", &run_params).unwrap();
-        assert_eq!(first_run["run"]["id"], retry_run["run"]["id"]);
-        assert_eq!(app.automation.runs.len(), 1);
+        assert_eq!(
+            app.dispatch("automation.run", &run_params).unwrap_err().0,
+            "no_session"
+        );
     }
 
     #[test]
@@ -4232,6 +4236,9 @@ impl App {
             }
             "automation.run" => {
                 reject_api_fields(p, &["id", "idempotency_key"])?;
+                if self.workspaces.is_empty() {
+                    return Err(("no_session".into(), "no active session".into()));
+                }
                 let id = req_str(p, "id")?.to_string();
                 let now = crate::automation::unix_now();
                 if let Some(run) = self
@@ -6342,7 +6349,7 @@ fn task_worker_mode(
 }
 
 /// A `Task` as a JSON value for API results + bus events.
-fn task_json(t: &crate::orch::Task) -> Value {
+pub(crate) fn task_json(t: &crate::orch::Task) -> Value {
     let mut value = json!({
         "id": t.id,
         "title": t.title,

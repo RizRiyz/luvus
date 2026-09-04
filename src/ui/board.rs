@@ -432,7 +432,7 @@ fn render_automations(
         let (status, color) = automation_status(state, &automation.id, cat, t);
         let next = automation
             .next_run_at
-            .map(format_utc)
+            .map(super::format_utc)
             .unwrap_or_else(|| "—".into());
         let name = pad(&automation.name, 23);
         let line = if body.width >= 80 {
@@ -527,7 +527,7 @@ fn automation_status<'a>(
 
 fn schedule_label(trigger: &Trigger) -> String {
     match trigger {
-        Trigger::Once { at_utc } => format!("once {}", format_utc(*at_utc)),
+        Trigger::Once { at_utc } => format!("once {}", super::format_utc(*at_utc)),
         Trigger::Interval { every_seconds, .. } => format!("every {every_seconds}s"),
         Trigger::Daily { second_of_day, .. } => {
             format!("daily {}", wall_time(*second_of_day))
@@ -549,14 +549,6 @@ fn schedule_label(trigger: &Trigger) -> String {
 
 fn wall_time(seconds: u32) -> String {
     format!("{:02}:{:02}", seconds / 3600, (seconds % 3600) / 60)
-}
-
-fn format_utc(seconds: u64) -> String {
-    i64::try_from(seconds)
-        .ok()
-        .and_then(|seconds| jiff::Timestamp::from_second(seconds).ok())
-        .map(|instant| instant.to_string())
-        .unwrap_or_else(|| seconds.to_string())
 }
 
 fn row_is_hovered(row: Rect, hover: Option<(u16, u16)>) -> bool {

@@ -1119,6 +1119,15 @@ pub(super) fn dashboard_block(
 /// fit. Width-aware like `display_width` (a CJK glyph counts as two, and is never
 /// split), so a narrowed sidebar clips long node/agent/branch names gracefully
 /// instead of hard-cutting mid-glyph (docs/29).
+/// Format a UTC Unix timestamp for sidebar, board, and Mission Control labels.
+pub(crate) fn format_utc(seconds: u64) -> String {
+    i64::try_from(seconds)
+        .ok()
+        .and_then(|seconds| jiff::Timestamp::from_second(seconds).ok())
+        .map(|instant| instant.to_string())
+        .unwrap_or_else(|| seconds.to_string())
+}
+
 pub(crate) fn truncate(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();

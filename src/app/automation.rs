@@ -133,6 +133,24 @@ impl App {
             }
         };
 
+        if self.workspaces.is_empty() {
+            let message = "no active session".to_string();
+            let _ = self.automation.set_run_status(
+                run_id,
+                RunStatus::Failed,
+                Some(message.clone()),
+                now,
+            );
+            let _ = self.automation.save();
+            self.emit_event(
+                "automation.run_failed",
+                json!({"run_id": run_id, "automation_id": run.automation_id, "code": "no_session"}),
+            );
+            self.pending_notify
+                .push(format!("Automation {} could not start", run.automation_id));
+            return true;
+        }
+
         // A scheduled launch must not steal the attached client's workspace or
         // active tab. Snapshot presentation selection and restore it afterwards.
         let active_workspace = self
