@@ -1641,7 +1641,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
             crate::platform::open_url(&url);
         }
         if let Some(path) = app.pending_open_path.take() {
-            crate::platform::open_path(&path);
+            crate::platform::open_path(std::path::Path::new(&path));
         }
         if let Some(text) = app.pending_clipboard.take() {
             let notify = tx.clone();
