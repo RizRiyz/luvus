@@ -174,10 +174,16 @@ and your project list on the other. If you hide the left sidebar entirely, the
 **Menu** button moves to the right sidebar so Settings is always reachable.
 
 :::tip
-The **Agents** dock header has an **All / Active** toggle: *Active* shows only
-running agents, while *All* also lists the resumable sessions luvus found on disk (click
-one to reopen it). Luvus remembers the selected filter across restarts. See
-[Working with Agents](/docs/guides/agents/).
+The **Agents** dock has two independent filters. **All / Active** controls
+lifecycle: *Active* shows only running agents, while *All* also lists resumable
+sessions found on disk (click one to reopen it). When multiple workspaces are
+open, the **Here** chip on the next row scopes both live agents and resumable
+sessions to the active workspace. Both choices are remembered across restarts.
+
+Attention stays global while **Here** is selected. If another workspace has a
+blocked agent, one overflow line reports the count; click it to jump to that
+agent without clearing the scope. The scope chip is hidden when only one
+workspace is open. See [Working with Agents](/docs/guides/agents/).
 :::
 
 ## Luvus Bar

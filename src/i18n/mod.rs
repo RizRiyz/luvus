@@ -43,6 +43,14 @@ pub struct Catalog {
     pub no_agents_waiting: &'static str,
     pub all: &'static str,
     pub active: &'static str,
+    /// AGENTS scope chip: show only the active workspace's agents. Drawn beside
+    /// the dock title, and only when more than one workspace is open.
+    pub here: &'static str,
+    /// Overflow line shown when the dock is scoped to one workspace and other
+    /// workspaces hold blocked agents. `{n}` is the count; each language places
+    /// it where its own grammar needs it. Clicking the line jumps to that agent
+    /// rather than widening the list.
+    pub blocked_elsewhere: &'static str,
     pub menu: &'static str,
     pub copied: &'static str,
     /// Toast shown when a dock can't be placed because the target sidebar already
@@ -408,6 +416,8 @@ pub static EN: Catalog = Catalog {
     no_agents_waiting: "no agents waiting",
     all: "All",
     active: "Active",
+    here: "Here",
+    blocked_elsewhere: "{n} blocked in other workspaces",
     menu: "Menu",
     copied: "Copied to clipboard",
     sidebar_full: "Sidebar full; turn a dock off first",
@@ -754,6 +764,8 @@ static ES: Catalog = Catalog {
     no_agents_waiting: "no hay agentes esperando",
     all: "Todos",
     active: "Activos",
+    here: "Aquí",
+    blocked_elsewhere: "{n} bloqueados en otros espacios",
     menu: "Menú",
     copied: "Copiado al portapapeles",
     sidebar_full: "Barra lateral llena; desactiva un panel primero",
@@ -1100,6 +1112,8 @@ static PT: Catalog = Catalog {
     no_agents_waiting: "nenhum agente aguardando",
     all: "Todos",
     active: "Ativos",
+    here: "Aqui",
+    blocked_elsewhere: "{n} bloqueados em outros espaços",
     menu: "Menu",
     copied: "Copiado",
     sidebar_full: "Barra lateral cheia; desative um painel primeiro",
@@ -1446,6 +1460,8 @@ static FR: Catalog = Catalog {
     no_agents_waiting: "aucun agent en attente",
     all: "Tous",
     active: "Actifs",
+    here: "Ici",
+    blocked_elsewhere: "{n} bloqués dans d'autres espaces",
     menu: "Menu",
     copied: "Copié dans le presse-papiers",
     sidebar_full: "Barre latérale pleine ; désactivez un panneau d'abord",
@@ -1792,6 +1808,8 @@ static DE: Catalog = Catalog {
     no_agents_waiting: "keine wartenden Agenten",
     all: "Alle",
     active: "Aktiv",
+    here: "Hier",
+    blocked_elsewhere: "{n} in anderen Arbeitsbereichen blockiert",
     menu: "Menü",
     copied: "In Zwischenablage kopiert",
     sidebar_full: "Seitenleiste voll; zuerst ein Dock deaktivieren",
@@ -2138,6 +2156,8 @@ static ID: Catalog = Catalog {
     no_agents_waiting: "tidak ada agen menunggu",
     all: "Semua",
     active: "Aktif",
+    here: "Di sini",
+    blocked_elsewhere: "{n} terblokir di ruang kerja lain",
     menu: "Menu",
     copied: "Disalin ke papan klip",
     sidebar_full: "Bilah sisi penuh; matikan satu dock dulu",
@@ -2484,6 +2504,8 @@ static ZH: Catalog = Catalog {
     no_agents_waiting: "没有等待的代理",
     all: "全部",
     active: "活动",
+    here: "本工作区",
+    blocked_elsewhere: "其他工作区有 {n} 个被阻塞",
     menu: "菜单",
     copied: "已复制到剪贴板",
     sidebar_full: "侧边栏已满；请先关闭一个面板",
@@ -2830,6 +2852,8 @@ static JA: Catalog = Catalog {
     no_agents_waiting: "待機中のエージェントなし",
     all: "すべて",
     active: "アクティブ",
+    here: "このワークスペース",
+    blocked_elsewhere: "他のワークスペースで {n} 件がブロック中",
     menu: "メニュー",
     copied: "クリップボードにコピーしました",
     sidebar_full: "サイドバーが満杯です。先にドックを1つオフにしてください",
@@ -3176,6 +3200,8 @@ static KO: Catalog = Catalog {
     no_agents_waiting: "대기 중인 에이전트 없음",
     all: "전체",
     active: "활성",
+    here: "이 작업 공간",
+    blocked_elsewhere: "다른 작업 공간에서 {n}개 차단됨",
     menu: "메뉴",
     copied: "클립보드에 복사됨",
     sidebar_full: "사이드바가 가득 참; 먼저 도킹을 하나 끄세요",
@@ -3546,6 +3572,26 @@ mod tests {
         // An unknown code degrades to English, never panics.
         assert_eq!(by_code("xx").workspaces, EN.workspaces);
         assert_eq!(native_name("xx"), "English");
+    }
+
+    #[test]
+    fn agents_scope_text_is_complete_for_every_language() {
+        for &code in LANGS {
+            let catalog = by_code(code);
+            assert!(!catalog.here.trim().is_empty(), "{code} has a scope label");
+            assert_eq!(
+                catalog.blocked_elsewhere.matches("{n}").count(),
+                1,
+                "{code} owns one count placeholder"
+            );
+            assert!(
+                !catalog
+                    .blocked_elsewhere
+                    .replace("{n}", "2")
+                    .contains("{n}"),
+                "{code} renders the blocked count"
+            );
+        }
     }
 
     #[test]
