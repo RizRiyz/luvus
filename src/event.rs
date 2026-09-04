@@ -286,7 +286,10 @@ pub enum AppEvent {
     /// only validates and swaps the resulting live configuration.
     ConfigReloaded {
         id: String,
-        config: crate::config::Config,
+        /// Boxed: the whole config is by far the largest thing any event
+        /// carries, and every other `AppEvent` in the channel would otherwise
+        /// be padded to its size.
+        config: Box<crate::config::Config>,
         reply: Sender<String>,
     },
     /// Agent manifest IO and parsing completed on the socket worker.
@@ -341,4 +344,9 @@ pub enum AppEvent {
         reply: Sender<String>,
         cancelled: Arc<AtomicBool>,
     },
+    /// A termination signal arrived. The handler only writes a self-pipe; this
+    /// event wakes a sleeping event loop so shutdown does not wait on a timer.
+    /// Windows has no POSIX signals; the detached server stops via `server stop`.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Shutdown,
 }

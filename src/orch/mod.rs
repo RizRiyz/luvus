@@ -859,7 +859,12 @@ impl OrchState {
         file.write_all(json.as_bytes())?;
         file.sync_all()?;
         drop(file);
-        crate::platform::atomic_replace_file(&tmp, path)
+        crate::platform::atomic_replace_file(&tmp, path)?;
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
     }
 
     fn recover_interrupted_merges(&mut self) {

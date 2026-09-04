@@ -2259,7 +2259,7 @@ fn handle_conn(
         if event_tx
             .send(AppEvent::ConfigReloaded {
                 id: id.clone(),
-                config,
+                config: Box::new(config),
                 reply,
             })
             .is_err()

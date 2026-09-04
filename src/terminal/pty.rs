@@ -1,6 +1,6 @@
 //! PTY pane lifecycle. Unix panes use one poll-driven descriptor actor for
 //! ordered input and output; Windows keeps portable-pty's split reader/writer
-//! backend. Child waiting is shared process-wide.
+//! backend. Child waiting is one process-wide event-driven reaper.
 
 #[cfg(windows)]
 use std::io::Read;
@@ -8,10 +8,11 @@ use std::io::Read;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::mpsc::{self, Sender};
+#[cfg(unix)]
+use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 use anyhow::Result;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
@@ -23,102 +24,17 @@ use crate::terminal::backend::TerminalRuntime;
 use crate::terminal::vt::{create_engine, VtEngine, VtEngineKind};
 
 mod io;
-
-const CHILD_REAPER_INTERVAL: Duration = Duration::from_millis(50);
-
-struct ReaperEntry {
-    id: PaneId,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
-    child_exited: Arc<AtomicBool>,
-    app_tx: Sender<AppEvent>,
-}
-
-static CHILD_REAPER: OnceLock<Sender<ReaperEntry>> = OnceLock::new();
+mod reaper;
 
 #[cfg(test)]
-static CHILD_REAPER_STARTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Hand a child to the process-wide reaper. Pane I/O remains isolated behind
-/// its platform backend, but waiting for child exit needs no per-pane thread:
-/// `try_wait` is non-blocking on every portable-pty backend.
-fn register_child_reaper(
-    id: PaneId,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
-    child_exited: Arc<AtomicBool>,
-    app_tx: Sender<AppEvent>,
-) {
-    let reaper = CHILD_REAPER.get_or_init(|| {
-        let (tx, rx) = mpsc::channel();
-        thread::Builder::new()
-            .name("luvus-pty-reaper".to_string())
-            .spawn(move || child_reaper_loop(rx))
-            .expect("failed to start the PTY child reaper");
-        #[cfg(test)]
-        CHILD_REAPER_STARTS.fetch_add(1, Ordering::SeqCst);
-        tx
-    });
-    let entry = ReaperEntry {
-        id,
-        child,
-        child_exited,
-        app_tx,
-    };
-    if let Err(error) = reaper.send(entry) {
-        // A panic in the shared reaper must not leave an unreaped child. This
-        // fallback is deliberately exceptional; the normal path stays at one
-        // waiter thread for the whole server.
-        let mut entry = error.0;
-        let _ = thread::Builder::new()
-            .name("luvus-pty-reaper-fallback".to_string())
-            .spawn(move || {
-                let _ = entry.child.wait();
-                finish_child(entry);
-            });
-    }
-}
-
-fn child_reaper_loop(rx: Receiver<ReaperEntry>) {
-    let mut children = Vec::<ReaperEntry>::new();
-    loop {
-        let received = if children.is_empty() {
-            rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
-        } else {
-            rx.recv_timeout(CHILD_REAPER_INTERVAL)
-        };
-        match received {
-            Ok(entry) => children.push(entry),
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break,
-        }
-        children.extend(rx.try_iter());
-
-        let mut index = 0;
-        while index < children.len() {
-            if child_poll_finished(children[index].child.try_wait()) {
-                let entry = children.swap_remove(index);
-                finish_child(entry);
-            } else {
-                index += 1;
-            }
-        }
-    }
-}
-
-#[inline]
-fn child_poll_finished(result: std::io::Result<Option<portable_pty::ExitStatus>>) -> bool {
-    matches!(result, Ok(Some(_)))
-}
+use reaper::child_poll_finished;
+use reaper::register_child_reaper;
+#[cfg(all(test, unix))]
+use reaper::CHILD_REAPER_STARTS;
 
 fn terminate_spawned_child(child: &mut (dyn portable_pty::Child + Send + Sync)) {
     let _ = child.kill();
     let _ = child.wait();
-}
-
-fn finish_child(entry: ReaperEntry) {
-    // Publish exit before notifying the app. If the app immediately drops the
-    // pane, `Drop` must not signal a PID that the operating system may reuse.
-    entry.child_exited.store(true, Ordering::SeqCst);
-    let _ = entry.app_tx.send(AppEvent::PtyExit(entry.id));
 }
 
 pub(crate) enum InputAction {
@@ -1303,6 +1219,17 @@ mod reap_tests {
         assert_eq!(CHILD_REAPER_STARTS.load(Ordering::SeqCst), 1);
         drop(first);
         drop(second);
+    }
+
+    #[test]
+    fn dropping_a_live_child_is_still_reaped() {
+        let pane = spawn_sh();
+        let pid = pane.child_pid.load(Ordering::SeqCst);
+        assert_ne!(pid, 0);
+        assert!(alive(pid));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(pane);
+        assert!(wait_gone(pid), "exit is still reaped without a timer");
     }
 
     /// A deferred pane (docs/82) is fully usable before its shell exists:

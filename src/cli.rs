@@ -3702,6 +3702,7 @@ fn automation_definition_params(
         .transpose()?
         .unwrap_or(3600);
     let mut obj = serde_json::Map::new();
+    let updating = id.is_some();
     if let Some(id) = id {
         obj.insert("id".into(), json!(id));
     }
@@ -3731,8 +3732,15 @@ fn automation_definition_params(
             "misfire_grace_seconds":grace,
         }),
     );
-    if let Some(key) = flag(args, "--idempotency-key") {
-        obj.insert("idempotency_key".into(), json!(key));
+    if updating && flag(args, "--idempotency-key").is_some() {
+        return Err(anyhow!(
+            "--idempotency-key is only valid for automation create"
+        ));
+    }
+    if !updating {
+        if let Some(key) = flag(args, "--idempotency-key") {
+            obj.insert("idempotency_key".into(), json!(key));
+        }
     }
     Ok(Value::Object(obj))
 }

@@ -487,8 +487,6 @@ def valid_global_request(value, methods):
             return False
         if mode == "workspace" and "branch" in params:
             return False
-        if mode == "worktree" and "workspace_id" in params:
-            return False
     if value["method"] in {"automation.list", "automation.health"}:
         return not value["params"]
     if value["method"] in {

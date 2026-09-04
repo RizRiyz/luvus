@@ -63,6 +63,9 @@ pub fn first_at_or_after(trigger: &Trigger, not_before: u64) -> Option<u64> {
             every_seconds,
             anchor_utc,
         } => {
+            if *every_seconds == 0 {
+                return None;
+            }
             if *anchor_utc >= not_before {
                 return Some(*anchor_utc);
             }
@@ -96,6 +99,9 @@ pub fn latest_at_or_before(trigger: &Trigger, at: u64) -> Option<u64> {
             every_seconds,
             anchor_utc,
         } => {
+            if *every_seconds == 0 {
+                return None;
+            }
             if *anchor_utc > at {
                 return None;
             }
@@ -264,6 +270,16 @@ mod tests {
             "2024-11-03T05:30:00Z"
         );
         assert!(next_after(&fold_trigger, fall).unwrap() > fall + 23 * 3600);
+    }
+
+    #[test]
+    fn zero_interval_never_schedules() {
+        let trigger = Trigger::Interval {
+            every_seconds: 0,
+            anchor_utc: 100,
+        };
+        assert_eq!(first_at_or_after(&trigger, 0), None);
+        assert_eq!(latest_at_or_before(&trigger, 200), None);
     }
 
     #[test]

@@ -388,16 +388,9 @@ fn render_automations(
         area.width.saturating_sub(2),
         area.height.saturating_sub(3 + footer_h),
     );
-    let header = if body.width >= 80 {
-        "   ID     STATE       NAME                    SCHEDULE                  NEXT UTC             AGENT"
-    } else {
-        "   ID     STATE       NAME                    NEXT UTC"
-    };
+    let header = Rect::new(body.x, body.y, body.width, 1);
     if body.height > 0 {
-        f.render_widget(
-            Paragraph::new(Span::styled(header, Style::new().fg(t.overlay0).bold())),
-            Rect::new(body.x, body.y, body.width, 1),
-        );
+        draw_automation_header(f, header, body.width >= 80, cat, t);
     }
     if state.automations.is_empty() && body.height > 1 {
         f.render_widget(
@@ -485,12 +478,12 @@ fn render_automations(
         f.render_widget(
             Paragraph::new(super::hint_line(
                 &[
-                    ("↑↓", "navigate"),
-                    ("tab", "view"),
-                    ("e", "enable / pause"),
-                    ("r", "run now"),
-                    ("D", "delete"),
-                    ("q", "close"),
+                    ("↑↓", cat.board_move_field),
+                    ("tab", cat.board_switch_type),
+                    ("e", cat.board_automation_toggle),
+                    ("r", cat.board_start),
+                    ("D", cat.act_delete),
+                    ("q", cat.act_close),
                 ],
                 t,
             )),
@@ -498,6 +491,31 @@ fn render_automations(
         );
     }
     BoardRender { scroll, hits }
+}
+
+fn draw_automation_header(f: &mut RenderTarget, area: Rect, wide: bool, cat: &Catalog, t: &Theme) {
+    let style = Style::new().fg(t.overlay1).bold();
+    if wide {
+        let line = format!(
+            "   {}     {}       {}                    {}                  {}             {}",
+            pad("ID", 2),
+            pad(&cat.col_status.to_uppercase(), 5),
+            pad(&cat.col_title.to_uppercase(), 4),
+            pad(&cat.board_f_schedule.to_uppercase(), 8),
+            pad(&cat.col_next_utc.to_uppercase(), 8),
+            pad(&cat.board_agent.to_uppercase(), 5),
+        );
+        f.render_widget(Paragraph::new(Span::styled(line, style)), area);
+    } else {
+        let line = format!(
+            "   {}     {}       {}                    {}",
+            pad("ID", 2),
+            pad(&cat.col_status.to_uppercase(), 5),
+            pad(&cat.col_title.to_uppercase(), 4),
+            pad(&cat.col_next_utc.to_uppercase(), 8),
+        );
+        f.render_widget(Paragraph::new(Span::styled(line, style)), area);
+    }
 }
 
 fn automation_status<'a>(

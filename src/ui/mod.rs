@@ -83,6 +83,7 @@ mod search;
 mod session_menu;
 mod settings;
 mod sidebar;
+pub(crate) use sidebar::SIDEBAR_CHROME_ROWS;
 mod status;
 pub(crate) mod switcher;
 mod tabbar;
@@ -167,6 +168,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     let diff_note_rects = std::mem::take(&mut app.diff_note_rects);
     let preview_link_rects = std::mem::take(&mut app.preview_link_rects);
     let module_dock_rects = std::mem::take(&mut app.module_dock_rects);
+    let dock_dividers = std::mem::take(&mut app.dock_dividers);
     let picker_rects = std::mem::take(&mut app.picker_rects);
     let settings_tab_rects = std::mem::take(&mut app.settings_tab_rects);
     let settings_ctl_rects = std::mem::take(&mut app.settings_ctl_rects);
@@ -305,6 +307,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     app.diff_note_rects = diff_note_rects;
     app.preview_link_rects = preview_link_rects;
     app.module_dock_rects = module_dock_rects;
+    app.dock_dividers = dock_dividers;
     app.picker_rects = picker_rects;
     app.settings_tab_rects = settings_tab_rects;
     app.settings_ctl_rects = settings_ctl_rects;
@@ -462,6 +465,10 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.menu_scroll.begin_frame();
     app.mission_row_rects.clear();
     app.orch_hits.clear();
+    // Cleared with the other per-frame hit geometry, above every early return:
+    // a frame that bails out (window too small, no workspace yet) must not
+    // leave a dock divider behind as a live drag target.
+    app.dock_dividers.clear();
     app.mobile_pane_prev_rect = None;
     app.mobile_pane_next_rect = None;
 
@@ -1481,5 +1488,62 @@ mod bar_projection_tests {
         assert!(app.switcher_close_rect.is_none());
         assert_eq!(app.pane_content_rects, desktop_content);
         assert_eq!(app.panes[&focus].size(), pty_size);
+    }
+}
+
+#[cfg(test)]
+mod dock_projection_tests {
+    use super::*;
+
+    /// A secondary or differently sized client must not overwrite the active
+    /// client's dock-divider hit targets. After projections at a much smaller
+    /// and a much larger size, `begin_dock_resize` still grabs the recorded row.
+    #[test]
+    fn render_projection_preserves_active_dock_dividers() {
+        let _env = crate::persist::test_env("dock-divider-projection");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents];
+        app.sidebars.left.visible = true;
+        app.sidebars.left.weights = Vec::new();
+
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+        render_into(&mut target, &mut app);
+
+        let recorded = app.dock_dividers.clone();
+        assert!(
+            !recorded.is_empty(),
+            "two stacked docks publish a divider hit target"
+        );
+        let (side, _, dy) = recorded[0];
+        let col = match side {
+            Side::Left => app.left_seam.expect("left seam after render").x,
+            Side::Right => app.right_seam.expect("right seam after render").x,
+        };
+
+        let small = Rect::new(0, 0, 40, 12);
+        let mut small_buffer = Buffer::empty(small);
+        let mut small_target = RenderTarget::new(&mut small_buffer, small);
+        render_projection(&mut small_target, &mut app);
+        assert_eq!(
+            app.dock_dividers, recorded,
+            "a smaller projection cannot replace the active divider hits"
+        );
+
+        let large = Rect::new(0, 0, 200, 80);
+        let mut large_buffer = Buffer::empty(large);
+        let mut large_target = RenderTarget::new(&mut large_buffer, large);
+        render_projection(&mut large_target, &mut app);
+        assert_eq!(
+            app.dock_dividers, recorded,
+            "a larger projection cannot replace the active divider hits"
+        );
+
+        assert!(
+            app.begin_dock_resize(col, dy),
+            "the recorded divider row is still a hit target after projection"
+        );
     }
 }

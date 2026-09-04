@@ -438,6 +438,8 @@ impl App {
                 if let Some(pane) = self.panes.get_mut(&id) {
                     pane.cwd = cwd;
                 }
+                self.runtime_cwd_dirty = true;
+                self.runtime_proc_dirty = true;
                 self.register_backend_terminal(id);
                 crate::logging::event(
                     crate::logging::EventKind::PaneOpen,
@@ -457,7 +459,7 @@ impl App {
                 return true;
             }
             AppEvent::ConfigReloaded { id, config, reply } => {
-                let response = match self.apply_socket_config(config, None) {
+                let response = match self.apply_socket_config(*config, None) {
                     Ok(()) => {
                         json!({"id":id,"result":{"type":"config_reloaded","config":self.config}})
                     }
@@ -667,6 +669,8 @@ impl App {
                     s.last_activity = Instant::now();
                 }
                 self.detection_dirty.insert(id);
+                self.runtime_cwd_dirty = true;
+                self.runtime_proc_dirty = true;
                 // A parked `wait.output` for this pane just got new output to
                 // test against — resolve it on the same wake (docs/81).
                 self.check_output_waits(id);
@@ -999,7 +1003,8 @@ impl App {
             // Handled by the server loop; never reaches here at runtime.
             AppEvent::ClientConnected { .. }
             | AppEvent::ClientDetach { .. }
-            | AppEvent::ClientInput { .. } => false,
+            | AppEvent::ClientInput { .. }
+            | AppEvent::Shutdown => false,
             // Consumed by the pre-dispatch worker-result branch above.
             AppEvent::ThemeUninstalled { .. }
             | AppEvent::ConfigReloaded { .. }
@@ -1793,6 +1798,13 @@ impl App {
                 if self.begin_sidebar_resize(m.column, m.row) {
                     return;
                 }
+                // Then the horizontal rule between two stacked docks. Checked
+                // after the edge seam so a corner press still resizes the
+                // sidebar, and before pane resize because this target lives
+                // inside the sidebar, where no pane divider can be.
+                if self.begin_dock_resize(m.column, m.row) {
+                    return;
+                }
                 // Pane resize (docs/27) takes priority over selection: a divider
                 // sits on borders/gaps, outside any content rect, so grabbing one
                 // never conflicts. RESIZE-2 = drag the divider directly;
@@ -1913,6 +1925,10 @@ impl App {
                     self.update_sidebar_resize(m.column, m.row);
                     return;
                 }
+                if self.dock_resize.is_some() {
+                    self.update_dock_resize(m.column, m.row);
+                    return;
+                }
                 if self.resize_drag.is_some() {
                     self.update_resize(m.column, m.row);
                     return;
@@ -1952,6 +1968,10 @@ impl App {
                 }
                 if self.sidebar_resize.is_some() {
                     self.end_sidebar_resize();
+                    return;
+                }
+                if self.dock_resize.is_some() {
+                    self.end_dock_resize();
                     return;
                 }
                 if self.resize_drag.is_some() {

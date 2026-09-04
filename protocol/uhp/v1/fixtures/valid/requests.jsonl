@@ -36,3 +36,4 @@
 {"id":"36","method":"integration.uninstall","params":{"agent":"claude","confirm":true}}
 {"id":"37","method":"automation.preview","params":{"trigger":{"kind":"daily","timezone":"Asia/Makassar","second_of_day":28800},"from_utc":1788393600}}
 {"id":"38","method":"automation.create","params":{"name":"Morning review","trigger":{"kind":"weekly","timezone":"Asia/Makassar","weekdays":[1,2,3,4,5],"second_of_day":28800},"task":{"title":"Review changes","prompt":"Review the workspace and report risks.","agent_id":"codex","workspace_id":"workspace_example","mode":"workspace"},"policy":{"misfire":"run_latest","overlap":"skip"},"idempotency_key":"fixture-morning-review"}}
+{"id":"39","method":"task.start","params":{"id":"t4","mode":"worktree","workspace_id":"workspace_example","agent":"codex"}}

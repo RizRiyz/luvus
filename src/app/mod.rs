@@ -220,19 +220,37 @@ pub struct SideState {
     pub visible: bool,
     pub width: u16,
     pub docks: Vec<DockKind>,
+    /// Relative height share per mounted dock, parallel to `docks`. Empty means
+    /// an equal split. Topology changes go through [`SideState::push_dock`] /
+    /// [`SideState::remove_dock`], which keep this vector aligned by dock
+    /// identity — or clear it when it was already unusable — so a stale list
+    /// cannot be reassigned positionally. See [`SideState::dock_weights`].
+    pub weights: Vec<u16>,
 }
 
 impl SideState {
+    /// Load a sidebar. Dock ids beyond [`MAX_DOCKS_PER_SIDE`] are dropped.
+    /// Weights are kept only when they already match the mounted docks
+    /// one-for-one and every share is positive; any other list (wrong length
+    /// after the cap truncation, or a zero) is discarded so it cannot be
+    /// reassigned to different docks.
     fn from_config(c: &crate::config::SideConfig) -> SideState {
         let mut docks: Vec<DockKind> = c.docks.iter().map(|s| DockKind::from_id(s)).collect();
         // Enforce the per-side cap on load: a hand-edited or pre-cap config with
         // more than `MAX_DOCKS_PER_SIDE` here keeps the first few; the overflow
         // falls to "off" (unmounted, still in the registry to re-place).
         docks.truncate(MAX_DOCKS_PER_SIDE);
+        let weights =
+            if c.dock_weights.len() == docks.len() && c.dock_weights.iter().all(|w| *w > 0) {
+                c.dock_weights.clone()
+            } else {
+                Vec::new()
+            };
         SideState {
             visible: c.visible,
             width: c.width.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX),
             docks,
+            weights,
         }
     }
     fn to_config(&self) -> crate::config::SideConfig {
@@ -240,6 +258,19 @@ impl SideState {
             visible: self.visible,
             width: self.width,
             docks: self.docks.iter().map(|d| d.id().to_string()).collect(),
+            dock_weights: self.weights.clone(),
+        }
+    }
+    /// Height shares for the mounted docks, always exactly `docks.len()` long.
+    ///
+    /// Anything unusable — never set, gone stale because a dock was mounted or
+    /// removed since, or containing a zero that would collapse a dock to
+    /// nothing — falls back to an equal split rather than to a broken layout.
+    pub fn dock_weights(&self) -> Vec<u16> {
+        if self.weights.len() == self.docks.len() && self.weights.iter().all(|w| *w > 0) {
+            self.weights.clone()
+        } else {
+            vec![1; self.docks.len()]
         }
     }
     /// True if this sidebar should occupy screen space (shown and non-empty).
@@ -249,6 +280,46 @@ impl SideState {
     /// True if `kind` is mounted in this sidebar.
     pub fn has(&self, kind: &DockKind) -> bool {
         self.docks.contains(kind)
+    }
+
+    /// Remove every occurrence of `kind`, dropping the weight at the same
+    /// index when the two vectors still line up. A stale or mismatched weight
+    /// list is cleared instead of being left for a later positional truncate.
+    pub fn remove_dock(&mut self, kind: &DockKind) {
+        if self.weights.len() == self.docks.len() {
+            let mut i = 0;
+            while i < self.docks.len() {
+                if self.docks[i] == *kind {
+                    self.docks.remove(i);
+                    self.weights.remove(i);
+                } else {
+                    i += 1;
+                }
+            }
+        } else {
+            self.docks.retain(|d| d != kind);
+            self.weights.clear();
+        }
+    }
+
+    /// Append `kind`. When the existing weights already describe the mounted
+    /// docks, the new dock gets the rounded average of those shares (minimum 1)
+    /// so it opens at a fair size instead of a sliver. Empty or unusable
+    /// weights stay empty so [`SideState::dock_weights`] falls back to an even
+    /// split.
+    pub fn push_dock(&mut self, kind: DockKind) {
+        let append_weight = !self.weights.is_empty()
+            && self.weights.len() == self.docks.len()
+            && self.weights.iter().all(|w| *w > 0);
+        if append_weight {
+            let sum: u32 = self.weights.iter().map(|w| u32::from(*w)).sum();
+            let n = self.weights.len() as u32;
+            let avg = sum.saturating_add(n / 2).checked_div(n).unwrap_or(1).max(1) as u16;
+            self.weights.push(avg);
+        } else {
+            self.weights.clear();
+        }
+        self.docks.push(kind);
     }
 }
 
@@ -1560,6 +1631,11 @@ const RESIZE_GRAB_TOL: u16 = 2;
 /// reaching into the sidebar body (where dock rows own the width).
 const SIDEBAR_GRAB_TOL: u16 = 2;
 
+/// Rows a dock keeps no matter how far its divider is dragged: enough for the
+/// header plus one line of content, so a dock can be made small but never
+/// squeezed into nothing the user then cannot grab back.
+pub(crate) const MIN_DOCK_HEIGHT: u16 = 3;
+
 impl Selection {
     /// (start, end) terminal cells in reading order (top-left → bottom-right).
     pub(crate) fn ordered(&self) -> ((u16, u16), (u16, u16)) {
@@ -2088,6 +2164,12 @@ pub struct App {
     /// Throttle for rescanning the agents' on-disk session stores.
     last_sessions_at: Instant,
     last_proc_at: Instant,
+    /// CWD/git follow-up is scheduled from PTY activity, not a 1s heartbeat.
+    runtime_cwd_dirty: bool,
+    /// Process-table identity is scheduled from PTY activity, not a 2s `ps`.
+    runtime_proc_dirty: bool,
+    /// Resumable-session disk scans run on attach/demand, not a 4s walk.
+    runtime_sessions_dirty: bool,
     /// Mission Control usage is demand-driven: opening/focusing the dashboard,
     /// changing its scope, or choosing refresh queues one off-loop scan. No
     /// usage reader runs merely because a hidden Mission Control tab exists.
@@ -2267,6 +2349,14 @@ pub struct App {
     /// `sidebar_seam_at`.
     pub left_seam: Option<Rect>,
     pub right_seam: Option<Rect>,
+    /// The horizontal rule between two stacked docks: `(side, index, row)`,
+    /// where `index` is the divider's position in that sidebar (the boundary
+    /// between dock `index` and `index + 1`). Rebuilt every frame like the
+    /// seams above, so a hidden sidebar leaves nothing here and its drag can
+    /// never fire.
+    pub dock_dividers: Vec<(Side, usize, u16)>,
+    /// The dock divider currently being dragged, as `(side, index)`.
+    pub dock_resize: Option<(Side, usize)>,
     /// The full content area (frame minus the status bar), stored so an in-flight
     /// sidebar drag can turn a cursor column into a width off the correct edge.
     pub last_main_area: Rect,
@@ -2558,6 +2648,9 @@ impl App {
             mission_active_workspace: None,
             usage_scan_inflight: false,
             last_proc_at: Instant::now(),
+            runtime_cwd_dirty: false,
+            runtime_proc_dirty: false,
+            runtime_sessions_dirty: false,
             last_detect_at: Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
@@ -2649,6 +2742,8 @@ impl App {
             hover_sidebar: None,
             left_seam: None,
             right_seam: None,
+            dock_dividers: Vec::new(),
+            dock_resize: None,
             last_main_area: Rect::ZERO,
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
@@ -3178,6 +3273,9 @@ impl App {
             mission_active_workspace: None,
             usage_scan_inflight: false,
             last_proc_at: Instant::now(),
+            runtime_cwd_dirty: false,
+            runtime_proc_dirty: false,
+            runtime_sessions_dirty: false,
             last_detect_at: Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
@@ -3269,6 +3367,8 @@ impl App {
             hover_sidebar: None,
             left_seam: None,
             right_seam: None,
+            dock_dividers: Vec::new(),
+            dock_resize: None,
             last_main_area: Rect::ZERO,
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
@@ -3445,18 +3545,21 @@ impl App {
     /// the side. Placing a dock onto the side it already occupies is never "full".
     pub fn move_dock(&mut self, kind: &DockKind, target: Side) -> bool {
         let dst = self.sidebars.get(target);
-        if !dst.has(kind) && dst.docks.len() >= MAX_DOCKS_PER_SIDE {
+        // Already there: honour the no-op. Removing and re-appending would
+        // push the dock to the bottom of its stack and, now that weights
+        // follow dock identity, swap its share for the average of the rest.
+        if dst.has(kind) {
+            return true;
+        }
+        if dst.docks.len() >= MAX_DOCKS_PER_SIDE {
             let msg = self.catalog.sidebar_full;
             self.show_toast(msg);
             return false;
         }
         for side in [Side::Left, Side::Right] {
-            self.sidebars.get_mut(side).docks.retain(|d| d != kind);
+            self.sidebars.get_mut(side).remove_dock(kind);
         }
-        let dst = self.sidebars.get_mut(target);
-        if !dst.docks.contains(kind) {
-            dst.docks.push(kind.clone());
-        }
+        self.sidebars.get_mut(target).push_dock(kind.clone());
         if kind == &DockKind::Files {
             self.sidebars.files_side = target;
         }
@@ -3474,7 +3577,7 @@ impl App {
     /// registry and can be re-placed). Persists.
     pub fn unmount_dock(&mut self, kind: &DockKind) {
         for side in [Side::Left, Side::Right] {
-            self.sidebars.get_mut(side).docks.retain(|d| d != kind);
+            self.sidebars.get_mut(side).remove_dock(kind);
         }
         // Remember an explicit "off" for a module dock so its own `ui.dock.push`
         // (startup / `workspace.created` / a refresh) can't resurrect it on the
@@ -3596,7 +3699,7 @@ impl App {
         for id in ids {
             let kind = DockKind::Module(id.clone());
             for side in [Side::Left, Side::Right] {
-                self.sidebars.get_mut(side).docks.retain(|d| d != &kind);
+                self.sidebars.get_mut(side).remove_dock(&kind);
             }
             self.module_docks.remove(id);
         }
@@ -5944,6 +6047,116 @@ impl App {
 
     /// Start dragging a sidebar's edge to resize it (docs/29). Returns whether a
     /// drag began, so the mouse handler can claim the press before selection.
+    /// The dock divider under `(c, r)`, if any.
+    ///
+    /// Exact row, deliberately: unlike a pane divider — which sits in a gap
+    /// between borders and can afford [`RESIZE_GRAB_TOL`] slack — this rule has
+    /// dock rows immediately above and below it, and any tolerance at all would
+    /// swallow clicks meant for a file or an agent. The target is still a
+    /// full-width row, so it stays easy to hit.
+    pub fn dock_divider_at(&self, c: u16, r: u16) -> Option<(Side, usize)> {
+        self.dock_dividers
+            .iter()
+            .find(|(side, _, dy)| {
+                let within = match side {
+                    Side::Left => self.left_seam.is_some_and(|s| c <= s.x),
+                    Side::Right => self.right_seam.is_some_and(|s| c >= s.x),
+                };
+                within && r == *dy
+            })
+            .map(|(side, index, _)| (*side, *index))
+    }
+
+    pub fn begin_dock_resize(&mut self, c: u16, r: u16) -> bool {
+        match self.dock_divider_at(c, r) {
+            Some(target) => {
+                self.dock_resize = Some(target);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drive the active dock resize from the cursor row: the dragged divider
+    /// moves to `r`, and the two docks it separates absorb the change. Every
+    /// other dock on that side keeps its height.
+    ///
+    /// Like the sidebar-width drag this updates live but does **not** persist;
+    /// `save_sidebars` runs once on release, keeping the disk write off the
+    /// drag path.
+    pub fn update_dock_resize(&mut self, _c: u16, r: u16) {
+        let Some((side, index)) = self.dock_resize else {
+            return;
+        };
+        // Rebuild the current pixel heights from the rendered dividers, so the
+        // drag works from what the user can see rather than from weights that
+        // may have been normalised differently.
+        let dividers: Vec<u16> = self
+            .dock_dividers
+            .iter()
+            .filter(|(s, _, _)| *s == side)
+            .map(|(_, _, dy)| *dy)
+            .collect();
+        let state = self.sidebars.get(side);
+        let n = state.docks.len();
+        if n < 2 || index >= dividers.len() {
+            return;
+        }
+        let mut heights = self.dock_heights(side);
+        if heights.len() != n {
+            return;
+        }
+        // The pair either side of this divider trade rows; the total they own
+        // is fixed, so nothing below shifts.
+        let pair = heights[index].saturating_add(heights[index + 1]);
+        // Below twice the floor there is no split that keeps both docks at it,
+        // and clamping only the first would push the second under. Refuse the
+        // drag instead of breaking the invariant.
+        if pair < MIN_DOCK_HEIGHT.saturating_mul(2) {
+            return;
+        }
+        let top = dividers[index];
+        let start = top.saturating_sub(heights[index]);
+        let want = r.saturating_sub(start);
+        let max = pair.saturating_sub(MIN_DOCK_HEIGHT);
+        let first = want.clamp(MIN_DOCK_HEIGHT, max.max(MIN_DOCK_HEIGHT));
+        heights[index] = first;
+        heights[index + 1] = pair.saturating_sub(first);
+        self.sidebars.get_mut(side).weights = heights;
+    }
+
+    /// The rendered height of each dock on `side`, derived from the dividers.
+    fn dock_heights(&self, side: Side) -> Vec<u16> {
+        let dividers: Vec<u16> = self
+            .dock_dividers
+            .iter()
+            .filter(|(s, _, _)| *s == side)
+            .map(|(_, _, dy)| *dy)
+            .collect();
+        let n = self.sidebars.get(side).docks.len();
+        let seam = match side {
+            Side::Left => self.left_seam,
+            Side::Right => self.right_seam,
+        };
+        let Some(seam) = seam else {
+            return Vec::new();
+        };
+        let mut heights = Vec::with_capacity(n);
+        let mut y = seam.y.saturating_add(crate::ui::SIDEBAR_CHROME_ROWS);
+        for i in 0..n {
+            let end = dividers.get(i).copied().unwrap_or(seam.bottom());
+            heights.push(end.saturating_sub(y));
+            y = end.saturating_add(1);
+        }
+        heights
+    }
+
+    pub fn end_dock_resize(&mut self) {
+        if self.dock_resize.take().is_some() {
+            self.save_sidebars();
+        }
+    }
+
     pub fn begin_sidebar_resize(&mut self, c: u16, r: u16) -> bool {
         match self.sidebar_seam_at(c, r) {
             Some(side) => {
@@ -9380,6 +9593,395 @@ mod tests {
     /// built-in *or* a user module dock — leaves in the app's click geometry, one
     /// frame where that dock isn't drawn (its sidebar hidden) must zero it, so no
     /// stale rect can fire under a widened pane area or a relocated dock. This is
+    /// Weights are only trusted when they still describe the mounted docks.
+    /// A dock added or removed since, or a zero that would collapse one to
+    /// nothing, falls back to an even split rather than to a broken sidebar.
+    #[test]
+    fn stale_or_degenerate_dock_weights_fall_back_to_an_even_split() {
+        let mut side = SideState {
+            visible: true,
+            width: 30,
+            docks: vec![DockKind::Workspaces, DockKind::Agents],
+            weights: vec![3, 1],
+        };
+        assert_eq!(side.dock_weights(), vec![3, 1], "a matching set is used");
+
+        side.docks.push(DockKind::Files);
+        assert_eq!(
+            side.dock_weights(),
+            vec![1, 1, 1],
+            "a dock was mounted since; the stale pair is discarded"
+        );
+
+        side.weights = vec![1, 0, 1];
+        assert_eq!(
+            side.dock_weights(),
+            vec![1, 1, 1],
+            "a zero would collapse a dock to nothing"
+        );
+    }
+
+    /// Removing a dock drops the weight at the same index; a config round-trip
+    /// keeps that identity mapping instead of truncating positionally.
+    #[test]
+    fn removing_a_dock_keeps_sibling_weights_and_round_trips() {
+        let mut side = SideState {
+            visible: true,
+            width: 30,
+            docks: vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files],
+            weights: vec![5, 3, 2],
+        };
+        side.remove_dock(&DockKind::Agents);
+        assert_eq!(
+            side.docks,
+            vec![DockKind::Workspaces, DockKind::Files],
+            "the middle dock is gone"
+        );
+        assert_eq!(side.weights, vec![5, 2], "its neighbours keep their shares");
+
+        let loaded = SideState::from_config(&side.to_config());
+        assert_eq!(loaded.docks, side.docks);
+        assert_eq!(loaded.weights, side.weights);
+    }
+
+    /// A persisted weight list of the wrong length is discarded, not truncated
+    /// onto whichever docks happen to remain.
+    #[test]
+    fn from_config_discards_a_weight_list_of_the_wrong_length() {
+        let cfg = crate::config::SideConfig {
+            visible: true,
+            width: 30,
+            docks: vec!["workspaces".into(), "agents".into()],
+            dock_weights: vec![5, 3, 2],
+        };
+        let side = SideState::from_config(&cfg);
+        assert!(
+            side.weights.is_empty(),
+            "stale weights are not kept: {:?}",
+            side.weights
+        );
+        assert_eq!(
+            side.dock_weights(),
+            vec![1, 1],
+            "the even-split fallback applies"
+        );
+    }
+
+    /// A newly mounted dock on a weighted side gets the rounded average of the
+    /// existing shares, not a leftover sliver.
+    #[test]
+    fn mounting_a_dock_appends_the_rounded_average_weight() {
+        let mut side = SideState {
+            visible: true,
+            width: 30,
+            docks: vec![DockKind::Workspaces, DockKind::Agents],
+            weights: vec![5, 3],
+        };
+        side.push_dock(DockKind::Files);
+        assert_eq!(
+            side.docks,
+            vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files]
+        );
+        assert_eq!(
+            side.weights,
+            vec![5, 3, 4],
+            "the new dock gets round((5+3)/2) = 4"
+        );
+    }
+
+    /// Moving a dock to the other side keeps the source weights aligned with
+    /// the docks that stayed, and the destination receives the dock without
+    /// inheriting a positional leftover.
+    #[test]
+    fn move_dock_keeps_remaining_weights_aligned_on_both_sides() {
+        let _env = crate::persist::test_env("dock-move-weights");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files];
+        app.sidebars.left.weights = vec![5, 3, 2];
+        app.sidebars.right.docks = Vec::new();
+        app.sidebars.right.weights = Vec::new();
+
+        assert!(app.move_dock(&DockKind::Agents, Side::Right));
+        assert_eq!(
+            app.sidebars.left.docks,
+            vec![DockKind::Workspaces, DockKind::Files]
+        );
+        assert_eq!(
+            app.sidebars.left.weights,
+            vec![5, 2],
+            "source keeps the weights of the docks that stayed"
+        );
+        assert_eq!(app.sidebars.right.docks, vec![DockKind::Agents]);
+        assert!(
+            app.sidebars.right.weights.is_empty(),
+            "empty destination stays on the even-split fallback: {:?}",
+            app.sidebars.right.weights
+        );
+        assert_eq!(app.sidebars.right.dock_weights(), vec![1]);
+    }
+
+    /// Moving a dock onto the side it already occupies is the documented
+    /// no-op: its position in the stack and its share must both survive.
+    #[test]
+    fn move_dock_onto_its_own_side_keeps_order_and_weights() {
+        let _env = crate::persist::test_env("dock-move-same-side");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files];
+        app.sidebars.left.weights = vec![5, 3, 2];
+
+        assert!(app.move_dock(&DockKind::Agents, Side::Left));
+        assert_eq!(
+            app.sidebars.left.docks,
+            vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files],
+            "the dock stays where it was, not at the bottom"
+        );
+        assert_eq!(
+            app.sidebars.left.weights,
+            vec![5, 3, 2],
+            "its share is untouched"
+        );
+    }
+
+    /// Dragging a divider moves the boundary between the two docks it separates
+    /// and leaves the rest of the sidebar alone. Neither side can be squeezed
+    /// past `MIN_DOCK_HEIGHT`, so a dock can always be grabbed back.
+    #[test]
+    fn dragging_a_dock_divider_trades_rows_between_its_pair_only() {
+        let _env = crate::persist::test_env("dock-divider-drag");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 40, tx).unwrap();
+
+        app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents];
+        app.sidebars.left.weights = Vec::new();
+        // Stand in for a frame: a 30-row sidebar whose two chrome rows sit
+        // above the dock body. The pair owns 27 rows (chrome plus the divider
+        // itself take the rest); the rule sits at row 15.
+        app.left_seam = Some(Rect::new(29, 0, 1, 30));
+        app.dock_dividers = vec![(Side::Left, 0, 15)];
+
+        app.dock_resize = Some((Side::Left, 0));
+        app.update_dock_resize(10, 22);
+        let weights = app.sidebars.left.weights.clone();
+        assert_eq!(weights.len(), 2);
+        assert!(
+            weights[0] > weights[1],
+            "dragging down grows the upper dock: {weights:?}"
+        );
+        assert_eq!(
+            weights[0] + weights[1],
+            27,
+            "the pair's combined rows are conserved"
+        );
+
+        // Far past the top: the upper dock stops at the floor instead of vanishing.
+        app.update_dock_resize(10, 0);
+        assert_eq!(
+            app.sidebars.left.weights[0], MIN_DOCK_HEIGHT,
+            "the upper dock keeps its floor"
+        );
+        // ...and the other one never falls under it either.
+        assert!(
+            app.sidebars.left.weights[1] >= MIN_DOCK_HEIGHT,
+            "the lower dock keeps its floor too: {:?}",
+            app.sidebars.left.weights
+        );
+    }
+
+    /// A pair with fewer rows than two floors cannot be split without pushing
+    /// one dock under the minimum, so the drag must decline rather than
+    /// produce a dock the user can no longer grab.
+    #[test]
+    fn a_pair_too_small_for_two_floors_refuses_the_drag() {
+        let _env = crate::persist::test_env("dock-divider-too-small");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 40, tx).unwrap();
+
+        app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents];
+        app.sidebars.left.weights = Vec::new();
+        // Five rows for two docks: 2 * MIN_DOCK_HEIGHT would need six.
+        app.left_seam = Some(Rect::new(29, 0, 1, 5));
+        app.dock_dividers = vec![(Side::Left, 0, 2)];
+
+        app.dock_resize = Some((Side::Left, 0));
+        app.update_dock_resize(10, 4);
+        assert!(
+            app.sidebars.left.weights.is_empty(),
+            "no split was written: {:?}",
+            app.sidebars.left.weights
+        );
+    }
+
+    /// Dragging a rendered divider by exactly one row must move that published
+    /// rule by one row, not jump, and must conserve the pair's combined height.
+    /// Fails while `dock_heights` measures from the seam origin (chrome rows
+    /// inflate the first dock) and passes once it starts at the dock body.
+    #[test]
+    fn dragging_a_rendered_dock_divider_by_one_row_moves_it_exactly_one_row() {
+        let _env = crate::persist::test_env("dock-divider-one-row");
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 40, tx).unwrap();
+        app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents];
+        app.sidebars.left.visible = true;
+        app.sidebars.left.weights = Vec::new();
+
+        let mut term = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let dy = app
+            .dock_dividers
+            .iter()
+            .find(|(side, _, _)| *side == Side::Left)
+            .map(|(_, _, y)| *y)
+            .expect("two stacked docks publish a left divider");
+        let col = app
+            .left_seam
+            .expect("left sidebar is shown")
+            .x
+            .saturating_sub(1);
+        let sum_before: u16 = app.dock_heights(Side::Left).iter().sum();
+        assert!(
+            sum_before > 0,
+            "rendered docks have a measurable pair: {:?}",
+            app.dock_heights(Side::Left)
+        );
+
+        assert!(
+            app.begin_dock_resize(col, dy),
+            "the published divider is a hit target"
+        );
+        app.update_dock_resize(col, dy + 1);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let down = app
+            .dock_dividers
+            .iter()
+            .find(|(side, _, _)| *side == Side::Left)
+            .map(|(_, _, y)| *y)
+            .expect("divider still published after a one-row drag down");
+        assert_eq!(down, dy + 1, "the rule moved down by exactly one row");
+        assert_eq!(
+            app.dock_heights(Side::Left).iter().sum::<u16>(),
+            sum_before,
+            "the pair's combined rows are conserved after dragging down"
+        );
+
+        app.sidebars.left.weights = Vec::new();
+        app.end_dock_resize();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let reset = app
+            .dock_dividers
+            .iter()
+            .find(|(side, _, _)| *side == Side::Left)
+            .map(|(_, _, y)| *y)
+            .expect("even split republishes a divider");
+        assert_eq!(reset, dy, "clearing weights restores the original split");
+
+        assert!(app.begin_dock_resize(col, dy));
+        app.update_dock_resize(col, dy - 1);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let up = app
+            .dock_dividers
+            .iter()
+            .find(|(side, _, _)| *side == Side::Left)
+            .map(|(_, _, y)| *y)
+            .expect("divider still published after a one-row drag up");
+        assert_eq!(up, dy - 1, "the rule moved up by exactly one row");
+        assert_eq!(
+            app.dock_heights(Side::Left).iter().sum::<u16>(),
+            sum_before,
+            "the pair's combined rows are conserved after dragging up"
+        );
+    }
+
+    /// Three stacked docks: dragging one divider must not resize the dock that
+    /// is not in the pair, the divider must follow the cursor by one row, and
+    /// a second render must not drift. Covers both dividers.
+    #[test]
+    fn dragging_one_of_three_dock_dividers_leaves_the_untouched_dock_still() {
+        let _env = crate::persist::test_env("dock-divider-three");
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 40, tx).unwrap();
+        app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files];
+        app.sidebars.left.visible = true;
+        app.sidebars.left.weights = Vec::new();
+
+        let mut term = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        let col = {
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            app.left_seam
+                .expect("left sidebar is shown")
+                .x
+                .saturating_sub(1)
+        };
+
+        for index in 0..2 {
+            app.sidebars.left.weights = Vec::new();
+            app.end_dock_resize();
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+            let before = app.dock_heights(Side::Left);
+            assert_eq!(before.len(), 3, "three docks after even split: {before:?}");
+            let dy = app
+                .dock_dividers
+                .iter()
+                .find(|(side, i, _)| *side == Side::Left && *i == index)
+                .map(|(_, _, y)| *y)
+                .unwrap_or_else(|| panic!("divider {index} is published"));
+            let untouched = if index == 0 { 2 } else { 0 };
+
+            assert!(
+                app.begin_dock_resize(col, dy),
+                "divider {index} is a hit target"
+            );
+            app.update_dock_resize(col, dy + 1);
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+            let after = app.dock_heights(Side::Left);
+            assert_eq!(
+                after[untouched], before[untouched],
+                "divider {index}: dock {untouched} is not in the pair: before={before:?} after={after:?}"
+            );
+            assert_eq!(
+                after[index].saturating_add(after[index + 1]),
+                before[index].saturating_add(before[index + 1]),
+                "divider {index}: the pair's rows are conserved: before={before:?} after={after:?}"
+            );
+            let moved = app
+                .dock_dividers
+                .iter()
+                .find(|(side, i, _)| *side == Side::Left && *i == index)
+                .map(|(_, _, y)| *y)
+                .unwrap_or_else(|| panic!("divider {index} still published after the drag"));
+            assert_eq!(
+                moved,
+                dy + 1,
+                "divider {index} followed the cursor by exactly one row"
+            );
+
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            let again = app.dock_heights(Side::Left);
+            assert_eq!(
+                again, after,
+                "divider {index}: a second render must not drift: {after:?} -> {again:?}"
+            );
+            let still = app
+                .dock_dividers
+                .iter()
+                .find(|(side, i, _)| *side == Side::Left && *i == index)
+                .map(|(_, _, y)| *y)
+                .unwrap_or_else(|| panic!("divider {index} still published after a second render"));
+            assert_eq!(
+                still, moved,
+                "divider {index} must not walk on a second render"
+            );
+        }
+    }
+
     /// the invariant the WORKSPACES-vs-FILES bug violated; it now covers every
     /// dock geometry field at once, so a future dock can't reintroduce it.
     #[test]
@@ -11411,11 +12013,13 @@ mod tests {
                     "files".into(),
                     "mod:y".into(),
                 ],
+                dock_weights: Vec::new(),
             },
             right: crate::config::SideConfig {
                 visible: false,
                 width: 26,
                 docks: Vec::new(),
+                dock_weights: Vec::new(),
             },
             files_side: None,
         };
