@@ -1458,7 +1458,7 @@ mod tests {
         assert_eq!(received_frame_size(&small_rx), (46, 16));
     }
 
-    fn received_open_path(rx: &mpsc::Receiver<ServerMessage>) -> Option<std::path::PathBuf> {
+    fn received_open_path(rx: &mpsc::Receiver<ServerMessage>) -> Option<String> {
         while let Ok(msg) = rx.try_recv() {
             if let ServerMessage::OpenPath(path) = msg {
                 return Some(path);
@@ -1485,7 +1485,7 @@ mod tests {
 
         // Stand in for the FILES action the key would trigger: the path is
         // already queued when client 2's input is applied.
-        let path = std::path::PathBuf::from("/tmp/notes.pdf");
+        let path = "/tmp/notes.pdf".to_string();
         app.pending_open_path = Some(path.clone());
         apply(
             AppEvent::ClientInput {

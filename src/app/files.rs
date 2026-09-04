@@ -651,10 +651,16 @@ impl App {
     /// in front of the user is the one that should see the file.
     ///
     /// No filesystem access here — existence is checked on the client when it
-    /// receives [`crate::ipc::protocol::ServerMessage::OpenPath`].
+    /// receives [`crate::ipc::protocol::ServerMessage::OpenPath`]. The wire
+    /// value is text, so reject a non-UTF-8 path instead of letting serde fail
+    /// later and terminate the client's IPC writer.
     pub fn open_path_externally(&mut self, path: PathBuf) {
-        self.show_toast(crate::ui::truncate(&path.display().to_string(), 60));
-        self.pending_open_path = Some(path);
+        let Some(path) = path.to_str() else {
+            self.show_toast("path is not valid UTF-8");
+            return;
+        };
+        self.show_toast(crate::ui::truncate(path, 60));
+        self.pending_open_path = Some(path.to_owned());
     }
 
     /// Navigate the FILES tree while it owns keyboard focus. Returns to the
@@ -1633,13 +1639,14 @@ mod tests {
         seed_keyboard_tree(&mut app);
         let cursor = app.file_tree.cursor;
         let path = app.file_tree.visible_rows()[cursor].path.clone();
+        let expected = path.to_str().expect("fixture path is UTF-8");
 
         app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
-        assert_eq!(app.pending_open_path.as_ref(), Some(&path), "bare o");
+        assert_eq!(app.pending_open_path.as_deref(), Some(expected), "bare o");
 
         app.pending_open_path = None;
         app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
-        assert_eq!(app.pending_open_path.as_ref(), Some(&path), "Ctrl+O");
+        assert_eq!(app.pending_open_path.as_deref(), Some(expected), "Ctrl+O");
 
         app.pending_open_path = None;
         app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::ALT));
@@ -1670,8 +1677,30 @@ mod tests {
             editors: Vec::new(),
         });
         app.file_menu_action_pub(FileMenuItem::OpenInOs);
-        assert_eq!(app.pending_open_path.as_ref(), Some(&path));
+        assert_eq!(app.pending_open_path.as_deref(), path.to_str());
         assert!(app.file_menu.is_none());
+    }
+
+    /// `PathBuf` serializes through UTF-8 in serde. Refuse an unrepresentable
+    /// path before it reaches `ServerMessage::OpenPath`, otherwise the display
+    /// client's writer exits while encoding the message.
+    #[cfg(unix)]
+    #[test]
+    fn open_path_externally_refuses_non_utf8_before_ipc() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let _env = crate::persist::test_env("files-open-externally-not-utf8");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let path = PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/not\xffutf8.pdf"));
+
+        app.open_path_externally(path);
+
+        assert!(app.pending_open_path.is_none());
+        assert_eq!(
+            app.toast.as_ref().map(|(text, _)| text.as_str()),
+            Some("path is not valid UTF-8")
+        );
     }
 
     #[test]

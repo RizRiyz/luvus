@@ -1770,7 +1770,7 @@ pub struct App {
     /// set it — from the FILES tree. Unlike `pending_open_url` it is not
     /// broadcast: the server drains it right after applying that client's
     /// input and sends it to that client alone.
-    pub pending_open_path: Option<PathBuf>,
+    pub pending_open_path: Option<String>,
     /// The cell `hover_link` was resolved for, so holding `Ctrl` while resting on a
     /// cell does not rescan. Cleared when `Ctrl` is released, so pointing at a
     /// link *first* and pressing `Ctrl` after still lights it up.

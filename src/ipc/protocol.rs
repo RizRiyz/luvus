@@ -63,7 +63,7 @@ pub enum ServerMessage {
     /// user is the one that should see the file. It opens only if that path
     /// exists on the client machine (for example a mounted share); otherwise
     /// the client silently does nothing.
-    OpenPath(std::path::PathBuf),
+    OpenPath(String),
     /// Ask this display client to reconnect to another validated named session.
     /// It contains no socket path or command and is resolved by the client using
     /// the same local/remote session rules as process startup.
@@ -500,7 +500,7 @@ mod tests {
     #[test]
     fn open_path_roundtrips_to_the_display_client() {
         let mut bytes = Vec::new();
-        let path = std::path::PathBuf::from("/tmp/notes.pdf");
+        let path = "/tmp/notes-é.pdf".to_string();
         write_message(&mut bytes, &ServerMessage::OpenPath(path.clone())).unwrap();
         assert!(matches!(
             read_message::<_, ServerMessage>(&mut &bytes[..]).unwrap(),

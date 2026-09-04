@@ -82,7 +82,8 @@ file manager. With `--remote`, the path is handed to the machine running the
 client and opens only if it exists there. The OS handler may execute
 application-like or shortcut-like entries (`.app`, `.desktop`, `.lnk`,
 `.command`) the same way double-clicking them would, so only open entries you
-trust.
+trust. A path that is not valid UTF-8 is refused rather than changed into a
+different path for transport.
 
 ## What a click does
 
