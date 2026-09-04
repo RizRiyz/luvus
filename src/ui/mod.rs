@@ -473,6 +473,8 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // a frame that bails out (window too small, no workspace yet) must not
     // leave a dock divider behind as a live drag target.
     app.dock_dividers.clear();
+    app.agents_scope_rect = None;
+    app.agents_elsewhere_rect = None;
     app.mobile_pane_prev_rect = None;
     app.mobile_pane_next_rect = None;
 
