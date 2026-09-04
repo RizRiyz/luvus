@@ -1313,6 +1313,13 @@ impl App {
 
     fn apply_mouse(&mut self, m: ratatui::crossterm::event::MouseEvent) {
         use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+        // A new primary-button gesture replaces any copied mouse selection,
+        // even when a modal, menu, resize handle, or child TUI claims the press
+        // below. This keeps the delayed highlight from surviving an unrelated
+        // click through one of those early-return paths.
+        if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+            self.clear_selection();
+        }
         // Track the cursor for hover affordances (e.g. the session delete ✕).
         self.hover = Some((m.column, m.row));
         if let MouseEventKind::Down(_) = m.kind {
@@ -1876,7 +1883,6 @@ impl App {
                 }
                 // Begin a selection only inside a pane's content; otherwise drop
                 // any old one. Falls through to normal click handling (focus/etc).
-                self.selection_clear_at = None;
                 self.selection = self
                     .pane_content_at(m.column, m.row)
                     .map(|(pane, content)| {
@@ -1945,11 +1951,10 @@ impl App {
                 return;
             }
             MouseEventKind::Up(MouseButton::Left) | MouseEventKind::Up(MouseButton::Middle) => {
-                // A double-click already copied on its press; keep its highlight
-                // briefly on release, like a drag copy (toast is the feedback).
+                // A double-click already copied and scheduled its highlight
+                // expiry on press. Its release only closes the gesture.
                 if self.dbl_click_release {
                     self.dbl_click_release = false;
-                    self.schedule_copy_highlight_clear();
                     return;
                 }
                 if let Some(p) = self.link_press.take() {
@@ -3082,6 +3087,7 @@ impl App {
         self.pending_clipboard = Some(text);
         let msg = self.catalog.copied;
         self.show_toast(msg);
+        self.schedule_copy_highlight_clear();
         true
     }
 
@@ -6020,6 +6026,66 @@ mod link_click_tests {
             "the second press copies the whitespace word"
         );
         assert!(app.selection.is_some(), "and highlights it");
+        let clear_at = app
+            .selection_clear_at
+            .expect("the second press schedules highlight expiry");
+
+        app.handle_event(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        assert!(!app.dbl_click_release, "release closes the gesture");
+        assert_eq!(
+            app.selection_clear_at,
+            Some(clear_at),
+            "release does not restart the press-time expiry"
+        );
+        assert!(app.tick_copy_highlight(clear_at));
+        assert!(app.selection.is_none(), "the press-time deadline clears it");
+    }
+
+    #[test]
+    fn a_new_left_press_clears_a_copied_highlight_before_overlay_handling() {
+        let _env = crate::persist::test_env("copy-highlight-overlay-click");
+        let (mut app, _t, at) = fixture_showing("hello world", 6);
+        let end = (at.0 + 4, at.1);
+
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            end,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            end,
+            KeyModifiers::NONE,
+        ));
+        assert!(app.selection.is_some(), "the copied drag is highlighted");
+        assert!(
+            app.selection_clear_at.is_some(),
+            "the copied drag has a pending expiry"
+        );
+
+        // The help overlay returns near the start of `apply_mouse`. Its click
+        // must still replace the delayed terminal highlight immediately.
+        app.help_open = true;
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            (0, 0),
+            KeyModifiers::NONE,
+        ));
+        assert!(!app.help_open, "the overlay handled the click");
+        assert!(app.selection.is_none(), "the old highlight cleared first");
+        assert!(
+            app.selection_clear_at.is_none(),
+            "its obsolete timer cleared with it"
+        );
     }
 
     #[test]
