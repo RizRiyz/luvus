@@ -89,6 +89,7 @@ pub enum Cmd {
     ToggleSidebar,
     ToggleRightSidebar,
     ToggleAgents,
+    ToggleAgentScope,
     /// Focus the FILES tree. The historical enum/config id remains stable so
     /// existing user keymaps keep working after the command's UX is refined.
     ToggleFiles,
@@ -140,6 +141,7 @@ impl Cmd {
         Cmd::ToggleSidebar,
         Cmd::ToggleRightSidebar,
         Cmd::ToggleAgents,
+        Cmd::ToggleAgentScope,
         Cmd::ToggleFiles,
         Cmd::Switcher,
         Cmd::GlobalSearch,
@@ -191,6 +193,7 @@ impl Cmd {
             Cmd::ToggleSidebar => "toggle_sidebar",
             Cmd::ToggleRightSidebar => "toggle_right_sidebar",
             Cmd::ToggleAgents => "toggle_agents",
+            Cmd::ToggleAgentScope => "toggle_agent_scope",
             Cmd::ToggleFiles => "toggle_files",
             Cmd::Switcher => "switcher",
             Cmd::GlobalSearch => "search",
@@ -235,6 +238,7 @@ impl Cmd {
             Cmd::ToggleSidebar => cat.cmd_toggle_sidebar,
             Cmd::ToggleRightSidebar => cat.cmd_toggle_right_sidebar,
             Cmd::ToggleAgents => cat.cmd_toggle_agents,
+            Cmd::ToggleAgentScope => cat.cmd_toggle_agent_scope,
             Cmd::ToggleFiles => cat.cmd_toggle_files,
             Cmd::Switcher => cat.cmd_switcher,
             Cmd::GlobalSearch => cat.cmd_search,
@@ -276,6 +280,7 @@ impl Cmd {
             | Cmd::ToggleSidebar
             | Cmd::ToggleRightSidebar
             | Cmd::ToggleAgents
+            | Cmd::ToggleAgentScope
             | Cmd::ToggleFiles
             | Cmd::GlobalSearch => cat.settings.keys_sections[3],
             Cmd::OpenSessions | Cmd::Switcher | Cmd::Detach => cat.settings.keys_sections[4],
@@ -320,6 +325,7 @@ impl Cmd {
             Cmd::ToggleSidebar => "b",
             Cmd::ToggleRightSidebar => "B",
             Cmd::ToggleAgents => "a",
+            Cmd::ToggleAgentScope => "A",
             Cmd::ToggleFiles => "e",
             Cmd::Switcher => "M",
             Cmd::GlobalSearch => "/",
@@ -905,6 +911,9 @@ impl App {
             Cmd::ToggleAgents => {
                 self.set_agents_filter(!self.agents_active_only);
             }
+            Cmd::ToggleAgentScope => {
+                self.set_agents_scope(!self.agents_this_workspace);
+            }
             Cmd::ToggleFiles => self.focus_files_tree(),
             Cmd::Switcher => self.toggle_switcher(),
             Cmd::GlobalSearch => self.toggle_search(),
@@ -967,6 +976,8 @@ mod tests {
         assert_eq!(m.get("i"), Some(&Cmd::OpenDiff));
         assert_eq!(m.get("m"), Some(&Cmd::OpenMission));
         assert_eq!(m.get("M"), Some(&Cmd::Switcher));
+        assert_eq!(m.get("a"), Some(&Cmd::ToggleAgents));
+        assert_eq!(m.get("A"), Some(&Cmd::ToggleAgentScope));
         // Every command is reachable by at least one default binding.
         for &c in Cmd::ALL {
             assert!(m.values().any(|v| *v == c), "{c:?} default binding");
@@ -1580,6 +1591,26 @@ mod tests {
         assert!(app.tab_rename.is_none());
         app.run_cmd(Cmd::RenameTab);
         assert!(app.tab_rename.is_some(), "rename tab opened the modal");
+    }
+
+    #[test]
+    fn toggle_agent_scope_command_persists_both_choices() {
+        let _env = crate::persist::test_env("toggle-agent-scope-command");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        assert!(!app.agents_this_workspace);
+
+        app.agents_scroll = 7;
+        app.run_cmd(Cmd::ToggleAgentScope);
+        assert!(app.agents_this_workspace);
+        assert_eq!(app.agents_scroll, 0);
+        assert!(crate::config::load().agents_this_workspace);
+
+        app.agents_scroll = 5;
+        app.run_cmd(Cmd::ToggleAgentScope);
+        assert!(!app.agents_this_workspace);
+        assert_eq!(app.agents_scroll, 0);
+        assert!(!crate::config::load().agents_this_workspace);
     }
 
     #[test]

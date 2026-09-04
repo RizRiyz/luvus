@@ -637,11 +637,13 @@ mod socket_api_tests {
         let result = app
             .dispatch(
                 "config.patch",
-                &json!({"patch":{"agents_active_only":true}}),
+                &json!({"patch":{"agents_active_only":true,"agents_this_workspace":true}}),
             )
             .unwrap();
         assert_eq!(result["config"]["agents_active_only"], true);
+        assert_eq!(result["config"]["agents_this_workspace"], true);
         assert!(app.agents_active_only);
+        assert!(app.agents_this_workspace);
         assert_eq!(app.agents_scroll, 0);
     }
 
@@ -650,13 +652,17 @@ mod socket_api_tests {
         let (_env, mut app) = app("socket-config-agents-reload");
         app.agents_active_only = true;
         app.config.agents_active_only = true;
+        app.agents_this_workspace = true;
+        app.config.agents_this_workspace = true;
         app.agents_scroll = 8;
 
         crate::config::save(&crate::config::Config::default());
         let result = app.dispatch("server.reload_config", &json!({})).unwrap();
 
         assert_eq!(result["config"]["agents_active_only"], false);
+        assert_eq!(result["config"]["agents_this_workspace"], false);
         assert!(!app.agents_active_only);
+        assert!(!app.agents_this_workspace);
         assert_eq!(app.agents_scroll, 0);
     }
 
@@ -5964,6 +5970,7 @@ impl App {
         self.file_tree.show_hidden = next.layout.files_show_hidden;
         self.file_tree.scroll = 0;
         self.apply_agents_filter(next.agents_active_only);
+        self.apply_agents_scope(next.agents_this_workspace);
         crate::layout::set_gaps(next.layout.col_gap, next.layout.row_gap);
         for pane in self.panes.values() {
             pane.set_history_budget(history_budget);

@@ -455,10 +455,11 @@ pub(super) fn draw_agent_menu(
     let anchor = menu.anchor;
     let items = app.agent_menu_items(menu.target);
     let extras = menu.module_actions.clone();
+    let scoped = app.agents_this_workspace;
     let rows: Vec<MenuRow> = items
         .iter()
         .map(|it| MenuRow {
-            text: agent_label(*it, cat, &extras),
+            text: agent_label(*it, cat, &extras, scoped),
             divider: matches!(it, AgentMenuItem::Divider),
             destructive: matches!(it, AgentMenuItem::Close),
         })
@@ -482,8 +483,19 @@ pub(super) fn draw_agent_menu(
     }
 }
 
-fn agent_label(it: AgentMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> String {
+fn agent_label(
+    it: AgentMenuItem,
+    cat: &Catalog,
+    extras: &[ModuleMenuAction],
+    scoped: bool,
+) -> String {
     match it {
+        AgentMenuItem::ToggleWorkspaceScope => if scoped {
+            cat.menu_show_all_workspaces
+        } else {
+            cat.menu_show_workspace_only
+        }
+        .to_string(),
         AgentMenuItem::Resume => cat.menu_resume.to_string(),
         AgentMenuItem::RenamePane => cat.menu_rename.to_string(),
         AgentMenuItem::Pin => cat.menu_pin.to_string(),
@@ -848,7 +860,7 @@ mod label_case_tests {
         // `app/mod.rs`).
         rows.push(cat.menu_new_tab.to_string());
         for it in [AgentMenuItem::Resume, AgentMenuItem::Close] {
-            rows.push(agent_label(it, cat, none));
+            rows.push(agent_label(it, cat, none, false));
         }
         for it in [
             OrchMenuItem::Start,

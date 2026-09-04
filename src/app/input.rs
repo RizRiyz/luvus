@@ -2343,6 +2343,12 @@ impl App {
             self.set_agents_filter(val);
             return;
         }
+        // The "blocked in other workspaces" line jumps to a pane this scope hid,
+        // rather than widening the list or cycling to a local blocked row.
+        if let Some((id, _)) = self.agents_elsewhere_rect.filter(|(_, rect)| hit(*rect)) {
+            self.focus_pane_global(id);
+            return;
+        }
         if let Some((id, _)) = self.agent_rects.iter().find(|(_, rect)| hit(*rect)) {
             let id = *id;
             self.focus_pane_global(id);

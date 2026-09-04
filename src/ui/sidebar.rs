@@ -565,9 +565,11 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
             x = x.saturating_add(w);
         }
     }
+    // Workspace scope is controlled by prefix `A`, Settings → Keys, or an
+    // agent/session row's context menu. It consumes no extra dock row.
+    let scoped = app.agents_scope_active();
     let alist_top = aheader + 1;
     let arows = area.bottom().saturating_sub(alist_top);
-    let acap = list_capacity(arows);
     app.agents_area = Rect::new(area.x, alist_top, area.width, arows);
 
     let focus = app.layout().focus;
@@ -577,12 +579,20 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     // delegate to the pane (`=name` or `=<id>`). The tab is intentionally dropped here
     // in favor of the pane token, which is what a script or delegation needs.
     let mut live: Vec<(PaneId, String)> = Vec::new();
-    for ws in app.workspaces.iter() {
-        for tab in ws.tabs.iter() {
+    let mut blocked_elsewhere: Vec<PaneId> = Vec::new();
+    for (wi, ws) in app.workspaces.iter().enumerate() {
+        let visible = !scoped || wi == app.active_ws;
+        for tab in &ws.tabs {
             for id in tab.layout.leaves() {
                 if let Some(s) = app.status.get(&id) {
-                    if app.manifests.is_agent(&s.agent) || s.agent_session.is_some() {
+                    let is_agent = app.manifests.is_agent(&s.agent) || s.agent_session.is_some();
+                    if !is_agent {
+                        continue;
+                    }
+                    if visible {
                         live.push((id, ws.name.clone()));
+                    } else if s.state == State::Blocked {
+                        blocked_elsewhere.push(id);
                     }
                 }
             }
@@ -595,12 +605,43 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     if !app.pinned_agents.is_empty() {
         live.sort_by_key(|(id, _)| !app.pinned_agents.contains(id));
     }
-    // In "Active" mode, hide the on-disk resumable session history.
-    let atotal = if active_only {
-        live.len()
-    } else {
-        live.len() + app.resumable.len()
+    // Scope resumable history by workspace ownership too. Longest matching root
+    // wins, matching pane-home semantics when workspaces are nested. Keep the
+    // original indices so click-to-resume still addresses `app.resumable`.
+    let session_owner = |cwd: &std::path::Path| {
+        app.workspaces
+            .iter()
+            .enumerate()
+            .filter(|(_, ws)| crate::platform::is_subpath(cwd, &ws.cwd))
+            .max_by_key(|(_, ws)| ws.cwd.as_os_str().len())
+            .map(|(wi, _)| wi)
     };
+    let resumable_scoped: Vec<usize> = if scoped && !active_only {
+        app.resumable
+            .iter()
+            .enumerate()
+            .filter(|(_, session)| session_owner(&session.cwd) == Some(app.active_ws))
+            .map(|(i, _)| i)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // Preserve the allocation-free default path: unscoped All indexes the
+    // existing history directly, while only the opt-in scoped projection builds
+    // an index. Active does neither because history is hidden.
+    let resumable_total = if active_only {
+        0
+    } else if scoped {
+        resumable_scoped.len()
+    } else {
+        app.resumable.len()
+    };
+    let atotal = live.len() + resumable_total;
+    // The overflow line is always visible while attention is hidden, even if no
+    // local rows exist. Reserve exactly one terminal row for it.
+    let has_elsewhere = scoped && !blocked_elsewhere.is_empty();
+    app.agents_elsewhere_rect = None;
+    let acap = list_capacity(arows.saturating_sub(u16::from(has_elsewhere)));
     app.agents_scroll = app.agents_scroll.min(atotal.saturating_sub(acap));
     let ascroll = app.agents_scroll;
 
@@ -691,7 +732,12 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                 }
             } else {
                 // A resumable session discovered on disk — click to reopen.
-                let si = k - live.len();
+                let visible_index = k - live.len();
+                let si = if scoped {
+                    resumable_scoped[visible_index]
+                } else {
+                    visible_index
+                };
                 let s = &app.resumable[si];
                 let proj = s
                     .cwd
@@ -726,12 +772,43 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
         }
         draw_scrollbar(
             f,
-            Rect::new(bar_col, alist_top, 1, arows),
+            Rect::new(
+                bar_col,
+                alist_top,
+                1,
+                arows.saturating_sub(u16::from(has_elsewhere)),
+            ),
             atotal,
             acap,
             ascroll,
             t,
         );
+    }
+
+    if has_elsewhere {
+        let y = area.bottom().saturating_sub(1);
+        if y >= alist_top {
+            let text = cat
+                .blocked_elsewhere
+                .replace("{n}", &blocked_elsewhere.len().to_string());
+            let state = State::Blocked;
+            let dot = state.dot();
+            let prefix_width = crate::ui::display_width(dot) + 1;
+            line_at(
+                f,
+                y,
+                Line::from(vec![
+                    Span::styled(dot, Style::new().fg(state.color(t))),
+                    Span::raw(" "),
+                    Span::styled(
+                        crate::ui::truncate(&text, (cw as usize).saturating_sub(prefix_width)),
+                        Style::new().fg(t.subtext0),
+                    ),
+                ]),
+            );
+            app.agents_elsewhere_rect =
+                Some((blocked_elsewhere[0], Rect::new(area.x, y, area.width, 1)));
+        }
     }
 
     (agent_rects, session_rects)
@@ -1146,6 +1223,114 @@ mod tests {
         assert!(!crate::config::load().agents_active_only);
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         assert!(buffer_contains(&term, "resume"));
+    }
+
+    #[test]
+    fn agents_workspace_scope_filters_both_row_kinds_and_keeps_attention_global() {
+        let _env = crate::persist::test_env("agents-workspace-scope");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+
+        // One workspace starts unscoped; scope remains available through the
+        // prefix command and every agent/session row menu.
+        assert!(!app.agents_this_workspace);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let first_pane = app.layout().focus;
+        app.status.get_mut(&first_pane).unwrap().agent = "claude".into();
+        let first_root = crate::persist::config_dir().join("parent-project");
+        std::fs::create_dir_all(&first_root).unwrap();
+        app.workspaces[0].cwd = first_root.clone();
+        let second_root = first_root.join("nested-project");
+        std::fs::create_dir_all(&second_root).unwrap();
+        assert!(app.create_workspace_at(second_root.clone()));
+        let second_pane = app.layout().focus;
+        app.status.get_mut(&second_pane).unwrap().agent = "codex".into();
+        assert_eq!(app.active_ws, 1);
+
+        app.resumable = vec![
+            crate::agent::SessionInfo {
+                agent: "kimi".into(),
+                session_id: "second-history".into(),
+                cwd: second_root.join("nested"),
+                updated: std::time::SystemTime::UNIX_EPOCH,
+            },
+            crate::agent::SessionInfo {
+                agent: "hermes".into(),
+                session_id: "first-history".into(),
+                cwd: first_root.join("nested"),
+                updated: std::time::SystemTime::UNIX_EPOCH,
+            },
+        ];
+
+        // All workspaces is the default. Workspace scope is not a third member
+        // of the All/Active segmented control and consumes no extra row.
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(app.agents_filter_rects.len(), 2);
+        assert!(!buffer_contains(&term, "Here"));
+        for visible in ["claude", "codex", "kimi", "hermes"] {
+            assert!(
+                buffer_contains(&term, visible),
+                "{visible} is initially visible"
+            );
+        }
+
+        app.agents_scroll = 4;
+        app.open_agent_menu(crate::app::AgentTarget::Live(second_pane), 0, 0);
+        app.agent_menu_action(crate::app::AgentMenuItem::ToggleWorkspaceScope);
+        assert!(app.agents_this_workspace);
+        assert!(!app.agents_active_only, "scope is independent of lifecycle");
+        assert_eq!(app.agents_scroll, 0);
+        assert!(crate::config::load().agents_this_workspace);
+
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(buffer_contains(&term, "codex"));
+        assert!(buffer_contains(&term, "kimi"));
+        assert!(!buffer_contains(&term, "claude"));
+        assert!(!buffer_contains(&term, "hermes"));
+        assert!(app.agents_elsewhere_rect.is_none());
+
+        // Lifecycle remains an independent second axis: Active hides the local
+        // resumable row but leaves workspace scope selected.
+        assert!(app.set_agents_filter(true));
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(app.agents_this_workspace);
+        assert!(buffer_contains(&term, "codex"));
+        assert!(!buffer_contains(&term, "kimi"));
+        assert!(app.set_agents_filter(false));
+
+        // A hidden blocked row still participates in global attention. The one
+        // overflow line names the count and targets a pane the scope actually hid.
+        app.status.get_mut(&first_pane).unwrap().state = crate::ui::theme::State::Blocked;
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(buffer_contains(&term, "1 blocked in other"));
+        let (target, overflow) = app.agents_elsewhere_rect.expect("attention overflow");
+        assert_eq!(target, first_pane);
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: overflow.x,
+            row: overflow.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(app.layout().focus, first_pane);
+        assert!(
+            app.agents_this_workspace,
+            "jump does not silently widen the list"
+        );
+
+        // With one workspace, persisted scope still applies to resumable
+        // history under that workspace root.
+        app.workspaces.truncate(1);
+        app.active_ws = 0;
+        assert!(app.agents_this_workspace);
+        assert!(app.agents_scope_active());
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(buffer_contains(&term, "hermes"));
+        assert!(
+            buffer_contains(&term, "kimi"),
+            "after the nested workspace closes, its cwd belongs to the parent"
+        );
     }
 }
 

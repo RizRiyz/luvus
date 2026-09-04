@@ -43,6 +43,11 @@ pub struct Catalog {
     pub no_agents_waiting: &'static str,
     pub all: &'static str,
     pub active: &'static str,
+    /// Overflow line shown when the dock is scoped to one workspace and other
+    /// workspaces hold blocked agents. `{n}` is the count; each language places
+    /// it where its own grammar needs it. Clicking the line jumps to that agent
+    /// rather than widening the list.
+    pub blocked_elsewhere: &'static str,
     pub menu: &'static str,
     pub copied: &'static str,
     /// Toast shown when a dock can't be placed because the target sidebar already
@@ -353,11 +358,14 @@ pub struct Catalog {
     pub cmd_toggle_sidebar: &'static str,
     pub cmd_toggle_right_sidebar: &'static str,
     pub cmd_toggle_agents: &'static str,
+    pub cmd_toggle_agent_scope: &'static str,
     pub cmd_toggle_files: &'static str,
     pub cmd_switcher: &'static str,
     pub cmd_search: &'static str,
     pub cmd_detach: &'static str,
     pub menu_resume: &'static str,
+    pub menu_show_workspace_only: &'static str,
+    pub menu_show_all_workspaces: &'static str,
     pub menu_split_vertical: &'static str,
     pub menu_move_to_tab: &'static str,
     pub menu_new_tab: &'static str,
@@ -408,6 +416,7 @@ pub static EN: Catalog = Catalog {
     no_agents_waiting: "no agents waiting",
     all: "All",
     active: "Active",
+    blocked_elsewhere: "{n} blocked in other workspaces",
     menu: "Menu",
     copied: "Copied to clipboard",
     sidebar_full: "Sidebar full; turn a dock off first",
@@ -700,11 +709,14 @@ pub static EN: Catalog = Catalog {
     cmd_toggle_sidebar: "Toggle sidebar",
     cmd_toggle_right_sidebar: "Toggle right sidebar",
     cmd_toggle_agents: "Agents: all / active",
+    cmd_toggle_agent_scope: "Agents: all workspaces / here",
     cmd_toggle_files: "Files: focus",
     cmd_switcher: "Switcher",
     cmd_search: "Global search",
     cmd_detach: "Detach (leave server running)",
     menu_resume: "Resume",
+    menu_show_workspace_only: "Show Workspace Only",
+    menu_show_all_workspaces: "Show All Workspaces",
     menu_split_vertical: "Split Vertical",
     menu_move_to_tab: "Move to Tab",
     menu_new_tab: "New Tab",
@@ -754,6 +766,7 @@ static ES: Catalog = Catalog {
     no_agents_waiting: "no hay agentes esperando",
     all: "Todos",
     active: "Activos",
+    blocked_elsewhere: "{n} bloqueados en otros espacios",
     menu: "Menú",
     copied: "Copiado al portapapeles",
     sidebar_full: "Barra lateral llena; desactiva un panel primero",
@@ -1046,11 +1059,14 @@ static ES: Catalog = Catalog {
     cmd_toggle_sidebar: "Alternar barra lateral",
     cmd_toggle_right_sidebar: "Alternar barra derecha",
     cmd_toggle_agents: "Agentes: todos / activos",
+    cmd_toggle_agent_scope: "Agentes: todos los espacios / aquí",
     cmd_toggle_files: "Archivos: enfocar",
     cmd_switcher: "Selector",
     cmd_search: "Búsqueda global",
     cmd_detach: "Desacoplar (servidor sigue activo)",
     menu_resume: "Reanudar",
+    menu_show_workspace_only: "Mostrar solo este espacio",
+    menu_show_all_workspaces: "Mostrar todos los espacios",
     menu_split_vertical: "Dividir vertical",
     menu_move_to_tab: "Mover a pestaña",
     menu_new_tab: "Nueva pestaña",
@@ -1100,6 +1116,7 @@ static PT: Catalog = Catalog {
     no_agents_waiting: "nenhum agente aguardando",
     all: "Todos",
     active: "Ativos",
+    blocked_elsewhere: "{n} bloqueados em outros espaços",
     menu: "Menu",
     copied: "Copiado",
     sidebar_full: "Barra lateral cheia; desative um painel primeiro",
@@ -1392,11 +1409,14 @@ static PT: Catalog = Catalog {
     cmd_toggle_sidebar: "Alternar barra lateral",
     cmd_toggle_right_sidebar: "Alternar barra direita",
     cmd_toggle_agents: "Agentes: todos / ativos",
+    cmd_toggle_agent_scope: "Agentes: todos os espaços / aqui",
     cmd_toggle_files: "Arquivos: focar",
     cmd_switcher: "Seletor",
     cmd_search: "Busca global",
     cmd_detach: "Desacoplar (servidor continua)",
     menu_resume: "Retomar",
+    menu_show_workspace_only: "Mostrar somente este espaço",
+    menu_show_all_workspaces: "Mostrar todos os espaços",
     menu_split_vertical: "Dividir vertical",
     menu_move_to_tab: "Mover para aba",
     menu_new_tab: "Nova aba",
@@ -1446,6 +1466,7 @@ static FR: Catalog = Catalog {
     no_agents_waiting: "aucun agent en attente",
     all: "Tous",
     active: "Actifs",
+    blocked_elsewhere: "{n} bloqués dans d'autres espaces",
     menu: "Menu",
     copied: "Copié dans le presse-papiers",
     sidebar_full: "Barre latérale pleine ; désactivez un panneau d'abord",
@@ -1738,11 +1759,14 @@ static FR: Catalog = Catalog {
     cmd_toggle_sidebar: "Basculer la barre latérale",
     cmd_toggle_right_sidebar: "Basculer la barre de droite",
     cmd_toggle_agents: "Agents : tous / actifs",
+    cmd_toggle_agent_scope: "Agents : tous les espaces / ici",
     cmd_toggle_files: "Fichiers : activer",
     cmd_switcher: "Sélecteur",
     cmd_search: "Recherche globale",
     cmd_detach: "Détacher (serveur actif)",
     menu_resume: "Reprendre",
+    menu_show_workspace_only: "Afficher uniquement cet espace",
+    menu_show_all_workspaces: "Afficher tous les espaces",
     menu_split_vertical: "Diviser verticalement",
     menu_move_to_tab: "Déplacer vers un onglet",
     menu_new_tab: "Nouvel onglet",
@@ -1792,6 +1816,7 @@ static DE: Catalog = Catalog {
     no_agents_waiting: "keine wartenden Agenten",
     all: "Alle",
     active: "Aktiv",
+    blocked_elsewhere: "{n} in anderen Arbeitsbereichen blockiert",
     menu: "Menü",
     copied: "In Zwischenablage kopiert",
     sidebar_full: "Seitenleiste voll; zuerst ein Dock deaktivieren",
@@ -2084,11 +2109,14 @@ static DE: Catalog = Catalog {
     cmd_toggle_sidebar: "Seitenleiste umschalten",
     cmd_toggle_right_sidebar: "Rechte Seitenleiste umschalten",
     cmd_toggle_agents: "Agenten: alle / aktiv",
+    cmd_toggle_agent_scope: "Agenten: alle Arbeitsbereiche / hier",
     cmd_toggle_files: "Dateien: fokussieren",
     cmd_switcher: "Umschalter",
     cmd_search: "Globale Suche",
     cmd_detach: "Abkoppeln (Server läuft weiter)",
     menu_resume: "Fortsetzen",
+    menu_show_workspace_only: "Nur diesen Arbeitsbereich anzeigen",
+    menu_show_all_workspaces: "Alle Arbeitsbereiche anzeigen",
     menu_split_vertical: "Vertikal teilen",
     menu_move_to_tab: "In Tab verschieben",
     menu_new_tab: "Neuer Tab",
@@ -2138,6 +2166,7 @@ static ID: Catalog = Catalog {
     no_agents_waiting: "tidak ada agen menunggu",
     all: "Semua",
     active: "Aktif",
+    blocked_elsewhere: "{n} terblokir di ruang kerja lain",
     menu: "Menu",
     copied: "Disalin ke papan klip",
     sidebar_full: "Bilah sisi penuh; matikan satu dock dulu",
@@ -2430,11 +2459,14 @@ static ID: Catalog = Catalog {
     cmd_toggle_sidebar: "Alihkan bilah sisi",
     cmd_toggle_right_sidebar: "Alihkan bilah kanan",
     cmd_toggle_agents: "Agen: semua / aktif",
+    cmd_toggle_agent_scope: "Agen: semua ruang kerja / di sini",
     cmd_toggle_files: "Berkas: fokus",
     cmd_switcher: "Pengalih",
     cmd_search: "Pencarian global",
     cmd_detach: "Lepas (server tetap jalan)",
     menu_resume: "Lanjutkan",
+    menu_show_workspace_only: "Tampilkan ruang kerja ini saja",
+    menu_show_all_workspaces: "Tampilkan semua ruang kerja",
     menu_split_vertical: "Bagi vertikal",
     menu_move_to_tab: "Pindah ke tab",
     menu_new_tab: "Tab baru",
@@ -2484,6 +2516,7 @@ static ZH: Catalog = Catalog {
     no_agents_waiting: "没有等待的代理",
     all: "全部",
     active: "活动",
+    blocked_elsewhere: "其他工作区有 {n} 个被阻塞",
     menu: "菜单",
     copied: "已复制到剪贴板",
     sidebar_full: "侧边栏已满；请先关闭一个面板",
@@ -2776,11 +2809,14 @@ static ZH: Catalog = Catalog {
     cmd_toggle_sidebar: "切换侧栏",
     cmd_toggle_right_sidebar: "切换右侧栏",
     cmd_toggle_agents: "代理：全部 / 活动",
+    cmd_toggle_agent_scope: "代理：所有工作区 / 本工作区",
     cmd_toggle_files: "文件：聚焦",
     cmd_switcher: "切换器",
     cmd_search: "全局搜索",
     cmd_detach: "分离（服务器继续运行）",
     menu_resume: "恢复",
+    menu_show_workspace_only: "仅显示本工作区",
+    menu_show_all_workspaces: "显示所有工作区",
     menu_split_vertical: "垂直拆分",
     menu_move_to_tab: "移动到标签页",
     menu_new_tab: "新标签页",
@@ -2830,6 +2866,7 @@ static JA: Catalog = Catalog {
     no_agents_waiting: "待機中のエージェントなし",
     all: "すべて",
     active: "アクティブ",
+    blocked_elsewhere: "他のワークスペースで {n} 件がブロック中",
     menu: "メニュー",
     copied: "クリップボードにコピーしました",
     sidebar_full: "サイドバーが満杯です。先にドックを1つオフにしてください",
@@ -3122,11 +3159,14 @@ static JA: Catalog = Catalog {
     cmd_toggle_sidebar: "サイドバー切替",
     cmd_toggle_right_sidebar: "右サイドバー切替",
     cmd_toggle_agents: "エージェント: 全部 / アクティブ",
+    cmd_toggle_agent_scope: "エージェント: 全ワークスペース / ここ",
     cmd_toggle_files: "ファイル：フォーカス",
     cmd_switcher: "スイッチャー",
     cmd_search: "全体検索",
     cmd_detach: "デタッチ（サーバーは継続）",
     menu_resume: "再開",
+    menu_show_workspace_only: "このワークスペースのみ表示",
+    menu_show_all_workspaces: "すべてのワークスペースを表示",
     menu_split_vertical: "垂直分割",
     menu_move_to_tab: "タブへ移動",
     menu_new_tab: "新しいタブ",
@@ -3176,6 +3216,7 @@ static KO: Catalog = Catalog {
     no_agents_waiting: "대기 중인 에이전트 없음",
     all: "전체",
     active: "활성",
+    blocked_elsewhere: "다른 작업 공간에서 {n}개 차단됨",
     menu: "메뉴",
     copied: "클립보드에 복사됨",
     sidebar_full: "사이드바가 가득 참; 먼저 도킹을 하나 끄세요",
@@ -3468,11 +3509,14 @@ static KO: Catalog = Catalog {
     cmd_toggle_sidebar: "사이드바 전환",
     cmd_toggle_right_sidebar: "오른쪽 사이드바 전환",
     cmd_toggle_agents: "에이전트: 전체 / 활성",
+    cmd_toggle_agent_scope: "에이전트: 모든 작업 공간 / 여기",
     cmd_toggle_files: "파일: 포커스",
     cmd_switcher: "전환기",
     cmd_search: "전체 검색",
     cmd_detach: "분리 (서버는 계속 실행)",
     menu_resume: "재개",
+    menu_show_workspace_only: "이 작업 공간만 표시",
+    menu_show_all_workspaces: "모든 작업 공간 표시",
     menu_split_vertical: "세로 분할",
     menu_move_to_tab: "탭으로 이동",
     menu_new_tab: "새 탭",
@@ -3546,6 +3590,33 @@ mod tests {
         // An unknown code degrades to English, never panics.
         assert_eq!(by_code("xx").workspaces, EN.workspaces);
         assert_eq!(native_name("xx"), "English");
+    }
+
+    #[test]
+    fn agents_scope_text_is_complete_for_every_language() {
+        for &code in LANGS {
+            let catalog = by_code(code);
+            assert!(
+                !catalog.menu_show_workspace_only.trim().is_empty(),
+                "{code} has a scoped action"
+            );
+            assert!(
+                !catalog.menu_show_all_workspaces.trim().is_empty(),
+                "{code} has an unscoped action"
+            );
+            assert_eq!(
+                catalog.blocked_elsewhere.matches("{n}").count(),
+                1,
+                "{code} owns one count placeholder"
+            );
+            assert!(
+                !catalog
+                    .blocked_elsewhere
+                    .replace("{n}", "2")
+                    .contains("{n}"),
+                "{code} renders the blocked count"
+            );
+        }
     }
 
     #[test]
