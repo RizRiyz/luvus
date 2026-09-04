@@ -163,6 +163,7 @@ fn finish_selected_text(mut out: String) -> Option<String> {
 /// A second left click within this of the first, on the same cell (±1), is a
 /// double-click. Terminals emit no native double-click, so luvus times it.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+const COPY_HIGHLIGHT_DURATION: Duration = Duration::from_millis(1400);
 
 /// A run of grid cells on one row: `(row, start_col, end_col)`, `end_col`
 /// exclusive — the same shape as [`crate::links::Link::spans`].
@@ -1875,6 +1876,7 @@ impl App {
                 }
                 // Begin a selection only inside a pane's content; otherwise drop
                 // any old one. Falls through to normal click handling (focus/etc).
+                self.selection_clear_at = None;
                 self.selection = self
                     .pane_content_at(m.column, m.row)
                     .map(|(pane, content)| {
@@ -1943,11 +1945,11 @@ impl App {
                 return;
             }
             MouseEventKind::Up(MouseButton::Left) | MouseEventKind::Up(MouseButton::Middle) => {
-                // A double-click already copied on its press; clear its highlight on
-                // release so it behaves like a drag copy (toast is the feedback).
+                // A double-click already copied on its press; keep its highlight
+                // briefly on release, like a drag copy (toast is the feedback).
                 if self.dbl_click_release {
                     self.dbl_click_release = false;
-                    self.selection = None;
+                    self.schedule_copy_highlight_clear();
                     return;
                 }
                 if let Some(p) = self.link_press.take() {
@@ -1983,16 +1985,16 @@ impl App {
                 }
                 // A real drag copies its text + flashes a toast; a plain click
                 // clears the (1-cell) selection so nothing stays highlighted.
-                // After a successful copy the highlight is also cleared immediately
-                // — the toast is the feedback, not a lingering selection.
+                // After a successful copy the highlight lingers briefly so you can
+                // see what was copied; the toast times out on the same cadence.
                 match self.selection_text() {
                     Some(text) => {
                         self.pending_clipboard = Some(text);
                         let msg = self.catalog.copied;
                         self.show_toast(msg);
-                        self.selection = None;
+                        self.schedule_copy_highlight_clear();
                     }
-                    None => self.selection = None,
+                    None => self.clear_selection(),
                 }
                 return;
             }
@@ -2645,7 +2647,7 @@ impl App {
             return false;
         };
         let (offset, history) = pane.scroll_state();
-        self.selection = None;
+        self.clear_selection();
         self.scroll_pane = None;
         self.copy_mode = Some(CopyMode {
             pane: id,
@@ -3064,8 +3066,8 @@ impl App {
         // Highlight exactly the copied cells: from the first covered cell to the
         // last, which for a rejoined soft-wrapped path runs through the full rows
         // between them (the same reading-order rule `Selection` copies with). The
-        // highlight is transient (screen coordinates, cleared on the next click),
-        // so it carries no retained-history span.
+        // highlight is transient (screen coordinates, cleared after copy or the
+        // next click), so it carries no retained-history span.
         if let (Some(first), Some(last)) = (spans.first(), spans.last()) {
             self.selection = Some(Selection {
                 pane,
@@ -3255,7 +3257,27 @@ impl App {
     }
 
     pub fn show_toast(&mut self, text: impl Into<String>) {
-        self.toast = Some((text.into(), Instant::now() + Duration::from_millis(1400)));
+        self.toast = Some((text.into(), Instant::now() + COPY_HIGHLIGHT_DURATION));
+    }
+
+    fn schedule_copy_highlight_clear(&mut self) {
+        self.selection_clear_at = Some(Instant::now() + COPY_HIGHLIGHT_DURATION);
+    }
+
+    fn clear_selection(&mut self) {
+        self.selection = None;
+        self.selection_clear_at = None;
+    }
+
+    /// Clear an expired copied-selection highlight; returns true when it changed
+    /// so the loop repaints once to remove it, since idle frames aren't rendered.
+    pub fn tick_copy_highlight(&mut self, now: Instant) -> bool {
+        if self.selection_clear_at.is_some_and(|at| now >= at) {
+            self.clear_selection();
+            true
+        } else {
+            false
+        }
     }
 
     /// Clear an expired toast; returns true when it changed (so the loop redraws
@@ -5789,6 +5811,20 @@ mod link_click_tests {
                 " Morning arrives without ceremony,\n a thin gold line on the edge of the glass.\n The kettle speaks in its private language,"
             )
         );
+        assert!(
+            app.selection.is_some(),
+            "the copied drag keeps its highlight briefly"
+        );
+        assert!(
+            !app.tick_copy_highlight(Instant::now()),
+            "the highlight stays until the toast cadence elapses"
+        );
+        assert!(app.selection.is_some());
+        assert!(
+            app.tick_copy_highlight(Instant::now() + COPY_HIGHLIGHT_DURATION),
+            "the highlight clears once the timer expires"
+        );
+        assert!(app.selection.is_none());
     }
 
     #[test]

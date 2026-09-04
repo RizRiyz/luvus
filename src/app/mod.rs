@@ -1825,6 +1825,8 @@ pub struct App {
     /// Active mouse text selection in a pane (drag to select). Cleared on a new
     /// click; on release its text is queued to `pending_clipboard`.
     pub selection: Option<Selection>,
+    /// When set, a copied mouse selection stays highlighted until this instant.
+    selection_clear_at: Option<Instant>,
     /// Keyboard copy selection. This deliberately owns navigation keys so they
     /// cannot reach the child while text is being selected.
     pub copy_mode: Option<CopyMode>,
@@ -2338,6 +2340,7 @@ impl App {
             pending_notify: Vec::new(),
             pending_sound: None,
             selection: None,
+            selection_clear_at: None,
             copy_mode: None,
             mouse_grab: None,
             pending_clipboard: None,
@@ -2957,6 +2960,7 @@ impl App {
             pending_notify: Vec::new(),
             pending_sound: None,
             selection: None,
+            selection_clear_at: None,
             copy_mode: None,
             mouse_grab: None,
             pending_clipboard: None,

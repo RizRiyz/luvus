@@ -1365,6 +1365,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
             emit_clipboard(&text);
         }
         app.tick_toast(Instant::now());
+        app.tick_copy_highlight(Instant::now());
         app.tick_search_flash(Instant::now());
         app.tick_bar_notifications(Instant::now());
         // A forced redraw (resize / regained focus) wipes the terminal so the next
