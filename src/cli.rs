@@ -3778,6 +3778,7 @@ fn parse_setting_value(s: &str) -> Value {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::BufRead;
 
     #[test]
     fn status_card_keeps_the_bug_and_rows_aligned() {
@@ -4690,6 +4691,169 @@ mod tests {
         let (m, p) = parse(&argv("luvus module enable my-mod")).unwrap();
         assert_eq!(m, "module.enable");
         assert_eq!(p.get("id").and_then(|v| v.as_str()), Some("my-mod"));
+    }
+
+    fn wait_test_server(tag: &str) -> crate::ipc::transport::Listener {
+        let path = std::env::temp_dir().join(format!(
+            "lw-{tag}-{}-{:?}.sock",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_file(&path);
+        std::env::set_var("LUVUS_SOCKET_PATH", &path);
+        crate::ipc::transport::bind(&path).expect("bind wait test server")
+    }
+
+    fn accept_wait_request(
+        listener: &crate::ipc::transport::Listener,
+    ) -> (crate::ipc::transport::Conn, Value) {
+        let connection = crate::ipc::transport::incoming(listener)
+            .next()
+            .expect("accept wait request");
+        let mut line = String::new();
+        BufReader::new(connection.clone())
+            .read_line(&mut line)
+            .expect("read wait request");
+        let request = serde_json::from_str(&line).expect("parse wait request");
+        (connection, request)
+    }
+
+    #[test]
+    fn wait_status_stream_keeps_an_absolute_deadline_during_unrelated_events() {
+        let _env = crate::persist::test_env("wait-stream-absolute-deadline");
+        let listener = wait_test_server("deadline");
+        let server = std::thread::spawn(move || {
+            let (mut events, subscribe) = accept_wait_request(&listener);
+            assert_eq!(subscribe["method"], "events.subscribe");
+            writeln!(events, r#"{{"id":"1","result":{{"type":"subscribed"}}}}"#).unwrap();
+
+            let (mut status, request) = accept_wait_request(&listener);
+            assert_eq!(request["method"], "pane.status");
+            writeln!(status, r#"{{"id":"1","result":{{"status":"idle"}}}}"#).unwrap();
+
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_millis(350) {
+                if writeln!(events, r#"{{"event":"pane.output","data":{{"pane":"7"}}}}"#).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+
+        let timeout = Duration::from_millis(75);
+        let started = Instant::now();
+        let result = wait_status_stream("7", "done", Some(started + timeout));
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+
+        assert_eq!(result.unwrap(), 2);
+        assert!(
+            elapsed <= timeout + Duration::from_millis(125),
+            "absolute timeout took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn wait_agent_status_set_uses_old_server_event_stream_for_transient_match() {
+        let _env = crate::persist::test_env("wait-status-set-old-server-stream");
+        let listener = wait_test_server("status-set");
+        let server = std::thread::spawn(move || {
+            let (mut agent_wait, request) = accept_wait_request(&listener);
+            assert_eq!(request["method"], "agent.wait");
+            assert_eq!(request["params"]["statuses"], json!(["working", "blocked"]));
+            writeln!(
+                agent_wait,
+                r#"{{"id":"1","error":{{"code":"invalid_request","message":"agent.wait contains an unknown parameter"}}}}"#
+            )
+            .unwrap();
+
+            let (mut next, request) = accept_wait_request(&listener);
+            if request["method"] == "pane.status" {
+                // The old polling fallback observes idle, while the matching state
+                // exists only during the gap before its next 25 ms connection.
+                writeln!(next, r#"{{"id":"1","result":{{"status":"idle"}}}}"#).unwrap();
+                std::thread::sleep(Duration::from_millis(5));
+                std::thread::sleep(Duration::from_millis(5));
+                return;
+            }
+
+            assert_eq!(request["method"], "events.subscribe");
+            writeln!(next, r#"{{"id":"1","result":{{"type":"subscribed"}}}}"#).unwrap();
+            let mut events = next;
+            let (mut status, request) = accept_wait_request(&listener);
+            assert_eq!(request["method"], "pane.status");
+            writeln!(status, r#"{{"id":"1","result":{{"status":"idle"}}}}"#).unwrap();
+
+            std::thread::sleep(Duration::from_millis(5));
+            writeln!(events, r#"{{"event":"pane.agent_status_changed","data":{{"pane":"7","status":"blocked"}}}}"#).unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+            let _ = writeln!(
+                events,
+                r#"{{"event":"pane.agent_status_changed","data":{{"pane":"7","status":"idle"}}}}"#
+            );
+        });
+
+        let result = wait_cmd(&argv(
+            "luvus wait agent-status 7 --status working,blocked --timeout 0.15",
+        ));
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn wait_agent_status_singular_keeps_old_server_event_stream_fallback() {
+        let _env = crate::persist::test_env("wait-status-singular-old-server-stream");
+        let listener = wait_test_server("singular");
+        let server = std::thread::spawn(move || {
+            let (mut agent_wait, request) = accept_wait_request(&listener);
+            assert_eq!(request["method"], "agent.wait");
+            assert_eq!(request["params"]["status"], "done");
+            assert!(request["params"].get("timeout_s").is_none());
+            writeln!(
+                agent_wait,
+                r#"{{"id":"1","error":{{"code":"invalid_request","message":"unknown method agent.wait"}}}}"#
+            )
+            .unwrap();
+
+            let (mut events, subscribe) = accept_wait_request(&listener);
+            assert_eq!(subscribe["method"], "events.subscribe");
+            writeln!(events, r#"{{"id":"1","result":{{"type":"subscribed"}}}}"#).unwrap();
+            let (mut status, request) = accept_wait_request(&listener);
+            assert_eq!(request["method"], "pane.status");
+            writeln!(status, r#"{{"id":"1","result":{{"status":"working"}}}}"#).unwrap();
+            writeln!(
+                events,
+                r#"{{"event":"pane.agent_status_changed","data":{{"pane":"7","status":"done"}}}}"#
+            )
+            .unwrap();
+        });
+
+        let result = wait_cmd(&argv("luvus wait agent-status 7 --status done"));
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn wait_status_stream_returns_timeout_code_when_stream_closes_mid_wait() {
+        let _env = crate::persist::test_env("wait-status-stream-close");
+        let listener = wait_test_server("stream-close");
+        let server = std::thread::spawn(move || {
+            let (mut events, subscribe) = accept_wait_request(&listener);
+            assert_eq!(subscribe["method"], "events.subscribe");
+            writeln!(events, r#"{{"id":"1","result":{{"type":"subscribed"}}}}"#).unwrap();
+            let (mut status, request) = accept_wait_request(&listener);
+            assert_eq!(request["method"], "pane.status");
+            writeln!(status, r#"{{"id":"1","result":{{"status":"idle"}}}}"#).unwrap();
+            drop(events);
+        });
+
+        let result = wait_status_stream(
+            "7",
+            "done",
+            Some(Instant::now() + Duration::from_millis(200)),
+        );
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), 2);
     }
 
     #[test]
