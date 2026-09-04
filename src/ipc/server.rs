@@ -26,13 +26,7 @@ use crate::ui;
 const DEFAULT_SIZE: (u16, u16) = (120, 32);
 /// Minimum time between rendered frames — the fps cap during activity (60fps).
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
-/// A genuinely quiet server only needs a bounded maintenance/signalling audit.
-/// This is still short enough for clean signal shutdown while cutting idle
-/// timeout wakes by more than 80% compared with the former 33 ms poll.
-const IDLE_INTERVAL: Duration = Duration::from_millis(250);
-/// Detection hysteresis and parked API workflows retain their established
-/// 100 ms cadence while they have time-sensitive work.
-const FAST_IDLE_INTERVAL: Duration = Duration::from_millis(100);
+const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
 
 fn frame_wait(elapsed_since_attempt: Duration) -> Duration {
     FRAME_INTERVAL
@@ -363,7 +357,7 @@ pub fn run() -> Result<()> {
     };
     app.events = events.clone();
     app.server_mode = true;
-    shutdown::install();
+    shutdown::install(tx.clone());
 
     let mut terminal_theme_enabled = app.config.theme == "terminal";
     let terminal_theme = Arc::new(AtomicBool::new(terminal_theme_enabled));
@@ -427,39 +421,70 @@ pub fn run() -> Result<()> {
     const REARM_INTERVAL: Duration = Duration::from_millis(100);
 
     loop {
-        // Pending + clients attached → wait only until the cap frees up (flush
-        // promptly); otherwise tick at the coarser idle cadence.
-        let wait = if render_request.needs_render() && !clients.is_empty() {
-            frame_wait(last_render_attempt.elapsed())
+        // Pending + clients attached → wait only until the cap frees up.
+        // Otherwise sleep until the next real deadline, or block on the
+        // channel when nothing is due (PTY/API/client/signal wake the loop).
+        let now = Instant::now();
+        let persist_due = (app.persist_session_now && !immediate_save_attempted)
+            || (app.session_dirty && last_save.elapsed() >= SESSION_SAVE_DEBOUNCE);
+        let rearm_due = app.has_pending_pty_output() && last_rearm.elapsed() >= REARM_INTERVAL;
+        let received = if persist_due || rearm_due {
+            // Already-due persist/re-arm must not `recv_timeout(0)`: that busy-loops
+            // until the 100ms re-arm cadence elapses.
+            None
+        } else if render_request.needs_render() && !clients.is_empty() {
+            match rx.recv_timeout(frame_wait(last_render_attempt.elapsed())) {
+                Ok(ev) => Some(ev),
+                Err(RecvTimeoutError::Timeout) => {
+                    LOOP_DEADLINE_WAKES.fetch_add(1, Ordering::Relaxed);
+                    None
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
         } else {
-            let mut idle = if app.needs_fast_runtime_tick(Instant::now()) {
-                FAST_IDLE_INTERVAL
-            } else {
-                IDLE_INTERVAL
-            };
+            let mut deadline = app.next_runtime_deadline(now, !clients.is_empty());
+            if app.session_dirty {
+                App::sooner_deadline(&mut deadline, last_save + SESSION_SAVE_DEBOUNCE);
+            }
             if app.has_pending_pty_output() {
-                idle = idle.min(REARM_INTERVAL.saturating_sub(last_rearm.elapsed()));
+                App::sooner_deadline(&mut deadline, last_rearm + REARM_INTERVAL);
             }
-            idle.max(Duration::from_millis(1))
+            match deadline.map(|at| at.saturating_duration_since(now)) {
+                Some(timeout) if !timeout.is_zero() => match rx.recv_timeout(timeout) {
+                    Ok(ev) => Some(ev),
+                    Err(RecvTimeoutError::Timeout) => {
+                        LOOP_DEADLINE_WAKES.fetch_add(1, Ordering::Relaxed);
+                        None
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
+                },
+                Some(_) => None,
+                None if shutdown::wake_available() => match rx.recv() {
+                    Ok(ev) => Some(ev),
+                    Err(_) => break,
+                },
+                None => match rx.recv_timeout(Duration::from_secs(1)) {
+                    Ok(ev) => Some(ev),
+                    Err(RecvTimeoutError::Timeout) => {
+                        LOOP_DEADLINE_WAKES.fetch_add(1, Ordering::Relaxed);
+                        None
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
+                },
+            }
         };
-        match rx.recv_timeout(wait) {
-            Ok(ev) => {
-                LOOP_EVENT_WAKES.fetch_add(1, Ordering::Relaxed);
-                let source = event_render_source(&app, &ev);
-                let changed = apply(
-                    ev,
-                    &mut app,
-                    &mut clients,
-                    &mut foreground,
-                    &mut interactive_size,
-                    &mut next_activity,
-                );
-                record_event_render_request(source, changed, &mut render_request);
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                LOOP_DEADLINE_WAKES.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(RecvTimeoutError::Disconnected) => break,
+        if let Some(ev) = received {
+            LOOP_EVENT_WAKES.fetch_add(1, Ordering::Relaxed);
+            let source = event_render_source(&app, &ev);
+            let changed = apply(
+                ev,
+                &mut app,
+                &mut clients,
+                &mut foreground,
+                &mut interactive_size,
+                &mut next_activity,
+            );
+            record_event_render_request(source, changed, &mut render_request);
         }
         while let Ok(ev) = rx.try_recv() {
             let source = event_render_source(&app, &ev);
@@ -506,7 +531,7 @@ pub fn run() -> Result<()> {
         // Closing the final project bypasses the debounce once. Failed writes
         // retain both flags and retry at the normal cadence instead of hot-looping.
         let immediate_save_due = app.persist_session_now && !immediate_save_attempted;
-        let debounced_save_due = app.session_dirty && last_save.elapsed() > Duration::from_secs(2);
+        let debounced_save_due = app.session_dirty && last_save.elapsed() >= SESSION_SAVE_DEBOUNCE;
         if immediate_save_due || debounced_save_due {
             immediate_save_attempted = app.persist_session_now;
             if persist::save(&app) {
@@ -543,7 +568,7 @@ pub fn run() -> Result<()> {
         // A state transition here (e.g. a silent agent reaching Done) has no PtyData
         // to ride on, so repaint when detection reports a visible change.
         let now = Instant::now();
-        if app.detect_tick(now) {
+        if app.detect_tick_with(now, !clients.is_empty()) {
             render_request.record(RenderCause::Detection);
         }
         // Parked `wait.output` deadlines lapse on the tick (docs/81); a no-op
@@ -680,6 +705,7 @@ fn apply(
             );
             *foreground = Some(id);
             apply_foreground_theme(app, clients, *foreground);
+            app.mark_runtime_scans_dirty();
             true
         }
         AppEvent::ClientDetach { id } => {
@@ -1332,23 +1358,84 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
 }
 
 /// Graceful shutdown on a termination signal. The handler only flips an atomic
-/// flag (the only async-signal-safe thing to do); the event loop polls it every
-/// idle tick (≤250ms) and exits through the normal path — clients notified, the
-/// session saved — instead of dying mid-state on SIGTERM (logout, `kill`,
-/// system shutdown).
+/// and writes a self-pipe (async-signal-safe); a waiter thread then posts
+/// `AppEvent::Shutdown` so a sleeping event loop still exits through the normal
+/// path — clients notified, the session saved — instead of dying mid-state on
+/// SIGTERM (logout, `kill`, system shutdown).
 #[cfg(unix)]
 mod shutdown {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::io;
+    use std::os::fd::RawFd;
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+    use std::sync::mpsc::Sender;
+    use std::thread;
+
+    use crate::event::AppEvent;
 
     static FLAG: AtomicBool = AtomicBool::new(false);
+    static WRITE_FD: AtomicI32 = AtomicI32::new(-1);
+    static WAKE_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
     pub fn requested() -> bool {
         FLAG.load(Ordering::Relaxed)
     }
 
-    pub fn install() {
+    pub fn wake_available() -> bool {
+        WAKE_AVAILABLE.load(Ordering::Relaxed)
+    }
+
+    pub fn install(tx: Sender<AppEvent>) {
+        let mut fds = [-1, -1];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            install_handler();
+            return;
+        }
+        if set_cloexec(fds[0]).is_err() || set_nonblocking_cloexec(fds[1]).is_err() {
+            unsafe {
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+            }
+            install_handler();
+            return;
+        }
+        WRITE_FD.store(fds[1], Ordering::Relaxed);
+        let read_fd = fds[0];
+        install_handler();
+        if thread::Builder::new()
+            .name("luvus-signal".into())
+            .spawn(move || wait_for_signal(read_fd, tx))
+            .is_ok()
+        {
+            WAKE_AVAILABLE.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn wait_for_signal(read_fd: RawFd, tx: Sender<AppEvent>) {
+        let mut buf = [0u8; 8];
+        loop {
+            let count = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
+            if count > 0 {
+                FLAG.store(true, Ordering::Relaxed);
+                let _ = tx.send(AppEvent::Shutdown);
+                continue;
+            }
+            if count < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+            }
+            break;
+        }
+    }
+
+    fn install_handler() {
         extern "C" fn on_signal(_sig: libc::c_int) {
             FLAG.store(true, Ordering::Relaxed);
+            let fd = WRITE_FD.load(Ordering::Relaxed);
+            if fd >= 0 {
+                write_wake_preserving_errno(fd);
+            }
         }
         unsafe {
             let h = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
@@ -1357,16 +1444,110 @@ mod shutdown {
             libc::signal(libc::SIGINT, h);
         }
     }
+
+    fn write_wake_preserving_errno(fd: RawFd) {
+        let byte = 1u8;
+        unsafe {
+            let errno = errno_location();
+            let saved_errno = errno.as_ref().copied();
+            let _ = libc::write(fd, (&byte as *const u8).cast(), 1);
+            if let Some(saved_errno) = saved_errno {
+                *errno = saved_errno;
+            }
+        }
+    }
+
+    #[cfg(any(
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "dragonfly"
+    ))]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        libc::__error()
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "hurd", target_os = "redox"))]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        libc::__errno_location()
+    }
+
+    #[cfg(any(
+        target_os = "android",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "nuttx"
+    ))]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        libc::__errno()
+    }
+
+    #[cfg(any(target_os = "solaris", target_os = "illumos"))]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        libc::___errno()
+    }
+
+    #[cfg(target_os = "aix")]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        libc::_Errno()
+    }
+
+    // libc exposes no common errno accessor across every possible `unix`
+    // target. Unknown targets retain an async-signal-safe handler; null
+    // precisely disables save/restore instead of guessing an ABI symbol.
+    #[cfg(not(any(
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "linux",
+        target_os = "hurd",
+        target_os = "redox",
+        target_os = "android",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "nuttx",
+        target_os = "solaris",
+        target_os = "illumos",
+        target_os = "aix"
+    )))]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        std::ptr::null_mut()
+    }
+
+    fn set_cloexec(fd: RawFd) -> io::Result<()> {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn set_nonblocking_cloexec(fd: RawFd) -> io::Result<()> {
+        set_cloexec(fd)?;
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
 }
 
 /// Windows: no POSIX signals; the detached server is stopped via `server stop`.
 #[cfg(not(unix))]
 mod shutdown {
+    use std::sync::mpsc::Sender;
+
+    use crate::event::AppEvent;
+
     pub fn requested() -> bool {
         false
     }
 
-    pub fn install() {}
+    pub fn wake_available() -> bool {
+        // Stop arrives as an API event, not a POSIX signal.
+        true
+    }
+
+    pub fn install(_tx: Sender<AppEvent>) {}
 }
 
 #[cfg(test)]
