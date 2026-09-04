@@ -4696,10 +4696,11 @@ mod tests {
         assert_eq!(p.get("id").and_then(|v| v.as_str()), Some("my-mod"));
     }
 
-    fn wait_test_server(tag: &str) -> crate::ipc::transport::Listener {
+    fn wait_test_server() -> crate::ipc::transport::Listener {
         let root = crate::persist::config_dir();
         fs::create_dir_all(&root).expect("create wait test home");
-        let path = root.join(format!("w-{tag}.sock"));
+        // Keep the macOS Unix-domain socket below sockaddr_un::sun_path.
+        let path = root.join("w");
         let _ = fs::remove_file(&path);
         std::env::set_var("LUVUS_SOCKET_PATH", &path);
         crate::ipc::transport::bind(&path).expect("bind wait test server")
@@ -4721,8 +4722,8 @@ mod tests {
 
     #[test]
     fn wait_status_stream_keeps_an_absolute_deadline_during_unrelated_events() {
-        let _env = crate::persist::test_env("wait-stream-absolute-deadline");
-        let listener = wait_test_server("deadline");
+        let _env = crate::persist::test_env("w-ad");
+        let listener = wait_test_server();
         let server = std::thread::spawn(move || {
             let (mut events, subscribe) = accept_wait_request(&listener);
             assert_eq!(subscribe["method"], "events.subscribe");
@@ -4756,8 +4757,8 @@ mod tests {
 
     #[test]
     fn wait_agent_status_set_uses_old_server_event_stream_for_transient_match() {
-        let _env = crate::persist::test_env("wait-status-set-old-server-stream");
-        let listener = wait_test_server("status-set");
+        let _env = crate::persist::test_env("w-set");
+        let listener = wait_test_server();
         let server = std::thread::spawn(move || {
             let (mut agent_wait, request) = accept_wait_request(&listener);
             assert_eq!(request["method"], "agent.wait");
@@ -4803,8 +4804,8 @@ mod tests {
 
     #[test]
     fn wait_agent_status_singular_keeps_old_server_event_stream_fallback() {
-        let _env = crate::persist::test_env("wait-status-singular-old-server-stream");
-        let listener = wait_test_server("singular");
+        let _env = crate::persist::test_env("w-one");
+        let listener = wait_test_server();
         let server = std::thread::spawn(move || {
             let (mut agent_wait, request) = accept_wait_request(&listener);
             assert_eq!(request["method"], "agent.wait");
@@ -4836,8 +4837,8 @@ mod tests {
 
     #[test]
     fn wait_status_stream_returns_timeout_code_when_stream_closes_mid_wait() {
-        let _env = crate::persist::test_env("wait-status-stream-close");
-        let listener = wait_test_server("stream-close");
+        let _env = crate::persist::test_env("w-eof");
+        let listener = wait_test_server();
         let server = std::thread::spawn(move || {
             let (mut events, subscribe) = accept_wait_request(&listener);
             assert_eq!(subscribe["method"], "events.subscribe");
