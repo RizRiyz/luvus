@@ -2400,11 +2400,17 @@ mod tests {
     fn tiny_terminal_shows_guard_not_garbage() {
         let (tx, _rx) = mpsc::channel::<AppEvent>();
         let mut app = App::new(80, 24, tx).expect("spawn pane");
+        app.automation_rects
+            .push(("stale".into(), ratatui::layout::Rect::new(1, 1, 5, 2)));
 
         for (w, h) in [(1, 1), (5, 2), (23, 5), (20, 4)] {
             let backend = TestBackend::new(w, h);
             let mut terminal = Terminal::new(backend).unwrap();
             terminal.draw(|f| ui::render(f, &mut app)).unwrap(); // must not panic
+            assert!(
+                app.automation_rects.is_empty(),
+                "tiny frames must clear stale automation hit geometry"
+            );
         }
 
         // At a small-but-writable size the guard message is visible.

@@ -469,6 +469,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.menu_scroll.begin_frame();
     app.mission_row_rects.clear();
     app.mission_automation_rects.clear();
+    app.automation_rects.clear();
     app.orch_hits.clear();
     // Cleared with the other per-frame hit geometry, above every early return:
     // a frame that bails out (window too small, no workspace yet) must not

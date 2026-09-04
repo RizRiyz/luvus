@@ -1034,12 +1034,16 @@ fn truncate(mut value: String, max: usize) -> String {
     if value.len() <= max {
         return value;
     }
-    let mut cut = max;
+    const ELLIPSIS: &str = "…";
+    let with_ellipsis = max >= ELLIPSIS.len();
+    let mut cut = max.saturating_sub(if with_ellipsis { ELLIPSIS.len() } else { 0 });
     while !value.is_char_boundary(cut) {
         cut -= 1;
     }
     value.truncate(cut);
-    value.push('…');
+    if with_ellipsis {
+        value.push_str(ELLIPSIS);
+    }
     value
 }
 
@@ -1311,6 +1315,26 @@ mod tests {
         assert!(!event.contains("private/path"));
         assert!(!event.contains("secret gate instructions"));
         assert_eq!(event.matches("workspace-1").count(), 1);
+    }
+
+    #[test]
+    fn persisted_run_error_truncation_includes_the_ellipsis_in_its_limit() {
+        let mut state = AutomationState::default();
+        let automation = state
+            .create(input(Trigger::Once { at_utc: 100 }), None, 10)
+            .unwrap();
+        let run = state.request_run(&automation.id, None, 20).unwrap();
+        let oversized = "é".repeat(MAX_ERROR_BYTES);
+
+        let updated = state
+            .set_run_status(&run.id, RunStatus::Failed, Some(oversized), 30)
+            .unwrap();
+        let error = updated.error.expect("failed run keeps a bounded error");
+
+        assert!(error.len() <= MAX_ERROR_BYTES);
+        assert!(error.ends_with('…'));
+        assert!(state.validate_loaded().is_ok());
+        assert_eq!(truncate("é".into(), 1), "");
     }
 
     #[test]

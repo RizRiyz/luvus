@@ -1056,6 +1056,7 @@ impl App {
                 title,
                 prompt,
                 agent,
+                mode,
                 start == crate::app::OrchFormStart::Now,
                 paths,
                 deps,
@@ -1078,6 +1079,7 @@ impl App {
         title: String,
         prompt: String,
         agent: String,
+        mode: TaskWorkerMode,
         start_now: bool,
         paths: Vec<String>,
         deps: Vec<String>,
@@ -1113,13 +1115,7 @@ impl App {
         self.orch_view = crate::app::OrchView::Tasks;
         self.orch_cursor = self.orch.tasks.len().saturating_sub(1);
         if let Some(descriptor) = descriptor {
-            match self.task_start(
-                &id,
-                None,
-                Some(descriptor.id.to_string()),
-                self.orch_flow_mode,
-                None,
-            ) {
+            match self.task_start(&id, None, Some(descriptor.id.to_string()), mode, None) {
                 Ok(_) => self.show_toast(format!("{id}: worker started")),
                 Err((_, message)) => self.show_toast(message),
             }
@@ -3097,6 +3093,33 @@ mod tests {
         let t = app.orch.task("t1").expect("task was created from the UI");
         assert_eq!(t.title, "auth");
         assert_eq!(t.paths, vec!["src/auth/**".to_string()]);
+    }
+
+    #[test]
+    fn immediate_task_form_honors_its_selected_run_mode() {
+        let _env = crate::persist::test_env("orchform-now-mode");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.orch_flow_mode = TaskWorkerMode::Worktree;
+        app.orch_form = Some(crate::app::OrchForm {
+            kind: crate::app::OrchFormKind::Task,
+            title: "shared review".into(),
+            prompt: "Review the active workspace.".into(),
+            agent: task_agent_choices()[0].into(),
+            mode: TaskWorkerMode::Workspace,
+            start: crate::app::OrchFormStart::Now,
+            ..crate::app::OrchForm::default()
+        });
+
+        app.submit_orch_form();
+
+        assert!(app.orch_form.is_none(), "successful submission closes");
+        let task = app.orch.task("t1").expect("form created a task");
+        assert_eq!(task.worker_mode, Some(TaskWorkerMode::Workspace));
+        assert!(
+            task.workspace_worker.is_some(),
+            "the form mode, not the board default, controls the launch"
+        );
     }
 
     #[test]
