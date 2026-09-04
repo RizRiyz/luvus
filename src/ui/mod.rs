@@ -966,10 +966,14 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     }
     if app.named_session_menu.is_some() {
         session_menu::draw_session_menu(f, area, app, &t);
+        if app.session_menu.is_some() {
+            menu::draw_session_menu(f, area, app, cat, &t);
+        }
     } else {
         app.named_session_menu_rect = None;
         app.named_session_close_rect = None;
         app.named_session_row_rects.clear();
+        app.session_menu = None;
     }
     // The global scrollback-search overlay (docs/63), above the chrome.
     if app.search.is_some() {
@@ -994,6 +998,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         || app.ws_menu.is_some()
         || app.pane_menu.is_some()
         || app.agent_menu.is_some()
+        || app.session_menu.is_some()
         || app.file_menu.is_some()
         || app.diff_menu.is_some()
         || app.orch_menu.is_some()

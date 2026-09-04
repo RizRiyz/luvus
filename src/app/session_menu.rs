@@ -33,6 +33,65 @@ pub enum NamedSessionOpenError {
 }
 
 impl App {
+    pub fn apply_named_session_stopped(
+        &mut self,
+        generation: u64,
+        name: String,
+        result: Result<(), String>,
+    ) {
+        // Borrow-check: need to handle show_toast after releasing menu borrow.
+        let is_closed = self.named_session_menu.is_none();
+        if is_closed {
+            match result {
+                Ok(()) => self.show_toast(format!("stopped {name}")),
+                Err(err) => self.show_toast(format!("could not stop {name}: {err}")),
+            }
+            return;
+        }
+        let generation_matches = self
+            .named_session_menu
+            .as_ref()
+            .is_some_and(|m| m.generation == generation);
+        if !generation_matches {
+            return;
+        }
+        // Capture values before mutable borrow for toast.
+        let toast = match &result {
+            Ok(()) => format!("stopped {name}"),
+            Err(_) => String::new(),
+        };
+        let (gen, had_error) = {
+            let menu = self.named_session_menu.as_mut().unwrap();
+            match result {
+                Ok(()) => {
+                    if let Some(pos) = menu.rows.iter().position(|r| r.name == name) {
+                        menu.rows.remove(pos);
+                        let count = menu.rows.len() + 1;
+                        if menu.cursor >= count {
+                            menu.cursor = count.saturating_sub(1);
+                        }
+                    }
+                    (menu.generation, false)
+                }
+                Err(err) => {
+                    menu.error = Some(err);
+                    (0, true)
+                }
+            }
+        };
+        if !had_error {
+            self.show_toast(toast);
+            let tx = self.app_tx.clone();
+            std::thread::spawn(move || {
+                let result = crate::session::list_sessions().map_err(|e| e.to_string());
+                let _ = tx.send(crate::event::AppEvent::NamedSessionsLoaded {
+                    generation: gen,
+                    result,
+                });
+            });
+        }
+    }
+
     pub fn open_named_session_menu(&mut self) {
         if !self.server_mode {
             self.show_toast(self.catalog.session_open_failed);
@@ -61,6 +120,7 @@ impl App {
     pub fn close_named_session_menu(&mut self) {
         self.named_session_generation = self.named_session_generation.wrapping_add(1);
         self.named_session_menu = None;
+        self.session_menu = None;
     }
 
     pub fn apply_named_sessions_loaded(

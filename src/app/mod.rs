@@ -982,6 +982,18 @@ impl AgentMenu {
     }
 }
 
+/// Right-click context menu on a named-session row (sessions switcher).
+pub struct SessionMenu {
+    pub name: String,
+    pub anchor: (u16, u16),
+    pub items: Vec<(SessionMenuItem, Rect)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SessionMenuItem {
+    Stop,
+}
+
 /// The workspace-rename modal: like [`TabRename`] but for a node's **label** (the
 /// folder on disk is never touched). Pre-filled with the current name.
 pub struct WsRename {
@@ -1481,6 +1493,7 @@ pub enum PopupId {
     File,
     Dock,
     Orch,
+    Session,
 }
 
 /// Scroll state for context menus taller than the space they are drawn in.
@@ -1686,6 +1699,8 @@ pub struct App {
     pub pane_menu: Option<PaneMenu>,
     /// Active AGENTS-list context menu (right-click a row); `None` when closed.
     pub agent_menu: Option<AgentMenu>,
+    /// Context menu on a session row (right-click → Stop session).
+    pub session_menu: Option<SessionMenu>,
     /// Live agents pinned to the top of the AGENTS list (right-click → Pin).
     /// Per-session: pane ids are reallocated each run, so this is not persisted;
     /// pruned when a pane closes.
@@ -2316,6 +2331,7 @@ impl App {
             worktree_delete: None,
             pane_menu: None,
             agent_menu: None,
+            session_menu: None,
             pinned_agents: std::collections::HashSet::new(),
             ws_rename: None,
             pane_rename: None,
@@ -2949,6 +2965,7 @@ impl App {
             worktree_delete: None,
             pane_menu: None,
             agent_menu: None,
+            session_menu: None,
             pinned_agents: std::collections::HashSet::new(),
             ws_rename: None,
             pane_rename: None,
@@ -5322,6 +5339,79 @@ impl App {
         if key.code == KeyCode::Esc {
             self.agent_menu = None;
         }
+    }
+
+    pub fn open_session_menu(
+        &mut self,
+        name: String,
+        col: u16,
+        row: u16,
+        running: bool,
+        current: bool,
+    ) {
+        // Guard: only running non-current sessions are stoppable; opening on a
+        // stopped/current row would show an empty menu, so treat as no-op.
+        if !running || current {
+            return;
+        }
+        self.session_menu = Some(SessionMenu {
+            name,
+            anchor: (col, row),
+            items: Vec::new(),
+        });
+    }
+
+    pub fn session_menu_click(&mut self, col: u16, row: u16) {
+        let hit = self.session_menu.as_ref().and_then(|m| {
+            m.items
+                .iter()
+                .find(|(_, r)| col >= r.x && col < r.right() && row >= r.y && row < r.bottom())
+                .map(|(it, _)| *it)
+        });
+        match hit {
+            Some(it) => self.session_menu_action(it),
+            None => self.session_menu = None,
+        }
+    }
+
+    pub fn session_menu_action(&mut self, item: SessionMenuItem) {
+        let Some(menu) = self.session_menu.take() else {
+            return;
+        };
+        match item {
+            SessionMenuItem::Stop => self.stop_named_session(menu.name),
+        }
+    }
+
+    pub fn handle_session_menu_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.session_menu = None;
+        }
+    }
+
+    fn stop_named_session(&mut self, name: String) {
+        // Must match CLI behavior: stop only the named session, never the
+        // current one. Current is already excluded at open time, but keep
+        // a second guard here.
+        let current = crate::session::display_name();
+        if name == current {
+            self.show_toast(self.catalog.session_open_failed);
+            return;
+        }
+        let generation = self.named_session_generation;
+        let tx = self.app_tx.clone();
+        // Keep the sessions list visible while stopping; close the context menu
+        // but not the sessions popup itself.
+        std::thread::spawn(move || {
+            let result = crate::session::stop_session(Some(&name))
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            let _ = tx.send(crate::event::AppEvent::NamedSessionStopped {
+                generation,
+                name,
+                result,
+            });
+        });
     }
 
     /// Key handling while the new-worktree prompt is open.
