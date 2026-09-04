@@ -1461,12 +1461,12 @@ impl App {
             }
             "pane.layout" => {
                 reject_api_fields(p, &["pane"])?;
-                let pane = self.resolve_pane(p)?.unwrap_or_else(|| self.layout().focus);
+                let pane = self.resolve_pane_or_focus(p)?;
                 self.socket_pane_layout(pane)
             }
             "pane.neighbor" => {
                 reject_api_fields(p, &["pane", "direction"])?;
-                let pane = self.resolve_pane(p)?.unwrap_or_else(|| self.layout().focus);
+                let pane = self.resolve_pane_or_focus(p)?;
                 let direction = crate::api::topology::direction(p)?;
                 let (workspace, tab) = self.pane_location(pane).ok_or_else(not_found)?;
                 let layout = &self.workspaces[workspace].tabs[tab].layout;
@@ -1477,7 +1477,7 @@ impl App {
             }
             "pane.edges" => {
                 reject_api_fields(p, &["pane"])?;
-                let pane = self.resolve_pane(p)?.unwrap_or_else(|| self.layout().focus);
+                let pane = self.resolve_pane_or_focus(p)?;
                 let (workspace, tab) = self.pane_location(pane).ok_or_else(not_found)?;
                 let area = crate::api::topology::logical_area();
                 let rect = self.workspaces[workspace].tabs[tab]
@@ -2354,7 +2354,7 @@ impl App {
             }
             "pane.focus_direction" => {
                 reject_api_fields(p, &["pane", "direction"])?;
-                let pane = self.resolve_pane(p)?.unwrap_or_else(|| self.layout().focus);
+                let pane = self.resolve_pane_or_focus(p)?;
                 let direction = crate::api::topology::direction(p)?;
                 let (workspace, tab) = self.pane_location(pane).ok_or_else(not_found)?;
                 let next = self.workspaces[workspace].tabs[tab]
@@ -2372,7 +2372,7 @@ impl App {
             }
             "pane.resize" => {
                 reject_api_fields(p, &["pane", "direction", "cells"])?;
-                let pane = self.resolve_pane(p)?.unwrap_or_else(|| self.layout().focus);
+                let pane = self.resolve_pane_or_focus(p)?;
                 let direction = crate::api::topology::direction(p)?;
                 let cells = p.get("cells").and_then(Value::as_i64).unwrap_or(1);
                 if !(1..=1000).contains(&cells) {
@@ -2407,9 +2407,8 @@ impl App {
             }
             "pane.zoom" => {
                 reject_api_fields(p, &["pane", "enabled"])?;
-                if let Some(pane) = self.resolve_pane(p)? {
-                    self.focus_pane_global(pane);
-                }
+                let pane = self.resolve_pane_or_focus(p)?;
+                self.focus_pane_global(pane);
                 let enabled = match p.get("enabled") {
                     None => !self.zoomed,
                     Some(Value::Bool(enabled)) => *enabled,
@@ -3630,7 +3629,7 @@ impl App {
                 }))
             }
             "diff.navigate" => {
-                let id = self.resolve_pane(p)?.unwrap_or_else(|| self.layout().focus);
+                let id = self.resolve_pane_or_focus(p)?;
                 let action = req_str(p, "action")?;
                 let key = match action {
                     "next" | "next_line" => KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
@@ -4343,6 +4342,19 @@ impl App {
                 Ok(self.panes.contains_key(&id).then_some(id))
             }
             None => Ok(Some(self.layout().focus)),
+        }
+    }
+
+    fn resolve_pane_or_focus(&self, p: &Value) -> Result<PaneId, (String, String)> {
+        match p.get("pane") {
+            None | Some(Value::Null) => Ok(self.layout().focus),
+            Some(value) => {
+                let id = PaneId(parse_u32_value(value, "pane")?);
+                self.pane_location(id)
+                    .is_some()
+                    .then_some(id)
+                    .ok_or_else(not_found)
+            }
         }
     }
 
