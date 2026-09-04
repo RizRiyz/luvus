@@ -475,27 +475,7 @@ fn draw_workspaces_dock(
         if is_member {
             line1.push(Span::styled("└ ", Style::new().fg(t.overlay0)));
         }
-        let reorder_marker = app.workspace_drag.as_ref().and_then(|drag| {
-            if drag
-                .target_workspace_id
-                .as_ref()
-                .is_some_and(|id| *id == ws.id)
-            {
-                Some(if drag.target_after { "▼" } else { "▲" })
-            } else if drag.workspace_id == ws.id {
-                Some("↕")
-            } else {
-                None
-            }
-        });
-        line1.push(Span::styled(
-            reorder_marker.unwrap_or_else(|| st.dot()),
-            Style::new().fg(if reorder_marker.is_some() {
-                t.accent
-            } else {
-                st.color(t)
-            }),
-        ));
+        line1.push(Span::styled(st.dot(), Style::new().fg(st.color(t))));
         line1.push(Span::raw(" "));
         line1.push(Span::styled(name_disp, name_style));
         if let Some(b) = &branch_disp {
