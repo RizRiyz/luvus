@@ -68,10 +68,41 @@ fn start_reaper() -> Reaper {
     #[cfg(unix)]
     wake.install_sigchld();
     let thread_wake = Arc::clone(&wake);
+    #[cfg(unix)]
+    let (ready_tx, ready_rx) = mpsc::sync_channel(0);
     thread::Builder::new()
         .name("luvus-pty-reaper".to_string())
-        .spawn(move || child_reaper_loop(rx, thread_wake))
+        .spawn(move || {
+            #[cfg(unix)]
+            {
+                // Signal masks survive exec and are inherited by new threads.
+                // Unblock SIGCHLD only in the process-lifetime reaper before it
+                // relies on the handler's self-pipe.
+                let _sigchld_unblocked = match SigchldUnblockGuard::new() {
+                    Ok(guard) => {
+                        if ready_tx.send(Ok(())).is_err() {
+                            return;
+                        }
+                        guard
+                    }
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error));
+                        return;
+                    }
+                };
+                child_reaper_loop(rx, thread_wake);
+            }
+            #[cfg(windows)]
+            child_reaper_loop(rx, thread_wake);
+        })
         .expect("failed to start the PTY child reaper");
+    #[cfg(unix)]
+    ready_rx
+        .recv()
+        .expect("PTY child reaper exited during signal-mask setup")
+        .unwrap_or_else(|error| {
+            panic!("failed to unblock SIGCHLD in the PTY child reaper: {error}")
+        });
     #[cfg(test)]
     CHILD_REAPER_STARTS.fetch_add(1, Ordering::SeqCst);
     Reaper { tx, wake }
@@ -170,6 +201,37 @@ struct UnixWake {
 static SIGCHLD_WRITE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 #[cfg(unix)]
+struct SigchldUnblockGuard {
+    inherited: libc::sigset_t,
+}
+
+#[cfg(unix)]
+impl SigchldUnblockGuard {
+    fn new() -> io::Result<Self> {
+        unsafe {
+            let mut sigchld: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut sigchld);
+            libc::sigaddset(&mut sigchld, libc::SIGCHLD);
+            let mut inherited: libc::sigset_t = std::mem::zeroed();
+            let result = libc::pthread_sigmask(libc::SIG_UNBLOCK, &sigchld, &mut inherited);
+            if result != 0 {
+                return Err(io::Error::from_raw_os_error(result));
+            }
+            Ok(Self { inherited })
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SigchldUnblockGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = libc::pthread_sigmask(libc::SIG_SETMASK, &self.inherited, std::ptr::null_mut());
+        }
+    }
+}
+
+#[cfg(unix)]
 impl UnixWake {
     fn new() -> io::Result<Self> {
         use std::os::fd::{FromRawFd, OwnedFd};
@@ -249,7 +311,70 @@ fn write_wake(fd: std::os::fd::RawFd) {
     let byte = [1u8];
     // The pipe is nonblocking and acts as an edge coalescer. EAGAIN means a
     // prior byte already guarantees that poll will wake.
-    let _ = unsafe { libc::write(fd, byte.as_ptr().cast(), byte.len()) };
+    unsafe {
+        let errno = errno_location();
+        let saved_errno = errno.as_ref().copied();
+        let _ = libc::write(fd, byte.as_ptr().cast(), byte.len());
+        if let Some(saved_errno) = saved_errno {
+            *errno = saved_errno;
+        }
+    }
+}
+
+#[cfg(any(
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "dragonfly"
+))]
+unsafe fn errno_location() -> *mut libc::c_int {
+    unsafe { libc::__error() }
+}
+
+#[cfg(any(target_os = "linux", target_os = "hurd", target_os = "redox"))]
+unsafe fn errno_location() -> *mut libc::c_int {
+    unsafe { libc::__errno_location() }
+}
+
+#[cfg(any(
+    target_os = "android",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "nuttx"
+))]
+unsafe fn errno_location() -> *mut libc::c_int {
+    unsafe { libc::__errno() }
+}
+
+#[cfg(any(target_os = "solaris", target_os = "illumos"))]
+unsafe fn errno_location() -> *mut libc::c_int {
+    unsafe { libc::___errno() }
+}
+
+#[cfg(target_os = "aix")]
+unsafe fn errno_location() -> *mut libc::c_int {
+    unsafe { libc::_Errno() }
+}
+
+// libc exposes no common errno accessor across every Unix target. Unknown
+// targets retain an async-signal-safe handler; null disables save/restore
+// rather than guessing an ABI symbol.
+#[cfg(not(any(
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "linux",
+    target_os = "hurd",
+    target_os = "redox",
+    target_os = "android",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "nuttx",
+    target_os = "solaris",
+    target_os = "illumos",
+    target_os = "aix"
+)))]
+unsafe fn errno_location() -> *mut libc::c_int {
+    std::ptr::null_mut()
 }
 
 #[cfg(unix)]

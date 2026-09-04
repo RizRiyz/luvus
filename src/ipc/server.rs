@@ -1431,10 +1431,7 @@ mod shutdown {
             FLAG.store(true, Ordering::Relaxed);
             let fd = WRITE_FD.load(Ordering::Relaxed);
             if fd >= 0 {
-                let byte = 1u8;
-                unsafe {
-                    libc::write(fd, (&byte as *const u8).cast(), 1);
-                }
+                write_wake_preserving_errno(fd);
             }
         }
         unsafe {
@@ -1443,6 +1440,74 @@ mod shutdown {
             libc::signal(libc::SIGHUP, h);
             libc::signal(libc::SIGINT, h);
         }
+    }
+
+    fn write_wake_preserving_errno(fd: RawFd) {
+        let byte = 1u8;
+        unsafe {
+            let errno = errno_location();
+            let saved_errno = errno.as_ref().copied();
+            let _ = libc::write(fd, (&byte as *const u8).cast(), 1);
+            if let Some(saved_errno) = saved_errno {
+                *errno = saved_errno;
+            }
+        }
+    }
+
+    #[cfg(any(
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "dragonfly"
+    ))]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        libc::__error()
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "hurd", target_os = "redox"))]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        libc::__errno_location()
+    }
+
+    #[cfg(any(
+        target_os = "android",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "nuttx"
+    ))]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        libc::__errno()
+    }
+
+    #[cfg(any(target_os = "solaris", target_os = "illumos"))]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        libc::___errno()
+    }
+
+    #[cfg(target_os = "aix")]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        libc::_Errno()
+    }
+
+    // libc exposes no common errno accessor across every possible `unix`
+    // target. Unknown targets retain an async-signal-safe handler; null
+    // precisely disables save/restore instead of guessing an ABI symbol.
+    #[cfg(not(any(
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "linux",
+        target_os = "hurd",
+        target_os = "redox",
+        target_os = "android",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "nuttx",
+        target_os = "solaris",
+        target_os = "illumos",
+        target_os = "aix"
+    )))]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        std::ptr::null_mut()
     }
 
     fn set_cloexec(fd: RawFd) -> io::Result<()> {

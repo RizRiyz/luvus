@@ -270,7 +270,7 @@ impl App {
             ],
         )?;
         let pane_id = self.resolve_backend_runtime(params, false)?;
-        self.request_proc_scan_if_unobserved(pane_id);
+        self.request_proc_scan_if_stale(pane_id);
         let process = self.pane_processes(pane_id);
         Ok(json!({
             "type":"terminal_backend_processes",
@@ -1561,7 +1561,7 @@ mod tests {
     }
 
     #[test]
-    fn process_inspection_uses_validated_identity_and_cached_executables() {
+    fn process_inspection_returns_cached_identity_and_refreshes_when_dirty() {
         let _env = crate::persist::test_env("backend-process-inspection");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
@@ -1574,6 +1574,7 @@ mod tests {
                 "/opt/bin/codex --api-key hidden".into(),
             ],
         );
+        app.runtime_proc_dirty = true;
         let result = app
             .backend_processes(&json!({
                 "server_generation":app.backend_server_generation,
@@ -1585,6 +1586,10 @@ mod tests {
         assert_eq!(result["executables"], json!(["zsh", "codex"]));
         assert_eq!(result["arguments_exposed"], false);
         assert!(!result.to_string().contains("hidden"));
+        assert!(
+            app.proc_scan_inflight,
+            "dirty backend process identity must trigger an off-loop refresh"
+        );
     }
 
     #[test]

@@ -17,6 +17,7 @@ const DETECTION_INTERVAL: Duration = Duration::from_millis(100);
 const DETECTION_AUDIT_INTERVAL: Duration = Duration::from_secs(2);
 const CWD_SCAN_INTERVAL: Duration = Duration::from_secs(1);
 const PROC_SCAN_INTERVAL: Duration = Duration::from_secs(2);
+pub(crate) const PROC_SCAN_FAILURE_RETRIES: u8 = 1;
 const SESSION_SCAN_INTERVAL: Duration = Duration::from_secs(4);
 const WAIT_RETEST_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -96,10 +97,21 @@ mod socket_api_tests {
         for status in app.status.values_mut() {
             status.last_resize = Some(now - RESIZE_GRACE - Duration::from_millis(1));
         }
+        app.last_detect_at = now;
+        let cooling = app
+            .next_runtime_deadline(now, true)
+            .expect("expired resize work must retain a detection deadline");
+        assert!(
+            cooling > now,
+            "detection cooldown prevents a zero-timeout spin"
+        );
+        assert!(cooling <= now + DETECTION_INTERVAL);
+
+        app.last_detect_at = now - DETECTION_INTERVAL;
         assert_eq!(
             app.next_runtime_deadline(now, true),
-            None,
-            "an expired resize grace must not become a 1ms loop timeout"
+            Some(now),
+            "expired resize work wakes once detection is eligible"
         );
 
         let resized = now;
@@ -147,6 +159,30 @@ mod socket_api_tests {
     }
 
     #[test]
+    fn overdue_dirty_runtime_scans_still_wake_with_a_client() {
+        let (_env, mut app) = app("overdue-runtime-scans");
+        let now = Instant::now();
+        for status in app.status.values_mut() {
+            status.force_detect = false;
+            status.candidate = status.state;
+            status.last_activity = now - ACTIVITY_WINDOW - QUIET_DWELL - Duration::from_secs(1);
+        }
+        app.runtime_cwd_dirty = true;
+        app.runtime_proc_dirty = true;
+        app.runtime_sessions_dirty = true;
+        app.last_cwd_at = now - CWD_SCAN_INTERVAL - Duration::from_millis(1);
+        app.last_proc_at = now - PROC_SCAN_INTERVAL - Duration::from_millis(1);
+        app.last_sessions_at = now - SESSION_SCAN_INTERVAL - Duration::from_millis(1);
+        app.last_detection_audit_at = now;
+
+        assert_eq!(
+            app.next_runtime_deadline(now, true),
+            Some(now),
+            "overdue dirty runtime scans must wake this iteration"
+        );
+    }
+
+    #[test]
     fn detached_runtime_skips_heartbeat_scans() {
         let (_env, mut app) = app("detached-heartbeat-scans");
         let now = Instant::now();
@@ -184,6 +220,136 @@ mod socket_api_tests {
         assert!(
             app.proc_scan_inflight,
             "UHP process inspection must scan without a TUI attached"
+        );
+    }
+
+    #[test]
+    fn dirty_cached_process_api_requests_refresh_without_waiting() {
+        let (_env, mut app) = app("dirty-process-api-demand");
+        let pane = app.layout().focus;
+        app.proc_commands.insert(pane, vec!["cached-shell".into()]);
+        app.proc_scan_inflight = false;
+        app.runtime_proc_dirty = true;
+
+        let result = app
+            .dispatch("pane.processes", &json!({"pane": pane.0}))
+            .unwrap();
+
+        assert_eq!(
+            result["scan"], "observed",
+            "the cached response stays immediate"
+        );
+        assert_eq!(result["executables"], json!(["cached-shell"]));
+        assert!(
+            app.proc_scan_inflight,
+            "dirty cached process identity must trigger an off-loop refresh"
+        );
+    }
+
+    #[test]
+    fn process_api_demand_survives_a_failed_inflight_dirty_scan() {
+        let (_env, mut app) = app("inflight-process-api-demand");
+        let pane = app.layout().focus;
+        let now = Instant::now();
+        app.proc_commands.insert(pane, vec!["cached-shell".into()]);
+        app.runtime_cwd_dirty = false;
+        app.runtime_proc_dirty = true;
+        app.runtime_sessions_dirty = false;
+        app.last_proc_at = now - PROC_SCAN_INTERVAL;
+
+        app.detect_tick_with(now, true);
+        assert!(app.proc_scan_inflight, "the ordinary dirty scan starts");
+        app.request_proc_scan_if_stale(pane);
+        assert!(
+            app.proc_scan_demand_inflight,
+            "the API request attaches retry demand to the in-flight scan"
+        );
+
+        app.apply_proc_scan(None);
+        assert!(
+            app.proc_scan_requested,
+            "failure restores the API request for a throttled retry"
+        );
+    }
+
+    #[test]
+    fn failed_demanded_process_scan_rearms_without_an_idle_heartbeat() {
+        let (_env, mut app) = app("failed-process-demand");
+        let now = Instant::now();
+        for status in app.status.values_mut() {
+            status.force_detect = false;
+            status.candidate = status.state;
+            status.last_activity = now - ACTIVITY_WINDOW - QUIET_DWELL - Duration::from_secs(1);
+        }
+        app.runtime_cwd_dirty = false;
+        app.runtime_proc_dirty = false;
+        app.runtime_sessions_dirty = false;
+        app.last_detection_audit_at = now;
+        app.last_proc_at = now - PROC_SCAN_INTERVAL;
+        app.proc_scan_requested = true;
+
+        app.detect_tick_with(now, false);
+        assert!(app.proc_scan_inflight);
+        assert!(app.proc_scan_demand_inflight);
+
+        app.apply_proc_scan(None);
+        assert!(app.proc_scan_requested, "a failed demanded scan must retry");
+        assert_eq!(
+            app.next_runtime_deadline(now, false),
+            Some(now + PROC_SCAN_INTERVAL),
+            "the retry remains throttled instead of hot-looping"
+        );
+    }
+
+    #[test]
+    fn detached_agent_start_demands_throttled_process_scans_only_while_active() {
+        let (_env, mut app) = app("detached-agent-start-process-demand");
+        let pane = app.layout().focus;
+        let now = Instant::now();
+        for status in app.status.values_mut() {
+            status.force_detect = false;
+            status.candidate = status.state;
+            status.last_activity = now - ACTIVITY_WINDOW - QUIET_DWELL - Duration::from_secs(1);
+        }
+        app.runtime_cwd_dirty = false;
+        app.runtime_proc_dirty = false;
+        app.runtime_sessions_dirty = false;
+        app.last_detection_audit_at = now;
+        app.last_proc_at = now;
+
+        let (reply, _reply_rx) = std::sync::mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        app.agent_starts.insert(
+            pane,
+            AgentStart {
+                request_id: "detached-start".into(),
+                name: "worker".into(),
+                kind: "claude".into(),
+                reply,
+                deadline: now + Duration::from_secs(30),
+                cancelled: cancelled.clone(),
+            },
+        );
+
+        assert_eq!(
+            app.next_runtime_deadline(now, false),
+            Some(now + PROC_SCAN_INTERVAL),
+            "a detached launch gets a finite process-identity deadline"
+        );
+        app.detect_tick_with(now + PROC_SCAN_INTERVAL, false);
+        assert!(
+            app.proc_scan_inflight,
+            "the due detached scan starts off-loop"
+        );
+
+        app.apply_proc_scan(None);
+        cancelled.store(true, Ordering::Release);
+        app.tick_agent_workflows(now + PROC_SCAN_INTERVAL);
+        assert!(app.agent_starts.is_empty());
+        assert_eq!(
+            app.next_runtime_deadline(now + PROC_SCAN_INTERVAL, false),
+            None,
+            "resolved launch workflows leave no process-scan heartbeat"
         );
     }
 
@@ -727,9 +893,7 @@ impl App {
                 status.force_detect
                     || status.candidate != status.state
                     || status.agent_report.is_some()
-                    || status
-                        .last_resize
-                        .is_some_and(|t| now.duration_since(t) < RESIZE_GRACE)
+                    || status.last_resize.is_some_and(|t| now >= t + RESIZE_GRACE)
                     || (status.state == State::Working
                         && now.saturating_duration_since(status.last_activity)
                             < ACTIVITY_WINDOW + QUIET_DWELL)
@@ -761,8 +925,8 @@ impl App {
 
     /// Next Instant the event loop must wake if no `AppEvent` arrives.
     /// `None` means block on the channel: PTY, API, client, and signals wake it.
-    /// Past Instants are not kept as a 1ms spin: expired resize grace must drop
-    /// out, while work that is already due wakes this iteration (`now`).
+    /// Past Instants become a single due wake only when work remains; detection
+    /// cooldowns cap that wake so an expired resize cannot create a 1ms spin.
     pub(crate) fn next_runtime_deadline(
         &self,
         now: Instant,
@@ -809,7 +973,10 @@ impl App {
                 consider(report.expires_at, true);
             }
             if let Some(resized) = status.last_resize {
-                consider(resized + RESIZE_GRACE, false);
+                consider(
+                    (resized + RESIZE_GRACE).max(self.last_detect_at + DETECTION_INTERVAL),
+                    true,
+                );
             }
             if status.state == State::Working {
                 consider(status.last_activity + ACTIVITY_WINDOW + QUIET_DWELL, false);
@@ -845,25 +1012,46 @@ impl App {
 
         if clients_attached {
             if self.runtime_cwd_dirty && !self.cwd_scan_inflight {
-                consider(self.last_cwd_at + CWD_SCAN_INTERVAL, false);
-            }
-            if self.runtime_proc_dirty && !self.proc_scan_inflight {
-                consider(self.last_proc_at + PROC_SCAN_INTERVAL, false);
+                consider(self.last_cwd_at + CWD_SCAN_INTERVAL, true);
             }
             if self.runtime_sessions_dirty && !self.sessions_scan_inflight {
-                consider(self.last_sessions_at + SESSION_SCAN_INTERVAL, false);
+                consider(self.last_sessions_at + SESSION_SCAN_INTERVAL, true);
             }
+        }
+        let proc_demanded = self.proc_scan_demanded();
+        if !self.proc_scan_inflight
+            && (proc_demanded || (clients_attached && self.runtime_proc_dirty))
+        {
+            consider(
+                self.last_proc_at + PROC_SCAN_INTERVAL,
+                proc_demanded || (clients_attached && self.runtime_proc_dirty),
+            );
         }
 
         deadline
     }
 
-    fn start_proc_scan(&mut self) {
+    fn proc_scan_demanded(&self) -> bool {
+        self.proc_scan_requested || !self.agent_starts.is_empty()
+    }
+
+    fn proc_scan_due(&self, now: Instant, include_runtime_dirty: bool) -> bool {
+        !self.proc_scan_inflight
+            && (self.proc_scan_demanded() || (include_runtime_dirty && self.runtime_proc_dirty))
+            && now.saturating_duration_since(self.last_proc_at) >= PROC_SCAN_INTERVAL
+    }
+
+    fn start_proc_scan(&mut self, now: Instant) {
         if self.proc_scan_inflight {
             return;
         }
         self.runtime_proc_dirty = false;
-        self.last_proc_at = Instant::now();
+        if self.proc_scan_requested {
+            self.proc_scan_failure_retries = PROC_SCAN_FAILURE_RETRIES;
+        }
+        self.proc_scan_demand_inflight = self.proc_scan_requested;
+        self.proc_scan_requested = false;
+        self.last_proc_at = now;
         self.proc_scan_inflight = true;
         let pids: Vec<u32> = self
             .panes
@@ -880,15 +1068,27 @@ impl App {
         });
     }
 
-    pub(crate) fn request_proc_scan_if_unobserved(&mut self, id: PaneId) {
-        if self.proc_commands.contains_key(&id) {
+    pub(crate) fn request_proc_scan_if_stale(&mut self, id: PaneId) {
+        if self.proc_scan_inflight {
+            // Treat the current snapshot as satisfying this request, but retain
+            // one bounded retry if the worker cannot obtain usable evidence.
+            self.proc_scan_demand_inflight = true;
+            self.proc_scan_failure_retries = PROC_SCAN_FAILURE_RETRIES;
             return;
         }
-        self.start_proc_scan();
+        if !self.runtime_proc_dirty && self.proc_commands.contains_key(&id) {
+            return;
+        }
+        self.proc_scan_requested = true;
+        self.proc_scan_failure_retries = PROC_SCAN_FAILURE_RETRIES;
+        self.start_proc_scan(Instant::now());
     }
 
     fn schedule_runtime_scans(&mut self, now: Instant, clients_attached: bool) {
         if !clients_attached {
+            if self.proc_scan_due(now, false) {
+                self.start_proc_scan(now);
+            }
             return;
         }
         // CWD/git follow the user after PTY activity, throttled to 1s. Quiet
@@ -900,11 +1100,11 @@ impl App {
             self.runtime_cwd_dirty = false;
             self.last_cwd_at = now;
             self.cwd_scan_inflight = true;
-            let include_processes = self.runtime_proc_dirty
-                && !self.proc_scan_inflight
-                && now.duration_since(self.last_proc_at) >= PROC_SCAN_INTERVAL;
+            let include_processes = self.proc_scan_due(now, true);
             if include_processes {
                 self.runtime_proc_dirty = false;
+                self.proc_scan_demand_inflight = self.proc_scan_requested;
+                self.proc_scan_requested = false;
                 self.last_proc_at = now;
                 self.proc_scan_inflight = true;
             }
@@ -967,10 +1167,10 @@ impl App {
                 let _ = tx.send(AppEvent::SessionsScanned(crate::agent::recent_sessions(12)));
             });
         }
-        // Identity comes from the pane's *processes* (docs/07). One `ps` covers
-        // every pane; it runs only after PTY activity, never as a heartbeat.
-        if self.runtime_proc_dirty && now.duration_since(self.last_proc_at) >= PROC_SCAN_INTERVAL {
-            self.start_proc_scan();
+        // Process scans are triggered by attached PTY activity or by a bounded
+        // identity demand (API inspection, launch readiness, or absence confirmation).
+        if self.proc_scan_due(now, true) {
+            self.start_proc_scan(now);
         }
     }
 
@@ -1086,6 +1286,7 @@ impl App {
                         status.force_detect
                             || status.candidate != status.state
                             || status.agent_report.is_some()
+                            || status.last_resize.is_some_and(|t| now >= t + RESIZE_GRACE)
                             || (status.state == State::Working
                                 && now.saturating_duration_since(status.last_activity)
                                     < ACTIVITY_WINDOW + QUIET_DWELL)
@@ -1285,6 +1486,7 @@ impl App {
                 {
                     continue;
                 }
+                s.last_resize = None;
                 // The done-latch and working history track the *raw* reading.
                 if s.prev_working && det.state == State::Idle && !focused {
                     s.done = true;
@@ -1883,7 +2085,7 @@ impl App {
             "pane.processes" => {
                 reject_api_fields(p, &["pane"])?;
                 let id = self.resolve_pane(p).ok_or_else(not_found)?;
-                self.request_proc_scan_if_unobserved(id);
+                self.request_proc_scan_if_stale(id);
                 Ok(self.pane_processes(id))
             }
             "pane.report_session" => {
@@ -4622,8 +4824,8 @@ impl App {
         })
     }
 
-    /// Cached process identity for a pane. Callers that need a first observation
-    /// queue `request_proc_scan_if_unobserved` first; this getter itself does no
+    /// Cached process identity for a pane. Callers that need a first or refreshed
+    /// observation queue `request_proc_scan_if_stale`; this getter itself does no
     /// IO and returns executable names rather than full argv, which may contain
     /// credentials or prompts.
     pub(crate) fn pane_processes(&self, id: PaneId) -> Value {
