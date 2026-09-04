@@ -11128,6 +11128,8 @@ mod tests {
         use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use ratatui::Terminal;
 
+        let _env = crate::persist::test_env("agent-menu-resume-dismiss");
+
         let sess = |id: &str, p: &str| crate::agent::SessionInfo {
             agent: "claude".into(),
             session_id: id.into(),
