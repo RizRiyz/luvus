@@ -655,6 +655,19 @@ mod socket_api_tests {
     }
 
     #[test]
+    fn null_pane_targets_focus_for_terminal_focus_defaults() {
+        let (_env, mut app) = app("null-terminal-pane-resolution");
+        let pane = app.layout().focus;
+
+        for method in ["pane.get", "pane.read", "pane.processes"] {
+            let result = app
+                .dispatch(method, &json!({"pane": null}))
+                .unwrap_or_else(|error| panic!("{method} rejected null: {error:?}"));
+            assert_eq!(result["pane"], pane.0.to_string(), "{method}");
+        }
+    }
+
+    #[test]
     fn workspace_block_move_is_atomic_and_keeps_active_workspace() {
         let (_env, mut app) = app("socket-workspace-move");
         app.dispatch("workspace.new", &json!({})).unwrap();
@@ -7686,7 +7699,14 @@ command = ["true"]
             Some(pane)
         );
         assert_eq!(app.resolve_pane(&json!({})).unwrap(), Some(pane));
-        assert_eq!(app.resolve_pane(&json!({"pane": null})).unwrap(), None);
+        assert_eq!(
+            app.resolve_pane(&json!({"pane": null})).unwrap(),
+            Some(pane)
+        );
+        let no_pane = app
+            .orch_pane(&json!({"pane": null}))
+            .expect_err("orchestration keeps explicit null as absent context");
+        assert_eq!(no_pane.0, "no_pane");
         let missing = app
             .resolve_pane(&json!({"pane": u32::MAX}))
             .expect_err("a well-formed missing pane must be distinct from omission");
