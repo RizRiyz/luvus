@@ -2331,11 +2331,6 @@ impl App {
             self.set_agents_filter(val);
             return;
         }
-        // The AGENTS scope chip. Independent of All/Active, so it toggles alone.
-        if self.agents_scope_rect.is_some_and(hit) {
-            self.set_agents_scope(!self.agents_this_workspace);
-            return;
-        }
         // The "blocked in other workspaces" line jumps to a pane this scope hid,
         // rather than widening the list or cycling to a local blocked row.
         if let Some((id, _)) = self.agents_elsewhere_rect.filter(|(_, rect)| hit(*rect)) {

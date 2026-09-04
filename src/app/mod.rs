@@ -958,6 +958,8 @@ pub struct AgentMenu {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AgentMenuItem {
+    /// Toggle between all workspaces and the active workspace in the AGENTS dock.
+    ToggleWorkspaceScope,
     Resume,
     /// "Rename" a live agent's pane (sets its live name). Live agents only.
     RenamePane,
@@ -2090,9 +2092,6 @@ pub struct App {
     pub git_section_rects: Vec<(crate::git::Section, Rect)>,
     /// The All/Active filter toggle in the AGENTS header (`bool` = active_only).
     pub agents_filter_rects: Vec<(bool, Rect)>,
-    /// The AGENTS scope chip on its own header row. `None` when it is not drawn,
-    /// which is the case with one workspace.
-    pub agents_scope_rect: Option<Rect>,
     /// The "blocked in other workspaces" overflow line, paired with the first
     /// hidden blocked pane so clicking jumps to an agent the view actually hid.
     pub agents_elsewhere_rect: Option<(PaneId, Rect)>,
@@ -2474,7 +2473,6 @@ impl App {
             ws_rects: Vec::new(),
             git_section_rects: Vec::new(),
             agents_filter_rects: Vec::new(),
-            agents_scope_rect: None,
             agents_elsewhere_rect: None,
             agent_rects: Vec::new(),
             session_rects: Vec::new(),
@@ -3097,7 +3095,6 @@ impl App {
             ws_rects: Vec::new(),
             git_section_rects: Vec::new(),
             agents_filter_rects: Vec::new(),
-            agents_scope_rect: None,
             agents_elsewhere_rect: None,
             agent_rects: Vec::new(),
             session_rects: Vec::new(),
@@ -4533,6 +4530,8 @@ impl App {
                 AgentMenuItem::Pin
             });
         }
+        items.push(AgentMenuItem::Divider);
+        items.push(AgentMenuItem::ToggleWorkspaceScope);
         let extras = self
             .agent_menu
             .as_ref()
@@ -5244,6 +5243,9 @@ impl App {
         };
         self.agent_menu = None;
         match (item, target) {
+            (AgentMenuItem::ToggleWorkspaceScope, _) => {
+                self.set_agents_scope(!self.agents_this_workspace);
+            }
             (AgentMenuItem::Resume, AgentTarget::Session(i)) => self.resume_session(i),
             (AgentMenuItem::Close, AgentTarget::Session(i)) => self.dismiss_session(i),
             (AgentMenuItem::Close, AgentTarget::Live(id)) => {
@@ -5251,21 +5253,21 @@ impl App {
                 self.close_pane(id);
             }
             (AgentMenuItem::RenamePane, AgentTarget::Live(id)) => self.open_pane_rename(id),
-            (AgentMenuItem::RenamePane, AgentTarget::Session(_)) => {} // no live pane
+            (AgentMenuItem::RenamePane, AgentTarget::Session(_)) => {}
             (AgentMenuItem::Pin, AgentTarget::Live(id)) => {
                 self.pinned_agents.insert(id);
             }
             (AgentMenuItem::Unpin, AgentTarget::Live(id)) => {
                 self.pinned_agents.remove(&id);
             }
-            (AgentMenuItem::Pin | AgentMenuItem::Unpin, AgentTarget::Session(_)) => {} // no pane
-            (AgentMenuItem::Resume, AgentTarget::Live(_)) => {} // n/a for a live agent
+            (AgentMenuItem::Pin | AgentMenuItem::Unpin, AgentTarget::Session(_)) => {}
+            (AgentMenuItem::Resume, AgentTarget::Live(_)) => {}
             (AgentMenuItem::Module(i), AgentTarget::Live(id)) => {
                 if let Some(a) = actions.get(i).cloned() {
                     self.run_module_menu_action("agent", a, Target::pane(id));
                 }
             }
-            (AgentMenuItem::Module(_), AgentTarget::Session(_)) => {} // no live pane
+            (AgentMenuItem::Module(_), AgentTarget::Session(_)) => {}
             (AgentMenuItem::Divider, _) => {}
         }
     }
@@ -9873,7 +9875,6 @@ mod tests {
         app.files_area = junk;
         app.file_tree_rects = vec![(0, junk)];
         app.agents_filter_rects = vec![(true, junk)];
-        app.agents_scope_rect = Some(junk);
         app.agents_elsewhere_rect = Some((app.layout().focus, junk));
         app.module_dock_rects = vec![("example.buzz".into(), 0, junk)]; // a user module dock
 
@@ -9889,7 +9890,6 @@ mod tests {
         assert_eq!(app.files_area, Rect::ZERO, "FILES area cleared");
         assert!(app.file_tree_rects.is_empty(), "FILES row rects cleared");
         assert!(app.agents_filter_rects.is_empty(), "AGENTS filter cleared");
-        assert!(app.agents_scope_rect.is_none(), "AGENTS scope chip cleared");
         assert!(
             app.agents_elsewhere_rect.is_none(),
             "AGENTS overflow line cleared"
@@ -11045,7 +11045,8 @@ mod tests {
         let mut term = Terminal::new(TestBackend::new(80, 20)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
 
-        // Right-click the second session row → an AGENTS menu with Resume + Close.
+        // Right-click the second session row → its normal actions plus the
+        // workspace-scope toggle.
         let row = app.session_rects.iter().find(|(i, _)| *i == 1).unwrap().1;
         app.handle_event(AppEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Right),
@@ -11059,11 +11060,46 @@ mod tests {
         );
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         let items = &app.agent_menu.as_ref().unwrap().items;
-        assert_eq!(items.len(), 2, "session menu has Resume + Close");
+        assert_eq!(
+            items.len(),
+            4,
+            "session menu has Resume + Close + divider + workspace scope"
+        );
         assert_eq!(items[0].0, AgentMenuItem::Resume);
+        assert_eq!(items[2].0, AgentMenuItem::Divider);
+        assert_eq!(items[3].0, AgentMenuItem::ToggleWorkspaceScope);
+        let rendered = |term: &Terminal<TestBackend>| {
+            term.backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        assert!(rendered(&term).contains("Show Workspace Only"));
 
-        // Click "Close" → the session leaves the list and stays dismissed.
-        let close = items[1].1;
+        // The scope row describes the action that will be taken. Clicking it
+        // persists the choice; reopening any AGENTS row offers the inverse.
+        let scope = items[3].1;
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: scope.x + 1,
+            row: scope.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.agents_this_workspace);
+        assert!(crate::config::load().agents_this_workspace);
+        app.open_agent_menu(AgentTarget::Session(1), row.x + 1, row.y);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(rendered(&term).contains("Show All Workspaces"));
+        app.agent_menu_action(AgentMenuItem::ToggleWorkspaceScope);
+        assert!(!app.agents_this_workspace);
+
+        // Reopen the row menu and click Close: the session leaves the list and
+        // stays dismissed.
+        app.open_agent_menu(AgentTarget::Session(1), row.x + 1, row.y);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let close = app.agent_menu.as_ref().unwrap().items[1].1;
         app.handle_event(AppEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: close.x + 1,

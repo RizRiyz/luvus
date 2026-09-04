@@ -565,28 +565,10 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
             x = x.saturating_add(w);
         }
     }
-    // Scope is a second axis, so it gets its own row instead of being folded into
-    // All/Active. The default 26-column sidebar has no room for another chip on
-    // the title row (and translated labels are wider still). Spend this row only
-    // when more than one workspace makes the choice meaningful.
-    app.agents_scope_rect = None;
-    let scope_rows = u16::from(app.workspaces.len() > 1 && area.height > 1);
+    // Workspace scope is controlled by prefix `A`, Settings → Keys, or an
+    // agent/session row's context menu. It consumes no extra dock row.
     let scoped = app.agents_scope_active();
-    if scope_rows > 0 {
-        let y = aheader + 1;
-        let label = format!(" {} ", cat.here);
-        let width = (crate::ui::display_width(&label) as u16).min(cw);
-        let rect = Rect::new(cx, y, width, 1);
-        let style = if scoped {
-            Style::new().fg(t.crust).bg(t.accent).bold()
-        } else {
-            Style::new().fg(t.overlay1).bg(t.surface1)
-        };
-        let label = crate::ui::truncate(&label, width as usize);
-        f.render_widget(Paragraph::new(Span::styled(label, style)), rect);
-        app.agents_scope_rect = Some(rect);
-    }
-    let alist_top = aheader + 1 + scope_rows;
+    let alist_top = aheader + 1;
     let arows = area.bottom().saturating_sub(alist_top);
     app.agents_area = Rect::new(area.x, alist_top, area.width, arows);
 
@@ -1250,11 +1232,10 @@ mod tests {
         let mut app = App::new(120, 40, tx).unwrap();
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
 
-        // One workspace: the persisted preference may exist, but the view does
-        // not narrow and no unexplained control is shown.
+        // One workspace starts unscoped; scope remains available through the
+        // prefix command and every agent/session row menu.
         assert!(!app.agents_this_workspace);
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
-        assert!(app.agents_scope_rect.is_none());
 
         let first_pane = app.layout().focus;
         app.status.get_mut(&first_pane).unwrap().agent = "claude".into();
@@ -1283,18 +1264,11 @@ mod tests {
             },
         ];
 
-        // All workspaces is the default. The scope control is a separate row,
-        // not a third member of the All/Active segmented control.
+        // All workspaces is the default. Workspace scope is not a third member
+        // of the All/Active segmented control and consumes no extra row.
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         assert_eq!(app.agents_filter_rects.len(), 2);
-        let scope = app
-            .agents_scope_rect
-            .expect("scope row with two workspaces");
-        assert_ne!(scope.y, app.agents_filter_rects[0].1.y);
-        assert!(
-            buffer_contains(&term, "Here") && buffer_contains(&term, "Active"),
-            "the default 26-column sidebar fits both independent controls"
-        );
+        assert!(!buffer_contains(&term, "Here"));
         for visible in ["claude", "codex", "kimi", "hermes"] {
             assert!(
                 buffer_contains(&term, visible),
@@ -1303,12 +1277,8 @@ mod tests {
         }
 
         app.agents_scroll = 4;
-        app.handle_event(AppEvent::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: scope.x,
-            row: scope.y,
-            modifiers: KeyModifiers::NONE,
-        }));
+        app.open_agent_menu(crate::app::AgentTarget::Live(second_pane), 0, 0);
+        app.agent_menu_action(crate::app::AgentMenuItem::ToggleWorkspaceScope);
         assert!(app.agents_this_workspace);
         assert!(!app.agents_active_only, "scope is independent of lifecycle");
         assert_eq!(app.agents_scroll, 0);
@@ -1349,14 +1319,13 @@ mod tests {
             "jump does not silently widen the list"
         );
 
-        // With one workspace the chip is hidden, but the persisted scope still
-        // applies to resumable history under that workspace root.
+        // With one workspace, persisted scope still applies to resumable
+        // history under that workspace root.
         app.workspaces.truncate(1);
         app.active_ws = 0;
         assert!(app.agents_this_workspace);
         assert!(app.agents_scope_active());
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
-        assert!(app.agents_scope_rect.is_none());
         assert!(buffer_contains(&term, "hermes"));
         assert!(
             buffer_contains(&term, "kimi"),
