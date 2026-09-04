@@ -159,6 +159,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     let ws_rects = std::mem::take(&mut app.ws_rects);
     let git_section_rects = std::mem::take(&mut app.git_section_rects);
     let agents_filter_rects = std::mem::take(&mut app.agents_filter_rects);
+    let agents_elsewhere_rect = app.agents_elsewhere_rect;
     let agent_rects = std::mem::take(&mut app.agent_rects);
     let automation_rects = std::mem::take(&mut app.automation_rects);
     let session_rects = std::mem::take(&mut app.session_rects);
@@ -300,6 +301,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     app.ws_rects = ws_rects;
     app.git_section_rects = git_section_rects;
     app.agents_filter_rects = agents_filter_rects;
+    app.agents_elsewhere_rect = agents_elsewhere_rect;
     app.agent_rects = agent_rects;
     app.automation_rects = automation_rects;
     app.session_rects = session_rects;
@@ -475,6 +477,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // a frame that bails out (window too small, no workspace yet) must not
     // leave a dock divider behind as a live drag target.
     app.dock_dividers.clear();
+    app.agents_elsewhere_rect = None;
     app.mobile_pane_prev_rect = None;
     app.mobile_pane_next_rect = None;
 
@@ -504,6 +507,8 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         app.tab_rects.clear();
         app.tab_close_rects.clear();
         app.ws_rects.clear();
+        app.agents_filter_rects.clear();
+        app.agents_elsewhere_rect = None;
         app.agent_rects.clear();
         app.automation_rects.clear();
         app.session_rects.clear();
@@ -626,6 +631,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.workspaces_area = Rect::ZERO;
     app.agents_area = Rect::ZERO;
     app.agents_filter_rects.clear();
+    app.agents_elsewhere_rect = None;
     app.module_dock_rects.clear();
     // The FILES dock's geometry must be zeroed here too, or its row rects go stale
     // when it isn't drawn this frame (its sidebar hidden, or the dock moved/off as
