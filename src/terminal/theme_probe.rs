@@ -97,12 +97,39 @@ pub fn probe() -> ProbeResult {
 
 #[cfg(unix)]
 fn fd_readable(fd: std::os::fd::RawFd, timeout_ms: i32) -> bool {
+    use std::time::{Duration, Instant};
+
     let mut poll_fd = libc::pollfd {
         fd,
         events: libc::POLLIN,
         revents: 0,
     };
-    unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) > 0 && poll_fd.revents & libc::POLLIN != 0 }
+    let deadline =
+        (timeout_ms >= 0).then(|| Instant::now() + Duration::from_millis(timeout_ms as u64));
+    let mut remaining = timeout_ms;
+    loop {
+        // SAFETY: `poll_fd` contains only the borrowed descriptor supplied by
+        // the caller. The timeout is bounded by the probe's existing deadline.
+        let result = unsafe { libc::poll(&mut poll_fd, 1, remaining) };
+        if result > 0 {
+            return poll_fd.revents & libc::POLLIN != 0;
+        }
+        if result == 0 {
+            return false;
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return false;
+        }
+        let Some(deadline) = deadline else {
+            continue;
+        };
+        let remaining_duration = deadline.saturating_duration_since(Instant::now());
+        if remaining_duration.is_zero() {
+            return false;
+        }
+        remaining = remaining_duration.as_millis().clamp(1, i32::MAX as u128) as i32;
+        poll_fd.revents = 0;
+    }
 }
 
 #[cfg(not(unix))]

@@ -205,7 +205,7 @@ impl UnixWake {
             // only writes one byte to a pipe fd published before this call.
             let mut action: libc::sigaction = std::mem::zeroed();
             action.sa_sigaction = on_sigchld as extern "C" fn(libc::c_int) as libc::sighandler_t;
-            action.sa_flags = libc::SA_NOCLDSTOP;
+            action.sa_flags = libc::SA_NOCLDSTOP | libc::SA_RESTART;
             libc::sigemptyset(&mut action.sa_mask);
             if libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut()) != 0 {
                 panic!(
