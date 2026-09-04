@@ -97,7 +97,11 @@ Luvus release number.
 Parameter shapes mirror the CLI flags (`luvus task add --paths x` →
 `{"paths": ["x"]}`). For CLI commands, an omitted pane uses
 `$LUVUS_PANE_ID` when available; a raw API request with no pane uses the
-currently focused pane.
+currently focused pane. Methods with a focus default also treat an explicit
+`null` pane as omitted. A well-formed explicit ID that does not name a live
+pane fails with `not_found`; malformed or out-of-range IDs fail with
+`invalid_request` before any mutation. Pane IDs accept an unsigned 32-bit JSON
+integer or its decimal string form.
 
 `pane.report_session` binds an exact built-in agent session to its owning pane.
 The identity-only form remains compatible with existing integrations:
