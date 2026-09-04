@@ -4869,7 +4869,10 @@ impl App {
             Some(Value::Null) => Ok(None),
             Some(value) => {
                 let id = PaneId(parse_u32_value(value, "pane")?);
-                Ok(self.panes.contains_key(&id).then_some(id))
+                self.panes
+                    .contains_key(&id)
+                    .then_some(Some(id))
+                    .ok_or_else(not_found)
             }
             None => Ok(Some(self.layout().focus)),
         }
