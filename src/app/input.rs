@@ -1312,38 +1312,42 @@ impl App {
     }
 
     fn begin_workspace_drag(&mut self, column: u16, row: u16) -> bool {
+        let Some(armed_id) = self
+            .workspace_drag
+            .as_ref()
+            .and_then(|drag| drag.origin.is_none().then(|| drag.workspace_id.clone()))
+        else {
+            return false;
+        };
         let Some((workspace, _)) = self.ws_rects.iter().find(|(_, rect)| {
             column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
         }) else {
             return false;
         };
         let workspace = *workspace;
-        let Some(workspace_id) = self
+        if self
             .workspaces
             .get(workspace)
-            .map(|workspace| workspace.id.clone())
-        else {
+            .map(|workspace| &workspace.id)
+            != Some(&armed_id)
+        {
             return false;
-        };
-        // Preserve the existing click contract: a workspace focuses on press.
-        // If this becomes a drag, reorder keeps that same stable identity active.
+        }
         self.active_ws = workspace;
-        self.workspace_drag = Some(WorkspaceDrag {
-            workspace_id,
-            origin: (column, row),
-            target_workspace_id: None,
-            target_after: false,
-            moved: false,
-        });
+        if let Some(drag) = self.workspace_drag.as_mut() {
+            drag.origin = Some((column, row));
+            drag.target_workspace_id = None;
+            drag.target_after = false;
+            drag.moved = false;
+        }
         true
     }
 
     fn update_workspace_drag(&mut self, column: u16, row: u16) {
-        let Some((source_id, origin, was_moved)) = self
-            .workspace_drag
-            .as_ref()
-            .map(|drag| (drag.workspace_id.clone(), drag.origin, drag.moved))
-        else {
+        let Some((source_id, origin, was_moved)) = self.workspace_drag.as_ref().and_then(|drag| {
+            drag.origin
+                .map(|origin| (drag.workspace_id.clone(), origin, drag.moved))
+        }) else {
             return;
         };
         let moved = was_moved || (column, row) != origin;
@@ -1491,10 +1495,20 @@ impl App {
         // click through one of those early-return paths.
         if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
             self.clear_selection();
-            self.workspace_drag = None;
         }
         // Track the cursor for hover affordances (e.g. the session delete ✕).
         self.hover = Some((m.column, m.row));
+        // Reorder is armed explicitly from a workspace menu. Only a press on
+        // that same row begins the gesture; every other primary click cancels
+        // the transient mode and continues through normal hit testing.
+        if matches!(m.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.workspace_drag.is_some()
+        {
+            if self.begin_workspace_drag(m.column, m.row) {
+                return;
+            }
+            self.workspace_drag = None;
+        }
         if let MouseEventKind::Down(_) = m.kind {
             self.menu_scroll.press(m.column, m.row);
         }
@@ -1883,6 +1897,7 @@ impl App {
         // Right-click a pane tab, WORKSPACES row, agent, file, dock row, or pane
         // to open the matching context menu.
         if let MouseEventKind::Down(MouseButton::Right) = m.kind {
+            self.workspace_drag = None;
             let (c, r) = (m.column, m.row);
             let hit =
                 |rect: Rect| c >= rect.x && c < rect.right() && r >= rect.y && r < rect.bottom();
@@ -1978,12 +1993,6 @@ impl App {
                 // sidebar, and before pane resize because this target lives
                 // inside the sidebar, where no pane divider can be.
                 if self.begin_dock_resize(m.column, m.row) {
-                    return;
-                }
-                // A WORKSPACES row owns the complete gesture. A stationary
-                // release keeps click-to-focus; movement turns it into a group
-                // reorder without leaking selection into a pane underneath.
-                if self.begin_workspace_drag(m.column, m.row) {
                     return;
                 }
                 // Pane resize (docs/27) takes priority over selection: a divider
@@ -2090,7 +2099,10 @@ impl App {
             }
             MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Middle) => {
                 if matches!(m.kind, MouseEventKind::Drag(MouseButton::Left))
-                    && self.workspace_drag.is_some()
+                    && self
+                        .workspace_drag
+                        .as_ref()
+                        .is_some_and(|drag| drag.origin.is_some())
                 {
                     self.update_workspace_drag(m.column, m.row);
                     return;
@@ -2137,7 +2149,10 @@ impl App {
             }
             MouseEventKind::Up(MouseButton::Left) | MouseEventKind::Up(MouseButton::Middle) => {
                 if matches!(m.kind, MouseEventKind::Up(MouseButton::Left))
-                    && self.workspace_drag.is_some()
+                    && self
+                        .workspace_drag
+                        .as_ref()
+                        .is_some_and(|drag| drag.origin.is_some())
                 {
                     self.update_workspace_drag(m.column, m.row);
                     self.finish_workspace_drag();
@@ -3680,6 +3695,12 @@ impl App {
         // The workspace context menu / rename modal capture all input while open.
         if self.ws_menu.is_some() {
             self.handle_ws_menu_key(key);
+            return true;
+        }
+        // Reorder is an explicit, transient pointer mode entered from the
+        // workspace menu. Any key cancels it instead of leaking into the pane.
+        if self.workspace_drag.is_some() {
+            self.workspace_drag = None;
             return true;
         }
         // The pane context menu (docs/28) captures all input while open.

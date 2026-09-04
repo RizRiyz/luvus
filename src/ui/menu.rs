@@ -500,6 +500,7 @@ fn ws_label(it: WsMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> Strin
         WsMenuItem::Unpin => cat.menu_unpin.to_string(),
         WsMenuItem::Close => cap_first(cat.act_close),
         WsMenuItem::Rename => cat.menu_rename.to_string(),
+        WsMenuItem::Reorder => cat.menu_reorder.to_string(),
         WsMenuItem::DeleteWorktree => cat.menu_delete_worktree.to_string(),
         WsMenuItem::NewWorktree => cat.menu_new_worktree.to_string(),
         WsMenuItem::OpenWorktree => cat.menu_open_worktree.to_string(),
@@ -823,6 +824,7 @@ mod label_case_tests {
         for it in [
             WsMenuItem::Close,
             WsMenuItem::Rename,
+            WsMenuItem::Reorder,
             WsMenuItem::DeleteWorktree,
             WsMenuItem::NewWorktree,
             WsMenuItem::OpenWorktree,

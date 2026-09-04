@@ -535,6 +535,7 @@ pub struct WsMenu {
 pub enum WsMenuItem {
     Pin,
     Unpin,
+    Reorder,
     Close,
     Rename,
     /// Delete a **linked worktree** and its files (git worktree remove + folder).
@@ -1141,12 +1142,13 @@ pub struct Workspace {
     pub pinned: bool,
 }
 
-/// A left-button gesture armed on a WORKSPACES row. Identities stay stable while
-/// the underlying workspace vector is reordered; the target is the leader of a
-/// complete workspace/worktree display group.
+/// A WORKSPACES reorder mode entered from the row's context menu. The optional
+/// origin distinguishes an armed mode from an active left-button gesture.
+/// Identities stay stable while the underlying workspace vector is reordered;
+/// the target is the leader of a complete workspace/worktree display group.
 pub struct WorkspaceDrag {
     pub workspace_id: String,
-    pub origin: (u16, u16),
+    pub origin: Option<(u16, u16)>,
     pub target_workspace_id: Option<String>,
     pub target_after: bool,
     pub moved: bool,
@@ -4433,7 +4435,12 @@ impl App {
         } else {
             WsMenuItem::Pin
         };
-        let mut items = vec![WsMenuItem::Close, WsMenuItem::Rename, pin];
+        let mut items = vec![
+            WsMenuItem::Close,
+            WsMenuItem::Rename,
+            WsMenuItem::Reorder,
+            pin,
+        ];
         if is_worktree {
             items.push(WsMenuItem::DeleteWorktree);
         }
@@ -4569,6 +4576,15 @@ impl App {
         let cwd = self.workspaces.get(index).map(|w| w.cwd.clone());
         match item {
             WsMenuItem::Divider => {}
+            WsMenuItem::Reorder => {
+                self.workspace_drag = Some(WorkspaceDrag {
+                    workspace_id,
+                    origin: None,
+                    target_workspace_id: None,
+                    target_after: false,
+                    moved: false,
+                });
+            }
             // Pin/Unpin the right-clicked node: float it to the top of the list
             // (docs), persisted across restarts.
             WsMenuItem::Pin | WsMenuItem::Unpin => {
@@ -10992,7 +11008,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_row_click_focuses_but_drag_reorders_and_persists() {
+    fn workspace_reorder_menu_arms_drag_and_persists_the_result() {
         use ratatui::backend::TestBackend;
         use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use ratatui::Terminal;
@@ -11029,8 +11045,8 @@ mod tests {
         let alpha_at = (alpha.x + 2, alpha.y);
         app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), alpha_at));
         assert!(
-            app.workspace_drag.is_some(),
-            "the row press owns the gesture"
+            app.workspace_drag.is_none(),
+            "a plain click does not reorder"
         );
         app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), alpha_at));
         assert_eq!(
@@ -11054,17 +11070,41 @@ mod tests {
             .1;
         let gamma_at = (gamma.x + 2, gamma.y);
         let before_alpha = (alpha.x + 2, alpha.y);
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Right), gamma_at));
+        draw(&mut app, &mut term);
+        let reorder = app
+            .ws_menu
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .find(|(item, _)| *item == WsMenuItem::Reorder)
+            .unwrap()
+            .1;
+        let reorder_at = (reorder.x, reorder.y);
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), reorder_at));
+        app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), reorder_at));
+        draw(&mut app, &mut term);
+        assert_eq!(
+            term.backend()
+                .buffer()
+                .cell((gamma.x + 2, gamma.y))
+                .unwrap()
+                .symbol(),
+            "↕",
+            "armed reorder mode replaces the source workspace circle"
+        );
         app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), gamma_at));
         app.handle_event(mouse(MouseEventKind::Drag(MouseButton::Left), before_alpha));
         draw(&mut app, &mut term);
         assert_eq!(
             term.backend()
                 .buffer()
-                .cell((alpha.x + 1, alpha.y))
+                .cell((alpha.x + 2, alpha.y))
                 .unwrap()
                 .symbol(),
             "▲",
-            "dragging above a row publishes a visible insertion marker"
+            "the destination circle becomes the insertion marker"
         );
         app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), before_alpha));
 
@@ -11143,6 +11183,8 @@ mod tests {
         let child_at = (child.x + 2, child.y);
         let after_other = (other.x + 2, other.y + 1);
 
+        app.open_ws_menu(2, child_at.0, child_at.1);
+        app.ws_menu_action(WsMenuItem::Reorder);
         app.handle_event(event(MouseEventKind::Down(MouseButton::Left), child_at));
         app.handle_event(event(MouseEventKind::Drag(MouseButton::Left), after_other));
         app.handle_event(event(MouseEventKind::Up(MouseButton::Left), after_other));
@@ -11179,6 +11221,13 @@ mod tests {
             .1;
         let other_at = (other.x + 2, other.y);
         let after_group = (child.x + 2, child.y + 1);
+        let other_index = app
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.name == "other")
+            .unwrap();
+        app.open_ws_menu(other_index, other_at.0, other_at.1);
+        app.ws_menu_action(WsMenuItem::Reorder);
         app.handle_event(event(MouseEventKind::Down(MouseButton::Left), other_at));
         app.handle_event(event(MouseEventKind::Drag(MouseButton::Left), after_group));
         app.handle_event(event(MouseEventKind::Up(MouseButton::Left), after_group));
@@ -11234,6 +11283,8 @@ mod tests {
         let gamma_at = (gamma.x + 2, gamma.y);
         let pinned_at = (pinned.x + 2, pinned.y);
 
+        app.open_ws_menu(2, gamma_at.0, gamma_at.1);
+        app.ws_menu_action(WsMenuItem::Reorder);
         app.handle_event(event(MouseEventKind::Down(MouseButton::Left), gamma_at));
         app.handle_event(event(MouseEventKind::Drag(MouseButton::Left), pinned_at));
         assert!(

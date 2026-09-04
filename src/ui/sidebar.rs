@@ -475,7 +475,27 @@ fn draw_workspaces_dock(
         if is_member {
             line1.push(Span::styled("└ ", Style::new().fg(t.overlay0)));
         }
-        line1.push(Span::styled(st.dot(), Style::new().fg(st.color(t))));
+        let reorder_marker = app.workspace_drag.as_ref().and_then(|drag| {
+            if drag
+                .target_workspace_id
+                .as_ref()
+                .is_some_and(|id| *id == ws.id)
+            {
+                Some(if drag.target_after { "▼" } else { "▲" })
+            } else if drag.workspace_id == ws.id {
+                Some("↕")
+            } else {
+                None
+            }
+        });
+        line1.push(Span::styled(
+            reorder_marker.unwrap_or_else(|| st.dot()),
+            Style::new().fg(if reorder_marker.is_some() {
+                t.accent
+            } else {
+                st.color(t)
+            }),
+        ));
         line1.push(Span::raw(" "));
         line1.push(Span::styled(name_disp, name_style));
         if let Some(b) = &branch_disp {
@@ -506,35 +526,6 @@ fn draw_workspaces_dock(
                     buf[(x, row)].set_bg(t.sel_bg);
                 }
             }
-        }
-    }
-    // A semantic target (stable workspace id + group edge) becomes a tiny
-    // viewport-local marker here. The input path never stores screen geometry,
-    // which keeps passive clients from publishing stale hit coordinates.
-    if let Some((target, after)) = app.workspace_drag.as_ref().and_then(|drag| {
-        drag.target_workspace_id
-            .as_ref()
-            .and_then(|id| {
-                app.workspaces
-                    .iter()
-                    .position(|workspace| workspace.id == *id)
-            })
-            .map(|target| (target, drag.target_after))
-    }) {
-        let group = app.workspace_display_group(target);
-        let visible: Vec<_> = ws_rects
-            .iter()
-            .filter(|(workspace, _)| group.contains(workspace))
-            .map(|(_, rect)| *rect)
-            .collect();
-        if let (Some(top), Some(bottom)) = (
-            visible.iter().map(|rect| rect.y).min(),
-            visible.iter().map(|rect| rect.bottom()).max(),
-        ) {
-            let y = if after { bottom.saturating_sub(1) } else { top };
-            f.buffer_mut()[(area.x + 1, y)]
-                .set_symbol(if after { "▼" } else { "▲" })
-                .set_fg(t.accent);
         }
     }
     draw_scrollbar(
