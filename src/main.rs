@@ -1365,6 +1365,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
             emit_clipboard(&text);
         }
         app.tick_toast(Instant::now());
+        app.tick_copy_highlight(Instant::now());
         app.tick_search_flash(Instant::now());
         app.tick_bar_notifications(Instant::now());
         // A forced redraw (resize / regained focus) wipes the terminal so the next
@@ -2453,6 +2454,10 @@ mod tests {
         }
 
         // A genuinely tiny phone-keyboard-open viewport shows the guard, not garbage.
+        // Seed AGENTS overflow geometry first: the early return must not leave an
+        // invisible jump target clickable over the friendly message.
+        let junk = ratatui::layout::Rect::new(0, 0, 20, 4);
+        app.agents_elsewhere_rect = Some((app.layout().focus, junk));
         let mut term = Terminal::new(TestBackend::new(20, 4)).unwrap();
         term.draw(|f| ui::render(f, &mut app)).unwrap();
         let all: String = (0..4).map(|r| full_row(&term, r)).collect();
@@ -2460,6 +2465,7 @@ mod tests {
             all.contains("enlarge terminal"),
             "a tiny viewport gets the friendly guard"
         );
+        assert!(app.agents_elsewhere_rect.is_none());
     }
 
     /// The orchestration board tab (docs/22, ORCH-7) renders its header, a task

@@ -2729,7 +2729,18 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             }
             ("agent.read".into(), Value::Object(obj))
         }
-        ("agent", _) => ("agent.list".into(), json!({})),
+        ("agent", "" | "list") if rest.is_empty() => ("agent.list".into(), json!({})),
+        ("agent", "list") => {
+            return Err(anyhow!(
+                "unexpected agent list argument `{}`. Try `luvus help agent`.",
+                rest[0]
+            ));
+        }
+        ("agent", other) => {
+            return Err(anyhow!(
+                "unknown agent command `{other}`. Try `luvus help agent`."
+            ));
+        }
 
         ("ui", "sidebar") => {
             let mut obj = serde_json::Map::new();
@@ -4092,6 +4103,26 @@ mod tests {
         assert_eq!(
             parse(&argv("luvus pane processes 7")).unwrap().0,
             "pane.processes"
+        );
+    }
+
+    #[test]
+    fn agent_list_requires_an_exact_subcommand_shape() {
+        for raw in ["luvus agent", "luvus agent list"] {
+            let (method, params) = parse(&argv(raw)).unwrap();
+            assert_eq!(method, "agent.list", "{raw}");
+            assert_eq!(params, json!({}), "{raw}");
+        }
+
+        assert_eq!(
+            parse(&argv("luvus agent lsit")).unwrap_err().to_string(),
+            "unknown agent command `lsit`. Try `luvus help agent`."
+        );
+        assert_eq!(
+            parse(&argv("luvus agent list extra"))
+                .unwrap_err()
+                .to_string(),
+            "unexpected agent list argument `extra`. Try `luvus help agent`."
         );
     }
 

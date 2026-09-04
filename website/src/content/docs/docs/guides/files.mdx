@@ -155,6 +155,11 @@ deterministic Unicode terminal text; unsupported or malformed syntax shows its
 original source instead of hiding content. `.mdx` is not treated as a preview
 format.
 
+Flowcharts preserve ranked boxes, decision shapes, branches, merges, cycles,
+and labelled routes. The layout follows `TB`, `BT`, `LR`, or `RL` when it fits
+the pane. A very narrow pane uses a compact text outline instead of clipping the
+diagram into unreadable fragments.
+
 Test fixtures for both preview types live in `examples/preview/`: open
 `README.md` for the Markdown showcase, `workflow.mmd` for a flowchart, and
 `agent-session.mermaid` for a sequence diagram.
