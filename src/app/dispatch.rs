@@ -659,11 +659,18 @@ mod socket_api_tests {
         let (_env, mut app) = app("null-terminal-pane-resolution");
         let pane = app.layout().focus;
 
-        for method in ["pane.get", "pane.read", "pane.processes"] {
+        for (method, response_type) in [
+            ("pane.get", "pane"),
+            ("pane.read", "pane_read"),
+            ("pane.processes", "pane_processes"),
+        ] {
             let result = app
                 .dispatch(method, &json!({"pane": null}))
                 .unwrap_or_else(|error| panic!("{method} rejected null: {error:?}"));
-            assert_eq!(result["pane"], pane.0.to_string(), "{method}");
+            assert_eq!(result["type"], response_type, "{method}");
+            if result.get("pane").is_some() {
+                assert_eq!(result["pane"], pane.0.to_string(), "{method}");
+            }
         }
     }
 
@@ -4917,17 +4924,26 @@ impl App {
     /// The pane a task/lease call acts for: the passed `pane`, else the caller's
     /// `$LUVUS_PANE_ID`. Orchestration is pane-keyed, so this is required.
     fn orch_pane(&self, p: &Value) -> Result<u32, (String, String)> {
-        self.resolve_pane(p)?.map(|id| id.0).ok_or_else(|| {
-            (
-                "no_pane".to_string(),
-                "no pane id — run inside a luvus pane or pass a pane id".to_string(),
-            )
-        })
+        self.resolve_optional_pane(p)?
+            .map(|id| id.0)
+            .ok_or_else(|| {
+                (
+                    "no_pane".to_string(),
+                    "no pane id — run inside a luvus pane or pass a pane id".to_string(),
+                )
+            })
+    }
+
+    fn resolve_optional_pane(&self, p: &Value) -> Result<Option<PaneId>, (String, String)> {
+        if matches!(p.get("pane"), Some(Value::Null)) {
+            return Ok(None);
+        }
+        self.resolve_pane(p)
     }
 
     pub(crate) fn resolve_pane(&self, p: &Value) -> Result<Option<PaneId>, (String, String)> {
         match p.get("pane") {
-            Some(Value::Null) => Ok(None),
+            None | Some(Value::Null) => Ok(Some(self.layout().focus)),
             Some(value) => {
                 let id = PaneId(parse_u32_value(value, "pane")?);
                 self.panes
@@ -4935,7 +4951,6 @@ impl App {
                     .then_some(Some(id))
                     .ok_or_else(not_found)
             }
-            None => Ok(Some(self.layout().focus)),
         }
     }
 
@@ -5314,7 +5329,7 @@ impl App {
                 );
                 return;
             }
-            (Some(_), None) => match self.resolve_pane(&json!({"pane":p["pane"]})) {
+            (Some(_), None) => match self.resolve_optional_pane(&json!({"pane":p["pane"]})) {
                 Ok(Some(id)) => (id, false),
                 Ok(None) => {
                     fail("not_found", "pane not found".to_string());
@@ -5328,7 +5343,7 @@ impl App {
             (_, _) => {
                 let mut split = serde_json::Map::new();
                 if let Some(anchor) = p.get("anchor") {
-                    let anchor = match self.resolve_pane(&json!({"pane":anchor})) {
+                    let anchor = match self.resolve_optional_pane(&json!({"pane":anchor})) {
                         Ok(Some(anchor)) => anchor,
                         Ok(None) => {
                             fail("not_found", "anchor pane not found".to_string());
@@ -8126,6 +8141,42 @@ command = ["true"]
         assert_eq!(value["result"]["ready"], true);
         assert_eq!(value["result"]["name"], "reviewer");
         assert_eq!(value["result"]["status"], "working");
+    }
+
+    #[test]
+    fn server_owned_agent_start_keeps_null_targets_terminal() {
+        for params in [
+            json!({
+                "name":"reviewer", "kind":"codex", "pane":null,
+                "args":[], "timeout_s":10,
+            }),
+            json!({
+                "name":"reviewer", "kind":"codex", "anchor":null,
+                "args":[], "timeout_s":10,
+            }),
+        ] {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(80, 24, tx).unwrap();
+            let before_focus = app.layout().focus;
+            let before_leaves = app.layout().leaves();
+            let before_panes = app.panes.len();
+            let (reply, response) = std::sync::mpsc::channel();
+
+            app.start_agent_launch(
+                "start-null".into(),
+                params,
+                reply,
+                Arc::new(AtomicBool::new(false)),
+            );
+
+            let value: Value = serde_json::from_str(&response.recv().unwrap()).unwrap();
+            assert_eq!(value["error"]["code"], "not_found");
+            assert!(app.agent_names.is_empty());
+            assert!(app.agent_starts.is_empty());
+            assert_eq!(app.layout().focus, before_focus);
+            assert_eq!(app.layout().leaves(), before_leaves);
+            assert_eq!(app.panes.len(), before_panes);
+        }
     }
 
     #[test]
