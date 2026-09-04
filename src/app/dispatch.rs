@@ -37,6 +37,28 @@ mod socket_api_tests {
         (env, app)
     }
 
+    fn layout_state_bytes(app: &App) -> (PaneId, Vec<u8>, Vec<u8>) {
+        let layout = app.layout();
+        let tree = serde_json::to_vec(&layout.to_tree()).unwrap();
+        let pane_sizes = serde_json::to_vec(
+            &layout
+                .panes(crate::api::topology::logical_area())
+                .into_iter()
+                .map(|pane| {
+                    json!({
+                        "pane": pane.id.0,
+                        "x": pane.rect.x,
+                        "y": pane.rect.y,
+                        "width": pane.rect.width,
+                        "height": pane.rect.height,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        (layout.focus, tree, pane_sizes)
+    }
+
     #[test]
     fn quiet_runtime_can_leave_the_fast_detection_cadence() {
         let (_env, mut app) = app("quiet-runtime-cadence");
@@ -179,6 +201,80 @@ mod socket_api_tests {
         assert_eq!(app.layout().focus, first);
         assert_eq!(app.layout().leaves().len(), 2);
         assert!(app.panes.contains_key(&first) && app.panes.contains_key(&second));
+    }
+
+    #[test]
+    fn explicit_missing_pane_resize_is_not_found_and_atomic() {
+        let (_env, mut app) = app("missing-pane-resize");
+        app.dispatch("pane.split", &json!({})).unwrap();
+        let before = layout_state_bytes(&app);
+
+        let error = app
+            .dispatch(
+                "pane.resize",
+                &json!({"pane": u32::MAX, "direction": "left", "cells": 1}),
+            )
+            .expect_err("an explicit missing pane must not resize the focused pane");
+
+        assert_eq!(error.0, "not_found");
+        assert_eq!(layout_state_bytes(&app), before);
+    }
+
+    #[test]
+    fn explicit_missing_pane_zoom_is_not_found_and_atomic() {
+        let (_env, mut app) = app("missing-pane-zoom");
+        let before = layout_state_bytes(&app);
+        let zoomed_before = app.zoomed;
+
+        let error = app
+            .dispatch(
+                "pane.zoom",
+                &json!({"pane": u32::MAX.to_string(), "enabled": true}),
+            )
+            .expect_err("an explicit missing pane must not zoom the focused pane");
+
+        assert_eq!(error.0, "not_found");
+        assert_eq!(layout_state_bytes(&app), before);
+        assert_eq!(app.zoomed, zoomed_before);
+    }
+
+    #[test]
+    fn explicit_missing_pane_neighbor_is_not_found_and_atomic() {
+        let (_env, mut app) = app("missing-pane-neighbor");
+        app.dispatch("pane.split", &json!({})).unwrap();
+        let before = layout_state_bytes(&app);
+
+        let error = app
+            .dispatch(
+                "pane.neighbor",
+                &json!({"pane": u32::MAX, "direction": "left"}),
+            )
+            .expect_err("an explicit missing pane must not inspect the focused pane");
+
+        assert_eq!(error.0, "not_found");
+        assert_eq!(layout_state_bytes(&app), before);
+    }
+
+    #[test]
+    fn omitted_and_null_pane_still_target_focus_where_supported() {
+        let (_env, mut app) = app("default-pane-resolution");
+        let first = app.layout().focus;
+        let second = PaneId(
+            app.dispatch("pane.split", &json!({})).unwrap()["pane"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
+        );
+
+        for params in [
+            json!({"direction": "left"}),
+            json!({"pane": null, "direction": "left"}),
+        ] {
+            let result = app.dispatch("pane.neighbor", &params).unwrap();
+            assert_eq!(result["pane"], second.0.to_string());
+            assert_eq!(result["neighbor"], first.0.to_string());
+        }
     }
 
     #[test]
@@ -6979,6 +7075,7 @@ command = ["true"]
             json!(overflow.to_string()),
             json!("-1"),
             json!("1.5"),
+            json!("abc"),
         ] {
             let error = app
                 .resolve_pane(&json!({"pane": invalid}))
