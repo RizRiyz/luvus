@@ -573,6 +573,23 @@ mod socket_api_tests {
     }
 
     #[test]
+    fn invalid_zoom_enabled_does_not_change_focus_or_layout() {
+        let (_env, mut app) = app("invalid-zoom-enabled");
+        let first = app.layout().focus;
+        app.dispatch("pane.split", &json!({})).unwrap();
+        let before = layout_state_bytes(&app);
+        let zoomed_before = app.zoomed;
+
+        let error = app
+            .dispatch("pane.zoom", &json!({"pane": first.0, "enabled": "yes"}))
+            .expect_err("invalid enabled must fail before focus changes");
+
+        assert_eq!(error.0, "invalid_request");
+        assert_eq!(layout_state_bytes(&app), before);
+        assert_eq!(app.zoomed, zoomed_before);
+    }
+
+    #[test]
     fn explicit_missing_pane_neighbor_is_not_found_and_atomic() {
         let (_env, mut app) = app("missing-pane-neighbor");
         app.dispatch("pane.split", &json!({})).unwrap();
@@ -2964,7 +2981,6 @@ impl App {
             "pane.zoom" => {
                 reject_api_fields(p, &["pane", "enabled"])?;
                 let pane = self.resolve_pane_or_focus(p)?;
-                self.focus_pane_global(pane);
                 let enabled = match p.get("enabled") {
                     None => !self.zoomed,
                     Some(Value::Bool(enabled)) => *enabled,
@@ -2975,6 +2991,7 @@ impl App {
                         ))
                     }
                 };
+                self.focus_pane_global(pane);
                 self.zoomed = enabled;
                 let pane = self.layout().focus;
                 self.emit_event(
