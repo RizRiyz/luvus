@@ -642,6 +642,65 @@ pub(crate) fn read_stream_frame(reader: &mut impl BufRead) -> io::Result<Option<
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "event frame is not UTF-8"))
 }
 
+/// Read one event-stream frame without allowing byte dribbles or unrelated
+/// frames to extend an absolute deadline. A receive timeout is refreshed from
+/// the remaining deadline immediately before every underlying socket read;
+/// bytes already buffered are consumed first.
+pub(crate) fn read_stream_frame_with_deadline(
+    reader: &mut BufReader<Conn>,
+    deadline: std::time::Instant,
+) -> io::Result<Option<String>> {
+    let connection = reader.get_ref().clone();
+    let mut frame = Vec::new();
+    loop {
+        if reader.buffer().is_empty() {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "event frame timed out",
+                ));
+            }
+            if connection.set_recv_timeout(remaining)? != transport::TimeoutMode::Kernel {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "event stream transport has no kernel receive timeout",
+                ));
+            }
+        }
+
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            if frame.is_empty() {
+                return Ok(None);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "event frame is missing LF",
+            ));
+        }
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |position| position + 1);
+        if frame.len().saturating_add(take) > crate::terminal::backend::MAX_FRAME_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "event frame is too large",
+            ));
+        }
+        frame.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if frame.last() == Some(&b'\n') {
+            return String::from_utf8(frame[..frame.len() - 1].to_vec())
+                .map(Some)
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "event frame is not UTF-8")
+                });
+        }
+    }
+}
+
 /// Read one bounded ordinary API request for CLI bridge callers.
 pub(crate) fn read_request_frame(reader: &mut impl BufRead) -> io::Result<String> {
     read_text_frame(reader, "request")

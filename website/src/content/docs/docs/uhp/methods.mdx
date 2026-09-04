@@ -305,8 +305,9 @@ set of `idle`, `working`, `blocked`, and `done`; the response's `status` is the
 state that actually matched. The initial comparison and registration are atomic
 on the app loop, so it has no subscribe-then-check race and performs no polling.
 `luvus wait agent-status` accepts repeated or comma-separated `--status` values.
-Against an older server it keeps the subscribe-first event stream for a single
-state and falls back to bounded status polling only for a set.
+Against an older server it keeps the subscribe-first event stream for the full
+status set. Bounded status polling remains only when the local transport cannot
+safely bound a stream read (currently Windows named pipes).
 
 `agent.start` takes `name`, `kind`, optional `pane` or `anchor`, optional
 `direction`, an `args` string array, and `timeout_s`. Luvus selects or creates
