@@ -497,14 +497,8 @@ fn run_inner(args: &[String]) -> Result<i32> {
     }
     let (method, params) = parse(args)?;
     let path = crate::persist::cli_socket_path();
-    let mut stream = crate::ipc::transport::connect(&path).map_err(|_| {
-        let context = crate::i18n::cli::Context::configured();
-        anyhow!(
-            "{} (socket: {})",
-            context.text("no luvus server running"),
-            path.display()
-        )
-    })?;
+    let mut stream = crate::ipc::transport::connect(&path)
+        .map_err(|error| server_connect_error(&path, error))?;
 
     let req = json!({ "id": "1", "method": method, "params": params });
     writeln!(stream, "{req}")?;
@@ -2141,12 +2135,8 @@ fn pane_status(pane: &str) -> Result<Option<String>> {
 /// never missed (it's already buffered on the stream).
 fn wait_status_stream(pane: &str, target: &str, deadline: Option<Instant>) -> Result<i32> {
     let path = crate::persist::cli_socket_path();
-    let stream = crate::ipc::transport::connect(&path).map_err(|_| {
-        anyhow!(
-            "{}",
-            crate::i18n::cli::Context::configured().text("no luvus server running")
-        )
-    })?;
+    let stream = crate::ipc::transport::connect(&path)
+        .map_err(|error| server_connect_error(&path, error))?;
     let mut writer = stream.clone();
     writeln!(
         writer,
@@ -2204,17 +2194,33 @@ pub fn request_attach(pane: &str) -> Result<()> {
 /// One request/response over the control socket.
 pub(crate) fn send_request(method: &str, params: Value) -> Result<Value> {
     let path = crate::persist::cli_socket_path();
-    let mut stream = crate::ipc::transport::connect(&path).map_err(|_| {
-        anyhow!(
-            "{}",
-            crate::i18n::cli::Context::configured().text("no luvus server running")
-        )
-    })?;
+    let mut stream = crate::ipc::transport::connect(&path)
+        .map_err(|error| server_connect_error(&path, error))?;
     let req = json!({ "id": "1", "method": method, "params": params });
     writeln!(stream, "{req}")?;
     let mut reader = BufReader::new(stream);
     let line = crate::ipc::api::read_response_frame(&mut reader)?;
     serde_json::from_str(&line).map_err(|e| anyhow!("bad reply: {e}"))
+}
+
+fn server_connect_error(path: &std::path::Path, error: std::io::Error) -> anyhow::Error {
+    let context = crate::i18n::cli::Context::configured();
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        anyhow!(
+            "{} (socket: {}): {}. {}",
+            context.text("Luvus server access was denied"),
+            path.display(),
+            error,
+            context.text("an agent or OS sandbox may be blocking the selected socket")
+        )
+    } else {
+        anyhow!(
+            "{} (socket: {}): {}",
+            context.text("no luvus server running"),
+            path.display(),
+            error
+        )
+    }
 }
 
 /// Transport-neutral one-frame bridge for harnesses that cannot use Unix
@@ -2233,7 +2239,7 @@ fn uhp_proxy() -> Result<i32> {
     }
     let path = crate::persist::cli_socket_path();
     let mut stream = crate::ipc::transport::connect(&path)
-        .map_err(|_| anyhow!("no luvus server running (socket: {})", path.display()))?;
+        .map_err(|error| server_connect_error(&path, error))?;
     writeln!(stream, "{request}")?;
     let mut reader = BufReader::new(stream);
     let response = crate::ipc::api::read_response_frame(&mut reader)?;
@@ -3849,6 +3855,30 @@ fn parse_setting_value(s: &str) -> Value {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn socket_permission_errors_are_not_reported_as_an_offline_server() {
+        let path = std::path::Path::new("/private/luvus.sock");
+        let denied = server_connect_error(
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "operation not permitted",
+            ),
+        )
+        .to_string();
+        assert!(denied.contains("server access was denied"));
+        assert!(denied.contains("sandbox"));
+        assert!(denied.contains("/private/luvus.sock"));
+        assert!(!denied.contains("no luvus server running"));
+
+        let absent = server_connect_error(
+            path,
+            std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
+        )
+        .to_string();
+        assert!(absent.contains("no luvus server running"));
+    }
 
     #[test]
     fn status_card_keeps_the_bug_and_rows_aligned() {

@@ -1817,7 +1817,7 @@ fn task_briefing(task: &crate::orch::Task, mode: TaskWorkerMode) -> String {
         }
     };
     let mut b = format!(
-        "You are the worker for luvus task {id}: {}. {location}",
+        "You are the worker for luvus task {id}: {}. {location} Use the Luvus executable named by `LUVUS_BIN_PATH` for task commands. The `luvus` command in this pane is also pinned to that same binary and server.",
         task.title
     );
     if let Some(prompt) = task
@@ -2885,6 +2885,7 @@ mod tests {
         assert!(!line.contains('\n'), "typed into a shell — one line");
         assert!(line.contains("claude"));
         assert!(line.contains("luvus task done t1"));
+        assert!(line.contains("LUVUS_BIN_PATH"));
         assert!(line.contains("cargo test auth"));
         if !cfg!(windows) {
             assert!(line.starts_with("LUVUS_TASK_ID=t1 "));

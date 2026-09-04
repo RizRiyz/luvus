@@ -198,6 +198,10 @@ luvus events
 
 Inside a luvus pane, commands default to the calling pane via
 `$LUVUS_PANE_ID`, so a worker agent can `luvus task heartbeat` itself.
+Luvus also puts the running server binary first in that pane's `PATH`. A worker
+created by a debug server therefore reports through the matching debug CLI,
+while an installed server uses its matching release CLI. The existing `PATH`
+entries remain available after it.
 
 Events on the bus: `task.added` · `task.claimed` · `task.started` ·
 `task.ready` · `task.gate_running` · `task.gate_passed` · `task.gate_failed` ·
@@ -245,6 +249,8 @@ Events on the bus: `task.added` · `task.claimed` · `task.started` ·
 | `d` → *needs compaction* | The worker's context is over 85%, so compact (e.g. `/compact`), then retry. |
 | Stuck at `review` | The gate failed. `luvus task get <id>` shows the output. Fix and `d` again. |
 | `blocked` after `m` | Merge conflict. Resolve in the task's worktree, then `m` again. |
+| Worker reports that Luvus server access was denied | The agent or OS sandbox cannot reach the session socket. Approve that exact local Luvus command or adjust the agent's own reviewed permission policy. Luvus does not silently disable the sandbox. |
+| Scheduled worker stops at folder trust or approval | Trust the workspace in that agent or configure its normal automation-safe permission mode before arming the schedule. Permission bypass remains an explicit agent-level choice. |
 
 Clean up a finished worker with `luvus worktree remove <path>` (the branch is
 kept).
