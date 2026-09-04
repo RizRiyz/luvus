@@ -590,6 +590,32 @@ mod socket_api_tests {
     }
 
     #[test]
+    fn remaining_focus_default_methods_reject_missing_panes_atomically() {
+        let (_env, mut app) = app("remaining-missing-pane-fallbacks");
+        app.dispatch("pane.split", &json!({})).unwrap();
+        let before = layout_state_bytes(&app);
+
+        for (method, params) in [
+            ("pane.layout", json!({"pane": u32::MAX})),
+            ("pane.edges", json!({"pane": u32::MAX})),
+            (
+                "pane.focus_direction",
+                json!({"pane": u32::MAX, "direction": "left"}),
+            ),
+            (
+                "diff.navigate",
+                json!({"pane": u32::MAX, "action": "next_line"}),
+            ),
+        ] {
+            let error = app
+                .dispatch(method, &params)
+                .expect_err("an explicit missing pane must not use focus");
+            assert_eq!(error.0, "not_found", "{method}");
+            assert_eq!(layout_state_bytes(&app), before, "{method}");
+        }
+    }
+
+    #[test]
     fn omitted_and_null_pane_still_target_focus_where_supported() {
         let (_env, mut app) = app("default-pane-resolution");
         let first = app.layout().focus;
