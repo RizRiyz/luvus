@@ -7636,6 +7636,10 @@ command = ["true"]
         );
         assert_eq!(app.resolve_pane(&json!({})).unwrap(), Some(pane));
         assert_eq!(app.resolve_pane(&json!({"pane": null})).unwrap(), None);
+        let missing = app
+            .resolve_pane(&json!({"pane": u32::MAX}))
+            .expect_err("a well-formed missing pane must be distinct from omission");
+        assert_eq!(missing.0, "not_found");
 
         let leaves = app.layout().leaves();
         let focus = app.layout().focus;
