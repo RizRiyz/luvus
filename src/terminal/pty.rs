@@ -1,6 +1,6 @@
 //! PTY pane lifecycle. Unix panes use one poll-driven descriptor actor for
 //! ordered input and output; Windows keeps portable-pty's split reader/writer
-//! backend. Child waiting is shared process-wide.
+//! backend. Child waiting is one process-wide event-driven reaper.
 
 #[cfg(windows)]
 use std::io::Read;
@@ -8,10 +8,11 @@ use std::io::Read;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::mpsc::{self, Sender};
+#[cfg(unix)]
+use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 use anyhow::Result;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
@@ -23,102 +24,17 @@ use crate::terminal::backend::TerminalRuntime;
 use crate::terminal::vt::{create_engine, VtEngine, VtEngineKind};
 
 mod io;
-
-const CHILD_REAPER_INTERVAL: Duration = Duration::from_millis(50);
-
-struct ReaperEntry {
-    id: PaneId,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
-    child_exited: Arc<AtomicBool>,
-    app_tx: Sender<AppEvent>,
-}
-
-static CHILD_REAPER: OnceLock<Sender<ReaperEntry>> = OnceLock::new();
+mod reaper;
 
 #[cfg(test)]
-static CHILD_REAPER_STARTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Hand a child to the process-wide reaper. Pane I/O remains isolated behind
-/// its platform backend, but waiting for child exit needs no per-pane thread:
-/// `try_wait` is non-blocking on every portable-pty backend.
-fn register_child_reaper(
-    id: PaneId,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
-    child_exited: Arc<AtomicBool>,
-    app_tx: Sender<AppEvent>,
-) {
-    let reaper = CHILD_REAPER.get_or_init(|| {
-        let (tx, rx) = mpsc::channel();
-        thread::Builder::new()
-            .name("luvus-pty-reaper".to_string())
-            .spawn(move || child_reaper_loop(rx))
-            .expect("failed to start the PTY child reaper");
-        #[cfg(test)]
-        CHILD_REAPER_STARTS.fetch_add(1, Ordering::SeqCst);
-        tx
-    });
-    let entry = ReaperEntry {
-        id,
-        child,
-        child_exited,
-        app_tx,
-    };
-    if let Err(error) = reaper.send(entry) {
-        // A panic in the shared reaper must not leave an unreaped child. This
-        // fallback is deliberately exceptional; the normal path stays at one
-        // waiter thread for the whole server.
-        let mut entry = error.0;
-        let _ = thread::Builder::new()
-            .name("luvus-pty-reaper-fallback".to_string())
-            .spawn(move || {
-                let _ = entry.child.wait();
-                finish_child(entry);
-            });
-    }
-}
-
-fn child_reaper_loop(rx: Receiver<ReaperEntry>) {
-    let mut children = Vec::<ReaperEntry>::new();
-    loop {
-        let received = if children.is_empty() {
-            rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
-        } else {
-            rx.recv_timeout(CHILD_REAPER_INTERVAL)
-        };
-        match received {
-            Ok(entry) => children.push(entry),
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break,
-        }
-        children.extend(rx.try_iter());
-
-        let mut index = 0;
-        while index < children.len() {
-            if child_poll_finished(children[index].child.try_wait()) {
-                let entry = children.swap_remove(index);
-                finish_child(entry);
-            } else {
-                index += 1;
-            }
-        }
-    }
-}
-
-#[inline]
-fn child_poll_finished(result: std::io::Result<Option<portable_pty::ExitStatus>>) -> bool {
-    matches!(result, Ok(Some(_)))
-}
+use reaper::child_poll_finished;
+use reaper::register_child_reaper;
+#[cfg(all(test, unix))]
+use reaper::CHILD_REAPER_STARTS;
 
 fn terminate_spawned_child(child: &mut (dyn portable_pty::Child + Send + Sync)) {
     let _ = child.kill();
     let _ = child.wait();
-}
-
-fn finish_child(entry: ReaperEntry) {
-    // Publish exit before notifying the app. If the app immediately drops the
-    // pane, `Drop` must not signal a PID that the operating system may reuse.
-    entry.child_exited.store(true, Ordering::SeqCst);
-    let _ = entry.app_tx.send(AppEvent::PtyExit(entry.id));
 }
 
 pub(crate) enum InputAction {
@@ -1265,6 +1181,35 @@ mod reap_tests {
     use super::*;
     use crate::ids::PaneId;
 
+    struct SignalMaskGuard(libc::sigset_t);
+
+    impl SignalMaskGuard {
+        fn block_sigchld() -> Self {
+            unsafe {
+                let mut sigchld: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut sigchld);
+                libc::sigaddset(&mut sigchld, libc::SIGCHLD);
+                let mut previous: libc::sigset_t = std::mem::zeroed();
+                let result = libc::pthread_sigmask(libc::SIG_BLOCK, &sigchld, &mut previous);
+                assert_eq!(
+                    result,
+                    0,
+                    "block SIGCHLD: {}",
+                    std::io::Error::from_raw_os_error(result)
+                );
+                Self(previous)
+            }
+        }
+    }
+
+    impl Drop for SignalMaskGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = libc::pthread_sigmask(libc::SIG_SETMASK, &self.0, std::ptr::null_mut());
+            }
+        }
+    }
+
     fn alive(pid: u32) -> bool {
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
     }
@@ -1303,6 +1248,91 @@ mod reap_tests {
         assert_eq!(CHILD_REAPER_STARTS.load(Ordering::SeqCst), 1);
         drop(first);
         drop(second);
+    }
+    #[test]
+    fn inherited_blocked_sigchld_still_reaps_natural_exit() {
+        const CHILD_RUN: &str = "LUVUS_BLOCKED_SIGCHLD_REAPER_TEST";
+        if std::env::var_os(CHILD_RUN).is_none() {
+            // Run this case alone in a fresh process so SIGCHLD is blocked
+            // before the process-wide OnceLock and handler are first touched.
+            // The child's process-global handler disappears with the child, so
+            // parallel tests cannot observe a temporary action.
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "terminal::pty::reap_tests::inherited_blocked_sigchld_still_reaps_natural_exit",
+                    "--nocapture",
+                ])
+                .env(CHILD_RUN, "1")
+                .output()
+                .expect("run isolated blocked-SIGCHLD test");
+            assert!(
+                output.status.success(),
+                "isolated blocked-SIGCHLD test failed:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let _mask = SignalMaskGuard::block_sigchld();
+        assert_eq!(
+            CHILD_REAPER_STARTS.load(Ordering::SeqCst),
+            0,
+            "the isolated process must block SIGCHLD before reaper setup"
+        );
+
+        let (tx, rx) = mpsc::channel();
+        let id = PaneId::alloc();
+        let pane = Pane::spawn(
+            id,
+            80,
+            24,
+            std::env::temp_dir(),
+            tx,
+            None,
+            "/bin/sh",
+            500,
+            PaneAppearance::default(),
+        )
+        .expect("spawn shell with inherited blocked SIGCHLD");
+        let pid = pane.child_pid.load(Ordering::SeqCst);
+        assert_ne!(pid, 0);
+
+        // Let the reaper reach its infinite poll before the child exits. With
+        // SIGCHLD inherited as blocked, the old design stranded here forever.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        pane.send(b"exit\r");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !pane.child_exited.load(Ordering::SeqCst) {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "natural child exit never woke the reaper"
+            );
+            // The PTY actor may publish PtyExit before the child waiter. Keep
+            // waiting until the reaper sets child_exited, which is the behavior
+            // this blocked-signal regression is proving.
+            match rx.recv_timeout(remaining.min(std::time::Duration::from_millis(50))) {
+                Ok(AppEvent::PtyExit(exited)) if exited == id => {}
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(error) => panic!("natural child exit never woke the reaper: {error}"),
+            }
+        }
+        assert!(wait_gone(pid), "naturally exited child was not reaped");
+        drop(pane);
+    }
+
+    #[test]
+    fn dropping_a_live_child_is_still_reaped() {
+        let pane = spawn_sh();
+        let pid = pane.child_pid.load(Ordering::SeqCst);
+        assert_ne!(pid, 0);
+        assert!(alive(pid));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(pane);
+        assert!(wait_gone(pid), "exit is still reaped without a timer");
     }
 
     /// A deferred pane (docs/82) is fully usable before its shell exists:

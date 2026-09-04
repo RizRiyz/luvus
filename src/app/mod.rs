@@ -958,6 +958,8 @@ pub struct AgentMenu {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AgentMenuItem {
+    /// Toggle between all workspaces and the active workspace in the AGENTS dock.
+    ToggleWorkspaceScope,
     Resume,
     /// "Rename" a live agent's pane (sets its live name). Live agents only.
     RenamePane,
@@ -1359,11 +1361,6 @@ pub struct ResizeDrag {
 /// between panes puts the two visible border lines ~2 cells apart, so a ±2 zone
 /// makes the seam comfortably grabbable without stealing clicks from content.
 const RESIZE_GRAB_TOL: u16 = 2;
-
-/// How many columns onto the content side of a sidebar's edge still grab it for a
-/// resize (docs/29). Widens the 1-column seam into a comfortable target without
-/// reaching into the sidebar body (where dock rows own the width).
-const SIDEBAR_GRAB_TOL: u16 = 2;
 
 /// Rows a dock keeps no matter how far its divider is dragged: enough for the
 /// header plus one line of content, so a dock can be made small but never
@@ -1830,6 +1827,8 @@ pub struct App {
     /// Active mouse text selection in a pane (drag to select). Cleared on a new
     /// click; on release its text is queued to `pending_clipboard`.
     pub selection: Option<Selection>,
+    /// When set, a copied mouse selection stays highlighted until this instant.
+    selection_clear_at: Option<Instant>,
     /// Keyboard copy selection. This deliberately owns navigation keys so they
     /// cannot reach the child while text is being selected.
     pub copy_mode: Option<CopyMode>,
@@ -1887,11 +1886,34 @@ pub struct App {
     pub(crate) proc_commands: HashMap<PaneId, Vec<String>>,
     /// One process scan at a time, same guard as the session scan.
     proc_scan_inflight: bool,
+    /// A one-shot process scan explicitly requested by an API or by the first
+    /// confirmed absence of a bound agent. Unlike PTY dirtiness, this demand
+    /// survives detach and is consumed only by a successful scan.
+    proc_scan_requested: bool,
+    /// Whether the in-flight worker consumed an explicit one-shot demand.
+    proc_scan_demand_inflight: bool,
+    /// Panes whose explicit process request must be represented by the next
+    /// successful snapshot. Keeping the identities avoids treating an older
+    /// in-flight snapshot as satisfying a request for a newly created pane.
+    proc_scan_requested_panes: HashSet<PaneId>,
+    /// Requested panes assigned to the current process snapshot. Requests that
+    /// arrive while it runs join this set and are retried when absent.
+    proc_scan_demand_panes_inflight: HashSet<PaneId>,
+    /// Remaining retries after a demanded worker cannot read the process table
+    /// or its snapshot predates a requested pane. Bounded so a persistent
+    /// platform failure cannot become an idle heartbeat.
+    proc_scan_failure_retries: u8,
     /// Session ids the user removed from the sidebar list (hidden, not deleted).
     pub dismissed_sessions: HashSet<String>,
     /// Throttle for rescanning the agents' on-disk session stores.
     last_sessions_at: Instant,
     last_proc_at: Instant,
+    /// CWD/git follow-up is scheduled from PTY activity, not a 1s heartbeat.
+    runtime_cwd_dirty: bool,
+    /// Attached PTY activity dirties process identity without creating a heartbeat.
+    runtime_proc_dirty: bool,
+    /// Resumable-session disk scans run on attach/demand, not a 4s walk.
+    runtime_sessions_dirty: bool,
     /// Mission Control usage is demand-driven: opening/focusing the dashboard,
     /// changing its scope, or choosing refresh queues one off-loop scan. No
     /// usage reader runs merely because a hidden Mission Control tab exists.
@@ -2037,6 +2059,12 @@ pub struct App {
     /// AGENTS list filter: `true` shows only live (active) agents; `false`
     /// (the default) also shows the resumable session history.
     pub agents_active_only: bool,
+    /// AGENTS scope: `true` shows only the active workspace's agents and
+    /// resumable sessions; `false` (the default) shows every workspace. This is
+    /// independent of `agents_active_only` — lifecycle and scope are separate
+    /// axes. The chip is hidden while only one workspace is open, but the saved
+    /// choice still scopes resumable history by that workspace's cwd.
+    pub agents_this_workspace: bool,
     /// Last active workspace shown, to auto-reveal it on a programmatic change.
     pub last_active_ws_shown: usize,
     /// Last mouse position, for hover affordances (the session delete ✕).
@@ -2089,6 +2117,9 @@ pub struct App {
     pub git_section_rects: Vec<(crate::git::Section, Rect)>,
     /// The All/Active filter toggle in the AGENTS header (`bool` = active_only).
     pub agents_filter_rects: Vec<(bool, Rect)>,
+    /// The "blocked in other workspaces" overflow line, paired with the first
+    /// hidden blocked pane so clicking jumps to an agent the view actually hid.
+    pub agents_elsewhere_rect: Option<(PaneId, Rect)>,
     pub agent_rects: Vec<(PaneId, Rect)>,
     /// Resumable-session rows in the sidebar (index into `resumable`).
     pub session_rects: Vec<(usize, Rect)>,
@@ -2191,6 +2222,7 @@ impl App {
         let config_baseline = config.clone();
         let files_show_hidden = config.layout.files_show_hidden;
         let agents_active_only = config.agents_active_only;
+        let agents_this_workspace = config.agents_this_workspace;
         crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
         let theme_registry = crate::theme::ThemeRegistry::load();
         let theme = theme_registry.theme_or_default(&config.theme);
@@ -2343,6 +2375,7 @@ impl App {
             pending_notify: Vec::new(),
             pending_sound: None,
             selection: None,
+            selection_clear_at: None,
             copy_mode: None,
             mouse_grab: None,
             pending_clipboard: None,
@@ -2361,12 +2394,20 @@ impl App {
             sessions_scan_inflight: false,
             proc_commands: HashMap::new(),
             proc_scan_inflight: false,
+            proc_scan_requested: false,
+            proc_scan_demand_inflight: false,
+            proc_scan_requested_panes: HashSet::new(),
+            proc_scan_demand_panes_inflight: HashSet::new(),
+            proc_scan_failure_retries: 0,
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
             mission_usage_requested: None,
             mission_active_workspace: None,
             usage_scan_inflight: false,
             last_proc_at: Instant::now(),
+            runtime_cwd_dirty: false,
+            runtime_proc_dirty: false,
+            runtime_sessions_dirty: false,
             last_detect_at: Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
@@ -2387,6 +2428,7 @@ impl App {
             workspaces_scroll: 0,
             agents_scroll: 0,
             agents_active_only,
+            agents_this_workspace,
             workspaces_area: Rect::ZERO,
             agents_area: Rect::ZERO,
             // Rooted at nothing; the first detect tick re-roots it to the active
@@ -2465,6 +2507,7 @@ impl App {
             ws_rects: Vec::new(),
             git_section_rects: Vec::new(),
             agents_filter_rects: Vec::new(),
+            agents_elsewhere_rect: None,
             agent_rects: Vec::new(),
             session_rects: Vec::new(),
             tab_close_rects: Vec::new(),
@@ -2501,6 +2544,7 @@ impl App {
         // previous server run, so rebind/clear them (same as `from_snapshot`).
         app.orch_reconcile();
         app.refresh_core_bar_widgets();
+        app.mark_runtime_scans_dirty();
         Ok(app)
     }
 
@@ -2510,6 +2554,7 @@ impl App {
             if let Some(mut app) = App::from_snapshot(snap, app_tx.clone()) {
                 // Kick off the async fetch for any restored git tabs.
                 app.refetch_git_tabs();
+                app.mark_runtime_scans_dirty();
                 return Ok(app);
             }
         }
@@ -2521,6 +2566,7 @@ impl App {
         let config_baseline = config.clone();
         let files_show_hidden = config.layout.files_show_hidden;
         let agents_active_only = config.agents_active_only;
+        let agents_this_workspace = config.agents_this_workspace;
         let theme_registry = crate::theme::ThemeRegistry::load();
         let theme = theme_registry.theme_or_default(&config.theme);
         let pane_appearance = child_appearance(&theme_registry, &config.theme, &theme, None);
@@ -2962,6 +3008,7 @@ impl App {
             pending_notify: Vec::new(),
             pending_sound: None,
             selection: None,
+            selection_clear_at: None,
             copy_mode: None,
             mouse_grab: None,
             pending_clipboard: None,
@@ -2980,12 +3027,20 @@ impl App {
             sessions_scan_inflight: false,
             proc_commands: HashMap::new(),
             proc_scan_inflight: false,
+            proc_scan_requested: false,
+            proc_scan_demand_inflight: false,
+            proc_scan_requested_panes: HashSet::new(),
+            proc_scan_demand_panes_inflight: HashSet::new(),
+            proc_scan_failure_retries: 0,
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
             mission_usage_requested: None,
             mission_active_workspace: None,
             usage_scan_inflight: false,
             last_proc_at: Instant::now(),
+            runtime_cwd_dirty: false,
+            runtime_proc_dirty: false,
+            runtime_sessions_dirty: false,
             last_detect_at: Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
@@ -3006,6 +3061,7 @@ impl App {
             workspaces_scroll: 0,
             agents_scroll: 0,
             agents_active_only,
+            agents_this_workspace,
             workspaces_area: Rect::ZERO,
             agents_area: Rect::ZERO,
             // Rooted at nothing; the first detect tick re-roots it to the active
@@ -3084,6 +3140,7 @@ impl App {
             ws_rects: Vec::new(),
             git_section_rects: Vec::new(),
             agents_filter_rects: Vec::new(),
+            agents_elsewhere_rect: None,
             agent_rects: Vec::new(),
             session_rects: Vec::new(),
             tab_close_rects: Vec::new(),
@@ -3234,6 +3291,37 @@ impl App {
         let config_changed = self.config.agents_active_only != active_only;
         if config_changed {
             self.config.agents_active_only = active_only;
+            self.persist_config();
+        }
+        runtime_changed || config_changed
+    }
+
+    /// Whether the AGENTS dock is scoped to the active workspace. Rendering may
+    /// hide the chip when only one workspace is open, but the persisted choice
+    /// still applies to resumable history: lifecycle and scope preferences do
+    /// not silently change as workspaces open or close.
+    pub fn agents_scope_active(&self) -> bool {
+        self.agents_this_workspace
+    }
+
+    /// Apply the AGENTS scope projection without performing I/O. Mirrors
+    /// `apply_agents_filter` so config reloads and direct clicks agree.
+    pub(crate) fn apply_agents_scope(&mut self, this_workspace: bool) -> bool {
+        if self.agents_this_workspace == this_workspace {
+            return false;
+        }
+        self.agents_this_workspace = this_workspace;
+        self.agents_scroll = 0;
+        true
+    }
+
+    /// Persist a direct scope selection. Same infrequent-write contract as
+    /// `set_agents_filter`.
+    pub(crate) fn set_agents_scope(&mut self, this_workspace: bool) -> bool {
+        let runtime_changed = self.apply_agents_scope(this_workspace);
+        let config_changed = self.config.agents_this_workspace != this_workspace;
+        if config_changed {
+            self.config.agents_this_workspace = this_workspace;
             self.persist_config();
         }
         runtime_changed || config_changed
@@ -4487,6 +4575,8 @@ impl App {
                 AgentMenuItem::Pin
             });
         }
+        items.push(AgentMenuItem::Divider);
+        items.push(AgentMenuItem::ToggleWorkspaceScope);
         let extras = self
             .agent_menu
             .as_ref()
@@ -5198,6 +5288,9 @@ impl App {
         };
         self.agent_menu = None;
         match (item, target) {
+            (AgentMenuItem::ToggleWorkspaceScope, _) => {
+                self.set_agents_scope(!self.agents_this_workspace);
+            }
             (AgentMenuItem::Resume, AgentTarget::Session(i)) => self.resume_session(i),
             (AgentMenuItem::Close, AgentTarget::Session(i)) => self.dismiss_session(i),
             (AgentMenuItem::Close, AgentTarget::Live(id)) => {
@@ -5205,21 +5298,21 @@ impl App {
                 self.close_pane(id);
             }
             (AgentMenuItem::RenamePane, AgentTarget::Live(id)) => self.open_pane_rename(id),
-            (AgentMenuItem::RenamePane, AgentTarget::Session(_)) => {} // no live pane
+            (AgentMenuItem::RenamePane, AgentTarget::Session(_)) => {}
             (AgentMenuItem::Pin, AgentTarget::Live(id)) => {
                 self.pinned_agents.insert(id);
             }
             (AgentMenuItem::Unpin, AgentTarget::Live(id)) => {
                 self.pinned_agents.remove(&id);
             }
-            (AgentMenuItem::Pin | AgentMenuItem::Unpin, AgentTarget::Session(_)) => {} // no pane
-            (AgentMenuItem::Resume, AgentTarget::Live(_)) => {} // n/a for a live agent
+            (AgentMenuItem::Pin | AgentMenuItem::Unpin, AgentTarget::Session(_)) => {}
+            (AgentMenuItem::Resume, AgentTarget::Live(_)) => {}
             (AgentMenuItem::Module(i), AgentTarget::Live(id)) => {
                 if let Some(a) = actions.get(i).cloned() {
                     self.run_module_menu_action("agent", a, Target::pane(id));
                 }
             }
-            (AgentMenuItem::Module(_), AgentTarget::Session(_)) => {} // no live pane
+            (AgentMenuItem::Module(_), AgentTarget::Session(_)) => {}
             (AgentMenuItem::Divider, _) => {}
         }
     }
@@ -5357,13 +5450,40 @@ impl App {
     /// agent back to text-only detection.
     pub(crate) fn apply_proc_scan(&mut self, found: Option<HashMap<u32, Vec<String>>>) -> bool {
         self.proc_scan_inflight = false;
-        let Some(by_pid) = found else { return false };
+        let demand_inflight = std::mem::take(&mut self.proc_scan_demand_inflight);
+        let demanded_panes = std::mem::take(&mut self.proc_scan_demand_panes_inflight);
+        let Some(by_pid) = found else {
+            if demand_inflight && self.proc_scan_failure_retries > 0 {
+                self.proc_scan_failure_retries -= 1;
+                self.proc_scan_requested = true;
+                self.proc_scan_requested_panes.extend(
+                    demanded_panes
+                        .into_iter()
+                        .filter(|id| self.panes.contains_key(id)),
+                );
+            } else {
+                self.proc_scan_failure_retries = 0;
+            }
+            return false;
+        };
         let mut next: HashMap<PaneId, Vec<String>> = HashMap::new();
         for (id, pane) in self.panes.iter() {
             let pid = pane.child_pid.load(std::sync::atomic::Ordering::SeqCst);
             if let Some(cmds) = (pid != 0).then(|| by_pid.get(&pid)).flatten() {
                 next.insert(*id, cmds.clone());
             }
+        }
+        let missing_demanded_panes: Vec<PaneId> = demanded_panes
+            .into_iter()
+            .filter(|id| self.panes.contains_key(id) && !next.contains_key(id))
+            .collect();
+        if !missing_demanded_panes.is_empty() && self.proc_scan_failure_retries > 0 {
+            self.proc_scan_failure_retries -= 1;
+            self.proc_scan_requested = true;
+            self.proc_scan_requested_panes
+                .extend(missing_demanded_panes);
+        } else if demand_inflight {
+            self.proc_scan_failure_retries = 0;
         }
         let mut lifecycle_changed = false;
         for (id, cmds) in &next {
@@ -5392,6 +5512,8 @@ impl App {
 
             st.agent_absent_scans = st.agent_absent_scans.saturating_add(1);
             if st.agent_absent_scans < 2 {
+                self.proc_scan_requested = true;
+                self.proc_scan_failure_retries = dispatch::PROC_SCAN_FAILURE_RETRIES;
                 continue;
             }
 
@@ -5715,12 +5837,10 @@ impl App {
     }
 
     /// The sidebar whose draggable edge seam is at `(c, r)`, if any (docs/29).
-    /// The seam `│` column always grabs; the grab band also reaches
-    /// `SIDEBAR_GRAB_TOL` columns onto the **content side** — but only over cells
-    /// that are *not* a mouse-tracking pane, so an agent's own edge clicks (Claude
-    /// Code expanding a tool result at its left edge) still forward, and a
-    /// split's border/gap stays grabbable. It never reaches into the sidebar body,
-    /// where dock rows own the width, so it can't steal a workspace/agent click.
+    /// Only the rendered `│` rule grabs. Pane borders and content remain owned by
+    /// the pane, while the sidebar body remains owned by its docks. Keeping one
+    /// exact visual target makes the hover affordance match the drag behavior on
+    /// both sides and prevents an invisible grab band from stealing edge input.
     fn sidebar_seam_at(&self, c: u16, r: u16) -> Option<Side> {
         // The seam spans the full frame visually, but only the pane lane is a
         // resize target. The tab and status rows own their cells; in particular,
@@ -5735,20 +5855,6 @@ impl App {
                 continue;
             }
             if c == seam.x {
-                return Some(side);
-            }
-            // Distance onto the content side (right of a left seam, left of a
-            // right seam); `None` when the cursor is on the sidebar side.
-            let dist = match side {
-                Side::Left => c.checked_sub(seam.x),
-                Side::Right => seam.x.checked_sub(c),
-            };
-            let Some(d) = dist else { continue };
-            let over_agent = self
-                .pane_content_at(c, r)
-                .and_then(|(id, _)| self.panes.get(&id))
-                .is_some_and(|p| p.mouse_mode().report);
-            if (1..=SIDEBAR_GRAB_TOL).contains(&d) && !over_agent {
                 return Some(side);
             }
         }
@@ -6651,6 +6757,10 @@ mod tests {
             !app.agents_active_only,
             "missing preference defaults to All"
         );
+        assert!(
+            !app.agents_this_workspace,
+            "missing scope defaults to All workspaces"
+        );
         let snapshot = serde_json::to_string(&persist::snapshot(&app)).unwrap();
 
         let (tx2, _rx2) = std::sync::mpsc::channel();
@@ -6659,20 +6769,33 @@ mod tests {
             !restored.agents_active_only,
             "snapshot restoration also defaults to All"
         );
+        assert!(
+            !restored.agents_this_workspace,
+            "snapshot restoration also defaults to All workspaces"
+        );
 
         let mut config = crate::config::load();
         config.agents_active_only = true;
+        config.agents_this_workspace = true;
         crate::config::save(&config);
 
         let (tx3, _rx3) = std::sync::mpsc::channel();
         let fresh = App::new(80, 24, tx3).unwrap();
         assert!(fresh.agents_active_only, "fresh construction reads Active");
+        assert!(
+            fresh.agents_this_workspace,
+            "fresh construction reads This workspace"
+        );
 
         let (tx4, _rx4) = std::sync::mpsc::channel();
         let restored = App::from_snapshot(serde_json::from_str(&snapshot).unwrap(), tx4).unwrap();
         assert!(
             restored.agents_active_only,
             "snapshot restoration reads config instead of snapshot state"
+        );
+        assert!(
+            restored.agents_this_workspace,
+            "snapshot restoration reads scope from config"
         );
     }
 
@@ -7558,12 +7681,30 @@ mod tests {
         // One shell-only observation is not enough: an agent may be starting or
         // re-execing. Seeing it again resets the exit candidate, even when a
         // different recognised agent appears earlier in the same process tree.
+        let first_absence_at = Instant::now();
+        app.last_proc_at = first_absence_at;
         assert!(
             !app.apply_proc_scan(scan(&[&shell])),
             "the first missing scan only updates the process cache"
         );
         assert!(app.status.get(&id).unwrap().agent_session.is_some());
         assert_eq!(app.status.get(&id).unwrap().agent_absent_scans, 1);
+        assert!(
+            app.proc_scan_requested,
+            "the first confirmed absence queues exactly one follow-up scan"
+        );
+        for status in app.status.values_mut() {
+            status.force_detect = false;
+            status.candidate = status.state;
+            status.last_activity = first_absence_at - Duration::from_secs(60);
+        }
+        app.last_detection_audit_at = first_absence_at;
+        let follow_up = app
+            .next_runtime_deadline(first_absence_at, false)
+            .expect("the follow-up scan must wake a detached server");
+        assert!(follow_up > first_absence_at);
+        assert!(follow_up <= first_absence_at + Duration::from_secs(2));
+        app.proc_scan_requested = false;
         assert!(
             !app.apply_proc_scan(scan(&[&shell, "codex", "claude"])),
             "seeing the bound agent again does not change visible lifecycle state"
@@ -7577,6 +7718,11 @@ mod tests {
         app.session_dirty = false;
         assert!(!app.handle_event(AppEvent::ProcScanned(scan(&[&shell]))));
         assert!(app.status.get(&id).unwrap().agent_session.is_some());
+        assert!(
+            app.proc_scan_requested,
+            "the first absence re-arms confirmation"
+        );
+        app.proc_scan_requested = false;
         assert!(
             app.handle_event(AppEvent::ProcScanned(scan(&[&shell]))),
             "the confirmed exit dirties the sidebar through the event path"
@@ -8753,6 +8899,121 @@ mod tests {
     }
 
     #[test]
+    fn pane_content_edge_starts_selection_instead_of_sidebar_resize() {
+        let _env = crate::persist::test_env("sidebar-edge-selection");
+        use crate::event::AppEvent;
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let pane = app.layout().focus;
+        app.panes
+            .get(&pane)
+            .expect("focused pane exists")
+            .engine
+            .lock()
+            .expect("terminal engine lock")
+            .advance(b"\x1b[H\x1b[2Jedge");
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let seam = app.left_seam.expect("visible left sidebar has a seam");
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("focused pane has a content rect");
+        assert!(
+            content.x > seam.x,
+            "the first content column is on the pane side of the rule"
+        );
+
+        let mouse = |kind, column| {
+            AppEvent::Mouse(MouseEvent {
+                kind,
+                column,
+                row: content.y,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), content.x));
+
+        assert!(
+            app.sidebar_resize.is_none(),
+            "pane content must not begin a sidebar resize"
+        );
+        assert!(
+            app.selection.is_some(),
+            "the first content column begins text selection"
+        );
+        app.handle_event(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            content.x + 3,
+        ));
+        app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), content.x + 3));
+        assert_eq!(app.pending_clipboard.as_deref(), Some("edge"));
+    }
+
+    #[test]
+    fn only_the_rendered_sidebar_rules_resize_and_highlight() {
+        let _env = crate::persist::test_env("sidebar-exact-resize-rule");
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.move_dock(&DockKind::Agents, Side::Right);
+        app.sidebars.right.visible = true;
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let pane = app.layout().focus;
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("focused pane has a content rect");
+        let row = content.y + 1;
+        let left = app.left_seam.expect("left rule is rendered");
+        let right = app.right_seam.expect("right rule is rendered");
+        let cases = [
+            (Side::Left, left.x, left.x + 1, content.x),
+            (
+                Side::Right,
+                right.x,
+                right.x.saturating_sub(1),
+                content.right().saturating_sub(1),
+            ),
+        ];
+
+        for (side, rule, pane_border, content_edge) in cases {
+            app.update_hover_sidebar(rule, row);
+            assert_eq!(app.hover_sidebar, Some(side), "{side:?} rule highlights");
+            assert!(
+                app.begin_sidebar_resize(rule, row),
+                "{side:?} rule begins resizing"
+            );
+            assert_eq!(app.sidebar_resize, Some(side));
+            app.end_sidebar_resize();
+
+            for column in [pane_border, content_edge] {
+                app.update_hover_sidebar(column, row);
+                assert_eq!(
+                    app.hover_sidebar, None,
+                    "{side:?} pane column {column} does not highlight the sidebar rule"
+                );
+                assert!(
+                    !app.begin_sidebar_resize(column, row),
+                    "{side:?} pane column {column} does not begin sidebar resizing"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn clicks_forward_to_a_mouse_tracking_app_instead_of_selecting() {
         // A pane app that requested mouse tracking (a TUI agent) receives
         // clicks — e.g. clicking a collapsed tool result expands it — instead
@@ -9711,6 +9972,7 @@ mod tests {
         app.files_area = junk;
         app.file_tree_rects = vec![(0, junk)];
         app.agents_filter_rects = vec![(true, junk)];
+        app.agents_elsewhere_rect = Some((app.layout().focus, junk));
         app.module_dock_rects = vec![("example.buzz".into(), 0, junk)]; // a user module dock
 
         // Hide both sidebars so no dock draws this frame — the worst stale case.
@@ -9725,6 +9987,10 @@ mod tests {
         assert_eq!(app.files_area, Rect::ZERO, "FILES area cleared");
         assert!(app.file_tree_rects.is_empty(), "FILES row rects cleared");
         assert!(app.agents_filter_rects.is_empty(), "AGENTS filter cleared");
+        assert!(
+            app.agents_elsewhere_rect.is_none(),
+            "AGENTS overflow line cleared"
+        );
         assert!(
             app.module_dock_rects.is_empty(),
             "user module dock rects cleared — a stale module dock can't fire"
@@ -10876,7 +11142,8 @@ mod tests {
         let mut term = Terminal::new(TestBackend::new(80, 20)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
 
-        // Right-click the second session row → an AGENTS menu with Resume + Close.
+        // Right-click the second session row → its normal actions plus the
+        // workspace-scope toggle.
         let row = app.session_rects.iter().find(|(i, _)| *i == 1).unwrap().1;
         app.handle_event(AppEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Right),
@@ -10890,11 +11157,46 @@ mod tests {
         );
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         let items = &app.agent_menu.as_ref().unwrap().items;
-        assert_eq!(items.len(), 2, "session menu has Resume + Close");
+        assert_eq!(
+            items.len(),
+            4,
+            "session menu has Resume + Close + divider + workspace scope"
+        );
         assert_eq!(items[0].0, AgentMenuItem::Resume);
+        assert_eq!(items[2].0, AgentMenuItem::Divider);
+        assert_eq!(items[3].0, AgentMenuItem::ToggleWorkspaceScope);
+        let rendered = |term: &Terminal<TestBackend>| {
+            term.backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        assert!(rendered(&term).contains("Show Workspace Only"));
 
-        // Click "Close" → the session leaves the list and stays dismissed.
-        let close = items[1].1;
+        // The scope row describes the action that will be taken. Clicking it
+        // persists the choice; reopening any AGENTS row offers the inverse.
+        let scope = items[3].1;
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: scope.x + 1,
+            row: scope.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.agents_this_workspace);
+        assert!(crate::config::load().agents_this_workspace);
+        app.open_agent_menu(AgentTarget::Session(1), row.x + 1, row.y);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(rendered(&term).contains("Show All Workspaces"));
+        app.agent_menu_action(AgentMenuItem::ToggleWorkspaceScope);
+        assert!(!app.agents_this_workspace);
+
+        // Reopen the row menu and click Close: the session leaves the list and
+        // stays dismissed.
+        app.open_agent_menu(AgentTarget::Session(1), row.x + 1, row.y);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let close = app.agent_menu.as_ref().unwrap().items[1].1;
         app.handle_event(AppEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: close.x + 1,
@@ -11578,7 +11880,7 @@ mod tests {
     // burst must not flip an idle pane to a lingering "working". Detection is
     // frozen for `RESIZE_GRACE` after a resize, then resumes normally.
     #[test]
-    fn resize_grace_suppresses_a_transient_working_after_a_switch() {
+    fn resize_grace_expiry_wakes_and_reclassifies_once() {
         use crate::ui::theme::State;
         let _env = crate::persist::test_env("resize-grace");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -11603,6 +11905,8 @@ mod tests {
             "a repaint right after a resize must not flip the pane to working"
         );
 
+        let considered = app.detection_panes_considered;
+
         // Past the grace window the same reading commits normally.
         let t1 = t0 + RESIZE_GRACE + std::time::Duration::from_millis(150);
         {
@@ -11610,13 +11914,19 @@ mod tests {
             s.last_activity = t1;
             s.last_input = t1 - std::time::Duration::from_secs(5);
         }
-        app.detection_dirty.insert(id);
+        assert_eq!(
+            app.next_runtime_deadline(t1, false),
+            Some(t1),
+            "expired resize grace is a due event even without a TUI"
+        );
         app.detect_tick(t1);
         assert_eq!(
             app.status.get(&id).unwrap().state,
             State::Working,
             "once the grid settles, a genuinely active pane reads working again"
         );
+        assert_eq!(app.status.get(&id).unwrap().last_resize, None);
+        assert_eq!(app.detection_panes_considered, considered + 1);
     }
 
     // docs/29: config with no `sidebars` migrates to today's default layout.

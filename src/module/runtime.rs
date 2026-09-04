@@ -4,7 +4,7 @@
 //! `AppEvent::ModuleCommandFinished`. Fire-and-forget; the caller gets a
 //! `Running` log immediately.
 
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -187,6 +187,7 @@ fn read_capped<R: Read>(r: &mut R) -> String {
                     kept.extend_from_slice(&chunk[..take]);
                 }
             }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         }
     }

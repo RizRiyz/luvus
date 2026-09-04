@@ -66,6 +66,13 @@ pub struct Config {
     /// upgrade. The visible All / Active control updates this preference.
     #[serde(default)]
     pub agents_active_only: bool,
+    /// Scope the AGENTS dock to the active workspace. This is a second axis,
+    /// independent of All / Active: that one selects lifecycle, this one selects
+    /// which project's rows are visible. Missing values keep the All-workspaces
+    /// default, so an upgrade never hides rows the user was already seeing. The
+    /// visible scope chip updates this preference.
+    #[serde(default)]
+    pub agents_this_workspace: bool,
     /// Custom keybindings: command id → key string (overrides the defaults).
     /// An empty value means the command is explicitly unbound.
     #[serde(default)]
@@ -458,6 +465,7 @@ impl Default for Config {
             check_updates: true,
             resume_launch_flags: false,
             agents_active_only: false,
+            agents_this_workspace: false,
             keybindings: std::collections::HashMap::new(),
             direct_keybindings: std::collections::HashMap::new(),
             prefix: default_prefix(),
@@ -794,6 +802,10 @@ mod tests {
             !from_empty.agents_active_only,
             "old configs retain the All agents default"
         );
+        assert!(
+            !from_empty.agents_this_workspace,
+            "old configs retain the All-workspaces agents scope"
+        );
         assert_eq!(
             from_empty.bars.bottom_right,
             vec![crate::bar::CORE_RUNTIME.to_string()],
@@ -870,6 +882,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(old.notifications.sound_style, crate::sound::STYLE_RETRO);
+    }
+
+    #[test]
+    fn agents_scope_preference_persists_both_choices() {
+        let _env = crate::persist::test_env("config-agents-scope");
+        let mut config = Config::default();
+        assert!(!config.agents_this_workspace);
+
+        config.agents_this_workspace = true;
+        save(&config);
+        assert!(load().agents_this_workspace);
+
+        config.agents_this_workspace = false;
+        save(&config);
+        assert!(!load().agents_this_workspace);
     }
 
     #[test]
