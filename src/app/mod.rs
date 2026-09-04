@@ -1893,8 +1893,16 @@ pub struct App {
     proc_scan_requested: bool,
     /// Whether the in-flight worker consumed an explicit one-shot demand.
     proc_scan_demand_inflight: bool,
-    /// Remaining retries after a demanded worker cannot read the process table.
-    /// Bounded so a persistent platform failure cannot become an idle heartbeat.
+    /// Panes whose explicit process request must be represented by the next
+    /// successful snapshot. Keeping the identities avoids treating an older
+    /// in-flight snapshot as satisfying a request for a newly created pane.
+    proc_scan_requested_panes: HashSet<PaneId>,
+    /// Requested panes assigned to the current process snapshot. Requests that
+    /// arrive while it runs join this set and are retried when absent.
+    proc_scan_demand_panes_inflight: HashSet<PaneId>,
+    /// Remaining retries after a demanded worker cannot read the process table
+    /// or its snapshot predates a requested pane. Bounded so a persistent
+    /// platform failure cannot become an idle heartbeat.
     proc_scan_failure_retries: u8,
     /// Session ids the user removed from the sidebar list (hidden, not deleted).
     pub dismissed_sessions: HashSet<String>,
@@ -2378,6 +2386,8 @@ impl App {
             proc_scan_inflight: false,
             proc_scan_requested: false,
             proc_scan_demand_inflight: false,
+            proc_scan_requested_panes: HashSet::new(),
+            proc_scan_demand_panes_inflight: HashSet::new(),
             proc_scan_failure_retries: 0,
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
@@ -3005,6 +3015,8 @@ impl App {
             proc_scan_inflight: false,
             proc_scan_requested: false,
             proc_scan_demand_inflight: false,
+            proc_scan_requested_panes: HashSet::new(),
+            proc_scan_demand_panes_inflight: HashSet::new(),
             proc_scan_failure_retries: 0,
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
@@ -5387,24 +5399,39 @@ impl App {
     pub(crate) fn apply_proc_scan(&mut self, found: Option<HashMap<u32, Vec<String>>>) -> bool {
         self.proc_scan_inflight = false;
         let demand_inflight = std::mem::take(&mut self.proc_scan_demand_inflight);
+        let demanded_panes = std::mem::take(&mut self.proc_scan_demand_panes_inflight);
         let Some(by_pid) = found else {
             if demand_inflight && self.proc_scan_failure_retries > 0 {
                 self.proc_scan_failure_retries -= 1;
                 self.proc_scan_requested = true;
+                self.proc_scan_requested_panes.extend(
+                    demanded_panes
+                        .into_iter()
+                        .filter(|id| self.panes.contains_key(id)),
+                );
             } else {
                 self.proc_scan_failure_retries = 0;
             }
             return false;
         };
-        if demand_inflight {
-            self.proc_scan_failure_retries = 0;
-        }
         let mut next: HashMap<PaneId, Vec<String>> = HashMap::new();
         for (id, pane) in self.panes.iter() {
             let pid = pane.child_pid.load(std::sync::atomic::Ordering::SeqCst);
             if let Some(cmds) = (pid != 0).then(|| by_pid.get(&pid)).flatten() {
                 next.insert(*id, cmds.clone());
             }
+        }
+        let missing_demanded_panes: Vec<PaneId> = demanded_panes
+            .into_iter()
+            .filter(|id| self.panes.contains_key(id) && !next.contains_key(id))
+            .collect();
+        if !missing_demanded_panes.is_empty() && self.proc_scan_failure_retries > 0 {
+            self.proc_scan_failure_retries -= 1;
+            self.proc_scan_requested = true;
+            self.proc_scan_requested_panes
+                .extend(missing_demanded_panes);
+        } else if demand_inflight {
+            self.proc_scan_failure_retries = 0;
         }
         let mut lifecycle_changed = false;
         for (id, cmds) in &next {

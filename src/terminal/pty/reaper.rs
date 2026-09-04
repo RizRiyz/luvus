@@ -267,7 +267,7 @@ impl UnixWake {
             // only writes one byte to a pipe fd published before this call.
             let mut action: libc::sigaction = std::mem::zeroed();
             action.sa_sigaction = on_sigchld as extern "C" fn(libc::c_int) as libc::sighandler_t;
-            action.sa_flags = libc::SA_NOCLDSTOP;
+            action.sa_flags = libc::SA_NOCLDSTOP | libc::SA_RESTART;
             libc::sigemptyset(&mut action.sa_mask);
             if libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut()) != 0 {
                 panic!(
@@ -358,21 +358,24 @@ unsafe fn errno_location() -> *mut libc::c_int {
 // libc exposes no common errno accessor across every Unix target. Unknown
 // targets retain an async-signal-safe handler; null disables save/restore
 // rather than guessing an ABI symbol.
-#[cfg(not(any(
-    target_vendor = "apple",
-    target_os = "freebsd",
-    target_os = "dragonfly",
-    target_os = "linux",
-    target_os = "hurd",
-    target_os = "redox",
-    target_os = "android",
-    target_os = "netbsd",
-    target_os = "openbsd",
-    target_os = "nuttx",
-    target_os = "solaris",
-    target_os = "illumos",
-    target_os = "aix"
-)))]
+#[cfg(all(
+    unix,
+    not(any(
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "linux",
+        target_os = "hurd",
+        target_os = "redox",
+        target_os = "android",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "nuttx",
+        target_os = "solaris",
+        target_os = "illumos",
+        target_os = "aix"
+    ))
+))]
 unsafe fn errno_location() -> *mut libc::c_int {
     std::ptr::null_mut()
 }

@@ -273,6 +273,38 @@ mod socket_api_tests {
     }
 
     #[test]
+    fn process_api_demand_retries_when_inflight_snapshot_omits_requested_pane() {
+        let (_env, mut app) = app("inflight-process-api-missing-pane");
+        let pane = app.layout().focus;
+        let now = Instant::now();
+        app.proc_commands.insert(pane, vec!["cached-shell".into()]);
+        app.runtime_cwd_dirty = false;
+        app.runtime_proc_dirty = true;
+        app.runtime_sessions_dirty = false;
+        app.last_proc_at = now - PROC_SCAN_INTERVAL;
+
+        app.detect_tick_with(now, true);
+        assert!(app.proc_scan_inflight, "the ordinary dirty scan starts");
+        app.request_proc_scan_if_stale(pane);
+
+        app.apply_proc_scan(Some(HashMap::new()));
+
+        assert!(
+            app.proc_scan_requested,
+            "an older snapshot must not consume a later pane request"
+        );
+        assert!(app.proc_scan_requested_panes.contains(&pane));
+        assert!(
+            !app.proc_scan_due(now, false),
+            "the follow-up must not hot-loop immediately"
+        );
+        assert!(
+            app.proc_scan_due(now + PROC_SCAN_INTERVAL, false),
+            "the throttled follow-up eventually becomes due"
+        );
+    }
+
+    #[test]
     fn failed_demanded_process_scan_rearms_without_an_idle_heartbeat() {
         let (_env, mut app) = app("failed-process-demand");
         let now = Instant::now();
@@ -287,6 +319,7 @@ mod socket_api_tests {
         app.last_detection_audit_at = now;
         app.last_proc_at = now - PROC_SCAN_INTERVAL;
         app.proc_scan_requested = true;
+        app.proc_scan_failure_retries = PROC_SCAN_FAILURE_RETRIES;
 
         app.detect_tick_with(now, false);
         assert!(app.proc_scan_inflight);
@@ -298,6 +331,15 @@ mod socket_api_tests {
             app.next_runtime_deadline(now, false),
             Some(now + PROC_SCAN_INTERVAL),
             "the retry remains throttled instead of hot-looping"
+        );
+
+        let retry_at = now + PROC_SCAN_INTERVAL;
+        app.detect_tick_with(retry_at, false);
+        assert!(app.proc_scan_inflight, "the one bounded retry starts");
+        app.apply_proc_scan(None);
+        assert!(
+            !app.proc_scan_requested,
+            "a persistent failure must not create an idle polling loop"
         );
     }
 
@@ -1046,11 +1088,10 @@ impl App {
             return;
         }
         self.runtime_proc_dirty = false;
-        if self.proc_scan_requested {
-            self.proc_scan_failure_retries = PROC_SCAN_FAILURE_RETRIES;
-        }
         self.proc_scan_demand_inflight = self.proc_scan_requested;
         self.proc_scan_requested = false;
+        self.proc_scan_demand_panes_inflight
+            .extend(std::mem::take(&mut self.proc_scan_requested_panes));
         self.last_proc_at = now;
         self.proc_scan_inflight = true;
         let pids: Vec<u32> = self
@@ -1070,9 +1111,11 @@ impl App {
 
     pub(crate) fn request_proc_scan_if_stale(&mut self, id: PaneId) {
         if self.proc_scan_inflight {
-            // Treat the current snapshot as satisfying this request, but retain
-            // one bounded retry if the worker cannot obtain usable evidence.
+            // The snapshot may have captured its pid list before this pane
+            // existed. Track the exact pane so a successful-but-older result
+            // cannot consume its demand without usable evidence.
             self.proc_scan_demand_inflight = true;
+            self.proc_scan_demand_panes_inflight.insert(id);
             self.proc_scan_failure_retries = PROC_SCAN_FAILURE_RETRIES;
             return;
         }
@@ -1080,6 +1123,7 @@ impl App {
             return;
         }
         self.proc_scan_requested = true;
+        self.proc_scan_requested_panes.insert(id);
         self.proc_scan_failure_retries = PROC_SCAN_FAILURE_RETRIES;
         self.start_proc_scan(Instant::now());
     }
@@ -1105,6 +1149,8 @@ impl App {
                 self.runtime_proc_dirty = false;
                 self.proc_scan_demand_inflight = self.proc_scan_requested;
                 self.proc_scan_requested = false;
+                self.proc_scan_demand_panes_inflight
+                    .extend(std::mem::take(&mut self.proc_scan_requested_panes));
                 self.last_proc_at = now;
                 self.proc_scan_inflight = true;
             }
