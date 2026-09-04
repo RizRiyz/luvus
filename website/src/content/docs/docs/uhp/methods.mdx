@@ -116,6 +116,12 @@ pane owns that exact session.
 {"id":"usage","method":"pane.report_session","params":{"pane":"9","agent":"opencode","session_id":"ses_123","usage":{"model":"anthropic/claude-sonnet-4","tokens_in":1200,"tokens_out":340,"cache_read":800,"cache_write":40,"cost":0.42,"updated_at":1788330000000}}}
 ```
 
+`agent.list` rows identify their workspace three ways. `workspace` is a 0-based
+position that changes when workspaces are reordered or an earlier one closes,
+`workspace_name` is the user-editable label, and `workspace_id` is the stable id
+also published by `workspace.list` and `workspace.get`. Filter or correlate on
+`workspace_id` when the result has to survive those changes.
+
 `task.start` and `task.next` with `start: true` accept `mode: "worktree"` or
 `mode: "workspace"`; omitted mode means worktree. Workspace mode may include a
 stable `workspace_id` and creates a dedicated branchless task tab in that
