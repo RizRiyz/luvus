@@ -2791,6 +2791,8 @@ static TEXT: &[Translation] = &[
         "인자를 받지 않습니다"),
     tr!("unexpected", "inesperado", "inesperado", "inattendu", "unerwartet", "tidak diharapkan", "意外参数", "想定外",
         "예상치 못함"),
+    tr!("--context-used requires a finite number from 0 to 1", "--context-used requiere un número finito de 0 a 1", "--context-used requer um número finito de 0 a 1", "--context-used exige un nombre fini compris entre 0 et 1", "--context-used erfordert eine endliche Zahl von 0 bis 1", "--context-used memerlukan angka terbatas dari 0 hingga 1", "--context-used 需要一个 0 到 1 之间的有限数值", "--context-used には 0 から 1 までの有限数が必要です",
+        "--context-used에는 0에서 1 사이의 유한한 숫자가 필요합니다"),
 ];
 
 /// Translate a canonical help block without ever touching command syntax.

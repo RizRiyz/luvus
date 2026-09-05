@@ -158,9 +158,9 @@ Events on the bus: `task.added` · `task.claimed` · `task.started` ·
   *assigned*, and worktrees mean even a misbehaving agent's clash only surfaces
   (safely) at merge time.
 - **A context gate.** Workers may report model context-window consumption via
-  `heartbeat`. Above 85%, `done` is blocked until the agent compacts or hands
-  off, so there are no half-remembered finishes. This value is never work
-  progress.
+  `heartbeat`. Above 85%, `done` is blocked until the agent compacts, hands off,
+  or corrects a mistaken heartbeat to 85% or below, so there are no
+  half-remembered finishes. This value is never work progress.
 
 ## Troubleshooting
 
