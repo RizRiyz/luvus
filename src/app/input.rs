@@ -6498,6 +6498,11 @@ mod link_click_tests {
             app.cmd_inspect.is_none(),
             "the title click did not open the command overlay"
         );
+        assert_eq!(
+            app.layout().focus,
+            bottom,
+            "the title click focused the pane"
+        );
         // Reset focus *after* the title click, so only the body click can move it.
         app.layout_mut().focus = top;
         app.handle_event(mouse(
