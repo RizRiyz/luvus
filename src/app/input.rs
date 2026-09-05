@@ -5347,6 +5347,58 @@ mod link_click_tests {
     }
 
     #[test]
+    fn workspace_menu_renders_swap_with_submenu_for_other_workspaces() {
+        let _env = crate::persist::test_env("workspace-swap-submenu");
+        let Fixture {
+            mut app, mut term, ..
+        } = fixture();
+        app.new_workspace();
+        app.new_workspace();
+        for (workspace, name) in app.workspaces.iter_mut().zip(["alpha", "beta", "gamma"]) {
+            workspace.name = name.into();
+            workspace.worktree = None;
+        }
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let first_workspace = app
+            .ws_rects
+            .iter()
+            .find(|(index, _)| *index == 0)
+            .map(|(_, rect)| *rect)
+            .expect("first workspace is visible");
+
+        assert!(app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            (first_workspace.x + 1, first_workspace.y),
+            KeyModifiers::NONE,
+        )));
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let swap_row = app
+            .ws_menu
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .find(|(item, _)| *item == WsMenuItem::SwapWith)
+            .map(|(_, rect)| *rect)
+            .expect("Swap With row");
+
+        assert!(app.handle_event(mouse(
+            MouseEventKind::Moved,
+            (swap_row.x + 1, swap_row.y),
+            KeyModifiers::NONE,
+        )));
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        assert_eq!(
+            app.ws_menu.as_ref().unwrap().swap_rects.len(),
+            2,
+            "the other workspaces are available in the submenu"
+        );
+    }
+
+    #[test]
     fn tab_menu_renders_swap_with_submenu_for_other_tabs() {
         let _env = crate::persist::test_env("tab-switch-submenu");
         let Fixture {

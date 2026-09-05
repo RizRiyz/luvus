@@ -191,6 +191,8 @@ pub(super) fn draw_ws_menu(
     let anchor = menu.anchor;
     let items = app.ws_menu_items(index);
     let extras = menu.module_actions.clone();
+    let swap_targets = menu.swap_targets.clone();
+    let previous_swap_rects = menu.swap_rects.clone();
     let rows: Vec<MenuRow> = items
         .iter()
         .map(|it| MenuRow {
@@ -213,8 +215,73 @@ pub(super) fn draw_ws_menu(
             scroll: &mut app.menu_scroll,
         },
     );
+    let swap_rect = items
+        .iter()
+        .zip(&rects)
+        .find(|(item, _)| **item == WsMenuItem::SwapWith)
+        .map(|(_, rect)| *rect)
+        .filter(|rect| rect.height > 0);
     if let Some(menu) = app.ws_menu.as_mut() {
-        menu.items = items.into_iter().zip(rects).collect();
+        menu.items = items.iter().copied().zip(rects.iter().copied()).collect();
+    }
+
+    // Match the tab menu: hovering Swap With opens a second popup, and crossing
+    // the one-column gap does not close it before the pointer reaches a target.
+    if let (Some(parent), Some(hover)) = (swap_rect, app.hover) {
+        let in_rect = |rect: &Rect| {
+            hover.0 >= rect.x
+                && hover.0 < rect.right()
+                && hover.1 >= rect.y
+                && hover.1 < rect.bottom()
+        };
+        let over_parent = in_rect(&parent);
+        let over_submenu = previous_swap_rects.iter().any(|(_, rect)| in_rect(rect));
+        let over_other = items.iter().zip(&rects).any(|(item, rect)| {
+            !matches!(item, WsMenuItem::SwapWith | WsMenuItem::Divider) && in_rect(rect)
+        });
+        if let Some(menu) = app.ws_menu.as_mut() {
+            if over_parent || over_submenu {
+                menu.swap_open = true;
+            } else if over_other {
+                menu.swap_open = false;
+            }
+        }
+    }
+
+    let open = app.ws_menu.as_ref().is_some_and(|menu| menu.swap_open);
+    if let (Some(parent), false) = (open.then_some(()).and(swap_rect), swap_targets.is_empty()) {
+        let sub_rows: Vec<MenuRow> = swap_targets
+            .iter()
+            .map(|(_, label)| MenuRow {
+                text: label.clone(),
+                divider: false,
+                destructive: false,
+            })
+            .collect();
+        let sub_anchor = (parent.right() + 1, parent.y.saturating_sub(1));
+        let sub_rects = render_popup(
+            f,
+            area,
+            sub_anchor,
+            &sub_rows,
+            t,
+            PopupCtx {
+                hover: app.hover,
+                selected: None,
+                mobile: app.compact,
+                id: PopupId::WsSwap,
+                scroll: &mut app.menu_scroll,
+            },
+        );
+        if let Some(menu) = app.ws_menu.as_mut() {
+            menu.swap_rects = swap_targets
+                .iter()
+                .map(|(target, _)| target.clone())
+                .zip(sub_rects)
+                .collect();
+        }
+    } else if let Some(menu) = app.ws_menu.as_mut() {
+        menu.swap_rects.clear();
     }
 }
 
@@ -512,6 +579,9 @@ fn ws_label(it: WsMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> Strin
         WsMenuItem::Unpin => cat.menu_unpin.to_string(),
         WsMenuItem::Close => cap_first(cat.act_close),
         WsMenuItem::Rename => cat.menu_rename.to_string(),
+        WsMenuItem::MoveUp => format!("{} {}", cap_first(cat.act_move), cat.side_up),
+        WsMenuItem::MoveDown => format!("{} {}", cap_first(cat.act_move), cat.side_down),
+        WsMenuItem::SwapWith => format!("{} ▸", cat.tab_swap_with),
         WsMenuItem::DeleteWorktree => cat.menu_delete_worktree.to_string(),
         WsMenuItem::NewWorktree => cat.menu_new_worktree.to_string(),
         WsMenuItem::OpenWorktree => cat.menu_open_worktree.to_string(),
@@ -835,6 +905,9 @@ mod label_case_tests {
         for it in [
             WsMenuItem::Close,
             WsMenuItem::Rename,
+            WsMenuItem::MoveUp,
+            WsMenuItem::MoveDown,
+            WsMenuItem::SwapWith,
             WsMenuItem::DeleteWorktree,
             WsMenuItem::NewWorktree,
             WsMenuItem::OpenWorktree,

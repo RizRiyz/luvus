@@ -508,8 +508,8 @@ pub enum TabMenuItem {
 /// Cap a custom tab name so a pathological paste can't bloat the session.
 pub(crate) const TAB_NAME_MAX: usize = 40;
 
-/// A right-click context menu on a WORKSPACES row: rename / worktree / close the
-/// node. Opened by right-clicking a workspace in the sidebar.
+/// A right-click context menu on a WORKSPACES row: reorder / rename / worktree /
+/// close the node. Opened by right-clicking a workspace in the sidebar.
 pub struct WsMenu {
     /// Stable target identity. Workspace indices shift when another workspace
     /// is closed through the API while this menu is open.
@@ -522,6 +522,12 @@ pub struct WsMenu {
     pub anchor: (u16, u16),
     /// Each visible item + its clickable rect, filled in by the renderer.
     pub items: Vec<(WsMenuItem, Rect)>,
+    pub can_move_up: bool,
+    pub can_move_down: bool,
+    /// Every other workspace group in the same pin cohort.
+    pub swap_targets: Vec<(String, String)>,
+    pub swap_open: bool,
+    pub swap_rects: Vec<(String, Rect)>,
     /// Module actions offered here, snapshotted when the menu opened (docs/13
     /// §3.8) so a registry change mid-menu can't shift what a click runs.
     pub module_actions: Vec<ModuleMenuAction>,
@@ -531,10 +537,13 @@ pub struct WsMenu {
 /// appear for nodes inside a git repo. `Divider` is a non-interactive separator.
 /// `Module(i)` is the `i`-th module action declaring `contexts = ["workspace"]`
 /// (docs/13 §3.8), resolved against the live registry when clicked.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WsMenuItem {
     Pin,
     Unpin,
+    MoveUp,
+    MoveDown,
+    SwapWith,
     Close,
     Rename,
     /// Delete a **linked worktree** and its files (git worktree remove + folder).
@@ -1472,6 +1481,7 @@ impl CopyMode {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum PopupId {
     Ws,
+    WsSwap,
     Tab,
     TabSwap,
     Pane,
@@ -4163,6 +4173,102 @@ impl App {
             .position(|&(workspace, _)| workspace == index)
     }
 
+    fn workspace_display_groups(&self) -> Vec<Vec<usize>> {
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for (workspace, nested) in self.workspace_display_order() {
+            if nested {
+                if let Some(group) = groups.last_mut() {
+                    group.push(workspace);
+                } else {
+                    groups.push(vec![workspace]);
+                }
+            } else {
+                groups.push(vec![workspace]);
+            }
+        }
+        groups
+    }
+
+    fn workspace_reorder_options(&self, index: usize) -> (bool, bool, Vec<(String, String)>) {
+        let groups = self.workspace_display_groups();
+        let Some(position) = groups.iter().position(|group| group.contains(&index)) else {
+            return (false, false, Vec::new());
+        };
+        let pinned = groups[position]
+            .iter()
+            .any(|workspace| self.workspaces[*workspace].pinned);
+        let same_cohort = |group: &[usize]| {
+            group
+                .iter()
+                .any(|workspace| self.workspaces[*workspace].pinned)
+                == pinned
+        };
+        let can_move_up = position > 0 && same_cohort(&groups[position - 1]);
+        let can_move_down = position + 1 < groups.len() && same_cohort(&groups[position + 1]);
+        let swap_targets = groups
+            .iter()
+            .enumerate()
+            .filter(|(other, group)| *other != position && same_cohort(group))
+            .filter_map(|(_, group)| {
+                let leader = self.workspaces.get(group[0])?;
+                Some((leader.id.clone(), leader.name.clone()))
+            })
+            .collect();
+        (can_move_up, can_move_down, swap_targets)
+    }
+
+    fn swap_workspace_groups(&mut self, source: usize, target: usize) -> bool {
+        let mut groups = self.workspace_display_groups();
+        let Some(source_position) = groups.iter().position(|group| group.contains(&source)) else {
+            return false;
+        };
+        let Some(target_position) = groups.iter().position(|group| group.contains(&target)) else {
+            return false;
+        };
+        if source_position == target_position {
+            return false;
+        }
+        let group_is_pinned = |group: &[usize]| {
+            group
+                .iter()
+                .any(|workspace| self.workspaces[*workspace].pinned)
+        };
+        if group_is_pinned(&groups[source_position]) != group_is_pinned(&groups[target_position]) {
+            return false;
+        }
+
+        groups.swap(source_position, target_position);
+        let order: Vec<_> = groups.into_iter().flatten().collect();
+        let workspaces = order.clone();
+        let Ok(positions) = self.reorder_workspace_block(&order, 0) else {
+            return false;
+        };
+        self.emit_event(
+            "workspace.block_moved",
+            serde_json::json!({"workspaces":workspaces,"positions":positions}),
+        );
+        true
+    }
+
+    fn workspace_reorder_neighbor(&self, index: usize, down: bool) -> Option<usize> {
+        let groups = self.workspace_display_groups();
+        let position = groups.iter().position(|group| group.contains(&index))?;
+        let target_position = if down {
+            position
+                .checked_add(1)
+                .filter(|next| *next < groups.len())?
+        } else {
+            position.checked_sub(1)?
+        };
+        let group_is_pinned = |group: &[usize]| {
+            group
+                .iter()
+                .any(|workspace| self.workspaces[*workspace].pinned)
+        };
+        (group_is_pinned(&groups[position]) == group_is_pinned(&groups[target_position]))
+            .then_some(groups[target_position][0])
+    }
+
     /// Create a git worktree for `branch` off `repo` and open it as a workspace
     /// (docs/18 WT). Laid out **nested by repo** —
     /// `~/.luvus/worktrees/<repo>/<branch>` — so checkouts don't clutter the repo
@@ -4450,11 +4556,17 @@ impl App {
     pub fn open_ws_menu(&mut self, index: usize, col: u16, row: u16) {
         if index < self.workspaces.len() {
             let is_repo = crate::git::local::is_repo(&self.workspaces[index].cwd);
+            let (can_move_up, can_move_down, swap_targets) = self.workspace_reorder_options(index);
             self.ws_menu = Some(WsMenu {
                 workspace_id: self.workspaces[index].id.clone(),
                 is_repo,
                 anchor: (col, row),
                 items: Vec::new(),
+                can_move_up,
+                can_move_down,
+                swap_targets,
+                swap_open: false,
+                swap_rects: Vec::new(),
                 module_actions: self.module_menu_actions("workspace"),
             });
         }
@@ -4485,7 +4597,34 @@ impl App {
         } else {
             WsMenuItem::Pin
         };
-        let mut items = vec![WsMenuItem::Close, WsMenuItem::Rename, pin];
+        let (can_move_up, can_move_down, can_swap) = self
+            .ws_menu
+            .as_ref()
+            .filter(|menu| {
+                ws.is_some_and(|workspace| workspace.id.as_str() == menu.workspace_id.as_str())
+            })
+            .map(|menu| {
+                (
+                    menu.can_move_up,
+                    menu.can_move_down,
+                    !menu.swap_targets.is_empty(),
+                )
+            })
+            .unwrap_or_else(|| {
+                let (up, down, targets) = self.workspace_reorder_options(index);
+                (up, down, !targets.is_empty())
+            });
+        let mut items = vec![WsMenuItem::Close, WsMenuItem::Rename];
+        if can_move_up {
+            items.push(WsMenuItem::MoveUp);
+        }
+        if can_move_down {
+            items.push(WsMenuItem::MoveDown);
+        }
+        if can_swap {
+            items.push(WsMenuItem::SwapWith);
+        }
+        items.push(pin);
         if is_worktree {
             items.push(WsMenuItem::DeleteWorktree);
         }
@@ -4590,13 +4729,43 @@ impl App {
 
     /// A click inside the open context menu: run the hit item, else dismiss.
     pub fn ws_menu_click(&mut self, col: u16, row: u16) {
+        let in_rect = |rect: &Rect| {
+            col >= rect.x && col < rect.right() && row >= rect.y && row < rect.bottom()
+        };
+        let swap_hit = self.ws_menu.as_ref().and_then(|menu| {
+            menu.swap_rects
+                .iter()
+                .find(|(_, rect)| in_rect(rect))
+                .map(|(target, _)| (menu.workspace_id.clone(), target.clone()))
+        });
+        if let Some((source, target)) = swap_hit {
+            self.ws_menu = None;
+            let source = self
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.id == source);
+            let target = self
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.id == target);
+            if let (Some(source), Some(target)) = (source, target) {
+                self.swap_workspace_groups(source, target);
+            }
+            return;
+        }
+
         let hit = self.ws_menu.as_ref().and_then(|m| {
             m.items
                 .iter()
-                .find(|(_, r)| col >= r.x && col < r.right() && row >= r.y && row < r.bottom())
+                .find(|(_, rect)| in_rect(rect))
                 .map(|(it, _)| *it)
         });
         match hit {
+            Some(WsMenuItem::SwapWith) => {
+                if let Some(menu) = self.ws_menu.as_mut() {
+                    menu.swap_open = true;
+                }
+            }
             Some(WsMenuItem::Divider) => {} // non-interactive; keep the menu open
             Some(it) => self.ws_menu_action(it),
             None => self.ws_menu = None, // click outside dismisses
@@ -4623,6 +4792,14 @@ impl App {
         let cwd = self.workspaces.get(index).map(|w| w.cwd.clone());
         match item {
             WsMenuItem::Divider => {}
+            WsMenuItem::MoveUp | WsMenuItem::MoveDown => {
+                if let Some(target) =
+                    self.workspace_reorder_neighbor(index, item == WsMenuItem::MoveDown)
+                {
+                    self.swap_workspace_groups(index, target);
+                }
+            }
+            WsMenuItem::SwapWith => {}
             // Pin/Unpin the right-clicked node: float it to the top of the list
             // (docs), persisted across restarts.
             WsMenuItem::Pin | WsMenuItem::Unpin => {
@@ -7843,6 +8020,11 @@ mod tests {
             is_repo: true,
             anchor: (0, 0),
             items: Vec::new(),
+            can_move_up: false,
+            can_move_down: false,
+            swap_targets: Vec::new(),
+            swap_open: false,
+            swap_rects: Vec::new(),
             module_actions: Vec::new(),
         });
 
@@ -11119,6 +11301,147 @@ mod tests {
         assert!(
             app.workspaces_scroll > 0,
             "the active workspace was scrolled into view"
+        );
+    }
+
+    #[test]
+    fn workspace_context_menu_moves_swaps_and_persists() {
+        let _env = crate::persist::test_env("workspace-context-menu-reorder");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.new_workspace();
+        app.new_workspace();
+        for (workspace, name) in app.workspaces.iter_mut().zip(["alpha", "beta", "gamma"]) {
+            workspace.name = name.into();
+            workspace.worktree = None;
+        }
+        app.active_ws = 2;
+
+        app.open_ws_menu(1, 10, 2);
+        let items = app.ws_menu_items(1);
+        assert!(items.contains(&WsMenuItem::MoveUp));
+        assert!(items.contains(&WsMenuItem::MoveDown));
+        assert!(items.contains(&WsMenuItem::SwapWith));
+        app.ws_menu_action(WsMenuItem::MoveUp);
+
+        assert_eq!(
+            app.workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_str())
+                .collect::<Vec<_>>(),
+            ["beta", "alpha", "gamma"]
+        );
+        assert_eq!(app.ws().name, "gamma", "active identity stays active");
+
+        app.open_ws_menu(0, 10, 2);
+        let gamma_id = app
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.name == "gamma")
+            .unwrap()
+            .id
+            .clone();
+        app.ws_menu.as_mut().unwrap().swap_rects = vec![(gamma_id, Rect::new(20, 4, 8, 1))];
+        app.ws_menu_click(21, 4);
+        assert_eq!(
+            app.workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_str())
+                .collect::<Vec<_>>(),
+            ["gamma", "alpha", "beta"]
+        );
+        assert_eq!(app.ws().name, "gamma", "active identity follows the swap");
+        assert!(app.session_dirty);
+        assert_eq!(
+            crate::persist::snapshot(&app)
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_str())
+                .collect::<Vec<_>>(),
+            ["gamma", "alpha", "beta"],
+            "the session snapshot preserves the menu-selected order"
+        );
+    }
+
+    #[test]
+    fn workspace_menu_moves_a_linked_worktree_group_as_one_unit() {
+        let _env = crate::persist::test_env("workspace-worktree-group-menu");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.new_workspace();
+        app.new_workspace();
+        for (workspace, name) in app.workspaces.iter_mut().zip(["parent", "other", "child"]) {
+            workspace.name = name.into();
+            workspace.worktree = None;
+        }
+        let common_dir = PathBuf::from("/repo/group/.git");
+        app.workspaces[0].worktree = Some(crate::git::WorktreeMembership {
+            common_dir: common_dir.clone(),
+            linked: false,
+        });
+        app.workspaces[2].worktree = Some(crate::git::WorktreeMembership {
+            common_dir,
+            linked: true,
+        });
+        app.open_ws_menu(2, 10, 2);
+        app.ws_menu_action(WsMenuItem::MoveDown);
+
+        assert_eq!(
+            app.workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_str())
+                .collect::<Vec<_>>(),
+            ["other", "parent", "child"],
+            "moving either member moves the complete display group"
+        );
+        assert_eq!(
+            app.workspace_display_order()
+                .into_iter()
+                .map(|(index, nested)| (app.workspaces[index].name.as_str(), nested))
+                .collect::<Vec<_>>(),
+            [("other", false), ("parent", false), ("child", true)]
+        );
+
+        let other_index = app
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.name == "other")
+            .unwrap();
+        app.open_ws_menu(other_index, 10, 2);
+        app.ws_menu_action(WsMenuItem::MoveDown);
+        assert_eq!(
+            app.workspace_display_order()
+                .into_iter()
+                .map(|(index, nested)| (app.workspaces[index].name.as_str(), nested))
+                .collect::<Vec<_>>(),
+            [("parent", false), ("child", true), ("other", false)],
+            "the group stays contiguous after moving back"
+        );
+    }
+
+    #[test]
+    fn workspace_menu_does_not_cross_the_pinned_boundary() {
+        let _env = crate::persist::test_env("workspace-pinned-menu-boundary");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.new_workspace();
+        app.new_workspace();
+        for (workspace, name) in app.workspaces.iter_mut().zip(["alpha", "pinned", "gamma"]) {
+            workspace.name = name.into();
+            workspace.worktree = None;
+        }
+        app.workspaces[1].pinned = true;
+        app.open_ws_menu(2, 10, 2);
+        let menu = app.ws_menu.as_ref().unwrap();
+        assert_eq!(menu.swap_targets.len(), 1);
+        assert_eq!(menu.swap_targets[0].1, "alpha");
+        app.ws_menu_action(WsMenuItem::MoveUp);
+        assert_eq!(
+            app.workspace_display_order()
+                .into_iter()
+                .map(|(index, _)| app.workspaces[index].name.as_str())
+                .collect::<Vec<_>>(),
+            ["pinned", "gamma", "alpha"]
         );
     }
 
