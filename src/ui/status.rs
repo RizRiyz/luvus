@@ -2,6 +2,7 @@
 //! the flexible middle, and the clickable version stays fixed at the right.
 
 use super::*;
+use crate::app::SidebarListFocus;
 
 pub(super) fn draw_status(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) {
     if area.height == 0 {
@@ -119,6 +120,26 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
             }
             keep -= 1;
         }
+    }
+    if let Some(focus) = app.sidebar_focus {
+        let agents = focus == SidebarListFocus::Agents;
+        left.push(mode_label(
+            if agents {
+                app.catalog.agents
+            } else {
+                app.catalog.workspaces
+            },
+            t,
+        ));
+        left.push(Span::raw("  "));
+        left.extend(hint("j/k", cat.act_move, t));
+        left.extend(hint("Enter", cat.act_open_menu, t));
+        left.extend(hint("a", cat.act_right_click, t));
+        if agents {
+            left.extend(hint("f", cat.act_filter, t));
+        }
+        left.extend(hint("Esc", cat.act_back, t));
+        return (Line::from(left), false);
     }
     if app.files_focused {
         let diff = app.files_mode == crate::diff::FilesMode::Diff;
@@ -491,6 +512,36 @@ mod tests {
                 "{mode:?} must own the leading mode label"
             );
         }
+    }
+
+    #[test]
+    fn sidebar_guidance_matches_workspace_and_agent_actions() {
+        let _env = crate::persist::test_env("bar-status-sidebar-focus");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 24, tx).unwrap();
+        let theme = app.theme.clone();
+
+        app.sidebar_focus = Some(SidebarListFocus::Workspaces);
+        let (line, _) = fixed_guidance(&app, &theme, 120);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("WORKSPACES"));
+        assert!(text.contains("Enter open"));
+        assert!(text.contains("a right click"));
+
+        app.sidebar_focus = Some(SidebarListFocus::Agents);
+        let (line, _) = fixed_guidance(&app, &theme, 120);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("AGENTS"));
+        assert!(text.contains("f filter"));
+        assert!(text.contains("a right click"));
     }
 
     #[test]

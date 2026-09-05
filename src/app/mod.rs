@@ -99,6 +99,23 @@ pub enum DockKind {
     Module(String),
 }
 
+/// A built-in sidebar list that currently owns normal-mode keyboard input.
+/// Pane focus stays unchanged so Esc/q can return directly to the terminal.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidebarListFocus {
+    Workspaces,
+    Agents,
+}
+
+/// One row in the AGENTS dock's keyboard projection, in rendered order.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum AgentDockTarget {
+    Live(PaneId),
+    Automation(String),
+    Session(usize),
+    Elsewhere(PaneId),
+}
+
 impl DockKind {
     /// Stable id used in `config.json` and the UHP.
     pub fn id(&self) -> &str {
@@ -525,6 +542,8 @@ pub struct WsMenu {
     pub anchor: (u16, u16),
     /// Each visible item + its clickable rect, filled in by the renderer.
     pub items: Vec<(WsMenuItem, Rect)>,
+    /// Keyboard-selected rendered item. Mouse-opened menus start without one.
+    pub selected: Option<usize>,
     /// Module actions offered here, snapshotted when the menu opened (docs/13
     /// §3.8) so a registry change mid-menu can't shift what a click runs.
     pub module_actions: Vec<ModuleMenuAction>,
@@ -955,6 +974,8 @@ pub struct AgentMenu {
     pub target: AgentTarget,
     pub anchor: (u16, u16),
     pub items: Vec<(AgentMenuItem, Rect)>,
+    /// Keyboard-selected rendered item. Mouse-opened menus start without one.
+    pub selected: Option<usize>,
     /// Module actions offered here, snapshotted when the menu opened (docs/13 §3.8).
     pub module_actions: Vec<ModuleMenuAction>,
 }
@@ -2441,6 +2462,11 @@ pub struct App {
     pub agents_scroll: usize,
     pub workspaces_area: Rect,
     pub agents_area: Rect,
+    /// Explicit keyboard ownership for WORKSPACES or AGENTS.
+    pub sidebar_focus: Option<SidebarListFocus>,
+    /// Display-order cursors for the two built-in sidebar lists.
+    pub workspace_cursor: usize,
+    pub agent_cursor: usize,
     /// The FILES dock (docs/38): the tree model, its scroll region, and the
     /// clickable rect per visible row (`(row index, rect)`), re-set each frame.
     pub file_tree: crate::files::FileTree,
@@ -2921,6 +2947,9 @@ impl App {
             agents_this_workspace,
             workspaces_area: Rect::ZERO,
             agents_area: Rect::ZERO,
+            sidebar_focus: None,
+            workspace_cursor: 0,
+            agent_cursor: 0,
             // Rooted at nothing; the first detect tick re-roots it to the active
             // node (set_root is a no-op when already correct).
             file_tree: {
@@ -3561,6 +3590,9 @@ impl App {
             agents_this_workspace,
             workspaces_area: Rect::ZERO,
             agents_area: Rect::ZERO,
+            sidebar_focus: None,
+            workspace_cursor: 0,
+            agent_cursor: 0,
             // Rooted at nothing; the first detect tick re-roots it to the active
             // node (set_root is a no-op when already correct).
             file_tree: {
@@ -3779,6 +3811,7 @@ impl App {
         }
         self.agents_active_only = active_only;
         self.agents_scroll = 0;
+        self.agent_cursor = 0;
         true
     }
 
@@ -3810,6 +3843,7 @@ impl App {
         }
         self.agents_this_workspace = this_workspace;
         self.agents_scroll = 0;
+        self.agent_cursor = 0;
         true
     }
 
@@ -3823,6 +3857,310 @@ impl App {
             self.persist_config();
         }
         runtime_changed || config_changed
+    }
+
+    /// Mount and reveal a built-in dock so an explicit focus command is always
+    /// useful, including after the user has hidden or unmounted that dock.
+    fn reveal_builtin_dock(&mut self, kind: DockKind) -> bool {
+        if self.sidebars.side_of(&kind).is_none() {
+            let target = if self.sidebars.has_room(Side::Left) {
+                Side::Left
+            } else {
+                Side::Right
+            };
+            if !self.move_dock(&kind, target) {
+                return false;
+            }
+        }
+        let Some(side) = self.sidebars.side_of(&kind) else {
+            return false;
+        };
+        self.sidebars.get_mut(side).visible = true;
+        true
+    }
+
+    /// Give normal-mode keyboard input to the WORKSPACES list without moving
+    /// terminal-pane focus. Esc/q returns input to the same pane.
+    pub fn focus_workspaces_dock(&mut self) {
+        if !self.reveal_builtin_dock(DockKind::Workspaces) {
+            return;
+        }
+        self.files_focused = false;
+        self.sidebar_focus = Some(SidebarListFocus::Workspaces);
+        self.workspace_cursor = self.workspace_display_position(self.active_ws).unwrap_or(0);
+    }
+
+    /// Give normal-mode keyboard input to the AGENTS list. The cursor starts at
+    /// the currently focused live agent when that row is visible.
+    pub fn focus_agents_dock(&mut self) {
+        if !self.reveal_builtin_dock(DockKind::Agents) {
+            return;
+        }
+        self.files_focused = false;
+        self.sidebar_focus = Some(SidebarListFocus::Agents);
+        let current = self
+            .workspaces
+            .get(self.active_ws)
+            .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
+            .map(|tab| tab.layout.focus);
+        let rows = self.agent_dock_targets();
+        self.agent_cursor = current
+            .and_then(|pane| {
+                rows.iter()
+                    .position(|target| *target == AgentDockTarget::Live(pane))
+            })
+            .unwrap_or_else(|| self.agent_cursor.min(rows.len().saturating_sub(1)));
+    }
+
+    /// Build the AGENTS rows in the same order as the renderer. This runs only
+    /// for explicit keyboard input, not on the app loop or detection path.
+    pub fn agent_dock_targets(&self) -> Vec<AgentDockTarget> {
+        let scoped = self.agents_scope_active();
+        let mut live = Vec::new();
+        let mut blocked_elsewhere = Vec::new();
+        for (workspace_index, workspace) in self.workspaces.iter().enumerate() {
+            let visible = !scoped || workspace_index == self.active_ws;
+            for tab in &workspace.tabs {
+                for pane in tab.layout.leaves() {
+                    let Some(status) = self.status.get(&pane) else {
+                        continue;
+                    };
+                    if !self.manifests.is_agent(&status.agent) && status.agent_session.is_none() {
+                        continue;
+                    }
+                    if visible {
+                        live.push(pane);
+                    } else if status.state == State::Blocked {
+                        blocked_elsewhere.push(pane);
+                    }
+                }
+            }
+        }
+        if !self.pinned_agents.is_empty() {
+            live.sort_by_key(|pane| !self.pinned_agents.contains(pane));
+        }
+
+        let mut rows: Vec<AgentDockTarget> = live.into_iter().map(AgentDockTarget::Live).collect();
+        let mut scheduled: Vec<(u64, String)> = self
+            .automation
+            .automations
+            .iter()
+            .filter_map(|automation| {
+                if !automation.enabled {
+                    return None;
+                }
+                let (workspace_index, _) = self
+                    .workspaces
+                    .iter()
+                    .enumerate()
+                    .find(|(_, workspace)| workspace.id == automation.task.workspace_id)?;
+                if scoped && workspace_index != self.active_ws {
+                    return None;
+                }
+                let live_run = self
+                    .automation
+                    .runs
+                    .iter()
+                    .rev()
+                    .find(|run| run.automation_id == automation.id && run.status.is_live());
+                let pane_backed = live_run
+                    .and_then(|run| run.task_id.as_deref())
+                    .and_then(|task| self.orch.task(task))
+                    .and_then(|task| task.assignee)
+                    .is_some_and(|pane| self.panes.contains_key(&PaneId(pane)));
+                if pane_backed
+                    || live_run.is_some_and(|run| {
+                        matches!(
+                            run.status,
+                            crate::automation::RunStatus::Running
+                                | crate::automation::RunStatus::Review
+                        )
+                    })
+                {
+                    return None;
+                }
+                let deadline = live_run
+                    .map(|run| run.scheduled_at)
+                    .or(automation.next_run_at)?;
+                Some((deadline, automation.id.clone()))
+            })
+            .collect();
+        scheduled.sort_by_key(|item| item.0);
+        rows.extend(
+            scheduled
+                .into_iter()
+                .map(|(_, id)| AgentDockTarget::Automation(id)),
+        );
+
+        if !self.agents_active_only {
+            let session_owner = |cwd: &std::path::Path| {
+                self.workspaces
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, workspace)| crate::platform::is_subpath(cwd, &workspace.cwd))
+                    .max_by_key(|(_, workspace)| workspace.cwd.as_os_str().len())
+                    .map(|(workspace_index, _)| workspace_index)
+            };
+            rows.extend(
+                self.resumable
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, session)| {
+                        !scoped || session_owner(&session.cwd) == Some(self.active_ws)
+                    })
+                    .map(|(index, _)| AgentDockTarget::Session(index)),
+            );
+        }
+        if scoped {
+            if let Some(pane) = blocked_elsewhere.first().copied() {
+                rows.push(AgentDockTarget::Elsewhere(pane));
+            }
+        }
+        rows
+    }
+
+    fn move_sidebar_cursor(cursor: &mut usize, len: usize, delta: isize) {
+        if len == 0 {
+            *cursor = 0;
+            return;
+        }
+        *cursor = cursor
+            .saturating_add_signed(delta)
+            .min(len.saturating_sub(1));
+    }
+
+    /// Keyboard navigation for WORKSPACES, mirroring FILES and DIFF.
+    pub fn handle_workspaces_key(&mut self, key: KeyEvent) -> bool {
+        let order = self.workspace_display_order();
+        let page = (usize::from(self.workspaces_area.height) / 2).max(1) as isize;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.sidebar_focus = None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), -1)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), 1)
+            }
+            KeyCode::PageUp => {
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), -page)
+            }
+            KeyCode::PageDown => {
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), page)
+            }
+            KeyCode::Home | KeyCode::Char('g') => self.workspace_cursor = 0,
+            KeyCode::End | KeyCode::Char('G') => {
+                self.workspace_cursor = order.len().saturating_sub(1)
+            }
+            KeyCode::Enter => {
+                if let Some(&(workspace, _)) = order.get(self.workspace_cursor) {
+                    self.active_ws = workspace;
+                    self.sidebar_focus = None;
+                }
+            }
+            KeyCode::Char('a') => {
+                if let Some(&(workspace, _)) = order.get(self.workspace_cursor) {
+                    let anchor = self
+                        .ws_rects
+                        .iter()
+                        .find(|(index, _)| *index == workspace)
+                        .map(|(_, rect)| (rect.x.saturating_add(2), rect.y))
+                        .unwrap_or((
+                            self.workspaces_area.x.saturating_add(2),
+                            self.workspaces_area.y,
+                        ));
+                    self.open_ws_menu(workspace, anchor.0, anchor.1);
+                    if let Some(menu) = self.ws_menu.as_mut() {
+                        menu.selected = Some(0);
+                    }
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// Keyboard navigation for AGENTS. `f` changes All/Active and `s` changes
+    /// workspace scope; row activation matches the existing mouse behavior.
+    pub fn handle_agents_key(&mut self, key: KeyEvent) -> bool {
+        let rows = self.agent_dock_targets();
+        let page = (usize::from(self.agents_area.height) / 2).max(1) as isize;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.sidebar_focus = None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), -1)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), 1)
+            }
+            KeyCode::PageUp => Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), -page),
+            KeyCode::PageDown => {
+                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), page)
+            }
+            KeyCode::Home | KeyCode::Char('g') => self.agent_cursor = 0,
+            KeyCode::End | KeyCode::Char('G') => self.agent_cursor = rows.len().saturating_sub(1),
+            KeyCode::Char('f') => {
+                self.set_agents_filter(!self.agents_active_only);
+                self.agent_cursor = 0;
+            }
+            KeyCode::Char('s') => {
+                self.set_agents_scope(!self.agents_this_workspace);
+                self.agent_cursor = 0;
+            }
+            KeyCode::Enter => {
+                if let Some(target) = rows.get(self.agent_cursor).cloned() {
+                    self.sidebar_focus = None;
+                    self.activate_agent_dock_target(target);
+                }
+            }
+            KeyCode::Char('a') => {
+                if let Some(target) = rows.get(self.agent_cursor).cloned() {
+                    self.open_agent_dock_action(target);
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn activate_agent_dock_target(&mut self, target: AgentDockTarget) {
+        match target {
+            AgentDockTarget::Live(pane) | AgentDockTarget::Elsewhere(pane) => {
+                self.focus_pane_global(pane)
+            }
+            AgentDockTarget::Automation(id) => self.open_automation_detail(&id),
+            AgentDockTarget::Session(index) => self.resume_session(index),
+        }
+    }
+
+    fn open_agent_dock_action(&mut self, target: AgentDockTarget) {
+        match target {
+            AgentDockTarget::Live(pane) => {
+                let anchor = self
+                    .agent_rects
+                    .iter()
+                    .find(|(id, _)| *id == pane)
+                    .map(|(_, rect)| (rect.x.saturating_add(2), rect.y))
+                    .unwrap_or((self.agents_area.x.saturating_add(2), self.agents_area.y));
+                self.open_agent_menu(AgentTarget::Live(pane), anchor.0, anchor.1);
+                if let Some(menu) = self.agent_menu.as_mut() {
+                    menu.selected = Some(0);
+                }
+            }
+            AgentDockTarget::Session(index) => {
+                let anchor = self
+                    .session_rects
+                    .iter()
+                    .find(|(session, _)| *session == index)
+                    .map(|(_, rect)| (rect.x.saturating_add(2), rect.y))
+                    .unwrap_or((self.agents_area.x.saturating_add(2), self.agents_area.y));
+                self.open_agent_menu(AgentTarget::Session(index), anchor.0, anchor.1);
+                if let Some(menu) = self.agent_menu.as_mut() {
+                    menu.selected = Some(0);
+                }
+            }
+            AgentDockTarget::Automation(id) => self.open_automation_detail(&id),
+            AgentDockTarget::Elsewhere(pane) => self.focus_pane_global(pane),
+        }
     }
 
     /// Every mounted dock in display order: left sidebar top→bottom, then right.
@@ -3872,6 +4210,13 @@ impl App {
     /// nowhere, without dropping any module content cache (it stays in the
     /// registry and can be re-placed). Persists.
     pub fn unmount_dock(&mut self, kind: &DockKind) {
+        if matches!(
+            (self.sidebar_focus, kind),
+            (Some(SidebarListFocus::Workspaces), DockKind::Workspaces)
+                | (Some(SidebarListFocus::Agents), DockKind::Agents)
+        ) {
+            self.sidebar_focus = None;
+        }
         for side in [Side::Left, Side::Right] {
             self.sidebars.get_mut(side).remove_dock(kind);
         }
@@ -4953,6 +5298,7 @@ impl App {
                 is_repo,
                 anchor: (col, row),
                 items: Vec::new(),
+                selected: None,
                 module_actions: self.module_menu_actions("workspace"),
             });
         }
@@ -5321,10 +5667,48 @@ impl App {
         }
     }
 
-    /// Key handling while the workspace context menu is open: `Esc` closes it.
+    /// Keyboard navigation for the workspace context menu. Dividers are skipped;
+    /// mouse-opened menus acquire a selection on the first navigation key.
     pub fn handle_ws_menu_key(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Esc {
+        let Some(index) = self.ws_menu_target_index() else {
             self.ws_menu = None;
+            return;
+        };
+        let items = self.ws_menu_items(index);
+        let selectable: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| (*item != WsMenuItem::Divider).then_some(index))
+            .collect();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.ws_menu = None,
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
+                if selectable.is_empty() {
+                    return;
+                }
+                let current = self
+                    .ws_menu
+                    .as_ref()
+                    .and_then(|menu| menu.selected)
+                    .and_then(|selected| selectable.iter().position(|index| *index == selected));
+                let next = if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
+                    current
+                        .map(|position| position.checked_sub(1).unwrap_or(selectable.len() - 1))
+                        .unwrap_or(selectable.len() - 1)
+                } else {
+                    current.map_or(0, |position| (position + 1) % selectable.len())
+                };
+                if let Some(menu) = self.ws_menu.as_mut() {
+                    menu.selected = Some(selectable[next]);
+                }
+            }
+            KeyCode::Enter => {
+                let selected = self.ws_menu.as_ref().and_then(|menu| menu.selected);
+                if let Some(item) = selected.and_then(|index| items.get(index)).copied() {
+                    self.ws_menu_action(item);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -5755,6 +6139,7 @@ impl App {
             target,
             anchor: (col, row),
             items: Vec::new(),
+            selected: None,
             module_actions,
         });
     }
@@ -5815,10 +6200,47 @@ impl App {
         }
     }
 
-    /// Key handling while the AGENTS menu is open: `Esc` closes it.
+    /// Keyboard navigation for the AGENTS menu, with the same wrapping and
+    /// divider-skipping behavior as FILES and DIFF menus.
     pub fn handle_agent_menu_key(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Esc {
-            self.agent_menu = None;
+        let Some(target) = self.agent_menu.as_ref().map(|menu| menu.target) else {
+            return;
+        };
+        let items = self.agent_menu_items(target);
+        let selectable: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| (*item != AgentMenuItem::Divider).then_some(index))
+            .collect();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.agent_menu = None,
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
+                if selectable.is_empty() {
+                    return;
+                }
+                let current = self
+                    .agent_menu
+                    .as_ref()
+                    .and_then(|menu| menu.selected)
+                    .and_then(|selected| selectable.iter().position(|index| *index == selected));
+                let next = if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
+                    current
+                        .map(|position| position.checked_sub(1).unwrap_or(selectable.len() - 1))
+                        .unwrap_or(selectable.len() - 1)
+                } else {
+                    current.map_or(0, |position| (position + 1) % selectable.len())
+                };
+                if let Some(menu) = self.agent_menu.as_mut() {
+                    menu.selected = Some(selectable[next]);
+                }
+            }
+            KeyCode::Enter => {
+                let selected = self.agent_menu.as_ref().and_then(|menu| menu.selected);
+                if let Some(item) = selected.and_then(|index| items.get(index)).copied() {
+                    self.agent_menu_action(item);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -8420,6 +8842,7 @@ mod tests {
             is_repo: true,
             anchor: (0, 0),
             items: Vec::new(),
+            selected: None,
             module_actions: Vec::new(),
         });
 

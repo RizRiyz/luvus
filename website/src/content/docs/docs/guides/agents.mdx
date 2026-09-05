@@ -25,7 +25,12 @@ which agents are still busy without continuous UI animation. When one finishes
 or blocks, luvus can play a Retro, Soft, or Pulse cue. Sounds are optional and
 off by default, turn on the events you want in **Settings → General**.
 
-Click a row to jump to that agent's pane from anywhere, across workspaces.
+Click a row to jump to that agent's pane from anywhere, across workspaces. For
+keyboard navigation, press `Ctrl+Space a` to focus AGENTS, move with arrows or
+`j` / `k`, and press `Enter` to open the selected live or resumable agent. Press
+`a` for the selected row's right-click actions, `f` to switch All / Active, `s`
+to switch all workspaces / this workspace, and `Esc` or `q` to return input to
+the pane.
 
 States are **debounced**: an agent that pauses mid-turn (thinking, tool calls,
 API latency) holds at *working* instead of flickering. You get one clean
