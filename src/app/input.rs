@@ -2799,8 +2799,14 @@ impl App {
                     // forwarded, so typing to the agent resumes with no lost key.
                     pane.scroll_to_bottom();
                     exit = true;
-                    let (app_cursor, disambiguate) = pane.key_encoding_modes();
-                    if let Some(bytes) = encode_key(&key, newline, app_cursor, disambiguate) {
+                    let modes = pane.key_encoding_modes();
+                    if let Some(bytes) = encode_key_with_modes(
+                        &key,
+                        newline,
+                        modes.application_cursor,
+                        modes.disambiguate_escape_codes,
+                        modes.report_all_keys_as_escape_codes,
+                    ) {
                         pane.send(&bytes);
                     }
                 }
@@ -3804,9 +3810,14 @@ impl App {
                     let prefix = self.prefix.key_event();
                     let newline = self.config.shift_enter_bytes().to_vec();
                     if let Some(pane) = self.focused() {
-                        let (app_cursor, disambiguate) = pane.key_encoding_modes();
-                        if let Some(bytes) = encode_key(&prefix, &newline, app_cursor, disambiguate)
-                        {
+                        let modes = pane.key_encoding_modes();
+                        if let Some(bytes) = encode_key_with_modes(
+                            &prefix,
+                            &newline,
+                            modes.application_cursor,
+                            modes.disambiguate_escape_codes,
+                            modes.report_all_keys_as_escape_codes,
+                        ) {
                             pane.send(&bytes);
                         }
                     }
@@ -3899,11 +3910,17 @@ impl App {
                 let newline = self.config.shift_enter_bytes();
                 // Cursor keys follow the pane's DECCKM state: a `less` that
                 // turned application cursor mode on only recognizes SS3 codes.
-                let (app_cursor, disambiguate) = self
+                let modes = self
                     .focused()
                     .map(|pane| pane.key_encoding_modes())
-                    .unwrap_or((false, false));
-                if let Some(bytes) = encode_key(&key, newline, app_cursor, disambiguate) {
+                    .unwrap_or_default();
+                if let Some(bytes) = encode_key_with_modes(
+                    &key,
+                    newline,
+                    modes.application_cursor,
+                    modes.disambiguate_escape_codes,
+                    modes.report_all_keys_as_escape_codes,
+                ) {
                     if let Some(p) = self.focused() {
                         // Typing snaps the view back to the live bottom, so you
                         // always see what you type (like every terminal).
@@ -4024,16 +4041,32 @@ fn mouse_wheel_seq(up: bool, col: u16, row: u16, sgr: bool) -> Vec<u8> {
 /// real terminal would send them — some apps (`less`) only recognize the SS3
 /// form once they've turned the mode on. Unnegotiated Alt+character stays
 /// ESC+char; after Kitty disambiguate it is CSI-u so `Alt+/` is not two keys.
+/// `report_all` is tracked separately because disambiguation alone deliberately
+/// leaves Tab and Backspace in their legacy forms.
+#[cfg(test)]
 fn encode_key(
     key: &KeyEvent,
     newline: &[u8],
     app_cursor: bool,
     disambiguate: bool,
 ) -> Option<Vec<u8>> {
+    encode_key_with_modes(key, newline, app_cursor, disambiguate, false)
+}
+
+fn encode_key_with_modes(
+    key: &KeyEvent,
+    newline: &[u8],
+    app_cursor: bool,
+    disambiguate: bool,
+    report_all: bool,
+) -> Option<Vec<u8>> {
     // AltGr arrives as Ctrl+Alt on Windows (`keys::is_ctrl_chord`) and types a
     // character — it is neither a Ctrl chord nor an `ESC`-prefixed Alt key.
     let ctrl = super::keys::is_ctrl_chord(key.modifiers);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    // Kitty's report-all mode implies disambiguation, even when the child did
+    // not also set the dedicated disambiguation bit.
+    let disambiguate = disambiguate || report_all;
     // True exactly when `is_ctrl_chord` refused a Ctrl+Alt press as AltGr. Only
     // the `Char` arm may act on it: every other key keeps both modifiers, so
     // `Ctrl+Alt+Enter` is still a modified Enter and sends the newline sequence.
@@ -4042,12 +4075,27 @@ fn encode_key(
 
     let bytes: Vec<u8> = match key.code {
         KeyCode::Char(c) => {
-            if ctrl {
-                if disambiguate {
+            if report_all
+                && !altgr
+                && modified_char_has_canonical_identity(c, key.modifiers, cfg!(windows))
+            {
+                let codepoint = if ctrl && matches!(c, '/' | '7') {
+                    '/'
+                } else if c.is_alphabetic() {
+                    single_lowercase_codepoint(c)
+                } else {
+                    c
+                };
+                return Some(csi_u_char(codepoint, key.modifiers));
+            } else if ctrl {
+                if disambiguate
+                    && modified_char_has_canonical_identity(c, key.modifiers, cfg!(windows))
+                {
                     // Once the nested application opts into Kitty keyboard
-                    // disambiguation, every Ctrl+character chord uses CSI-u.
-                    // This preserves the protocol's key identity instead of
-                    // mixing negotiated CSI-u with legacy control bytes.
+                    // disambiguation, every Ctrl+character chord with a known
+                    // canonical identity uses CSI-u. This preserves the key
+                    // identity instead of mixing negotiated CSI-u with legacy
+                    // control bytes.
                     let codepoint = match c {
                         // Crossterm represents a legacy 0x1f input byte as
                         // Ctrl+7. The originating terminal could not
@@ -4076,6 +4124,7 @@ fn encode_key(
                     || key
                         .modifiers
                         .intersects(KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META))
+                && modified_char_has_canonical_identity(c, key.modifiers, cfg!(windows))
             {
                 // Kitty disambiguate reports alt/super+key as CSI-u instead of
                 // ESC+char or a Super-stripped character.
@@ -4104,16 +4153,17 @@ fn encode_key(
         // (`config::shift_enter`); the default `ESC CR` is what agents expect out
         // of the box (Claude Code's `/terminal-setup`).
         KeyCode::Enter if shift || alt => newline.to_vec(),
+        KeyCode::Enter if report_all => csi_u_code(13, key.modifiers),
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Tab => {
-            if disambiguate && key_modifier_param(key.modifiers) != 1 {
+            if report_all {
                 csi_u_code(9, key.modifiers)
             } else {
                 vec![b'\t']
             }
         }
         KeyCode::BackTab => {
-            if disambiguate {
+            if report_all {
                 let mut modifiers = key.modifiers;
                 modifiers.insert(KeyModifiers::SHIFT);
                 csi_u_code(9, modifiers)
@@ -4122,7 +4172,7 @@ fn encode_key(
             }
         }
         KeyCode::Backspace => {
-            if disambiguate && key_modifier_param(key.modifiers) != 1 {
+            if report_all {
                 csi_u_code(127, key.modifiers)
             } else if alt {
                 vec![0x1b, 0x7f]
@@ -4179,6 +4229,18 @@ fn encode_key(
         _ => return None,
     };
     Some(bytes)
+}
+
+/// A native Windows key event can contain only the shifted punctuation and its
+/// Shift modifier, not the unshifted key identity Kitty requires. Keep those
+/// combinations on the pre-existing legacy path until the Windows input layer
+/// can preserve the virtual-key or scan-code identity alongside the event.
+fn modified_char_has_canonical_identity(
+    character: char,
+    modifiers: KeyModifiers,
+    windows: bool,
+) -> bool {
+    !windows || !modifiers.contains(KeyModifiers::SHIFT) || character.is_alphabetic()
 }
 
 /// Lowercase a key identity only when Unicode maps it to exactly one scalar.
@@ -4793,7 +4855,11 @@ mod tests {
                 false,
                 true,
             ),
-            Some(b"\x1b[47;4u".to_vec())
+            Some(if cfg!(windows) {
+                b"\x1b/".to_vec()
+            } else {
+                b"\x1b[47;4u".to_vec()
+            })
         );
     }
 
@@ -4811,69 +4877,124 @@ mod tests {
         assert_eq!(key(KeyModifiers::NONE, false), Some(vec![0x7f]));
         assert_eq!(key(KeyModifiers::NONE, true), Some(vec![0x7f]));
         assert_eq!(key(KeyModifiers::ALT, false), Some(vec![0x1b, 0x7f]));
-        assert_eq!(key(KeyModifiers::ALT, true), Some(b"\x1b[127;3u".to_vec()));
+        assert_eq!(key(KeyModifiers::ALT, true), Some(vec![0x1b, 0x7f]));
         assert_eq!(key(KeyModifiers::CONTROL, false), Some(vec![0x7f]));
-        assert_eq!(
-            key(KeyModifiers::CONTROL, true),
-            Some(b"\x1b[127;5u".to_vec())
-        );
+        assert_eq!(key(KeyModifiers::CONTROL, true), Some(vec![0x7f]));
     }
 
     #[test]
-    fn modified_tab_esc_and_super_use_csi_u_after_negotiation() {
-        let encode = |code, modifiers, disambiguate| {
-            encode_key(
+    fn tab_and_backspace_require_report_all_for_csi_u() {
+        let encode = |code, modifiers, disambiguate, report_all| {
+            encode_key_with_modes(
                 &KeyEvent::new(code, modifiers),
                 b"\x1b\r",
                 false,
                 disambiguate,
+                report_all,
+            )
+        };
+
+        for disambiguate in [false, true] {
+            assert_eq!(
+                encode(KeyCode::Tab, KeyModifiers::CONTROL, disambiguate, false),
+                Some(b"\t".to_vec())
+            );
+            assert_eq!(
+                encode(KeyCode::BackTab, KeyModifiers::NONE, disambiguate, false),
+                Some(b"\x1b[Z".to_vec())
+            );
+            assert_eq!(
+                encode(KeyCode::Backspace, KeyModifiers::ALT, disambiguate, false),
+                Some(vec![0x1b, 0x7f])
+            );
+        }
+
+        assert_eq!(
+            encode(KeyCode::Tab, KeyModifiers::CONTROL, false, true),
+            Some(b"\x1b[9;5u".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::Tab, KeyModifiers::ALT, false, true),
+            Some(b"\x1b[9;3u".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::BackTab, KeyModifiers::NONE, false, true),
+            Some(b"\x1b[9;2u".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::Backspace, KeyModifiers::ALT, false, true),
+            Some(b"\x1b[127;3u".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::Backspace, KeyModifiers::CONTROL, false, true),
+            Some(b"\x1b[127;5u".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::Enter, KeyModifiers::NONE, false, true),
+            Some(b"\x1b[13u".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::Char('a'), KeyModifiers::NONE, false, true),
+            Some(b"\x1b[97u".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::Char('A'), KeyModifiers::SHIFT, false, true),
+            Some(b"\x1b[97;2u".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::Char('7'), KeyModifiers::CONTROL, false, true),
+            Some(b"\x1b[47;5u".to_vec())
+        );
+    }
+
+    #[test]
+    fn disambiguate_and_report_all_encode_esc_and_modified_chars() {
+        let encode = |code, modifiers, disambiguate, report_all| {
+            encode_key_with_modes(
+                &KeyEvent::new(code, modifiers),
+                b"\x1b\r",
+                false,
+                disambiguate,
+                report_all,
             )
         };
 
         assert_eq!(
-            encode(KeyCode::Tab, KeyModifiers::CONTROL, false),
-            Some(b"\t".to_vec())
-        );
-        assert_eq!(
-            encode(KeyCode::Tab, KeyModifiers::CONTROL, true),
-            Some(b"\x1b[9;5u".to_vec())
-        );
-        assert_eq!(
-            encode(KeyCode::Tab, KeyModifiers::ALT, true),
-            Some(b"\x1b[9;3u".to_vec())
-        );
-        assert_eq!(
-            encode(KeyCode::BackTab, KeyModifiers::NONE, false),
-            Some(b"\x1b[Z".to_vec())
-        );
-        assert_eq!(
-            encode(KeyCode::BackTab, KeyModifiers::NONE, true),
-            Some(b"\x1b[9;2u".to_vec())
-        );
-        assert_eq!(
-            encode(KeyCode::Esc, KeyModifiers::NONE, false),
+            encode(KeyCode::Esc, KeyModifiers::NONE, false, false),
             Some(vec![0x1b])
         );
+        for modes in [(true, false), (false, true)] {
+            assert_eq!(
+                encode(KeyCode::Esc, KeyModifiers::NONE, modes.0, modes.1),
+                Some(b"\x1b[27u".to_vec())
+            );
+            assert_eq!(
+                encode(KeyCode::Esc, KeyModifiers::ALT, modes.0, modes.1),
+                Some(b"\x1b[27;3u".to_vec())
+            );
+            assert_eq!(
+                encode(KeyCode::Char('a'), KeyModifiers::SUPER, modes.0, modes.1),
+                Some(b"\x1b[97;9u".to_vec())
+            );
+        }
         assert_eq!(
-            encode(KeyCode::Esc, KeyModifiers::NONE, true),
-            Some(b"\x1b[27u".to_vec())
-        );
-        assert_eq!(
-            encode(KeyCode::Esc, KeyModifiers::ALT, false),
+            encode(KeyCode::Esc, KeyModifiers::ALT, false, false),
             Some(vec![0x1b, 0x1b])
         );
         assert_eq!(
-            encode(KeyCode::Esc, KeyModifiers::ALT, true),
-            Some(b"\x1b[27;3u".to_vec())
-        );
-        assert_eq!(
-            encode(KeyCode::Char('a'), KeyModifiers::SUPER, false),
+            encode(KeyCode::Char('a'), KeyModifiers::SUPER, false, false),
             Some(b"a".to_vec())
         );
-        assert_eq!(
-            encode(KeyCode::Char('a'), KeyModifiers::SUPER, true),
-            Some(b"\x1b[97;9u".to_vec())
-        );
+    }
+
+    #[test]
+    fn windows_shifted_punctuation_is_excluded_from_csi_u_without_key_identity() {
+        let alt_shift = KeyModifiers::ALT | KeyModifiers::SHIFT;
+        assert!(!modified_char_has_canonical_identity('?', alt_shift, true));
+        assert!(!modified_char_has_canonical_identity('/', alt_shift, true));
+        assert!(!modified_char_has_canonical_identity('€', alt_shift, true));
+        assert!(modified_char_has_canonical_identity('A', alt_shift, true));
+        assert!(modified_char_has_canonical_identity('?', alt_shift, false));
     }
 
     #[test]

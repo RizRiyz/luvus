@@ -1018,6 +1018,10 @@ impl VtEngine for AlacrittyEngine {
         self.term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES)
     }
 
+    fn report_all_keys_as_escape_codes(&self) -> bool {
+        self.term.mode().contains(TermMode::REPORT_ALL_KEYS_AS_ESC)
+    }
+
     fn mouse_drag(&self) -> bool {
         self.term
             .mode()
@@ -1867,22 +1871,29 @@ mod tests {
     }
 
     #[test]
-    fn nested_keyboard_disambiguation_is_tracked_across_config_updates() {
+    fn nested_keyboard_modes_are_tracked_across_config_updates() {
         let (tx, _rx) = channel();
         let mut e = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 2_000));
         assert!(!e.disambiguate_escape_codes());
+        assert!(!e.report_all_keys_as_escape_codes());
 
         e.advance(b"\x1b[>1u");
         assert!(e.disambiguate_escape_codes());
+        assert!(!e.report_all_keys_as_escape_codes());
+
+        e.advance(b"\x1b[=8u");
+        assert!(!e.disambiguate_escape_codes());
+        assert!(e.report_all_keys_as_escape_codes());
 
         e.set_history_budget(budget_for_rows(20, 1_000));
         assert!(
-            e.disambiguate_escape_codes(),
+            e.report_all_keys_as_escape_codes(),
             "changing scrollback settings must not disable the child keyboard protocol"
         );
 
         e.advance(b"\x1b[<u");
         assert!(!e.disambiguate_escape_codes());
+        assert!(!e.report_all_keys_as_escape_codes());
     }
 
     #[test]

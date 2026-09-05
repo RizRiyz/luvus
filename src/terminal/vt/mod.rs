@@ -460,6 +460,11 @@ pub trait VtEngine: Send {
     /// original key identity, such as Ctrl+/ versus Ctrl+7.
     fn disambiguate_escape_codes(&self) -> bool;
 
+    /// Whether the child requested Kitty's full key-event encoding mode. Unlike
+    /// disambiguation alone, this also encodes Enter, Tab, Backspace, and text
+    /// keys as escape sequences instead of their legacy bytes.
+    fn report_all_keys_as_escape_codes(&self) -> bool;
+
     /// Whether the child also requested **drag/motion tracking** (1002/1003) —
     /// press-and-move events are forwarded only then, so a click-only (1000)
     /// app isn't spammed with motion it never asked for.
