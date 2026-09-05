@@ -533,6 +533,14 @@ impl App {
                 self.apply_named_session_prepared(generation, name, result);
                 return true;
             }
+            AppEvent::NamedSessionStopped {
+                generation,
+                name,
+                result,
+            } => {
+                self.apply_named_session_stopped(generation, name, result);
+                return true;
+            }
             other => other,
         };
         // Control-API requests and parked `wait.output` replies must be answered
@@ -1031,7 +1039,9 @@ impl App {
             | AppEvent::SearchResults { .. }
             | AppEvent::SearchFederatedResults { .. }
             | AppEvent::SearchHandoffReady { .. } => unreachable!(),
-            AppEvent::NamedSessionsLoaded { .. } | AppEvent::NamedSessionPrepared { .. } => {
+            AppEvent::NamedSessionsLoaded { .. }
+            | AppEvent::NamedSessionPrepared { .. }
+            | AppEvent::NamedSessionStopped { .. } => {
                 unreachable!()
             }
         }
@@ -1165,6 +1175,16 @@ impl App {
         let first = |rects: &[Rect]| rects.iter().copied().find(|rect| hit(*rect));
 
         if self.named_session_menu.is_some() {
+            if self.session_menu.is_some() {
+                if let Some(menu) = &self.session_menu {
+                    if let Some(rect) = menu.items.iter().map(|(_, r)| *r).find(|r| hit(*r)) {
+                        return Some(rect);
+                    }
+                }
+                // Hover stays inside the Stop menu while it is open — do not
+                // highlight the session list behind it when moving the mouse.
+                return self.named_session_close_rect.filter(|rect| hit(*rect));
+            }
             return self
                 .named_session_close_rect
                 .filter(|rect| hit(*rect))
@@ -1359,9 +1379,110 @@ impl App {
             return;
         }
         if self.named_session_menu.is_some() {
+            // Context menu on a session row owns the click first.
+            if self.session_menu.is_some() {
+                match m.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        // If this press scrolls the session popup, keep the
+                        // context menu under the cursor like other menus.
+                        if self.menu_scroll.wheel(m.column, m.row, 0) {
+                            // no-op: just update hover for menu_scroll internal state
+                        }
+                        self.session_menu_click(m.column, m.row);
+                    }
+                    MouseEventKind::Down(MouseButton::Right) => {
+                        // Re-anchor: right-clicking another row moves the menu, like Agents.
+                        if let Some(idx) = self
+                            .named_session_row_rects
+                            .iter()
+                            .find(|(_, r)| {
+                                m.column >= r.x
+                                    && m.column < r.right()
+                                    && m.row >= r.y
+                                    && m.row < r.bottom()
+                            })
+                            .map(|(i, _)| *i)
+                        {
+                            if idx != 0 {
+                                // Keep `menu` bound here so `menu.preparing` is in scope.
+                                // The previous `.and_then(|menu| menu.rows.get(..))` moves
+                                // `menu` into the closure, so a naive `&& !menu.preparing`
+                                // at the row check would not compile.
+                                if let Some(menu) = self.named_session_menu.as_ref() {
+                                    if let Some(row) = menu.rows.get(idx - 1) {
+                                        if row.running && !row.current && !menu.preparing {
+                                            self.open_session_menu(
+                                                row.name.clone(),
+                                                m.column,
+                                                m.row,
+                                                row.running,
+                                                row.current,
+                                            );
+                                        } else {
+                                            self.session_menu = None;
+                                        }
+                                    } else {
+                                        self.session_menu = None;
+                                    }
+                                } else {
+                                    self.session_menu = None;
+                                }
+                            } else {
+                                self.session_menu = None;
+                            }
+                        } else if !self.session_menu.as_ref().is_some_and(|menu| {
+                            menu.items.iter().any(|(_, r)| {
+                                m.column >= r.x
+                                    && m.column < r.right()
+                                    && m.row >= r.y
+                                    && m.row < r.bottom()
+                            })
+                        }) {
+                            self.session_menu = None;
+                        }
+                    }
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                        let _ = self.menu_scroll.wheel(m.column, m.row, 0);
+                    }
+                    _ => {}
+                }
+                return;
+            }
             match m.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     self.named_session_click(m.column, m.row)
+                }
+                MouseEventKind::Down(MouseButton::Right) => {
+                    // Right-click on a row → open Stop menu for running sessions only.
+                    if let Some(idx) = self
+                        .named_session_row_rects
+                        .iter()
+                        .find(|(_, r)| {
+                            m.column >= r.x
+                                && m.column < r.right()
+                                && m.row >= r.y
+                                && m.row < r.bottom()
+                        })
+                        .map(|(i, _)| *i)
+                    {
+                        if idx != 0 {
+                            // Same reason as the guard above: bind `menu` first so
+                            // `!menu.preparing` is available (`.and_then` would hide it).
+                            if let Some(menu) = self.named_session_menu.as_ref() {
+                                if let Some(row) = menu.rows.get(idx - 1) {
+                                    if row.running && !row.current && !menu.preparing {
+                                        self.open_session_menu(
+                                            row.name.clone(),
+                                            m.column,
+                                            m.row,
+                                            row.running,
+                                            row.current,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 MouseEventKind::ScrollUp => self.move_named_session_cursor(-1),
                 MouseEventKind::ScrollDown => self.move_named_session_cursor(1),
@@ -3477,6 +3598,15 @@ impl App {
             return true;
         }
         if self.named_session_menu.is_some() {
+            // Context menu Esc should close the menu before the session popup.
+            if self.session_menu.is_some() && key.code == KeyCode::Esc {
+                self.session_menu = None;
+                return true;
+            }
+            if self.session_menu.is_some() {
+                self.handle_session_menu_key(key);
+                return true;
+            }
             self.named_session_key(key);
             return true;
         }

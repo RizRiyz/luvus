@@ -160,7 +160,8 @@ pub(crate) fn draw_session_menu(
     for index in scroll..item_count.min(scroll + visible_items) {
         let y = top + ((index - scroll) as u16 * item_height);
         let rect = Rect::new(inner.x, y, inner.width, item_height);
-        let hovered = app.hover.is_some_and(|(x, y)| contains(rect, x, y));
+        let hovered =
+            app.session_menu.is_none() && app.hover.is_some_and(|(x, y)| contains(rect, x, y));
         let selected = index == cursor;
         let hot = selected || hovered;
         if hot {
