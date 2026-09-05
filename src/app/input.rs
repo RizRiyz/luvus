@@ -4133,6 +4133,8 @@ fn encode_key(
         KeyCode::Esc => {
             if disambiguate {
                 csi_u_code(27, key.modifiers)
+            } else if alt {
+                vec![0x1b, 0x1b]
             } else {
                 vec![0x1b]
             }
@@ -4858,7 +4860,7 @@ mod tests {
         );
         assert_eq!(
             encode(KeyCode::Esc, KeyModifiers::ALT, false),
-            Some(vec![0x1b])
+            Some(vec![0x1b, 0x1b])
         );
         assert_eq!(
             encode(KeyCode::Esc, KeyModifiers::ALT, true),
