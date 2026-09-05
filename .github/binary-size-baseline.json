@@ -6,8 +6,8 @@
   },
   "targets": {
     "aarch64-apple-darwin": {
-      "executable_bytes": 8741072,
-      "archive_bytes": 3781053
+      "executable_bytes": 9711424,
+      "archive_bytes": 4162039
     },
     "x86_64-apple-darwin": {
       "executable_bytes": 9550124,
