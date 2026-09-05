@@ -281,11 +281,12 @@ def valid_automation_definition(params, *, update):
 def agent_key(value):
     if not isinstance(value, str):
         return False
-    lower = value.lower()
-    if lower in KEY_NAMES:
-        return True
-    if re.fullmatch(r"(?:ctrl\+|c-)[a-z]", lower) is not None:
-        return True
+    if value.isascii():
+        lower = value.lower()
+        if lower in KEY_NAMES:
+            return True
+        if re.fullmatch(r"(?:ctrl\+|c-)[a-z]", lower) is not None:
+            return True
     return len(value) == 1 and unicodedata.category(value) not in {"Cc", "Cs"}
 
 
@@ -672,6 +673,7 @@ def valid_global_response(value):
 
 def main():
     assert not agent_key("\ud800"), "Unicode surrogates are not valid key scalars"
+    assert not agent_key("ctrl+K"), "Ctrl aliases accept ASCII letters only"
     manifest = json.loads((PACKAGE / "fixtures" / "manifest.json").read_text())
     assert manifest["protocol"] == {"name": "luvus-uhp", "major": 1, "minor": 0}
     request_schema = json.loads((PACKAGE / "schema" / "request.schema.json").read_text())
