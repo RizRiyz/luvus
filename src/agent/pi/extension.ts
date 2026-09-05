@@ -1,4 +1,4 @@
-// pi-luvus v0.1.0 — Luvus control plane client for Pi — Apache-2.0
+// pi-luvus v0.1.1 — Luvus control plane client for Pi — Apache-2.0
 // Self-contained extension bundle. Load with `pi -e` or install to
 // ~/.pi/agent/extensions/. Pi-owned packages stay external (peer deps).
 // @bun
@@ -3038,13 +3038,121 @@ class UhpInspector {
 // src/tools/discover.ts
 import { Type as Type3 } from "typebox";
 
+// src/tools/truncate.ts
+var DEFAULT_MAX_LINES = 2000;
+var DEFAULT_MAX_BYTES = 50 * 1024;
+var runtimeBuffer = globalThis.Buffer;
+var nonAsciiPattern = /[^\x00-\x7f]/;
+function utf8ByteLength(content) {
+  if (runtimeBuffer)
+    return runtimeBuffer.byteLength(content, "utf8");
+  const firstNonAscii = content.search(nonAsciiPattern);
+  if (firstNonAscii === -1)
+    return content.length;
+  let bytes = firstNonAscii;
+  for (let i = firstNonAscii;i < content.length; i++) {
+    const code = content.charCodeAt(i);
+    if (code <= 127) {
+      bytes += 1;
+    } else if (code <= 2047) {
+      bytes += 2;
+    } else if (code >= 55296 && code <= 56319 && i + 1 < content.length) {
+      const next = content.charCodeAt(i + 1);
+      if (next >= 56320 && next <= 57343) {
+        bytes += 4;
+        i++;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+function splitLinesForCounting(content) {
+  if (content.length === 0)
+    return [];
+  const lines = content.split(`
+`);
+  if (content.endsWith(`
+`))
+    lines.pop();
+  return lines;
+}
+function truncateHead(content, options = {}) {
+  const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
+  const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+  const totalBytes = utf8ByteLength(content);
+  const lines = splitLinesForCounting(content);
+  const totalLines = lines.length;
+  if (totalLines <= maxLines && totalBytes <= maxBytes) {
+    return {
+      content,
+      truncated: false,
+      truncatedBy: null,
+      totalLines,
+      totalBytes,
+      outputLines: totalLines,
+      outputBytes: totalBytes,
+      lastLinePartial: false,
+      firstLineExceedsLimit: false,
+      maxLines,
+      maxBytes
+    };
+  }
+  const firstLineBytes = utf8ByteLength(lines[0]);
+  if (firstLineBytes > maxBytes) {
+    return {
+      content: "",
+      truncated: true,
+      truncatedBy: "bytes",
+      totalLines,
+      totalBytes,
+      outputLines: 0,
+      outputBytes: 0,
+      lastLinePartial: false,
+      firstLineExceedsLimit: true,
+      maxLines,
+      maxBytes
+    };
+  }
+  const outputLinesArr = [];
+  let outputBytesCount = 0;
+  let truncatedBy = "lines";
+  for (let i = 0;i < lines.length && i < maxLines; i++) {
+    const line = lines[i];
+    const lineBytes = utf8ByteLength(line) + (i > 0 ? 1 : 0);
+    if (outputBytesCount + lineBytes > maxBytes) {
+      truncatedBy = "bytes";
+      break;
+    }
+    outputLinesArr.push(line);
+    outputBytesCount += lineBytes;
+  }
+  if (outputLinesArr.length >= maxLines && outputBytesCount <= maxBytes) {
+    truncatedBy = "lines";
+  }
+  const outputContent = outputLinesArr.join(`
+`);
+  const finalOutputBytes = utf8ByteLength(outputContent);
+  return {
+    content: outputContent,
+    truncated: true,
+    truncatedBy,
+    totalLines,
+    totalBytes,
+    outputLines: outputLinesArr.length,
+    outputBytes: finalOutputBytes,
+    lastLinePartial: false,
+    firstLineExceedsLimit: false,
+    maxLines,
+    maxBytes
+  };
+}
+
 // src/tools/delegate.ts
-import {
-  DEFAULT_MAX_BYTES,
-  DEFAULT_MAX_LINES,
-  truncateHead
-} from "@earendil-works/pi-agent-core";
-import { StringEnum } from "@earendil-works/pi-ai/utils/typebox-helpers";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
 // src/ui/entries.ts
@@ -3744,12 +3852,7 @@ function additiveSetActiveTools(pi, namesToAdd) {
 }
 
 // src/tools/task.ts
-import {
-  DEFAULT_MAX_BYTES as DEFAULT_MAX_BYTES2,
-  DEFAULT_MAX_LINES as DEFAULT_MAX_LINES2,
-  truncateHead as truncateHead2
-} from "@earendil-works/pi-agent-core";
-import { StringEnum as StringEnum2 } from "@earendil-works/pi-ai/utils/typebox-helpers";
+import { StringEnum as StringEnum2 } from "@earendil-works/pi-ai";
 import { Type as Type2 } from "typebox";
 var TASK_TOOL_NAME = "luvus_task";
 var TASK_ACTIONS = [
@@ -3802,9 +3905,9 @@ function fail4(hint) {
   throw new Error(`luvus_task: ${hint}`);
 }
 function truncate2(text) {
-  const result = truncateHead2(text, {
-    maxLines: DEFAULT_MAX_LINES2,
-    maxBytes: DEFAULT_MAX_BYTES2
+  const result = truncateHead(text, {
+    maxLines: DEFAULT_MAX_LINES,
+    maxBytes: DEFAULT_MAX_BYTES
   });
   if (!result.truncated)
     return result.content;
@@ -4286,12 +4389,7 @@ ${lines.join(`
 }
 
 // src/tools/inspect.ts
-import {
-  DEFAULT_MAX_BYTES as DEFAULT_MAX_BYTES3,
-  DEFAULT_MAX_LINES as DEFAULT_MAX_LINES3,
-  truncateHead as truncateHead3
-} from "@earendil-works/pi-agent-core";
-import { StringEnum as StringEnum3 } from "@earendil-works/pi-ai/utils/typebox-helpers";
+import { StringEnum as StringEnum3 } from "@earendil-works/pi-ai";
 import { Type as Type4 } from "typebox";
 
 // src/inspection/cli-inspector.ts
@@ -4412,9 +4510,9 @@ var TARGET_REQUIRED = [
 ];
 var MAX_TABLE_ROWS = 50;
 function truncate3(text) {
-  const result = truncateHead3(text, {
-    maxLines: DEFAULT_MAX_LINES3,
-    maxBytes: DEFAULT_MAX_BYTES3
+  const result = truncateHead(text, {
+    maxLines: DEFAULT_MAX_LINES,
+    maxBytes: DEFAULT_MAX_BYTES
   });
   if (!result.truncated)
     return result.content;
