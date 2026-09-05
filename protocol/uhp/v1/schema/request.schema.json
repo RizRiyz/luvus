@@ -77,6 +77,24 @@
       },
       "oneOf": [ { "required": ["status"] }, { "required": ["statuses"] } ]
     },
+    "agentKey": {
+      "type": "string",
+      "anyOf": [
+        { "pattern": "^(?:[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Cc][Rr]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Tt][Aa][Bb]|[Ss][Pp][Aa][Cc][Ee]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Bb][Ss]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Dd][Ee][Ll]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Rr][Ii][Gg][Hh][Tt]|[Ll][Ee][Ff][Tt]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Gg][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Pp][Gg][Dd][Nn])$" },
+        { "pattern": "^(?:[Cc][Tt][Rr][Ll]\\+|[Cc]-)[A-Za-z]$" },
+        { "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F\\uD800-\\uDFFF]$" }
+      ]
+    },
+    "agentKeysParams": {
+      "type": "object", "additionalProperties": false, "required": ["target", "keys"],
+      "properties": {
+        "target": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "keys": {
+          "type": "array", "minItems": 1,
+          "items": { "$ref": "#/$defs/agentKey" }
+        }
+      }
+    },
     "missionQueryParams": {
       "type": "object", "additionalProperties": false,
       "properties": {
@@ -268,6 +286,8 @@
       "then": { "properties": { "params": { "$ref": "#/$defs/eventWaitParams" } } } },
     { "if": { "properties": { "method": { "const": "agent.wait" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/agentWaitParams" } } } },
+    { "if": { "properties": { "method": { "const": "agent.keys" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/agentKeysParams" } } } },
     { "if": { "properties": { "method": { "enum": ["mission.snapshot", "mission.refresh"] } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/missionQueryParams" } } } },
     { "if": { "properties": { "method": { "enum": ["session.status", "session.start", "session.stop", "session.restart"] } } },

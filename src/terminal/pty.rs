@@ -769,6 +769,11 @@ impl Pane {
             .map_err(|_| "target pane closed before input was delivered".to_string())
     }
 
+    #[cfg(test)]
+    pub(crate) fn replace_input_sender_for_test(&mut self, sender: Sender<InputAction>) {
+        self.input_tx = sender.into();
+    }
+
     /// Enqueue one atomic submitted-text action for protocol consumers. Queue
     /// success is dispatch evidence only; it does not claim the child consumed
     /// or acted on the bytes.
