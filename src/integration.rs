@@ -920,11 +920,233 @@ mod tests {
     }
 
     #[test]
-    fn omp_install_accepts_pi_spelling_only_as_separate_agent() {
-        // omp and pi are different agents. `install("pi")` must NOT install the
-        // OMP extension — pi has no hook integration, so the request errors.
-        assert!(install("pi").is_err(), "pi is not omp; no alias");
-        assert!(!agent_ids().any(|agent| agent == "pi"));
+    fn pi_install_is_supported_and_separate_from_omp() {
+        // omp and pi are different agents with their own managed extensions.
+        // `install("pi")` installs the Pi extension, never the OMP one.
+        assert!(agent_ids().any(|agent| agent == "pi"));
+        assert!(operation("pi").is_some());
+        assert!(operation("omp").is_some());
+    }
+
+    fn pi_extension() -> &'static str {
+        crate::agent::pi::extension_source()
+    }
+
+    struct PiHomeGuard {
+        saved_home: Option<std::ffi::OsString>,
+        saved_userprofile: Option<std::ffi::OsString>,
+        saved_vars: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        tmp: PathBuf,
+    }
+
+    impl PiHomeGuard {
+        /// Snapshot HOME/USERPROFILE/PI_* and point them at `tmp`. Callers
+        /// must already hold `crate::persist::TEST_ENV_LOCK` (`_env`).
+        fn lock(tmp: PathBuf) -> Self {
+            let saved_home = std::env::var_os("HOME");
+            let saved_userprofile = std::env::var_os("USERPROFILE");
+            let keys = [
+                "PI_PROFILE",
+                "PI_CONFIG_DIR",
+                "PI_CODING_AGENT_DIR",
+                "PI_CODING_AGENT_SESSION_DIR",
+                "XDG_DATA_HOME",
+            ];
+            let saved_vars: Vec<_> = keys
+                .iter()
+                .map(|key| (*key, std::env::var_os(key)))
+                .collect();
+            std::env::set_var("HOME", &tmp);
+            std::env::set_var("USERPROFILE", &tmp);
+            for key in keys {
+                std::env::remove_var(key);
+            }
+            Self {
+                saved_home,
+                saved_userprofile,
+                saved_vars,
+                tmp,
+            }
+        }
+    }
+
+    impl Drop for PiHomeGuard {
+        fn drop(&mut self) {
+            match self.saved_home.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match self.saved_userprofile.take() {
+                Some(v) => std::env::set_var("USERPROFILE", v),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            for (key, value) in self.saved_vars.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            let _ = fs::remove_dir_all(&self.tmp);
+        }
+    }
+
+    #[test]
+    fn pi_install_writes_extension_and_is_idempotent() {
+        let _env = crate::persist::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("luvus-pi-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let _guard = PiHomeGuard::lock(tmp.clone());
+
+        install("pi").unwrap();
+        install("pi").unwrap(); // idempotent
+
+        let ext = tmp
+            .join(".pi")
+            .join("agent")
+            .join("extensions")
+            .join("luvus.ts");
+        assert!(ext.exists(), "luvus.ts dropped in the pi extensions dir");
+        // A user-installed factory in the same directory must survive.
+        let sibling = tmp
+            .join(".pi")
+            .join("agent")
+            .join("extensions")
+            .join("mine.ts");
+        fs::write(&sibling, "export default () => {}").unwrap();
+
+        install("pi").unwrap();
+        assert!(sibling.exists(), "unrelated pi extension preserved");
+        assert!(is_installed("pi"));
+
+        uninstall("pi").unwrap();
+        assert!(!is_installed("pi"), "luvus.ts removed");
+        assert!(sibling.exists(), "unrelated pi extension still preserved");
+        uninstall("pi").unwrap(); // idempotent
+    }
+
+    #[test]
+    fn pi_install_respects_coding_agent_dir_override() {
+        let _env = crate::persist::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("luvus-pi-dir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let _guard = PiHomeGuard::lock(tmp.clone());
+        let custom = tmp.join("custom-agent");
+        std::env::set_var("PI_CODING_AGENT_DIR", &custom);
+
+        install("pi").unwrap();
+        assert!(
+            custom.join("extensions").join("luvus.ts").exists(),
+            "PI_CODING_AGENT_DIR override is honored"
+        );
+        assert!(
+            !tmp.join(".pi").exists(),
+            "the default pi dir is untouched when overridden"
+        );
+        uninstall("pi").unwrap();
+        assert!(!is_installed("pi"));
+    }
+
+    #[test]
+    fn pi_uninstall_preserves_neighboring_extensions() {
+        let _env = crate::persist::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("luvus-pi-nb-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let _guard = PiHomeGuard::lock(tmp.clone());
+        let dir = tmp.join(".pi").join("agent").join("extensions");
+        fs::create_dir_all(&dir).unwrap();
+        // A user-authored luvus.ts lookalike plus an unrelated extension.
+        fs::write(dir.join("mine.ts"), "export default () => {}").unwrap();
+
+        install("pi").unwrap();
+        // Overwrite the managed file with user content, then reinstall: the
+        // managed file is restored and the neighbor survives.
+        fs::write(dir.join("luvus.ts"), "// user edit").unwrap();
+        install("pi").unwrap();
+        assert!(dir.join("mine.ts").exists());
+        assert_ne!(
+            fs::read_to_string(dir.join("luvus.ts")).unwrap(),
+            "// user edit",
+            "reinstall restores the managed extension"
+        );
+
+        uninstall("pi").unwrap();
+        assert!(!dir.join("luvus.ts").exists());
+        assert!(dir.join("mine.ts").exists(), "neighbor survives uninstall");
+    }
+
+    #[test]
+    fn pi_extension_source_is_syntactically_valid_typescript() {
+        // Rust CI embeds the extension as text and never type-checks it, so
+        // validate the generated file with Node's parser (available on every
+        // GitHub runner). `node --check` parses the source without executing
+        // it; a missing identifier or syntax error fails the build.
+        let node = std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join(if cfg!(windows) { "node.exe" } else { "node" }))
+                .find(|candidate| candidate.is_file())
+        });
+        let Some(node) = node else {
+            return; // node not installed locally — CI runners always have it
+        };
+        let dir = std::env::temp_dir().join(format!("luvus-pi-parse-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("luvus.mts"); // .mts: parsed as an ES module
+        fs::write(&path, pi_extension()).unwrap();
+        let output = std::process::Command::new(node)
+            .args(["--check", "--experimental-strip-types"])
+            .arg(&path)
+            .output()
+            .expect("node --check should spawn");
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            output.status.success(),
+            "generated pi extension failed to parse: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn pi_extension_exports_default_factory_and_reads_luvus_env() {
+        // Pi loads the extension through its default-exported factory; the
+        // factory must stay a no-op without Luvus context and must read the
+        // documented LUVUS_* surface.
+        let source = pi_extension();
+        assert!(
+            source.contains("createLuvusExtension as default"),
+            "the extension must keep its default export or pi never loads it"
+        );
+        for var in [
+            "LUVUS_ENV",
+            "LUVUS_PANE_ID",
+            "LUVUS_SOCKET_PATH",
+            "LUVUS_BIN_PATH",
+            "LUVUS_API_ADDRESS",
+        ] {
+            assert!(source.contains(var), "missing `{var}` surface");
+        }
+        for event in [
+            "session_start",
+            "agent_start",
+            "agent_settled",
+            "ui_prompt_start",
+            "ui_prompt_end",
+            "tool_execution_start",
+            "tool_execution_end",
+            "turn_end",
+            "session_shutdown",
+        ] {
+            assert!(
+                source.contains(&format!("pi.on(\"{event}\""))
+                    || source.contains(&format!("pi.on('{event}'")),
+                "missing `{event}` registration"
+            );
+        }
     }
 
     #[test]

@@ -340,7 +340,7 @@ server:
   server restart             stop + start (load a newly-installed binary)
   server update-manifest     fetch the latest agent-detection rules from luvus.dev
                              (applies live if the server is up; else on next start)
-  integration install|uninstall <claude|copilot|codex|antigravity|opencode|kimi|grok|hermes|omp>
+  integration install|uninstall <claude|copilot|codex|antigravity|opencode|kimi|grok|hermes|omp|pi>
                              add/remove luvus's session-resume hook (uninstall
                              removes only luvus's hook, never the agent)
 ";
@@ -5737,18 +5737,15 @@ mod tests {
     }
 
     #[test]
-    fn integration_help_and_docs_name_omp_not_pi() {
-        // The OMP extension installs via `install omp`. Plain Pi is a
-        // different agent with no hook integration, so neither the help text
-        // nor the published CLI reference may advertise `pi` here — and both
-        // must list `omp`.
-        assert!(DETAILED_USAGE.contains("|omp>"));
-        assert!(!DETAILED_USAGE.contains("|pi>"));
+    fn integration_help_and_docs_name_omp_and_pi() {
+        // The OMP extension installs via `install omp` and the Pi extension
+        // via `install pi`. Both are different agents, so the help text and
+        // the published CLI reference must list both.
+        assert!(DETAILED_USAGE.contains("|omp|pi>"));
         let page = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("website/src/content/docs/docs/reference/cli.mdx");
         if let Ok(text) = fs::read_to_string(page) {
-            assert!(text.contains("|omp>"));
-            assert!(!text.contains("|pi>"));
+            assert!(text.contains("|omp|pi>"));
         }
     }
 }

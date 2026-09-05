@@ -6,10 +6,7 @@ pub(in crate::agent) fn base() -> PathBuf {
     std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            super::super::home()
-                .join(".pi")
-                .join("agent")
-                .join("sessions")
+            super::integration::default_agent_dir_at(&super::super::home()).join("sessions")
         })
 }
 

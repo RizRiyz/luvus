@@ -96,7 +96,7 @@ Keyboard → Keyboard Shortcuts → Input Sources** to free `Ctrl+Space`.
 | Kimi | ✓ | ✓ | ✓ |
 | Grok | ✓ | ✓ | ✓ |
 | Hermes CLI | ✓ | ✓ with integration | session only |
-| Pi | ✓ | ✓ | No |
+| Pi | ✓ | ✓ | ✓ |
 | Oh My Pi (omp) | ✓ | ✓ | ✓ |
 | Muse Code | ✓ | ✓ | No |
 | Fx | ✓ | ✓ | No |

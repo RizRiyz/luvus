@@ -207,7 +207,7 @@ Screen-based detection needs no setup and works for everything. The optional
 where its hook contract supports them safely, lifecycle events into luvus:
 
 ```sh
-luvus integration install claude    # or: copilot · codex · antigravity · opencode · kimi · grok · hermes · omp
+luvus integration install claude    # or: copilot · codex · antigravity · opencode · kimi · grok · hermes · omp · pi
 ```
 
 or toggle it in **Settings → Integrations**. What it does per agent:
@@ -237,6 +237,11 @@ or toggle it in **Settings → Integrations**. What it does per agent:
   directory. It reports exact session identity and authoritative
   idle/working/blocked/done transitions while preserving Luvus's native
   process/screen detection as the zero-setup fallback.
+- **pi**: installs one managed TypeScript extension in Pi's active agent
+  directory (`~/.pi/agent/extensions/`, honoring `PI_CODING_AGENT_DIR`,
+  `PI_CONFIG_DIR`, and `PI_PROFILE`). Same reporting contract as the OMP
+  extension: exact session identity plus authoritative
+  idle/working/blocked/done transitions, with native detection as fallback.
 
 Uninstalling (`luvus integration uninstall <agent>`, or the same Settings
 toggle) surgically removes **only luvus's hook entry**. Your other settings

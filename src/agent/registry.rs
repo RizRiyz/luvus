@@ -34,6 +34,7 @@ static INTEGRATIONS: &[&AgentDescriptor] = &[
     &super::grok::DESCRIPTOR,
     &super::hermes::DESCRIPTOR,
     &super::omp::DESCRIPTOR,
+    &super::pi::DESCRIPTOR,
 ];
 
 const _: () = assert!(
@@ -324,6 +325,7 @@ mod tests {
                 "grok",
                 "hermes",
                 "omp",
+                "pi",
             ]
         );
     }
