@@ -4022,7 +4022,8 @@ fn mouse_wheel_seq(up: bool, col: u16, row: u16, sgr: bool) -> Vec<u8> {
 /// `app_cursor` mirrors the pane's DECCKM state: cursor keys go out as SS3
 /// (`ESC O <letter>`) when the app enabled application cursor mode, exactly as a
 /// real terminal would send them — some apps (`less`) only recognize the SS3
-/// form once they've turned the mode on.
+/// form once they've turned the mode on. Unnegotiated Alt+character stays
+/// ESC+char; after Kitty disambiguate it is CSI-u so `Alt+/` is not two keys.
 fn encode_key(
     key: &KeyEvent,
     newline: &[u8],
@@ -4069,6 +4070,21 @@ fn encode_key(
                 } else {
                     vec![b]
                 }
+            } else if disambiguate
+                && !altgr
+                && (alt
+                    || key
+                        .modifiers
+                        .intersects(KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META))
+            {
+                // Kitty disambiguate reports alt/super+key as CSI-u instead of
+                // ESC+char or a Super-stripped character.
+                let codepoint = if shift && c.is_alphabetic() {
+                    single_lowercase_codepoint(c)
+                } else {
+                    c
+                };
+                return Some(csi_u_char(codepoint, key.modifiers));
             } else {
                 let mut s = c.to_string().into_bytes();
                 if alt && !altgr {
@@ -4089,16 +4105,38 @@ fn encode_key(
         // of the box (Claude Code's `/terminal-setup`).
         KeyCode::Enter if shift || alt => newline.to_vec(),
         KeyCode::Enter => vec![b'\r'],
-        KeyCode::Tab => vec![b'\t'],
-        KeyCode::BackTab => vec![0x1b, b'[', b'Z'],
+        KeyCode::Tab => {
+            if disambiguate && key_modifier_param(key.modifiers) != 1 {
+                csi_u_code(9, key.modifiers)
+            } else {
+                vec![b'\t']
+            }
+        }
+        KeyCode::BackTab => {
+            if disambiguate {
+                let mut modifiers = key.modifiers;
+                modifiers.insert(KeyModifiers::SHIFT);
+                csi_u_code(9, modifiers)
+            } else {
+                vec![0x1b, b'[', b'Z']
+            }
+        }
         KeyCode::Backspace => {
-            if alt {
+            if disambiguate && key_modifier_param(key.modifiers) != 1 {
+                csi_u_code(127, key.modifiers)
+            } else if alt {
                 vec![0x1b, 0x7f]
             } else {
                 vec![0x7f]
             }
         }
-        KeyCode::Esc => vec![0x1b],
+        KeyCode::Esc => {
+            if disambiguate && key_modifier_param(key.modifiers) != 1 {
+                csi_u_code(27, key.modifiers)
+            } else {
+                vec![0x1b]
+            }
+        }
         // Keep navigation modifiers intact. Crossterm reports these directly
         // from Windows console records, while terminals on Unix report them via
         // xterm/Kitty escape sequences. Dropping the modifiers here turned
@@ -4173,12 +4211,11 @@ fn csi(final_byte: u8) -> Vec<u8> {
 }
 
 fn csi_u_char(character: char, modifiers: KeyModifiers) -> Vec<u8> {
-    format!(
-        "\x1b[{};{}u",
-        character as u32,
-        key_modifier_param(modifiers)
-    )
-    .into_bytes()
+    csi_u_code(u32::from(character), modifiers)
+}
+
+fn csi_u_code(codepoint: u32, modifiers: KeyModifiers) -> Vec<u8> {
+    format!("\x1b[{codepoint};{}u", key_modifier_param(modifiers)).into_bytes()
 }
 
 /// Encode a cursor key (arrows / Home / End). In application cursor mode
@@ -4724,6 +4761,36 @@ mod tests {
     }
 
     #[test]
+    fn alt_punctuation_uses_csi_u_only_after_negotiation() {
+        let encode = |character, disambiguate| {
+            encode_key(
+                &KeyEvent::new(KeyCode::Char(character), KeyModifiers::ALT),
+                b"\x1b\r",
+                false,
+                disambiguate,
+            )
+        };
+
+        assert_eq!(encode('/', false), Some(b"\x1b/".to_vec()));
+        assert_eq!(encode(';', false), Some(b"\x1b;".to_vec()));
+        assert_eq!(encode('a', false), Some(b"\x1ba".to_vec()));
+
+        assert_eq!(encode('/', true), Some(b"\x1b[47;3u".to_vec()));
+        assert_eq!(encode(';', true), Some(b"\x1b[59;3u".to_vec()));
+        assert_eq!(encode('\'', true), Some(b"\x1b[39;3u".to_vec()));
+        assert_eq!(encode('a', true), Some(b"\x1b[97;3u".to_vec()));
+        assert_eq!(
+            encode_key(
+                &KeyEvent::new(KeyCode::Char('/'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+                b"\x1b\r",
+                false,
+                true,
+            ),
+            Some(b"\x1b[47;4u".to_vec())
+        );
+    }
+
+    #[test]
     fn alt_backspace_sends_meta_delete_for_word_deletion() {
         let key = |modifiers, disambiguate| {
             encode_key(
@@ -4734,10 +4801,68 @@ mod tests {
             )
         };
 
-        for disambiguate in [false, true] {
-            assert_eq!(key(KeyModifiers::NONE, disambiguate), Some(vec![0x7f]));
-            assert_eq!(key(KeyModifiers::ALT, disambiguate), Some(vec![0x1b, 0x7f]));
-        }
+        assert_eq!(key(KeyModifiers::NONE, false), Some(vec![0x7f]));
+        assert_eq!(key(KeyModifiers::NONE, true), Some(vec![0x7f]));
+        assert_eq!(key(KeyModifiers::ALT, false), Some(vec![0x1b, 0x7f]));
+        assert_eq!(key(KeyModifiers::ALT, true), Some(b"\x1b[127;3u".to_vec()));
+        assert_eq!(key(KeyModifiers::CONTROL, false), Some(vec![0x7f]));
+        assert_eq!(
+            key(KeyModifiers::CONTROL, true),
+            Some(b"\x1b[127;5u".to_vec())
+        );
+    }
+
+    #[test]
+    fn modified_tab_esc_and_super_use_csi_u_after_negotiation() {
+        let encode = |code, modifiers, disambiguate| {
+            encode_key(
+                &KeyEvent::new(code, modifiers),
+                b"\x1b\r",
+                false,
+                disambiguate,
+            )
+        };
+
+        assert_eq!(
+            encode(KeyCode::Tab, KeyModifiers::CONTROL, false),
+            Some(b"\t".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::Tab, KeyModifiers::CONTROL, true),
+            Some(b"\x1b[9;5u".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::Tab, KeyModifiers::ALT, true),
+            Some(b"\x1b[9;3u".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::BackTab, KeyModifiers::NONE, false),
+            Some(b"\x1b[Z".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::BackTab, KeyModifiers::NONE, true),
+            Some(b"\x1b[9;2u".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::Esc, KeyModifiers::NONE, true),
+            Some(vec![0x1b])
+        );
+        assert_eq!(
+            encode(KeyCode::Esc, KeyModifiers::ALT, false),
+            Some(vec![0x1b])
+        );
+        assert_eq!(
+            encode(KeyCode::Esc, KeyModifiers::ALT, true),
+            Some(b"\x1b[27;3u".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::Char('a'), KeyModifiers::SUPER, false),
+            Some(b"a".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::Char('a'), KeyModifiers::SUPER, true),
+            Some(b"\x1b[97;9u".to_vec())
+        );
     }
 
     #[test]
