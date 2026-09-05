@@ -15,3 +15,4 @@
 {"id":"bad-session-extra","method":"session.start","params":{"name":"review","extra":true}}
 {"id":"bad-session-name","method":"session.start","params":{"name":"."}}
 {"id":"bad-integration-status","method":"integration.status","params":{"agent":"claude"}}
+{"id":"bad-task-heartbeat-progress","method":"task.heartbeat","params":{"id":"t1","context":1.1}}

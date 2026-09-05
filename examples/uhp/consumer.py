@@ -390,6 +390,16 @@ def valid_global_request(value, methods):
             return False
         if mode == "worktree" and "workspace_id" in params:
             return False
+    if value["method"] == "task.heartbeat":
+        params = value["params"]
+        context = params.get("context")
+        return (
+            set(params) == {"id", "context"}
+            and bounded_string(params["id"], 128, allow_empty=False)
+            and isinstance(context, (int, float))
+            and not isinstance(context, bool)
+            and 0 <= context <= 1
+        )
     return True
 
 

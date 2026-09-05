@@ -938,6 +938,29 @@ mod socket_api_tests {
     }
 
     #[test]
+    fn task_heartbeat_rejects_invalid_context_without_mutation() {
+        let (_env, mut app) = app("socket-task-heartbeat-context");
+        app.orch
+            .add_task("heartbeat".into(), vec![], vec![], None)
+            .unwrap();
+
+        app.dispatch("task.heartbeat", &json!({"id":"t1","context":0.6}))
+            .unwrap();
+        assert_eq!(app.orch.task("t1").unwrap().context, Some(0.6));
+
+        for params in [
+            json!({"id":"t1"}),
+            json!({"id":"t1","context":"0.5"}),
+            json!({"id":"t1","context":-0.1}),
+            json!({"id":"t1","context":1.1}),
+        ] {
+            let error = app.dispatch("task.heartbeat", &params).unwrap_err();
+            assert_eq!(error.0, "invalid_request");
+            assert_eq!(app.orch.task("t1").unwrap().context, Some(0.6));
+        }
+    }
+
+    #[test]
     fn socket_mutations_support_optimistic_revision_guards() {
         let (_env, mut app) = app("socket-revision-guard");
         let (reply, _) = std::sync::mpsc::channel();
@@ -4865,6 +4888,12 @@ impl App {
                         "context (0..1) is required".to_string(),
                     )
                 })?;
+                if !ctx.is_finite() || !(0.0..=1.0).contains(&ctx) {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "context must be a finite number from 0 to 1".to_string(),
+                    ));
+                }
                 let over = self.orch.heartbeat(&id, ctx).map_err(orch_err)?;
                 self.orch.save();
                 if over {

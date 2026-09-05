@@ -277,7 +277,9 @@ orchestration (multiple agents on one project, docs/22):
                              claim the next ready task (--start creates a worker)
   task start <id> [--branch <b>] [--agent <cmd>] [--mode worktree|workspace]
                              start a worker (worktree default; workspace shares checkout)
-  task heartbeat <id> --context <0..1>   report context usage (blocks done at >85%)
+  task heartbeat <id> --context-used <0..1>
+                             report model context-window use, not task progress
+                             (>85% blocks done; --context remains accepted)
   task update <id> [--status <s>] [--output <o>] [--note <n>]
   task done <id>             mark done + release its leases
   task merge <id>            integrate the task's branch into luvus/integration
@@ -3495,9 +3497,10 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             if let Some(id) = arg0() {
                 obj.insert("id".into(), json!(id));
             }
-            if let Some(c) = flag(args, "--context").and_then(|s| s.parse::<f64>().ok()) {
-                obj.insert("context".into(), json!(c));
-            }
+            // `--context` remains a compatibility alias. Keep the UHP field
+            // stable while making the CLI spelling explicit enough that an
+            // agent cannot reasonably confuse it with task progress.
+            obj.insert("context".into(), json!(heartbeat_context(args)?));
             ("task.heartbeat".into(), Value::Object(obj))
         }
         ("task", "start") => {
@@ -3605,6 +3608,22 @@ fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter()
         .position(|a| a == name)
         .and_then(|i| args.get(i + 1).cloned())
+}
+
+/// Parse the model context-window fraction for `task heartbeat`. The explicit
+/// spelling wins whenever both aliases are present, including when its value is
+/// invalid, so a malformed primary flag cannot silently fall back to legacy
+/// input.
+fn heartbeat_context(args: &[String]) -> Result<f64> {
+    let flag_name = if args.iter().any(|arg| arg == "--context-used") {
+        "--context-used"
+    } else {
+        "--context"
+    };
+    flag(args, flag_name)
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        .ok_or_else(|| anyhow!("--context-used requires a finite number from 0 to 1"))
 }
 
 /// A module-setting value typed on the command line. `true`/`false` and whole
@@ -4526,9 +4545,35 @@ mod tests {
 
         assert!(parse(&argv("luvus task start t1 --mode unsafe")).is_err());
 
-        let (m, p) = parse(&argv("luvus task heartbeat t1 --context 0.7")).unwrap();
+        let (m, p) = parse(&argv("luvus task heartbeat t1 --context-used 0.7")).unwrap();
         assert_eq!(m, "task.heartbeat");
         assert_eq!(p.get("context").and_then(|v| v.as_f64()), Some(0.7));
+
+        let (m, p) = parse(&argv("luvus task heartbeat t1 --context 0.4")).unwrap();
+        assert_eq!(m, "task.heartbeat");
+        assert_eq!(p.get("context").and_then(|v| v.as_f64()), Some(0.4));
+
+        let (_, p) = parse(&argv(
+            "luvus task heartbeat t1 --context 0.4 --context-used 0.7",
+        ))
+        .unwrap();
+        assert_eq!(p.get("context").and_then(|v| v.as_f64()), Some(0.7));
+
+        for invalid in [
+            "luvus task heartbeat t1",
+            "luvus task heartbeat t1 --context-used",
+            "luvus task heartbeat t1 --context-used nope",
+            "luvus task heartbeat t1 --context-used NaN",
+            "luvus task heartbeat t1 --context-used inf",
+            "luvus task heartbeat t1 --context-used -0.1",
+            "luvus task heartbeat t1 --context-used 1.1",
+            "luvus task heartbeat t1 --context nope",
+            "luvus task heartbeat t1 --context -0.1",
+            "luvus task heartbeat t1 --context 1.1",
+            "luvus task heartbeat t1 --context 0.4 --context-used nope",
+        ] {
+            assert!(parse(&argv(invalid)).is_err(), "{invalid} must be rejected");
+        }
 
         let (m, p) = parse(&argv("luvus task merge t1")).unwrap();
         assert_eq!(m, "task.merge");
