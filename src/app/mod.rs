@@ -6790,13 +6790,12 @@ impl App {
     /// which for a stacked pane lands exactly on the horizontal divider. Resize
     /// must yield there, or the divider grab zone swallows every click on the ✕
     /// and the pane can't be closed by mouse.
-    /// True if `(c, r)` lands on a pane's interactive **border chrome**: a title
-    /// strip (the command-inspector button), the ⤢/⤡ zoom toggle, or the ✕ close
-    /// button. These live on the top border row — exactly the cells a resize grab
-    /// band would otherwise swallow — so every resize path (grab, Ctrl-grab, hover
-    /// highlight) excludes them: the seam between panes stays grabbable, but a
-    /// click on a title or button always wins. On a stacked split this matters
-    /// most, since the divider line *is* the lower pane's top border.
+    /// True if `(c, r)` lands on pane **border chrome**: a title strip, the ⤢/⤡
+    /// zoom toggle, or the ✕ close button. These live on the top border row,
+    /// exactly where a resize grab band would otherwise claim the press, so every
+    /// resize path excludes them. A title click can then focus its pane without
+    /// unexpectedly starting a resize. On a stacked split this matters most,
+    /// since the divider line is the lower pane's top border.
     fn on_pane_chrome(&self, c: u16, r: u16) -> bool {
         fn hit(rc: Rect, c: u16, r: u16) -> bool {
             c >= rc.x && c < rc.right() && r >= rc.y && r < rc.bottom()
@@ -6808,10 +6807,8 @@ impl App {
 
     pub fn begin_resize(&mut self, c: u16, r: u16) -> bool {
         // Pane border chrome (title, ⤢ zoom, ✕ close) always wins the click, even
-        // though it sits on the seam a resize would otherwise grab — see
-        // `on_pane_chrome`. This is what makes those buttons and the title
-        // clickable on a stacked split, where the divider line lands on the lower
-        // pane's top border row.
+        // though it sits on the seam a resize would otherwise grab. This keeps
+        // title focus and the two buttons reliable on stacked splits.
         if self.active_is_git() || self.active_is_orch() || self.on_pane_chrome(c, r) {
             return false;
         }
@@ -10424,9 +10421,9 @@ mod tests {
     }
 
     /// End-to-end through the real mouse pipeline (`handle_event`), the user's
-    /// exact report: on a stacked split, clicking the bottom pane's title opens
-    /// its command overlay, clicking its ⤢ zoom toggles zoom, and clicking its
-    /// content focuses it — none of them get eaten by a divider resize.
+    /// exact report: on a stacked split, clicking the bottom pane's title focuses
+    /// it, clicking its ⤢ zoom toggles zoom, and clicking its content focuses it.
+    /// None of them get eaten by a divider resize.
     #[test]
     fn stacked_bottom_pane_title_zoom_and_body_are_all_clickable() {
         let _env = crate::persist::test_env("stacked-clickable");
@@ -10463,19 +10460,17 @@ mod tests {
         app.zoomed = false;
         render(&mut app, &mut term);
 
-        // 2. The title strip opens the running-command overlay.
+        // 2. The title strip focuses its pane without opening an overlay.
         let (_, title) = *app
             .pane_title_rects
             .iter()
             .max_by_key(|(_, rc)| rc.y)
             .expect("bottom pane has a title strip");
+        app.layout_mut().focus = top;
         click(&mut app, title.x + 1, title.y);
-        assert!(
-            app.cmd_inspect.is_some(),
-            "clicking the title opened the command overlay"
-        );
+        assert_eq!(app.layout().focus, bottom, "title click focused its pane");
+        assert!(app.cmd_inspect.is_none(), "title click opened no overlay");
         assert!(app.resize_drag.is_none(), "title did not start a resize");
-        app.close_cmd_inspect();
         render(&mut app, &mut term);
 
         // 3. Focus the top pane, then a click in the bottom pane's *body* focuses
@@ -12751,19 +12746,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    // Clicking a pane's title opens the running-command overlay. The point is
-    // that the command comes from the OS, not the screen: an agent's own UI
-    // elides long commands and those characters never reach luvus at all.
+    // The pane context menu keeps the running-command overlay available. The
+    // command comes from the OS, not the screen, because an agent's own UI can
+    // elide characters before they ever reach luvus.
     #[test]
-    fn clicking_a_pane_title_shows_the_real_command() {
-        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    fn pane_menu_shows_the_real_running_command() {
         use ratatui::{backend::TestBackend, Terminal};
         let _env = crate::persist::test_env("cmd-inspect");
         let (tx, rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
 
-        // Titles (and borders) only render on split panes, so split first — the
-        // single-pane case is covered by the pane context menu instead.
+        // Split first so this continues to exercise the same live child process
+        // setup as the pane-title regression tests.
         app.split(Axis::Col);
         let id = app.layout().focus;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -12779,22 +12773,16 @@ mod tests {
                 Err(error) => panic!("the split pane never became ready: {error}"),
             }
         }
-        // Render once so the title strips are registered as click targets.
+        // The right-click menu action remains the explicit path to inspection.
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
-        let (_, title) = *app
-            .pane_title_rects
-            .iter()
-            .find(|(pid, _)| *pid == id)
-            .expect("the focused pane has a clickable title");
-
         assert!(app.cmd_inspect.is_none());
-        app.handle_event(AppEvent::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: title.x + 1,
-            row: title.y,
-            modifiers: KeyModifiers::NONE,
-        }));
+        app.open_pane_menu(id, 1, 1);
+        assert!(
+            app.pane_menu_items().contains(&PaneMenuItem::RunningCmd),
+            "the pane menu offers running-command inspection"
+        );
+        app.pane_menu_action(PaneMenuItem::RunningCmd);
         let c = app.cmd_inspect.as_ref().expect("the overlay opened");
         assert_eq!(c.pane, id);
         // The pane's own shell is the root of the tree, with its real argv.
