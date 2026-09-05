@@ -4054,8 +4054,11 @@ fn encode_key(
                         // slash binding for the nested CSI-u client.
                         '/' | '7' => '/',
                         // Kitty reports the unshifted codepoint and carries
-                        // Shift in the modifier parameter.
-                        'a'..='z' | 'A'..='Z' if shift => c.to_ascii_lowercase(),
+                        // Shift in the modifier parameter. Normalize Unicode
+                        // letters too when their lowercase form is one scalar.
+                        character if shift && character.is_alphabetic() => {
+                            single_lowercase_codepoint(character)
+                        }
                         _ => c,
                     };
                     return Some(csi_u_char(codepoint, key.modifiers));
@@ -4136,6 +4139,17 @@ fn encode_key(
         _ => return None,
     };
     Some(bytes)
+}
+
+/// Lowercase a key identity only when Unicode maps it to exactly one scalar.
+fn single_lowercase_codepoint(character: char) -> char {
+    let mut lowercase = character.to_lowercase();
+    let first = lowercase.next().unwrap_or(character);
+    if lowercase.next().is_none() {
+        first
+    } else {
+        character
+    }
 }
 
 fn legacy_control_byte(character: char) -> Option<u8> {
@@ -4786,6 +4800,23 @@ mod tests {
                 "Ctrl+{character} should use negotiated CSI-u"
             );
         }
+        // Shifted Unicode letters use their unshifted, single-codepoint form
+        // once CSI-u is negotiated. Legacy mode remains unable to represent
+        // this chord and therefore keeps its previous no-output behavior.
+        let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        let unicode = |disambiguate| {
+            encode_key(
+                &KeyEvent::new(KeyCode::Char('É'), ctrl_shift),
+                b"\x1b\r",
+                false,
+                disambiguate,
+            )
+        };
+        assert_eq!(unicode(false), None);
+        assert_eq!(
+            unicode(true),
+            Some(format!("\x1b[{};6u", 'é' as u32).into_bytes())
+        );
     }
 
     /// `Ctrl+Shift+<letter>` must survive the trip to a nested TUI. The legacy
