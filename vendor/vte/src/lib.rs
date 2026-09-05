@@ -720,11 +720,28 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     /// Handle ground dispatch of print/execute for all characters in a string.
     #[inline]
     fn ground_dispatch<P: Perform>(performer: &mut P, text: &str) {
-        for c in text.chars() {
+        let bytes = text.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if matches!(bytes[index], b' '..=b'~') {
+                let start = index;
+                index += 1;
+                while index < bytes.len() && matches!(bytes[index], b' '..=b'~') {
+                    index += 1;
+                }
+                performer.print_ascii(&bytes[start..index]);
+                continue;
+            }
+
+            let c = text[index..]
+                .chars()
+                .next()
+                .expect("ground text index remains on a character boundary");
             match c {
                 '\x00'..='\x1f' | '\u{80}'..='\u{9f}' => performer.execute(c as u8),
                 _ => performer.print(c),
             }
+            index += c.len_utf8();
         }
     }
 }
@@ -761,6 +778,17 @@ enum State {
 pub trait Perform {
     /// Draw a character to the screen and update states.
     fn print(&mut self, _c: char) {}
+
+    /// Draw a contiguous run of printable ASCII characters.
+    ///
+    /// The default retains the exact per-character contract. Terminal
+    /// implementations can override this to avoid repeating UTF-8 and width
+    /// classification for the overwhelmingly common shell-output path.
+    fn print_ascii(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.print(char::from(*byte));
+        }
+    }
 
     /// Execute a C0 or C1 control function.
     fn execute(&mut self, _byte: u8) {}

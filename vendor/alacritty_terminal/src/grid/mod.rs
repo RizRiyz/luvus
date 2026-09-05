@@ -1,6 +1,7 @@
 //! A specialized 2D grid implementation optimized for use in a terminal.
 
 use std::cmp::{max, min};
+use std::hash::Hash;
 use std::ops::{Bound, Deref, Index, IndexMut, Range, RangeBounds};
 
 #[cfg(feature = "serde")]
@@ -18,6 +19,7 @@ mod tests;
 
 pub use self::row::Row;
 use self::storage::Storage;
+use self::storage::StorageMetrics;
 
 pub trait GridCell: Sized + Clone {
     /// Check if the cell contains any content.
@@ -328,7 +330,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         // Ensure all new lines are fully cleared.
         for i in (region.end.0 - positions as i32..region.end.0).map(Line::from) {
-            self.raw[i].reset(&self.cursor.template);
+            self.raw.reset_row(i, &self.cursor.template);
         }
     }
 
@@ -427,6 +429,11 @@ impl<T> Grid<T> {
         self.raw.cache_bytes()
     }
 
+    #[inline]
+    pub(crate) fn storage_metrics(&self) -> StorageMetrics {
+        self.raw.storage_metrics()
+    }
+
     /// Estimated shallow allocation for the grid's row and cell vectors.
     #[inline]
     pub fn estimated_storage_bytes(&self) -> usize {
@@ -510,6 +517,23 @@ impl<T> Grid<T> {
     {
         let point = self.cursor.point;
         &mut self[point.line][point.column]
+    }
+}
+
+impl<T> Grid<T>
+where
+    T: GridCell + Default + Eq + Hash,
+{
+    /// Pack newly cold history without touching the active or recent rows.
+    #[inline]
+    pub fn pack_cold_history(&mut self) -> usize {
+        self.raw.pack_cold_history()
+    }
+
+    /// Repack every dense cold-history run after a structural mutation.
+    #[inline]
+    pub fn pack_all_cold_history(&mut self) -> usize {
+        self.raw.pack_all_cold_history()
     }
 }
 

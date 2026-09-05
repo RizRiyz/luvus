@@ -508,6 +508,13 @@ pub trait Handler {
     /// A character to be displayed.
     fn input(&mut self, _c: char) {}
 
+    /// A contiguous run of printable ASCII characters.
+    fn input_ascii(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.input(char::from(*byte));
+        }
+    }
+
     /// Set cursor to position.
     fn goto(&mut self, _line: i32, _col: usize) {}
 
@@ -1299,6 +1306,12 @@ where
     fn print(&mut self, c: char) {
         self.handler.input(c);
         self.state.preceding_char = Some(c);
+    }
+
+    #[inline]
+    fn print_ascii(&mut self, bytes: &[u8]) {
+        self.handler.input_ascii(bytes);
+        self.state.preceding_char = bytes.last().copied().map(char::from);
     }
 
     #[inline]

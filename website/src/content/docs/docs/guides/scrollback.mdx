@@ -16,6 +16,14 @@ memory predictably but reports retained bytes as an estimate rather than an
 exact allocator measurement. Reducing the setting trims existing history
 immediately; increasing it applies to subsequent output.
 
+Completed rows stay fully lossless but cold history is packed into bounded,
+shared blocks. Repeated cells use a block-local dictionary, while high-entropy
+content falls back to direct packed cells. The visible screen and recent 128
+history rows stay in the normal mutable representation. Unix schedules packing
+on a bounded activity deadline inside the existing PTY descriptor actor;
+Windows uses its coalesced output boundary. This adds no thread or idle polling,
+and reading old history does not inflate the complete transcript.
+
 **Keyboard scroll mode:** press **`Shift+↑`** (no prefix needed, so it works
 even where macOS eats `Ctrl+Space`). The status bar switches to SCROLL and
 plain keys navigate without reaching the program in the pane:
