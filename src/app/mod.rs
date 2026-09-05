@@ -12613,6 +12613,9 @@ mod tests {
     // Clicking a pane's title opens the running-command overlay. The point is
     // that the command comes from the OS, not the screen: an agent's own UI
     // elides long commands and those characters never reach luvus at all.
+    /// Unix only: `platform::process_tree` returns an empty vec off unix, so the
+    /// overlay degrades to the pane's own command and has no tree to assert.
+    #[cfg(unix)]
     #[test]
     fn clicking_a_pane_title_shows_the_real_command() {
         use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -13732,17 +13735,23 @@ mod tests {
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         app.open_settings();
         app.handle_event(AppEvent::Key(KeyEvent::new(
-            KeyCode::Char('2'),
+            KeyCode::Char('3'),
             KeyModifiers::NONE,
-        ))); // Layout
+        ))); // Layout — `1` General, `2` Theme, `3` Layout (`SettingsTab::ALL`)
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
 
         assert_eq!(app.config.shell, "default");
-        // The Shell row (control index 5) cycles forward on click.
+        // The Shell row cycles forward on click. Ask the row list where it is:
+        // a hardcoded index silently clicks whatever moved into its place.
+        let shell_idx = app
+            .layout_rows()
+            .iter()
+            .position(|r| matches!(r, crate::app::settings::LayoutRow::Shell))
+            .expect("the Layout tab has a Shell row on Windows");
         let row = app
             .settings_ctl_rects
             .iter()
-            .find(|(i, _)| *i == 5)
+            .find(|(i, _)| *i == shell_idx)
             .unwrap()
             .1;
         app.handle_event(AppEvent::Mouse(MouseEvent {
@@ -14017,6 +14026,9 @@ mod tests {
         assert_eq!(offset(&app), saved, "cancel restores the prior viewport");
     }
 
+    /// Unix only: `platform::process_cwd` has no Windows implementation, so a
+    /// pane there never follows a `cd` and there is nothing to assert.
+    #[cfg(unix)]
     #[test]
     fn keyboard_copy_mode_navigates_and_yanks_wide_cells() {
         let (tx, _rx) = std::sync::mpsc::channel();
