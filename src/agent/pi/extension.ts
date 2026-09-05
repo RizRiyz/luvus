@@ -1,4 +1,4 @@
-// pi-luvus v0.1.1 — Luvus control plane client for Pi — Apache-2.0
+// pi-luvus v0.1.2 — Luvus control plane client for Pi — Apache-2.0
 // Self-contained extension bundle. Load with `pi -e` or install to
 // ~/.pi/agent/extensions/. Pi-owned packages stay external (peer deps).
 // @bun
@@ -2739,7 +2739,7 @@ class OpsRouter {
 
 // src/policy/permissions.ts
 function defaultAutonomy(now = Date.now()) {
-  return { mode: "confirm", setAt: now, setBy: "default" };
+  return { mode: "auto", setAt: now, setBy: "default" };
 }
 var CLASSIFICATIONS = {
   "agent/start": { class: "delegate", reinforced: false },
@@ -2779,11 +2779,25 @@ class DefaultPolicyEngine {
     if (row === undefined) {
       throw new Error(`unknown policy action: ${action}`);
     }
+    const mode = this.autonomy.mode;
+    const highImpact = row.class === "high-impact";
+    let requiresConfirmation;
+    let failClosedWithoutUI;
+    if (mode === "restricted") {
+      requiresConfirmation = !highImpact;
+      failClosedWithoutUI = true;
+    } else if (mode === "confirm") {
+      requiresConfirmation = true;
+      failClosedWithoutUI = true;
+    } else {
+      requiresConfirmation = highImpact;
+      failClosedWithoutUI = highImpact;
+    }
     return {
       action,
       class: row.class,
-      requiresConfirmation: true,
-      failClosedWithoutUI: true,
+      requiresConfirmation,
+      failClosedWithoutUI,
       reinforced: row.reinforced
     };
   }
@@ -2808,6 +2822,9 @@ class DefaultPolicyEngine {
         allowed: false,
         reason: `action ${action} is disabled in restricted mode`
       };
+    }
+    if (!classification.requiresConfirmation) {
+      return { allowed: true };
     }
     if (!ctx.hasUI) {
       return {
@@ -4280,6 +4297,25 @@ function registerDiscoverTool(pi, deps) {
 
 // src/tools/commands.ts
 var POLICY_MODES = ["auto", "confirm", "restricted"];
+var POLICY_CHOICES = [
+  "auto \u2014 default: execute ordinary tasks/actions without asking (high-impact still asks)",
+  "confirm \u2014 ask on every task/action (explicit per-session opt-in)",
+  "restricted \u2014 ask on ordinary tasks/actions; block high-impact"
+];
+var POLICY_MODE_DESCRIPTIONS = {
+  auto: "ordinary writes execute without asking; high-impact still requires confirmation",
+  confirm: "every task/action asks for confirmation",
+  restricted: "ordinary writes ask for confirmation; high-impact is blocked"
+};
+function parsePolicyMode(picked) {
+  const normalized = picked.trim().toLowerCase();
+  for (const mode of POLICY_MODES) {
+    if (normalized === mode || normalized.startsWith(`${mode} `) || normalized.startsWith(`${mode} \u2014`) || normalized.startsWith(`${mode} -`)) {
+      return mode;
+    }
+  }
+  return;
+}
 function bound2(text, max = 2000) {
   return text.length <= max ? text : `${text.slice(0, max - 3)}...`;
 }
@@ -4294,22 +4330,21 @@ function shortText3(value, max = 120) {
 }
 function registerPhase4Commands(pi, deps) {
   pi.registerCommand("luvus-policy", {
-    description: "Show or change the Luvus mutation policy mode",
+    description: "Show or change the Luvus mutation policy mode (default auto executes ordinary writes without asking; confirm opts into asking every time)",
     handler: async (_args, ctx) => {
       if (!ctx.hasUI) {
         ctx.ui.notify("luvus-policy requires UI", "error");
         return;
       }
       const current = deps.policy.mode();
-      const picked = await ctx.ui.select(`Luvus policy: ${current}`, [
-        ...POLICY_MODES
-      ]);
+      const picked = await ctx.ui.select(`Luvus policy: ${current} (${POLICY_MODE_DESCRIPTIONS[current] ?? current})`, [...POLICY_CHOICES]);
       if (picked === undefined)
         return;
-      if (!POLICY_MODES.includes(picked))
+      const mode = parsePolicyMode(picked);
+      if (mode === undefined)
         return;
-      deps.policy.setMode(picked, "user");
-      ctx.ui.notify(`Luvus policy mode set to ${picked}`, "info");
+      deps.policy.setMode(mode, "user");
+      ctx.ui.notify(`Luvus policy mode set to ${mode} \u2014 ${POLICY_MODE_DESCRIPTIONS[mode]}`, "info");
     }
   });
   pi.registerCommand("luvus-task", {
