@@ -4065,25 +4065,19 @@ fn encode_key(
                         // already unambiguous as 0x10, and the disambiguate
                         // level leaves such keys in their legacy form.
                         'a'..='z' | 'A'..='Z' if shift => Some(c.to_ascii_lowercase()),
+                        // CSI-u can represent every other Ctrl+character chord
+                        // that has no legacy control byte. Keep this gated on
+                        // the nested application opting into the protocol so a
+                        // plain shell never receives an escape sequence it did
+                        // not request.
+                        _ if legacy_control_byte(c).is_none() => Some(c),
                         _ => None,
                     };
                     if let Some(codepoint) = codepoint {
                         return Some(csi_u_char(codepoint, key.modifiers));
                     }
                 }
-                let b = match c.to_ascii_lowercase() {
-                    'a'..='z' => (c.to_ascii_uppercase() as u8) & 0x1f,
-                    ' ' | '@' => 0,
-                    '[' => 0x1b,
-                    '\\' => 0x1c,
-                    ']' => 0x1d,
-                    '^' => 0x1e,
-                    // Ctrl+/ is the user-facing chord for the US control byte.
-                    // Legacy terminal input arrives through crossterm as
-                    // Ctrl+7, while enhanced keyboard protocols preserve `/`.
-                    '_' | '/' | '7' => 0x1f,
-                    _ => return None,
-                };
+                let b = legacy_control_byte(c)?;
                 if alt {
                     vec![0x1b, b]
                 } else {
@@ -4159,6 +4153,22 @@ fn encode_key(
         _ => return None,
     };
     Some(bytes)
+}
+
+fn legacy_control_byte(character: char) -> Option<u8> {
+    Some(match character.to_ascii_lowercase() {
+        'a'..='z' => (character.to_ascii_uppercase() as u8) & 0x1f,
+        ' ' | '@' => 0,
+        '[' => 0x1b,
+        '\\' => 0x1c,
+        ']' => 0x1d,
+        '^' => 0x1e,
+        // Ctrl+/ is the user-facing chord for the US control byte. Legacy
+        // terminal input arrives through crossterm as Ctrl+7, while enhanced
+        // keyboard protocols preserve `/`.
+        '_' | '/' | '7' => 0x1f,
+        _ => return None,
+    })
 }
 
 fn csi(final_byte: u8) -> Vec<u8> {
@@ -4759,6 +4769,35 @@ mod tests {
             "a legacy Ctrl+/ alias regains slash identity for a nested CSI-u client"
         );
         assert_eq!(encode('_', true), Some(b"\x1b[95;5u".to_vec()));
+    }
+
+    #[test]
+    fn control_characters_without_legacy_bytes_use_gated_csi_u() {
+        let encode = |character, disambiguate| {
+            encode_key(
+                &KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL),
+                b"\x1b\r",
+                false,
+                disambiguate,
+            )
+        };
+
+        for character in [';', '\'', ',', '.', '-', '=', '`', '1', '8', '€'] {
+            assert_eq!(
+                encode(character, false),
+                None,
+                "Ctrl+{character} has no legacy representation"
+            );
+            assert_eq!(
+                encode(character, true),
+                Some(format!("\x1b[{};5u", character as u32).into_bytes()),
+                "Ctrl+{character} should use CSI-u after the nested app opts in"
+            );
+        }
+
+        // Existing single-byte Ctrl chords remain byte-for-byte compatible.
+        assert_eq!(encode('a', true), Some(vec![0x01]));
+        assert_eq!(encode('[', true), Some(vec![0x1b]));
     }
 
     /// `Ctrl+Shift+<letter>` must survive the trip to a nested TUI. The legacy
