@@ -388,11 +388,15 @@ or leaving stale state after an adapter crashes.
 The normative schemas and fixtures live under `protocol/uhp/v1` and are
 embedded in packaged binaries. Print that exact contract with `luvus uhp schema`.
 
-`agent.wait` takes `{pane, status, timeout_s?}` and parks on the server. The
-initial comparison and registration are atomic on the app loop, so it has no
-subscribe-then-check race and performs no polling. The existing
-`luvus wait agent-status` command uses this method and falls back only when it
-talks to an older server.
+`agent.wait` takes either `{pane, status, timeout_s?}` or
+`{pane, statuses, timeout_s?}` and parks on the server. `statuses` is a non-empty
+set of `idle`, `working`, `blocked`, and `done`; the response's `status` is the
+state that actually matched. The initial comparison and registration are atomic
+on the app loop, so it has no subscribe-then-check race and performs no polling.
+`luvus wait agent-status` accepts repeated or comma-separated `--status` values.
+Against an older server it keeps the subscribe-first event stream for the full
+status set. Bounded status polling remains only when the local transport cannot
+safely bound a stream read (currently Windows named pipes).
 
 `agent.start` takes `name`, `kind`, optional `pane` or `anchor`, optional
 `direction`, an `args` string array, and `timeout_s`. Luvus selects or creates

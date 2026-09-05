@@ -327,7 +327,7 @@ pub enum AppEvent {
     AgentWait {
         id: String,
         pane: String,
-        state: String,
+        states: Vec<String>,
         timeout: Option<std::time::Duration>,
         reply: Sender<String>,
         cancelled: Arc<AtomicBool>,

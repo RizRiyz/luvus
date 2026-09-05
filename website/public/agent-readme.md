@@ -266,7 +266,7 @@ luvus pane split --down
 luvus pane run <pane-id> <command> [args...]
 luvus agent start reviewer --kind codex --anchor <pane-id> --timeout 60
 luvus agent prompt reviewer "Review the current diff" --wait --timeout 600
-luvus wait agent-status <pane-id> --status done --timeout 600
+luvus wait agent-status <pane-id> --status done,blocked --timeout 600
 ```
 
 The neutral home workspace supports ordinary tabs and panes, and its displayed

@@ -176,7 +176,7 @@ panes / agents:
   skill disable              remove unchanged Luvus-managed installations
   skill show                 print the bundled, version-matched SKILL.md
   wait output <id> --match <text> [--timeout <s>]    block until output appears
-  wait agent-status <id> --status done|blocked|working|idle [--timeout <s>]
+  wait agent-status <id> --status <state[,state...]> [--status <state>] [--timeout <s>]
   attach <id>                open the TUI into a single fullscreen pane
 
 search:
@@ -1670,8 +1670,8 @@ fn module_search(args: &[String], context: crate::i18n::cli::Context) -> Result<
 enum WaitFor {
     /// `wait output <id> --match <text>`: the pane's recent output contains `text`.
     Output { needle: String },
-    /// `wait agent-status <id> --status <s>`: the pane's agent reaches `status`.
-    AgentStatus { status: String },
+    /// `wait agent-status <id> --status <s>`: the pane's agent reaches any status.
+    AgentStatus { statuses: Vec<String> },
 }
 
 #[derive(Debug, PartialEq)]
@@ -1711,9 +1711,7 @@ fn parse_wait(args: &[String]) -> Result<WaitSpec> {
             })?,
         },
         "agent-status" => WaitFor::AgentStatus {
-            status: flag(args, "--status").ok_or_else(|| {
-                anyhow!("usage: luvus wait agent-status <id> --status done|blocked|working|idle [--timeout <s>]")
-            })?,
+            statuses: parse_wait_statuses(args)?,
         },
         _ => return Err(anyhow!("usage: luvus wait output|agent-status <id> …")),
     };
@@ -1722,6 +1720,50 @@ fn parse_wait(args: &[String]) -> Result<WaitSpec> {
         condition,
         timeout,
     })
+}
+
+fn parse_wait_statuses(args: &[String]) -> Result<Vec<String>> {
+    let usage = "usage: luvus wait agent-status <id> --status idle|working|blocked|done[,STATE...] [--status STATE] [--timeout <s>]";
+    let mut statuses = Vec::new();
+    let mut saw_timeout = false;
+    let mut index = 3;
+    if args
+        .get(index)
+        .is_some_and(|value| value.parse::<u32>().is_ok())
+    {
+        index += 1;
+    }
+    while index < args.len() {
+        match args[index].as_str() {
+            "--status" => {
+                let raw = args
+                    .get(index + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or_else(|| anyhow!(usage))?;
+                for status in raw.split(',') {
+                    if !matches!(status, "idle" | "working" | "blocked" | "done") {
+                        return Err(anyhow!(usage));
+                    }
+                    if !statuses.iter().any(|existing| existing == status) {
+                        statuses.push(status.to_string());
+                    }
+                }
+                index += 2;
+            }
+            "--timeout" if !saw_timeout => {
+                args.get(index + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or_else(|| anyhow!(usage))?;
+                saw_timeout = true;
+                index += 2;
+            }
+            _ => return Err(anyhow!(usage)),
+        }
+    }
+    if statuses.is_empty() {
+        return Err(anyhow!(usage));
+    }
+    Ok(statuses)
 }
 
 /// `luvus wait …` — block until the condition holds (exit 0) or the timeout
@@ -1788,8 +1830,13 @@ fn wait_cmd(args: &[String]) -> Result<i32> {
             }
             Ok(2)
         }
-        WaitFor::AgentStatus { status } => {
-            let mut params = json!({"pane":spec.pane, "status":status});
+        WaitFor::AgentStatus { statuses } => {
+            let uses_statuses = statuses.len() > 1;
+            let mut params = if uses_statuses {
+                json!({"pane":spec.pane, "statuses":statuses})
+            } else {
+                json!({"pane":spec.pane, "status":statuses[0]})
+            };
             if let Some(timeout) = spec.timeout {
                 params["timeout_s"] = json!(timeout);
             }
@@ -1802,13 +1849,11 @@ fn wait_cmd(args: &[String]) -> Result<i32> {
             {
                 return Ok(0);
             }
-            let unknown = response
-                .get("error")
-                .and_then(|error| error.get("message"))
-                .and_then(Value::as_str)
-                .is_some_and(|message| message.starts_with("unknown method"));
-            if unknown {
-                return wait_status_stream(&spec.pane, &status, deadline);
+            match agent_wait_fallback(&response, uses_statuses) {
+                AgentWaitFallback::Stream => {
+                    return wait_status_stream(&spec.pane, &statuses, deadline)
+                }
+                AgentWaitFallback::None => {}
             }
             if let Some(error) = response.get("error") {
                 eprintln!(
@@ -1822,6 +1867,41 @@ fn wait_cmd(args: &[String]) -> Result<i32> {
             Ok(2)
         }
     }
+}
+
+/// Which compatibility path a rejected `agent.wait` should take.
+#[derive(Debug, PartialEq, Eq)]
+enum AgentWaitFallback {
+    /// The rejection is a real error: report it instead of waiting again.
+    None,
+    /// No `agent.wait` at all. Subscribe to the event stream, then poll once,
+    /// so a transition between the two is buffered rather than lost.
+    Stream,
+}
+
+/// Fail closed: only the two envelopes an older server actually produces earn a
+/// fallback. Anything else (`not_found`, a bad pane id, a bare message with no
+/// code) is the server's answer and is reported as such.
+fn agent_wait_fallback(response: &Value, uses_statuses: bool) -> AgentWaitFallback {
+    let Some(error) = response.get("error") else {
+        return AgentWaitFallback::None;
+    };
+    if error.get("code").and_then(Value::as_str) != Some("invalid_request") {
+        return AgentWaitFallback::None;
+    }
+    let Some(message) = error.get("message").and_then(Value::as_str) else {
+        return AgentWaitFallback::None;
+    };
+    if message.starts_with("unknown method") {
+        return AgentWaitFallback::Stream;
+    }
+    if uses_statuses
+        && (message == "agent.wait contains an unknown parameter"
+            || message.starts_with("agent.wait needs a pane and status"))
+    {
+        return AgentWaitFallback::Stream;
+    }
+    AgentWaitFallback::None
 }
 
 #[derive(Debug, PartialEq)]
@@ -2129,20 +2209,65 @@ fn agent_send_cmd(args: &[String]) -> Result<i32> {
     })
 }
 
-/// Current agent status of `pane` (global lookup via `pane.status`).
-fn pane_status(pane: &str) -> Result<Option<String>> {
-    let v = send_request("pane.status", json!({ "pane": pane }))?;
-    Ok(v.get("result")
+fn pane_status_from_response(response: &Value) -> Result<Option<&str>> {
+    if let Some(error) = response.get("error") {
+        let code = error
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("request_failed");
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("pane.status failed");
+        return Err(anyhow!("pane.status {code}: {message}"));
+    }
+    Ok(response
+        .get("result")
         .and_then(|r| r.get("status"))
-        .and_then(|x| x.as_str())
-        .map(String::from))
+        .and_then(Value::as_str))
 }
 
-/// Block until `pane`'s agent reaches `target` (exit 0), or `deadline` passes
-/// (exit 2). Subscribes to the event stream **first**, then polls the current
-/// status — so a transition that happens between the poll and the subscribe is
-/// never missed (it's already buffered on the stream).
-fn wait_status_stream(pane: &str, target: &str, deadline: Option<Instant>) -> Result<i32> {
+fn wait_status_poll_with<Request, Pause>(
+    pane: &str,
+    targets: &[String],
+    deadline: Option<Instant>,
+    mut request: Request,
+    mut pause: Pause,
+) -> Result<bool>
+where
+    Request: FnMut(&str) -> Result<Value>,
+    Pause: FnMut(Duration),
+{
+    loop {
+        let response = request(pane)?;
+        if pane_status_from_response(&response)?
+            .is_some_and(|status| targets.iter().any(|target| target == status))
+        {
+            return Ok(true);
+        }
+        if deadline.is_some_and(|end| Instant::now() >= end) {
+            return Ok(false);
+        }
+        pause(Duration::from_millis(25));
+    }
+}
+
+/// Current agent status of `pane` (global lookup via `pane.status`).
+fn pane_status(pane: &str) -> Result<Option<String>> {
+    let response = send_request("pane.status", json!({ "pane": pane }))?;
+    Ok(pane_status_from_response(&response)?.map(String::from))
+}
+
+/// Compatibility path for servers with no status-set-aware `agent.wait`. Blocks
+/// until `pane`'s agent reaches any target (exit 0) or `deadline` passes (exit 2).
+///
+/// The subscription is sent **before** the initial status poll, so a transition
+/// that lands between the two is already buffered on the stream instead of
+/// being missed. A finite wait recomputes the remaining absolute deadline before
+/// every frame read, so unrelated events cannot extend the timeout. Transports
+/// without a safe kernel receive timeout (currently Windows named pipes) retain
+/// bounded status polling instead of leaving a blocked stream reader behind.
+fn wait_status_stream(pane: &str, targets: &[String], deadline: Option<Instant>) -> Result<i32> {
     let path = crate::persist::cli_socket_path();
     let stream = crate::ipc::transport::connect(&path)
         .map_err(|error| server_connect_error(&path, error))?;
@@ -2152,47 +2277,57 @@ fn wait_status_stream(pane: &str, target: &str, deadline: Option<Instant>) -> Re
         "{}",
         json!({"id":"1","method":"events.subscribe","params":{}})
     )?;
-    let mut reader = BufReader::new(stream);
 
-    let (tx, rx) = std::sync::mpsc::channel();
-    let (pane_s, target_s) = (pane.to_string(), target.to_string());
-    std::thread::spawn(move || {
-        while let Ok(Some(l)) = crate::ipc::api::read_stream_frame(&mut reader) {
-            if let Ok(v) = serde_json::from_str::<Value>(&l) {
-                let is_status =
-                    v.get("event").and_then(|e| e.as_str()) == Some("pane.agent_status_changed");
-                let data = v.get("data");
-                let p = data.and_then(|d| d.get("pane")).and_then(|x| x.as_str());
-                let s = data.and_then(|d| d.get("status")).and_then(|x| x.as_str());
-                if is_status && p == Some(pane_s.as_str()) && s == Some(target_s.as_str()) {
-                    let _ = tx.send(());
-                    break;
-                }
-            }
-        }
-    });
-
-    // Now that we're listening, an initial poll handles the already-there case.
-    if pane_status(pane)?.as_deref() == Some(target) {
+    // Now that the server is queueing events for us, the already-there case is
+    // answered without ever starting a reader.
+    if pane_status(pane)?
+        .as_deref()
+        .is_some_and(|status| targets.iter().any(|target| target == status))
+    {
         return Ok(0);
     }
 
-    match deadline {
-        Some(d) => {
-            let now = Instant::now();
-            if d <= now {
-                return Ok(2);
+    let mut reader = BufReader::new(stream);
+    loop {
+        let read = match deadline {
+            Some(end) => crate::ipc::api::read_stream_frame_with_deadline(&mut reader, end),
+            None => crate::ipc::api::read_stream_frame(&mut reader),
+        };
+        let line = match read {
+            Ok(Some(line)) => line,
+            Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+                return wait_status_poll(pane, targets, deadline)
             }
-            match rx.recv_timeout(d - now) {
-                Ok(()) => Ok(0),
-                Err(_) => Ok(2),
-            }
-        }
-        None => {
-            let _ = rx.recv();
-            Ok(0)
+            // A closed stream or elapsed receive deadline did not match.
+            Ok(None) | Err(_) => return Ok(2),
+        };
+        let Ok(event) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let data = event.get("data");
+        let observed = data.and_then(|d| d.get("pane")).and_then(Value::as_str);
+        let state = data.and_then(|d| d.get("status")).and_then(Value::as_str);
+        if event.get("event").and_then(Value::as_str) == Some("pane.agent_status_changed")
+            && observed == Some(pane)
+            && state.is_some_and(|state| targets.iter().any(|target| target == state))
+        {
+            return Ok(0);
         }
     }
+}
+
+/// Transport fallback when a status event stream cannot be given a safe receive
+/// deadline. Poll until one target matches (exit 0) or the deadline passes (exit
+/// 2). Keeping this synchronous ensures every return closes its connection.
+fn wait_status_poll(pane: &str, targets: &[String], deadline: Option<Instant>) -> Result<i32> {
+    let matched = wait_status_poll_with(
+        pane,
+        targets,
+        deadline,
+        |pane| send_request("pane.status", json!({ "pane": pane })),
+        std::thread::sleep,
+    )?;
+    Ok(if matched { 0 } else { 2 })
 }
 
 /// Focus + zoom a pane via `attach.pane` (docs/18 WA-2). Used by `luvus attach`.
@@ -3915,6 +4050,7 @@ fn parse_setting_value(s: &str) -> Value {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::BufRead;
 
     #[test]
     fn socket_permission_errors_are_not_reported_as_an_offline_server() {
@@ -4975,6 +5111,164 @@ mod tests {
         assert_eq!(p.get("id").and_then(|v| v.as_str()), Some("my-mod"));
     }
 
+    fn wait_test_server() -> crate::ipc::transport::Listener {
+        let root = crate::persist::config_dir();
+        fs::create_dir_all(&root).expect("create wait test home");
+        // Keep the macOS Unix-domain socket below sockaddr_un::sun_path.
+        let path = root.join("w");
+        let _ = fs::remove_file(&path);
+        std::env::set_var("LUVUS_SOCKET_PATH", &path);
+        crate::ipc::transport::bind(&path).expect("bind wait test server")
+    }
+
+    fn accept_wait_request(
+        listener: &crate::ipc::transport::Listener,
+    ) -> (crate::ipc::transport::Conn, Value) {
+        let connection = crate::ipc::transport::incoming(listener)
+            .next()
+            .expect("accept wait request");
+        let mut line = String::new();
+        BufReader::new(connection.clone())
+            .read_line(&mut line)
+            .expect("read wait request");
+        let request = serde_json::from_str(&line).expect("parse wait request");
+        (connection, request)
+    }
+
+    #[test]
+    fn wait_status_stream_keeps_an_absolute_deadline_during_unrelated_events() {
+        let _env = crate::persist::test_env("w-ad");
+        let listener = wait_test_server();
+        let server = std::thread::spawn(move || {
+            let (mut events, subscribe) = accept_wait_request(&listener);
+            assert_eq!(subscribe["method"], "events.subscribe");
+            writeln!(events, r#"{{"id":"1","result":{{"type":"subscribed"}}}}"#).unwrap();
+
+            let (mut status, request) = accept_wait_request(&listener);
+            assert_eq!(request["method"], "pane.status");
+            writeln!(status, r#"{{"id":"1","result":{{"status":"idle"}}}}"#).unwrap();
+
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_millis(350) {
+                if writeln!(events, r#"{{"event":"pane.output","data":{{"pane":"7"}}}}"#).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+
+        let timeout = Duration::from_millis(75);
+        let started = Instant::now();
+        let result = wait_status_stream("7", &["done".into()], Some(started + timeout));
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+
+        assert_eq!(result.unwrap(), 2);
+        assert!(
+            elapsed <= timeout + Duration::from_millis(125),
+            "absolute timeout took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn wait_agent_status_set_uses_old_server_event_stream_for_transient_match() {
+        let _env = crate::persist::test_env("w-set");
+        let listener = wait_test_server();
+        let server = std::thread::spawn(move || {
+            let (mut agent_wait, request) = accept_wait_request(&listener);
+            assert_eq!(request["method"], "agent.wait");
+            assert_eq!(request["params"]["statuses"], json!(["working", "blocked"]));
+            writeln!(
+                agent_wait,
+                r#"{{"id":"1","error":{{"code":"invalid_request","message":"agent.wait contains an unknown parameter"}}}}"#
+            )
+            .unwrap();
+
+            let (mut next, request) = accept_wait_request(&listener);
+            if request["method"] == "pane.status" {
+                // The old polling fallback observes idle, while the matching state
+                // exists only during the gap before its next 25 ms connection.
+                writeln!(next, r#"{{"id":"1","result":{{"status":"idle"}}}}"#).unwrap();
+                std::thread::sleep(Duration::from_millis(5));
+                std::thread::sleep(Duration::from_millis(5));
+                return;
+            }
+
+            assert_eq!(request["method"], "events.subscribe");
+            writeln!(next, r#"{{"id":"1","result":{{"type":"subscribed"}}}}"#).unwrap();
+            let mut events = next;
+            let (mut status, request) = accept_wait_request(&listener);
+            assert_eq!(request["method"], "pane.status");
+            writeln!(status, r#"{{"id":"1","result":{{"status":"idle"}}}}"#).unwrap();
+
+            std::thread::sleep(Duration::from_millis(5));
+            writeln!(events, r#"{{"event":"pane.agent_status_changed","data":{{"pane":"7","status":"blocked"}}}}"#).unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+            let _ = writeln!(
+                events,
+                r#"{{"event":"pane.agent_status_changed","data":{{"pane":"7","status":"idle"}}}}"#
+            );
+        });
+
+        let result = wait_cmd(&argv(
+            "luvus wait agent-status 7 --status working,blocked --timeout 0.15",
+        ));
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn wait_agent_status_singular_keeps_old_server_event_stream_fallback() {
+        let _env = crate::persist::test_env("w-one");
+        let listener = wait_test_server();
+        let server = std::thread::spawn(move || {
+            let (mut agent_wait, request) = accept_wait_request(&listener);
+            assert_eq!(request["method"], "agent.wait");
+            assert_eq!(request["params"]["status"], "done");
+            assert!(request["params"].get("timeout_s").is_none());
+            writeln!(
+                agent_wait,
+                r#"{{"id":"1","error":{{"code":"invalid_request","message":"unknown method agent.wait"}}}}"#
+            )
+            .unwrap();
+
+            let (mut events, subscribe) = accept_wait_request(&listener);
+            assert_eq!(subscribe["method"], "events.subscribe");
+            writeln!(events, r#"{{"id":"1","result":{{"type":"subscribed"}}}}"#).unwrap();
+            let (mut status, request) = accept_wait_request(&listener);
+            assert_eq!(request["method"], "pane.status");
+            writeln!(status, r#"{{"id":"1","result":{{"status":"working"}}}}"#).unwrap();
+            writeln!(
+                events,
+                r#"{{"event":"pane.agent_status_changed","data":{{"pane":"7","status":"done"}}}}"#
+            )
+            .unwrap();
+        });
+
+        let result = wait_cmd(&argv("luvus wait agent-status 7 --status done"));
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn wait_status_stream_returns_timeout_code_when_stream_closes_mid_wait() {
+        let _env = crate::persist::test_env("w-eof");
+        let listener = wait_test_server();
+        let server = std::thread::spawn(move || {
+            let (mut events, subscribe) = accept_wait_request(&listener);
+            assert_eq!(subscribe["method"], "events.subscribe");
+            writeln!(events, r#"{{"id":"1","result":{{"type":"subscribed"}}}}"#).unwrap();
+            let (mut status, request) = accept_wait_request(&listener);
+            assert_eq!(request["method"], "pane.status");
+            writeln!(status, r#"{{"id":"1","result":{{"status":"idle"}}}}"#).unwrap();
+            drop(events);
+        });
+
+        let result = wait_status_stream("7", &["done".into()], None);
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), 2);
+    }
+
     #[test]
     fn parses_wait() {
         std::env::remove_var("LUVUS_PANE_ID");
@@ -4994,9 +5288,51 @@ mod tests {
         assert_eq!(
             s.condition,
             WaitFor::AgentStatus {
-                status: "blocked".into()
+                statuses: vec!["blocked".into()]
             }
         );
+
+        let repeated = parse_wait(&argv(
+            "luvus wait agent-status 7 --status working --status done,blocked",
+        ))
+        .unwrap();
+        assert_eq!(
+            repeated.condition,
+            WaitFor::AgentStatus {
+                statuses: vec!["working".into(), "done".into(), "blocked".into()]
+            }
+        );
+        let comma = parse_wait(&argv("luvus wait agent-status 7 --status working,done")).unwrap();
+        assert_eq!(
+            comma.condition,
+            WaitFor::AgentStatus {
+                statuses: vec!["working".into(), "done".into()]
+            }
+        );
+        let reordered = parse_wait(&argv(
+            "luvus wait agent-status 7 --timeout 5 --status done,done",
+        ))
+        .unwrap();
+        assert_eq!(reordered.timeout, Some(5.0));
+        assert_eq!(
+            reordered.condition,
+            WaitFor::AgentStatus {
+                statuses: vec!["done".into()]
+            }
+        );
+        assert!(parse_wait(&argv("luvus wait agent-status 7 --status")).is_err());
+        assert!(parse_wait(&argv("luvus wait agent-status 7 --status done --timeout")).is_err());
+        assert!(parse_wait(&argv("luvus wait agent-status 7 --status done,")).is_err());
+        assert!(parse_wait(&argv("luvus wait agent-status 7 --status unknown")).is_err());
+        assert!(parse_wait(&argv(
+            "luvus wait agent-status 7 --status done --typo value"
+        ))
+        .is_err());
+        assert!(parse_wait(&argv("luvus wait agent-status 7 unexpected --status done")).is_err());
+        assert!(parse_wait(&argv(
+            "luvus wait agent-status 7 --status done --timeout 1 --timeout 2"
+        ))
+        .is_err());
 
         // missing --match is an error
         assert!(parse_wait(&argv("luvus wait output 3")).is_err());
@@ -5005,6 +5341,127 @@ mod tests {
         let s = parse_wait(&argv("luvus wait output --match hi")).unwrap();
         assert_eq!(s.pane, "9");
         std::env::remove_var("LUVUS_PANE_ID");
+    }
+
+    #[test]
+    fn agent_wait_status_sets_fall_back_for_older_servers() {
+        // A server with no `agent.wait` uses the subscribe-first stream for both
+        // a single state and a complete status set.
+        let unknown_method =
+            json!({"error":{"code":"invalid_request","message":"unknown method agent.wait"}});
+        assert_eq!(
+            agent_wait_fallback(&unknown_method, false),
+            AgentWaitFallback::Stream
+        );
+        assert_eq!(
+            agent_wait_fallback(&unknown_method, true),
+            AgentWaitFallback::Stream
+        );
+
+        let old_parameter = json!({"error":{
+            "code":"invalid_request",
+            "message":"agent.wait contains an unknown parameter"
+        }});
+        assert_eq!(
+            agent_wait_fallback(&old_parameter, true),
+            AgentWaitFallback::Stream
+        );
+        assert_eq!(
+            agent_wait_fallback(&old_parameter, false),
+            AgentWaitFallback::None
+        );
+
+        let message_only = json!({"error":{"message":"agent.wait contains an unknown parameter"}});
+        assert_eq!(
+            agent_wait_fallback(&message_only, true),
+            AgentWaitFallback::None
+        );
+
+        let needs_status = json!({"error":{
+            "code":"invalid_request",
+            "message":"agent.wait needs a pane and status idle|working|blocked|done"
+        }});
+        assert_eq!(
+            agent_wait_fallback(&needs_status, true),
+            AgentWaitFallback::Stream
+        );
+        assert_eq!(
+            agent_wait_fallback(&needs_status, false),
+            AgentWaitFallback::None
+        );
+
+        let unrelated =
+            json!({"error":{"code":"invalid_request","message":"pane must be a pane id"}});
+        assert_eq!(
+            agent_wait_fallback(&unrelated, true),
+            AgentWaitFallback::None
+        );
+
+        // Fail closed: a resolved-but-missing pane is an answer, not an old
+        // server, so neither compatibility path may run.
+        let not_found = json!({"error":{"code":"not_found","message":"pane not found"}});
+        assert_eq!(
+            agent_wait_fallback(&not_found, false),
+            AgentWaitFallback::None
+        );
+        assert_eq!(
+            agent_wait_fallback(&not_found, true),
+            AgentWaitFallback::None
+        );
+
+        // A successful reply never takes a fallback.
+        assert_eq!(
+            agent_wait_fallback(&json!({"result":{"matched":false}}), true),
+            AgentWaitFallback::None
+        );
+    }
+
+    #[test]
+    fn wait_status_poll_is_bounded_and_propagates_server_errors() {
+        use std::cell::Cell;
+
+        fn poll_once(
+            response: Value,
+            deadline: Option<Instant>,
+        ) -> (Result<bool>, usize, usize, usize) {
+            let requests = Cell::new(0);
+            let in_flight = Cell::new(0);
+            let sleeps = Cell::new(0);
+            let result = wait_status_poll_with(
+                "7",
+                &["working".to_string(), "done".to_string()],
+                deadline,
+                |pane| {
+                    assert_eq!(pane, "7");
+                    requests.set(requests.get() + 1);
+                    in_flight.set(in_flight.get() + 1);
+                    let response = response.clone();
+                    in_flight.set(in_flight.get() - 1);
+                    Ok(response)
+                },
+                |_| sleeps.set(sleeps.get() + 1),
+            );
+            (result, requests.get(), in_flight.get(), sleeps.get())
+        }
+
+        let (matched, requests, in_flight, sleeps) =
+            poll_once(json!({"result":{"status":"working"}}), None);
+        assert!(matched.unwrap());
+        assert_eq!((requests, in_flight, sleeps), (1, 0, 0));
+
+        let (matched, requests, in_flight, sleeps) =
+            poll_once(json!({"result":{"status":"idle"}}), Some(Instant::now()));
+        assert!(!matched.unwrap());
+        assert_eq!((requests, in_flight, sleeps), (1, 0, 0));
+
+        let (error, requests, in_flight, sleeps) = poll_once(
+            json!({"error":{"code":"not_found","message":"pane not found"}}),
+            None,
+        );
+        let error = error.unwrap_err();
+        assert!(error.to_string().contains("not_found"));
+        assert!(error.to_string().contains("pane not found"));
+        assert_eq!((requests, in_flight, sleeps), (1, 0, 0));
     }
 
     #[test]

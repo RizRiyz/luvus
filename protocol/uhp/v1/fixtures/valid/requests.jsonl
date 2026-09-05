@@ -34,8 +34,10 @@
 {"id":"34","method":"integration.status","params":{}}
 {"id":"35","method":"integration.install","params":{"agent":"claude","confirm":true}}
 {"id":"36","method":"integration.uninstall","params":{"agent":"claude","confirm":true}}
-{"id":"37","method":"automation.preview","params":{"trigger":{"kind":"daily","timezone":"Asia/Makassar","second_of_day":28800},"from_utc":1788393600}}
-{"id":"38","method":"automation.create","params":{"name":"Morning review","trigger":{"kind":"weekly","timezone":"Asia/Makassar","weekdays":[1,2,3,4,5],"second_of_day":28800},"task":{"title":"Review changes","prompt":"Review the workspace and report risks.","agent_id":"codex","workspace_id":"workspace_example","mode":"workspace","access":"read_only"},"policy":{"misfire":"run_latest","overlap":"skip"},"idempotency_key":"fixture-morning-review"}}
-{"id":"38-active","method":"automation.create","params":{"name":"Continue review","trigger":{"kind":"once","at_utc":1788393600},"target":{"kind":"active_agent","pane_id":7,"terminal_id":"0123456789abcdef0123456789abcdef","if_busy":"wait"},"task":{"title":"Continue review","prompt":"Continue with the next review step.","agent_id":"codex","workspace_id":"workspace_example","mode":"workspace","access":"workspace"}}}
-{"id":"39","method":"task.start","params":{"id":"t4","branch":"luvus/t4","mode":"worktree","workspace_id":"workspace_example","agent":"codex"}}
-{"id":"40","method":"task.heartbeat","params":{"id":"t1","context":0.6}}
+{"id":"37","method":"agent.wait","params":{"pane":"7","statuses":["idle","working","blocked","done"],"timeout_s":30}}
+{"id":"38","method":"agent.wait","params":{"pane":"7","status":"done"}}
+{"id":"39","method":"automation.preview","params":{"trigger":{"kind":"daily","timezone":"Asia/Makassar","second_of_day":28800},"from_utc":1788393600}}
+{"id":"40","method":"automation.create","params":{"name":"Morning review","trigger":{"kind":"weekly","timezone":"Asia/Makassar","weekdays":[1,2,3,4,5],"second_of_day":28800},"task":{"title":"Review changes","prompt":"Review the workspace and report risks.","agent_id":"codex","workspace_id":"workspace_example","mode":"workspace","access":"read_only"},"policy":{"misfire":"run_latest","overlap":"skip"},"idempotency_key":"fixture-morning-review"}}
+{"id":"40-active","method":"automation.create","params":{"name":"Continue review","trigger":{"kind":"once","at_utc":1788393600},"target":{"kind":"active_agent","pane_id":7,"terminal_id":"0123456789abcdef0123456789abcdef","if_busy":"wait"},"task":{"title":"Continue review","prompt":"Continue with the next review step.","agent_id":"codex","workspace_id":"workspace_example","mode":"workspace","access":"workspace"}}}
+{"id":"41","method":"task.start","params":{"id":"t4","branch":"luvus/t4","mode":"worktree","workspace_id":"workspace_example","agent":"codex"}}
+{"id":"42","method":"task.heartbeat","params":{"id":"t1","context":0.6}}

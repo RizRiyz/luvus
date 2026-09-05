@@ -251,6 +251,9 @@ identity is recognized. `unknown` is not proof of completion, but it does not
 undo a matching identity. When `agent start` returns `ready: true`, accept its
 name, pane, and kind without another status lookup. Use `wait agent-status` for
 a requested lifecycle transition after work is sent, not for startup identity.
+Repeat `--status` or pass a comma-separated set when any of several terminal
+states should unblock the workflow. Unknown options and positional arguments
+are rejected instead of being ignored.
 
 For a blocked agent:
 

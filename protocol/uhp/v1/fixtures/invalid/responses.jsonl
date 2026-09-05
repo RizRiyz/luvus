@@ -1,1 +1,4 @@
 {"id":"unicode-é","result":{}}
+{"id":"bad-agent-wait-match","result":{"type":"agent_wait","matched":true,"pane":null,"status":null}}
+{"id":"non-object-result","result":[]}
+{"id":"non-object-error","error":"bad"}
