@@ -277,7 +277,9 @@ orchestration (multiple agents on one project, docs/22):
                              claim the next ready task (--start creates a worker)
   task start <id> [--branch <b>] [--agent <cmd>] [--mode worktree|workspace]
                              start a worker (worktree default; workspace shares checkout)
-  task heartbeat <id> --context <0..1>   report context usage (blocks done at >85%)
+  task heartbeat <id> --context-used <0..1>
+                             report model context-window use, not task progress
+                             (>85% blocks done; --context remains accepted)
   task update <id> [--status <s>] [--output <o>] [--note <n>]
   task done <id>             mark done + release its leases
   task merge <id>            integrate the task's branch into luvus/integration
@@ -3495,7 +3497,13 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             if let Some(id) = arg0() {
                 obj.insert("id".into(), json!(id));
             }
-            if let Some(c) = flag(args, "--context").and_then(|s| s.parse::<f64>().ok()) {
+            // `--context` remains a compatibility alias. Keep the UHP field
+            // stable while making the CLI spelling explicit enough that an
+            // agent cannot reasonably confuse it with task progress.
+            if let Some(c) = flag(args, "--context-used")
+                .or_else(|| flag(args, "--context"))
+                .and_then(|s| s.parse::<f64>().ok())
+            {
                 obj.insert("context".into(), json!(c));
             }
             ("task.heartbeat".into(), Value::Object(obj))
@@ -4526,9 +4534,13 @@ mod tests {
 
         assert!(parse(&argv("luvus task start t1 --mode unsafe")).is_err());
 
-        let (m, p) = parse(&argv("luvus task heartbeat t1 --context 0.7")).unwrap();
+        let (m, p) = parse(&argv("luvus task heartbeat t1 --context-used 0.7")).unwrap();
         assert_eq!(m, "task.heartbeat");
         assert_eq!(p.get("context").and_then(|v| v.as_f64()), Some(0.7));
+
+        let (m, p) = parse(&argv("luvus task heartbeat t1 --context 0.4")).unwrap();
+        assert_eq!(m, "task.heartbeat");
+        assert_eq!(p.get("context").and_then(|v| v.as_f64()), Some(0.4));
 
         let (m, p) = parse(&argv("luvus task merge t1")).unwrap();
         assert_eq!(m, "task.merge");

@@ -218,7 +218,9 @@ orchestration (multiple agents on one project, docs/22):
                              claim the next ready task (--start creates a worker)
   task start <id> [--branch <b>] [--agent <cmd>] [--mode worktree|workspace]
                              start a worker (worktree default; workspace shares checkout)
-  task heartbeat <id> --context <0..1>   report context usage (blocks done at >85%)
+  task heartbeat <id> --context-used <0..1>
+                             report model context-window use, not task progress
+                             (>85% blocks done; --context remains accepted)
   task update <id> [--status <s>] [--output <o>] [--note <n>]
   task done <id>             mark done + release its leases
   task merge <id>            integrate the task's branch into luvus/integration

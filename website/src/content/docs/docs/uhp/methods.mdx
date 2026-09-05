@@ -103,6 +103,12 @@ pane fails with `not_found`; malformed or out-of-range IDs fail with
 `invalid_request` before any mutation. Pane IDs accept an unsigned 32-bit JSON
 integer or its decimal string form.
 
+For `task.heartbeat`, the canonical UHP `context` field is the fraction of the
+model context window already consumed. `0.6` means 60% of that window has been
+used, not 60% task progress. Send work progress through the `note` field of
+`task.update` and omit the heartbeat when context-window usage is unknown. The
+CLI exposes the same field as the clearer `--context-used` flag.
+
 `pane.report_session` binds an exact built-in agent session to its owning pane.
 The identity-only form remains compatible with existing integrations:
 

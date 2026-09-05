@@ -2180,15 +2180,26 @@ static HELP: &[Translation] = &[
         "워커 시작 (기본값 worktree, workspace는 체크아웃 공유)"
     ),
     tr!(
-        "report context usage (blocks done at >85%)",
-        "informar uso de contexto (bloquea finalizar por encima del 85%)",
-        "informar uso de contexto (bloqueia conclusão acima de 85%)",
-        "signaler l'usage du contexte (bloque la fin au-delà de 85 %)",
-        "Kontextnutzung melden (blockiert Abschluss über 85 %)",
-        "laporkan penggunaan konteks (blokir selesai di atas 85%)",
-        "报告上下文使用率（超过 85% 时阻止完成）",
-        "コンテキスト使用率を報告（85%超で完了を拒否）",
-        "컨텍스트 사용량 보고 (85% 초과 시 완료 차단)"
+        "report model context-window use, not task progress",
+        "informar uso de la ventana de contexto del modelo, no progreso de la tarea",
+        "informar uso da janela de contexto do modelo, não o progresso da tarefa",
+        "signaler l'utilisation de la fenêtre de contexte du modèle, pas la progression de la tâche",
+        "Nutzung des Modell-Kontextfensters melden, nicht den Aufgabenfortschritt",
+        "laporkan pemakaian jendela konteks model, bukan progres tugas",
+        "报告模型上下文窗口用量，而非任务进度",
+        "タスク進捗ではなくモデルのコンテキストウィンドウ使用量を報告",
+        "작업 진행률이 아닌 모델 컨텍스트 창 사용량 보고"
+    ),
+    tr!(
+        "(>85% blocks done; --context remains accepted)",
+        "(>85% bloquea finalizar; --context sigue aceptado)",
+        "(>85% bloqueia conclusão; --context continua aceito)",
+        "(>85 % bloque la fin ; --context reste accepté)",
+        "(>85 % blockiert Abschluss; --context bleibt gültig)",
+        "(>85% memblokir penyelesaian; --context tetap diterima)",
+        "（超过 85% 时阻止完成；仍接受 --context）",
+        "（85%超で完了を拒否、--context も引き続き使用可能）",
+        "(85% 초과 시 완료 차단, --context도 계속 허용)"
     ),
     tr!(
         "mark done + release its leases",

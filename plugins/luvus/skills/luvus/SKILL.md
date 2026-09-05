@@ -375,6 +375,10 @@ surface:
   retrying. Leases coordinate declared paths but do not sandbox a shared
   checkout. `task release` requeues an
   active task and releases its path leases; it does not stop the worker pane.
+  Report work progress only with `task update --note`. `task heartbeat
+  --context-used <0..1>` means the fraction of the model context window already
+  consumed, never task-completion progress; `0.6` means 60% consumed. Omit the
+  heartbeat when context-window usage is unknown.
 - Inspect module metadata, actions, settings, and logs before changing module
   state. Installation, uninstallation, and consequential setting changes need
   clear authorization.

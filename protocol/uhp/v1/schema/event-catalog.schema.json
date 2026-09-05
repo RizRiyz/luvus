@@ -366,7 +366,10 @@
       "required": ["id", "context"],
       "properties": {
         "id": { "type": "string" },
-        "context": { "type": "number", "minimum": 0, "maximum": 1 }
+        "context": {
+          "type": "number", "minimum": 0, "maximum": 1,
+          "description": "Fraction of the model context window already consumed. This is not task-completion progress."
+        }
       }
     },
     "task_merge_started": {

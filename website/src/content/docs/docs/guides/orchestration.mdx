@@ -119,7 +119,7 @@ luvus task next --start --agent "claude"   # claim + start the next ready task
 luvus task start t2 --mode workspace --agent "codex"
 
 # finish + merge
-luvus task heartbeat t1 --context 0.6      # context gate: >0.85 blocks `done`
+luvus task heartbeat t1 --context-used 0.6 # 60% of the model context window is used
 luvus task done t1                          # runs the quality gate
 luvus task merge t1
 
@@ -132,6 +132,10 @@ luvus events
 
 Inside a luvus pane, commands default to the calling pane via
 `$LUVUS_PANE_ID`, so a worker agent can `luvus task heartbeat` itself.
+`--context-used` is the fraction of the model's context window already consumed:
+`0.6` means 60% consumed. It is not task-completion progress. Use `task update
+--note` for work progress and omit the heartbeat when context-window usage is
+unknown. The older `--context` spelling remains accepted for compatibility.
 
 Events on the bus: `task.added` · `task.claimed` · `task.started` ·
 `task.ready` · `task.gate_running` · `task.gate_passed` · `task.gate_failed` ·
@@ -153,9 +157,10 @@ Events on the bus: `task.added` · `task.claimed` · `task.started` ·
 - **Two layers of isolation.** Leases prevent overlapping work from being
   *assigned*, and worktrees mean even a misbehaving agent's clash only surfaces
   (safely) at merge time.
-- **A context gate.** Workers report context usage via `heartbeat`. Above 85%,
-  `done` is blocked until the agent compacts, so there are no half-remembered
-  finishes.
+- **A context gate.** Workers may report model context-window consumption via
+  `heartbeat`. Above 85%, `done` is blocked until the agent compacts or hands
+  off, so there are no half-remembered finishes. This value is never work
+  progress.
 
 ## Troubleshooting
 
@@ -164,7 +169,7 @@ Events on the bus: `task.added` · `task.claimed` · `task.started` ·
 | `s` → *not a git repo* | Worktree mode needs Git. Select workspace mode to run a branchless worker in the current directory. |
 | `s` → *deps not done* | A dependency task isn't `done` yet. |
 | `s` → *lease conflict* | Another task owns an overlapping path. Finish or release that task before retrying. No worker was created. |
-| `d` → *needs compaction* | The worker's context is over 85%, so compact (e.g. `/compact`), then retry. |
+| `d` → *needs compaction* | The worker's model context window is over 85%. Compact if the agent supports it, hand off, or correct a mistaken report with `luvus task heartbeat <id> --context-used <0..1>`, then retry. |
 | Stuck at `review` | The gate failed. `luvus task get <id>` shows the output. Fix and `d` again. |
 | `blocked` after `m` | Merge conflict. Resolve in the task's worktree, then `m` again. |
 

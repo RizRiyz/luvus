@@ -34,3 +34,4 @@
 {"id":"34","method":"integration.status","params":{}}
 {"id":"35","method":"integration.install","params":{"agent":"claude","confirm":true}}
 {"id":"36","method":"integration.uninstall","params":{"agent":"claude","confirm":true}}
+{"id":"37","method":"task.heartbeat","params":{"id":"t1","context":0.6}}
