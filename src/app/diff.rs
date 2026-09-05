@@ -144,6 +144,7 @@ impl App {
     /// mounted on its remembered side and revealed, while terminal-pane focus
     /// stays unchanged until a diff is opened.
     pub fn focus_diff_list(&mut self) {
+        self.sidebar_focus = None;
         if self.workspaces.is_empty() {
             self.files_focused = false;
             return;
