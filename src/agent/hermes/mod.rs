@@ -6,7 +6,9 @@
 
 use std::path::PathBuf;
 
-use super::types::{AgentDescriptor, IdentityDescriptor, SessionOperations};
+use super::types::{
+    AgentDescriptor, AutomationLaunch, AutomationOperations, IdentityDescriptor, SessionOperations,
+};
 
 mod integration;
 
@@ -22,6 +24,14 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     aliases: &["hermes-agent"],
     launch_command: "hermes",
     task_prompt_args: &["--oneshot"],
+    automation: Some(AutomationOperations {
+        read_only: None,
+        workspace: None,
+        // Hermes one-shot mode documents that it bypasses approvals.
+        full_access: Some(AutomationLaunch {
+            args: &["--oneshot"],
+        }),
+    }),
     identity: IdentityDescriptor {
         // `hermes` is an ordinary proper name, so trust it only in deliberate
         // command/title evidence. The launcher and Python module identities are

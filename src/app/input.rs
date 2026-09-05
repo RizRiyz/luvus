@@ -1610,10 +1610,11 @@ impl App {
                         .map(|(hit, _)| hit.clone());
                     if let Some(hit) = hit {
                         self.orch_activate_hit(hit);
-                    } else if self.orch_form.is_some() {
+                    } else if self.orch_form.is_some() || self.orch_detail.is_some() {
                         // Match Settings and the folder picker: the modal
                         // surface is inert, while its dimmed backdrop cancels.
                         self.orch_form = None;
+                        self.orch_detail = None;
                     }
                 }
                 MouseEventKind::ScrollUp if self.orch_detail.is_some() => {
@@ -1859,6 +1860,10 @@ impl App {
                 self.open_ws_menu(*i, c, r);
             } else if let Some((id, _)) = self.agent_rects.iter().find(|(_, rect)| hit(*rect)) {
                 self.open_agent_menu(AgentTarget::Live(*id), c, r); // live agent → Close
+            } else if let Some((id, _)) = self.automation_rects.iter().find(|(_, rect)| hit(*rect))
+            {
+                let id = id.clone();
+                self.open_automation_detail(&id);
             } else if let Some((i, _)) = self.session_rects.iter().find(|(_, rect)| hit(*rect)) {
                 self.open_agent_menu(AgentTarget::Session(*i), c, r); // session → Resume/Close
             } else if let Some((row, _)) = self.diff_row_rects.iter().find(|(_, rect)| hit(*rect)) {
@@ -2489,6 +2494,11 @@ impl App {
             self.focus_pane_global(id);
             return;
         }
+        if let Some((id, _)) = self.automation_rects.iter().find(|(_, rect)| hit(*rect)) {
+            let id = id.clone();
+            self.open_automation_detail(&id);
+            return;
+        }
         // Clicking a resumable session row reopens it into a pane.
         if let Some((i, _)) = self.session_rects.iter().find(|(_, rect)| hit(*rect)) {
             let i = *i;
@@ -2628,6 +2638,15 @@ impl App {
             }
             if let Some((scope, _)) = self.mission_scope_rects.iter().find(|(_, rect)| hit(*rect)) {
                 self.set_mission_scope(*scope);
+                return;
+            }
+            if let Some((id, _)) = self
+                .mission_automation_rects
+                .iter()
+                .find(|(_, rect)| hit(*rect))
+            {
+                let id = id.clone();
+                self.open_automation_detail(&id);
                 return;
             }
             let row = self

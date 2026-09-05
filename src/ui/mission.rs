@@ -8,6 +8,101 @@ use super::*;
 use crate::i18n::Catalog;
 use crate::mission::{MissionRowView, MissionScope};
 
+fn draw_automation_health(
+    f: &mut RenderTarget,
+    area: Rect,
+    health: crate::automation::AutomationHealth,
+    rows: &[crate::automation::AutomationView],
+    t: &Theme,
+) -> Vec<(String, Rect)> {
+    if area.height == 0 {
+        return Vec::new();
+    }
+    let state = if health.review > 0 || health.failed > 0 {
+        ("ATTENTION", t.coral)
+    } else if health.running > 0 {
+        ("RUNNING", t.mint)
+    } else if health.scheduled > 0 {
+        ("SCHEDULED", t.accent)
+    } else {
+        ("IDLE", t.overlay1)
+    };
+    let next = health
+        .next_run_at
+        .map(|deadline| format!("NEXT UTC {}", super::format_utc(deadline)))
+        .unwrap_or_else(|| "NO UPCOMING RUN".into());
+    if area.height == 1 {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" AUTOMATION ", Style::new().fg(t.crust).bg(state.1).bold()),
+                Span::styled(format!("  {}", state.0), Style::new().fg(state.1).bold()),
+                Span::styled(
+                    format!(
+                        "  ·  {} armed  ·  {} live  ·  {} review  ·  {} failed  ·  {next}",
+                        health.scheduled, health.running, health.review, health.failed
+                    ),
+                    Style::new().fg(t.overlay1),
+                ),
+            ])),
+            area,
+        );
+        return Vec::new();
+    }
+    let block = deck_block("AUTOMATIONS", t, false);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height == 0 {
+        return Vec::new();
+    }
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " STATE        NAME                     NEXT UTC",
+            Style::new().fg(t.overlay0).bold(),
+        )),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    let mut hits = Vec::new();
+    for (index, row) in rows
+        .iter()
+        .take(inner.height.saturating_sub(1) as usize)
+        .enumerate()
+    {
+        let color = match row.state.as_str() {
+            "running" => t.mint,
+            "review" | "failed" | "unavailable" => t.coral,
+            "scheduled" => t.accent,
+            "completed" => t.green,
+            _ => t.overlay1,
+        };
+        let next = row
+            .next_run_at
+            .and_then(|seconds| i64::try_from(seconds).ok())
+            .and_then(|seconds| jiff::Timestamp::from_second(seconds).ok())
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "—".into());
+        let rect = Rect::new(inner.x, inner.y + 1 + index as u16, inner.width, 1);
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    format!(" {:<12}", truncate(&row.state, 11)),
+                    Style::new().fg(color),
+                ),
+                Span::styled(
+                    format!("{:<25}", truncate(&row.name, 24)),
+                    Style::new().fg(t.subtext1),
+                ),
+                Span::styled(
+                    truncate(&next, inner.width.saturating_sub(38) as usize),
+                    Style::new().fg(t.overlay1),
+                ),
+            ])),
+            rect,
+        );
+        hits.push((row.id.clone(), rect));
+    }
+    hits
+}
+
 /// Format a token count compactly: `945`, `12.3k`, `1.2M`.
 fn fmt_tokens(n: u64) -> String {
     if n >= 1_000_000 {
@@ -800,6 +895,8 @@ pub(super) fn render(
     refreshing: bool,
     burn: Option<f64>,
     budget: Option<f64>,
+    automation: crate::automation::AutomationHealth,
+    automation_rows: &[crate::automation::AutomationView],
     compact: bool,
     cat: &Catalog,
     t: &Theme,
@@ -809,15 +906,22 @@ pub(super) fn render(
             scroll: 0,
             scope_rects: Vec::new(),
             refresh_rect: None,
+            automation_rects: Vec::new(),
             row_rects: Vec::new(),
         };
     }
     fill_bg(f, area, t.mantle);
     let footer_h = u16::from(!compact && area.height >= 10);
-    let [header, scopes, metrics, body, footer]: [Rect; 5] = Layout::vertical([
+    let automation_h = if automation_rows.is_empty() || area.height < 16 {
+        u16::from(area.height >= 12)
+    } else {
+        (automation_rows.len() as u16 + 2).clamp(3, 5)
+    };
+    let [header, scopes, metrics, automation_area, body, footer]: [Rect; 6] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(1),
         Constraint::Length(if area.height >= 14 { 4 } else { 3 }),
+        Constraint::Length(automation_h),
         Constraint::Min(3),
         Constraint::Length(footer_h),
     ])
@@ -825,6 +929,8 @@ pub(super) fn render(
     draw_header(f, header, rows, scope, cat, t);
     let (scope_rects, refresh_rect) = draw_scope_tabs(f, scopes, scope, refreshing, cat, t);
     draw_metrics(f, metrics, rows, burn, budget, cat, t);
+    let automation_rects =
+        draw_automation_health(f, automation_area, automation, automation_rows, t);
 
     let cursor = cursor.min(rows.len().saturating_sub(1));
     let rendered = if body.width >= 78 && body.height >= 14 {
@@ -868,6 +974,7 @@ pub(super) fn render(
         scroll: rendered.scroll,
         scope_rects,
         refresh_rect,
+        automation_rects,
         row_rects: rendered.row_rects,
     }
 }
@@ -876,6 +983,7 @@ pub(super) struct MissionRender {
     pub scroll: usize,
     pub scope_rects: Vec<(MissionScope, Rect)>,
     pub refresh_rect: Option<Rect>,
+    pub automation_rects: Vec<(String, Rect)>,
     pub row_rects: Vec<(usize, Rect)>,
 }
 

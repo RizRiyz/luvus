@@ -98,7 +98,52 @@ mod tests {
                 "invalid task prompt argument for {}",
                 descriptor.id
             );
+            if let Some(automation) = descriptor.automation {
+                let launches = [
+                    automation.read_only,
+                    automation.workspace,
+                    automation.full_access,
+                ];
+                assert!(
+                    launches.iter().any(Option::is_some),
+                    "{} advertises automation without a launch profile",
+                    descriptor.id
+                );
+                for launch in launches.into_iter().flatten() {
+                    assert!(
+                        launch
+                            .args
+                            .iter()
+                            .all(|arg| !arg.is_empty() && !arg.chars().any(char::is_control)),
+                        "invalid automation argument for {}",
+                        descriptor.id
+                    );
+                }
+            }
         }
+    }
+
+    #[test]
+    fn automation_capabilities_are_explicit_per_agent_and_access_level() {
+        use crate::automation::AutomationAccess;
+
+        let codex = find("codex").unwrap().automation.unwrap();
+        assert!(codex.supports(AutomationAccess::ReadOnly));
+        assert!(codex.supports(AutomationAccess::Workspace));
+        assert!(codex.supports(AutomationAccess::FullAccess));
+
+        let aider = find("aider").unwrap().automation.unwrap();
+        assert!(aider.supports(AutomationAccess::ReadOnly));
+        assert!(!aider.supports(AutomationAccess::Workspace));
+        assert!(aider.supports(AutomationAccess::FullAccess));
+
+        assert!(find("antigravity").unwrap().automation.is_none());
+        assert!(find("amp").unwrap().automation.is_none());
+
+        let pi = find("pi").unwrap().automation.unwrap();
+        assert!(pi.supports(AutomationAccess::ReadOnly));
+        assert!(!pi.supports(AutomationAccess::Workspace));
+        assert!(!pi.supports(AutomationAccess::FullAccess));
     }
 
     #[test]

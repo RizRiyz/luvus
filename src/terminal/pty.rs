@@ -2,11 +2,12 @@
 //! ordered input and output; Windows keeps portable-pty's split reader/writer
 //! backend. Child waiting is one process-wide event-driven reaper.
 
+use std::ffi::OsString;
 #[cfg(windows)]
 use std::io::Read;
 #[cfg(any(windows, test))]
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 #[cfg(unix)]
@@ -1139,7 +1140,26 @@ fn apply_pane_env(
     // different CLI (skill/binary skew). Matches the server it talks to.
     if let Ok(exe) = std::env::current_exe() {
         cmd.env("LUVUS_BIN_PATH", &exe);
+        if let Some(path) = path_with_server_binary(&exe, std::env::var_os("PATH")) {
+            cmd.env("PATH", path);
+        }
     }
+}
+
+/// Put the server's own executable directory first without dropping the
+/// user's existing command search path. A debug server therefore gives its
+/// panes the debug CLI, while an installed server gives them that exact
+/// release CLI. `split_paths`/`join_paths` keep this portable across Unix and
+/// Windows and avoid shell-specific quoting.
+fn path_with_server_binary(exe: &Path, inherited: Option<OsString>) -> Option<OsString> {
+    let binary_dir = exe.parent()?;
+    let mut entries = vec![binary_dir.to_path_buf()];
+    if let Some(inherited) = inherited {
+        entries.extend(
+            std::env::split_paths(&inherited).filter(|entry| entry.as_path() != binary_dir),
+        );
+    }
+    std::env::join_paths(entries).ok()
 }
 
 #[cfg(windows)]
@@ -1566,7 +1586,10 @@ mod reap_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{child_poll_finished, wrap_paste, write_input_action, InputAction};
+    use super::{
+        child_poll_finished, path_with_server_binary, wrap_paste, write_input_action, InputAction,
+    };
+    use std::path::PathBuf;
     use std::time::Duration;
 
     #[test]
@@ -1622,5 +1645,28 @@ mod tests {
         assert!(child_poll_finished(Ok(Some(
             portable_pty::ExitStatus::with_exit_code(0)
         ))));
+    }
+
+    #[test]
+    fn pane_path_pins_the_owning_server_binary_portably() {
+        let binary_dir = std::env::temp_dir().join("luvus exact binary");
+        let exe = binary_dir.join(if cfg!(windows) { "luvus.exe" } else { "luvus" });
+        let other = std::env::temp_dir().join("other tools");
+        let inherited = std::env::join_paths([other.clone(), binary_dir.clone()]).unwrap();
+
+        let path = path_with_server_binary(&exe, Some(inherited)).expect("portable PATH");
+        let entries = std::env::split_paths(&path).collect::<Vec<PathBuf>>();
+        assert_eq!(entries.first(), Some(&binary_dir));
+        assert_eq!(
+            entries.iter().filter(|entry| *entry == &binary_dir).count(),
+            1
+        );
+        assert!(entries.contains(&other), "the user's PATH is preserved");
+
+        let only = path_with_server_binary(&exe, None).expect("PATH without an inherited value");
+        assert_eq!(
+            std::env::split_paths(&only).collect::<Vec<_>>(),
+            [binary_dir]
+        );
     }
 }
