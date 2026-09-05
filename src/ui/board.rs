@@ -12,6 +12,10 @@ use crate::i18n::Catalog;
 use crate::orch::{OrchState, Task, TaskStatus};
 use ratatui::widgets::{Borders, Clear, Wrap};
 
+/// Keep the fleet summary renderer available without spending a viewport row
+/// while the task and automation tables already expose the same state.
+const SHOW_FLEET_STATUS: bool = false;
+
 /// A task's status, localized for display (the English `TaskStatus::as_str` stays
 /// the wire/JSON form; this is the human-facing label, docs/21).
 fn status_label(s: TaskStatus, cat: &Catalog) -> &'static str {
@@ -83,11 +87,7 @@ pub(super) fn render(
     fill_bg(f, area, t.mantle);
     let mut hits = Vec::new();
     // Match the established full-tab dashboard header: identity and action on
-    // the first row, fleet signal below it, then a quiet separator.
-    let mut counts = [0usize; 9];
-    for task in &orch.tasks {
-        counts[status_index(task.status)] += 1;
-    }
+    // the first row, then a quiet separator.
     let action_text = format!(" + {} ", cat.board_new_task.to_uppercase());
     let action_w = (super::display_width(&action_text) as u16).min(area.width);
     let action = Rect::new(
@@ -147,8 +147,27 @@ pub(super) fn render(
         action,
     );
     hits.push((crate::app::OrchHit::NewTask, action));
-    draw_status_summary(f, area, view, &counts, automation, cat, t);
-    hline(f, area.x + 1, area.y + 2, area.width.saturating_sub(2), t);
+    let footer_h = u16::from(!compact && area.height >= 10);
+    let summary_h = u16::from(SHOW_FLEET_STATUS && area.height >= 5);
+    let summary_y = area
+        .bottom()
+        .saturating_sub(footer_h.saturating_add(summary_h));
+    if summary_h > 0 {
+        let mut counts = [0usize; 9];
+        for task in &orch.tasks {
+            counts[status_index(task.status)] += 1;
+        }
+        draw_status_summary(
+            f,
+            Rect::new(area.x, summary_y, area.width, 1),
+            view,
+            &counts,
+            automation,
+            cat,
+            t,
+        );
+    }
+    hline(f, area.x + 1, area.y + 1, area.width.saturating_sub(2), t);
 
     if view == OrchView::Automations {
         return render_automations(
@@ -165,13 +184,12 @@ pub(super) fn render(
         );
     }
 
-    let footer_h = u16::from(!compact && area.height >= 10);
-    let body_y = area.y.saturating_add(3);
+    let body_y = area.y.saturating_add(2);
     let body = Rect::new(
         area.x,
         body_y,
         area.width,
-        area.bottom().saturating_sub(body_y + footer_h),
+        area.bottom().saturating_sub(body_y + footer_h + summary_h),
     );
     if body.height == 0 {
         return BoardRender { scroll: 0, hits };
@@ -339,6 +357,8 @@ struct AutomationRender<'a> {
 #[derive(Clone, Copy)]
 enum AutomationDisplayStatus {
     Scheduled,
+    Restoring,
+    NeedsRebind,
     Running,
     Review,
     Failed,
@@ -352,22 +372,37 @@ struct AutomationColumns {
     title: usize,
     schedule: usize,
     next: usize,
+    agent: usize,
+    pane: usize,
 }
 
 fn automation_columns(width: u16) -> AutomationColumns {
-    if width >= 97 {
+    if width >= 112 {
         AutomationColumns {
             wide: true,
-            title: 23,
-            schedule: 25,
-            next: 20,
+            title: 20,
+            schedule: 22,
+            next: 23,
+            agent: 12,
+            pane: 5,
         }
-    } else if width >= 80 {
+    } else if width >= 97 {
         AutomationColumns {
             wide: true,
             title: 15,
             schedule: 18,
-            next: 15,
+            next: 23,
+            agent: 9,
+            pane: 4,
+        }
+    } else if width >= 80 {
+        AutomationColumns {
+            wide: true,
+            title: 13,
+            schedule: 15,
+            next: 21,
+            agent: 0,
+            pane: 0,
         }
     } else {
         AutomationColumns {
@@ -375,6 +410,8 @@ fn automation_columns(width: u16) -> AutomationColumns {
             title: 23,
             schedule: 0,
             next: 20,
+            agent: 0,
+            pane: 0,
         }
     }
 }
@@ -389,25 +426,29 @@ fn draw_status_summary(
     t: &Theme,
 ) {
     let entries = if view == OrchView::Automations {
-        let mut counts = [0usize; 6];
+        let mut counts = [0usize; 8];
         for item in &automation.automations {
             let index = match automation_display_status(automation, item) {
                 AutomationDisplayStatus::Scheduled => 0,
-                AutomationDisplayStatus::Running => 1,
-                AutomationDisplayStatus::Review => 2,
-                AutomationDisplayStatus::Failed => 3,
-                AutomationDisplayStatus::Paused => 4,
-                AutomationDisplayStatus::Completed => 5,
+                AutomationDisplayStatus::Restoring => 1,
+                AutomationDisplayStatus::NeedsRebind => 2,
+                AutomationDisplayStatus::Running => 3,
+                AutomationDisplayStatus::Review => 4,
+                AutomationDisplayStatus::Failed => 5,
+                AutomationDisplayStatus::Paused => 6,
+                AutomationDisplayStatus::Completed => 7,
             };
             counts[index] += 1;
         }
         vec![
             (cat.automation_scheduled, counts[0], t.accent),
-            (cat.task_running, counts[1], t.mint),
-            (cat.task_review, counts[2], t.amber),
-            (cat.task_failed, counts[3], t.coral),
-            (cat.automation_paused, counts[4], t.overlay1),
-            (cat.automation_completed, counts[5], t.green),
+            (cat.automation_restoring, counts[1], t.amber),
+            (cat.automation_needs_rebind, counts[2], t.coral),
+            (cat.task_running, counts[3], t.mint),
+            (cat.task_review, counts[4], t.amber),
+            (cat.task_failed, counts[5], t.coral),
+            (cat.automation_paused, counts[6], t.overlay1),
+            (cat.automation_completed, counts[7], t.green),
         ]
     } else {
         vec![
@@ -434,10 +475,7 @@ fn draw_status_summary(
             Style::new().fg(if count > 0 { active_color } else { t.overlay1 }),
         ));
     }
-    f.render_widget(
-        Paragraph::new(Line::from(spans)),
-        Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
-    );
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_automations(
@@ -454,18 +492,18 @@ fn render_automations(
         theme: t,
     } = panel;
     let footer_h = u16::from(!compact && area.height >= 10);
+    let summary_h = u16::from(SHOW_FLEET_STATUS && area.height >= 5);
     let body = Rect::new(
         area.x.saturating_add(1),
-        area.y.saturating_add(3),
+        area.y.saturating_add(2),
         area.width.saturating_sub(2),
-        area.height.saturating_sub(3 + footer_h),
+        area.height.saturating_sub(2 + footer_h + summary_h),
     );
-    let header = Rect::new(body.x, body.y, body.width, 1);
-    let columns = automation_columns(body.width);
-    if body.height > 0 {
-        draw_automation_header(f, header, columns, cat, t);
-    }
     if state.automations.is_empty() {
+        let header = Rect::new(body.x, body.y, body.width, 1);
+        if body.height > 0 {
+            draw_automation_header(f, header, automation_columns(body.width), cat, t);
+        }
         let empty = Rect::new(
             body.x,
             body.y.saturating_add(1),
@@ -478,6 +516,13 @@ fn render_automations(
     let cursor = cursor.min(state.automations.len().saturating_sub(1));
     let capacity = body.height.saturating_sub(1) as usize;
     let scroll = cursor.saturating_sub(capacity.saturating_sub(1));
+    let overflow = capacity > 0 && state.automations.len() > capacity;
+    let table_width = body.width.saturating_sub(u16::from(overflow));
+    let header = Rect::new(body.x, body.y, table_width, 1);
+    let columns = automation_columns(table_width);
+    if body.height > 0 {
+        draw_automation_header(f, header, columns, cat, t);
+    }
     for (visible, automation) in state
         .automations
         .iter()
@@ -486,62 +531,33 @@ fn render_automations(
         .enumerate()
     {
         let index = scroll + visible;
-        let row = Rect::new(body.x, body.y + 1 + visible as u16, body.width, 1);
+        let row = Rect::new(body.x, body.y + 1 + visible as u16, table_width, 1);
         let selected = index == cursor;
         if selected {
             fill_bg(f, row, t.sel_bg);
         }
-        let (status, color) = automation_status(state, &automation.id, cat, t);
-        let next = automation
-            .next_run_at
-            .map(super::format_utc)
-            .unwrap_or_else(|| "—".into());
-        let name = pad(&automation.name, columns.title);
-        let line = if columns.wide {
-            format!(
-                "{} {} {} {} {} {} {}",
-                if selected { "▸" } else { " " },
-                pad(&automation.id, 6),
-                pad(status, 11),
-                name,
-                pad(&schedule_label(&automation.trigger), columns.schedule),
-                pad(&next, columns.next),
-                automation.task.agent_id
-            )
-        } else {
-            format!(
-                "{} {} {} {} {}",
-                if selected { "▸" } else { " " },
-                pad(&automation.id, 6),
-                pad(status, 11),
-                name,
-                pad(&next, 20)
-            )
-        };
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(
-                    truncate(&line, body.width as usize),
-                    Style::new().fg(t.subtext1),
-                ),
-                Span::styled("", Style::new().fg(color)),
-            ])),
+            Paragraph::new(automation_line(
+                state, automation, columns, selected, cat, t,
+            )),
             row,
         );
-        // Paint the state column after the base row so its status remains easy
-        // to scan without constructing a per-cell table model.
-        if row.width > 9 {
-            f.render_widget(
-                Paragraph::new(Span::styled(
-                    truncate(status, 11),
-                    Style::new()
-                        .fg(color)
-                        .bg(if selected { t.sel_bg } else { t.mantle }),
-                )),
-                Rect::new(row.x + 9, row.y, 11.min(row.width.saturating_sub(9)), 1),
-            );
-        }
         hits.push((crate::app::OrchHit::Automation(automation.id.clone()), row));
+    }
+    if overflow {
+        draw_automation_scrollbar(
+            f,
+            Rect::new(
+                body.right().saturating_sub(1),
+                body.y + 1,
+                1,
+                capacity as u16,
+            ),
+            state.automations.len(),
+            capacity,
+            scroll,
+            t,
+        );
     }
     if footer_h > 0 {
         f.render_widget(
@@ -563,6 +579,105 @@ fn render_automations(
     BoardRender { scroll, hits }
 }
 
+fn automation_line<'a>(
+    state: &AutomationState,
+    automation: &'a Automation,
+    columns: AutomationColumns,
+    selected: bool,
+    cat: &'a Catalog,
+    t: &'a Theme,
+) -> Line<'a> {
+    let (status, status_color) = automation_status(state, &automation.id, cat, t);
+    let next = automation
+        .next_run_at
+        .map(super::format_utc)
+        .unwrap_or_else(|| "—".into());
+    let mut spans = vec![
+        Span::styled(
+            if selected { "▌ " } else { "  " },
+            Style::new().fg(t.accent),
+        ),
+        Span::styled(
+            format!("{} ", pad(&automation.id, 6)),
+            Style::new().fg(t.subtext1).bold(),
+        ),
+        Span::styled(
+            format!("{} ", pad(status, 11)),
+            Style::new().fg(status_color),
+        ),
+        Span::styled(
+            format!("{} ", pad(&automation.name, columns.title)),
+            Style::new().fg(t.text),
+        ),
+    ];
+    if columns.wide {
+        spans.extend([
+            Span::styled(
+                format!(
+                    "{} ",
+                    pad(&schedule_label(&automation.trigger), columns.schedule)
+                ),
+                Style::new().fg(t.subtext0),
+            ),
+            Span::styled(
+                format!("{} ", pad(&next, columns.next)),
+                Style::new().fg(t.overlay1),
+            ),
+            Span::styled(
+                if columns.agent > 0 {
+                    pad(&automation.task.agent_id, columns.agent)
+                } else {
+                    automation.task.agent_id.clone()
+                },
+                Style::new().fg(t.mint).bold(),
+            ),
+        ]);
+        if columns.pane > 0 {
+            spans.extend([
+                Span::raw(" "),
+                Span::styled(
+                    automation_pane_label(automation),
+                    Style::new().fg(t.amber).bold(),
+                ),
+            ]);
+        }
+    } else {
+        spans.push(Span::styled(pad(&next, 20), Style::new().fg(t.overlay1)));
+    }
+    Line::from(spans)
+}
+
+/// A proportional position rail for long automation lists. It uses the same
+/// quiet full-cell track as the mobile navigator, but is confined to the row
+/// gutter so it never obscures table content or hit targets.
+fn draw_automation_scrollbar(
+    f: &mut RenderTarget,
+    track: Rect,
+    total: usize,
+    capacity: usize,
+    scroll: usize,
+    t: &Theme,
+) {
+    if total <= capacity || capacity == 0 || track.height == 0 {
+        return;
+    }
+    let len = track.height as usize;
+    let thumb = (len * capacity / total).clamp(1, len);
+    let span = total - capacity;
+    let position = ((len - thumb) * scroll.min(span)) / span;
+    for offset in 0..len {
+        fill_bg(
+            f,
+            Rect::new(track.x, track.y + offset as u16, 1, 1),
+            if offset >= position && offset < position + thumb {
+                t.overlay1
+            } else {
+                t.surface1
+            },
+        );
+    }
+}
+
 fn draw_automation_header(
     f: &mut RenderTarget,
     area: Rect,
@@ -571,7 +686,19 @@ fn draw_automation_header(
     t: &Theme,
 ) {
     let style = Style::new().fg(t.overlay1).bold();
-    if columns.wide {
+    if columns.pane > 0 {
+        let line = format!(
+            "  {} {} {} {} {} {} {}",
+            pad("ID", 6),
+            pad(&cat.col_status.to_uppercase(), 11),
+            pad(&cat.col_title.to_uppercase(), columns.title),
+            pad(&cat.board_f_schedule.to_uppercase(), columns.schedule),
+            pad(&cat.col_next_utc.to_uppercase(), columns.next),
+            pad(&cat.board_agent.to_uppercase(), columns.agent),
+            cat.pane.to_uppercase(),
+        );
+        f.render_widget(Paragraph::new(Span::styled(line, style)), area);
+    } else if columns.wide {
         let line = format!(
             "  {} {} {} {} {} {}",
             pad("ID", 6),
@@ -594,6 +721,15 @@ fn draw_automation_header(
     }
 }
 
+fn automation_pane_label(automation: &Automation) -> String {
+    match &automation.target {
+        crate::automation::AutomationTarget::ActiveAgent { pane_id, .. } => {
+            format!("p{pane_id}")
+        }
+        crate::automation::AutomationTarget::NewWorker => "—".into(),
+    }
+}
+
 fn automation_status<'a>(
     state: &AutomationState,
     id: &str,
@@ -605,6 +741,8 @@ fn automation_status<'a>(
     };
     match automation_display_status(state, item) {
         AutomationDisplayStatus::Scheduled => (cat.automation_scheduled, t.accent),
+        AutomationDisplayStatus::Restoring => (cat.automation_restoring, t.amber),
+        AutomationDisplayStatus::NeedsRebind => (cat.automation_needs_rebind, t.coral),
         AutomationDisplayStatus::Running => (cat.task_running, t.mint),
         AutomationDisplayStatus::Review => (cat.task_review, t.amber),
         AutomationDisplayStatus::Failed => (cat.task_failed, t.coral),
@@ -617,6 +755,17 @@ fn automation_display_status(
     state: &AutomationState,
     automation: &Automation,
 ) -> AutomationDisplayStatus {
+    if let Some(target_state) = state.active_target_states.get(&automation.id) {
+        match target_state {
+            crate::automation::ActiveTargetState::Restoring => {
+                return AutomationDisplayStatus::Restoring;
+            }
+            crate::automation::ActiveTargetState::NeedsRebind => {
+                return AutomationDisplayStatus::NeedsRebind;
+            }
+            crate::automation::ActiveTargetState::Bound => {}
+        }
+    }
     match state.latest_run(&automation.id).map(|run| run.status) {
         Some(RunStatus::Pending | RunStatus::Starting | RunStatus::Running) => {
             AutomationDisplayStatus::Running
@@ -2354,6 +2503,18 @@ pub(super) fn draw_automation_detail(
         },
         &mut lines,
     );
+    if let crate::automation::AutomationTarget::ActiveAgent { durable, .. } = &automation.target {
+        kv(
+            cat.automation_binding,
+            if durable.is_some() {
+                cat.automation_survives_restart
+            } else {
+                cat.automation_until_restart
+            }
+            .to_string(),
+            &mut lines,
+        );
+    }
     kv(
         cat.board_workspace,
         automation.task.workspace_id.clone(),
@@ -2463,7 +2624,7 @@ pub(super) fn draw_automation_detail(
         body,
     );
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
-    let open_label = format!(" ⏎ {} ", cat.automation_open_orch);
+    let open_label = format!(" ⏎ {} ", cat.automation_open_target);
     let open_rect = Rect::new(
         footer.x,
         footer.y,
@@ -2483,7 +2644,7 @@ pub(super) fn draw_automation_detail(
     DetailRender {
         scroll,
         hits: vec![
-            (crate::app::OrchHit::DetailOpenOrch, open_rect),
+            (crate::app::OrchHit::DetailOpenTarget, open_rect),
             (crate::app::OrchHit::DetailModal, modal),
         ],
     }
@@ -2583,7 +2744,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn automation_table_uses_full_aligned_headers_and_reports_scheduled_count() {
+    fn automation_table_uses_spaced_headers_and_reports_the_target_pane() {
         let theme = Theme::quattro_rally();
         let header_area = Rect::new(0, 0, 120, 1);
         let mut header_buffer = Buffer::empty(header_area);
@@ -2601,11 +2762,122 @@ mod tests {
         assert_eq!(header.find("ID"), Some(2));
         assert_eq!(header.find("STATUS"), Some(9));
         assert_eq!(header.find("TITLE"), Some(21));
-        assert_eq!(header.find("SCHEDULE"), Some(45));
-        assert_eq!(header.find("NEXT UTC"), Some(71));
-        assert_eq!(header.find("AGENT"), Some(92));
+        assert_eq!(header.find("SCHEDULE"), Some(42));
+        assert_eq!(header.find("NEXT UTC"), Some(65));
+        assert_eq!(header.find("AGENT"), Some(89));
+        assert_eq!(header.find("PANE"), Some(102));
         assert!(!header.contains('…'));
 
+        let mut state = AutomationState::default();
+        state.automations.push(Automation {
+            id: "a1".into(),
+            name: "Morning review".into(),
+            enabled: true,
+            trigger: Trigger::Once { at_utc: 100 },
+            target: crate::automation::AutomationTarget::ActiveAgent {
+                pane_id: 7,
+                terminal_id: "0123456789abcdef0123456789abcdef".into(),
+                if_busy: crate::automation::ActiveAgentBusyPolicy::Wait,
+                durable: None,
+            },
+            task: crate::automation::TaskTemplate {
+                title: "Review".into(),
+                prompt: "Review changes".into(),
+                agent_id: "codex".into(),
+                workspace_id: "workspace-1".into(),
+                mode: crate::orch::TaskWorkerMode::Workspace,
+                access: crate::automation::AutomationAccess::Workspace,
+                paths: Vec::new(),
+                gate: None,
+            },
+            policy: crate::automation::AutomationPolicy::default(),
+            next_run_at: Some(100),
+            created_at: 1,
+            updated_at: 1,
+        });
+        let table_area = Rect::new(0, 0, 120, 12);
+        let mut table_buffer = Buffer::empty(table_area);
+        let mut table_target = RenderTarget::new(&mut table_buffer, table_area);
+        render_automations(
+            &mut table_target,
+            table_area,
+            AutomationRender {
+                state: &state,
+                cursor: 0,
+                compact: false,
+                catalog: &crate::i18n::EN,
+                theme: &theme,
+            },
+            Vec::new(),
+        );
+        let cells = |start: u16, width: u16| {
+            (start..start + width)
+                .map(|x| table_buffer[(x, 3)].symbol())
+                .collect::<String>()
+        };
+        assert_eq!(table_buffer[(1, 3)].symbol(), "▌");
+        assert_eq!(cells(90, 5), "codex");
+        assert_eq!(cells(103, 2), "p7");
+        assert_eq!(table_buffer[(90, 3)].fg, theme.mint);
+        assert_eq!(table_buffer[(103, 3)].fg, theme.amber);
+        assert_eq!(table_buffer[(90, 3)].bg, theme.sel_bg);
+    }
+
+    #[test]
+    fn overflowing_automation_table_draws_a_proportional_position_rail() {
+        let theme = Theme::quattro_rally();
+        let area = Rect::new(0, 0, 80, 10);
+        let mut state = AutomationState::default();
+        for index in 0..12 {
+            state.automations.push(Automation {
+                id: format!("a{}", index + 1),
+                name: format!("Review {}", index + 1),
+                enabled: true,
+                trigger: Trigger::Once { at_utc: 100 },
+                target: crate::automation::AutomationTarget::NewWorker,
+                task: crate::automation::TaskTemplate {
+                    title: "Review".into(),
+                    prompt: "Review changes".into(),
+                    agent_id: "codex".into(),
+                    workspace_id: "workspace-1".into(),
+                    mode: crate::orch::TaskWorkerMode::Workspace,
+                    access: crate::automation::AutomationAccess::Workspace,
+                    paths: Vec::new(),
+                    gate: None,
+                },
+                policy: crate::automation::AutomationPolicy::default(),
+                next_run_at: Some(100),
+                created_at: 1,
+                updated_at: 1,
+            });
+        }
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+        let rendered = render_automations(
+            &mut target,
+            area,
+            AutomationRender {
+                state: &state,
+                cursor: 0,
+                compact: false,
+                catalog: &crate::i18n::EN,
+                theme: &theme,
+            },
+            Vec::new(),
+        );
+
+        assert_eq!(rendered.scroll, 0);
+        // With the fleet summary hidden, area 80x10 gives a six-row viewport
+        // and reserves x=78 for the rail.
+        assert_eq!(buffer[(78, 3)].bg, theme.overlay1);
+        assert_eq!(buffer[(78, 6)].bg, theme.surface1);
+        assert!(rendered.hits.iter().all(|(_, rect)| rect.right() <= 78));
+    }
+
+    #[test]
+    fn fleet_status_is_hidden_but_its_renderer_remains_available() {
+        let theme = Theme::quattro_rally();
+        let area = Rect::new(0, 0, 120, 20);
         let mut state = AutomationState::default();
         state.automations.push(Automation {
             id: "a1".into(),
@@ -2628,7 +2900,55 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         });
-        let summary_area = Rect::new(0, 0, 120, 2);
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+        render(
+            &mut target,
+            area,
+            &OrchState::default(),
+            &state,
+            0,
+            0,
+            0,
+            OrchView::Automations,
+            crate::orch::TaskWorkerMode::Worktree,
+            false,
+            None,
+            &crate::i18n::EN,
+            &theme,
+        );
+        let automation_view = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(!automation_view.contains("1 scheduled"));
+
+        let mut task_buffer = Buffer::empty(area);
+        let mut task_target = RenderTarget::new(&mut task_buffer, area);
+        render(
+            &mut task_target,
+            area,
+            &OrchState::default(),
+            &AutomationState::default(),
+            0,
+            0,
+            0,
+            OrchView::Tasks,
+            crate::orch::TaskWorkerMode::Worktree,
+            false,
+            None,
+            &crate::i18n::EN,
+            &theme,
+        );
+        let task_view = task_buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(!task_view.contains("0 queued"));
+
+        let summary_area = Rect::new(0, 0, 120, 1);
         let mut summary_buffer = Buffer::empty(summary_area);
         let mut summary_target = RenderTarget::new(&mut summary_buffer, summary_area);
         draw_status_summary(
@@ -2640,10 +2960,76 @@ mod tests {
             &crate::i18n::EN,
             &theme,
         );
-        let summary = (0..summary_area.width)
-            .map(|x| summary_buffer[(x, 1)].symbol())
+        let summary = summary_buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(summary.contains("1 scheduled"));
+    }
+
+    #[test]
+    fn automation_detail_explains_a_durable_active_agent_binding() {
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+        let mut state = AutomationState::default();
+        state.automations.push(Automation {
+            id: "a1".into(),
+            name: "Continue review".into(),
+            enabled: true,
+            trigger: Trigger::Once { at_utc: 100 },
+            target: crate::automation::AutomationTarget::ActiveAgent {
+                pane_id: 7,
+                terminal_id: "0123456789abcdef0123456789abcdef".into(),
+                if_busy: crate::automation::ActiveAgentBusyPolicy::Wait,
+                durable: Some(crate::automation::DurableAgentIdentity {
+                    agent_id: "codex".into(),
+                    native_session_id: "private-session".into(),
+                    workspace_id: "workspace-1".into(),
+                    cwd: std::path::PathBuf::from("/workspace"),
+                }),
+            },
+            task: crate::automation::TaskTemplate {
+                title: "Continue review".into(),
+                prompt: "Continue".into(),
+                agent_id: "codex".into(),
+                workspace_id: "workspace-1".into(),
+                mode: crate::orch::TaskWorkerMode::Workspace,
+                access: crate::automation::AutomationAccess::Workspace,
+                paths: Vec::new(),
+                gate: None,
+            },
+            policy: crate::automation::AutomationPolicy::default(),
+            next_run_at: Some(100),
+            created_at: 1,
+            updated_at: 1,
+        });
+
+        draw_automation_detail(
+            &mut target,
+            area,
+            AutomationDetail {
+                automation: &state.automations[0],
+                state: &state,
+                preview: &[],
+            },
+            0,
+            &crate::i18n::EN,
+            &Theme::quattro_rally(),
+        );
+
+        let rendered = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Binding"));
+        assert!(rendered.contains("Survives server restart"));
+        assert!(!rendered.contains("private-session"));
     }
 
     #[test]
@@ -2711,21 +3097,21 @@ mod tests {
         );
         let automation_text = crate::i18n::EN.automation_empty;
         let automation_row: String = (0..automation_area.width)
-            .map(|x| automation_buffer[(x, 9)].symbol())
+            .map(|x| automation_buffer[(x, 8)].symbol())
             .collect();
         assert_eq!(automation_row.trim(), automation_text);
         let automation_x = automation_row.find('N').expect("centered automation text");
         let trailing =
             automation_area.width as usize - automation_x - super::display_width(automation_text);
         assert!(automation_x.abs_diff(trailing) <= 1);
-        let automation_cell = &automation_buffer[(automation_x as u16, 9)];
+        let automation_cell = &automation_buffer[(automation_x as u16, 8)];
         assert_eq!(automation_cell.symbol(), "N");
         assert_eq!(automation_cell.fg, theme.text);
         assert!(automation_cell
             .modifier
             .contains(ratatui::style::Modifier::BOLD));
         let command_row: String = (0..automation_area.width)
-            .map(|x| automation_buffer[(x, 13)].symbol())
+            .map(|x| automation_buffer[(x, 12)].symbol())
             .collect();
         assert_eq!(command_row.trim(), "luvus automation create --help");
     }

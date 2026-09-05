@@ -57,7 +57,9 @@ schedule stays at that local wall-clock time across daylight-saving changes.
 Armed definitions appear in the ORCH table and as `scheduled` rows in the
 sidebar's Active section. When a run starts, its placeholder becomes the normal
 live agent row. Open a definition to see the next occurrences and bounded run
-history; Mission Control summarizes scheduled, live, review, and failed runs.
+history. Right-click a scheduled row to open its context menu; if no live pane
+exists yet, the menu offers definition-safe actions instead of pane actions.
+Mission Control summarizes scheduled, live, review, and failed runs.
 
 ## Choose a new or active agent
 
@@ -67,19 +69,37 @@ policy.
 
 **Active agent** sends the scheduled prompt into a recognized live agent pane
 so it continues with that interactive conversation's context. The picker shows
-only agents running in the current named server session. Luvus binds the
-definition to both the pane ID and the terminal's random lifetime ID, verifies
-the agent and workspace again at delivery, and never redirects a stale target
-to another pane.
+only agents running in the current named server session. Luvus initially binds
+the definition to both the pane ID and the terminal's random lifetime ID,
+verifies the agent and workspace again at delivery, and never redirects a stale
+target to another pane. When the pane also has an exact trusted native session
+ID for a resumable built-in adapter, Luvus privately stores that durable
+identity. After restart it replaces the stale route only when exactly one pane
+proves the same agent, conversation, workspace, and working directory.
 
-Active-agent definitions are process-bound:
+Active-agent definitions:
 
 - they do not create an ORCH task, worktree, path lease, or quality gate;
 - `wait` leaves one occurrence pending until the agent becomes idle, while
   `skip` records a busy occurrence as skipped;
 - successful delivery is recorded as `delivered`, not as completed work;
-- closing the target pane or restarting the server fails waiting runs and
-  disables the definition. Select the restored agent again before re-enabling.
+- appear as `restoring` while a recovered pane awaits fresh process or
+  integration evidence, and as `needs_rebind` when no exact route is proven;
+- keep a due occurrence pending during recovery;
+- remain process-bound when no trusted native identity is available. Those
+  definitions retain the older behavior: pane closure or restart fails waiting
+  runs and disables the definition.
+
+Luvus never exposes the private native session ID through CLI, UHP, events,
+logs, Mission Control, or the UI. If automatic recovery cannot prove one exact
+pane, rebind the same conversation explicitly:
+
+```sh
+luvus automation rebind a1 --pane 7
+```
+
+Add `--terminal-id <id>` for stale-terminal protection. A different native
+conversation is rejected even when its agent and directory look identical.
 
 This keeps prompt delivery contextual without pretending Luvus can prove when
 an arbitrary interactive agent has finished that prompt.
@@ -212,6 +232,9 @@ luvus automation enable a1
 # Request one run now without advancing the retained schedule.
 luvus automation run a1 --idempotency-key manual-check-2026-09-04
 
+# Reattach a durable active-agent definition to its restored pane.
+luvus automation rebind a2 --pane 7
+
 # Delete only when the definition has no live run.
 luvus automation delete a1
 ```
@@ -251,10 +274,11 @@ after local midnight.
 {"id":"preview","method":"automation.preview","params":{"trigger":{"kind":"daily","timezone":"Asia/Makassar","second_of_day":28800}}}
 {"id":"create","method":"automation.create","params":{"name":"Morning review","trigger":{"kind":"weekly","timezone":"Asia/Makassar","weekdays":[1,2,3,4,5],"second_of_day":28800},"target":{"kind":"new_worker"},"task":{"title":"Review changes","prompt":"Review the workspace and report risks.","agent_id":"codex","workspace_id":"workspace_example","mode":"workspace","access":"read_only"},"policy":{"misfire":"run_latest","overlap":"skip","misfire_grace_seconds":3600},"idempotency_key":"morning-review-v1"}}
 {"id":"continue","method":"automation.create","params":{"name":"Continue review","trigger":{"kind":"once","at_utc":1788393600},"target":{"kind":"active_agent","pane_id":7,"terminal_id":"0123456789abcdef0123456789abcdef","if_busy":"wait"},"task":{"title":"Continue review","prompt":"Continue from our current context.","agent_id":"codex","workspace_id":"workspace_example","mode":"workspace","access":"workspace"}}}
+{"id":"rebind","method":"automation.rebind","params":{"id":"a2","pane":7}}
 ```
 
 Read methods require the UHP `read` scope. Creating, updating, enabling,
-disabling, running, or deleting definitions requires `orchestration`. Discover
+disabling, rebinding, running, or deleting definitions requires `orchestration`. Discover
 the live contract with `luvus uhp capabilities`, then reconcile after a remote
 reconnect with `automation.list`, `automation.history`, and
 `automation.health`. See the [UHP method reference](/docs/uhp/methods/#agent-automation)
@@ -278,7 +302,9 @@ unattended profiles; a detection-only manifest cannot gain execution authority.
 |---|---|
 | Nothing ran at the deadline | The owning named server must be running. Check `automation get <id>`, `automation health`, and `automation history <id>`. |
 | `workspace_not_found` | Refresh `luvus workspace list` and use the stable ID from the same named server session. |
-| `stale_target` | The existing pane closed, moved workspace, changed agents, or acquired a new terminal lifetime. Select it again and replace the definition. |
+| `needs_rebind` | No exact restored native conversation was proven. Use `automation rebind <id> --pane <id>` with the intended pane. |
+| `identity_mismatch` | The selected pane is a different native conversation. Resume the original conversation or create a new definition deliberately. |
+| `stale_target` | A process-bound pane closed, moved workspace, changed agents, or acquired a new terminal lifetime. Select it again and replace the definition. |
 | Active-agent run stays pending | Its busy policy is `wait`; it retries on that pane's next agent-state change without polling. |
 | `unsupported_automation_access` | Choose an access level declared by that built-in agent adapter. No ORCH resources were created. |
 | Worktree creation failed | Confirm the workspace is a Git repository and the target paths are available, or choose `--mode workspace`. |

@@ -415,6 +415,7 @@ fn allowed_method(mode: AccessMode, method: &str) -> bool {
                     | "automation.update"
                     | "automation.enable"
                     | "automation.disable"
+                    | "automation.rebind"
                     | "automation.delete"
                     | "automation.run"
                     | "terminal.backend.control"
@@ -925,12 +926,14 @@ mod tests {
         assert!(allowed_method(AccessMode::Control, "pane.focus"));
         assert!(allowed_method(AccessMode::Control, "agent.prompt"));
         assert!(!allowed_method(AccessMode::ReadOnly, "automation.create"));
+        assert!(!allowed_method(AccessMode::ReadOnly, "automation.rebind"));
         assert!(allowed_method(AccessMode::ReadOnly, "automation.health"));
         for method in [
             "automation.create",
             "automation.update",
             "automation.enable",
             "automation.disable",
+            "automation.rebind",
             "automation.delete",
             "automation.run",
         ] {

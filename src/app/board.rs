@@ -1316,6 +1316,7 @@ impl App {
                         pane_id: target.pane.0,
                         terminal_id: target.terminal_id,
                         if_busy: crate::automation::ActiveAgentBusyPolicy::Wait,
+                        durable: None,
                     },
                     target.agent,
                     target.workspace_id,
@@ -1324,7 +1325,7 @@ impl App {
                 )
             }
         };
-        let input = crate::automation::CreateAutomation {
+        let mut input = crate::automation::CreateAutomation {
             name: title.clone(),
             enabled: true,
             trigger,
@@ -1345,7 +1346,7 @@ impl App {
             input.target,
             crate::automation::AutomationTarget::ActiveAgent { .. }
         ) {
-            self.validate_active_agent_target(&input.target, &input.task)
+            self.prepare_active_agent_target(&mut input.target, &mut input.task)
                 .map_err(|(_, message)| message)?;
         } else {
             // Reuse ORCH validation before changing automation state.
@@ -1367,6 +1368,9 @@ impl App {
         if let Err(error) = self.automation.save() {
             self.automation = before;
             return Err(format!("could not save automation: {error}"));
+        }
+        if item.target.is_durable_active_agent() {
+            self.initialize_durable_active_target_state(&item);
         }
         self.emit_event(
             "automation.created",
@@ -1410,14 +1414,7 @@ impl App {
                 self.orch_scroll = 0;
             }
             crate::app::OrchHit::Automation(id) => {
-                if let Some(index) = self
-                    .automation
-                    .automations
-                    .iter()
-                    .position(|automation| automation.id == id)
-                {
-                    self.orch_automation_cursor = index;
-                }
+                self.orch_select_automation(&id);
             }
             crate::app::OrchHit::Worker(id) => {
                 if self.orch_select_task(&id) {
@@ -1470,7 +1467,7 @@ impl App {
             crate::app::OrchHit::StartCancel => self.orch_start = None,
             crate::app::OrchHit::DetailClose => self.orch_detail = None,
             crate::app::OrchHit::DetailModal => {}
-            crate::app::OrchHit::DetailOpenOrch => self.open_automation_detail_in_orch(),
+            crate::app::OrchHit::DetailOpenTarget => self.open_automation_detail_target(),
             crate::app::OrchHit::Task(_) => {}
         }
     }
@@ -1480,6 +1477,19 @@ impl App {
             .automations
             .get(self.orch_automation_cursor)
             .map(|automation| automation.id.clone())
+    }
+
+    pub(crate) fn orch_select_automation(&mut self, id: &str) -> bool {
+        let Some(index) = self
+            .automation
+            .automations
+            .iter()
+            .position(|automation| automation.id == id)
+        else {
+            return false;
+        };
+        self.orch_automation_cursor = index;
+        true
     }
 
     fn orch_automation_toggle(&mut self) {
@@ -1533,6 +1543,13 @@ impl App {
         }
     }
 
+    /// Toggle one definition selected through a stable context-menu identity.
+    pub(super) fn orch_toggle_automation(&mut self, id: &str) {
+        if self.orch_select_automation(id) {
+            self.orch_automation_toggle();
+        }
+    }
+
     fn orch_automation_run(&mut self) {
         let Some(id) = self.selected_automation_id() else {
             return;
@@ -1555,6 +1572,13 @@ impl App {
                 }
             },
             Err(error) => self.show_toast(error.message),
+        }
+    }
+
+    /// Queue one definition selected through a stable context-menu identity.
+    pub(super) fn orch_run_automation(&mut self, id: &str) {
+        if self.orch_select_automation(id) {
+            self.orch_automation_run();
         }
     }
 
@@ -1598,6 +1622,13 @@ impl App {
                 }
             },
             Err(error) => self.show_toast(error.message),
+        }
+    }
+
+    /// Delete one definition selected through a stable context-menu identity.
+    pub(super) fn orch_delete_automation(&mut self, id: &str) {
+        if self.orch_select_automation(id) {
+            self.orch_automation_delete();
         }
     }
 
@@ -1860,11 +1891,11 @@ impl App {
         }
     }
 
-    /// Key handling while the task detail overlay is open.
+    /// Key handling while a task or automation detail overlay is open.
     pub fn handle_orch_detail_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('o') => self.orch_detail = None,
-            KeyCode::Enter => self.open_automation_detail_in_orch(),
+            KeyCode::Enter => self.open_automation_detail_target(),
             KeyCode::Char('j') | KeyCode::Down => self.orch_detail_scroll += 1,
             KeyCode::Char('k') | KeyCode::Up => {
                 self.orch_detail_scroll = self.orch_detail_scroll.saturating_sub(1)
@@ -1873,10 +1904,15 @@ impl App {
         }
     }
 
-    fn open_automation_detail_in_orch(&mut self) {
+    fn open_automation_detail_target(&mut self) {
         let Some(id) = self.orch_detail.clone() else {
             return;
         };
+        if let Some(pane) = self.automation_live_pane(&id) {
+            self.orch_detail = None;
+            self.focus_pane_global(pane);
+            return;
+        }
         let Some(index) = self
             .automation
             .automations
@@ -1963,13 +1999,24 @@ impl App {
         }
     }
 
-    /// Scroll the board (mouse wheel); moves the cursor so the selection follows.
+    /// Scroll the active board list (mouse wheel); moves its cursor so the
+    /// selection follows in both the task and automation views.
     pub fn orch_scroll_by(&mut self, delta: i32) {
-        let last = self.orch.tasks.len().saturating_sub(1);
-        self.orch_cursor = if delta < 0 {
-            self.orch_cursor.saturating_sub((-delta) as usize)
+        let (cursor, last) = if self.orch_view == crate::app::OrchView::Automations {
+            (
+                &mut self.orch_automation_cursor,
+                self.automation.automations.len().saturating_sub(1),
+            )
         } else {
-            (self.orch_cursor + delta as usize).min(last)
+            (
+                &mut self.orch_cursor,
+                self.orch.tasks.len().saturating_sub(1),
+            )
+        };
+        *cursor = if delta < 0 {
+            cursor.saturating_sub((-delta) as usize)
+        } else {
+            (*cursor + delta as usize).min(last)
         };
     }
 }
@@ -2393,6 +2440,41 @@ mod tests {
         assert_eq!(app.orch_cursor, 2);
         app.orch_scroll_by(5);
         assert_eq!(app.orch_cursor, 2); // clamped at the last task (index 2 of 3)
+
+        let workspace_id = app.workspaces[0].id.clone();
+        for index in 0..3 {
+            app.automation
+                .create(
+                    crate::automation::CreateAutomation {
+                        name: format!("automation {index}"),
+                        enabled: true,
+                        trigger: crate::automation::Trigger::Once {
+                            at_utc: 4_000_000_000 + index,
+                        },
+                        target: crate::automation::AutomationTarget::NewWorker,
+                        task: crate::automation::TaskTemplate {
+                            title: "review".into(),
+                            prompt: "Review changes".into(),
+                            agent_id: "codex".into(),
+                            workspace_id: workspace_id.clone(),
+                            mode: crate::orch::TaskWorkerMode::Workspace,
+                            access: crate::automation::AutomationAccess::Workspace,
+                            paths: Vec::new(),
+                            gate: None,
+                        },
+                        policy: crate::automation::AutomationPolicy::default(),
+                    },
+                    None,
+                    10,
+                )
+                .unwrap();
+        }
+        app.orch_view = crate::app::OrchView::Automations;
+        app.orch_scroll_by(2);
+        assert_eq!(app.orch_automation_cursor, 2);
+        assert_eq!(app.orch_cursor, 2, "task selection stays independent");
+        app.orch_scroll_by(-5);
+        assert_eq!(app.orch_automation_cursor, 0);
     }
 
     #[test]
@@ -3788,6 +3870,56 @@ mod tests {
             app.orch.tasks.is_empty(),
             "future work is not a sleeping task"
         );
+    }
+
+    #[test]
+    fn board_durable_target_waits_for_fresh_readiness_evidence() {
+        let _env = crate::persist::test_env("orch-automation-durable-readiness");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "codex".into();
+        app.status.get_mut(&pane).unwrap().agent_session = Some(AgentSession {
+            agent: "codex".into(),
+            session_id: "board-native-session".into(),
+        });
+        app.proc_scan_inflight = true;
+        let terminal_id = app
+            .panes
+            .get(&pane)
+            .and_then(|pane| pane.terminal_runtime())
+            .unwrap()
+            .terminal_id;
+        let workspace_id = app.workspace_of_pane(pane).unwrap().id.clone();
+
+        app.submit_scheduled_orch_task(
+            "Continue review".into(),
+            "Check the latest changes.".into(),
+            "codex".into(),
+            crate::app::OrchAutomationTarget::ActiveAgent,
+            Some(crate::app::OrchActiveAgent {
+                pane,
+                terminal_id,
+                agent: "codex".into(),
+                workspace_id,
+                label: "codex".into(),
+            }),
+            TaskWorkerMode::Workspace,
+            crate::automation::AutomationAccess::Workspace,
+            crate::app::OrchFormStart::Daily,
+            "08:00".into(),
+            "Asia/Makassar".into(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            app.automation.active_target_states.get("a1"),
+            Some(&crate::automation::ActiveTargetState::Restoring)
+        );
+        assert!(!app.automation.ready_active_targets.contains("a1"));
+        assert!(app.proc_scan_demand_panes_inflight.contains(&pane));
     }
 
     #[test]

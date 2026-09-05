@@ -1699,7 +1699,7 @@ mod tests {
         app.run_cmd(Cmd::ToggleAgents);
         app.handle_agents_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         assert!(matches!(
-            app.agent_menu.as_ref().map(|menu| menu.target),
+            app.agent_menu.as_ref().map(|menu| menu.target.clone()),
             Some(AgentTarget::Session(0))
         ));
         assert_eq!(

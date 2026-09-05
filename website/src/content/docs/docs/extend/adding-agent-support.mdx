@@ -159,6 +159,12 @@ Resume and fork builders must treat session IDs as data and preserve arguments
 exactly. Add fixtures for hostile-looking IDs and platform path variants rather
 than interpolating them into a shell program.
 
+An exact session identity can also make an active-agent automation durable.
+Luvus keeps that identity private and rebinds only after the restored pane
+proves the same agent, native session, workspace, and canonical directory plus
+fresh readiness evidence. A detection-only adapter or guessed transcript ID
+must remain process-bound.
+
 ## Optional integrations
 
 An integration is appropriate only when the upstream agent documents a hook,

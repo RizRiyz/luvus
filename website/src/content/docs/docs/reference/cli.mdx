@@ -245,6 +245,7 @@ agent automation (scheduled ORCH tasks):
   automation get <id>        show one definition
   automation update <id> --name <name> <same required task and schedule options as create>
   automation enable|disable <id>
+  automation rebind <id> --pane <id> [--terminal-id <id>]   reattach the same native conversation
   automation run <id> [--idempotency-key <key>]   run once without advancing its schedule
   automation history [<id>] [--limit <1-200>]     show bounded run history
   automation preview (--once <UTC>|--every <seconds>|--daily <HH:MM>|--weekly <days> --at <HH:MM>)

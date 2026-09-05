@@ -455,7 +455,7 @@ pub(super) fn draw_agent_menu(
     };
     let anchor = menu.anchor;
     let selected = menu.selected;
-    let items = app.agent_menu_items(menu.target);
+    let items = app.agent_menu_items(menu.target.clone());
     let extras = menu.module_actions.clone();
     let scoped = app.agents_this_workspace;
     let rows: Vec<MenuRow> = items
@@ -463,7 +463,7 @@ pub(super) fn draw_agent_menu(
         .map(|it| MenuRow {
             text: agent_label(*it, cat, &extras, scoped),
             divider: matches!(it, AgentMenuItem::Divider),
-            destructive: matches!(it, AgentMenuItem::Close),
+            destructive: matches!(it, AgentMenuItem::Close | AgentMenuItem::AutomationDelete),
         })
         .collect();
     let rects = render_popup(
@@ -503,6 +503,10 @@ fn agent_label(
         AgentMenuItem::Pin => cat.menu_pin.to_string(),
         AgentMenuItem::Unpin => cat.menu_unpin.to_string(),
         AgentMenuItem::Close => cap_first(cat.act_close),
+        AgentMenuItem::AutomationDetails => cap_first(cat.act_details),
+        AgentMenuItem::AutomationRun => cap_first(cat.automation_now),
+        AgentMenuItem::AutomationToggle => cap_first(cat.board_automation_toggle),
+        AgentMenuItem::AutomationDelete => cap_first(cat.act_delete),
         AgentMenuItem::Divider => String::new(),
         AgentMenuItem::Module(i) => module_label(extras, i),
     }

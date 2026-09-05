@@ -14,6 +14,7 @@ impl App {
             .map(|automation| {
                 let latest = self.automation.latest_run(&automation.id);
                 let current = latest.filter(|run| run.status.is_live());
+                let target_state = self.durable_active_target_state(automation);
                 let available = match automation.target {
                     crate::automation::AutomationTarget::NewWorker => {
                         crate::agent::registry::find(&automation.task.agent_id).is_some()
@@ -27,6 +28,11 @@ impl App {
                         .is_ok(),
                 };
                 let state = match current.map(|run| run.status) {
+                    Some(crate::automation::RunStatus::Pending)
+                        if matches!(target_state, Some("restoring" | "needs_rebind")) =>
+                    {
+                        target_state.unwrap()
+                    }
                     Some(crate::automation::RunStatus::Review) => "review",
                     Some(_) => "running",
                     None if latest
@@ -43,6 +49,9 @@ impl App {
                         "completed"
                     }
                     None if !automation.enabled => "paused",
+                    None if matches!(target_state, Some("restoring" | "needs_rebind")) => {
+                        target_state.unwrap()
+                    }
                     None if !available => "unavailable",
                     None => "scheduled",
                 };
@@ -57,6 +66,7 @@ impl App {
                     latest_error: latest.and_then(|run| run.error.clone()),
                     agent_id: automation.task.agent_id.clone(),
                     workspace_id: automation.task.workspace_id.clone(),
+                    target_state: target_state.map(str::to_string),
                 }
             })
             .collect()

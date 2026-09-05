@@ -641,7 +641,14 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     // hit target opens read-only automation detail rather than focusing a pane.
     // As soon as a due occurrence owns a live ORCH task, the ordinary pane row
     // replaces this projection.
-    let mut scheduled: Vec<(String, String, String, u64, bool)> = app
+    let mut scheduled: Vec<(
+        String,
+        String,
+        String,
+        u64,
+        bool,
+        Option<crate::automation::ActiveTargetState>,
+    )> = app
         .automation
         .automations
         .iter()
@@ -689,6 +696,10 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                 workspace.name.clone(),
                 deadline,
                 starting,
+                app.automation
+                    .active_target_states
+                    .get(&automation.id)
+                    .copied(),
             ))
         })
         .collect();
@@ -829,28 +840,31 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                         }
                     }
                 }
-            } else if let Some((automation, agent, workspace, deadline, starting)) =
+            } else if let Some((automation, agent, workspace, deadline, starting, target_state)) =
                 scheduled.get(k.saturating_sub(live.len()))
             {
                 automation_rects.push((
                     automation.clone(),
                     Rect::new(area.x, y, area.width, ROW_STRIDE),
                 ));
-                let label = format!(
-                    " {}  ",
-                    if *starting {
-                        cat.automation_starting
-                    } else {
-                        cat.automation_scheduled
+                let (status, status_color) = match target_state {
+                    Some(crate::automation::ActiveTargetState::Restoring) => {
+                        (cat.automation_restoring, t.amber)
                     }
-                );
+                    Some(crate::automation::ActiveTargetState::NeedsRebind) => {
+                        (cat.automation_needs_rebind, t.coral)
+                    }
+                    _ if *starting => (cat.automation_starting, t.accent),
+                    _ => (cat.automation_scheduled, t.accent),
+                };
+                let label = format!(" {status}  ");
                 let prefix_w = 1 + crate::ui::display_width(&label);
                 line_at(
                     f,
                     y,
                     Line::from(vec![
-                        Span::styled("◷", Style::new().fg(t.accent)),
-                        Span::styled(label, Style::new().fg(t.accent)),
+                        Span::styled("◷", Style::new().fg(status_color)),
+                        Span::styled(label, Style::new().fg(status_color)),
                         Span::styled(
                             crate::ui::truncate(agent, (cw as usize).saturating_sub(prefix_w)),
                             Style::new().fg(t.subtext1).bold(),

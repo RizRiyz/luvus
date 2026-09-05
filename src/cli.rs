@@ -305,6 +305,7 @@ agent automation (scheduled ORCH tasks):
   automation get <id>        show one definition
   automation update <id> --name <name> <same required task and schedule options as create>
   automation enable|disable <id>
+  automation rebind <id> --pane <id> [--terminal-id <id>]   reattach the same native conversation
   automation run <id> [--idempotency-key <key>]   run once without advancing its schedule
   automation history [<id>] [--limit <1-200>]     show bounded run history
   automation preview (--once <UTC>|--every <seconds>|--daily <HH:MM>|--weekly <days> --at <HH:MM>)
@@ -3650,6 +3651,47 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         ("automation", "get") => ("automation.get".into(), one("id", arg0())),
         ("automation", "enable") => ("automation.enable".into(), one("id", arg0())),
         ("automation", "disable") => ("automation.disable".into(), one("id", arg0())),
+        ("automation", "rebind") => {
+            let id = rest
+                .first()
+                .filter(|value| !value.starts_with("--"))
+                .cloned()
+                .ok_or_else(|| anyhow!("automation rebind requires an id"))?;
+            let mut pane = None;
+            let mut terminal_id = None;
+            let mut index = 1;
+            while index < rest.len() {
+                let option = rest[index].as_str();
+                if !matches!(option, "--pane" | "--terminal-id") {
+                    return Err(anyhow!(
+                        "unexpected automation rebind argument `{}`",
+                        rest[index]
+                    ));
+                }
+                let value = rest
+                    .get(index + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .cloned()
+                    .ok_or_else(|| anyhow!("{option} requires a value"))?;
+                let slot = if option == "--pane" {
+                    &mut pane
+                } else {
+                    &mut terminal_id
+                };
+                if slot.replace(value).is_some() {
+                    return Err(anyhow!("duplicate automation rebind option `{option}`"));
+                }
+                index += 2;
+            }
+            let pane = pane.ok_or_else(|| anyhow!("automation rebind requires --pane"))?;
+            let mut obj = serde_json::Map::new();
+            obj.insert("id".into(), json!(id));
+            obj.insert("pane".into(), json!(pane));
+            if let Some(terminal_id) = terminal_id {
+                obj.insert("terminal_id".into(), json!(terminal_id));
+            }
+            ("automation.rebind".into(), Value::Object(obj))
+        }
         ("automation", "delete") => ("automation.delete".into(), one("id", arg0())),
         ("automation", "run") => {
             let mut obj = serde_json::Map::new();
@@ -5067,6 +5109,15 @@ mod tests {
         assert_eq!(params["target"]["if_busy"], "skip");
 
         let (method, params) = parse(&argv(
+            "luvus automation rebind a7 --pane 9 --terminal-id 0123456789abcdef0123456789abcdef",
+        ))
+        .unwrap();
+        assert_eq!(method, "automation.rebind");
+        assert_eq!(params["id"], "a7");
+        assert_eq!(params["pane"], "9");
+        assert_eq!(params["terminal_id"], "0123456789abcdef0123456789abcdef");
+
+        let (method, params) = parse(&argv(
             "luvus automation preview --weekly mon,fri --at 09:00 --timezone UTC",
         ))
         .unwrap();
@@ -5080,6 +5131,13 @@ mod tests {
             "luvus automation preview --weekly moons --at 09:00 --timezone UTC",
             "luvus automation create morning --title review --prompt check --agent codex --workspace-id workspace-a --daily 09:00 --timezone UTC --access root",
             "luvus automation create morning --title review --prompt check --agent codex --workspace-id workspace-a --once 2000000000 --pane 7",
+            "luvus automation rebind a7",
+            "luvus automation rebind a7 --pane",
+            "luvus automation rebind a7 --pane 9 --terminal-id",
+            "luvus automation rebind a7 --pane 9 --pane 10",
+            "luvus automation rebind a7 --pane 9 --terminal-id one --terminal-id two",
+            "luvus automation rebind a7 --pane 9 --unknown value",
+            "luvus automation rebind a7 --pane 9 trailing",
             "luvus automation create morning --title review --prompt check --agent codex --workspace-id workspace-a --once 2000000000 --target active-agent --pane 7",
         ] {
             assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");

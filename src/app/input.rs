@@ -442,6 +442,10 @@ impl App {
                 self.runtime_cwd_dirty = true;
                 self.runtime_proc_dirty = true;
                 self.register_backend_terminal(id);
+                self.reconcile_durable_active_targets(Some(id));
+                if self.durable_target_requires_readiness_scan(id) {
+                    self.request_proc_scan_if_stale(id);
+                }
                 crate::logging::event(
                     crate::logging::EventKind::PaneOpen,
                     &[
@@ -821,7 +825,15 @@ impl App {
             // Process-table churn is only a cache update, but a confirmed agent
             // exit changes the visible sidebar immediately. `apply_proc_scan`
             // distinguishes those cases so the common scan stays render-free.
-            AppEvent::ProcScanned(found) => self.apply_proc_scan(found),
+            AppEvent::ProcScanned(found) => {
+                let scan_succeeded = found.is_some();
+                let changed = self.apply_proc_scan(found);
+                if scan_succeeded {
+                    changed | self.reconcile_durable_active_targets(None)
+                } else {
+                    changed
+                }
+            }
             AppEvent::CwdScanned {
                 panes,
                 branches,
@@ -1870,8 +1882,8 @@ impl App {
         // highlight (docs/27, RESIZE-4), plus the sidebar edge seam (docs/29).
         self.update_hover_divider(m.column, m.row);
         self.update_hover_sidebar(m.column, m.row);
-        // Right-click a pane tab, WORKSPACES row, agent, file, dock row, or pane
-        // to open the matching context menu.
+        // Right-click a pane tab, WORKSPACES row, live/scheduled agent, ORCH
+        // row, file, dock row, or pane to open the matching context menu.
         if let MouseEventKind::Down(MouseButton::Right) = m.kind {
             let (c, r) = (m.column, m.row);
             let hit =
@@ -1885,13 +1897,30 @@ impl App {
             } else if let Some((id, _)) = self.automation_rects.iter().find(|(_, rect)| hit(*rect))
             {
                 let id = id.clone();
-                self.open_automation_detail(&id);
+                if let Some(pane) = self.automation_live_pane(&id) {
+                    self.open_agent_menu(AgentTarget::Live(pane), c, r);
+                } else {
+                    self.open_agent_menu(AgentTarget::Automation(id), c, r);
+                }
             } else if let Some((i, _)) = self.session_rects.iter().find(|(_, rect)| hit(*rect)) {
                 self.open_agent_menu(AgentTarget::Session(*i), c, r); // session → Resume/Close
             } else if let Some((row, _)) = self.diff_row_rects.iter().find(|(_, rect)| hit(*rect)) {
                 self.open_diff_menu(*row, c, r);
             } else if let Some((i, _)) = self.file_tree_rects.iter().find(|(_, rect)| hit(*rect)) {
                 self.open_file_menu(*i, c, r); // FILES-dock row → new/rename/delete (docs/38)
+            } else if let Some(automation) =
+                self.orch_hits
+                    .iter()
+                    .find_map(|(target, rect)| match target {
+                        OrchHit::Automation(automation) if hit(*rect) => Some(automation.clone()),
+                        _ => None,
+                    })
+            {
+                if let Some(pane) = self.automation_live_pane(&automation) {
+                    self.open_agent_menu(AgentTarget::Live(pane), c, r);
+                } else {
+                    self.open_agent_menu(AgentTarget::Automation(automation), c, r);
+                }
             } else if let Some((task, _)) =
                 self.orch_hits
                     .iter()
@@ -2644,6 +2673,18 @@ impl App {
                 } else {
                     self.orch_select_task(&id);
                     self.orch_last_click = Some((id, now));
+                }
+            } else if let Some(OrchHit::Automation(id)) = target {
+                let now = Instant::now();
+                let double = self.orch_last_click.take().is_some_and(|(previous, when)| {
+                    previous == id && now.duration_since(when) <= DOUBLE_CLICK
+                });
+                if self.orch_select_automation(&id) {
+                    if double {
+                        self.open_automation_detail(&id);
+                    } else {
+                        self.orch_last_click = Some((id, now));
+                    }
                 }
             } else if let Some(target) = target {
                 self.orch_last_click = None;
@@ -5514,6 +5555,231 @@ mod link_click_tests {
         ));
         assert!(!app.active_is_orch());
         assert_eq!(app.layout().focus, worker);
+    }
+
+    fn add_active_agent_automation(app: &mut App) -> (crate::ids::PaneId, String) {
+        let pane = app.layout().focus;
+        let terminal_id = app
+            .panes
+            .get(&pane)
+            .and_then(|pane| pane.terminal_runtime())
+            .expect("test pane has a live terminal")
+            .terminal_id;
+        app.status.get_mut(&pane).unwrap().agent = "codex".into();
+        let workspace_id = app.workspace_of_pane(pane).unwrap().id.clone();
+        let definition = app
+            .automation
+            .create(
+                crate::automation::CreateAutomation {
+                    name: "continue review".into(),
+                    enabled: true,
+                    trigger: crate::automation::Trigger::Once {
+                        at_utc: 4_000_000_000,
+                    },
+                    target: crate::automation::AutomationTarget::ActiveAgent {
+                        pane_id: pane.0,
+                        terminal_id,
+                        if_busy: crate::automation::ActiveAgentBusyPolicy::Wait,
+                        durable: None,
+                    },
+                    task: crate::automation::TaskTemplate {
+                        title: "continue review".into(),
+                        prompt: "Review the current changes.".into(),
+                        agent_id: "codex".into(),
+                        workspace_id,
+                        mode: crate::orch::TaskWorkerMode::Workspace,
+                        access: crate::automation::AutomationAccess::Workspace,
+                        paths: Vec::new(),
+                        gate: None,
+                    },
+                    policy: crate::automation::AutomationPolicy::default(),
+                },
+                None,
+                10,
+            )
+            .unwrap();
+        (pane, definition.id)
+    }
+
+    #[test]
+    fn automation_row_opens_details_and_uses_the_live_agent_context() {
+        let _env = crate::persist::test_env("automation-row-actions");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 30, tx).unwrap();
+        let (pane, automation) = add_active_agent_automation(&mut app);
+        app.open_orch_board();
+        app.orch_view = crate::app::OrchView::Automations;
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let row = app
+            .orch_hits
+            .iter()
+            .find_map(|(hit, rect)| {
+                matches!(hit, OrchHit::Automation(id) if id == &automation).then_some(*rect)
+            })
+            .expect("automation row is clickable");
+        let at = (row.x + 1, row.y);
+
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            at,
+            KeyModifiers::NONE,
+        ));
+        assert!(matches!(
+            app.agent_menu.as_ref().map(|menu| menu.target.clone()),
+            Some(AgentTarget::Live(target)) if target == pane
+        ));
+        assert!(app.orch_detail.is_none());
+        app.agent_menu = None;
+
+        double_click(&mut app, at);
+        assert_eq!(app.orch_detail.as_deref(), Some(automation.as_str()));
+        app.handle_orch_detail_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.orch_detail.is_none());
+        assert!(!app.active_is_orch());
+        assert_eq!(app.layout().focus, pane);
+    }
+
+    #[test]
+    fn automation_detail_enter_follows_a_live_orch_worker() {
+        let _env = crate::persist::test_env("automation-worker-detail");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 30, tx).unwrap();
+        let worker = app.layout().focus;
+        let workspace_id = app.workspaces[0].id.clone();
+        let definition = app
+            .automation
+            .create(
+                crate::automation::CreateAutomation {
+                    name: "scheduled review".into(),
+                    enabled: true,
+                    trigger: crate::automation::Trigger::Once {
+                        at_utc: 4_000_000_000,
+                    },
+                    target: crate::automation::AutomationTarget::NewWorker,
+                    task: crate::automation::TaskTemplate {
+                        title: "scheduled review".into(),
+                        prompt: "Review changes".into(),
+                        agent_id: "codex".into(),
+                        workspace_id,
+                        mode: crate::orch::TaskWorkerMode::Workspace,
+                        access: crate::automation::AutomationAccess::Workspace,
+                        paths: Vec::new(),
+                        gate: None,
+                    },
+                    policy: crate::automation::AutomationPolicy::default(),
+                },
+                None,
+                10,
+            )
+            .unwrap();
+        let run = app
+            .automation
+            .request_run(&definition.id, None, 20)
+            .unwrap();
+        let task = app
+            .orch
+            .add_task("scheduled review".into(), Vec::new(), Vec::new(), None)
+            .unwrap();
+        app.orch.claim(&task.id, worker.0).unwrap();
+        app.automation
+            .bind_task(&run.id, task.id.clone(), 21)
+            .unwrap();
+        app.open_orch_board();
+        app.open_automation_detail(&definition.id);
+
+        app.handle_orch_detail_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.orch_detail.is_none());
+        assert!(!app.active_is_orch());
+        assert_eq!(app.layout().focus, worker);
+    }
+
+    #[test]
+    fn scheduled_sidebar_uses_detail_on_left_and_agent_menu_on_right() {
+        let _env = crate::persist::test_env("automation-sidebar-actions");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 30, tx).unwrap();
+        let (pane, automation) = add_active_agent_automation(&mut app);
+        let row = Rect::new(2, 4, 24, 2);
+        app.automation_rects = vec![(automation.clone(), row)];
+        let at = (row.x + 1, row.y);
+
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            at,
+            KeyModifiers::NONE,
+        ));
+        assert!(matches!(
+            app.agent_menu.as_ref().map(|menu| menu.target.clone()),
+            Some(AgentTarget::Live(target)) if target == pane
+        ));
+        assert!(app.orch_detail.is_none());
+        app.agent_menu = None;
+
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.orch_detail.as_deref(), Some(automation.as_str()));
+        assert!(app.agent_menu.is_none());
+    }
+
+    #[test]
+    fn scheduled_sidebar_opens_automation_menu_without_a_live_pane() {
+        let _env = crate::persist::test_env("automation-sidebar-placeholder-menu");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 30, tx).unwrap();
+        let workspace_id = app.workspaces[0].id.clone();
+        let definition = app
+            .automation
+            .create(
+                crate::automation::CreateAutomation {
+                    name: "scheduled review".into(),
+                    enabled: true,
+                    trigger: crate::automation::Trigger::Once {
+                        at_utc: 4_000_000_000,
+                    },
+                    target: crate::automation::AutomationTarget::NewWorker,
+                    task: crate::automation::TaskTemplate {
+                        title: "scheduled review".into(),
+                        prompt: "Review changes".into(),
+                        agent_id: "codex".into(),
+                        workspace_id,
+                        mode: crate::orch::TaskWorkerMode::Workspace,
+                        access: crate::automation::AutomationAccess::Workspace,
+                        paths: Vec::new(),
+                        gate: None,
+                    },
+                    policy: crate::automation::AutomationPolicy::default(),
+                },
+                None,
+                10,
+            )
+            .unwrap();
+        let row = Rect::new(2, 4, 24, 2);
+        app.automation_rects = vec![(definition.id.clone(), row)];
+
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            (row.x + 1, row.y),
+            KeyModifiers::NONE,
+        ));
+
+        let menu = app.agent_menu.as_ref().expect("automation menu opens");
+        assert_eq!(menu.target, AgentTarget::Automation(definition.id.clone()));
+        let items = app.agent_menu_items(menu.target.clone());
+        assert!(items.contains(&crate::app::AgentMenuItem::AutomationDetails));
+        assert!(items.contains(&crate::app::AgentMenuItem::AutomationRun));
+        assert!(items.contains(&crate::app::AgentMenuItem::AutomationToggle));
+        assert!(items.contains(&crate::app::AgentMenuItem::AutomationDelete));
+        assert!(app.orch_detail.is_none());
+
+        app.agent_menu_action(crate::app::AgentMenuItem::AutomationDetails);
+        assert_eq!(app.orch_detail.as_deref(), Some(definition.id.as_str()));
+        assert!(app.agent_menu.is_none());
     }
 
     #[test]

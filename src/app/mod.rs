@@ -959,17 +959,20 @@ impl PaneMenuItem {
     ];
 }
 
-/// What an [`AgentMenu`] targets: a resumable on-disk session (by list index) or
-/// a live agent pane.
-#[derive(Clone, Copy)]
+/// What an [`AgentMenu`] targets: a resumable on-disk session (by list index),
+/// a live agent pane, or an automation placeholder that does not currently own
+/// a live pane.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum AgentTarget {
     Session(usize),
     Live(PaneId),
+    Automation(String),
 }
 
 /// A right-click context menu on an AGENTS-list row. A resumable session offers
 /// **Resume** (reopen) + **Close** (remove from the list); a live agent offers
-/// **Close** (close its pane).
+/// pane actions; and a scheduled placeholder offers definition-safe automation
+/// actions until it owns a live pane.
 pub struct AgentMenu {
     pub target: AgentTarget,
     pub anchor: (u16, u16),
@@ -988,6 +991,10 @@ pub enum AgentMenuItem {
     /// "Rename" a live agent's pane (sets its live name). Live agents only.
     RenamePane,
     Close,
+    AutomationDetails,
+    AutomationRun,
+    AutomationToggle,
+    AutomationDelete,
     /// Pin a live agent to the top of the AGENTS list (per-session).
     Pin,
     Unpin,
@@ -1002,6 +1009,12 @@ impl AgentMenu {
         match target {
             AgentTarget::Session(_) => vec![AgentMenuItem::Resume, AgentMenuItem::Close],
             AgentTarget::Live(_) => vec![AgentMenuItem::RenamePane, AgentMenuItem::Close],
+            AgentTarget::Automation(_) => vec![
+                AgentMenuItem::AutomationDetails,
+                AgentMenuItem::AutomationRun,
+                AgentMenuItem::AutomationToggle,
+                AgentMenuItem::AutomationDelete,
+            ],
         }
     }
 }
@@ -1583,7 +1596,7 @@ pub enum OrchHit {
     /// The inert task/automation detail surface. Its backdrop closes the
     /// overlay without allowing the click to reach the board behind it.
     DetailModal,
-    DetailOpenOrch,
+    DetailOpenTarget,
 }
 
 /// ORCH shows the selected task beside the fleet at this viewport size.
@@ -2222,7 +2235,7 @@ pub struct App {
     /// Durable agent automation definitions and bounded run history. The app
     /// event loop remains their only mutable owner.
     pub automation: crate::automation::AutomationState,
-    /// Scroll offset of the orchestration board tab (docs/22, ORCH-7).
+    /// Scroll offset of the active orchestration board list (docs/22, ORCH-7).
     pub orch_scroll: usize,
     /// Active ORCH dashboard projection: concrete tasks or future definitions.
     pub orch_view: OrchView,
@@ -2235,7 +2248,7 @@ pub struct App {
     pub orch_form: Option<OrchForm>,
     /// The board's "start worker with…" agent picker, when open.
     pub orch_start: Option<OrchStart>,
-    /// Task whose detail overlay is open on the board (`o`), plus its scroll.
+    /// Task or automation whose detail overlay is open, plus its scroll.
     pub orch_detail: Option<String>,
     pub orch_detail_scroll: usize,
     /// Next automation occurrences captured when its detail is opened. Keeping
@@ -2629,7 +2642,8 @@ pub struct App {
     pub agents_elsewhere_rect: Option<(PaneId, Rect)>,
     pub agent_rects: Vec<(PaneId, Rect)>,
     /// Armed automation placeholders in the AGENTS dock. Their stable IDs open
-    /// read-only detail because no pane exists to focus yet.
+    /// details on left click and an automation-safe AGENTS menu on right click
+    /// when no pane exists to receive the live-agent menu.
     pub automation_rects: Vec<(String, Rect)>,
     /// Resumable-session rows in the sidebar (index into `resumable`).
     pub session_rects: Vec<(usize, Rect)>,
@@ -5409,7 +5423,7 @@ impl App {
     /// The AGENTS-list context-menu items for `target`, plus module actions
     /// declaring `contexts = ["agent"]`.
     pub fn agent_menu_items(&self, target: AgentTarget) -> Vec<AgentMenuItem> {
-        let mut items = AgentMenu::items_for(target);
+        let mut items = AgentMenu::items_for(target.clone());
         // A live agent can be pinned to the top of the AGENTS list, below its
         // Rename/Close actions (per-session, since pane ids are reallocated).
         if let AgentTarget::Live(id) = target {
@@ -6127,13 +6141,12 @@ impl App {
         }
     }
 
-    /// Open the AGENTS-list context menu for `target` (a resumable session or a
-    /// live agent), anchored at the click.
+    /// Open the AGENTS-list context menu for `target`, anchored at the click.
     pub fn open_agent_menu(&mut self, target: AgentTarget, col: u16, row: u16) {
         // Only a live agent has a pane for an action to act on.
-        let module_actions = match target {
+        let module_actions = match &target {
             AgentTarget::Live(_) => self.module_menu_actions("agent"),
-            AgentTarget::Session(_) => Vec::new(),
+            AgentTarget::Session(_) | AgentTarget::Automation(_) => Vec::new(),
         };
         self.agent_menu = Some(AgentMenu {
             target,
@@ -6159,13 +6172,14 @@ impl App {
         }
     }
 
-    /// Run an AGENTS-menu action, then close the menu. Resume/Close act on a
-    /// session; Close on a live agent jumps to and closes its pane.
+    /// Run an AGENTS-menu action, then close the menu. Pane and automation
+    /// actions remain distinct so a scheduled placeholder cannot mutate an
+    /// unrelated live pane.
     pub fn agent_menu_action(&mut self, item: AgentMenuItem) {
         let Some((target, actions)) = self
             .agent_menu
             .as_ref()
-            .map(|m| (m.target, m.module_actions.clone()))
+            .map(|m| (m.target.clone(), m.module_actions.clone()))
         else {
             return;
         };
@@ -6180,22 +6194,45 @@ impl App {
                 self.focus_pane_global(id); // switch to its tab so close targets it
                 self.close_pane(id);
             }
+            (AgentMenuItem::Close, AgentTarget::Automation(_)) => {}
+            (AgentMenuItem::AutomationDetails, AgentTarget::Automation(id)) => {
+                self.open_automation_detail(&id);
+            }
+            (AgentMenuItem::AutomationRun, AgentTarget::Automation(id)) => {
+                self.orch_run_automation(&id);
+            }
+            (AgentMenuItem::AutomationToggle, AgentTarget::Automation(id)) => {
+                self.orch_toggle_automation(&id);
+            }
+            (AgentMenuItem::AutomationDelete, AgentTarget::Automation(id)) => {
+                self.orch_delete_automation(&id);
+            }
             (AgentMenuItem::RenamePane, AgentTarget::Live(id)) => self.open_pane_rename(id),
-            (AgentMenuItem::RenamePane, AgentTarget::Session(_)) => {}
+            (AgentMenuItem::RenamePane, AgentTarget::Session(_) | AgentTarget::Automation(_)) => {}
             (AgentMenuItem::Pin, AgentTarget::Live(id)) => {
                 self.pinned_agents.insert(id);
             }
             (AgentMenuItem::Unpin, AgentTarget::Live(id)) => {
                 self.pinned_agents.remove(&id);
             }
-            (AgentMenuItem::Pin | AgentMenuItem::Unpin, AgentTarget::Session(_)) => {}
-            (AgentMenuItem::Resume, AgentTarget::Live(_)) => {}
+            (
+                AgentMenuItem::Pin | AgentMenuItem::Unpin,
+                AgentTarget::Session(_) | AgentTarget::Automation(_),
+            ) => {}
+            (AgentMenuItem::Resume, AgentTarget::Live(_) | AgentTarget::Automation(_)) => {}
             (AgentMenuItem::Module(i), AgentTarget::Live(id)) => {
                 if let Some(a) = actions.get(i).cloned() {
                     self.run_module_menu_action("agent", a, Target::pane(id));
                 }
             }
-            (AgentMenuItem::Module(_), AgentTarget::Session(_)) => {}
+            (AgentMenuItem::Module(_), AgentTarget::Session(_) | AgentTarget::Automation(_)) => {}
+            (
+                AgentMenuItem::AutomationDetails
+                | AgentMenuItem::AutomationRun
+                | AgentMenuItem::AutomationToggle
+                | AgentMenuItem::AutomationDelete,
+                AgentTarget::Session(_) | AgentTarget::Live(_),
+            ) => {}
             (AgentMenuItem::Divider, _) => {}
         }
     }
@@ -6203,7 +6240,7 @@ impl App {
     /// Keyboard navigation for the AGENTS menu, with the same wrapping and
     /// divider-skipping behavior as FILES and DIFF menus.
     pub fn handle_agent_menu_key(&mut self, key: KeyEvent) {
-        let Some(target) = self.agent_menu.as_ref().map(|menu| menu.target) else {
+        let Some(target) = self.agent_menu.as_ref().map(|menu| menu.target.clone()) else {
             return;
         };
         let items = self.agent_menu_items(target);
@@ -6457,6 +6494,29 @@ impl App {
                 );
             } else {
                 self.proc_scan_failure_retries = 0;
+                let affected = self
+                    .automation
+                    .automations
+                    .iter()
+                    .filter_map(|automation| match automation.target {
+                        crate::automation::AutomationTarget::ActiveAgent {
+                            pane_id,
+                            durable: Some(_),
+                            ..
+                        } if demanded_panes.contains(&PaneId(pane_id)) => {
+                            Some(automation.id.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let changed = !affected.is_empty();
+                for id in affected {
+                    self.automation.ready_active_targets.remove(&id);
+                    self.automation
+                        .active_target_states
+                        .insert(id, crate::automation::ActiveTargetState::NeedsRebind);
+                }
+                return changed;
             }
             return false;
         };
@@ -7104,6 +7164,35 @@ impl App {
 
     fn close_pane(&mut self, id: PaneId) {
         let owner = self.pane_location(id);
+        let durable = self
+            .automation
+            .automations
+            .iter()
+            .filter_map(|automation| match automation.target {
+                crate::automation::AutomationTarget::ActiveAgent {
+                    pane_id,
+                    durable: Some(_),
+                    ..
+                } if pane_id == id.0 => Some(automation.id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for automation_id in durable {
+            self.automation.ready_active_targets.remove(&automation_id);
+            self.automation.active_target_states.insert(
+                automation_id.clone(),
+                crate::automation::ActiveTargetState::NeedsRebind,
+            );
+            if let Some(automation) = self.automation.automation(&automation_id).cloned() {
+                self.emit_event(
+                    "automation.rebound",
+                    crate::automation::definition_target_event(
+                        &automation,
+                        crate::automation::ActiveTargetState::NeedsRebind,
+                    ),
+                );
+            }
+        }
         self.expire_active_agent_targets(
             Some(id),
             "active-agent automation target pane closed",

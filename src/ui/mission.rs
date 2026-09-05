@@ -13,6 +13,7 @@ fn draw_automation_health(
     area: Rect,
     health: crate::automation::AutomationHealth,
     rows: &[crate::automation::AutomationView],
+    cat: &Catalog,
     t: &Theme,
 ) -> Vec<(String, Rect)> {
     if area.height == 0 {
@@ -69,10 +70,16 @@ fn draw_automation_health(
     {
         let color = match row.state.as_str() {
             "running" => t.mint,
-            "review" | "failed" | "unavailable" => t.coral,
+            "restoring" => t.amber,
+            "review" | "failed" | "unavailable" | "needs_rebind" => t.coral,
             "scheduled" => t.accent,
             "completed" => t.green,
             _ => t.overlay1,
+        };
+        let state_label = match row.state.as_str() {
+            "restoring" => cat.automation_restoring,
+            "needs_rebind" => cat.automation_needs_rebind,
+            _ => row.state.as_str(),
         };
         let next = row
             .next_run_at
@@ -84,7 +91,7 @@ fn draw_automation_health(
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
-                    format!(" {:<12}", truncate(&row.state, 11)),
+                    format!(" {:<12}", truncate(state_label, 11)),
                     Style::new().fg(color),
                 ),
                 Span::styled(
@@ -930,7 +937,7 @@ pub(super) fn render(
     let (scope_rects, refresh_rect) = draw_scope_tabs(f, scopes, scope, refreshing, cat, t);
     draw_metrics(f, metrics, rows, burn, budget, cat, t);
     let automation_rects =
-        draw_automation_health(f, automation_area, automation, automation_rows, t);
+        draw_automation_health(f, automation_area, automation, automation_rows, cat, t);
 
     let cursor = cursor.min(rows.len().saturating_sub(1));
     let rendered = if body.width >= 78 && body.height >= 14 {

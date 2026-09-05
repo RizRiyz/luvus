@@ -90,7 +90,7 @@ Luvus release number.
 | terminal | `terminal.backend.inventory` · `terminal.backend.snapshot` · `terminal.backend.validate` · `terminal.backend.processes` · `terminal.backend.capture` · `terminal.backend.observe` · `terminal.backend.control` · `terminal.backend.type_literal` · `terminal.backend.submit_text` · `terminal.backend.send_key` · `terminal.backend.set_title` · `terminal.backend.notify` · `terminal.backend.create` · `terminal.backend.close` · `terminal.backend.wait_change` · `terminal.backend.wait_output` · `terminal.backend.events.subscribe` |
 | worktrees | `worktree.list` · `worktree.create` · `worktree.open` · `worktree.remove` |
 | orchestration | `task.add` · `task.list` · `task.get` · `task.claim` · `task.next` · `task.start` · `task.heartbeat` · `task.update` · `task.done` · `task.merge` · `task.release` · `lease.acquire` · `lease.list` · `lease.release` |
-| agent automation | `automation.create` · `automation.list` · `automation.get` · `automation.update` · `automation.enable` · `automation.disable` · `automation.delete` · `automation.run` · `automation.history` · `automation.preview` · `automation.health` |
+| agent automation | `automation.create` · `automation.list` · `automation.get` · `automation.update` · `automation.enable` · `automation.disable` · `automation.rebind` · `automation.delete` · `automation.run` · `automation.history` · `automation.preview` · `automation.health` |
 | modules | `module.list` · `module.info` · `module.link` · `module.unlink` · `module.enable` · `module.disable` · `module.action.list` · `module.action.invoke` · `module.pane.open` · `module.pane.focus` · `module.pane.close` · `module.config_dir` · `module.settings.list` · `module.settings.get` · `module.settings.set` · `module.log.list` |
 | themes | `theme.list` · `theme.path` · `theme.use` · `theme.reload` |
 | ui / server | `ui.sidebar` · `ui.dock.push` · `ui.dock.list` · `ui.dock.move` · `ui.bar.push` · `ui.bar.list` · `ui.bar.move` · `ui.bar.remove` · `ui.notification.push` · `ui.notification.clear` · `ui.toast` · `ping` · `server.stop` · `events.subscribe` · `events.wait` |
@@ -180,6 +180,7 @@ the next five UTC deadlines without storing or launching anything.
 | `automation.get` | `{id}` | read |
 | `automation.update` | `{id, name, enabled?, trigger, target?, task, policy?}` | orchestration write |
 | `automation.enable` / `automation.disable` | `{id}` | orchestration write |
+| `automation.rebind` | `{id, pane, terminal_id?}`; accepts only the same durable native conversation | orchestration write |
 | `automation.delete` | `{id}`; rejected while a run is live | orchestration write |
 | `automation.run` | `{id, idempotency_key?}`; does not advance the schedule | orchestration write |
 | `automation.history` | `{id?, limit?}`; limit is 1–200 | read |
@@ -187,6 +188,8 @@ the next five UTC deadlines without storing or launching anything.
 | `automation.health` | `{}` | read |
 
 `automation.create` and `automation.run` support retry-safe idempotency keys.
+`automation.rebind` is intrinsically idempotent when repeated with the same
+verified pane.
 Reusing a key with identical input returns the original object; reusing it with
 different input returns `idempotency_conflict`. Definitions are capped at 256,
 run history at 2,048, and idempotency records at 256. Missed occurrences use
@@ -200,10 +203,13 @@ ORCH task to `blocked` and is reflected in automation history.
 
 `target` defaults to `{"kind":"new_worker"}`. An existing live agent uses
 `{"kind":"active_agent","pane_id":7,"terminal_id":"<32 lowercase hex>","if_busy":"wait"}`.
-The pane, terminal lifetime, agent ID, and workspace ID must all match. Existing
-targets are process-bound, create no ORCH task, and report `delivered` after the
-prompt reaches the pane input queue. Server restart or pane closure disables
-them rather than retargeting another agent.
+The pane, terminal lifetime, agent ID, and workspace ID must all match. Targets
+with a trusted native session identity can recover across restart. Public
+responses expose only `binding: "durable"` and `target_state` (`bound`,
+`restoring`, or `needs_rebind`), never the native session ID or recovery path.
+`automation.rebind` accepts only a pane proving the same private conversation.
+Targets without that proof remain process-bound. Active targets create no ORCH
+task and report `delivered` after the prompt reaches the pane input queue.
 
 `agent.list` returns the stable `workspace_id` and process-lifetime
 `terminal_id` on each live agent row so clients can construct this target
