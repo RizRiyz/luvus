@@ -33,26 +33,36 @@ pub enum NamedSessionOpenError {
 }
 
 impl App {
+    fn refresh_named_sessions(&self, generation: u64) {
+        let tx = self.app_tx.clone();
+        std::thread::spawn(move || {
+            let result = crate::session::list_sessions().map_err(|error| error.to_string());
+            let _ = tx.send(crate::event::AppEvent::NamedSessionsLoaded { generation, result });
+        });
+    }
+
     pub fn apply_named_session_stopped(
         &mut self,
         generation: u64,
         name: String,
         result: Result<(), String>,
     ) {
-        // Borrow-check: need to handle show_toast after releasing menu borrow.
-        let is_closed = self.named_session_menu.is_none();
-        if is_closed {
+        let Some(current_generation) = self.named_session_menu.as_ref().map(|menu| menu.generation)
+        else {
             match result {
                 Ok(()) => self.show_toast(format!("stopped {name}")),
                 Err(err) => self.show_toast(format!("could not stop {name}: {err}")),
             }
             return;
-        }
-        let generation_matches = self
-            .named_session_menu
-            .as_ref()
-            .is_some_and(|m| m.generation == generation);
-        if !generation_matches {
+        };
+        if current_generation != generation {
+            match result {
+                Ok(()) => {
+                    self.show_toast(format!("stopped {name}"));
+                    self.refresh_named_sessions(current_generation);
+                }
+                Err(err) => self.show_toast(format!("could not stop {name}: {err}")),
+            }
             return;
         }
         // Capture values before mutable borrow for toast.
@@ -81,14 +91,7 @@ impl App {
         };
         if !had_error {
             self.show_toast(toast);
-            let tx = self.app_tx.clone();
-            std::thread::spawn(move || {
-                let result = crate::session::list_sessions().map_err(|e| e.to_string());
-                let _ = tx.send(crate::event::AppEvent::NamedSessionsLoaded {
-                    generation: gen,
-                    result,
-                });
-            });
+            self.refresh_named_sessions(gen);
         }
     }
 
@@ -110,11 +113,7 @@ impl App {
             error: None,
             preparing: false,
         });
-        let tx = self.app_tx.clone();
-        std::thread::spawn(move || {
-            let result = crate::session::list_sessions().map_err(|err| err.to_string());
-            let _ = tx.send(crate::event::AppEvent::NamedSessionsLoaded { generation, result });
-        });
+        self.refresh_named_sessions(generation);
     }
 
     pub fn close_named_session_menu(&mut self) {
@@ -429,6 +428,8 @@ fn is_session_name_character(character: char) -> bool {
 mod tests {
     use super::{session_rows, NamedSessionMenu, NamedSessionRow};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::sync::mpsc::Receiver;
+    use std::time::Duration;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -439,6 +440,16 @@ mod tests {
         info.name = name.to_string();
         info.running = running;
         info
+    }
+
+    fn loaded_generation(rx: &Receiver<crate::event::AppEvent>) -> u64 {
+        match rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("session refresh should complete")
+        {
+            crate::event::AppEvent::NamedSessionsLoaded { generation, .. } => generation,
+            _ => panic!("expected a named-session refresh"),
+        }
     }
 
     #[test]
@@ -576,6 +587,89 @@ mod tests {
         app.apply_named_session_prepared(4, "review".into(), Ok(()));
         assert!(app.pending_session_switch.is_none());
         assert!(app.named_session_menu.is_some());
+    }
+
+    #[test]
+    fn stopped_session_refreshes_a_reopened_menu_with_its_current_generation() {
+        let _env = crate::persist::test_env("named-session-stop-reopened-refresh");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(100, 30, tx).unwrap();
+        app.named_session_menu = Some(NamedSessionMenu {
+            generation: 8,
+            rows: vec![NamedSessionRow {
+                name: "review".into(),
+                running: true,
+                current: false,
+            }],
+            cursor: 1,
+            scroll: 0,
+            loading: false,
+            prompt: None,
+            error: None,
+            preparing: false,
+        });
+
+        app.apply_named_session_stopped(7, "review".into(), Ok(()));
+
+        assert_eq!(
+            app.named_session_menu.as_ref().unwrap().rows.len(),
+            1,
+            "a stale result must not edit the replacement menu directly"
+        );
+        assert_eq!(loaded_generation(&rx), 8);
+    }
+
+    #[test]
+    fn stopped_session_is_removed_and_refreshed_for_the_matching_menu() {
+        let _env = crate::persist::test_env("named-session-stop-current-refresh");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(100, 30, tx).unwrap();
+        app.named_session_menu = Some(NamedSessionMenu {
+            generation: 5,
+            rows: vec![NamedSessionRow {
+                name: "review".into(),
+                running: true,
+                current: false,
+            }],
+            cursor: 1,
+            scroll: 0,
+            loading: false,
+            prompt: None,
+            error: None,
+            preparing: false,
+        });
+
+        app.apply_named_session_stopped(5, "review".into(), Ok(()));
+
+        assert!(app.named_session_menu.as_ref().unwrap().rows.is_empty());
+        assert_eq!(loaded_generation(&rx), 5);
+    }
+
+    #[test]
+    fn failed_stop_remains_visible_in_the_matching_menu() {
+        let _env = crate::persist::test_env("named-session-stop-error");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(100, 30, tx).unwrap();
+        app.named_session_menu = Some(NamedSessionMenu {
+            generation: 3,
+            rows: vec![NamedSessionRow {
+                name: "review".into(),
+                running: true,
+                current: false,
+            }],
+            cursor: 1,
+            scroll: 0,
+            loading: false,
+            prompt: None,
+            error: None,
+            preparing: false,
+        });
+
+        app.apply_named_session_stopped(3, "review".into(), Err("server busy".into()));
+
+        let menu = app.named_session_menu.as_ref().unwrap();
+        assert_eq!(menu.rows.len(), 1);
+        assert_eq!(menu.error.as_deref(), Some("server busy"));
     }
 
     #[test]
