@@ -40,21 +40,6 @@ pub fn option_modifier_pressed() -> bool {
     false
 }
 
-/// Recover the unshifted identity of a translated printable key when possible.
-///
-/// Windows console records expose the Shift-translated character (for example,
-/// `?`) but Kitty CSI-u needs the underlying key (`/`). Other platforms already
-/// receive that identity from the outer terminal's keyboard protocol.
-#[cfg(windows)]
-pub fn unshifted_key_char(character: char) -> Option<char> {
-    windows::unshifted_key_char(character)
-}
-
-#[cfg(not(windows))]
-pub fn unshifted_key_char(_character: char) -> Option<char> {
-    None
-}
-
 /// Do two paths name the same folder? (docs/43 WIN-6.)
 ///
 /// Node lookup used to compare `PathBuf`s with `==`, so any difference in

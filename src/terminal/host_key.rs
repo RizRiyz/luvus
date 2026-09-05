@@ -22,35 +22,6 @@ pub fn normalize_platform_modifiers(event: Event) -> Event {
     restore_option_for_editing_key(event, crate::platform::option_modifier_pressed())
 }
 
-/// Return the layout-aware unshifted identity for a modified character without
-/// changing the event Luvus uses for its own shortcuts and text fields.
-pub fn unshifted_character(event: &Event) -> Option<char> {
-    unshifted_character_with(event, crate::platform::unshifted_key_char)
-}
-
-fn unshifted_character_with(
-    event: &Event,
-    unshift: impl FnOnce(char) -> Option<char>,
-) -> Option<char> {
-    let Event::Key(key) = event else {
-        return None;
-    };
-    let KeyCode::Char(character) = key.code else {
-        return None;
-    };
-    (key.modifiers.contains(KeyModifiers::SHIFT)
-        && key.modifiers.intersects(
-            KeyModifiers::CONTROL
-                | KeyModifiers::ALT
-                | KeyModifiers::SUPER
-                | KeyModifiers::HYPER
-                | KeyModifiers::META,
-        )
-        && !character.is_alphabetic())
-    .then(|| unshift(character))
-    .flatten()
-}
-
 fn restore_option_for_editing_key(mut event: Event, option_pressed: bool) -> Event {
     let Event::Key(key) = &mut event else {
         return event;
@@ -71,35 +42,6 @@ mod tests {
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
-    }
-
-    #[test]
-    fn windows_shifted_punctuation_keeps_a_separate_unshifted_identity() {
-        let shifted = |character, modifiers| {
-            Event::Key(KeyEvent::new(
-                KeyCode::Char(character),
-                modifiers | KeyModifiers::SHIFT,
-            ))
-        };
-        let event = shifted('?', KeyModifiers::ALT);
-        assert_eq!(
-            unshifted_character_with(&event, |character| { (character == '?').then_some('/') }),
-            Some('/')
-        );
-        assert!(matches!(
-            event,
-            Event::Key(key)
-                if key.code == KeyCode::Char('?')
-                    && key.modifiers == KeyModifiers::ALT | KeyModifiers::SHIFT
-        ));
-        assert_eq!(
-            unshifted_character_with(&shifted('?', KeyModifiers::NONE), |_| Some('/')),
-            None
-        );
-        assert_eq!(
-            unshifted_character_with(&shifted('A', KeyModifiers::SUPER), |_| Some('a')),
-            None
-        );
     }
 
     #[test]

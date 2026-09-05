@@ -1477,12 +1477,8 @@ fn send_decoded_input(
 }
 
 fn app_event(event: Event) -> Option<AppEvent> {
-    let unshifted = crate::terminal::host_key::unshifted_character(&event);
     match crate::terminal::host_key::normalize_platform_modifiers(event) {
-        Event::Key(key) => Some(match unshifted {
-            Some(unshifted) => AppEvent::KeyWithIdentity { key, unshifted },
-            None => AppEvent::Key(key),
-        }),
+        Event::Key(k) => Some(AppEvent::Key(k)),
         Event::Mouse(m) => Some(AppEvent::Mouse(m)),
         Event::Resize(_, _) => Some(AppEvent::Resize),
         Event::Paste(s) => Some(AppEvent::Paste(s)),

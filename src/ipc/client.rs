@@ -411,12 +411,8 @@ fn write_decoded_input(
 }
 
 fn event_message(event: Event) -> Option<ClientMessage> {
-    let unshifted = crate::terminal::host_key::unshifted_character(&event);
     match crate::terminal::host_key::normalize_platform_modifiers(event) {
-        Event::Key(key) => Some(match unshifted {
-            Some(unshifted) => ClientMessage::KeyWithIdentity { key, unshifted },
-            None => ClientMessage::Key(key),
-        }),
+        Event::Key(k) => Some(ClientMessage::Key(k)),
         Event::Mouse(m) => Some(ClientMessage::Mouse(m)),
         Event::Resize(cols, rows) => {
             crate::logging::event(

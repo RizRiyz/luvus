@@ -16,7 +16,6 @@ use crate::terminal::theme_probe::TerminalColors;
 /// performs hit-testing or forwards bytes to a pane.
 pub enum ClientInput {
     Key(KeyEvent),
-    KeyWithIdentity { key: KeyEvent, unshifted: char },
     Mouse(MouseEvent),
     Paste(String),
     Resize(u16, u16),
@@ -24,12 +23,6 @@ pub enum ClientInput {
 
 pub enum AppEvent {
     Key(KeyEvent),
-    /// The original key plus a client-derived layout-aware identity used only
-    /// when forwarding a negotiated CSI-u character to a pane.
-    KeyWithIdentity {
-        key: KeyEvent,
-        unshifted: char,
-    },
     Mouse(MouseEvent),
     Paste(String),
     Resize,
