@@ -1080,6 +1080,33 @@ mod tests {
         assert!(dir.join("mine.ts").exists(), "neighbor survives uninstall");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn pi_uninstall_surfaces_non_not_found_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = crate::persist::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("luvus-pi-ro-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let _guard = PiHomeGuard::lock(tmp.clone());
+
+        install("pi").unwrap();
+        let dir = tmp.join(".pi").join("agent").join("extensions");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        // The managed file exists but cannot be removed: uninstall must fail
+        // rather than report success while Pi can still load the extension.
+        assert!(
+            uninstall("pi").is_err(),
+            "unremovable luvus.ts surfaces an error"
+        );
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        uninstall("pi").unwrap();
+        assert!(!dir.join("luvus.ts").exists());
+        // A missing file keeps uninstall idempotent.
+        uninstall("pi").unwrap();
+    }
+
     #[test]
     fn pi_extension_source_is_syntactically_valid_typescript() {
         // Rust CI embeds the extension as text and never type-checks it, so

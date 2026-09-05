@@ -133,9 +133,14 @@ pub(crate) fn install_extension() -> Result<PathBuf> {
 pub(crate) fn uninstall_extension() -> Result<()> {
     let dir = extension_dir()?;
     // Surgical: only the Luvus-managed file is removed. Neighboring
-    // extensions and the directory itself are left intact.
-    let _ = fs::remove_file(dir.join("luvus.ts"));
-    Ok(())
+    // extensions and the directory itself are left intact. A missing file
+    // keeps uninstall idempotent; any other I/O failure is surfaced so a
+    // stuck extension is never reported as removed.
+    match fs::remove_file(dir.join("luvus.ts")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) fn extension_installed() -> bool {
