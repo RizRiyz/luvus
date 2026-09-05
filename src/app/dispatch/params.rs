@@ -88,6 +88,57 @@ pub(in crate::app::dispatch) fn agent_fork_error(err: AgentForkError) -> (String
     (code.to_string(), message.to_string())
 }
 
+pub(in crate::app::dispatch) const MAX_AGENT_ROW_TITLE_BYTES: usize = 256;
+pub(in crate::app::dispatch) const MAX_AGENT_ROW_TITLES: usize = 256;
+
+pub(in crate::app::dispatch) fn sanitize_agent_row_title(
+    raw: &str,
+) -> Result<Option<String>, (String, String)> {
+    let cleaned: String = raw
+        .chars()
+        .map(|character| {
+            if matches!(character, '\n' | '\r') {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.len() > MAX_AGENT_ROW_TITLE_BYTES {
+        return Err(("invalid_request".into(), "title is too long".into()));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+pub(in crate::app::dispatch) fn agent_row_title_session(
+    agent: Option<&Value>,
+    session_id: Option<&Value>,
+) -> Result<Option<(String, String)>, (String, String)> {
+    match (agent, session_id) {
+        (None, None) => Ok(None),
+        (Some(agent), Some(session_id)) => {
+            let agent = agent
+                .as_str()
+                .map(str::trim)
+                .filter(|agent| !agent.is_empty())
+                .ok_or_else(|| ("invalid_request".into(), "agent is required".into()))?;
+            let session_id = session_id.as_str().unwrap_or("");
+            if !crate::agent::safe_session_id(session_id) {
+                return Err(("invalid_request".into(), "invalid session_id".into()));
+            }
+            Ok(Some((agent.to_string(), session_id.to_string())))
+        }
+        _ => Err((
+            "invalid_request".into(),
+            "agent and session_id must be supplied together".into(),
+        )),
+    }
+}
+
 /// Strip a leading decorative icon/glyph that some agents prepend to their OSC
 /// title (a spinner or status emoji), plus the surrounding whitespace, so the
 /// sidebar shows just the text. A non-ASCII symbol/emoji leads is dropped;

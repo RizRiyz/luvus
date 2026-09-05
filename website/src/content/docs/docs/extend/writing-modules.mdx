@@ -25,6 +25,7 @@ A module can reach every surface the app has:
 | **Settings** | `[[settings]]` | Typed controls in Settings → Modules, no UI code |
 | **Events** | `[[events]]` | Run when agents, panes, tabs, or tasks change |
 | **Startup** | `[[startup]]` | Restore your state when the session comes up |
+| **AGENTS titles** | any command | Publish session titles onto live and resumable AGENTS rows |
 
 ## Author with your AI agent
 
@@ -646,7 +647,31 @@ selected=$(printf '%s' "$LUVUS_MODULE_CONTEXT_JSON" | jq -r .selection)
 "$LUVUS_BIN_PATH" tab rename review        # name the current tab
 "$LUVUS_BIN_PATH" ui toast "build passing" # flash a one-line message
 "$LUVUS_BIN_PATH" ui dock push --id you:ci --rows '[...]'   # feed your sidebar dock
+"$LUVUS_BIN_PATH" ui agent-title push --titles '[{"agent":"pi","session_id":"01a0…","title":"Ship desktop"}]'
 ```
+
+### AGENTS sidebar titles
+
+Luvus does not parse an agent's native session store for the AGENTS sidebar.
+A module can publish titles onto live rows (including idle) and All/history
+resumable rows:
+
+```sh
+"$LUVUS_BIN_PATH" ui agent-title push --titles '[
+  {"pane":"3","title":"Ship desktop"},
+  {"agent":"pi","session_id":"01a07061-9cc8-779d-b50d-f09889439f94","title":"Ship desktop"}
+]'
+```
+
+OSC titles still win. If there is no OSC title, the pane title is used, then
+the `agent`+`session_id` title. If neither exists, live rows keep
+`workspace · =pane` and resumable rows keep the project folder. Never send a
+Luvus pane alias (`=name`) as `title`. Empty `title` clears that key. Clear
+everything with `ui agent-title clear`, or one row with `--pane` /
+`--agent` + `--session-id`.
+
+Repaint from `[[startup]]` and `[[events]]` such as `pane.agent_status_changed`.
+Pi's `session_info.name` belongs in that module, not in Luvus core.
 
 Anything in `luvus help all` is available: panes, tabs, workspaces, worktrees, the
 git tab, the orchestration board, agents, and the UI chrome. Your command reads

@@ -212,10 +212,11 @@ pub struct LayoutConfig {
     /// its name, an unnamed pane its path (the original behavior).
     #[serde(default)]
     pub pane_title_path: bool,
-    /// In the AGENTS sidebar, show each agent's live session title (the OSC title
-    /// it sets, e.g. "Ship the desktop release…") in place of the `wsname · =<id>`
-    /// meta line. Off by default; falls back to the meta line when an agent set no
-    /// useful title.
+    /// In the AGENTS sidebar, show each agent's session title in place of the
+    /// `wsname · =<id>` meta line (live) or the project folder (resumable).
+    /// OSC title wins when the agent set one; otherwise a module-provided title
+    /// from `ui.agent_title.push`. Off by default. Luvus pane aliases are never
+    /// used as a title.
     #[serde(default)]
     pub agent_title: bool,
     /// Show the cwd line beneath each WORKSPACES entry. On by default to retain

@@ -72,6 +72,78 @@ impl App {
         }
     }
 
+    pub(super) fn api_ui_agent_title_push(&mut self, method: &str, p: &Value) -> DispatchResult {
+        let _ = method;
+        let titles = p.get("titles").and_then(Value::as_array).ok_or_else(|| {
+            (
+                "invalid_request".to_string(),
+                "titles must be a JSON array".to_string(),
+            )
+        })?;
+        if titles.len() > MAX_AGENT_ROW_TITLES {
+            return Err(("invalid_request".to_string(), "too many titles".to_string()));
+        }
+        let mut changed = false;
+        for item in titles {
+            changed |= self.apply_agent_row_title_item(item)?;
+        }
+        Ok(json!({"type":"ok", "changed": changed}))
+    }
+
+    pub(super) fn api_ui_agent_title_clear(&mut self, method: &str, p: &Value) -> DispatchResult {
+        let _ = method;
+        let pane = match p.get("pane") {
+            Some(value) => Some(self.parse_agent_row_title_pane(value)?),
+            None => None,
+        };
+        let session = agent_row_title_session(p.get("agent"), p.get("session_id"))?;
+        let changed = self.clear_agent_row_titles(pane, session);
+        Ok(json!({"type":"ok", "changed": changed}))
+    }
+
+    fn parse_agent_row_title_pane(&self, value: &Value) -> Result<PaneId, (String, String)> {
+        let id = value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+            .and_then(|id| u32::try_from(id).ok())
+            .map(PaneId)
+            .ok_or_else(|| ("invalid_request".into(), "invalid pane".into()))?;
+        if !self.panes.contains_key(&id) {
+            return Err(("not_found".into(), "pane not found".into()));
+        }
+        Ok(id)
+    }
+
+    fn apply_agent_row_title_item(&mut self, item: &Value) -> Result<bool, (String, String)> {
+        if !item.is_object() {
+            return Err((
+                "invalid_request".into(),
+                "each title must be an object".into(),
+            ));
+        }
+        let title =
+            sanitize_agent_row_title(item.get("title").and_then(Value::as_str).unwrap_or(""))?;
+        let pane = match item.get("pane") {
+            Some(value) => Some(self.parse_agent_row_title_pane(value)?),
+            None => None,
+        };
+        let session = agent_row_title_session(item.get("agent"), item.get("session_id"))?;
+        if pane.is_none() && session.is_none() {
+            return Err((
+                "invalid_request".into(),
+                "each title needs pane or agent+session_id".into(),
+            ));
+        }
+        let mut changed = false;
+        if let Some(pane) = pane {
+            changed |= self.set_agent_row_title_for_pane(pane, title.clone());
+        }
+        if let Some((agent, session_id)) = session {
+            changed |= self.set_agent_row_title_for_session(agent, session_id, title);
+        }
+        Ok(changed)
+    }
+
     pub(super) fn api_ui_dock_push(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = (method, p);
         {

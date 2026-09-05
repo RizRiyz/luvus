@@ -168,6 +168,8 @@ pub const METHODS: &[&str] = &[
     "theme.reload",
     "manifest.reload",
     "ui.sidebar",
+    "ui.agent_title.push",
+    "ui.agent_title.clear",
     "ui.dock.push",
     "ui.dock.list",
     "ui.dock.move",

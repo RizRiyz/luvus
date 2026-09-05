@@ -824,8 +824,8 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                         .agent_name_for(id)
                         .map(|n| format!("={n}"))
                         .unwrap_or_else(|| format!("={}", id.0));
-                    // When enabled, show the live OSC title in place of the meta
-                    // line; fall back when the agent set no useful title.
+                    // When enabled, show OSC first, then a module-provided
+                    // title; fall back to workspace · =pane when neither is set.
                     let meta = app
                         .config
                         .layout
@@ -924,11 +924,21 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("project");
+                    let meta = app
+                        .config
+                        .layout
+                        .agent_title
+                        .then(|| {
+                            app.agent_row_title_for_session(&s.agent, &s.session_id)
+                                .map(|title| format!("  {title}"))
+                        })
+                        .flatten()
+                        .unwrap_or_else(|| format!("  {proj}"));
                     line_at(
                         f,
                         y + 1,
                         Line::from(Span::styled(
-                            crate::ui::truncate(&format!("  {proj}"), cw as usize),
+                            crate::ui::truncate(&meta, cw as usize),
                             Style::new().fg(t.overlay0),
                         )),
                     );
@@ -1678,6 +1688,66 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["a1"],
             "closed-workspace schedules do not leak into the remaining scope"
+        );
+    }
+
+    #[test]
+    fn agent_title_shows_module_title_not_alias() {
+        let _env = crate::persist::test_env("agent-module-title");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.config.layout.agent_title = true;
+        let id = app.layout().focus;
+        {
+            let status = app.status.get_mut(&id).unwrap();
+            status.agent = "pi".into();
+            status.agent_session = Some(crate::app::AgentSession {
+                agent: "pi".into(),
+                session_id: "sess-1".into(),
+            });
+        }
+        app.agent_names.insert("chezmoi".into(), id);
+        assert!(app.set_agent_row_title_for_session(
+            "pi".into(),
+            "sess-1".into(),
+            Some("Ship desktop".into()),
+        ));
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(
+            buffer_contains(&term, "Ship desktop"),
+            "idle live rows show the module-provided session title"
+        );
+        assert!(
+            !buffer_contains(&term, "=chezmoi"),
+            "a Luvus pane alias must not stand in for the session title"
+        );
+    }
+
+    #[test]
+    fn resumable_rows_show_module_session_title() {
+        let _env = crate::persist::test_env("resumable-module-title");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.config.layout.agent_title = true;
+        app.agents_active_only = false;
+        app.resumable = vec![crate::agent::SessionInfo {
+            agent: "pi".into(),
+            session_id: "sess-closed".into(),
+            cwd: std::path::PathBuf::from("/tmp/proj"),
+            updated: std::time::SystemTime::UNIX_EPOCH,
+        }];
+        assert!(app.set_agent_row_title_for_session(
+            "pi".into(),
+            "sess-closed".into(),
+            Some("Closed session name".into()),
+        ));
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(buffer_contains(&term, "resume"));
+        assert!(
+            buffer_contains(&term, "Closed session name"),
+            "All history rows show the module-provided title"
         );
     }
 }

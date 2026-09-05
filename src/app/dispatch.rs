@@ -260,6 +260,8 @@ impl App {
             // A module pushes rows into its sidebar dock (docs/29, DOCK-4).
             // A one-line confirmation, the same transient toast a copy shows.
             "ui.toast" => self.api_ui_toast(method, p),
+            "ui.agent_title.push" => self.api_ui_agent_title_push(method, p),
+            "ui.agent_title.clear" => self.api_ui_agent_title_clear(method, p),
             "ui.dock.push" => self.api_ui_dock_push(method, p),
             "ui.dock.list" => self.api_ui_dock_list(method, p),
             "ui.dock.move" => self.api_ui_dock_move(method, p),

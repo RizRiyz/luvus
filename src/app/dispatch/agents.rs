@@ -695,15 +695,33 @@ impl App {
             })
     }
 
-    /// The pane's live session title (the OSC title the agent set), trimmed, if
-    /// non-empty. The AGENTS sidebar shows it in place of the meta line when the
-    /// "show agent session title" setting is on (`config.layout.agent_title`).
+    /// The pane's live session title, trimmed, if non-empty. OSC title wins;
+    /// otherwise a module-provided title (`ui.agent_title.push`). Luvus pane
+    /// aliases (`=name`) are never used as a title. The AGENTS sidebar shows
+    /// this in place of the meta line when the "show agent session title"
+    /// setting is on (`config.layout.agent_title`).
     pub(crate) fn pane_title(&self, pane: PaneId) -> Option<String> {
-        self.panes
+        if let Some(title) = self
+            .panes
             .get(&pane)
             .and_then(|p| p.engine.lock().ok().and_then(|e| e.title()))
             .map(|s| strip_title_icon(&s))
             .filter(|s| !s.is_empty())
+        {
+            return Some(title);
+        }
+        if let Some(title) = self
+            .agent_title_panes
+            .get(&pane)
+            .map(|title| strip_title_icon(title))
+            .filter(|title| !title.is_empty())
+        {
+            return Some(title);
+        }
+        let session = self.status.get(&pane)?.agent_session.as_ref()?;
+        self.agent_row_title_for_session(&session.agent, &session.session_id)
+            .map(strip_title_icon)
+            .filter(|title| !title.is_empty())
     }
 
     /// Whether `pane` currently hosts a recognised agent (detection) or a bound

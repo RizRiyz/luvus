@@ -49,6 +49,13 @@ The **All / Active** toggle in the header switches between the full resumable
 history and live agents only. A new configuration starts with **All**, then
 luvus remembers whichever view you select across restarts.
 
+When **Show agent session title** is on, the second line of each agent row
+prefers the live OSC title, then a title a module published with
+`ui.agent_title.push`. If neither is set, live rows keep `workspace · =pane`
+and resumable rows keep the project folder. Luvus pane aliases (`=name`) are
+not used as titles. Core Luvus does not parse an agent's native session store
+for this line; a module supplies names such as Pi's `session_info.name`.
+
 ## Usage in Mission Control
 
 Open Mission Control with `Ctrl+Space m`, from the desktop switcher, or with

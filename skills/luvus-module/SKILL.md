@@ -58,6 +58,7 @@ Run the `luvus` CLI from inside the command; it talks to the running server over
 - `luvus bar push --id <widget> --content <json>` — atomically publish structured `text`, `symbol`, `state`, `badge`, `progress`, `spacer`, and `separator` segments. Add `--compact-content`; an `action` must name one of your `[[actions]]`.
 - `luvus ui notification push --text <text> --level info|success|warning|error` — publish bounded transient status; use `--dedupe-key` for replacement.
 - `luvus ui toast "<text>"` — flash a one-line confirmation.
+- `luvus ui agent-title push --titles <json>` — publish AGENTS sidebar titles for live panes (`pane`) and resumable sessions (`agent` + `session_id`). OSC still wins; never send a Luvus `=alias` as the title. `luvus ui agent-title clear` drops one key or all titles.
 - `luvus ui sidebar` / `ui dock list` / `ui dock move` — sidebar/dock control.
 - `luvus tab rename <name>` / `tab list` — tabs.
 - `luvus module settings <id>` / `module settings <id> <key>` — read your settings exactly (values are masked in `settings list` when `secret`, but exact in `settings get`).

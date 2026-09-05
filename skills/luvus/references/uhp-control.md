@@ -110,7 +110,7 @@ read current state and reconcile instead of blindly retrying.
     selected pane proves the same native conversation.
 - Extensions: `module.*`
 - Themes and configuration: `theme.*`, `config.*`, and `manifest.reload`
-- UI surfaces: `ui.sidebar`, `ui.dock.*`, `ui.bar.*`,
+- UI surfaces: `ui.sidebar`, `ui.agent_title.*`, `ui.dock.*`, `ui.bar.*`,
   `ui.notification.*`, and `ui.toast`
 - Terminal backends: `terminal.backend.*`
 

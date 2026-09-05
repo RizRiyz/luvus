@@ -2496,6 +2496,10 @@ pub struct App {
     cwd_git_hits: HashMap<PaneId, (PathBuf, u8)>,
     /// Resumable agent sessions discovered on disk (for the AGENTS sidebar).
     pub resumable: Vec<crate::agent::SessionInfo>,
+    /// Module-provided AGENTS sidebar titles for live panes. OSC still wins.
+    pub(crate) agent_title_panes: HashMap<PaneId, String>,
+    /// Module-provided titles for native sessions (live idle fallback and All/history).
+    pub(crate) agent_title_sessions: HashMap<(String, String), String>,
     /// A resumable-session disk scan is running on a worker thread; don't start
     /// another until its `SessionsScanned` result arrives.
     sessions_scan_inflight: bool,
@@ -3042,6 +3046,8 @@ impl App {
             cwd_scan_inflight: false,
             cwd_git_hits: HashMap::new(),
             resumable: Vec::new(),
+            agent_title_panes: HashMap::new(),
+            agent_title_sessions: HashMap::new(),
             sessions_scan_inflight: false,
             proc_commands: HashMap::new(),
             proc_scan_inflight: false,
@@ -3698,6 +3704,8 @@ impl App {
             cwd_scan_inflight: false,
             cwd_git_hits: HashMap::new(),
             resumable: Vec::new(),
+            agent_title_panes: HashMap::new(),
+            agent_title_sessions: HashMap::new(),
             sessions_scan_inflight: false,
             proc_commands: HashMap::new(),
             proc_scan_inflight: false,
@@ -7022,6 +7030,72 @@ impl App {
         changed
     }
 
+    pub(crate) fn set_agent_row_title_for_pane(
+        &mut self,
+        pane: PaneId,
+        title: Option<String>,
+    ) -> bool {
+        match title {
+            Some(title) if self.agent_title_panes.get(&pane) == Some(&title) => false,
+            Some(title) => {
+                self.agent_title_panes.insert(pane, title);
+                true
+            }
+            None => self.agent_title_panes.remove(&pane).is_some(),
+        }
+    }
+
+    pub(crate) fn set_agent_row_title_for_session(
+        &mut self,
+        agent: String,
+        session_id: String,
+        title: Option<String>,
+    ) -> bool {
+        let key = (agent, session_id);
+        match title {
+            Some(title) if self.agent_title_sessions.get(&key) == Some(&title) => false,
+            Some(title) => {
+                self.agent_title_sessions.insert(key, title);
+                true
+            }
+            None => self.agent_title_sessions.remove(&key).is_some(),
+        }
+    }
+
+    pub(crate) fn clear_agent_row_titles(
+        &mut self,
+        pane: Option<PaneId>,
+        session: Option<(String, String)>,
+    ) -> bool {
+        match (pane, session) {
+            (None, None) => {
+                let changed =
+                    !self.agent_title_panes.is_empty() || !self.agent_title_sessions.is_empty();
+                self.agent_title_panes.clear();
+                self.agent_title_sessions.clear();
+                changed
+            }
+            (Some(pane), None) => self.agent_title_panes.remove(&pane).is_some(),
+            (None, Some(session)) => self.agent_title_sessions.remove(&session).is_some(),
+            (Some(pane), Some(session)) => {
+                let pane_changed = self.agent_title_panes.remove(&pane).is_some();
+                let session_changed = self.agent_title_sessions.remove(&session).is_some();
+                pane_changed || session_changed
+            }
+        }
+    }
+
+    pub(crate) fn agent_row_title_for_session(
+        &self,
+        agent: &str,
+        session_id: &str,
+    ) -> Option<&str> {
+        self.agent_title_sessions
+            .get(&(agent.to_string(), session_id.to_string()))
+            .map(String::as_str)
+            .filter(|title| !title.is_empty())
+    }
+
     /// Remove a resumable session from the sidebar list. Hides it for the rest of
     /// the run (so the periodic rescan doesn't bring it back) — it does NOT touch
     /// the agent's stored session on disk.
@@ -7496,6 +7570,7 @@ impl App {
         self.emit_backend_terminal_event(id, "terminal.closed", serde_json::json!({}));
         self.backend_terminal_index.retain(|_, pane| *pane != id);
         self.backend_labels.remove(&id);
+        self.agent_title_panes.remove(&id);
         self.cancel_backend_revision_waits(id);
         let reported = self
             .reported_usage
@@ -13161,6 +13236,41 @@ mod tests {
 
         drop(restored);
         let _ = std::fs::remove_dir_all(other);
+    }
+
+    #[test]
+    fn module_agent_titles_apply_to_live_and_resumable_without_using_alias() {
+        let _env = crate::persist::test_env("module-agent-titles");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        {
+            let status = app.status.get_mut(&pane).unwrap();
+            status.agent = "pi".into();
+            status.agent_session = Some(AgentSession {
+                agent: "pi".into(),
+                session_id: "live-1".into(),
+            });
+        }
+        app.agent_names.insert("chezmoi".into(), pane);
+        assert!(app.set_agent_row_title_for_session(
+            "pi".into(),
+            "live-1".into(),
+            Some("Live module title".into()),
+        ));
+        assert!(app.set_agent_row_title_for_session(
+            "pi".into(),
+            "old-1".into(),
+            Some("History title".into()),
+        ));
+        assert_eq!(app.pane_title(pane).as_deref(), Some("Live module title"));
+        assert_eq!(app.agent_name_for(pane), Some("chezmoi"));
+        assert_eq!(
+            app.agent_row_title_for_session("pi", "old-1"),
+            Some("History title")
+        );
+        assert!(app.clear_agent_row_titles(None, Some(("pi".into(), "live-1".into()))));
+        assert!(app.pane_title(pane).is_none());
     }
 
     #[test]
