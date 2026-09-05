@@ -375,6 +375,10 @@ surface:
   retrying. Leases coordinate declared paths but do not sandbox a shared
   checkout. `task release` requeues an
   active task and releases its path leases; it does not stop the worker pane.
+  Report work progress only with `task update --note`. `task heartbeat
+  --context-used <0..1>` means the fraction of the model context window already
+  consumed, never task-completion progress; `0.6` means 60% consumed. Omit the
+  heartbeat when context-window usage is unknown.
 - Inspect `automation.list`, `automation.get`, and `automation.history` before
   changing an agent schedule. Creating, updating, enabling, disabling,
   deleting, or manually running an automation requires explicit authorization.

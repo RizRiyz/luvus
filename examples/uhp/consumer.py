@@ -196,8 +196,34 @@ def valid_automation_policy(value):
     return integer(grace) and 0 <= grace <= 31536000
 
 
+def valid_automation_target(value):
+    if not isinstance(value, dict):
+        return False
+    if value.get("kind") == "new_worker":
+        return set(value) == {"kind"}
+    if value.get("kind") != "active_agent":
+        return False
+    if not {"kind", "pane_id", "terminal_id"} <= set(value):
+        return False
+    if not set(value) <= {"kind", "pane_id", "terminal_id", "if_busy"}:
+        return False
+    pane_id = value["pane_id"]
+    if isinstance(pane_id, str):
+        valid_pane = PANE.fullmatch(pane_id) is not None and int(pane_id) <= 4294967295
+    else:
+        valid_pane = integer(pane_id) and 1 <= pane_id <= 4294967295
+    return (
+        valid_pane
+        and isinstance(value["terminal_id"], str)
+        and re.fullmatch(r"[0-9a-f]{32}", value["terminal_id"]) is not None
+        and value.get("if_busy", "wait") in {"wait", "skip"}
+    )
+
+
 def valid_automation_definition(params, *, update):
-    allowed = {"id", "name", "enabled", "trigger", "task", "policy", "idempotency_key"}
+    allowed = {
+        "id", "name", "enabled", "trigger", "target", "task", "policy", "idempotency_key"
+    }
     required = {"name", "trigger", "task"} | ({"id"} if update else set())
     if not required <= set(params) or not set(params) <= allowed:
         return False
@@ -210,6 +236,8 @@ def valid_automation_definition(params, *, update):
     if "enabled" in params and type(params["enabled"]) is not bool:
         return False
     if not valid_automation_trigger(params["trigger"]):
+        return False
+    if "target" in params and not valid_automation_target(params["target"]):
         return False
     if not valid_automation_task(params["task"]):
         return False
@@ -502,6 +530,16 @@ def valid_global_request(value, methods):
             return False
         if mode == "workspace" and "branch" in params:
             return False
+    if value["method"] == "task.heartbeat":
+        params = value["params"]
+        context = params.get("context")
+        return (
+            set(params) == {"id", "context"}
+            and bounded_string(params["id"], 128, allow_empty=False)
+            and isinstance(context, (int, float))
+            and not isinstance(context, bool)
+            and 0 <= context <= 1
+        )
     if value["method"] in {"automation.list", "automation.health"}:
         return not value["params"]
     if value["method"] in {

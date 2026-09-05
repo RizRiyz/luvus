@@ -42,6 +42,28 @@ mod socket_api_tests {
         (env, app)
     }
 
+    fn layout_state_bytes(app: &App) -> (PaneId, Vec<u8>, Vec<u8>) {
+        let layout = app.layout();
+        let tree = serde_json::to_vec(&layout.to_tree()).unwrap();
+        let pane_sizes = serde_json::to_vec(
+            &layout
+                .panes(crate::api::topology::logical_area())
+                .into_iter()
+                .map(|pane| {
+                    json!({
+                        "pane": pane.id.0,
+                        "x": pane.rect.x,
+                        "y": pane.rect.y,
+                        "width": pane.rect.width,
+                        "height": pane.rect.height,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        (layout.focus, tree, pane_sizes)
+    }
+
     #[test]
     fn quiet_runtime_can_leave_the_fast_detection_cadence() {
         let (_env, mut app) = app("quiet-runtime-cadence");
@@ -548,6 +570,143 @@ mod socket_api_tests {
     }
 
     #[test]
+    fn explicit_missing_pane_resize_is_not_found_and_atomic() {
+        let (_env, mut app) = app("missing-pane-resize");
+        app.dispatch("pane.split", &json!({})).unwrap();
+        let before = layout_state_bytes(&app);
+
+        let error = app
+            .dispatch(
+                "pane.resize",
+                &json!({"pane": u32::MAX, "direction": "left", "cells": 1}),
+            )
+            .expect_err("an explicit missing pane must not resize the focused pane");
+
+        assert_eq!(error.0, "not_found");
+        assert_eq!(layout_state_bytes(&app), before);
+    }
+
+    #[test]
+    fn explicit_missing_pane_zoom_is_not_found_and_atomic() {
+        let (_env, mut app) = app("missing-pane-zoom");
+        let before = layout_state_bytes(&app);
+        let zoomed_before = app.zoomed;
+
+        let error = app
+            .dispatch(
+                "pane.zoom",
+                &json!({"pane": u32::MAX.to_string(), "enabled": true}),
+            )
+            .expect_err("an explicit missing pane must not zoom the focused pane");
+
+        assert_eq!(error.0, "not_found");
+        assert_eq!(layout_state_bytes(&app), before);
+        assert_eq!(app.zoomed, zoomed_before);
+    }
+
+    #[test]
+    fn invalid_zoom_enabled_does_not_change_focus_or_layout() {
+        let (_env, mut app) = app("invalid-zoom-enabled");
+        let first = app.layout().focus;
+        app.dispatch("pane.split", &json!({})).unwrap();
+        let before = layout_state_bytes(&app);
+        let zoomed_before = app.zoomed;
+
+        let error = app
+            .dispatch("pane.zoom", &json!({"pane": first.0, "enabled": "yes"}))
+            .expect_err("invalid enabled must fail before focus changes");
+
+        assert_eq!(error.0, "invalid_request");
+        assert_eq!(layout_state_bytes(&app), before);
+        assert_eq!(app.zoomed, zoomed_before);
+    }
+
+    #[test]
+    fn explicit_missing_pane_neighbor_is_not_found_and_atomic() {
+        let (_env, mut app) = app("missing-pane-neighbor");
+        app.dispatch("pane.split", &json!({})).unwrap();
+        let before = layout_state_bytes(&app);
+
+        let error = app
+            .dispatch(
+                "pane.neighbor",
+                &json!({"pane": u32::MAX, "direction": "left"}),
+            )
+            .expect_err("an explicit missing pane must not inspect the focused pane");
+
+        assert_eq!(error.0, "not_found");
+        assert_eq!(layout_state_bytes(&app), before);
+    }
+
+    #[test]
+    fn remaining_focus_default_methods_reject_missing_panes_atomically() {
+        let (_env, mut app) = app("remaining-missing-pane-fallbacks");
+        app.dispatch("pane.split", &json!({})).unwrap();
+        let before = layout_state_bytes(&app);
+
+        for (method, params) in [
+            ("pane.layout", json!({"pane": u32::MAX})),
+            ("pane.edges", json!({"pane": u32::MAX})),
+            (
+                "pane.focus_direction",
+                json!({"pane": u32::MAX, "direction": "left"}),
+            ),
+            (
+                "diff.navigate",
+                json!({"pane": u32::MAX, "action": "next_line"}),
+            ),
+        ] {
+            let error = app
+                .dispatch(method, &params)
+                .expect_err("an explicit missing pane must not use focus");
+            assert_eq!(error.0, "not_found", "{method}");
+            assert_eq!(layout_state_bytes(&app), before, "{method}");
+        }
+    }
+
+    #[test]
+    fn omitted_and_null_pane_still_target_focus_where_supported() {
+        let (_env, mut app) = app("default-pane-resolution");
+        let first = app.layout().focus;
+        let second = PaneId(
+            app.dispatch("pane.split", &json!({})).unwrap()["pane"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
+        );
+
+        for params in [
+            json!({"direction": "left"}),
+            json!({"pane": null, "direction": "left"}),
+        ] {
+            let result = app.dispatch("pane.neighbor", &params).unwrap();
+            assert_eq!(result["pane"], second.0.to_string());
+            assert_eq!(result["neighbor"], first.0.to_string());
+        }
+    }
+
+    #[test]
+    fn null_pane_targets_focus_for_terminal_focus_defaults() {
+        let (_env, mut app) = app("null-terminal-pane-resolution");
+        let pane = app.layout().focus;
+
+        for (method, response_type) in [
+            ("pane.get", "pane"),
+            ("pane.read", "pane_read"),
+            ("pane.processes", "pane_processes"),
+        ] {
+            let result = app
+                .dispatch(method, &json!({"pane": null}))
+                .unwrap_or_else(|error| panic!("{method} rejected null: {error:?}"));
+            assert_eq!(result["type"], response_type, "{method}");
+            if result.get("pane").is_some() {
+                assert_eq!(result["pane"], pane.0.to_string(), "{method}");
+            }
+        }
+    }
+
+    #[test]
     fn workspace_block_move_is_atomic_and_keeps_active_workspace() {
         let (_env, mut app) = app("socket-workspace-move");
         app.dispatch("workspace.new", &json!({})).unwrap();
@@ -1019,6 +1178,29 @@ mod socket_api_tests {
         assert!(!encoded.contains("private agent briefing"));
         assert!(!encoded.contains("scheduled_at"));
         assert_eq!(list["tasks"][0]["title"], "review");
+    }
+
+    #[test]
+    fn task_heartbeat_rejects_invalid_context_without_mutation() {
+        let (_env, mut app) = app("socket-task-heartbeat-context");
+        app.orch
+            .add_task("heartbeat".into(), vec![], vec![], None)
+            .unwrap();
+
+        app.dispatch("task.heartbeat", &json!({"id":"t1","context":0.6}))
+            .unwrap();
+        assert_eq!(app.orch.task("t1").unwrap().context, Some(0.6));
+
+        for params in [
+            json!({"id":"t1"}),
+            json!({"id":"t1","context":"0.5"}),
+            json!({"id":"t1","context":-0.1}),
+            json!({"id":"t1","context":1.1}),
+        ] {
+            let error = app.dispatch("task.heartbeat", &params).unwrap_err();
+            assert_eq!(error.0, "invalid_request");
+            assert_eq!(app.orch.task("t1").unwrap().context, Some(0.6));
+        }
     }
 
     #[test]
@@ -2155,7 +2337,7 @@ impl App {
             }
             "pane.get" => {
                 reject_api_fields(p, &["pane"])?;
-                let pane = self.resolve_pane(p).ok_or_else(not_found)?;
+                let pane = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 self.socket_pane(pane)
             }
             "pane.current" => {
@@ -2164,12 +2346,12 @@ impl App {
             }
             "pane.layout" => {
                 reject_api_fields(p, &["pane"])?;
-                let pane = self.resolve_pane(p).unwrap_or_else(|| self.layout().focus);
+                let pane = self.resolve_pane_or_focus(p)?;
                 self.socket_pane_layout(pane)
             }
             "pane.neighbor" => {
                 reject_api_fields(p, &["pane", "direction"])?;
-                let pane = self.resolve_pane(p).unwrap_or_else(|| self.layout().focus);
+                let pane = self.resolve_pane_or_focus(p)?;
                 let direction = crate::api::topology::direction(p)?;
                 let (workspace, tab) = self.pane_location(pane).ok_or_else(not_found)?;
                 let layout = &self.workspaces[workspace].tabs[tab].layout;
@@ -2180,7 +2362,7 @@ impl App {
             }
             "pane.edges" => {
                 reject_api_fields(p, &["pane"])?;
-                let pane = self.resolve_pane(p).unwrap_or_else(|| self.layout().focus);
+                let pane = self.resolve_pane_or_focus(p)?;
                 let (workspace, tab) = self.pane_location(pane).ok_or_else(not_found)?;
                 let area = crate::api::topology::logical_area();
                 let rect = self.workspaces[workspace].tabs[tab]
@@ -2256,7 +2438,7 @@ impl App {
                 }
                 let base = match p.get("pane") {
                     None | Some(Value::Null) => self.layout().focus,
-                    Some(_) => self.resolve_pane(p).ok_or_else(not_found)?,
+                    Some(_) => self.resolve_pane(p)?.ok_or_else(not_found)?,
                 };
                 let dir = p
                     .get("direction")
@@ -2278,7 +2460,7 @@ impl App {
                 }))
             }
             "pane.move" => {
-                let id = self.resolve_pane(p).ok_or_else(not_found)?;
+                let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 let new_tab = match p.get("new_tab") {
                     None => false,
                     Some(Value::Bool(v)) => *v,
@@ -2310,7 +2492,7 @@ impl App {
                 }))
             }
             "pane.run" => {
-                let id = self.resolve_pane(p).ok_or_else(not_found)?;
+                let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 let cmd = p.get("command").and_then(|v| v.as_str()).unwrap_or("");
                 if let Some(pane) = self.panes.get(&id) {
                     pane.send(cmd.as_bytes());
@@ -2319,7 +2501,7 @@ impl App {
                 Ok(json!({"type":"ok"}))
             }
             "pane.send_input" => {
-                let id = self.resolve_pane(p).ok_or_else(not_found)?;
+                let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
                 if let Some(pane) = self.panes.get(&id) {
                     pane.send(text.as_bytes());
@@ -2327,7 +2509,7 @@ impl App {
                 Ok(json!({"type":"ok"}))
             }
             "pane.read" => {
-                let id = self.resolve_pane(p).ok_or_else(not_found)?;
+                let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 let lines = p.get("lines").and_then(|v| v.as_u64()).unwrap_or(200) as u16;
                 let text = self
                     .panes
@@ -2368,14 +2550,14 @@ impl App {
                 }))
             }
             "pane.close" => {
-                let id = self.resolve_pane(p).ok_or_else(not_found)?;
+                let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 self.close_pane(id);
                 Ok(json!({"type":"ok"}))
             }
             // A **global** single-pane status lookup (any workspace) — `pane.list` is
             // scoped to the active workspace, so `luvus wait agent-status` polls this.
             "pane.status" => {
-                let id = self.resolve_pane(p).ok_or_else(not_found)?;
+                let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 let (agent, status, authority, state_source) = self
                     .status
                     .get(&id)
@@ -2406,13 +2588,13 @@ impl App {
             }
             "pane.processes" => {
                 reject_api_fields(p, &["pane"])?;
-                let id = self.resolve_pane(p).ok_or_else(not_found)?;
+                let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 self.request_proc_scan_if_stale(id);
                 Ok(self.pane_processes(id))
             }
             "pane.report_session" => {
                 reject_api_fields(p, &["pane", "agent", "session_id", "usage"])?;
-                let id = self.resolve_pane(p).ok_or_else(not_found)?;
+                let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 let raw_agent = required_bounded_string(p, "agent", 64)?;
                 let agent = crate::agent::canonical_builtin(&raw_agent).ok_or_else(|| {
                     (
@@ -2520,7 +2702,7 @@ impl App {
             // permission prompt, question, turn end. Forwarded verbatim onto the
             // event bus as `agent.hook` for modules and API clients.
             "pane.report_event" => {
-                let id = self.resolve_pane(p).ok_or_else(not_found)?;
+                let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 let agent = p.get("agent").and_then(|v| v.as_str()).unwrap_or("");
                 let kind = p.get("kind").and_then(|v| v.as_str()).unwrap_or("");
                 let message = p.get("message").and_then(|v| v.as_str()).unwrap_or("");
@@ -3052,13 +3234,13 @@ impl App {
             }
             // ── panes / agents ──
             "pane.focus" => {
-                let id = self.resolve_pane(p).ok_or_else(not_found)?;
+                let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 self.focus_pane_global(id);
                 Ok(json!({"type":"ok"}))
             }
             "pane.focus_direction" => {
                 reject_api_fields(p, &["pane", "direction"])?;
-                let pane = self.resolve_pane(p).unwrap_or_else(|| self.layout().focus);
+                let pane = self.resolve_pane_or_focus(p)?;
                 let direction = crate::api::topology::direction(p)?;
                 let (workspace, tab) = self.pane_location(pane).ok_or_else(not_found)?;
                 let next = self.workspaces[workspace].tabs[tab]
@@ -3076,7 +3258,7 @@ impl App {
             }
             "pane.resize" => {
                 reject_api_fields(p, &["pane", "direction", "cells"])?;
-                let pane = self.resolve_pane(p).unwrap_or_else(|| self.layout().focus);
+                let pane = self.resolve_pane_or_focus(p)?;
                 let direction = crate::api::topology::direction(p)?;
                 let cells = p.get("cells").and_then(Value::as_i64).unwrap_or(1);
                 if !(1..=1000).contains(&cells) {
@@ -3111,9 +3293,7 @@ impl App {
             }
             "pane.zoom" => {
                 reject_api_fields(p, &["pane", "enabled"])?;
-                if let Some(pane) = self.resolve_pane(p) {
-                    self.focus_pane_global(pane);
-                }
+                let pane = self.resolve_pane_or_focus(p)?;
                 let enabled = match p.get("enabled") {
                     None => !self.zoomed,
                     Some(Value::Bool(enabled)) => *enabled,
@@ -3124,6 +3304,7 @@ impl App {
                         ))
                     }
                 };
+                self.focus_pane_global(pane);
                 self.zoomed = enabled;
                 let pane = self.layout().focus;
                 self.emit_event(
@@ -3134,7 +3315,7 @@ impl App {
             }
             "pane.rename" => {
                 reject_api_fields(p, &["pane", "name"])?;
-                let pane = self.resolve_pane(p).ok_or_else(not_found)?;
+                let pane = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 let name = p
                     .get("name")
                     .and_then(Value::as_str)
@@ -3159,7 +3340,7 @@ impl App {
             }
             "pane.swap" => {
                 reject_api_fields(p, &["pane", "with"])?;
-                let first = self.resolve_pane(p).ok_or_else(not_found)?;
+                let first = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 let second = PaneId(parse_u32_value(
                     p.get("with").ok_or_else(|| {
                         (
@@ -3196,7 +3377,7 @@ impl App {
             // `attach.pane` (docs/18 WA-2): focus a pane and zoom it, so a client
             // attaching next opens straight into that fullscreen terminal.
             "attach.pane" => {
-                let id = self.resolve_pane(p).ok_or_else(not_found)?;
+                let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 self.focus_pane_global(id);
                 self.zoomed = true;
                 Ok(json!({"type":"ok","pane": id.0.to_string()}))
@@ -3254,8 +3435,12 @@ impl App {
                                 "authority":s.identity_source,
                                 "state_source":s.state_source,
                                 "session": session,
-                                "workspace": wi.to_string(), "workspace_id": ws.id,
-                                "workspace_name": ws.name,
+                                "workspace": wi.to_string(), "workspace_name": ws.name,
+                                // The one selector that survives reordering:
+                                // `workspace` is a positional index that shifts
+                                // when an earlier workspace closes, and
+                                // `workspace_name` is user-editable.
+                                "workspace_id": ws.id,
                                 "project": ws.name, "cwd": cwd,
                                 "branch": branch, "repo": repo, "worktree": is_worktree,
                                 "tab": (ti + 1).to_string(), "focused": id == focus,
@@ -3268,7 +3453,7 @@ impl App {
             // Give a pane's agent a live alias (or clear it) so `agent.send` /
             // `agent.keys` / `agent.read` can address it by name. Ephemeral.
             "agent.name" => {
-                let pane = self.resolve_pane(p).ok_or_else(not_found)?;
+                let pane = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 if p.get("clear").and_then(|v| v.as_bool()).unwrap_or(false) {
                     self.set_agent_name(pane, None);
                     return Ok(
@@ -3456,10 +3641,11 @@ impl App {
                         ));
                     }
                 }
-                let id = self
-                    .resolve_agent_pane(p)
-                    .or_else(|| self.resolve_pane(p))
-                    .ok_or_else(not_found)?;
+                let id = if p.get("target").is_some() {
+                    self.resolve_agent_pane(p).ok_or_else(agent_not_found)?
+                } else {
+                    self.resolve_pane(p)?.ok_or_else(not_found)?
+                };
                 Ok(self.agent_explanation(id))
             }
             "agent.report" => {
@@ -3476,10 +3662,10 @@ impl App {
                         "ttl_s",
                     ],
                 )?;
-                let id = self
-                    .resolve_agent_pane(p)
-                    .or_else(|| self.resolve_pane(p))
-                    .ok_or_else(not_found)?;
+                // `target` is not an accepted field here, so `pane` is the only
+                // explicit target and a miss is terminal — the same rule
+                // `agent.explain` applies, with no fallback to the focused pane.
+                let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 let source = required_report_source(p)?;
                 let agent = p.get("agent").and_then(Value::as_str).ok_or_else(|| {
                     (
@@ -3606,10 +3792,10 @@ impl App {
             }
             "agent.release" => {
                 reject_api_fields(p, &["pane", "source"])?;
-                let id = self
-                    .resolve_agent_pane(p)
-                    .or_else(|| self.resolve_pane(p))
-                    .ok_or_else(not_found)?;
+                // `target` is not an accepted field here, so `pane` is the only
+                // explicit target and a miss is terminal — the same rule
+                // `agent.explain` applies, with no fallback to the focused pane.
+                let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 let source = required_report_source(p)?;
                 let status = self.status.get_mut(&id).ok_or_else(not_found)?;
                 let Some(report) = status.agent_report.as_ref() else {
@@ -4187,12 +4373,12 @@ impl App {
                 Ok(json!({"type":"module_setting","id": id,"key": key,"value": v}))
             }
             "module.pane.focus" => {
-                let id = self.resolve_pane(p).ok_or_else(not_found)?;
+                let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 self.focus_pane_global(id);
                 Ok(json!({"type":"ok"}))
             }
             "module.pane.close" => {
-                let id = self.resolve_pane(p).ok_or_else(not_found)?;
+                let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 self.close_pane(id);
                 Ok(json!({"type":"ok"}))
             }
@@ -4341,7 +4527,7 @@ impl App {
                 }))
             }
             "diff.navigate" => {
-                let id = self.resolve_pane(p).unwrap_or_else(|| self.layout().focus);
+                let id = self.resolve_pane_or_focus(p)?;
                 let action = req_str(p, "action")?;
                 let key = match action {
                     "next" | "next_line" => KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
@@ -5175,6 +5361,12 @@ impl App {
                         "context (0..1) is required".to_string(),
                     )
                 })?;
+                if !ctx.is_finite() || !(0.0..=1.0).contains(&ctx) {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "context must be a finite number from 0 to 1".to_string(),
+                    ));
+                }
                 let over = self.orch.heartbeat(&id, ctx).map_err(orch_err)?;
                 self.orch.save();
                 if over {
@@ -5235,25 +5427,46 @@ impl App {
     /// The pane a task/lease call acts for: the passed `pane`, else the caller's
     /// `$LUVUS_PANE_ID`. Orchestration is pane-keyed, so this is required.
     fn orch_pane(&self, p: &Value) -> Result<u32, (String, String)> {
-        self.resolve_pane(p).map(|id| id.0).ok_or_else(|| {
-            (
-                "no_pane".to_string(),
-                "no pane id — run inside a luvus pane or pass a pane id".to_string(),
-            )
-        })
+        self.resolve_optional_pane(p)?
+            .map(|id| id.0)
+            .ok_or_else(|| {
+                (
+                    "no_pane".to_string(),
+                    "no pane id — run inside a luvus pane or pass a pane id".to_string(),
+                )
+            })
     }
 
-    pub(crate) fn resolve_pane(&self, p: &Value) -> Option<PaneId> {
+    fn resolve_optional_pane(&self, p: &Value) -> Result<Option<PaneId>, (String, String)> {
+        if matches!(p.get("pane"), Some(Value::Null)) {
+            return Ok(None);
+        }
+        self.resolve_pane(p)
+    }
+
+    pub(crate) fn resolve_pane(&self, p: &Value) -> Result<Option<PaneId>, (String, String)> {
         match p.get("pane") {
-            Some(v) => {
-                let raw = v
-                    .as_str()
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .or_else(|| v.as_u64().map(|n| n as u32))?;
-                let id = PaneId(raw);
-                self.panes.contains_key(&id).then_some(id)
+            None | Some(Value::Null) => Ok(Some(self.layout().focus)),
+            Some(value) => {
+                let id = PaneId(parse_u32_value(value, "pane")?);
+                self.panes
+                    .contains_key(&id)
+                    .then_some(Some(id))
+                    .ok_or_else(not_found)
             }
-            None => Some(self.layout().focus),
+        }
+    }
+
+    fn resolve_pane_or_focus(&self, p: &Value) -> Result<PaneId, (String, String)> {
+        match p.get("pane") {
+            None | Some(Value::Null) => Ok(self.layout().focus),
+            Some(value) => {
+                let id = PaneId(parse_u32_value(value, "pane")?);
+                self.pane_location(id)
+                    .is_some()
+                    .then_some(id)
+                    .ok_or_else(not_found)
+            }
         }
     }
 
@@ -5619,19 +5832,30 @@ impl App {
                 );
                 return;
             }
-            (Some(_), None) => match self.resolve_pane(&json!({"pane":p["pane"]})) {
-                Some(id) => (id, false),
-                None => {
+            (Some(_), None) => match self.resolve_optional_pane(&json!({"pane":p["pane"]})) {
+                Ok(Some(id)) => (id, false),
+                Ok(None) => {
                     fail("not_found", "pane not found".to_string());
+                    return;
+                }
+                Err((code, message)) => {
+                    fail(&code, message);
                     return;
                 }
             },
             (_, _) => {
                 let mut split = serde_json::Map::new();
                 if let Some(anchor) = p.get("anchor") {
-                    let Some(anchor) = self.resolve_pane(&json!({"pane":anchor})) else {
-                        fail("not_found", "anchor pane not found".to_string());
-                        return;
+                    let anchor = match self.resolve_optional_pane(&json!({"pane":anchor})) {
+                        Ok(Some(anchor)) => anchor,
+                        Ok(None) => {
+                            fail("not_found", "anchor pane not found".to_string());
+                            return;
+                        }
+                        Err((code, message)) => {
+                            fail(&code, message);
+                            return;
+                        }
                     };
                     split.insert("pane".into(), json!(anchor.0.to_string()));
                 }
@@ -8323,6 +8547,197 @@ command = ["true"]
         assert_eq!(out["agents"][0]["session"], "sess-42");
     }
 
+    #[test]
+    fn pane_ids_are_checked_before_resolution_or_mutation() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let overflow = u64::from(u32::MAX) + 1;
+        let alias_one = u64::from(u32::MAX) + 2;
+
+        for invalid in [
+            json!(overflow),
+            json!(alias_one),
+            json!(-1),
+            json!(1.5),
+            json!(overflow.to_string()),
+            json!("-1"),
+            json!("1.5"),
+            json!("abc"),
+        ] {
+            let error = app
+                .resolve_pane(&json!({"pane": invalid}))
+                .expect_err("malformed pane ids must be validation errors");
+            assert_eq!(error.0, "invalid_request", "{invalid}");
+        }
+        assert_eq!(
+            app.resolve_pane(&json!({"pane": pane.0})).unwrap(),
+            Some(pane)
+        );
+        assert_eq!(
+            app.resolve_pane(&json!({"pane": pane.0.to_string()}))
+                .unwrap(),
+            Some(pane)
+        );
+        assert_eq!(app.resolve_pane(&json!({})).unwrap(), Some(pane));
+        assert_eq!(
+            app.resolve_pane(&json!({"pane": null})).unwrap(),
+            Some(pane)
+        );
+        let no_pane = app
+            .orch_pane(&json!({"pane": null}))
+            .expect_err("orchestration keeps explicit null as absent context");
+        assert_eq!(no_pane.0, "no_pane");
+        let missing = app
+            .resolve_pane(&json!({"pane": u32::MAX}))
+            .expect_err("a well-formed missing pane must be distinct from omission");
+        assert_eq!(missing.0, "not_found");
+
+        let leaves = app.layout().leaves();
+        let focus = app.layout().focus;
+        let revision = app.panes[&pane].content_revision();
+        for (method, params) in [
+            ("pane.close", json!({"pane": alias_one})),
+            (
+                "pane.send_input",
+                json!({"pane": alias_one, "text": "exit\r"}),
+            ),
+        ] {
+            let error = app
+                .dispatch(method, &params)
+                .expect_err("invalid pane ids must not mutate pane one");
+            assert_eq!(error.0, "invalid_request");
+            assert!(app.panes.contains_key(&pane));
+            assert_eq!(app.layout().leaves(), leaves);
+            assert_eq!(app.layout().focus, focus);
+            assert_eq!(app.panes[&pane].content_revision(), revision);
+        }
+
+        let error = app
+            .dispatch("agent.explain", &json!({"target": alias_one.to_string()}))
+            .expect_err("an invalid explicit target must not fall back to focus");
+        assert_eq!(error.0, "not_found");
+        assert!(app.panes.contains_key(&pane));
+    }
+
+    /// `agent.report` and `agent.release` take their target only as `pane`, so an
+    /// explicit one that misses must be terminal rather than quietly acting on
+    /// the focused pane — the same rule `agent.explain` applies to `target`.
+    #[test]
+    fn explicit_agent_report_targets_never_fall_back_to_focus() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let missing = (pane.0 + 4321).to_string();
+        let report = json!({
+            "pane": missing, "source": "hook", "agent": "claude", "status": "working",
+        });
+        let release = json!({ "pane": missing, "source": "hook" });
+
+        for (method, params) in [
+            ("agent.report", report.clone()),
+            ("agent.release", release.clone()),
+        ] {
+            let error = app
+                .dispatch(method, &params)
+                .expect_err("a missing explicit pane is terminal");
+            assert_eq!(error.0, "not_found", "{method}");
+            assert!(
+                app.status
+                    .get(&pane)
+                    .is_none_or(|s| s.agent_report.is_none()),
+                "{method} must not have written authority to the focused pane"
+            );
+        }
+
+        // `target` is not part of either signature, so it stays an unknown field
+        // instead of opening a second resolution path.
+        for (method, extra) in [("agent.report", report), ("agent.release", release)] {
+            let mut params = extra;
+            params["target"] = json!("reviewer");
+            params.as_object_mut().unwrap().remove("pane");
+            let error = app
+                .dispatch(method, &params)
+                .expect_err("target is not an accepted field");
+            assert_eq!(error.0, "invalid_request", "{method}");
+        }
+
+        // A malformed explicit pane fails validation before any lookup.
+        let error = app
+            .dispatch(
+                "agent.release",
+                &json!({"pane": u64::from(u32::MAX) + 2, "source": "hook"}),
+            )
+            .expect_err("an out-of-range pane id must not wrap");
+        assert_eq!(error.0, "invalid_request");
+    }
+
+    /// Every `agent.list` row carries its workspace's stable id. `workspace` is a
+    /// positional index that moves when workspaces are reordered or an earlier one
+    /// closes, and `workspace_name` is user-editable, so the id is the only
+    /// selector a consumer can hold across those changes.
+    #[test]
+    fn agent_list_rows_carry_a_stable_workspace_id() {
+        let _env = crate::persist::test_env("agent-list-workspace-id");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        let first_pane = app.layout().focus;
+        app.status.get_mut(&first_pane).unwrap().agent = "claude".into();
+        let first_id = app.workspaces[0].id.clone();
+
+        let second_root = crate::persist::config_dir().join("second-workspace");
+        std::fs::create_dir_all(&second_root).unwrap();
+        assert!(app.create_workspace_at(second_root));
+        let second_pane = app.layout().focus;
+        app.status.get_mut(&second_pane).unwrap().agent = "codex".into();
+        let second_id = app.workspaces[1].id.clone();
+        assert_ne!(first_id, second_id);
+
+        let row_for = |app: &mut App, pane: crate::app::PaneId| -> Value {
+            let out = app.dispatch("agent.list", &json!({})).expect("agent.list");
+            let wanted = pane.0.to_string();
+            out["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["pane"].as_str() == Some(wanted.as_str()))
+                .expect("the agent is listed")
+                .clone()
+        };
+
+        // The id agrees with the one `workspace.get` publishes for that index, so
+        // a consumer can join the two surfaces without guessing.
+        let second_row = row_for(&mut app, second_pane);
+        assert_eq!(second_row["workspace"], "1");
+        assert_eq!(second_row["workspace_id"], second_id.as_str());
+        let published = app
+            .dispatch("workspace.get", &json!({"workspace": 1}))
+            .expect("workspace.get");
+        assert_eq!(published["workspace_id"], second_row["workspace_id"]);
+
+        // Reordering moves the index but not the id. This is the whole point of
+        // the field: an index captured before the move now names the other
+        // workspace, while the id still names this one.
+        app.dispatch("workspace.move", &json!({"workspace": 1, "to": 0}))
+            .expect("workspace.move");
+        let moved = row_for(&mut app, second_pane);
+        assert_eq!(
+            moved["workspace"], "0",
+            "the positional index followed the move"
+        );
+        assert_eq!(
+            moved["workspace_id"],
+            second_id.as_str(),
+            "the stable id survived the move"
+        );
+        assert_eq!(
+            row_for(&mut app, first_pane)["workspace_id"],
+            first_id.as_str(),
+            "the workspace that was displaced keeps its own id"
+        );
+    }
+
     /// A live alias set by `agent.name` shows up in `agent.list` and resolves an
     /// `agent.*` target, and closing the pane prunes it.
     #[test]
@@ -8592,6 +9007,42 @@ command = ["true"]
         assert_eq!(value["result"]["ready"], true);
         assert_eq!(value["result"]["name"], "reviewer");
         assert_eq!(value["result"]["status"], "working");
+    }
+
+    #[test]
+    fn server_owned_agent_start_keeps_null_targets_terminal() {
+        for params in [
+            json!({
+                "name":"reviewer", "kind":"codex", "pane":null,
+                "args":[], "timeout_s":10,
+            }),
+            json!({
+                "name":"reviewer", "kind":"codex", "anchor":null,
+                "args":[], "timeout_s":10,
+            }),
+        ] {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(80, 24, tx).unwrap();
+            let before_focus = app.layout().focus;
+            let before_leaves = app.layout().leaves();
+            let before_panes = app.panes.len();
+            let (reply, response) = std::sync::mpsc::channel();
+
+            app.start_agent_launch(
+                "start-null".into(),
+                params,
+                reply,
+                Arc::new(AtomicBool::new(false)),
+            );
+
+            let value: Value = serde_json::from_str(&response.recv().unwrap()).unwrap();
+            assert_eq!(value["error"]["code"], "not_found");
+            assert!(app.agent_names.is_empty());
+            assert!(app.agent_starts.is_empty());
+            assert_eq!(app.layout().focus, before_focus);
+            assert_eq!(app.layout().leaves(), before_leaves);
+            assert_eq!(app.panes.len(), before_panes);
+        }
     }
 
     #[test]

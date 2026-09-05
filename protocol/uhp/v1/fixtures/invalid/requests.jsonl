@@ -19,3 +19,4 @@
 {"id":"bad-automation-extra","method":"automation.health","params":{"workspace":0}}
 {"id":"bad-automation-access","method":"automation.create","params":{"name":"bad","trigger":{"kind":"once","at_utc":1788393600},"task":{"title":"bad","prompt":"bad","agent_id":"codex","workspace_id":"workspace_example","access":"root"}}}
 {"id":"bad-automation-target","method":"automation.create","params":{"name":"bad target","trigger":{"kind":"once","at_utc":1788393600},"target":{"kind":"active_agent","pane_id":7,"terminal_id":"not-a-terminal-id"},"task":{"title":"bad","prompt":"bad","agent_id":"codex","workspace_id":"workspace_example"}}}
+{"id":"bad-task-heartbeat-progress","method":"task.heartbeat","params":{"id":"t1","context":1.1}}

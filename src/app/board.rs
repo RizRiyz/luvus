@@ -857,8 +857,8 @@ impl App {
                 return Err((
                     "needs_compaction".to_string(),
                     format!(
-                        "context at {:.0}% — run /compact (or hand off to a fresh agent) before finishing",
-                        ctx * 100.0
+                        "model context window at {:.0}% — compact in the agent if supported, hand off, or correct a mistaken report with `luvus task heartbeat {id} --context-used <0..1>` before finishing",
+                        ctx * 100.0,
                     ),
                 ));
             }
@@ -2089,8 +2089,11 @@ fn task_briefing(task: &crate::orch::Task, mode: TaskWorkerMode) -> String {
         )),
     }
     b.push_str(&format!(
-        " Report progress with `luvus task update {id} --note <text>` and context usage \
-         with `luvus task heartbeat {id} --context <0..1>`."
+        " Report work progress only with `luvus task update {id} --note <text>`. If you \
+         can estimate model context-window consumption, report it with `luvus task \
+         heartbeat {id} --context-used <0..1>`, where 0.6 means 60% of the model \
+         context window is consumed, not 60% task progress. Omit the heartbeat when \
+         context-window usage is unknown."
     ));
     b
 }
@@ -3181,6 +3184,9 @@ mod tests {
         assert!(line.contains("luvus task done t1"));
         assert!(line.contains("LUVUS_BIN_PATH"));
         assert!(line.contains("cargo test auth"));
+        assert!(line.contains("--context-used <0..1>"));
+        assert!(line.contains("not 60% task progress"));
+        assert!(!line.contains("--context <0..1>"));
         if !cfg!(windows) {
             assert!(line.starts_with("LUVUS_TASK_ID=t1 "));
             // The apostrophe in the title survives POSIX single-quoting.
@@ -4243,7 +4249,10 @@ mod tests {
         app.orch.add_task("x".into(), vec![], vec![], None).unwrap();
         // Over the compaction threshold → done is refused.
         app.orch.heartbeat("t1", 0.92).unwrap();
-        assert_eq!(app.complete_task("t1").unwrap_err().0, "needs_compaction");
+        let error = app.complete_task("t1").unwrap_err();
+        assert_eq!(error.0, "needs_compaction");
+        assert!(error.1.contains("model context window"));
+        assert!(error.1.contains("--context-used"));
         assert_ne!(
             app.orch.task("t1").unwrap().status,
             crate::orch::TaskStatus::Done

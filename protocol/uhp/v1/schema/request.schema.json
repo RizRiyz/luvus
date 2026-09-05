@@ -230,6 +230,16 @@
         "trigger": { "$ref": "#/$defs/automationTrigger" },
         "from_utc": { "type": "integer", "minimum": 0 }
       }
+    },
+    "taskHeartbeatParams": {
+      "type": "object", "additionalProperties": false, "required": ["id", "context"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "context": {
+          "type": "number", "minimum": 0, "maximum": 1,
+          "description": "Fraction of the model context window already consumed. This is not task-completion progress."
+        }
+      }
     }
   },
   "allOf": [
@@ -273,6 +283,8 @@
       "then": { "properties": { "params": { "allOf": [{ "$ref": "#/$defs/automationDefinitionParams" }, { "not": { "required": ["id"] } }] } } } },
     { "if": { "properties": { "method": { "const": "automation.update" } } },
       "then": { "properties": { "params": { "allOf": [{ "$ref": "#/$defs/automationDefinitionParams" }, { "required": ["id"] }, { "not": { "required": ["idempotency_key"] } }] } } } },
+    { "if": { "properties": { "method": { "const": "task.heartbeat" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/taskHeartbeatParams" } } } },
     { "if": { "properties": { "method": { "const": "terminal.backend.inventory" } } },
       "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/inventory.schema.json" } } } },
     { "if": { "properties": { "method": { "const": "terminal.backend.snapshot" } } },

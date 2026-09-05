@@ -134,6 +134,11 @@ Branch-backed dependencies unblock only after they are merged into the shared
 integration history.
 `task release` requeues active work and releases its path leases, but it does
 not stop the worker pane or discard its worktree.
+Use `task update --note` for work progress. `task heartbeat --context-used
+<0..1>` reports only the fraction of the model context window already consumed,
+where `0.6` means 60% consumed, not 60% task progress. Omit the heartbeat when
+that measurement is unknown. The older `--context` spelling remains a CLI
+compatibility alias; UHP keeps the stable `context` field.
 `task start` checks path leases before creating a worker. Its default
 `mode=worktree` creates an isolated branch and checkout. Explicit
 `mode=workspace` creates a dedicated task tab in an existing shared checkout;
