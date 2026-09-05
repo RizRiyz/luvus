@@ -1543,6 +1543,13 @@ impl App {
         }
     }
 
+    /// Toggle one definition selected through a stable context-menu identity.
+    pub(super) fn orch_toggle_automation(&mut self, id: &str) {
+        if self.orch_select_automation(id) {
+            self.orch_automation_toggle();
+        }
+    }
+
     fn orch_automation_run(&mut self) {
         let Some(id) = self.selected_automation_id() else {
             return;
@@ -1565,6 +1572,13 @@ impl App {
                 }
             },
             Err(error) => self.show_toast(error.message),
+        }
+    }
+
+    /// Queue one definition selected through a stable context-menu identity.
+    pub(super) fn orch_run_automation(&mut self, id: &str) {
+        if self.orch_select_automation(id) {
+            self.orch_automation_run();
         }
     }
 
@@ -1608,6 +1622,13 @@ impl App {
                 }
             },
             Err(error) => self.show_toast(error.message),
+        }
+    }
+
+    /// Delete one definition selected through a stable context-menu identity.
+    pub(super) fn orch_delete_automation(&mut self, id: &str) {
+        if self.orch_select_automation(id) {
+            self.orch_automation_delete();
         }
     }
 

@@ -1882,6 +1882,8 @@ impl App {
                 let id = id.clone();
                 if let Some(pane) = self.automation_live_pane(&id) {
                     self.open_agent_menu(AgentTarget::Live(pane), c, r);
+                } else {
+                    self.open_agent_menu(AgentTarget::Automation(id), c, r);
                 }
             } else if let Some((i, _)) = self.session_rects.iter().find(|(_, rect)| hit(*rect)) {
                 self.open_agent_menu(AgentTarget::Session(*i), c, r); // session → Resume/Close
@@ -1899,6 +1901,8 @@ impl App {
             {
                 if let Some(pane) = self.automation_live_pane(&automation) {
                     self.open_agent_menu(AgentTarget::Live(pane), c, r);
+                } else {
+                    self.open_agent_menu(AgentTarget::Automation(automation), c, r);
                 }
             } else if let Some((task, _)) =
                 self.orch_hits
@@ -5588,7 +5592,7 @@ mod link_click_tests {
             KeyModifiers::NONE,
         ));
         assert!(matches!(
-            app.agent_menu.as_ref().map(|menu| menu.target),
+            app.agent_menu.as_ref().map(|menu| menu.target.clone()),
             Some(AgentTarget::Live(target)) if target == pane
         ));
         assert!(app.orch_detail.is_none());
@@ -5673,7 +5677,7 @@ mod link_click_tests {
             KeyModifiers::NONE,
         ));
         assert!(matches!(
-            app.agent_menu.as_ref().map(|menu| menu.target),
+            app.agent_menu.as_ref().map(|menu| menu.target.clone()),
             Some(AgentTarget::Live(target)) if target == pane
         ));
         assert!(app.orch_detail.is_none());
@@ -5685,6 +5689,61 @@ mod link_click_tests {
             KeyModifiers::NONE,
         ));
         assert_eq!(app.orch_detail.as_deref(), Some(automation.as_str()));
+        assert!(app.agent_menu.is_none());
+    }
+
+    #[test]
+    fn scheduled_sidebar_opens_automation_menu_without_a_live_pane() {
+        let _env = crate::persist::test_env("automation-sidebar-placeholder-menu");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 30, tx).unwrap();
+        let workspace_id = app.workspaces[0].id.clone();
+        let definition = app
+            .automation
+            .create(
+                crate::automation::CreateAutomation {
+                    name: "scheduled review".into(),
+                    enabled: true,
+                    trigger: crate::automation::Trigger::Once {
+                        at_utc: 4_000_000_000,
+                    },
+                    target: crate::automation::AutomationTarget::NewWorker,
+                    task: crate::automation::TaskTemplate {
+                        title: "scheduled review".into(),
+                        prompt: "Review changes".into(),
+                        agent_id: "codex".into(),
+                        workspace_id,
+                        mode: crate::orch::TaskWorkerMode::Workspace,
+                        access: crate::automation::AutomationAccess::Workspace,
+                        paths: Vec::new(),
+                        gate: None,
+                    },
+                    policy: crate::automation::AutomationPolicy::default(),
+                },
+                None,
+                10,
+            )
+            .unwrap();
+        let row = Rect::new(2, 4, 24, 2);
+        app.automation_rects = vec![(definition.id.clone(), row)];
+
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            (row.x + 1, row.y),
+            KeyModifiers::NONE,
+        ));
+
+        let menu = app.agent_menu.as_ref().expect("automation menu opens");
+        assert_eq!(menu.target, AgentTarget::Automation(definition.id.clone()));
+        let items = app.agent_menu_items(menu.target.clone());
+        assert!(items.contains(&crate::app::AgentMenuItem::AutomationDetails));
+        assert!(items.contains(&crate::app::AgentMenuItem::AutomationRun));
+        assert!(items.contains(&crate::app::AgentMenuItem::AutomationToggle));
+        assert!(items.contains(&crate::app::AgentMenuItem::AutomationDelete));
+        assert!(app.orch_detail.is_none());
+
+        app.agent_menu_action(crate::app::AgentMenuItem::AutomationDetails);
+        assert_eq!(app.orch_detail.as_deref(), Some(definition.id.as_str()));
         assert!(app.agent_menu.is_none());
     }
 
