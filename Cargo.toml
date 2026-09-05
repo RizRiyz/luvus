@@ -81,7 +81,10 @@ fs2 = "0.4"
 # protocol. This calls the operating-system RNG directly; identifiers are not
 # derived from pane routes, PIDs, clocks, or process-global counters.
 getrandom = "0.3"
-
+# Calendar-safe IANA timezone conversion for daily and weekly automations.
+# Jiff is local-only: it reads the OS timezone database (with a Windows bundle)
+# and performs no runtime network access.
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 # `libc` (setsid + macOS proc_pidinfo) is only needed on Unix.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

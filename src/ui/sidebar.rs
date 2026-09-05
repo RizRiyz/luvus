@@ -34,17 +34,18 @@ fn rollup(app: &App, ws_index: usize) -> State {
 
 // ── sidebar ───────────────────────────────────────────────────────────────
 
-/// (workspace rows, live-agent rows, resumable-session rows, new-workspace button).
+/// Workspace, live-agent, scheduled-automation, resumable-session, and new-workspace hits.
 pub(super) type SidebarHits = (
     Vec<(usize, Rect)>,
     Vec<(PaneId, Rect)>,
+    Vec<(String, Rect)>,
     Vec<(usize, Rect)>,
     Option<Rect>,
 );
 
 /// Clickable geometry a single dock reports back to the container.
 type WorkspaceHits = (Vec<(usize, Rect)>, Option<Rect>);
-type AgentHits = (Vec<(PaneId, Rect)>, Vec<(usize, Rect)>);
+type AgentHits = (Vec<(PaneId, Rect)>, Vec<(String, Rect)>, Vec<(usize, Rect)>);
 
 /// Rows of sidebar chrome above the dock stack: the brand/menu row plus one
 /// blank separator row. The dock body, and therefore dock-height measurement
@@ -226,6 +227,7 @@ pub(super) fn draw_sidebar(
 
     let mut ws_rects = Vec::new();
     let mut agent_rects = Vec::new();
+    let mut automation_rects = Vec::new();
     let mut session_rects = Vec::new();
     let mut new_ws_rect = None;
     for (kind, slot) in docks.iter().zip(slots) {
@@ -236,8 +238,9 @@ pub(super) fn draw_sidebar(
                 new_ws_rect = n;
             }
             DockKind::Agents => {
-                let (a, s) = draw_agents_dock(f, slot, app, t);
+                let (a, scheduled, s) = draw_agents_dock(f, slot, app, t);
                 agent_rects = a;
+                automation_rects = scheduled;
                 session_rects = s;
             }
             DockKind::Files => super::files::draw_files_dock(f, slot, app, t),
@@ -245,7 +248,13 @@ pub(super) fn draw_sidebar(
         }
     }
 
-    (ws_rects, agent_rects, session_rects, new_ws_rect)
+    (
+        ws_rects,
+        agent_rects,
+        automation_rects,
+        session_rects,
+        new_ws_rect,
+    )
 }
 
 /// The left sidebar's chrome, all on the **top row** (`area.y`, aligned with the
@@ -533,6 +542,7 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
         }
     };
     let mut agent_rects = Vec::new();
+    let mut automation_rects = Vec::new();
     let mut session_rects = Vec::new();
 
     let aheader = area.y;
@@ -605,6 +615,62 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     if !app.pinned_agents.is_empty() {
         live.sort_by_key(|(id, _)| !app.pinned_agents.contains(id));
     }
+    // Armed definitions appear in Active as lightweight placeholders. Their
+    // hit target opens read-only automation detail rather than focusing a pane.
+    // As soon as a due occurrence owns a live ORCH task, the ordinary pane row
+    // replaces this projection.
+    let mut scheduled: Vec<(String, String, String, u64, bool)> = app
+        .automation
+        .automations
+        .iter()
+        .filter_map(|automation| {
+            if !automation.enabled {
+                return None;
+            }
+            let (workspace_index, workspace) = app
+                .workspaces
+                .iter()
+                .enumerate()
+                .find(|(_, workspace)| workspace.id == automation.task.workspace_id)?;
+            if scoped && workspace_index != app.active_ws {
+                return None;
+            }
+            let live_run = app
+                .automation
+                .runs
+                .iter()
+                .rev()
+                .find(|run| run.automation_id == automation.id && run.status.is_live());
+            let pane_backed = live_run
+                .and_then(|run| run.task_id.as_deref())
+                .and_then(|task| app.orch.task(task))
+                .and_then(|task| task.assignee)
+                .is_some_and(|pane| app.panes.contains_key(&PaneId(pane)));
+            if pane_backed
+                || live_run.is_some_and(|run| {
+                    matches!(
+                        run.status,
+                        crate::automation::RunStatus::Running
+                            | crate::automation::RunStatus::Review
+                    )
+                })
+            {
+                return None;
+            }
+            let starting = live_run.is_some();
+            let deadline = live_run
+                .map(|run| run.scheduled_at)
+                .or(automation.next_run_at)?;
+            Some((
+                automation.id.clone(),
+                automation.task.agent_id.clone(),
+                workspace.name.clone(),
+                deadline,
+                starting,
+            ))
+        })
+        .collect();
+    scheduled.sort_by_key(|item| item.3);
     // Scope resumable history by workspace ownership too. Longest matching root
     // wins, matching pane-home semantics when workspaces are nested. Keep the
     // original indices so click-to-resume still addresses `app.resumable`.
@@ -636,7 +702,7 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     } else {
         app.resumable.len()
     };
-    let atotal = live.len() + resumable_total;
+    let atotal = live.len() + scheduled.len() + resumable_total;
     // The overflow line is always visible while attention is hidden, even if no
     // local rows exist. Reserve exactly one terminal row for it.
     let has_elsewhere = scoped && !blocked_elsewhere.is_empty();
@@ -730,9 +796,48 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                         }
                     }
                 }
+            } else if let Some((automation, agent, workspace, deadline, starting)) =
+                scheduled.get(k.saturating_sub(live.len()))
+            {
+                automation_rects.push((
+                    automation.clone(),
+                    Rect::new(area.x, y, area.width, ROW_STRIDE),
+                ));
+                let label = format!(
+                    " {}  ",
+                    if *starting {
+                        cat.automation_starting
+                    } else {
+                        cat.automation_scheduled
+                    }
+                );
+                let prefix_w = 1 + crate::ui::display_width(&label);
+                line_at(
+                    f,
+                    y,
+                    Line::from(vec![
+                        Span::styled("◷", Style::new().fg(t.accent)),
+                        Span::styled(label, Style::new().fg(t.accent)),
+                        Span::styled(
+                            crate::ui::truncate(agent, (cw as usize).saturating_sub(prefix_w)),
+                            Style::new().fg(t.subtext1).bold(),
+                        ),
+                    ]),
+                );
+                line_at(
+                    f,
+                    y + 1,
+                    Line::from(Span::styled(
+                        crate::ui::truncate(
+                            &format!("  {workspace} · UTC {}", super::format_utc(*deadline)),
+                            cw as usize,
+                        ),
+                        Style::new().fg(t.overlay0),
+                    )),
+                );
             } else {
                 // A resumable session discovered on disk — click to reopen.
-                let visible_index = k - live.len();
+                let visible_index = k - live.len() - scheduled.len();
                 let si = if scoped {
                     resumable_scoped[visible_index]
                 } else {
@@ -811,7 +916,7 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
         }
     }
 
-    (agent_rects, session_rects)
+    (agent_rects, automation_rects, session_rects)
 }
 
 /// A module-contributed dock (docs/29, DOCK-4): a header (its cached title) and
@@ -1249,6 +1354,37 @@ mod tests {
         app.status.get_mut(&second_pane).unwrap().agent = "codex".into();
         assert_eq!(app.active_ws, 1);
 
+        let first_workspace = app.workspaces[0].id.clone();
+        let second_workspace = app.workspaces[1].id.clone();
+        for (name, agent_id, workspace_id) in [
+            ("first schedule", "agent-first", first_workspace),
+            ("second schedule", "agent-second", second_workspace),
+        ] {
+            app.automation
+                .create(
+                    crate::automation::CreateAutomation {
+                        name: name.into(),
+                        enabled: true,
+                        trigger: crate::automation::Trigger::Once { at_utc: 100 },
+                        target: crate::automation::AutomationTarget::NewWorker,
+                        task: crate::automation::TaskTemplate {
+                            title: name.into(),
+                            prompt: "run the scheduled task".into(),
+                            agent_id: agent_id.into(),
+                            workspace_id,
+                            mode: crate::orch::TaskWorkerMode::Workspace,
+                            access: crate::automation::AutomationAccess::Workspace,
+                            paths: vec![],
+                            gate: None,
+                        },
+                        policy: crate::automation::AutomationPolicy::default(),
+                    },
+                    None,
+                    1,
+                )
+                .unwrap();
+        }
+
         app.resumable = vec![
             crate::agent::SessionInfo {
                 agent: "kimi".into(),
@@ -1275,6 +1411,11 @@ mod tests {
                 "{visible} is initially visible"
             );
         }
+        assert_eq!(
+            app.automation_rects.len(),
+            2,
+            "unscoped dock shows schedules from both workspaces"
+        );
 
         app.agents_scroll = 4;
         app.open_agent_menu(crate::app::AgentTarget::Live(second_pane), 0, 0);
@@ -1289,6 +1430,14 @@ mod tests {
         assert!(buffer_contains(&term, "kimi"));
         assert!(!buffer_contains(&term, "claude"));
         assert!(!buffer_contains(&term, "hermes"));
+        assert_eq!(
+            app.automation_rects
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a2"],
+            "workspace scope also filters scheduled automation rows"
+        );
         assert!(app.agents_elsewhere_rect.is_none());
 
         // Lifecycle remains an independent second axis: Active hides the local
@@ -1330,6 +1479,14 @@ mod tests {
         assert!(
             buffer_contains(&term, "kimi"),
             "after the nested workspace closes, its cwd belongs to the parent"
+        );
+        assert_eq!(
+            app.automation_rects
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a1"],
+            "closed-workspace schedules do not leak into the remaining scope"
         );
     }
 }

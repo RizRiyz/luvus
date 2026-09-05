@@ -134,6 +134,11 @@ Branch-backed dependencies unblock only after they are merged into the shared
 integration history.
 `task release` requeues active work and releases its path leases, but it does
 not stop the worker pane or discard its worktree.
+Use `task update --note` for work progress. `task heartbeat --context-used
+<0..1>` reports only the fraction of the model context window already consumed,
+where `0.6` means 60% consumed, not 60% task progress. Omit the heartbeat when
+that measurement is unknown. The older `--context` spelling remains a CLI
+compatibility alias; UHP keeps the stable `context` field.
 `task start` checks path leases before creating a worker. Its default
 `mode=worktree` creates an isolated branch and checkout. Explicit
 `mode=workspace` creates a dedicated task tab in an existing shared checkout;
@@ -303,13 +308,34 @@ session IDs. List sessions and use the exact returned identifier.
 
 Universal Harness Protocol 1.0 is Luvus's public automation contract for
 workspaces, tabs, panes, agents, terminals, files, Git, DIFF, Mission Control,
-tasks, leases, modules, bars, configuration, and events.
+tasks, agent schedules, leases, modules, bars, configuration, and events.
 
 Open Mission Control in the active workspace with `luvus mission open`, target
 a zero-based workspace with `luvus mission open <workspace>`, or call the
 workspace-scoped UHP method `mission.open`. Use `mission.snapshot` to read agent
 and usage data without changing the UI. `mission.refresh` requests one explicit
 off-render-path usage scan rather than enabling background polling.
+
+Use `automation.preview` before storing a calendar trigger, then
+`automation.create` with a canonical built-in agent, stable workspace ID,
+explicit prompt, IANA timezone, and the narrowest `task.access` value:
+`read_only`, `workspace` (the default), or `full_access`. Access is separate from
+the worktree/workspace Git mode, and unsupported agent/access pairs are rejected
+before a worker is created. Read definitions with `automation.list`,
+runs with `automation.history`, and fleet health with `automation.health`.
+Create and manual-run requests accept idempotency keys for safe retries.
+Disabling a definition prevents future occurrences but never kills its current
+ORCH task or pane. Detection-only manifest agents cannot be scheduled.
+Luvus uses reviewed one-shot flags from the built-in adapter and never types a
+blind approval response or changes an agent's permanent permission config.
+
+To continue an existing interactive conversation, set `target.kind` to
+`active_agent` and provide the exact `pane_id`, 32-character `terminal_id`,
+matching `task.agent_id`, and matching `task.workspace_id` from `agent.list`.
+Use `target.if_busy` as `wait` or `skip`. This target is valid only for that PTY
+and server lifetime, creates no ORCH worker, and records queue acceptance as
+`delivered`, not task completion. Never guess or reuse a terminal ID after a
+pane closes or the server restarts.
 
 Start with capability discovery and validate against the installed JSON Schema
 bundle. Do not infer method support from a release number alone.

@@ -1,4 +1,7 @@
-use super::types::{AgentDescriptor, DiscoveryOperations, IdentityDescriptor, SessionOperations};
+use super::types::{
+    AgentDescriptor, AutomationLaunch, AutomationOperations, DiscoveryOperations,
+    IdentityDescriptor, SessionOperations,
+};
 
 mod config;
 mod integration;
@@ -11,6 +14,13 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     aliases: &[],
     launch_command: "opencode",
     task_prompt_args: &["--prompt"],
+    automation: Some(AutomationOperations {
+        read_only: None,
+        workspace: Some(AutomationLaunch {
+            args: &["run", "--auto"],
+        }),
+        full_access: None,
+    }),
     identity: IdentityDescriptor {
         distinct: &["opencode"],
         ambiguous: &[],

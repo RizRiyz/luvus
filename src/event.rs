@@ -134,6 +134,12 @@ pub enum AppEvent {
         generation: u64,
         result: Result<Vec<crate::session::SessionInfo>, String>,
     },
+    /// A stop request for a named session finished (from the session-menu context menu).
+    NamedSessionStopped {
+        generation: u64,
+        name: String,
+        result: Result<(), String>,
+    },
     /// A selected named session is ready for this client to attach.
     NamedSessionPrepared {
         generation: u64,

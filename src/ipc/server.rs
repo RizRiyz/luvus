@@ -357,6 +357,7 @@ pub fn run() -> Result<()> {
     };
     app.events = events.clone();
     app.server_mode = true;
+    app.reconcile_automations();
     shutdown::install(tx.clone());
 
     let mut terminal_theme_enabled = app.config.theme == "terminal";
@@ -577,6 +578,9 @@ pub fn run() -> Result<()> {
         app.tick_agent_waits(now);
         app.tick_agent_workflows(now);
         app.tick_backend_revision_waits(now);
+        if app.tick_automations(crate::automation::unix_now()) {
+            render_request.record(RenderCause::Detection);
+        }
         for msg in app.pending_notify.drain(..) {
             broadcast(&mut clients, ServerMessage::Notify(msg));
         }

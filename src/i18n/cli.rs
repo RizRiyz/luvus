@@ -387,6 +387,17 @@ static HELP: &[Translation] = &[
         "오케스트레이션 (한 프로젝트에서 여러 에이전트 운용, docs/22):"
     ),
     tr!(
+        "agent automation (scheduled ORCH tasks):",
+        "automatización de agentes (tareas ORCH programadas):",
+        "automação de agentes (tarefas ORCH agendadas):",
+        "automatisation des agents (tâches ORCH planifiées) :",
+        "Agentenautomatisierung (geplante ORCH-Aufgaben):",
+        "otomatisasi agen (tugas ORCH terjadwal):",
+        "智能体自动化（计划的 ORCH 任务）：",
+        "エージェント自動化（スケジュール済み ORCH タスク）：",
+        "에이전트 자동화 (예약된 ORCH 작업):"
+    ),
+    tr!(
         "events:",
         "eventos:",
         "eventos:",
@@ -605,6 +616,17 @@ static HELP: &[Translation] = &[
         "协调多个编程智能体的工作",
         "複数エージェントの作業を調整",
         "여러 코딩 에이전트 간 작업 조율"
+    ),
+    tr!(
+        "Schedule agents through the ORCH task engine",
+        "Programar agentes mediante el motor de tareas ORCH",
+        "Agendar agentes pelo mecanismo de tarefas ORCH",
+        "Planifier des agents via le moteur de tâches ORCH",
+        "Agenten über die ORCH-Aufgabenverwaltung planen",
+        "Jadwalkan agen melalui mesin tugas ORCH",
+        "通过 ORCH 任务引擎调度智能体",
+        "ORCH タスクエンジンでエージェントをスケジュール",
+        "ORCH 작업 엔진으로 에이전트 예약"
     ),
     tr!(
         "Reserve file paths for active tasks",
@@ -2180,15 +2202,26 @@ static HELP: &[Translation] = &[
         "워커 시작 (기본값 worktree, workspace는 체크아웃 공유)"
     ),
     tr!(
-        "report context usage (blocks done at >85%)",
-        "informar uso de contexto (bloquea finalizar por encima del 85%)",
-        "informar uso de contexto (bloqueia conclusão acima de 85%)",
-        "signaler l'usage du contexte (bloque la fin au-delà de 85 %)",
-        "Kontextnutzung melden (blockiert Abschluss über 85 %)",
-        "laporkan penggunaan konteks (blokir selesai di atas 85%)",
-        "报告上下文使用率（超过 85% 时阻止完成）",
-        "コンテキスト使用率を報告（85%超で完了を拒否）",
-        "컨텍스트 사용량 보고 (85% 초과 시 완료 차단)"
+        "report model context-window use, not task progress",
+        "informar uso de la ventana de contexto del modelo, no progreso de la tarea",
+        "informar uso da janela de contexto do modelo, não o progresso da tarefa",
+        "signaler l'utilisation de la fenêtre de contexte du modèle, pas la progression de la tâche",
+        "Nutzung des Modell-Kontextfensters melden, nicht den Aufgabenfortschritt",
+        "laporkan pemakaian jendela konteks model, bukan progres tugas",
+        "报告模型上下文窗口用量，而非任务进度",
+        "タスク進捗ではなくモデルのコンテキストウィンドウ使用量を報告",
+        "작업 진행률이 아닌 모델 컨텍스트 창 사용량 보고"
+    ),
+    tr!(
+        "(>85% blocks done; --context remains accepted)",
+        "(>85% bloquea finalizar; --context sigue aceptado)",
+        "(>85% bloqueia conclusão; --context continua aceito)",
+        "(>85 % bloque la fin ; --context reste accepté)",
+        "(>85 % blockiert Abschluss; --context bleibt gültig)",
+        "(>85% memblokir penyelesaian; --context tetap diterima)",
+        "（超过 85% 时阻止完成；仍接受 --context）",
+        "（85%超で完了を拒否、--context も引き続き使用可能）",
+        "(85% 초과 시 완료 차단, --context도 계속 허용)"
     ),
     tr!(
         "mark done + release its leases",
@@ -2288,6 +2321,72 @@ static HELP: &[Translation] = &[
         "列出活动路径租约",
         "有効なパス予約を一覧表示",
         "활성 경로 임대 나열"
+    ),
+    tr!(
+        "list definitions and their next UTC deadlines",
+        "listar definiciones y sus próximos plazos UTC",
+        "listar definições e seus próximos prazos UTC",
+        "lister les définitions et leurs prochaines échéances UTC",
+        "Definitionen und ihre nächsten UTC-Termine auflisten",
+        "daftar definisi dan tenggat UTC berikutnya",
+        "列出定义及其下一个 UTC 截止时间",
+        "定義と次の UTC 実行時刻を一覧表示",
+        "정의와 다음 UTC 실행 시각 나열"
+    ),
+    tr!(
+        "show one definition",
+        "mostrar una definición",
+        "mostrar uma definição",
+        "afficher une définition",
+        "eine Definition anzeigen",
+        "tampilkan satu definisi",
+        "显示一个定义",
+        "1件の定義を表示",
+        "정의 하나 표시"
+    ),
+    tr!(
+        "run once without advancing its schedule",
+        "ejecutar una vez sin avanzar su programación",
+        "executar uma vez sem avançar o agendamento",
+        "exécuter une fois sans avancer la planification",
+        "einmal ausführen, ohne den Zeitplan vorzustellen",
+        "jalankan sekali tanpa memajukan jadwalnya",
+        "运行一次而不推进其计划",
+        "スケジュールを進めずに1回実行",
+        "일정을 진행하지 않고 한 번 실행"
+    ),
+    tr!(
+        "show bounded run history",
+        "mostrar el historial limitado de ejecuciones",
+        "mostrar o histórico limitado de execuções",
+        "afficher l'historique borné des exécutions",
+        "begrenzten Ausführungsverlauf anzeigen",
+        "tampilkan riwayat proses terbatas",
+        "显示有界运行历史",
+        "上限付きの実行履歴を表示",
+        "제한된 실행 기록 표시"
+    ),
+    tr!(
+        "summarize armed, live, review, and failed runs",
+        "resumir ejecuciones programadas, activas, en revisión y fallidas",
+        "resumir execuções programadas, ativas, em revisão e com falha",
+        "résumer les exécutions planifiées, actives, en révision et échouées",
+        "geplante, aktive, zu prüfende und fehlgeschlagene Läufe zusammenfassen",
+        "ringkas proses terjadwal, aktif, ditinjau, dan gagal",
+        "汇总已计划、运行中、待审查和失败的执行",
+        "予定済み、実行中、レビュー中、失敗の実行を集計",
+        "예약됨, 실행 중, 검토 중, 실패 실행 요약"
+    ),
+    tr!(
+        "remove an idle definition",
+        "eliminar una definición inactiva",
+        "remover uma definição inativa",
+        "supprimer une définition inactive",
+        "eine inaktive Definition entfernen",
+        "hapus definisi yang tidak aktif",
+        "删除空闲定义",
+        "待機中の定義を削除",
+        "유휴 정의 제거"
     ),
     tr!(
         "stream live status changes",
@@ -2656,6 +2755,10 @@ static TEXT: &[Translation] = &[
         "서버 중지됨"),
     tr!("no luvus server running", "no hay ningún servidor luvus en ejecución", "nenhum servidor luvus em execução", "aucun serveur luvus en cours", "kein Luvus-Server läuft", "tidak ada server luvus berjalan", "没有正在运行的 luvus 服务器", "実行中の luvus サーバーはありません",
         "실행 중인 luvus 서버 없음"),
+    tr!("Luvus server access was denied", "se denegó el acceso al servidor Luvus", "o acesso ao servidor Luvus foi negado", "l’accès au serveur Luvus a été refusé", "Zugriff auf den Luvus-Server wurde verweigert", "akses ke server Luvus ditolak", "Luvus 服务器访问被拒绝", "Luvus サーバーへのアクセスが拒否されました",
+        "Luvus 서버 접근이 거부되었습니다"),
+    tr!("an agent or OS sandbox may be blocking the selected socket", "un agente o el entorno aislado del sistema operativo puede estar bloqueando el socket seleccionado", "um agente ou a sandbox do sistema operacional pode estar bloqueando o socket selecionado", "un agent ou le bac à sable du système peut bloquer le socket sélectionné", "Ein Agent oder die Betriebssystem-Sandbox blockiert möglicherweise den ausgewählten Socket", "agen atau sandbox sistem operasi mungkin memblokir socket yang dipilih", "智能体或操作系统沙箱可能阻止了所选套接字", "エージェントまたは OS のサンドボックスが選択したソケットをブロックしている可能性があります",
+        "에이전트 또는 OS 샌드박스가 선택한 소켓을 차단하고 있을 수 있습니다"),
     tr!("server restarted", "servidor reiniciado", "servidor reiniciado", "serveur redémarré", "Server neu gestartet", "server dimulai ulang", "服务器已重启", "サーバーを再起動しました",
         "서버 재시작됨"),
     tr!("not running", "no está en ejecución", "não está em execução", "arrêté", "läuft nicht", "tidak berjalan", "未运行", "停止中",
@@ -2780,6 +2883,8 @@ static TEXT: &[Translation] = &[
         "인자를 받지 않습니다"),
     tr!("unexpected", "inesperado", "inesperado", "inattendu", "unerwartet", "tidak diharapkan", "意外参数", "想定外",
         "예상치 못함"),
+    tr!("--context-used requires a finite number from 0 to 1", "--context-used requiere un número finito de 0 a 1", "--context-used requer um número finito de 0 a 1", "--context-used exige un nombre fini compris entre 0 et 1", "--context-used erfordert eine endliche Zahl von 0 bis 1", "--context-used memerlukan angka terbatas dari 0 hingga 1", "--context-used 需要一个 0 到 1 之间的有限数值", "--context-used には 0 から 1 までの有限数が必要です",
+        "--context-used에는 0에서 1 사이의 유한한 숫자가 필요합니다"),
 ];
 
 /// Translate a canonical help block without ever touching command syntax.

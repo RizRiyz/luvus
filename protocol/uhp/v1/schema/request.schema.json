@@ -27,6 +27,7 @@
         "diff.refresh", "diff.list", "diff.open", "diff.get", "diff.navigate", "diff.note.add", "diff.note.apply", "diff.note.list", "diff.note.edit", "diff.note.resolve", "diff.note.reopen", "diff.note.remove", "diff.note.send",
         "worktree.list", "worktree.create", "worktree.open", "worktree.remove",
         "task.add", "task.list", "task.get", "task.claim", "task.next", "task.start", "task.heartbeat", "task.update", "task.done", "task.merge", "task.release", "task.delete",
+        "automation.create", "automation.list", "automation.get", "automation.update", "automation.enable", "automation.disable", "automation.delete", "automation.run", "automation.history", "automation.preview", "automation.health",
         "lease.acquire", "lease.list", "lease.release",
         "module.list", "module.info", "module.link", "module.unlink", "module.uninstall", "module.enable", "module.disable", "module.action.list", "module.action.invoke", "module.pane.open", "module.pane.focus", "module.pane.close", "module.config_dir", "module.settings.list", "module.settings.get", "module.settings.set", "module.log.list",
         "theme.list", "theme.path", "theme.use", "theme.reload", "manifest.reload",
@@ -139,9 +140,7 @@
       },
       "allOf": [
         { "if": { "properties": { "mode": { "const": "workspace" } }, "required": ["mode"] },
-          "then": { "not": { "required": ["branch"] } } },
-        { "if": { "properties": { "mode": { "const": "worktree" } }, "required": ["mode"] },
-          "then": { "not": { "required": ["workspace_id"] } } }
+          "then": { "not": { "required": ["branch"] } } }
       ]
     },
     "taskNextParams": {
@@ -152,6 +151,107 @@
         "pane": { "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "integer", "minimum": 0 }] },
         "mode": { "enum": ["worktree", "workspace"] },
         "workspace_id": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "automationIdParams": {
+      "type": "object", "additionalProperties": false, "required": ["id"],
+      "properties": { "id": { "type": "string", "minLength": 1, "maxLength": 128 } }
+    },
+    "automationRunParams": {
+      "type": "object", "additionalProperties": false, "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "automationHistoryParams": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
+      }
+    },
+    "automationTrigger": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind", "at_utc"],
+          "properties": { "kind": { "const": "once" }, "at_utc": { "type": "integer", "minimum": 1 } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "every_seconds", "anchor_utc"],
+          "properties": { "kind": { "const": "interval" }, "every_seconds": { "type": "integer", "minimum": 60 }, "anchor_utc": { "type": "integer", "minimum": 1 } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "timezone", "second_of_day"],
+          "properties": { "kind": { "const": "daily" }, "timezone": { "type": "string", "minLength": 1, "maxLength": 128 }, "second_of_day": { "type": "integer", "minimum": 0, "maximum": 86399 } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "timezone", "weekdays", "second_of_day"],
+          "properties": { "kind": { "const": "weekly" }, "timezone": { "type": "string", "minLength": 1, "maxLength": 128 }, "weekdays": { "type": "array", "minItems": 1, "maxItems": 7, "uniqueItems": true, "items": { "type": "integer", "minimum": 1, "maximum": 7 } }, "second_of_day": { "type": "integer", "minimum": 0, "maximum": 86399 } } }
+      ]
+    },
+    "automationPolicy": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "misfire": { "enum": ["skip", "run_latest"] },
+        "overlap": { "enum": ["skip", "queue_one"] },
+        "misfire_grace_seconds": { "type": "integer", "minimum": 0, "maximum": 31536000 }
+      }
+    },
+    "automationTarget": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind"],
+          "properties": { "kind": { "const": "new_worker" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "pane_id", "terminal_id"],
+          "properties": {
+            "kind": { "const": "active_agent" },
+            "pane_id": { "oneOf": [{ "type": "string", "pattern": "^[1-9][0-9]*$" }, { "type": "integer", "minimum": 1, "maximum": 4294967295 }] },
+            "terminal_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+            "if_busy": { "enum": ["wait", "skip"] }
+          }
+        }
+      ]
+    },
+    "automationTask": {
+      "type": "object", "additionalProperties": false,
+      "required": ["title", "prompt", "agent_id", "workspace_id"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "prompt": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "agent_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "workspace_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "mode": { "enum": ["worktree", "workspace"] },
+        "access": { "enum": ["read_only", "workspace", "full_access"] },
+        "paths": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 1024 } },
+        "gate": { "type": ["string", "null"], "maxLength": 4096 }
+      }
+    },
+    "automationDefinitionParams": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "trigger", "task"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "enabled": { "type": "boolean" },
+        "trigger": { "$ref": "#/$defs/automationTrigger" },
+        "target": { "$ref": "#/$defs/automationTarget" },
+        "task": { "$ref": "#/$defs/automationTask" },
+        "policy": { "$ref": "#/$defs/automationPolicy" },
+        "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "automationPreviewParams": {
+      "type": "object", "additionalProperties": false, "required": ["trigger"],
+      "properties": {
+        "trigger": { "$ref": "#/$defs/automationTrigger" },
+        "from_utc": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "taskHeartbeatParams": {
+      "type": "object", "additionalProperties": false, "required": ["id", "context"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "context": {
+          "type": "number", "minimum": 0, "maximum": 1,
+          "description": "Fraction of the model context window already consumed. This is not task-completion progress."
+        }
       }
     }
   },
@@ -184,6 +284,22 @@
       "then": { "properties": { "params": { "$ref": "#/$defs/taskStartParams" } } } },
     { "if": { "properties": { "method": { "const": "task.next" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/taskNextParams" } } } },
+    { "if": { "properties": { "method": { "enum": ["automation.list", "automation.health"] } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
+    { "if": { "properties": { "method": { "enum": ["automation.get", "automation.enable", "automation.disable", "automation.delete"] } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/automationIdParams" } } } },
+    { "if": { "properties": { "method": { "const": "automation.run" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/automationRunParams" } } } },
+    { "if": { "properties": { "method": { "const": "automation.history" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/automationHistoryParams" } } } },
+    { "if": { "properties": { "method": { "const": "automation.preview" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/automationPreviewParams" } } } },
+    { "if": { "properties": { "method": { "const": "automation.create" } } },
+      "then": { "properties": { "params": { "allOf": [{ "$ref": "#/$defs/automationDefinitionParams" }, { "not": { "required": ["id"] } }] } } } },
+    { "if": { "properties": { "method": { "const": "automation.update" } } },
+      "then": { "properties": { "params": { "allOf": [{ "$ref": "#/$defs/automationDefinitionParams" }, { "required": ["id"] }, { "not": { "required": ["idempotency_key"] } }] } } } },
+    { "if": { "properties": { "method": { "const": "task.heartbeat" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/taskHeartbeatParams" } } } },
     { "if": { "properties": { "method": { "const": "terminal.backend.inventory" } } },
       "then": { "properties": { "params": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/methods/inventory.schema.json" } } } },
     { "if": { "properties": { "method": { "const": "terminal.backend.snapshot" } } },

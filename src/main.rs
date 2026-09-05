@@ -5,6 +5,7 @@
 mod agent;
 mod api;
 mod app;
+mod automation;
 mod bar;
 mod changelog;
 mod cli;
@@ -88,6 +89,12 @@ fn main() -> Result<()> {
     // endpoints without changing the selected Luvus home in any way.
     if is_backend_discovery_request(&args) {
         std::process::exit(cli::run(&args)?);
+    }
+    // Private foreground route used only by scheduled worker panes. Keep it
+    // ahead of migrations and TUI/server routing: it must run exactly one
+    // adapter process, settle its ORCH task, and exit.
+    if args.get(1).map(String::as_str) == Some("__automation-worker") {
+        std::process::exit(automation::run_worker(&args)?);
     }
 
     // One-time local cleanup of the old default-on skill installation. This
@@ -2400,11 +2407,17 @@ mod tests {
     fn tiny_terminal_shows_guard_not_garbage() {
         let (tx, _rx) = mpsc::channel::<AppEvent>();
         let mut app = App::new(80, 24, tx).expect("spawn pane");
+        app.automation_rects
+            .push(("stale".into(), ratatui::layout::Rect::new(1, 1, 5, 2)));
 
         for (w, h) in [(1, 1), (5, 2), (23, 5), (20, 4)] {
             let backend = TestBackend::new(w, h);
             let mut terminal = Terminal::new(backend).unwrap();
             terminal.draw(|f| ui::render(f, &mut app)).unwrap(); // must not panic
+            assert!(
+                app.automation_rects.is_empty(),
+                "tiny frames must clear stale automation hit geometry"
+            );
         }
 
         // At a small-but-writable size the guard message is visible.

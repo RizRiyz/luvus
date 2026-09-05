@@ -506,6 +506,41 @@ fn agent_label(
     }
 }
 
+pub(super) fn draw_session_menu(
+    f: &mut RenderTarget,
+    area: Rect,
+    app: &mut App,
+    cat: &Catalog,
+    t: &Theme,
+) {
+    let Some(menu) = app.session_menu.as_ref() else {
+        return;
+    };
+    let anchor = menu.anchor;
+    let rows: Vec<MenuRow> = vec![MenuRow {
+        text: cat.menu_stop_session.to_string(),
+        divider: false,
+        destructive: true,
+    }];
+    let rects = render_popup(
+        f,
+        area,
+        anchor,
+        &rows,
+        t,
+        PopupCtx {
+            hover: app.hover,
+            selected: None,
+            mobile: app.compact,
+            id: PopupId::Session,
+            scroll: &mut app.menu_scroll,
+        },
+    );
+    if let Some(menu) = app.session_menu.as_mut() {
+        menu.items = vec![(crate::app::SessionMenuItem::Stop, rects[0])];
+    }
+}
+
 fn ws_label(it: WsMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> String {
     match it {
         WsMenuItem::Pin => cat.menu_pin.to_string(),

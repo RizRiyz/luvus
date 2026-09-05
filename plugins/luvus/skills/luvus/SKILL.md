@@ -187,7 +187,7 @@ above remain sufficient when `luvus skill show` is the only available file.
 
 ## Delegate and manage agents
 
-Resolve existing agents with:
+Resolve active agents with:
 
 ```sh
 luvus agent list
@@ -378,6 +378,21 @@ surface:
   retrying. Leases coordinate declared paths but do not sandbox a shared
   checkout. `task release` requeues an
   active task and releases its path leases; it does not stop the worker pane.
+  Report work progress only with `task update --note`. `task heartbeat
+  --context-used <0..1>` means the fraction of the model context window already
+  consumed, never task-completion progress; `0.6` means 60% consumed. Omit the
+  heartbeat when context-window usage is unknown.
+- Inspect `automation.list`, `automation.get`, and `automation.history` before
+  changing an agent schedule. Creating, updating, enabling, disabling,
+  deleting, or manually running an automation requires explicit authorization.
+  Preview calendar triggers first, retain the user's IANA timezone, use an
+  idempotency key for retryable create/run requests, and never turn an
+  automation into an arbitrary scheduled shell command. Disabling prevents
+  future occurrences; it does not stop a live ORCH task or pane.
+  `target=new_worker` is the durable default. Use `active_agent` only with
+  the exact discovered pane, terminal lifetime, agent, and workspace identities;
+  treat `delivered` as input-queue evidence rather than completed work, and do
+  not reuse a process-bound target after pane closure or server restart.
 - Inspect module metadata, actions, settings, and logs before changing module
   state. Installation, uninstallation, and consequential setting changes need
   clear authorization.

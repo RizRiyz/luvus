@@ -9,6 +9,17 @@
     "agent.authority_released",
     "agent.authority_reported",
     "agent.hook",
+    "automation.created",
+    "automation.deleted",
+    "automation.disabled",
+    "automation.enabled",
+    "automation.run_failed",
+    "automation.run_finished",
+    "automation.run_materialized",
+    "automation.run_queued",
+    "automation.run_started",
+    "automation.run_updated",
+    "automation.updated",
     "config.changed",
     "events.resync_required",
     "layout.applied",
@@ -61,6 +72,17 @@
     "agent.authority_released": { "$ref": "#/$defs/authority_released" },
     "agent.authority_reported": { "$ref": "#/$defs/authority_reported" },
     "agent.hook": { "$ref": "#/$defs/agent_hook" },
+    "automation.created": { "$ref": "#/$defs/automation_definition" },
+    "automation.deleted": { "$ref": "#/$defs/id_only" },
+    "automation.disabled": { "$ref": "#/$defs/automation_definition" },
+    "automation.enabled": { "$ref": "#/$defs/automation_definition" },
+    "automation.run_failed": { "$ref": "#/$defs/automation_run" },
+    "automation.run_finished": { "$ref": "#/$defs/automation_run" },
+    "automation.run_materialized": { "$ref": "#/$defs/automation_run" },
+    "automation.run_queued": { "$ref": "#/$defs/automation_run" },
+    "automation.run_started": { "$ref": "#/$defs/automation_run" },
+    "automation.run_updated": { "$ref": "#/$defs/automation_run" },
+    "automation.updated": { "$ref": "#/$defs/automation_definition" },
     "config.changed": { "$ref": "#/$defs/empty" },
     "events.resync_required": { "$ref": "#/$defs/resync_required" },
     "layout.applied": { "$ref": "#/$defs/layout_applied" },
@@ -110,6 +132,61 @@
     "workspace.moved": { "$ref": "#/$defs/workspace_moved" }
   },
   "$defs": {
+    "automation_definition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "enabled", "trigger", "task", "next_run_at"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "trigger": { "type": "object" },
+        "target": {
+          "oneOf": [
+            {
+              "type": "object", "additionalProperties": false, "required": ["kind"],
+              "properties": { "kind": { "const": "new_worker" } }
+            },
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["kind", "pane_id", "terminal_id", "if_busy"],
+              "properties": {
+                "kind": { "const": "active_agent" },
+                "pane_id": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+                "terminal_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+                "if_busy": { "enum": ["wait", "skip"] }
+              }
+            }
+          ]
+        },
+        "task": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["agent_id", "workspace_id", "mode", "access"],
+          "properties": {
+            "agent_id": { "type": "string" },
+            "workspace_id": { "type": "string" },
+            "mode": { "enum": ["worktree", "workspace"] },
+            "access": { "enum": ["read_only", "workspace", "full_access"] }
+          }
+        },
+        "next_run_at": { "type": ["integer", "null"] }
+      }
+    },
+    "automation_run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["automation_id", "run_id"],
+      "properties": {
+        "automation_id": { "type": "string" },
+        "run_id": { "type": "string" },
+        "task_id": { "type": "string" },
+        "pane": { "type": "string" },
+        "scheduled_at": { "type": "integer", "minimum": 0 },
+        "status": { "type": "string" },
+        "code": { "type": "string" }
+      }
+    },
     "empty": {
       "type": "object",
       "additionalProperties": false
@@ -366,7 +443,10 @@
       "required": ["id", "context"],
       "properties": {
         "id": { "type": "string" },
-        "context": { "type": "number", "minimum": 0, "maximum": 1 }
+        "context": {
+          "type": "number", "minimum": 0, "maximum": 1,
+          "description": "Fraction of the model context window already consumed. This is not task-completion progress."
+        }
       }
     },
     "task_merge_started": {
