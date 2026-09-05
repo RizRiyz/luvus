@@ -4043,47 +4043,27 @@ fn encode_key(
         KeyCode::Char(c) => {
             if ctrl {
                 if disambiguate {
+                    // Once the nested application opts into Kitty keyboard
+                    // disambiguation, every Ctrl+character chord uses CSI-u.
+                    // This preserves the protocol's key identity instead of
+                    // mixing negotiated CSI-u with legacy control bytes.
                     let codepoint = match c {
                         // Crossterm represents a legacy 0x1f input byte as
                         // Ctrl+7. The originating terminal could not
                         // distinguish it from Ctrl+/, so prefer the user-facing
-                        // slash binding when the nested application requests
-                        // an unambiguous key sequence.
-                        '/' | '7' => Some('/'),
-                        '_' => Some('_'),
-                        // A Ctrl chord on a letter is folded through
-                        // `to_ascii_uppercase() & 0x1f` below, which is caseless:
-                        // Ctrl+Shift+P and Ctrl+P both become 0x10, so an agent
-                        // binding Ctrl+Shift+<letter> silently gets the
-                        // unshifted action. Report the *unshifted* codepoint and
-                        // let `key_modifier_param` carry Shift, as the protocol
-                        // requires — Ctrl+Shift+P is `CSI 112;6u`, never
-                        // `CSI 80;...`, since the shifted codepoint would
-                        // reintroduce the very ambiguity being resolved.
-                        //
-                        // Only diverted when Shift is present: plain Ctrl+P is
-                        // already unambiguous as 0x10, and the disambiguate
-                        // level leaves such keys in their legacy form.
-                        'a'..='z' | 'A'..='Z' if shift => Some(c.to_ascii_lowercase()),
-                        _ => None,
+                        // slash binding for the nested CSI-u client.
+                        '/' | '7' => '/',
+                        // Kitty reports the unshifted codepoint and carries
+                        // Shift in the modifier parameter. Normalize Unicode
+                        // letters too when their lowercase form is one scalar.
+                        character if shift && character.is_alphabetic() => {
+                            single_lowercase_codepoint(character)
+                        }
+                        _ => c,
                     };
-                    if let Some(codepoint) = codepoint {
-                        return Some(csi_u_char(codepoint, key.modifiers));
-                    }
+                    return Some(csi_u_char(codepoint, key.modifiers));
                 }
-                let b = match c.to_ascii_lowercase() {
-                    'a'..='z' => (c.to_ascii_uppercase() as u8) & 0x1f,
-                    ' ' | '@' => 0,
-                    '[' => 0x1b,
-                    '\\' => 0x1c,
-                    ']' => 0x1d,
-                    '^' => 0x1e,
-                    // Ctrl+/ is the user-facing chord for the US control byte.
-                    // Legacy terminal input arrives through crossterm as
-                    // Ctrl+7, while enhanced keyboard protocols preserve `/`.
-                    '_' | '/' | '7' => 0x1f,
-                    _ => return None,
-                };
+                let b = legacy_control_byte(c)?;
                 if alt {
                     vec![0x1b, b]
                 } else {
@@ -4159,6 +4139,33 @@ fn encode_key(
         _ => return None,
     };
     Some(bytes)
+}
+
+/// Lowercase a key identity only when Unicode maps it to exactly one scalar.
+fn single_lowercase_codepoint(character: char) -> char {
+    let mut lowercase = character.to_lowercase();
+    let first = lowercase.next().unwrap_or(character);
+    if lowercase.next().is_none() {
+        first
+    } else {
+        character
+    }
+}
+
+fn legacy_control_byte(character: char) -> Option<u8> {
+    Some(match character.to_ascii_lowercase() {
+        'a'..='z' => (character.to_ascii_uppercase() as u8) & 0x1f,
+        ' ' | '@' => 0,
+        '[' => 0x1b,
+        '\\' => 0x1c,
+        ']' => 0x1d,
+        '^' => 0x1e,
+        // Ctrl+/ is the user-facing chord for the US control byte. Legacy
+        // terminal input arrives through crossterm as Ctrl+7, while enhanced
+        // keyboard protocols preserve `/`.
+        '_' | '/' | '7' => 0x1f,
+        _ => return None,
+    })
 }
 
 fn csi(final_byte: u8) -> Vec<u8> {
@@ -4761,6 +4768,57 @@ mod tests {
         assert_eq!(encode('_', true), Some(b"\x1b[95;5u".to_vec()));
     }
 
+    #[test]
+    fn control_characters_use_full_csi_u_only_after_negotiation() {
+        let encode = |character, disambiguate| {
+            encode_key(
+                &KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL),
+                b"\x1b\r",
+                false,
+                disambiguate,
+            )
+        };
+
+        // Legacy mode retains traditional control bytes and cannot represent
+        // the remaining chords without losing their Ctrl modifier.
+        assert_eq!(encode('a', false), Some(vec![0x01]));
+        assert_eq!(encode('[', false), Some(vec![0x1b]));
+        for character in [';', '\'', ',', '.', '-', '=', '`', '1', '8', '€'] {
+            assert_eq!(
+                encode(character, false),
+                None,
+                "Ctrl+{character} has no legacy representation"
+            );
+        }
+
+        // After the nested application opts in, every Ctrl+character chord is
+        // encoded consistently as CSI-u, including those with legacy bytes.
+        for character in ['a', '[', ';', '\'', ',', '.', '-', '=', '`', '1', '8', '€'] {
+            assert_eq!(
+                encode(character, true),
+                Some(format!("\x1b[{};5u", character as u32).into_bytes()),
+                "Ctrl+{character} should use negotiated CSI-u"
+            );
+        }
+        // Shifted Unicode letters use their unshifted, single-codepoint form
+        // once CSI-u is negotiated. Legacy mode remains unable to represent
+        // this chord and therefore keeps its previous no-output behavior.
+        let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        let unicode = |disambiguate| {
+            encode_key(
+                &KeyEvent::new(KeyCode::Char('É'), ctrl_shift),
+                b"\x1b\r",
+                false,
+                disambiguate,
+            )
+        };
+        assert_eq!(unicode(false), None);
+        assert_eq!(
+            unicode(true),
+            Some(format!("\x1b[{};6u", 'é' as u32).into_bytes())
+        );
+    }
+
     /// `Ctrl+Shift+<letter>` must survive the trip to a nested TUI. The legacy
     /// fold `to_ascii_uppercase() & 0x1f` is caseless, so it maps Ctrl+Shift+P
     /// and Ctrl+P onto the same 0x10 and an agent binding the shifted chord
@@ -4782,9 +4840,10 @@ mod tests {
         assert_eq!(encode('p', ctrl, false), Some(vec![0x10]));
         assert_eq!(encode('p', ctrl_shift, false), Some(vec![0x10]));
 
-        // A CSI-u client gets distinct sequences. The codepoint stays lowercase
-        // `p` (112) and Shift rides in the modifier param: 5 = ctrl, 6 = ctrl+shift.
-        assert_eq!(encode('p', ctrl, true), Some(vec![0x10]));
+        // A CSI-u client gets full negotiated encoding for both chords. The
+        // codepoint stays lowercase `p` and Shift rides in the modifier param:
+        // 5 = ctrl, 6 = ctrl+shift.
+        assert_eq!(encode('p', ctrl, true), Some(b"\x1b[112;5u".to_vec()));
         assert_eq!(encode('p', ctrl_shift, true), Some(b"\x1b[112;6u".to_vec()));
         assert_ne!(encode('p', ctrl, true), encode('p', ctrl_shift, true));
 
@@ -4792,9 +4851,9 @@ mod tests {
         // report 112, never 80, or the ambiguity returns.
         assert_eq!(encode('P', ctrl_shift, true), Some(b"\x1b[112;6u".to_vec()));
 
-        // Unshifted Ctrl chords keep their legacy bytes, and plain typing and
-        // Shift-only capitals are untouched by the protocol.
-        assert_eq!(encode('a', ctrl, true), Some(vec![0x01]));
+        // Plain typing and Shift-only capitals remain untouched by the
+        // negotiated Ctrl encoding.
+        assert_eq!(encode('a', ctrl, true), Some(b"\x1b[97;5u".to_vec()));
         assert_eq!(encode('A', KeyModifiers::SHIFT, true), Some(b"A".to_vec()));
         assert_eq!(encode('a', KeyModifiers::NONE, true), Some(b"a".to_vec()));
     }
