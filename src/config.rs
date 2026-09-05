@@ -218,6 +218,15 @@ pub struct LayoutConfig {
     /// useful title.
     #[serde(default)]
     pub agent_title: bool,
+    /// Show the cwd line beneath each WORKSPACES entry. On by default to retain
+    /// the established two-row presentation; the row context menu persists the
+    /// compact one-row preference when this is disabled.
+    #[serde(default = "yes")]
+    pub workspace_paths: bool,
+    /// Show the workspace/path detail line beneath each AGENTS entry. On by
+    /// default; the row context menu can hide it for a denser one-row list.
+    #[serde(default = "yes")]
+    pub agent_paths: bool,
     /// Resume a session into its own workspace (else a new tab in the current one).
     #[serde(default = "yes", alias = "resume_in_new_node")]
     pub resume_in_new_workspace: bool,
@@ -485,6 +494,8 @@ impl Default for LayoutConfig {
             show_titles: true,
             pane_title_path: false,
             agent_title: false,
+            workspace_paths: true,
+            agent_paths: true,
             resume_in_new_workspace: true,
             new_pane_to_workspace_root: false,
             file_open: default_file_open(),
@@ -788,12 +799,16 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.theme, "quattro-rally");
         assert!(c.layout.show_titles);
+        assert!(c.layout.workspace_paths);
+        assert!(c.layout.agent_paths);
         assert_eq!(c.layout.col_gap, 1);
         assert_eq!(c.layout.mobile_width, crate::app::MOBILE_WIDTH);
         // Empty object → all defaults (forward/back compat).
         let from_empty: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(from_empty.theme, "quattro-rally");
         assert_eq!(from_empty.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
+        assert!(from_empty.layout.workspace_paths);
+        assert!(from_empty.layout.agent_paths);
         assert!(
             from_empty.direct_keybindings.is_empty(),
             "existing configs do not gain input-stealing direct shortcuts"

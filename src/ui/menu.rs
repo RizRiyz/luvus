@@ -195,7 +195,7 @@ pub(super) fn draw_ws_menu(
     let rows: Vec<MenuRow> = items
         .iter()
         .map(|it| MenuRow {
-            text: ws_label(*it, cat, &extras),
+            text: ws_label(*it, cat, &extras, app.config.layout.workspace_paths),
             divider: matches!(it, WsMenuItem::Divider),
             destructive: matches!(it, WsMenuItem::Close | WsMenuItem::DeleteWorktree),
         })
@@ -461,7 +461,7 @@ pub(super) fn draw_agent_menu(
     let rows: Vec<MenuRow> = items
         .iter()
         .map(|it| MenuRow {
-            text: agent_label(*it, cat, &extras, scoped),
+            text: agent_label(*it, cat, &extras, scoped, app.config.layout.agent_paths),
             divider: matches!(it, AgentMenuItem::Divider),
             destructive: matches!(it, AgentMenuItem::Close),
         })
@@ -490,6 +490,7 @@ fn agent_label(
     cat: &Catalog,
     extras: &[ModuleMenuAction],
     scoped: bool,
+    paths_visible: bool,
 ) -> String {
     match it {
         AgentMenuItem::ToggleWorkspaceScope => if scoped {
@@ -502,6 +503,12 @@ fn agent_label(
         AgentMenuItem::RenamePane => cat.menu_rename.to_string(),
         AgentMenuItem::Pin => cat.menu_pin.to_string(),
         AgentMenuItem::Unpin => cat.menu_unpin.to_string(),
+        AgentMenuItem::TogglePath => if paths_visible {
+            cat.menu_hide_path
+        } else {
+            cat.menu_show_path
+        }
+        .to_string(),
         AgentMenuItem::Close => cap_first(cat.act_close),
         AgentMenuItem::Divider => String::new(),
         AgentMenuItem::Module(i) => module_label(extras, i),
@@ -543,10 +550,21 @@ pub(super) fn draw_session_menu(
     }
 }
 
-fn ws_label(it: WsMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> String {
+fn ws_label(
+    it: WsMenuItem,
+    cat: &Catalog,
+    extras: &[ModuleMenuAction],
+    paths_visible: bool,
+) -> String {
     match it {
         WsMenuItem::Pin => cat.menu_pin.to_string(),
         WsMenuItem::Unpin => cat.menu_unpin.to_string(),
+        WsMenuItem::TogglePath => if paths_visible {
+            cat.menu_hide_path
+        } else {
+            cat.menu_show_path
+        }
+        .to_string(),
         WsMenuItem::Close => cap_first(cat.act_close),
         WsMenuItem::Rename => cat.menu_rename.to_string(),
         WsMenuItem::DeleteWorktree => cat.menu_delete_worktree.to_string(),
@@ -872,6 +890,7 @@ mod label_case_tests {
         for it in [
             WsMenuItem::Close,
             WsMenuItem::Rename,
+            WsMenuItem::TogglePath,
             WsMenuItem::DeleteWorktree,
             WsMenuItem::NewWorktree,
             WsMenuItem::OpenWorktree,
@@ -879,7 +898,7 @@ mod label_case_tests {
             WsMenuItem::OpenOrch,
             WsMenuItem::OpenMission,
         ] {
-            rows.push(ws_label(it, cat, none));
+            rows.push(ws_label(it, cat, none, true));
         }
         for it in PaneMenuItem::ALL.iter().copied() {
             rows.push(pane_label(it, cat, none));
@@ -896,8 +915,12 @@ mod label_case_tests {
         // user content, but the trailing "New Tab" is ours (`move_targets` in
         // `app/mod.rs`).
         rows.push(cat.menu_new_tab.to_string());
-        for it in [AgentMenuItem::Resume, AgentMenuItem::Close] {
-            rows.push(agent_label(it, cat, none, false));
+        for it in [
+            AgentMenuItem::Resume,
+            AgentMenuItem::TogglePath,
+            AgentMenuItem::Close,
+        ] {
+            rows.push(agent_label(it, cat, none, false, true));
         }
         for it in [
             OrchMenuItem::Start,
