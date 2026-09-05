@@ -88,6 +88,9 @@ pub enum Cmd {
     OpenSessions,
     ToggleSidebar,
     ToggleRightSidebar,
+    FocusWorkspaces,
+    /// Focus the AGENTS list. The historical enum/config id remains stable so
+    /// existing user keymaps keep working after the command's UX is refined.
     ToggleAgents,
     ToggleAgentScope,
     /// Focus the FILES tree. The historical enum/config id remains stable so
@@ -140,6 +143,7 @@ impl Cmd {
         Cmd::OpenSessions,
         Cmd::ToggleSidebar,
         Cmd::ToggleRightSidebar,
+        Cmd::FocusWorkspaces,
         Cmd::ToggleAgents,
         Cmd::ToggleAgentScope,
         Cmd::ToggleFiles,
@@ -192,6 +196,7 @@ impl Cmd {
             Cmd::OpenSessions => "open_sessions",
             Cmd::ToggleSidebar => "toggle_sidebar",
             Cmd::ToggleRightSidebar => "toggle_right_sidebar",
+            Cmd::FocusWorkspaces => "focus_workspaces",
             Cmd::ToggleAgents => "toggle_agents",
             Cmd::ToggleAgentScope => "toggle_agent_scope",
             Cmd::ToggleFiles => "toggle_files",
@@ -237,6 +242,7 @@ impl Cmd {
             Cmd::OpenSessions => cat.cmd_open_sessions,
             Cmd::ToggleSidebar => cat.cmd_toggle_sidebar,
             Cmd::ToggleRightSidebar => cat.cmd_toggle_right_sidebar,
+            Cmd::FocusWorkspaces => cat.cmd_focus_workspaces,
             Cmd::ToggleAgents => cat.cmd_toggle_agents,
             Cmd::ToggleAgentScope => cat.cmd_toggle_agent_scope,
             Cmd::ToggleFiles => cat.cmd_toggle_files,
@@ -279,6 +285,7 @@ impl Cmd {
             | Cmd::OpenSettings
             | Cmd::ToggleSidebar
             | Cmd::ToggleRightSidebar
+            | Cmd::FocusWorkspaces
             | Cmd::ToggleAgents
             | Cmd::ToggleAgentScope
             | Cmd::ToggleFiles
@@ -310,8 +317,8 @@ impl Cmd {
             Cmd::RenameTab => ",",
             Cmd::NewWorkspace => "N",
             Cmd::CloseWorkspace => "D",
-            Cmd::NextWorkspace => "w",
-            Cmd::PrevWorkspace => "W",
+            Cmd::NextWorkspace => "u",
+            Cmd::PrevWorkspace => "U",
             Cmd::JumpWorkspace(position) => SHIFTED_DIGIT_KEYS[workspace_jump_index(position)],
             Cmd::NewWorktree => "G",
             Cmd::OpenGit => "g",
@@ -324,6 +331,7 @@ impl Cmd {
             Cmd::OpenSessions => "t",
             Cmd::ToggleSidebar => "b",
             Cmd::ToggleRightSidebar => "B",
+            Cmd::FocusWorkspaces => "w",
             Cmd::ToggleAgents => "a",
             Cmd::ToggleAgentScope => "A",
             Cmd::ToggleFiles => "e",
@@ -748,6 +756,8 @@ pub fn presets() -> &'static [Preset] {
                 // `(` / `)` step to the previous / next session (luvus workspace).
                 ("prev_node", "("),
                 ("next_node", ")"),
+                // tmux reserves `w` for its choose-tree equivalent below.
+                ("focus_workspaces", ""),
                 // These workspace defaults use the same legacy terminal symbols
                 // as tmux's split and previous-session keys. Mark them honestly
                 // unbound instead of displaying shortcuts that cannot run.
@@ -908,9 +918,8 @@ impl App {
             Cmd::OpenSessions => self.open_named_session_menu(),
             Cmd::ToggleSidebar => self.toggle_all_sides(),
             Cmd::ToggleRightSidebar => self.toggle_side(crate::app::Side::Right),
-            Cmd::ToggleAgents => {
-                self.set_agents_filter(!self.agents_active_only);
-            }
+            Cmd::FocusWorkspaces => self.focus_workspaces_dock(),
+            Cmd::ToggleAgents => self.focus_agents_dock(),
             Cmd::ToggleAgentScope => {
                 self.set_agents_scope(!self.agents_this_workspace);
             }
@@ -976,6 +985,9 @@ mod tests {
         assert_eq!(m.get("i"), Some(&Cmd::OpenDiff));
         assert_eq!(m.get("m"), Some(&Cmd::OpenMission));
         assert_eq!(m.get("M"), Some(&Cmd::Switcher));
+        assert_eq!(m.get("w"), Some(&Cmd::FocusWorkspaces));
+        assert_eq!(m.get("u"), Some(&Cmd::NextWorkspace));
+        assert_eq!(m.get("U"), Some(&Cmd::PrevWorkspace));
         assert_eq!(m.get("a"), Some(&Cmd::ToggleAgents));
         assert_eq!(m.get("A"), Some(&Cmd::ToggleAgentScope));
         // Every command is reachable by at least one default binding.
@@ -1376,6 +1388,7 @@ mod tests {
         assert_eq!(app.keymap.get(","), Some(&Cmd::RenameTab));
         assert_eq!(app.keymap.get(")"), Some(&Cmd::NextWorkspace));
         assert_eq!(app.keymap.get("("), Some(&Cmd::PrevWorkspace));
+        assert!(app.key_for(Cmd::FocusWorkspaces).is_empty());
         assert!(app.key_for(Cmd::JumpWorkspace(5)).is_empty());
         assert!(app.key_for(Cmd::JumpWorkspace(9)).is_empty());
         assert!(!app
@@ -1614,23 +1627,92 @@ mod tests {
     }
 
     #[test]
-    fn toggle_agents_command_persists_both_filter_choices() {
-        let _env = crate::persist::test_env("toggle-agents-command");
+    fn agents_command_focuses_the_dock_and_filter_key_persists() {
+        let _env = crate::persist::test_env("focus-agents-command");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         assert!(!app.agents_active_only);
 
         app.agents_scroll = 7;
         app.run_cmd(Cmd::ToggleAgents);
+        assert_eq!(app.sidebar_focus, Some(SidebarListFocus::Agents));
+        assert!(!app.agents_active_only, "focus does not change the filter");
+
+        app.handle_agents_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
         assert!(app.agents_active_only);
         assert_eq!(app.agents_scroll, 0);
         assert!(crate::config::load().agents_active_only);
 
         app.agents_scroll = 5;
-        app.run_cmd(Cmd::ToggleAgents);
+        app.handle_agents_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
         assert!(!app.agents_active_only);
         assert_eq!(app.agents_scroll, 0);
         assert!(!crate::config::load().agents_active_only);
+    }
+
+    #[test]
+    fn workspace_focus_navigates_without_switching_until_enter() {
+        let _env = crate::persist::test_env("focus-workspaces-command");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.workspaces.push(Workspace {
+            id: crate::ids::public_id("workspace"),
+            name: "second".into(),
+            cwd: std::env::current_dir().unwrap(),
+            branch: None,
+            git_ahead_behind: None,
+            worktree: None,
+            tabs: vec![Tab::panes(TileLayout::new(pane))],
+            active_tab: 0,
+            pinned: false,
+        });
+
+        app.run_cmd(Cmd::FocusWorkspaces);
+        assert_eq!(app.sidebar_focus, Some(SidebarListFocus::Workspaces));
+        app.handle_workspaces_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.active_ws, 0, "moving the cursor does not switch early");
+        app.handle_workspaces_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_ws, 1);
+        assert_eq!(app.sidebar_focus, None);
+    }
+
+    #[test]
+    fn sidebar_action_key_opens_keyboard_selected_context_menus() {
+        let _env = crate::persist::test_env("sidebar-action-menus");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        app.run_cmd(Cmd::FocusWorkspaces);
+        app.handle_workspaces_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(app.ws_menu.as_ref().and_then(|menu| menu.selected), Some(0));
+        app.handle_ws_menu_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.ws_menu.as_ref().and_then(|menu| menu.selected), Some(1));
+
+        app.ws_menu = None;
+        app.resumable.push(crate::agent::SessionInfo {
+            agent: "claude".into(),
+            session_id: "keyboard-menu".into(),
+            cwd: std::env::current_dir().unwrap(),
+            updated: std::time::SystemTime::now(),
+        });
+        app.run_cmd(Cmd::ToggleAgents);
+        app.handle_agents_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(matches!(
+            app.agent_menu.as_ref().map(|menu| menu.target.clone()),
+            Some(AgentTarget::Session(0))
+        ));
+        assert_eq!(
+            app.agent_menu.as_ref().and_then(|menu| menu.selected),
+            Some(0)
+        );
+        app.handle_agent_menu_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        app.handle_agent_menu_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(
+            app.agent_menu.as_ref().and_then(|menu| menu.selected),
+            Some(3),
+            "keyboard navigation skips the divider"
+        );
     }
 
     #[test]

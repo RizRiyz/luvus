@@ -1851,6 +1851,23 @@ impl App {
                 self.files_focused = false;
             }
         }
+        // WORKSPACES/AGENTS keyboard ownership follows the same rule as FILES:
+        // a pointer press outside the focused list returns input to the pane.
+        if matches!(m.kind, MouseEventKind::Down(_)) {
+            let area = match self.sidebar_focus {
+                Some(SidebarListFocus::Workspaces) => Some(self.workspaces_area),
+                Some(SidebarListFocus::Agents) => Some(self.agents_area),
+                None => None,
+            };
+            if area.is_some_and(|area| {
+                m.column < area.x
+                    || m.column >= area.right()
+                    || m.row < area.y
+                    || m.row >= area.bottom()
+            }) {
+                self.sidebar_focus = None;
+            }
+        }
         // Bar actions and the read-only overflow popup own their rendered
         // rectangles. This sits below every modal guard: while a modal is open,
         // it owns the screen and a click must never invoke a hidden bar action.
@@ -2520,22 +2537,26 @@ impl App {
         // The "blocked in other workspaces" line jumps to a pane this scope hid,
         // rather than widening the list or cycling to a local blocked row.
         if let Some((id, _)) = self.agents_elsewhere_rect.filter(|(_, rect)| hit(*rect)) {
+            self.sidebar_focus = None;
             self.focus_pane_global(id);
             return;
         }
         if let Some((id, _)) = self.agent_rects.iter().find(|(_, rect)| hit(*rect)) {
             let id = *id;
+            self.sidebar_focus = None;
             self.focus_pane_global(id);
             return;
         }
         if let Some((id, _)) = self.automation_rects.iter().find(|(_, rect)| hit(*rect)) {
             let id = id.clone();
+            self.sidebar_focus = None;
             self.open_automation_detail(&id);
             return;
         }
         // Clicking a resumable session row reopens it into a pane.
         if let Some((i, _)) = self.session_rects.iter().find(|(_, rect)| hit(*rect)) {
             let i = *i;
+            self.sidebar_focus = None;
             self.resume_session(i);
             return;
         }
@@ -2601,6 +2622,7 @@ impl App {
         }
         if let Some((i, _)) = self.ws_rects.iter().find(|(_, rect)| hit(*rect)) {
             let i = (*i).min(self.workspaces.len().saturating_sub(1));
+            self.sidebar_focus = None;
             self.active_ws = i;
             return;
         }
@@ -3803,6 +3825,19 @@ impl App {
                 self.run_cmd(command);
                 return true;
             }
+        }
+        // WORKSPACES/AGENTS dock focus is explicit and separate from pane focus.
+        if let Some(focus) = self.sidebar_focus {
+            if self.prefix.matches(&key) {
+                self.sidebar_focus = None;
+                self.mode = Mode::Prefix;
+            } else {
+                match focus {
+                    SidebarListFocus::Workspaces => self.handle_workspaces_key(key),
+                    SidebarListFocus::Agents => self.handle_agents_key(key),
+                };
+            }
+            return true;
         }
         // FILES/DIFF dock focus is explicit and separate from terminal-pane
         // focus. The prefix remains available for global commands; ordinary

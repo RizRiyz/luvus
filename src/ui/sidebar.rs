@@ -5,6 +5,7 @@
 //! single-purpose left sidebar.
 
 use super::*;
+use crate::app::SidebarListFocus;
 
 fn attention(s: State) -> u8 {
     match s {
@@ -431,9 +432,17 @@ fn draw_workspaces_dock(
         .iter()
         .position(|(i, _)| *i == app.active_ws)
         .unwrap_or(0);
+    let keyboard_focused = app.sidebar_focus == Some(SidebarListFocus::Workspaces);
+    app.workspace_cursor = app.workspace_cursor.min(ntotal.saturating_sub(1));
     // Auto-reveal the active workspace when it changes (cycle / new / resume), without
     // fighting wheel scrolling (which never changes `active_ws`).
-    if app.active_ws != app.last_active_ws_shown {
+    if keyboard_focused {
+        if app.workspace_cursor < app.workspaces_scroll {
+            app.workspaces_scroll = app.workspace_cursor;
+        } else if ncap > 0 && app.workspace_cursor >= app.workspaces_scroll + ncap {
+            app.workspaces_scroll = app.workspace_cursor + 1 - ncap;
+        }
+    } else if app.active_ws != app.last_active_ws_shown {
         if active_pos < app.workspaces_scroll {
             app.workspaces_scroll = active_pos;
         } else if ncap > 0 && active_pos >= app.workspaces_scroll + ncap {
@@ -447,11 +456,12 @@ fn draw_workspaces_dock(
     for (vi, (i, is_member)) in order.into_iter().skip(nscroll).take(ncap).enumerate() {
         let y = nlist_top + vi as u16 * ROW_STRIDE;
         let active = i == app.active_ws;
+        let selected = keyboard_focused && nscroll + vi == app.workspace_cursor;
         ws_rects.push((i, Rect::new(area.x, y, area.width, 2)));
         let st = rollup(app, i);
         let ws = &app.workspaces[i];
         let terminal_cwd = app.workspace_terminal_cwd(i).unwrap_or(&ws.cwd);
-        let name_style = if active {
+        let name_style = if selected || active {
             Style::new().fg(t.accent).bold()
         } else {
             Style::new().fg(t.subtext1)
@@ -490,7 +500,13 @@ fn draw_workspaces_dock(
         if let Some(b) = &branch_disp {
             line1.push(Span::styled(
                 format!("  {b}"),
-                Style::new().fg(if active { t.green } else { t.overlay0 }),
+                Style::new().fg(if selected {
+                    t.accent
+                } else if active {
+                    t.green
+                } else {
+                    t.overlay0
+                }),
             ));
         }
         line_at(f, y, Line::from(line1));
@@ -505,14 +521,20 @@ fn draw_workspaces_dock(
                     " ".repeat(pad),
                     short_path(terminal_cwd, cw.saturating_sub(pad as u16))
                 ),
-                Style::new().fg(if active { t.subtext0 } else { t.overlay0 }),
+                Style::new().fg(if selected {
+                    t.accent
+                } else if active {
+                    t.subtext0
+                } else {
+                    t.overlay0
+                }),
             )),
         );
-        if active {
+        if active || selected {
             let buf = f.buffer_mut();
             for row in [y, y + 1] {
                 for x in area.x..area.right().saturating_sub(1) {
-                    buf[(x, row)].set_bg(t.sel_bg);
+                    buf[(x, row)].set_bg(if selected { t.surface1 } else { t.sel_bg });
                 }
             }
         }
@@ -717,8 +739,18 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     // The overflow line is always visible while attention is hidden, even if no
     // local rows exist. Reserve exactly one terminal row for it.
     let has_elsewhere = scoped && !blocked_elsewhere.is_empty();
+    let keyboard_focused = app.sidebar_focus == Some(SidebarListFocus::Agents);
+    let keyboard_total = atotal + usize::from(has_elsewhere);
+    app.agent_cursor = app.agent_cursor.min(keyboard_total.saturating_sub(1));
     app.agents_elsewhere_rect = None;
     let acap = list_capacity(arows.saturating_sub(u16::from(has_elsewhere)));
+    if keyboard_focused && app.agent_cursor < atotal {
+        if app.agent_cursor < app.agents_scroll {
+            app.agents_scroll = app.agent_cursor;
+        } else if acap > 0 && app.agent_cursor >= app.agents_scroll + acap {
+            app.agents_scroll = app.agent_cursor + 1 - acap;
+        }
+    }
     app.agents_scroll = app.agents_scroll.min(atotal.saturating_sub(acap));
     let ascroll = app.agents_scroll;
 
@@ -738,6 +770,7 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     } else {
         for (vi, k) in (ascroll..atotal).take(acap).enumerate() {
             let y = alist_top + vi as u16 * ROW_STRIDE;
+            let selected = keyboard_focused && app.agent_cursor == k;
             if let Some((id, wsname)) = live.get(k) {
                 // A live agent: runtime status + which workspace it runs in.
                 let id = *id;
@@ -888,6 +921,12 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                 // Removing / reopening a session is on the row's right-click menu
                 // (docs/28) — no per-row ✕ button.
             }
+            if selected {
+                f.buffer_mut().set_style(
+                    Rect::new(area.x, y, area.width.saturating_sub(1), ROW_STRIDE),
+                    Style::new().fg(t.accent).bg(t.surface1),
+                );
+            }
         }
         draw_scrollbar(
             f,
@@ -927,6 +966,12 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
             );
             app.agents_elsewhere_rect =
                 Some((blocked_elsewhere[0], Rect::new(area.x, y, area.width, 1)));
+            if keyboard_focused && app.agent_cursor == atotal {
+                f.buffer_mut().set_style(
+                    Rect::new(area.x, y, area.width.saturating_sub(1), 1),
+                    Style::new().fg(t.accent).bg(t.surface1),
+                );
+            }
         }
     }
 
@@ -1127,6 +1172,46 @@ mod tests {
                 .collect::<String>()
                 .contains(needle)
         })
+    }
+
+    #[test]
+    fn keyboard_focus_highlights_workspace_and_agent_rows() {
+        let _env = crate::persist::test_env("sidebar-keyboard-highlight");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+
+        app.focus_workspaces_dock();
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let workspace = app.ws_rects[0].1;
+        assert_eq!(
+            term.backend()
+                .buffer()
+                .cell((workspace.x, workspace.y))
+                .unwrap()
+                .bg,
+            app.theme.surface1
+        );
+
+        app.resumable.push(crate::agent::SessionInfo {
+            agent: "claude".into(),
+            session_id: "sidebar-highlight".into(),
+            cwd: std::env::current_dir().unwrap(),
+            updated: std::time::SystemTime::now(),
+        });
+        app.focus_agents_dock();
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let session = app.session_rects[0].1;
+        assert_eq!(
+            term.backend()
+                .buffer()
+                .cell((session.x, session.y))
+                .unwrap()
+                .bg,
+            app.theme.surface1
+        );
     }
 
     /// The column each agent row's state label starts at, for every row drawn.

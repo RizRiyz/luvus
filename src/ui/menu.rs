@@ -189,6 +189,7 @@ pub(super) fn draw_ws_menu(
         return;
     };
     let anchor = menu.anchor;
+    let selected = menu.selected;
     let items = app.ws_menu_items(index);
     let extras = menu.module_actions.clone();
     let rows: Vec<MenuRow> = items
@@ -207,7 +208,7 @@ pub(super) fn draw_ws_menu(
         t,
         PopupCtx {
             hover: app.hover,
-            selected: None,
+            selected,
             mobile: app.compact,
             id: PopupId::Ws,
             scroll: &mut app.menu_scroll,
@@ -453,6 +454,7 @@ pub(super) fn draw_agent_menu(
         return;
     };
     let anchor = menu.anchor;
+    let selected = menu.selected;
     let items = app.agent_menu_items(menu.target.clone());
     let extras = menu.module_actions.clone();
     let scoped = app.agents_this_workspace;
@@ -472,7 +474,7 @@ pub(super) fn draw_agent_menu(
         t,
         PopupCtx {
             hover: app.hover,
-            selected: None,
+            selected,
             mobile: app.compact,
             id: PopupId::Agent,
             scroll: &mut app.menu_scroll,

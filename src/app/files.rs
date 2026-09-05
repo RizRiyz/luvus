@@ -266,6 +266,7 @@ impl App {
     /// command does not hide any sidebar. `Ctrl+Space b` remains the visibility
     /// control; Esc/q return input to the unchanged terminal-pane focus.
     pub fn focus_files_tree(&mut self) {
+        self.sidebar_focus = None;
         if self.sidebars.side_of(&DockKind::Files).is_none() {
             let target = self.sidebars.files_side;
             if !self.move_dock(&DockKind::Files, target) {
