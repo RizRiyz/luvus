@@ -646,7 +646,8 @@ impl App {
             }
         }
         match ev {
-            AppEvent::Key(k) => self.handle_key(k),
+            AppEvent::Key(key) => self.handle_key(key, None),
+            AppEvent::KeyWithIdentity { key, unshifted } => self.handle_key(key, Some(unshifted)),
             AppEvent::Mouse(m) => self.handle_mouse(m),
             AppEvent::Paste(s) => {
                 // Copy mode owns input just like scroll mode: never leak a
@@ -2758,7 +2759,7 @@ impl App {
         true
     }
 
-    fn handle_scroll_mode_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_scroll_mode_key(&mut self, key: KeyEvent, unshifted: Option<char>) -> bool {
         let Some(id) = self.scroll_pane else {
             return false;
         };
@@ -2800,7 +2801,9 @@ impl App {
                     pane.scroll_to_bottom();
                     exit = true;
                     let (app_cursor, disambiguate) = pane.key_encoding_modes();
-                    if let Some(bytes) = encode_key(&key, newline, app_cursor, disambiguate) {
+                    if let Some(bytes) =
+                        encode_key_with_identity(&key, unshifted, newline, app_cursor, disambiguate)
+                    {
                         pane.send(&bytes);
                     }
                 }
@@ -3525,7 +3528,7 @@ impl App {
     /// render). Plain input forwarded to a pane returns `false`: the pane's echo
     /// arrives as a separate `PtyData` event and renders then, so we don't burn a
     /// full render on the keystroke itself.
-    fn handle_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_key(&mut self, key: KeyEvent, unshifted: Option<char>) -> bool {
         if key.kind == KeyEventKind::Release {
             return false; // ignored — nothing changed
         }
@@ -3742,7 +3745,7 @@ impl App {
         // Keyboard scroll mode owns every key until it's left (`q`/`Esc`/typing);
         // no `Ctrl+Space` prefix involved — the Mac-friendly path.
         if self.scroll_pane.is_some() {
-            return self.handle_scroll_mode_key(key);
+            return self.handle_scroll_mode_key(key, unshifted);
         }
         // Keyboard copy mode is deliberately ahead of prefix handling and all
         // pane input: its navigation must never reach the selected program.
@@ -3903,7 +3906,9 @@ impl App {
                     .focused()
                     .map(|pane| pane.key_encoding_modes())
                     .unwrap_or((false, false));
-                if let Some(bytes) = encode_key(&key, newline, app_cursor, disambiguate) {
+                if let Some(bytes) =
+                    encode_key_with_identity(&key, unshifted, newline, app_cursor, disambiguate)
+                {
                     if let Some(p) = self.focused() {
                         // Typing snaps the view back to the live bottom, so you
                         // always see what you type (like every terminal).
@@ -4030,6 +4035,16 @@ fn encode_key(
     app_cursor: bool,
     disambiguate: bool,
 ) -> Option<Vec<u8>> {
+    encode_key_with_identity(key, None, newline, app_cursor, disambiguate)
+}
+
+fn encode_key_with_identity(
+    key: &KeyEvent,
+    unshifted: Option<char>,
+    newline: &[u8],
+    app_cursor: bool,
+    disambiguate: bool,
+) -> Option<Vec<u8>> {
     // AltGr arrives as Ctrl+Alt on Windows (`keys::is_ctrl_chord`) and types a
     // character — it is neither a Ctrl chord nor an `ESC`-prefixed Alt key.
     let ctrl = super::keys::is_ctrl_chord(key.modifiers);
@@ -4057,9 +4072,13 @@ fn encode_key(
                         // Kitty reports the unshifted codepoint and carries
                         // Shift in the modifier parameter. Normalize Unicode
                         // letters too when their lowercase form is one scalar.
-                        character if shift && character.is_alphabetic() => {
-                            single_lowercase_codepoint(character)
-                        }
+                        character if shift => unshifted.unwrap_or_else(|| {
+                            if character.is_alphabetic() {
+                                single_lowercase_codepoint(character)
+                            } else {
+                                character
+                            }
+                        }),
                         _ => c,
                     };
                     return Some(csi_u_char(codepoint, key.modifiers));
@@ -4079,8 +4098,14 @@ fn encode_key(
             {
                 // Kitty disambiguate reports alt/super+key as CSI-u instead of
                 // ESC+char or a Super-stripped character.
-                let codepoint = if shift && c.is_alphabetic() {
-                    single_lowercase_codepoint(c)
+                let codepoint = if shift {
+                    unshifted.unwrap_or_else(|| {
+                        if c.is_alphabetic() {
+                            single_lowercase_codepoint(c)
+                        } else {
+                            c
+                        }
+                    })
                 } else {
                     c
                 };
@@ -4131,7 +4156,7 @@ fn encode_key(
             }
         }
         KeyCode::Esc => {
-            if disambiguate && key_modifier_param(key.modifiers) != 1 {
+            if disambiguate {
                 csi_u_code(27, key.modifiers)
             } else {
                 vec![0x1b]
@@ -4215,7 +4240,12 @@ fn csi_u_char(character: char, modifiers: KeyModifiers) -> Vec<u8> {
 }
 
 fn csi_u_code(codepoint: u32, modifiers: KeyModifiers) -> Vec<u8> {
-    format!("\x1b[{codepoint};{}u", key_modifier_param(modifiers)).into_bytes()
+    let modifier = key_modifier_param(modifiers);
+    if modifier == 1 {
+        format!("\x1b[{codepoint}u").into_bytes()
+    } else {
+        format!("\x1b[{codepoint};{modifier}u").into_bytes()
+    }
 }
 
 /// Encode a cursor key (arrows / Home / End). In application cursor mode
@@ -4779,14 +4809,16 @@ mod tests {
         assert_eq!(encode(';', true), Some(b"\x1b[59;3u".to_vec()));
         assert_eq!(encode('\'', true), Some(b"\x1b[39;3u".to_vec()));
         assert_eq!(encode('a', true), Some(b"\x1b[97;3u".to_vec()));
+        let windows_shifted =
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::ALT | KeyModifiers::SHIFT);
         assert_eq!(
-            encode_key(
-                &KeyEvent::new(KeyCode::Char('/'), KeyModifiers::ALT | KeyModifiers::SHIFT),
-                b"\x1b\r",
-                false,
-                true,
-            ),
+            encode_key_with_identity(&windows_shifted, Some('/'), b"\x1b\r", false, true),
             Some(b"\x1b[47;4u".to_vec())
+        );
+        assert_eq!(
+            encode_key_with_identity(&windows_shifted, Some('/'), b"\x1b\r", false, false),
+            Some(b"\x1b?".to_vec()),
+            "legacy panes still receive the translated character"
         );
     }
 
@@ -4844,8 +4876,12 @@ mod tests {
             Some(b"\x1b[9;2u".to_vec())
         );
         assert_eq!(
-            encode(KeyCode::Esc, KeyModifiers::NONE, true),
+            encode(KeyCode::Esc, KeyModifiers::NONE, false),
             Some(vec![0x1b])
+        );
+        assert_eq!(
+            encode(KeyCode::Esc, KeyModifiers::NONE, true),
+            Some(b"\x1b[27u".to_vec())
         );
         assert_eq!(
             encode(KeyCode::Esc, KeyModifiers::ALT, false),

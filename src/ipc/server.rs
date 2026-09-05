@@ -778,6 +778,9 @@ fn apply(
 
             let event = match input {
                 ClientInput::Key(key) => AppEvent::Key(key),
+                ClientInput::KeyWithIdentity { key, unshifted } => {
+                    AppEvent::KeyWithIdentity { key, unshifted }
+                }
                 ClientInput::Mouse(mouse) => AppEvent::Mouse(mouse),
                 ClientInput::Paste(text) => AppEvent::Paste(text),
                 ClientInput::Resize(..) => unreachable!("handled above"),
@@ -1313,6 +1316,17 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
                     .send(AppEvent::ClientInput {
                         id,
                         input: ClientInput::Key(k),
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMessage::KeyWithIdentity { key, unshifted }) => {
+                if app_tx
+                    .send(AppEvent::ClientInput {
+                        id,
+                        input: ClientInput::KeyWithIdentity { key, unshifted },
                     })
                     .is_err()
                 {

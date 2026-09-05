@@ -26,10 +26,61 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_BASIC_INFORMATION, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
     PROCESS_VM_READ, RTL_USER_PROCESS_PARAMETERS,
 };
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyboardLayout, MapVirtualKeyExW, ToUnicodeEx, VkKeyScanExW, MAPVK_VK_TO_VSC,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
 const MAX_PROCESS_ENTRIES: usize = 16_384;
 const MAX_DESCENDANTS_PER_ROOT: usize = 64;
 const MAX_COMMAND_LINE_BYTES: usize = 64 * 1024;
+
+/// Resolve the unshifted character for a Windows console key event.
+///
+/// Crossterm exposes the translated Unicode character but not the original
+/// virtual-key code. Reverse the translation with the foreground thread's
+/// active keyboard layout, then translate that virtual key with an empty key
+/// state. Fail closed for characters outside the BMP, dead keys, ligatures, or
+/// layouts that do not map the character back to one ordinary key.
+pub(super) fn unshifted_key_char(character: char) -> Option<char> {
+    let character = u16::try_from(u32::from(character)).ok()?;
+    // SAFETY: the foreground window handle is borrowed only for this query;
+    // the process-id output is optional and deliberately null.
+    let thread = unsafe { GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut()) };
+    // SAFETY: zero is accepted when no foreground thread is available.
+    let layout = unsafe { GetKeyboardLayout(thread) };
+    // SAFETY: `character` is one valid BMP scalar and `layout` came from User32.
+    let key = unsafe { VkKeyScanExW(character, layout) };
+    if key == -1 || ((key as u16) >> 8) & 1 == 0 {
+        return None;
+    }
+    let virtual_key = u32::from((key as u16) & 0xff);
+    // SAFETY: the virtual key and layout came from User32 above.
+    let scan_code = unsafe { MapVirtualKeyExW(virtual_key, MAPVK_VK_TO_VSC, layout) };
+    let key_state = [0u8; 256];
+    let mut buffer = [0u16; 4];
+    // Bit 2 keeps ToUnicodeEx from mutating the kernel-mode keyboard buffer.
+    // SAFETY: both buffers are valid for their declared lengths, and the
+    // virtual key and layout were returned by User32 for this character.
+    let written = unsafe {
+        ToUnicodeEx(
+            virtual_key,
+            scan_code,
+            key_state.as_ptr(),
+            buffer.as_mut_ptr(),
+            buffer.len() as i32,
+            0x4,
+            layout,
+        )
+    };
+    if written <= 0 {
+        return None;
+    }
+    let units = usize::try_from(written).ok()?.min(buffer.len());
+    let mut decoded = char::decode_utf16(buffer[..units].iter().copied());
+    let result = decoded.next()?.ok()?;
+    decoded.next().is_none().then_some(result)
+}
 
 pub(super) fn atomic_replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
     fn wide(path: &Path) -> std::io::Result<Vec<u16>> {

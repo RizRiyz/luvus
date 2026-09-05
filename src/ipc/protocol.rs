@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::sound::SoundSignal;
 use crate::terminal::theme_probe::TerminalColors;
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -24,6 +24,12 @@ pub enum ClientMessage {
         rows: u16,
     },
     Key(KeyEvent),
+    /// A key whose host reported a Shift-translated character while the client
+    /// could still recover the layout-aware unshifted identity for CSI-u.
+    KeyWithIdentity {
+        key: KeyEvent,
+        unshifted: char,
+    },
     Mouse(MouseEvent),
     Paste(String),
     Resize {
@@ -461,6 +467,25 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn key_identity_roundtrips_for_remote_csi_u_encoding() {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+        let message = ClientMessage::KeyWithIdentity {
+            key: KeyEvent::new(KeyCode::Char('?'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+            unshifted: '/',
+        };
+        let mut bytes = Vec::new();
+        write_message(&mut bytes, &message).unwrap();
+        assert!(matches!(
+            read_message::<_, ClientMessage>(&mut &bytes[..]).unwrap(),
+            ClientMessage::KeyWithIdentity { key, unshifted }
+                if key.code == KeyCode::Char('?')
+                    && key.modifiers == KeyModifiers::ALT | KeyModifiers::SHIFT
+                    && unshifted == '/'
+        ));
     }
 
     #[test]
