@@ -557,6 +557,8 @@ pub struct WsMenu {
 pub enum WsMenuItem {
     Pin,
     Unpin,
+    /// Toggle the persisted cwd line for every WORKSPACES row.
+    TogglePath,
     Close,
     Rename,
     /// Delete a **linked worktree** and its files (git worktree remove + folder).
@@ -998,6 +1000,8 @@ pub enum AgentMenuItem {
     /// Pin a live agent to the top of the AGENTS list (per-session).
     Pin,
     Unpin,
+    /// Toggle the persisted path/detail line for every AGENTS row.
+    TogglePath,
     Divider,
     /// The `i`-th module action declaring `contexts = ["agent"]` (docs/13 §3.8).
     Module(usize),
@@ -5343,7 +5347,12 @@ impl App {
         } else {
             WsMenuItem::Pin
         };
-        let mut items = vec![WsMenuItem::Close, WsMenuItem::Rename, pin];
+        let mut items = vec![
+            WsMenuItem::Close,
+            WsMenuItem::Rename,
+            pin,
+            WsMenuItem::TogglePath,
+        ];
         if is_worktree {
             items.push(WsMenuItem::DeleteWorktree);
         }
@@ -5433,6 +5442,7 @@ impl App {
                 AgentMenuItem::Pin
             });
         }
+        items.push(AgentMenuItem::TogglePath);
         items.push(AgentMenuItem::Divider);
         items.push(AgentMenuItem::ToggleWorkspaceScope);
         let extras = self
@@ -5485,6 +5495,10 @@ impl App {
             // (docs), persisted across restarts.
             WsMenuItem::Pin | WsMenuItem::Unpin => {
                 let _ = self.set_workspace_pinned(index, item == WsMenuItem::Pin);
+            }
+            WsMenuItem::TogglePath => {
+                self.config.layout.workspace_paths = !self.config.layout.workspace_paths;
+                self.persist_config();
             }
             // The right-clicked node, which needn't be the focused one.
             WsMenuItem::Module(i) => {
@@ -6187,6 +6201,10 @@ impl App {
         match (item, target) {
             (AgentMenuItem::ToggleWorkspaceScope, _) => {
                 self.set_agents_scope(!self.agents_this_workspace);
+            }
+            (AgentMenuItem::TogglePath, _) => {
+                self.config.layout.agent_paths = !self.config.layout.agent_paths;
+                self.persist_config();
             }
             (AgentMenuItem::Resume, AgentTarget::Session(i)) => self.resume_session(i),
             (AgentMenuItem::Close, AgentTarget::Session(i)) => self.dismiss_session(i),
@@ -8916,6 +8934,39 @@ mod tests {
             app.workspace_display_order(),
             vec![(1, false), (2, true), (0, false)]
         );
+    }
+
+    #[test]
+    fn sidebar_path_toggles_persist_independently() {
+        let _env = crate::persist::test_env("sidebar-path-toggles");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+
+        assert!(app.config.layout.workspace_paths);
+        assert!(app.config.layout.agent_paths);
+        assert!(app.ws_menu_items(0).contains(&WsMenuItem::TogglePath));
+        assert!(app
+            .agent_menu_items(AgentTarget::Live(pane))
+            .contains(&AgentMenuItem::TogglePath));
+
+        app.open_ws_menu(0, 0, 0);
+        app.ws_menu_action(WsMenuItem::TogglePath);
+        let stored = crate::config::load();
+        assert!(!stored.layout.workspace_paths);
+        assert!(stored.layout.agent_paths);
+
+        app.open_agent_menu(AgentTarget::Live(pane), 0, 0);
+        app.agent_menu_action(AgentMenuItem::TogglePath);
+        let stored = crate::config::load();
+        assert!(!stored.layout.workspace_paths);
+        assert!(!stored.layout.agent_paths);
+
+        drop(app);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let restarted = App::new(80, 24, tx).unwrap();
+        assert!(!restarted.config.layout.workspace_paths);
+        assert!(!restarted.config.layout.agent_paths);
     }
 
     #[test]
@@ -12250,12 +12301,13 @@ mod tests {
         let items = &app.agent_menu.as_ref().unwrap().items;
         assert_eq!(
             items.len(),
-            4,
-            "session menu has Resume + Close + divider + workspace scope"
+            5,
+            "session menu has Resume + Close + path + divider + workspace scope"
         );
         assert_eq!(items[0].0, AgentMenuItem::Resume);
-        assert_eq!(items[2].0, AgentMenuItem::Divider);
-        assert_eq!(items[3].0, AgentMenuItem::ToggleWorkspaceScope);
+        assert_eq!(items[2].0, AgentMenuItem::TogglePath);
+        assert_eq!(items[3].0, AgentMenuItem::Divider);
+        assert_eq!(items[4].0, AgentMenuItem::ToggleWorkspaceScope);
         let rendered = |term: &Terminal<TestBackend>| {
             term.backend()
                 .buffer()
@@ -12268,7 +12320,7 @@ mod tests {
 
         // The scope row describes the action that will be taken. Clicking it
         // persists the choice; reopening any AGENTS row offers the inverse.
-        let scope = items[3].1;
+        let scope = items[4].1;
         app.handle_event(AppEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: scope.x + 1,
