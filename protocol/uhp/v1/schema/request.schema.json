@@ -27,7 +27,7 @@
         "diff.refresh", "diff.list", "diff.open", "diff.get", "diff.navigate", "diff.note.add", "diff.note.apply", "diff.note.list", "diff.note.edit", "diff.note.resolve", "diff.note.reopen", "diff.note.remove", "diff.note.send",
         "worktree.list", "worktree.create", "worktree.open", "worktree.remove",
         "task.add", "task.list", "task.get", "task.claim", "task.next", "task.start", "task.heartbeat", "task.update", "task.done", "task.merge", "task.release", "task.delete",
-        "automation.create", "automation.list", "automation.get", "automation.update", "automation.enable", "automation.disable", "automation.delete", "automation.run", "automation.history", "automation.preview", "automation.health",
+        "automation.create", "automation.list", "automation.get", "automation.update", "automation.enable", "automation.disable", "automation.rebind", "automation.delete", "automation.run", "automation.history", "automation.preview", "automation.health",
         "lease.acquire", "lease.list", "lease.release",
         "module.list", "module.info", "module.link", "module.unlink", "module.uninstall", "module.enable", "module.disable", "module.action.list", "module.action.invoke", "module.pane.open", "module.pane.focus", "module.pane.close", "module.config_dir", "module.settings.list", "module.settings.get", "module.settings.set", "module.log.list",
         "theme.list", "theme.path", "theme.use", "theme.reload", "manifest.reload",
@@ -182,6 +182,14 @@
         "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 128 }
       }
     },
+    "automationRebindParams": {
+      "type": "object", "additionalProperties": false, "required": ["id", "pane"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "pane": { "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "integer", "minimum": 1 }] },
+        "terminal_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" }
+      }
+    },
     "automationHistoryParams": {
       "type": "object", "additionalProperties": false,
       "properties": {
@@ -310,6 +318,8 @@
       "then": { "properties": { "params": { "$ref": "#/$defs/automationIdParams" } } } },
     { "if": { "properties": { "method": { "const": "automation.run" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/automationRunParams" } } } },
+    { "if": { "properties": { "method": { "const": "automation.rebind" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/automationRebindParams" } } } },
     { "if": { "properties": { "method": { "const": "automation.history" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/automationHistoryParams" } } } },
     { "if": { "properties": { "method": { "const": "automation.preview" } } },

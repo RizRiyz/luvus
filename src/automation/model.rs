@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 pub type AutomationId = String;
 pub type AutomationRunId = String;
@@ -108,8 +109,38 @@ pub enum ActiveAgentBusyPolicy {
     Skip,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActiveTargetState {
+    Bound,
+    Restoring,
+    NeedsRebind,
+}
+
+impl ActiveTargetState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bound => "bound",
+            Self::Restoring => "restoring",
+            Self::NeedsRebind => "needs_rebind",
+        }
+    }
+}
+
 /// Where an occurrence executes. Active-agent targets bind to one exact PTY
-/// lifetime so a restored or replaced shell cannot receive a stale prompt.
+/// lifetime unless Luvus can prove a durable native agent conversation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DurableAgentIdentity {
+    /// Canonical built-in agent id. This is persisted privately and never
+    /// included in a public target projection with the native session id.
+    pub agent_id: String,
+    /// Opaque upstream conversation id from a trusted native session source.
+    pub native_session_id: String,
+    /// Stable Luvus workspace id inside this named-session namespace.
+    pub workspace_id: String,
+    /// Canonicalized when possible; compared with platform path semantics.
+    pub cwd: PathBuf,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AutomationTarget {
@@ -121,7 +152,23 @@ pub enum AutomationTarget {
         terminal_id: String,
         #[serde(default)]
         if_busy: ActiveAgentBusyPolicy,
+        /// Private proof used to recover a new pane/terminal route after a
+        /// server restart. Older ledgers omit it and remain process-bound.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        durable: Option<DurableAgentIdentity>,
     },
+}
+
+impl AutomationTarget {
+    pub fn is_durable_active_agent(&self) -> bool {
+        matches!(
+            self,
+            Self::ActiveAgent {
+                durable: Some(_),
+                ..
+            }
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,6 +290,8 @@ pub struct AutomationView {
     pub latest_error: Option<String>,
     pub agent_id: String,
     pub workspace_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_state: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

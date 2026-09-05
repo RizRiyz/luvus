@@ -6035,6 +6035,29 @@ impl App {
                 );
             } else {
                 self.proc_scan_failure_retries = 0;
+                let affected = self
+                    .automation
+                    .automations
+                    .iter()
+                    .filter_map(|automation| match automation.target {
+                        crate::automation::AutomationTarget::ActiveAgent {
+                            pane_id,
+                            durable: Some(_),
+                            ..
+                        } if demanded_panes.contains(&PaneId(pane_id)) => {
+                            Some(automation.id.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let changed = !affected.is_empty();
+                for id in affected {
+                    self.automation.ready_active_targets.remove(&id);
+                    self.automation
+                        .active_target_states
+                        .insert(id, crate::automation::ActiveTargetState::NeedsRebind);
+                }
+                return changed;
             }
             return false;
         };
@@ -6682,6 +6705,35 @@ impl App {
 
     fn close_pane(&mut self, id: PaneId) {
         let owner = self.pane_location(id);
+        let durable = self
+            .automation
+            .automations
+            .iter()
+            .filter_map(|automation| match automation.target {
+                crate::automation::AutomationTarget::ActiveAgent {
+                    pane_id,
+                    durable: Some(_),
+                    ..
+                } if pane_id == id.0 => Some(automation.id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for automation_id in durable {
+            self.automation.ready_active_targets.remove(&automation_id);
+            self.automation.active_target_states.insert(
+                automation_id.clone(),
+                crate::automation::ActiveTargetState::NeedsRebind,
+            );
+            if let Some(automation) = self.automation.automation(&automation_id).cloned() {
+                self.emit_event(
+                    "automation.rebound",
+                    crate::automation::definition_target_event(
+                        &automation,
+                        crate::automation::ActiveTargetState::NeedsRebind,
+                    ),
+                );
+            }
+        }
         self.expire_active_agent_targets(
             Some(id),
             "active-agent automation target pane closed",

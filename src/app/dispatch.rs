@@ -1155,6 +1155,61 @@ mod socket_api_tests {
     }
 
     #[test]
+    fn automation_api_rebinds_only_the_same_private_native_session() {
+        let (_env, mut app) = app("socket-automation-durable-active-agent");
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "codex".into();
+        app.status.get_mut(&pane).unwrap().agent_session = Some(AgentSession {
+            agent: "codex".into(),
+            session_id: "private-native-session".into(),
+        });
+        let terminal_id = app
+            .panes
+            .get(&pane)
+            .and_then(|pane| pane.terminal_runtime())
+            .unwrap()
+            .terminal_id;
+        let workspace_id = app.workspace_of_pane(pane).unwrap().id.clone();
+        let created = app
+            .dispatch(
+                "automation.create",
+                &json!({
+                    "name":"Continue native review",
+                    "trigger":{"kind":"once","at_utc":4_000_000_000_u64},
+                    "target":{"kind":"active_agent","pane_id":pane.0,"terminal_id":terminal_id},
+                    "task":{
+                        "title":"Continue native review", "prompt":":", "agent_id":"codex",
+                        "workspace_id":workspace_id, "mode":"workspace"
+                    }
+                }),
+            )
+            .unwrap();
+        let id = created["automation"]["id"].as_str().unwrap().to_string();
+        assert_eq!(created["automation"]["target"]["binding"], "durable");
+        assert!(!created.to_string().contains("private-native-session"));
+
+        let rebound = app
+            .dispatch(
+                "automation.rebind",
+                &json!({"id":id,"pane":pane.0,"terminal_id":terminal_id}),
+            )
+            .unwrap();
+        assert_eq!(rebound["automation"]["target"]["binding"], "durable");
+        assert!(!rebound.to_string().contains("private-native-session"));
+
+        app.status.get_mut(&pane).unwrap().agent_session = Some(AgentSession {
+            agent: "codex".into(),
+            session_id: "different-native-session".into(),
+        });
+        assert_eq!(
+            app.dispatch("automation.rebind", &json!({"id":id,"pane":pane.0}),)
+                .unwrap_err()
+                .0,
+            "identity_mismatch"
+        );
+    }
+
+    #[test]
     fn task_api_projection_does_not_expose_automation_briefings() {
         let (_env, mut app) = app("socket-task-projection");
         let task = app
@@ -2696,6 +2751,7 @@ impl App {
                     self.usage_mtimes.remove(&key);
                 }
                 self.session_dirty = true;
+                self.confirm_durable_active_target(id);
                 Ok(json!({"type":"ok"}))
             }
             // A precise agent lifecycle event from an integration hook:
@@ -3786,6 +3842,7 @@ impl App {
                     json!({"pane":id.0.to_string(), "source":source, "agent":agent, "status":state_str(state), "sequence":sequence, "ttl_s":ttl_s}),
                 );
                 log_agent_authority(id, agent, crate::logging::Outcome::Ok);
+                self.reconcile_durable_active_targets(Some(id));
                 if changed {
                     self.emit_event(
                         "pane.agent_status_changed",
@@ -5036,7 +5093,10 @@ impl App {
                         .create_retry(&input, opt_borrowed_str(p, "idempotency_key"))
                         .map_err(automation_err)?
                     {
-                        return Ok(json!({"type":"automation", "automation":automation}));
+                        let state = self.durable_active_target_state(&automation);
+                        return Ok(
+                            json!({"type":"automation", "automation":crate::automation::public_automation(&automation, state)}),
+                        );
                     }
                 }
                 validate_automation_target(self, &mut input)?;
@@ -5058,6 +5118,18 @@ impl App {
                         format!("could not persist automation: {error}"),
                     ));
                 }
+                if automation.target.is_durable_active_agent() {
+                    self.automation
+                        .ready_active_targets
+                        .insert(automation.id.clone());
+                    self.automation.active_target_states.insert(
+                        automation.id.clone(),
+                        crate::automation::ActiveTargetState::Bound,
+                    );
+                } else {
+                    self.automation.ready_active_targets.remove(&automation.id);
+                    self.automation.active_target_states.remove(&automation.id);
+                }
                 self.emit_event(
                     if method == "automation.create" {
                         "automation.created"
@@ -5066,13 +5138,27 @@ impl App {
                     },
                     crate::automation::definition_event(&automation),
                 );
-                Ok(json!({"type":"automation", "automation":automation}))
+                let state = self.durable_active_target_state(&automation);
+                Ok(
+                    json!({"type":"automation", "automation":crate::automation::public_automation(&automation, state)}),
+                )
             }
             "automation.list" => {
                 reject_api_fields(p, &[])?;
+                let automations = self
+                    .automation
+                    .automations
+                    .iter()
+                    .map(|automation| {
+                        crate::automation::public_automation(
+                            automation,
+                            self.durable_active_target_state(automation),
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 Ok(json!({
                     "type":"automation_list",
-                    "automations": self.automation.automations,
+                    "automations": automations,
                 }))
             }
             "automation.get" => {
@@ -5082,7 +5168,9 @@ impl App {
                     .automation
                     .automation(id)
                     .ok_or_else(|| ("not_found".into(), format!("no such automation: {id}")))?;
-                Ok(json!({"type":"automation", "automation":automation}))
+                Ok(
+                    json!({"type":"automation", "automation":crate::automation::public_automation(automation, self.durable_active_target_state(automation))}),
+                )
             }
             "automation.enable" | "automation.disable" => {
                 reject_api_fields(p, &["id"])?;
@@ -5117,7 +5205,42 @@ impl App {
                     },
                     crate::automation::definition_event(&automation),
                 );
-                Ok(json!({"type":"automation", "automation":automation}))
+                let state = self.durable_active_target_state(&automation);
+                Ok(
+                    json!({"type":"automation", "automation":crate::automation::public_automation(&automation, state)}),
+                )
+            }
+            "automation.rebind" => {
+                reject_api_fields(p, &["id", "pane", "terminal_id"])?;
+                let id = req_str(p, "id")?.to_string();
+                if p.get("pane").is_none() {
+                    return Err((
+                        "invalid_request".into(),
+                        "automation.rebind requires pane".into(),
+                    ));
+                }
+                let pane = self.resolve_pane(p)?.ok_or_else(not_found)?;
+                let expected_terminal_id = optional_bounded_string(p, "terminal_id", 64)?;
+                let automation = self.rebind_active_agent_automation(
+                    &id,
+                    pane,
+                    expected_terminal_id.as_deref(),
+                )?;
+                let state = self.durable_active_target_state(&automation);
+                let event_state = self
+                    .automation
+                    .active_target_states
+                    .get(&automation.id)
+                    .copied()
+                    .unwrap_or(crate::automation::ActiveTargetState::NeedsRebind);
+                self.emit_event(
+                    "automation.rebound",
+                    crate::automation::definition_target_event(&automation, event_state),
+                );
+                Ok(json!({
+                    "type":"automation",
+                    "automation":crate::automation::public_automation(&automation, state),
+                }))
             }
             "automation.delete" => {
                 reject_api_fields(p, &["id"])?;
@@ -5129,7 +5252,9 @@ impl App {
                     return Err(("persistence_failed".into(), error.to_string()));
                 }
                 self.emit_event("automation.deleted", json!({"id":id}));
-                Ok(json!({"type":"automation", "automation":automation}))
+                Ok(
+                    json!({"type":"automation", "automation":crate::automation::public_automation(&automation, None)}),
+                )
             }
             "automation.run" => {
                 reject_api_fields(p, &["id", "idempotency_key"])?;
@@ -5143,7 +5268,9 @@ impl App {
                     .run_retry(&id, opt_borrowed_str(p, "idempotency_key"))
                     .map_err(automation_err)?
                 {
-                    return Ok(json!({"type":"automation_run", "run":run}));
+                    return Ok(
+                        json!({"type":"automation_run", "run":crate::automation::public_run(&run)}),
+                    );
                 }
                 let before = self.automation.clone();
                 let run = self
@@ -5160,7 +5287,7 @@ impl App {
                 );
                 self.start_automation_run(&run.id, now);
                 let run = self.automation.run(&run.id).cloned().unwrap_or(run);
-                Ok(json!({"type":"automation_run", "run":run}))
+                Ok(json!({"type":"automation_run", "run":crate::automation::public_run(&run)}))
             }
             "automation.history" => {
                 reject_api_fields(p, &["id", "limit"])?;
@@ -5177,7 +5304,7 @@ impl App {
                     .rev()
                     .filter(|run| id.is_none_or(|id| run.automation_id == id))
                     .take(limit)
-                    .cloned()
+                    .map(crate::automation::public_run)
                     .collect::<Vec<_>>();
                 Ok(json!({"type":"automation_history", "runs":runs}))
             }
@@ -7313,6 +7440,7 @@ fn automation_target(
                 pane_id,
                 terminal_id,
                 if_busy,
+                durable: None,
             })
         }
         _ => Err((
@@ -7327,7 +7455,7 @@ fn validate_automation_target(
     input: &mut crate::automation::CreateAutomation,
 ) -> Result<(), (String, String)> {
     if let crate::automation::AutomationTarget::ActiveAgent { .. } = &input.target {
-        app.validate_active_agent_target(&input.target, &input.task)?;
+        app.prepare_active_agent_target(&mut input.target, &mut input.task)?;
         return Ok(());
     }
 

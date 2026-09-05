@@ -1316,6 +1316,7 @@ impl App {
                         pane_id: target.pane.0,
                         terminal_id: target.terminal_id,
                         if_busy: crate::automation::ActiveAgentBusyPolicy::Wait,
+                        durable: None,
                     },
                     target.agent,
                     target.workspace_id,
@@ -1324,7 +1325,7 @@ impl App {
                 )
             }
         };
-        let input = crate::automation::CreateAutomation {
+        let mut input = crate::automation::CreateAutomation {
             name: title.clone(),
             enabled: true,
             trigger,
@@ -1345,7 +1346,7 @@ impl App {
             input.target,
             crate::automation::AutomationTarget::ActiveAgent { .. }
         ) {
-            self.validate_active_agent_target(&input.target, &input.task)
+            self.prepare_active_agent_target(&mut input.target, &mut input.task)
                 .map_err(|(_, message)| message)?;
         } else {
             // Reuse ORCH validation before changing automation state.
@@ -1367,6 +1368,12 @@ impl App {
         if let Err(error) = self.automation.save() {
             self.automation = before;
             return Err(format!("could not save automation: {error}"));
+        }
+        if item.target.is_durable_active_agent() {
+            self.automation.ready_active_targets.insert(item.id.clone());
+            self.automation
+                .active_target_states
+                .insert(item.id.clone(), crate::automation::ActiveTargetState::Bound);
         }
         self.emit_event(
             "automation.created",

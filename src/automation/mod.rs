@@ -9,7 +9,7 @@ mod persist;
 mod schedule;
 mod worker;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,7 +28,7 @@ pub struct AutomationHealth {
     pub next_run_at: Option<u64>,
 }
 
-pub const AUTOMATION_FORMAT_VERSION: u32 = 1;
+pub const AUTOMATION_FORMAT_VERSION: u32 = 2;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AutomationState {
@@ -47,6 +47,13 @@ pub struct AutomationState {
     /// In-memory nearest deadline. Keeps the server tick's ordinary path O(1).
     #[serde(skip)]
     next_wake_at: Option<u64>,
+    /// Durable targets proven ready in this server lifetime. Persistence must
+    /// never carry readiness across restart: a restored PTY needs fresh native
+    /// session and process evidence before scheduled input is allowed.
+    #[serde(skip)]
+    pub(crate) ready_active_targets: HashSet<AutomationId>,
+    #[serde(skip)]
+    pub(crate) active_target_states: HashMap<AutomationId, ActiveTargetState>,
 }
 
 impl Default for AutomationState {
@@ -60,6 +67,8 @@ impl Default for AutomationState {
             idempotency: Vec::new(),
             persist_path: None,
             next_wake_at: None,
+            ready_active_targets: HashSet::new(),
+            active_target_states: HashMap::new(),
         }
     }
 }
@@ -239,6 +248,92 @@ impl AutomationState {
         Ok(automation)
     }
 
+    /// Rewrite only the ephemeral pane/terminal route for one active-agent
+    /// definition and its still-pending occurrence snapshots. The private
+    /// durable identity is unchanged and remains the authority for this move.
+    pub(crate) fn set_active_route(
+        &mut self,
+        id: &str,
+        pane_id: u32,
+        terminal_id: String,
+        now: u64,
+    ) -> Result<Automation, Reject> {
+        let automation = self
+            .automations
+            .iter_mut()
+            .find(|automation| automation.id == id)
+            .ok_or_else(|| Reject::new("not_found", format!("no such automation: {id}")))?;
+        let AutomationTarget::ActiveAgent {
+            pane_id: current_pane,
+            terminal_id: current_terminal,
+            durable: Some(_),
+            ..
+        } = &mut automation.target
+        else {
+            return Err(Reject::new(
+                "process_bound_target",
+                "automation does not have a durable active-agent identity",
+            ));
+        };
+        *current_pane = pane_id;
+        *current_terminal = terminal_id.clone();
+        automation.updated_at = now;
+        let result = automation.clone();
+        for run in self
+            .runs
+            .iter_mut()
+            .filter(|run| run.automation_id == id && run.status == RunStatus::Pending)
+        {
+            if let AutomationTarget::ActiveAgent {
+                pane_id: run_pane,
+                terminal_id: run_terminal,
+                durable: Some(_),
+                ..
+            } = &mut run.target
+            {
+                *run_pane = pane_id;
+                *run_terminal = terminal_id.clone();
+            }
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn replace_active_target(
+        &mut self,
+        id: &str,
+        target: AutomationTarget,
+        now: u64,
+    ) -> Result<Automation, Reject> {
+        if !target.is_durable_active_agent() {
+            return Err(Reject::new(
+                "invalid_target",
+                "replacement target must have a durable identity",
+            ));
+        }
+        let automation = self
+            .automations
+            .iter_mut()
+            .find(|automation| automation.id == id)
+            .ok_or_else(|| Reject::new("not_found", format!("no such automation: {id}")))?;
+        if !matches!(automation.target, AutomationTarget::ActiveAgent { .. }) {
+            return Err(Reject::new(
+                "invalid_target",
+                "only active-agent automations can be rebound",
+            ));
+        }
+        automation.target = target.clone();
+        automation.updated_at = now;
+        let result = automation.clone();
+        for run in self
+            .runs
+            .iter_mut()
+            .filter(|run| run.automation_id == id && run.status == RunStatus::Pending)
+        {
+            run.target = target.clone();
+        }
+        Ok(result)
+    }
+
     pub fn delete(&mut self, id: &str) -> Result<Automation, Reject> {
         if self
             .runs
@@ -256,6 +351,8 @@ impl AutomationState {
             .position(|automation| automation.id == id)
             .ok_or_else(|| Reject::new("not_found", format!("no such automation: {id}")))?;
         let automation = self.automations.remove(index);
+        self.ready_active_targets.remove(id);
+        self.active_target_states.remove(id);
         self.refresh_deadline();
         Ok(automation)
     }
@@ -623,7 +720,7 @@ impl AutomationState {
     }
 
     pub(crate) fn normalize_after_load(&mut self) {
-        if self.format_version == 0 {
+        if self.format_version < AUTOMATION_FORMAT_VERSION {
             self.format_version = AUTOMATION_FORMAT_VERSION;
         }
         self.next_automation = self
@@ -852,7 +949,7 @@ pub fn definition_event(automation: &Automation) -> serde_json::Value {
         "name": automation.name,
         "enabled": automation.enabled,
         "trigger": automation.trigger,
-        "target": automation.target,
+        "target": public_target(&automation.target),
         "task": {
             "agent_id": automation.task.agent_id,
             "workspace_id": automation.task.workspace_id,
@@ -860,6 +957,70 @@ pub fn definition_event(automation: &Automation) -> serde_json::Value {
             "access": automation.task.access,
         },
         "next_run_at": automation.next_run_at,
+    })
+}
+
+pub fn definition_target_event(
+    automation: &Automation,
+    target_state: ActiveTargetState,
+) -> serde_json::Value {
+    let mut value = definition_event(automation);
+    value["target_state"] = serde_json::json!(target_state.as_str());
+    value
+}
+
+/// Public target projection. The native conversation id and canonical path are
+/// private recovery material and must never cross CLI, UHP, events, or logs.
+pub fn public_target(target: &AutomationTarget) -> serde_json::Value {
+    match target {
+        AutomationTarget::NewWorker => serde_json::json!({"kind":"new_worker"}),
+        AutomationTarget::ActiveAgent {
+            pane_id,
+            terminal_id,
+            if_busy,
+            durable,
+        } => serde_json::json!({
+            "kind":"active_agent",
+            "pane_id":pane_id,
+            "terminal_id":terminal_id,
+            "if_busy":if_busy,
+            "binding":if durable.is_some() { "durable" } else { "process_bound" },
+        }),
+    }
+}
+
+pub fn public_automation(automation: &Automation, target_state: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "id":automation.id,
+        "name":automation.name,
+        "enabled":automation.enabled,
+        "trigger":automation.trigger,
+        "target":public_target(&automation.target),
+        "target_state":target_state,
+        "task":automation.task,
+        "policy":automation.policy,
+        "next_run_at":automation.next_run_at,
+        "created_at":automation.created_at,
+        "updated_at":automation.updated_at,
+    })
+}
+
+pub fn public_run(run: &AutomationRun) -> serde_json::Value {
+    serde_json::json!({
+        "id":run.id,
+        "automation_id":run.automation_id,
+        "scheduled_at":run.scheduled_at,
+        "created_at":run.created_at,
+        "started_at":run.started_at,
+        "finished_at":run.finished_at,
+        "task_id":run.task_id,
+        "status":run.status,
+        "attempt":run.attempt,
+        "error":run.error,
+        "trigger":run.trigger,
+        "policy":run.policy,
+        "target":public_target(&run.target),
+        "task":run.task,
     })
 }
 
@@ -950,6 +1111,39 @@ fn validate_definition(
 ) -> Result<(), Reject> {
     validate_text("name", name, MAX_NAME_BYTES)?;
     validate_target(target)?;
+    if let AutomationTarget::ActiveAgent {
+        durable: Some(identity),
+        ..
+    } = target
+    {
+        if !identity.agent_id.eq_ignore_ascii_case(&task.agent_id)
+            || identity.workspace_id != task.workspace_id
+        {
+            return Err(Reject::new(
+                "invalid_target",
+                "durable target identity does not match its task",
+            ));
+        }
+        if !crate::agent::is_resumable(&identity.agent_id) {
+            return Err(Reject::new(
+                "invalid_target",
+                "durable target agent has no native resume capability",
+            ));
+        }
+        validate_text("target native session id", &identity.native_session_id, 512)?;
+        if identity.native_session_id.chars().any(char::is_control) {
+            return Err(Reject::new(
+                "invalid_target",
+                "durable target native session id contains control characters",
+            ));
+        }
+        if identity.cwd.as_os_str().is_empty() {
+            return Err(Reject::new(
+                "invalid_target",
+                "durable target cwd is required",
+            ));
+        }
+    }
     validate_task(task)?;
     if matches!(target, AutomationTarget::ActiveAgent { .. })
         && (!task.paths.is_empty() || task.gate.is_some())
@@ -1074,11 +1268,28 @@ fn create_fingerprint(input: &CreateAutomation) -> String {
         &input.name,
         input.enabled,
         &input.trigger,
-        &input.target,
+        fingerprint_target(&input.target),
         &input.task,
         &input.policy,
     ))
     .unwrap_or_default()
+}
+
+fn fingerprint_target(target: &AutomationTarget) -> serde_json::Value {
+    match target {
+        AutomationTarget::NewWorker => serde_json::json!({"kind":"new_worker"}),
+        AutomationTarget::ActiveAgent {
+            pane_id,
+            terminal_id,
+            if_busy,
+            ..
+        } => serde_json::json!({
+            "kind":"active_agent",
+            "pane_id":pane_id,
+            "terminal_id":terminal_id,
+            "if_busy":if_busy,
+        }),
+    }
 }
 
 fn validate_text(field: &str, value: &str, max: usize) -> Result<(), Reject> {
@@ -1204,6 +1415,7 @@ mod tests {
             pane_id: 7,
             terminal_id: "not-a-terminal".into(),
             if_busy: ActiveAgentBusyPolicy::Wait,
+            durable: None,
         };
         let error = state.create(definition, None, 10).unwrap_err();
 
@@ -1214,8 +1426,59 @@ mod tests {
             pane_id: 7,
             terminal_id: "0123456789abcdef0123456789abcdef".into(),
             if_busy: ActiveAgentBusyPolicy::Skip,
+            durable: None,
         };
         assert!(state.create(valid, None, 10).is_ok());
+    }
+
+    #[test]
+    fn public_active_target_never_exposes_private_rebind_identity() {
+        let target = AutomationTarget::ActiveAgent {
+            pane_id: 7,
+            terminal_id: "0123456789abcdef0123456789abcdef".into(),
+            if_busy: ActiveAgentBusyPolicy::Wait,
+            durable: Some(DurableAgentIdentity {
+                agent_id: "codex".into(),
+                native_session_id: "private-native-session".into(),
+                workspace_id: "workspace-a".into(),
+                cwd: std::path::PathBuf::from("/private/workspace"),
+            }),
+        };
+
+        let projected = public_target(&target).to_string();
+        assert!(projected.contains("durable"));
+        assert!(!projected.contains("private-native-session"));
+        assert!(!projected.contains("/private/workspace"));
+    }
+
+    #[test]
+    fn durable_identity_persists_privately_while_runtime_binding_state_does_not() {
+        let mut state = AutomationState::default();
+        let mut definition = input(Trigger::Once { at_utc: 100 });
+        definition.target = AutomationTarget::ActiveAgent {
+            pane_id: 7,
+            terminal_id: "0123456789abcdef0123456789abcdef".into(),
+            if_busy: ActiveAgentBusyPolicy::Wait,
+            durable: Some(DurableAgentIdentity {
+                agent_id: "codex".into(),
+                native_session_id: "private-native-session".into(),
+                workspace_id: "workspace-1".into(),
+                cwd: std::path::PathBuf::from("/private/workspace"),
+            }),
+        };
+        let automation = state.create(definition, None, 10).unwrap();
+        state.ready_active_targets.insert(automation.id.clone());
+        state
+            .active_target_states
+            .insert(automation.id, ActiveTargetState::Bound);
+
+        let persisted = serde_json::to_string(&state).unwrap();
+        assert!(persisted.contains("private-native-session"));
+        assert!(!persisted.contains("ready_active_targets"));
+        assert!(!persisted.contains("active_target_states"));
+        let restored: AutomationState = serde_json::from_str(&persisted).unwrap();
+        assert!(restored.ready_active_targets.is_empty());
+        assert!(restored.active_target_states.is_empty());
     }
 
     #[test]

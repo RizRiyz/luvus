@@ -136,6 +136,7 @@ pub const METHODS: &[&str] = &[
     "automation.update",
     "automation.enable",
     "automation.disable",
+    "automation.rebind",
     "automation.delete",
     "automation.run",
     "automation.history",
@@ -342,11 +343,14 @@ pub fn all_methods() -> impl Iterator<Item = &'static str> {
 }
 
 fn is_idempotent(method: &str) -> bool {
-    is_read_only(method)
-        && !matches!(
-            method,
-            "events.subscribe" | "terminal.backend.events.subscribe" | "terminal.backend.observe"
-        )
+    method == "automation.rebind"
+        || (is_read_only(method)
+            && !matches!(
+                method,
+                "events.subscribe"
+                    | "terminal.backend.events.subscribe"
+                    | "terminal.backend.observe"
+            ))
 }
 
 #[cfg(test)]
@@ -412,7 +416,7 @@ pub fn capabilities(event_sequence: u64) -> Value {
         "authorization":{"default":"local_owner","delegation":"scoped_ephemeral_token",
             "scopes":["read","workspace","agent","terminal","orchestration","extensions","admin","all"]},
         "concurrency":{"mutation_guard":"if_revision"},
-        "atomic_methods":["agent.start","agent.prompt","automation.create","automation.run","workspace.move_block","layout.apply","diff.note.apply"],
+        "atomic_methods":["agent.start","agent.prompt","automation.create","automation.rebind","automation.run","workspace.move_block","layout.apply","diff.note.apply"],
         "idempotency_keys":{"methods":["automation.create","automation.run"],"max_bytes":128},
         "graphics":false,
     })
@@ -437,6 +441,7 @@ mod tests {
             "terminal.backend.observe",
             "terminal.backend.control",
             "automation.create",
+            "automation.rebind",
             "automation.health",
         ] {
             assert!(unique.contains(required), "missing {required}");
@@ -460,7 +465,10 @@ mod tests {
         assert_eq!(required_scope("session.snapshot"), "read");
         assert_eq!(required_scope("events.subscribe"), "read");
         assert_eq!(required_scope("automation.create"), "orchestration");
+        assert_eq!(required_scope("automation.rebind"), "orchestration");
         assert!(!is_read_only("automation.create"));
+        assert!(!is_read_only("automation.rebind"));
+        assert!(is_idempotent("automation.rebind"));
         assert!(is_read_only("automation.preview"));
         for stream in [
             "events.subscribe",

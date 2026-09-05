@@ -2356,6 +2356,17 @@ static HELP: &[Translation] = &[
         "일정을 진행하지 않고 한 번 실행"
     ),
     tr!(
+        "reattach the same native conversation",
+        "volver a adjuntar la misma conversación nativa",
+        "reanexar a mesma conversa nativa",
+        "rattacher la même conversation native",
+        "dieselbe native Konversation erneut verbinden",
+        "sambungkan kembali percakapan native yang sama",
+        "重新连接同一个原生对话",
+        "同じネイティブ会話に再接続",
+        "동일한 네이티브 대화에 다시 연결"
+    ),
+    tr!(
         "show bounded run history",
         "mostrar el historial limitado de ejecuciones",
         "mostrar o histórico limitado de execuções",

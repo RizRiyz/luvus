@@ -442,6 +442,10 @@ impl App {
                 self.runtime_cwd_dirty = true;
                 self.runtime_proc_dirty = true;
                 self.register_backend_terminal(id);
+                self.reconcile_durable_active_targets(Some(id));
+                if self.durable_target_requires_readiness_scan(id) {
+                    self.request_proc_scan_if_stale(id);
+                }
                 crate::logging::event(
                     crate::logging::EventKind::PaneOpen,
                     &[
@@ -821,7 +825,15 @@ impl App {
             // Process-table churn is only a cache update, but a confirmed agent
             // exit changes the visible sidebar immediately. `apply_proc_scan`
             // distinguishes those cases so the common scan stays render-free.
-            AppEvent::ProcScanned(found) => self.apply_proc_scan(found),
+            AppEvent::ProcScanned(found) => {
+                let scan_succeeded = found.is_some();
+                let changed = self.apply_proc_scan(found);
+                if scan_succeeded {
+                    changed | self.reconcile_durable_active_targets(None)
+                } else {
+                    changed
+                }
+            }
             AppEvent::CwdScanned {
                 panes,
                 branches,

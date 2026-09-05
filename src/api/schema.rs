@@ -122,6 +122,7 @@ mod tests {
             "automation.deleted",
             "automation.disabled",
             "automation.enabled",
+            "automation.rebound",
             "automation.run_failed",
             "automation.run_finished",
             "automation.run_materialized",

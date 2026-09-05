@@ -396,7 +396,10 @@ surface:
   `target=new_worker` is the durable default. Use `active_agent` only with
   the exact discovered pane, terminal lifetime, agent, and workspace identities;
   treat `delivered` as input-queue evidence rather than completed work, and do
-  not reuse a process-bound target after pane closure or server restart.
+  not reuse a process-bound target after pane closure or server restart. A
+  target advertised as `binding=durable` may recover only the same private
+  native conversation. When it reports `needs_rebind`, inspect the intended
+  pane first and use `automation.rebind`; never substitute another session.
 - Inspect module metadata, actions, settings, and logs before changing module
   state. Installation, uninstallation, and consequential setting changes need
   clear authorization.

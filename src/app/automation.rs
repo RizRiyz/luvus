@@ -7,6 +7,20 @@ impl App {
     /// No timer, worker, or client is created by this bookkeeping step.
     pub fn reconcile_automations(&mut self) -> bool {
         let now = crate::automation::unix_now();
+        self.automation.ready_active_targets.clear();
+        self.automation.active_target_states.clear();
+        let durable_ids = self
+            .automation
+            .automations
+            .iter()
+            .filter(|automation| automation.target.is_durable_active_agent())
+            .map(|automation| automation.id.clone())
+            .collect::<Vec<_>>();
+        for id in durable_ids {
+            self.automation
+                .active_target_states
+                .insert(id, crate::automation::ActiveTargetState::NeedsRebind);
+        }
         let expired_active = self.expire_active_agent_targets(
             None,
             "active-agent automation target belonged to the previous server lifetime",
@@ -98,6 +112,25 @@ impl App {
         }
         if changed {
             let _ = self.automation.save();
+        }
+        changed |= self.reconcile_durable_active_targets(None);
+        let restoring_panes = self
+            .automation
+            .automations
+            .iter()
+            .filter(|automation| {
+                self.automation.active_target_states.get(&automation.id)
+                    == Some(&crate::automation::ActiveTargetState::Restoring)
+            })
+            .filter_map(|automation| match automation.target {
+                crate::automation::AutomationTarget::ActiveAgent { pane_id, .. } => {
+                    Some(crate::ids::PaneId(pane_id))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for pane in restoring_panes {
+            self.request_proc_scan_if_stale(pane);
         }
         let started = self.start_pending_automation_runs(now);
         changed || started
@@ -385,7 +418,468 @@ impl App {
                 "target agent moved to a different workspace".into(),
             ));
         }
+        if let crate::automation::AutomationTarget::ActiveAgent {
+            durable: Some(identity),
+            ..
+        } = target
+        {
+            if !self.pane_matches_durable_identity(pane, identity) {
+                return Err((
+                    "identity_mismatch".into(),
+                    "target pane no longer owns the durable native conversation".into(),
+                ));
+            }
+        }
         Ok((pane, status.state))
+    }
+
+    /// Upgrade a live, process-bound target to a durable native conversation
+    /// only when the pane already carries exact trusted session evidence.
+    pub(crate) fn prepare_active_agent_target(
+        &self,
+        target: &mut crate::automation::AutomationTarget,
+        task: &mut crate::automation::TaskTemplate,
+    ) -> Result<(), (String, String)> {
+        let (pane, _) = self.validate_active_agent_target(target, task)?;
+        let status = self.status.get(&pane).ok_or_else(|| {
+            (
+                "agent_not_ready".into(),
+                "target pane has no agent status".into(),
+            )
+        })?;
+        let Some(session) = status.agent_session.as_ref() else {
+            return Ok(());
+        };
+        if !session.agent.eq_ignore_ascii_case(&task.agent_id) {
+            return Err((
+                "identity_mismatch".into(),
+                "target pane agent and native session owner disagree".into(),
+            ));
+        }
+        let descriptor = crate::agent::registry::find(&session.agent).ok_or_else(|| {
+            (
+                "unsupported_agent".into(),
+                format!("{} is not a built-in agent", session.agent),
+            )
+        })?;
+        if descriptor.sessions.is_none() || session.session_id.trim().is_empty() {
+            return Ok(());
+        }
+        task.agent_id = descriptor.id.to_string();
+        let workspace = self.workspace_of_pane(pane).ok_or_else(|| {
+            (
+                "stale_target".into(),
+                "target agent is no longer in a workspace".into(),
+            )
+        })?;
+        let cwd = self
+            .panes
+            .get(&pane)
+            .map(|pane| std::fs::canonicalize(&pane.cwd).unwrap_or_else(|_| pane.cwd.clone()))
+            .ok_or_else(|| ("stale_target".into(), "target pane closed".into()))?;
+        let crate::automation::AutomationTarget::ActiveAgent { durable, .. } = target else {
+            unreachable!("validated active-agent target changed kind")
+        };
+        *durable = Some(crate::automation::DurableAgentIdentity {
+            agent_id: descriptor.id.to_string(),
+            native_session_id: session.session_id.clone(),
+            workspace_id: workspace.id.clone(),
+            cwd,
+        });
+        Ok(())
+    }
+
+    fn pane_matches_durable_identity(
+        &self,
+        pane: crate::ids::PaneId,
+        identity: &crate::automation::DurableAgentIdentity,
+    ) -> bool {
+        let Some(status) = self.status.get(&pane) else {
+            return false;
+        };
+        let Some(session) = status.agent_session.as_ref() else {
+            return false;
+        };
+        if !session.agent.eq_ignore_ascii_case(&identity.agent_id)
+            || session.session_id != identity.native_session_id
+        {
+            return false;
+        }
+        let Some(workspace) = self.workspace_of_pane(pane) else {
+            return false;
+        };
+        let Some(current) = self.panes.get(&pane) else {
+            return false;
+        };
+        workspace.id == identity.workspace_id
+            && crate::platform::same_path(&current.cwd, &identity.cwd)
+    }
+
+    fn durable_target_has_ready_evidence(
+        &self,
+        pane: crate::ids::PaneId,
+        identity: &crate::automation::DurableAgentIdentity,
+    ) -> bool {
+        if !self.pane_matches_durable_identity(pane, identity) {
+            return false;
+        }
+        let reported = self.status.get(&pane).is_some_and(|status| {
+            status
+                .agent_report
+                .as_ref()
+                .is_some_and(|report| report.agent.eq_ignore_ascii_case(&identity.agent_id))
+        });
+        reported
+            || self.proc_commands.get(&pane).is_some_and(|commands| {
+                !commands.is_empty()
+                    && self
+                        .manifests
+                        .process_has_agent(commands, &identity.agent_id)
+            })
+    }
+
+    pub(crate) fn durable_active_target_state(
+        &self,
+        automation: &crate::automation::Automation,
+    ) -> Option<&'static str> {
+        let crate::automation::AutomationTarget::ActiveAgent {
+            pane_id,
+            terminal_id,
+            durable: Some(identity),
+            ..
+        } = &automation.target
+        else {
+            return None;
+        };
+        if let Some(state) = self
+            .automation
+            .active_target_states
+            .get(&automation.id)
+            .copied()
+        {
+            return Some(state.as_str());
+        }
+        let pane = crate::ids::PaneId(*pane_id);
+        let route_matches = self
+            .panes
+            .get(&pane)
+            .and_then(|pane| pane.terminal_runtime())
+            .is_some_and(|runtime| runtime.terminal_id == *terminal_id)
+            && self.pane_matches_durable_identity(pane, identity);
+        if !route_matches {
+            Some("needs_rebind")
+        } else if self
+            .automation
+            .ready_active_targets
+            .contains(&automation.id)
+        {
+            Some("bound")
+        } else {
+            Some("restoring")
+        }
+    }
+
+    pub(crate) fn durable_target_requires_readiness_scan(&self, pane: crate::ids::PaneId) -> bool {
+        self.automation.automations.iter().any(|automation| {
+            matches!(
+                automation.target,
+                crate::automation::AutomationTarget::ActiveAgent { pane_id, durable: Some(_), .. }
+                    if pane_id == pane.0
+            ) && self.automation.active_target_states.get(&automation.id)
+                == Some(&crate::automation::ActiveTargetState::Restoring)
+        })
+    }
+
+    pub(crate) fn confirm_durable_active_target(&mut self, pane: crate::ids::PaneId) -> bool {
+        self.reconcile_durable_active_targets(Some(pane));
+        let ids = self
+            .automation
+            .automations
+            .iter()
+            .filter_map(|automation| match &automation.target {
+                crate::automation::AutomationTarget::ActiveAgent {
+                    pane_id,
+                    durable: Some(identity),
+                    ..
+                } if *pane_id == pane.0 && self.pane_matches_durable_identity(pane, identity) => {
+                    Some(automation.id.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for id in ids {
+            changed |= self.automation.ready_active_targets.insert(id.clone());
+            let state_changed = self
+                .automation
+                .active_target_states
+                .insert(id.clone(), crate::automation::ActiveTargetState::Bound)
+                != Some(crate::automation::ActiveTargetState::Bound);
+            changed |= state_changed;
+            if state_changed {
+                if let Some(automation) = self.automation.automation(&id).cloned() {
+                    self.emit_event(
+                        "automation.rebound",
+                        crate::automation::definition_target_event(
+                            &automation,
+                            crate::automation::ActiveTargetState::Bound,
+                        ),
+                    );
+                }
+            }
+        }
+        if changed {
+            self.wake_active_agent_automations(pane);
+        }
+        changed
+    }
+
+    /// Rebuild ephemeral active-agent routes from exact native conversation
+    /// identity. This is called only by restore, PTY, process, and integration
+    /// events; it adds no polling path or background worker.
+    pub(crate) fn reconcile_durable_active_targets(
+        &mut self,
+        preferred: Option<crate::ids::PaneId>,
+    ) -> bool {
+        let definitions = self
+            .automation
+            .automations
+            .iter()
+            .filter_map(|automation| match &automation.target {
+                crate::automation::AutomationTarget::ActiveAgent {
+                    durable: Some(identity),
+                    ..
+                } => Some((automation.id.clone(), identity.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        let mut wake = Vec::new();
+        let mut events = Vec::new();
+        for (id, identity) in definitions {
+            if let Some(preferred) = preferred {
+                if !self.pane_matches_durable_identity(preferred, &identity) {
+                    let routes_through_preferred =
+                        self.automation.automation(&id).is_some_and(|automation| {
+                            matches!(
+                                automation.target,
+                                crate::automation::AutomationTarget::ActiveAgent { pane_id, .. }
+                                    if pane_id == preferred.0
+                            )
+                        });
+                    if routes_through_preferred {
+                        changed |= self.automation.ready_active_targets.remove(&id);
+                        let state_changed =
+                            self.automation.active_target_states.insert(
+                                id.clone(),
+                                crate::automation::ActiveTargetState::NeedsRebind,
+                            ) != Some(crate::automation::ActiveTargetState::NeedsRebind);
+                        changed |= state_changed;
+                        if state_changed {
+                            events.push((
+                                id.clone(),
+                                crate::automation::ActiveTargetState::NeedsRebind,
+                            ));
+                        }
+                    }
+                    continue;
+                }
+            }
+            let candidates = self
+                .panes
+                .keys()
+                .copied()
+                .filter(|pane| preferred.is_none_or(|preferred| preferred == *pane))
+                .filter(|pane| self.pane_matches_durable_identity(*pane, &identity))
+                .filter_map(|pane| {
+                    self.panes
+                        .get(&pane)
+                        .and_then(|pane_ref| pane_ref.terminal_runtime())
+                        .map(|runtime| (pane, runtime.terminal_id.clone()))
+                })
+                .collect::<Vec<_>>();
+            if candidates.len() != 1 {
+                changed |= self.automation.ready_active_targets.remove(&id);
+                let state_changed = self.automation.active_target_states.insert(
+                    id.clone(),
+                    crate::automation::ActiveTargetState::NeedsRebind,
+                ) != Some(crate::automation::ActiveTargetState::NeedsRebind);
+                changed |= state_changed;
+                if state_changed {
+                    events.push((id, crate::automation::ActiveTargetState::NeedsRebind));
+                }
+                continue;
+            }
+            let (pane, terminal_id) = candidates[0].clone();
+            let route_changed = self.automation.automation(&id).is_some_and(|automation| {
+                match &automation.target {
+                    crate::automation::AutomationTarget::ActiveAgent {
+                        pane_id,
+                        terminal_id: current,
+                        ..
+                    } => *pane_id != pane.0 || *current != terminal_id,
+                    _ => false,
+                }
+            });
+            if route_changed {
+                let _ = self.automation.set_active_route(
+                    &id,
+                    pane.0,
+                    terminal_id,
+                    crate::automation::unix_now(),
+                );
+                changed = true;
+            }
+            let ready = self.durable_target_has_ready_evidence(pane, &identity);
+            let readiness_changed = if ready {
+                self.automation.ready_active_targets.insert(id.clone())
+            } else {
+                self.automation.ready_active_targets.remove(&id)
+            };
+            let target_state = if ready {
+                crate::automation::ActiveTargetState::Bound
+            } else {
+                crate::automation::ActiveTargetState::Restoring
+            };
+            let state_changed = self
+                .automation
+                .active_target_states
+                .insert(id.clone(), target_state)
+                != Some(target_state);
+            changed |= state_changed;
+            changed |= readiness_changed;
+            if route_changed || state_changed {
+                events.push((id.clone(), target_state));
+            }
+            if ready {
+                wake.push(pane);
+            }
+        }
+        if changed {
+            let _ = self.automation.save();
+        }
+        for (id, state) in events {
+            if let Some(automation) = self.automation.automation(&id).cloned() {
+                self.emit_event(
+                    "automation.rebound",
+                    crate::automation::definition_target_event(&automation, state),
+                );
+            }
+        }
+        for pane in wake {
+            self.wake_active_agent_automations(pane);
+        }
+        changed
+    }
+
+    pub(crate) fn rebind_active_agent_automation(
+        &mut self,
+        automation_id: &str,
+        pane: crate::ids::PaneId,
+        expected_terminal_id: Option<&str>,
+    ) -> Result<crate::automation::Automation, (String, String)> {
+        let existing = self
+            .automation
+            .automation(automation_id)
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    "not_found".into(),
+                    format!("no such automation: {automation_id}"),
+                )
+            })?;
+        let crate::automation::AutomationTarget::ActiveAgent {
+            if_busy,
+            durable: previous_identity,
+            ..
+        } = &existing.target
+        else {
+            return Err((
+                "invalid_target".into(),
+                "only active-agent automations can be rebound".into(),
+            ));
+        };
+        let terminal_id = self
+            .panes
+            .get(&pane)
+            .and_then(|pane| pane.terminal_runtime())
+            .map(|runtime| runtime.terminal_id.clone())
+            .ok_or_else(|| {
+                (
+                    "stale_target".into(),
+                    "target pane has no live terminal".into(),
+                )
+            })?;
+        if expected_terminal_id.is_some_and(|expected| expected != terminal_id) {
+            return Err((
+                "stale_target".into(),
+                "target terminal lifetime changed".into(),
+            ));
+        }
+        let mut task = existing.task.clone();
+        let mut target = crate::automation::AutomationTarget::ActiveAgent {
+            pane_id: pane.0,
+            terminal_id,
+            if_busy: *if_busy,
+            durable: None,
+        };
+        self.prepare_active_agent_target(&mut target, &mut task)?;
+        let crate::automation::AutomationTarget::ActiveAgent {
+            durable: Some(next_identity),
+            ..
+        } = &target
+        else {
+            return Err((
+                "identity_unavailable".into(),
+                "target pane has no trusted native agent session identity".into(),
+            ));
+        };
+        let next_identity = next_identity.clone();
+        if previous_identity.as_ref().is_some_and(|previous| {
+            !previous
+                .agent_id
+                .eq_ignore_ascii_case(&next_identity.agent_id)
+                || previous.native_session_id != next_identity.native_session_id
+                || previous.workspace_id != next_identity.workspace_id
+                || !crate::platform::same_path(&previous.cwd, &next_identity.cwd)
+        }) {
+            return Err((
+                "identity_mismatch".into(),
+                "selected pane belongs to a different native agent conversation".into(),
+            ));
+        }
+        let before = self.automation.clone();
+        let item = self
+            .automation
+            .replace_active_target(automation_id, target, crate::automation::unix_now())
+            .map_err(automation_err)?;
+        let ready = self.durable_target_has_ready_evidence(pane, &next_identity);
+        if ready {
+            self.automation
+                .ready_active_targets
+                .insert(automation_id.to_string());
+        } else {
+            self.automation.ready_active_targets.remove(automation_id);
+        }
+        self.automation.active_target_states.insert(
+            automation_id.to_string(),
+            if ready {
+                crate::automation::ActiveTargetState::Bound
+            } else {
+                crate::automation::ActiveTargetState::Restoring
+            },
+        );
+        if let Err(error) = self.automation.save() {
+            self.automation = before;
+            return Err(persistence_err(error));
+        }
+        if ready {
+            self.wake_active_agent_automations(pane);
+        } else {
+            self.proc_commands.remove(&pane);
+            self.request_proc_scan_if_stale(pane);
+        }
+        Ok(item)
     }
 
     fn deliver_active_agent_run(&mut self, run: &AutomationRun, now: u64) -> bool {
@@ -396,6 +890,7 @@ impl App {
             pane_id,
             terminal_id: _,
             if_busy,
+            ..
         } = &run.target
         else {
             return false;
@@ -403,11 +898,26 @@ impl App {
         let pane_id = crate::ids::PaneId(*pane_id);
         let state = match self.validate_active_agent_target(&run.target, &run.task) {
             Ok((_, state)) => state,
+            Err((_, message)) if run.target.is_durable_active_agent() => {
+                return self.wait_for_durable_active_target(run, message, now);
+            }
             Err((_, message)) => {
                 self.finish_active_agent_run(run, RunStatus::Failed, Some(message), now, true);
                 return true;
             }
         };
+        if run.target.is_durable_active_agent()
+            && !self
+                .automation
+                .ready_active_targets
+                .contains(&run.automation_id)
+        {
+            return self.wait_for_durable_active_target(
+                run,
+                "waiting for restored agent readiness evidence".into(),
+                now,
+            );
+        }
 
         if !matches!(state, State::Idle | State::Done) {
             if *if_busy == ActiveAgentBusyPolicy::Skip {
@@ -493,6 +1003,37 @@ impl App {
         true
     }
 
+    fn wait_for_durable_active_target(
+        &mut self,
+        run: &AutomationRun,
+        message: String,
+        now: u64,
+    ) -> bool {
+        let waiting = format!("durable target unavailable: {message}");
+        if self
+            .automation
+            .run(&run.id)
+            .and_then(|current| current.error.as_deref())
+            == Some(waiting.as_str())
+        {
+            return false;
+        }
+        let _ = self
+            .automation
+            .set_run_status(&run.id, RunStatus::Pending, Some(waiting), now);
+        let _ = self.automation.save();
+        self.emit_event(
+            "automation.run_updated",
+            serde_json::json!({
+                "automation_id":run.automation_id,
+                "run_id":run.id,
+                "status":"pending",
+                "target_state":"needs_rebind",
+            }),
+        );
+        true
+    }
+
     fn finish_active_agent_run(
         &mut self,
         run: &AutomationRun,
@@ -575,8 +1116,11 @@ impl App {
             .filter(|automation| {
                 matches!(
                     automation.target,
-                    crate::automation::AutomationTarget::ActiveAgent { pane_id, .. }
-                        if pane.is_none_or(|pane| pane.0 == pane_id)
+                    crate::automation::AutomationTarget::ActiveAgent {
+                        pane_id,
+                        durable: None,
+                        ..
+                    } if pane.is_none_or(|pane| pane.0 == pane_id)
                 )
             })
             .map(|automation| automation.id.clone())
@@ -845,6 +1389,7 @@ mod tests {
                     pane_id: pane.0,
                     terminal_id,
                     if_busy,
+                    durable: None,
                 },
                 task: crate::automation::TaskTemplate {
                     title: "continue review".into(),
@@ -859,6 +1404,21 @@ mod tests {
                 policy: crate::automation::AutomationPolicy::default(),
             },
         )
+    }
+
+    fn durable_active_agent_input(
+        app: &mut App,
+        state: crate::ui::theme::State,
+    ) -> (PaneId, crate::automation::CreateAutomation) {
+        let (pane, mut input) =
+            active_agent_input(app, state, crate::automation::ActiveAgentBusyPolicy::Wait);
+        app.status.get_mut(&pane).unwrap().agent_session = Some(AgentSession {
+            agent: "codex".into(),
+            session_id: "native-session-1".into(),
+        });
+        app.prepare_active_agent_target(&mut input.target, &mut input.task)
+            .unwrap();
+        (pane, input)
     }
 
     fn running_automation_task(app: &mut App) -> (PaneId, String, String) {
@@ -1374,5 +1934,118 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|detail| detail.contains("previous server lifetime")));
+    }
+
+    #[test]
+    fn durable_target_rebinds_exact_native_session_and_refreshes_pending_route() {
+        let _env = crate::persist::test_env("automation-durable-rebind");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let (pane, input) = durable_active_agent_input(&mut app, crate::ui::theme::State::Idle);
+        let definition = app.automation.create(input, None, 10).unwrap();
+        let run = app
+            .automation
+            .request_run(&definition.id, None, 20)
+            .unwrap();
+        if let crate::automation::AutomationTarget::ActiveAgent { terminal_id, .. } =
+            &mut app.automation.automations[0].target
+        {
+            *terminal_id = "00000000000000000000000000000000".into();
+        }
+        if let crate::automation::AutomationTarget::ActiveAgent { terminal_id, .. } =
+            &mut app.automation.runs[0].target
+        {
+            *terminal_id = "00000000000000000000000000000000".into();
+        }
+        app.proc_commands.insert(pane, vec!["codex".into()]);
+
+        assert!(app.reconcile_durable_active_targets(None));
+        let live_terminal = app
+            .panes
+            .get(&pane)
+            .unwrap()
+            .terminal_runtime()
+            .unwrap()
+            .terminal_id
+            .clone();
+        let crate::automation::AutomationTarget::ActiveAgent { terminal_id, .. } =
+            &app.automation.automation(&definition.id).unwrap().target
+        else {
+            unreachable!();
+        };
+        assert_eq!(terminal_id, &live_terminal);
+        let crate::automation::AutomationTarget::ActiveAgent { terminal_id, .. } =
+            &app.automation.run(&run.id).unwrap().target
+        else {
+            unreachable!();
+        };
+        assert_eq!(terminal_id, &live_terminal);
+        assert!(app.automation.ready_active_targets.contains(&definition.id));
+    }
+
+    #[test]
+    fn durable_pending_run_waits_instead_of_disabling_on_stale_route() {
+        let _env = crate::persist::test_env("automation-durable-waits");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let (_, input) = durable_active_agent_input(&mut app, crate::ui::theme::State::Idle);
+        let definition = app.automation.create(input, None, 10).unwrap();
+        let run = app
+            .automation
+            .request_run(&definition.id, None, 20)
+            .unwrap();
+        if let crate::automation::AutomationTarget::ActiveAgent { terminal_id, .. } =
+            &mut app.automation.runs[0].target
+        {
+            *terminal_id = "00000000000000000000000000000000".into();
+        }
+
+        assert!(app.start_automation_run(&run.id, 20));
+        assert_eq!(
+            app.automation.run(&run.id).unwrap().status,
+            RunStatus::Pending
+        );
+        assert!(app.automation.automation(&definition.id).unwrap().enabled);
+    }
+
+    #[test]
+    fn failed_readiness_scan_keeps_durable_target_needing_rebind() {
+        let _env = crate::persist::test_env("automation-durable-scan-failure");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let (pane, input) = durable_active_agent_input(&mut app, crate::ui::theme::State::Idle);
+        let definition = app.automation.create(input, None, 10).unwrap();
+        app.automation.active_target_states.insert(
+            definition.id.clone(),
+            crate::automation::ActiveTargetState::Restoring,
+        );
+        app.proc_scan_demand_inflight = true;
+        app.proc_scan_demand_panes_inflight.insert(pane);
+        app.proc_scan_failure_retries = 0;
+
+        assert!(app.handle_event(AppEvent::ProcScanned(None)));
+        assert_eq!(
+            app.automation.active_target_states.get(&definition.id),
+            Some(&crate::automation::ActiveTargetState::NeedsRebind)
+        );
+        assert!(!app.automation.ready_active_targets.contains(&definition.id));
+    }
+
+    #[test]
+    fn manual_rebind_rejects_a_different_native_conversation() {
+        let _env = crate::persist::test_env("automation-durable-manual-mismatch");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let (pane, input) = durable_active_agent_input(&mut app, crate::ui::theme::State::Idle);
+        let definition = app.automation.create(input, None, 10).unwrap();
+        app.status.get_mut(&pane).unwrap().agent_session = Some(AgentSession {
+            agent: "codex".into(),
+            session_id: "another-session".into(),
+        });
+
+        let error = app
+            .rebind_active_agent_automation(&definition.id, pane, None)
+            .unwrap_err();
+        assert_eq!(error.0, "identity_mismatch");
     }
 }

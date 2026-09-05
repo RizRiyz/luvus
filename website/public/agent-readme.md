@@ -329,6 +329,9 @@ the worktree/workspace Git mode, and unsupported agent/access pairs are rejected
 before a worker is created. Read definitions with `automation.list`,
 runs with `automation.history`, and fleet health with `automation.health`.
 Create and manual-run requests accept idempotency keys for safe retries.
+Use `automation.rebind` only to reconnect a durable active-agent definition to
+a pane that proves the same native conversation; it requires orchestration
+authority and is safe to repeat with the same pane.
 Disabling a definition prevents future occurrences but never kills its current
 ORCH task or pane. Detection-only manifest agents cannot be scheduled.
 Luvus uses reviewed one-shot flags from the built-in adapter and never types a
@@ -337,10 +340,13 @@ blind approval response or changes an agent's permanent permission config.
 To continue an existing interactive conversation, set `target.kind` to
 `active_agent` and provide the exact `pane_id`, 32-character `terminal_id`,
 matching `task.agent_id`, and matching `task.workspace_id` from `agent.list`.
-Use `target.if_busy` as `wait` or `skip`. This target is valid only for that PTY
-and server lifetime, creates no ORCH worker, and records queue acceptance as
-`delivered`, not task completion. Never guess or reuse a terminal ID after a
-pane closes or the server restarts.
+Use `target.if_busy` as `wait` or `skip`. If Luvus has a trusted native session
+identity, it can recover the route after restart only from an exact unique
+match; public automation data exposes `binding` and `target_state` but never
+the native session ID. Otherwise the target remains valid only for that PTY and
+server lifetime. Active targets create no ORCH worker and record queue
+acceptance as `delivered`, not task completion. Never guess a terminal ID or
+rebind to a different conversation.
 
 Start with capability discovery and validate against the installed JSON Schema
 bundle. Do not infer method support from a release number alone.

@@ -176,10 +176,16 @@ lock scopes short and never hold it across unrelated slow work.
 - Named-session listing and startup are user-triggered background work. Fence
   results by generation so a closed or replaced selector cannot apply stale
   discovery or launch results; do not add idle session polling.
-- Active-agent automations bind to an exact pane and terminal lifetime. They
-  create no ORCH worker, report prompt queueing as `delivered` rather than task
-  completion, and fail closed on pane closure, identity drift, or server restart.
-  Busy `wait` targets wake from agent-state events; do not add polling.
+- Active-agent automations initially bind to an exact pane and terminal
+  lifetime. When a resumable built-in adapter supplies a trusted native session
+  ID, the private durable identity may rebind after restart only to one exact
+  agent/session/workspace/cwd match with fresh readiness evidence. Public
+  projections expose only `binding` and `target_state`, never native session
+  IDs or recovery paths. Process-bound targets retain fail-closed restart
+  behavior. Active targets create no ORCH worker, report prompt queueing as
+  `delivered` rather than task completion, and fail closed on ambiguity,
+  identity drift, or stale terminal routes. Busy `wait` targets and restoring
+  targets wake from existing lifecycle events; do not add polling.
 - File, DIFF, Markdown, and Mermaid views are native layout leaves, not hidden
   PTYs. Keep reads/layout off-loop, generation-checked, bounded, reusable, and
   independent of the configured file editor.

@@ -339,6 +339,8 @@ struct AutomationRender<'a> {
 #[derive(Clone, Copy)]
 enum AutomationDisplayStatus {
     Scheduled,
+    Restoring,
+    NeedsRebind,
     Running,
     Review,
     Failed,
@@ -389,25 +391,29 @@ fn draw_status_summary(
     t: &Theme,
 ) {
     let entries = if view == OrchView::Automations {
-        let mut counts = [0usize; 6];
+        let mut counts = [0usize; 8];
         for item in &automation.automations {
             let index = match automation_display_status(automation, item) {
                 AutomationDisplayStatus::Scheduled => 0,
-                AutomationDisplayStatus::Running => 1,
-                AutomationDisplayStatus::Review => 2,
-                AutomationDisplayStatus::Failed => 3,
-                AutomationDisplayStatus::Paused => 4,
-                AutomationDisplayStatus::Completed => 5,
+                AutomationDisplayStatus::Restoring => 1,
+                AutomationDisplayStatus::NeedsRebind => 2,
+                AutomationDisplayStatus::Running => 3,
+                AutomationDisplayStatus::Review => 4,
+                AutomationDisplayStatus::Failed => 5,
+                AutomationDisplayStatus::Paused => 6,
+                AutomationDisplayStatus::Completed => 7,
             };
             counts[index] += 1;
         }
         vec![
             (cat.automation_scheduled, counts[0], t.accent),
-            (cat.task_running, counts[1], t.mint),
-            (cat.task_review, counts[2], t.amber),
-            (cat.task_failed, counts[3], t.coral),
-            (cat.automation_paused, counts[4], t.overlay1),
-            (cat.automation_completed, counts[5], t.green),
+            (cat.automation_restoring, counts[1], t.amber),
+            (cat.automation_needs_rebind, counts[2], t.coral),
+            (cat.task_running, counts[3], t.mint),
+            (cat.task_review, counts[4], t.amber),
+            (cat.task_failed, counts[5], t.coral),
+            (cat.automation_paused, counts[6], t.overlay1),
+            (cat.automation_completed, counts[7], t.green),
         ]
     } else {
         vec![
@@ -605,6 +611,8 @@ fn automation_status<'a>(
     };
     match automation_display_status(state, item) {
         AutomationDisplayStatus::Scheduled => (cat.automation_scheduled, t.accent),
+        AutomationDisplayStatus::Restoring => (cat.automation_restoring, t.amber),
+        AutomationDisplayStatus::NeedsRebind => (cat.automation_needs_rebind, t.coral),
         AutomationDisplayStatus::Running => (cat.task_running, t.mint),
         AutomationDisplayStatus::Review => (cat.task_review, t.amber),
         AutomationDisplayStatus::Failed => (cat.task_failed, t.coral),
@@ -617,6 +625,17 @@ fn automation_display_status(
     state: &AutomationState,
     automation: &Automation,
 ) -> AutomationDisplayStatus {
+    if let Some(target_state) = state.active_target_states.get(&automation.id) {
+        match target_state {
+            crate::automation::ActiveTargetState::Restoring => {
+                return AutomationDisplayStatus::Restoring;
+            }
+            crate::automation::ActiveTargetState::NeedsRebind => {
+                return AutomationDisplayStatus::NeedsRebind;
+            }
+            crate::automation::ActiveTargetState::Bound => {}
+        }
+    }
     match state.latest_run(&automation.id).map(|run| run.status) {
         Some(RunStatus::Pending | RunStatus::Starting | RunStatus::Running) => {
             AutomationDisplayStatus::Running
@@ -2354,6 +2373,18 @@ pub(super) fn draw_automation_detail(
         },
         &mut lines,
     );
+    if let crate::automation::AutomationTarget::ActiveAgent { durable, .. } = &automation.target {
+        kv(
+            cat.automation_binding,
+            if durable.is_some() {
+                cat.automation_survives_restart
+            } else {
+                cat.automation_until_restart
+            }
+            .to_string(),
+            &mut lines,
+        );
+    }
     kv(
         cat.board_workspace,
         automation.task.workspace_id.clone(),
@@ -2644,6 +2675,70 @@ mod tests {
             .map(|x| summary_buffer[(x, 1)].symbol())
             .collect::<String>();
         assert!(summary.contains("1 scheduled"));
+    }
+
+    #[test]
+    fn automation_detail_explains_a_durable_active_agent_binding() {
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+        let mut state = AutomationState::default();
+        state.automations.push(Automation {
+            id: "a1".into(),
+            name: "Continue review".into(),
+            enabled: true,
+            trigger: Trigger::Once { at_utc: 100 },
+            target: crate::automation::AutomationTarget::ActiveAgent {
+                pane_id: 7,
+                terminal_id: "0123456789abcdef0123456789abcdef".into(),
+                if_busy: crate::automation::ActiveAgentBusyPolicy::Wait,
+                durable: Some(crate::automation::DurableAgentIdentity {
+                    agent_id: "codex".into(),
+                    native_session_id: "private-session".into(),
+                    workspace_id: "workspace-1".into(),
+                    cwd: std::path::PathBuf::from("/workspace"),
+                }),
+            },
+            task: crate::automation::TaskTemplate {
+                title: "Continue review".into(),
+                prompt: "Continue".into(),
+                agent_id: "codex".into(),
+                workspace_id: "workspace-1".into(),
+                mode: crate::orch::TaskWorkerMode::Workspace,
+                access: crate::automation::AutomationAccess::Workspace,
+                paths: Vec::new(),
+                gate: None,
+            },
+            policy: crate::automation::AutomationPolicy::default(),
+            next_run_at: Some(100),
+            created_at: 1,
+            updated_at: 1,
+        });
+
+        draw_automation_detail(
+            &mut target,
+            area,
+            AutomationDetail {
+                automation: &state.automations[0],
+                state: &state,
+                preview: &[],
+            },
+            0,
+            &crate::i18n::EN,
+            &Theme::quattro_rally(),
+        );
+
+        let rendered = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Binding"));
+        assert!(rendered.contains("Survives server restart"));
+        assert!(!rendered.contains("private-session"));
     }
 
     #[test]

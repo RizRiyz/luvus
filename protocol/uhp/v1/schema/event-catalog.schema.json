@@ -13,6 +13,7 @@
     "automation.deleted",
     "automation.disabled",
     "automation.enabled",
+    "automation.rebound",
     "automation.run_failed",
     "automation.run_finished",
     "automation.run_materialized",
@@ -76,6 +77,7 @@
     "automation.deleted": { "$ref": "#/$defs/id_only" },
     "automation.disabled": { "$ref": "#/$defs/automation_definition" },
     "automation.enabled": { "$ref": "#/$defs/automation_definition" },
+    "automation.rebound": { "$ref": "#/$defs/automation_definition" },
     "automation.run_failed": { "$ref": "#/$defs/automation_run" },
     "automation.run_finished": { "$ref": "#/$defs/automation_run" },
     "automation.run_materialized": { "$ref": "#/$defs/automation_run" },
@@ -141,6 +143,7 @@
         "name": { "type": "string" },
         "enabled": { "type": "boolean" },
         "trigger": { "type": "object" },
+        "target_state": { "enum": ["bound", "restoring", "needs_rebind"] },
         "target": {
           "oneOf": [
             {
@@ -149,12 +152,13 @@
             },
             {
               "type": "object", "additionalProperties": false,
-              "required": ["kind", "pane_id", "terminal_id", "if_busy"],
+              "required": ["kind", "pane_id", "terminal_id", "if_busy", "binding"],
               "properties": {
                 "kind": { "const": "active_agent" },
                 "pane_id": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
                 "terminal_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
-                "if_busy": { "enum": ["wait", "skip"] }
+                "if_busy": { "enum": ["wait", "skip"] },
+                "binding": { "enum": ["process_bound", "durable"] }
               }
             }
           ]
