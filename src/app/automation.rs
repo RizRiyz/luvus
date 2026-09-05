@@ -433,6 +433,30 @@ impl App {
         Ok((pane, status.state))
     }
 
+    /// Resolve the pane a detail overlay should open without guessing. Active
+    /// targets must still match their exact terminal/session identity; worker
+    /// targets come only from the latest live run's bound ORCH task.
+    pub(crate) fn automation_live_pane(&self, automation_id: &str) -> Option<crate::ids::PaneId> {
+        let automation = self.automation.automation(automation_id)?;
+        match &automation.target {
+            crate::automation::AutomationTarget::ActiveAgent { .. } => self
+                .validate_active_agent_target(&automation.target, &automation.task)
+                .ok()
+                .map(|(pane, _)| pane),
+            crate::automation::AutomationTarget::NewWorker => self
+                .automation
+                .runs
+                .iter()
+                .rev()
+                .find(|run| run.automation_id == automation_id && run.status.is_live())
+                .and_then(|run| run.task_id.as_deref())
+                .and_then(|task_id| self.orch.task(task_id))
+                .and_then(|task| task.assignee)
+                .map(crate::ids::PaneId)
+                .filter(|pane| self.panes.contains_key(pane)),
+        }
+    }
+
     /// Upgrade a live, process-bound target to a durable native conversation
     /// only when the pane already carries exact trusted session evidence.
     pub(crate) fn prepare_active_agent_target(

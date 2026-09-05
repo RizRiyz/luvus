@@ -1562,7 +1562,7 @@ pub enum OrchHit {
     /// The inert task/automation detail surface. Its backdrop closes the
     /// overlay without allowing the click to reach the board behind it.
     DetailModal,
-    DetailOpenOrch,
+    DetailOpenTarget,
 }
 
 /// ORCH shows the selected task beside the fleet at this viewport size.
@@ -2201,7 +2201,7 @@ pub struct App {
     /// Durable agent automation definitions and bounded run history. The app
     /// event loop remains their only mutable owner.
     pub automation: crate::automation::AutomationState,
-    /// Scroll offset of the orchestration board tab (docs/22, ORCH-7).
+    /// Scroll offset of the active orchestration board list (docs/22, ORCH-7).
     pub orch_scroll: usize,
     /// Active ORCH dashboard projection: concrete tasks or future definitions.
     pub orch_view: OrchView,
@@ -2214,7 +2214,7 @@ pub struct App {
     pub orch_form: Option<OrchForm>,
     /// The board's "start worker with…" agent picker, when open.
     pub orch_start: Option<OrchStart>,
-    /// Task whose detail overlay is open on the board (`o`), plus its scroll.
+    /// Task or automation whose detail overlay is open, plus its scroll.
     pub orch_detail: Option<String>,
     pub orch_detail_scroll: usize,
     /// Next automation occurrences captured when its detail is opened. Keeping
