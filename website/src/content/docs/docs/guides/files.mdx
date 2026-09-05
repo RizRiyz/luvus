@@ -34,8 +34,8 @@ contains changes. Files created outside luvus, by an agent or a command in a
 pane, show up on their own within a couple of seconds.
 
 **Right-click a row**, or press `a` on the keyboard-selected row, for New File,
-New Folder, Rename, Copy Path, Insert Path, Open as Workspace (folders), and
-Delete (Delete always asks first).
+New Folder, Rename, Copy Path, Insert Path, Open Externally, Open as Workspace
+(folders), and Delete (Delete always asks first).
 
 | Key | FILES tree action |
 |---|---|
@@ -44,6 +44,7 @@ Delete (Delete always asks first).
 | `l` / `→` | expand a folder, or move to its first child |
 | `Enter` | follow **File click behavior** for the selected row |
 | `Shift+Enter` | open the selected file in a permanent read-only pane |
+| `o` / `Ctrl+O` | open the selected file or folder in the desktop's own application |
 | `a` | open the selected row's actions; use arrows or `j` / `k` and `Enter` |
 | `g` / `G`, Home / End | first / last row |
 | PageUp / PageDown | move one visible page |
@@ -67,13 +68,22 @@ insert would not be the path you clicked.
 |---|---|
 | **Click** | **previews** the file by default, or opens a tab — see [What a click does](#what-a-click-does) |
 | **Shift+click** | when forwarded by the terminal, opens the **read-only viewer** in a *permanent* pane beside the focus |
-| **Right-click** | **Open in Tab**, open in an installed editor, or explicitly preview Markdown/Mermaid |
+| **Right-click** | **Open in Tab**, open in an installed editor, Open Externally, or explicitly preview Markdown/Mermaid |
 
 Shift+click is an optional "keep this one open" shortcut. It stays read-only
 whatever the two settings below say, and unlike a preview it is never reused for
 the next file you click. Some terminals reserve Shift-modified mouse input for
 native text selection, so the gesture may not reach Luvus; use **Open in Tab**
 from the right-click menu when you need a permanent view.
+
+**Open Externally** hands the selected file or folder to the desktop. A file
+opens in the application the desktop associates with it; a folder opens in the
+file manager. With `--remote`, the path is handed to the machine running the
+client and opens only if it exists there. The OS handler may execute
+application-like or shortcut-like entries (`.app`, `.desktop`, `.lnk`,
+`.command`) the same way double-clicking them would, so only open entries you
+trust. A path that is not valid UTF-8 is refused rather than changed into a
+different path for transport.
 
 ## What a click does
 

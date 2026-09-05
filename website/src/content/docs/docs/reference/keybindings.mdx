@@ -118,14 +118,20 @@ Keys.
 
 `Shift+↑` enters [scroll mode](/docs/guides/scrollback/). `Ctrl+Space e` focuses
 the FILES tree, while `Ctrl+Space i` focuses the DIFF review list. Both accept
-arrows or `j` / `k`, and `Esc` returns to the pane. After `Enter` opens a file
-view, `x` closes that view. An opened DIFF review closes with `q` or `Esc`.
+arrows or `j` / `k`, and `Esc` returns to the pane. In the FILES tree, `o` or
+`Ctrl+O` opens the selected file or folder in the desktop's own application,
+on the machine running the client. The path is passed as a separate argument,
+which prevents shell injection but does not change what the OS handler does:
+application or shortcut-like entries (`.app`, `.desktop`, `.lnk`, `.command`)
+run exactly as a double-click would, so only open entries you trust. After
+`Enter` opens a file view, `x` closes that view. An opened DIFF review closes
+with `q` or `Esc`.
 
 **Right-click menus** (no key needed): a **tab** to rename it, a **workspace** row
 for its menu (rename / close / worktrees / git / board), a **pane** to split or
 close it, an **agent** row for quick actions, or a **FILES** row to open it
-read-only or in an editor, explicitly preview Markdown/Mermaid, or manage the
-entry (new / rename / delete). See
+read-only or in an editor, open it externally, explicitly preview
+Markdown/Mermaid, or manage the entry (new / rename / delete). See
 [Panes, Tabs & Workspaces](/docs/guides/layout/) and
 [Browsing & Opening Files](/docs/guides/files/).
 

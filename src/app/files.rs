@@ -646,6 +646,23 @@ impl App {
         }
     }
 
+    /// Queue `path` to open with the *client's* OS handler, the same way
+    /// [`App::open_url`] queues a browser open: with `--remote` the desktop
+    /// in front of the user is the one that should see the file.
+    ///
+    /// No filesystem access here — existence is checked on the client when it
+    /// receives [`crate::ipc::protocol::ServerMessage::OpenPath`]. The wire
+    /// value is text, so reject a non-UTF-8 path instead of letting serde fail
+    /// later and terminate the client's IPC writer.
+    pub fn open_path_externally(&mut self, path: PathBuf) {
+        let Some(path) = path.to_str() else {
+            self.show_toast("path is not valid UTF-8");
+            return;
+        };
+        self.show_toast(crate::ui::truncate(path, 60));
+        self.pending_open_path = Some(path.to_owned());
+    }
+
     /// Navigate the FILES tree while it owns keyboard focus. Returns to the
     /// pane before opening a file so its native view receives subsequent keys.
     pub fn handle_file_tree_key(&mut self, key: KeyEvent) -> bool {
@@ -668,6 +685,26 @@ impl App {
             KeyCode::Left | KeyCode::Char('h') => self.collapse_file_row_or_parent(),
             KeyCode::Right | KeyCode::Char('l') => self.expand_file_row_or_child(),
             KeyCode::Char('a') => self.open_file_menu_for_keyboard(),
+            // Bare `o` and Ctrl+O only. Any other modifier combination (Alt,
+            // Ctrl+Alt which is how Windows AltGr text arrives, Super) must
+            // fall through so it cannot trigger the action. A separate argv
+            // entry prevents shell injection, but the OS handler still
+            // executes application or shortcut-like files the same way a
+            // double-click would; the path is the user's own FILES row.
+            KeyCode::Char('o')
+                if key.modifiers == KeyModifiers::NONE
+                    || key.modifiers == KeyModifiers::CONTROL =>
+            {
+                let index = self.file_tree.cursor;
+                if let Some(path) = self
+                    .file_tree
+                    .visible_rows()
+                    .get(index)
+                    .map(|row| row.path.clone())
+                {
+                    self.open_path_externally(path);
+                }
+            }
             KeyCode::Enter => {
                 let target = if key.modifiers.contains(KeyModifiers::SHIFT) {
                     OpenTarget::Pane
@@ -781,6 +818,9 @@ impl App {
                 self.files_focused = false;
                 self.open_file_view(menu.path.clone(), OpenTarget::Tab);
             }
+            // Offered for folders too, so this one sits outside the file-only
+            // block above.
+            FileMenuItem::OpenInOs => self.open_path_externally(menu.path),
             FileMenuItem::OpenWith(i) => {
                 if let Some((cmd, _)) = menu.editors.get(i).cloned() {
                     self.files_focused = false;
@@ -1551,6 +1591,115 @@ mod tests {
         assert!(
             ditems.contains(&FileMenuItem::NewFile),
             "folder still has CRUD"
+        );
+    }
+
+    /// Handing an entry to the desktop is the one open action that makes sense
+    /// for a folder too, so unlike the editor rows it appears on both menus.
+    #[test]
+    fn file_menu_offers_os_open_for_files_and_folders() {
+        let file = FileMenu {
+            path: PathBuf::from("/tmp/x.pdf"),
+            is_dir: false,
+            anchor: (0, 0),
+            items: Vec::new(),
+            selected: None,
+            editors: Vec::new(),
+        };
+        let items = file.build_items();
+        assert!(
+            items.contains(&FileMenuItem::OpenInOs),
+            "offered for a file"
+        );
+        let os = items.iter().position(|i| *i == FileMenuItem::OpenInOs);
+        let del = items.iter().position(|i| *i == FileMenuItem::Delete);
+        assert!(os < del, "it belongs with the open block, above Delete");
+
+        let folder = FileMenu {
+            path: PathBuf::from("/tmp"),
+            is_dir: true,
+            anchor: (0, 0),
+            items: Vec::new(),
+            selected: None,
+            editors: Vec::new(),
+        };
+        assert!(
+            folder.build_items().contains(&FileMenuItem::OpenInOs),
+            "offered for a folder, which opens the file manager"
+        );
+    }
+
+    /// Bare `o` and Ctrl+O queue the focused row for the client's OS handler;
+    /// Alt+O and Ctrl+Alt+O (Windows AltGr) must not.
+    #[test]
+    fn files_keyboard_open_externally_accepts_only_bare_o_and_ctrl_o() {
+        let _env = crate::persist::test_env("files-open-externally-key");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        seed_keyboard_tree(&mut app);
+        let cursor = app.file_tree.cursor;
+        let path = app.file_tree.visible_rows()[cursor].path.clone();
+        let expected = path.to_str().expect("fixture path is UTF-8");
+
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert_eq!(app.pending_open_path.as_deref(), Some(expected), "bare o");
+
+        app.pending_open_path = None;
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        assert_eq!(app.pending_open_path.as_deref(), Some(expected), "Ctrl+O");
+
+        app.pending_open_path = None;
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::ALT));
+        assert!(app.pending_open_path.is_none(), "Alt+O must fall through");
+
+        app.handle_file_tree_key(KeyEvent::new(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ));
+        assert!(
+            app.pending_open_path.is_none(),
+            "Ctrl+Alt+O (Windows AltGr) must fall through"
+        );
+    }
+
+    #[test]
+    fn file_menu_open_in_os_queues_the_path_for_the_client() {
+        let _env = crate::persist::test_env("files-open-externally-menu");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let path = PathBuf::from("/tmp/x.pdf");
+        app.file_menu = Some(FileMenu {
+            path: path.clone(),
+            is_dir: false,
+            anchor: (0, 0),
+            items: Vec::new(),
+            selected: None,
+            editors: Vec::new(),
+        });
+        app.file_menu_action_pub(FileMenuItem::OpenInOs);
+        assert_eq!(app.pending_open_path.as_deref(), path.to_str());
+        assert!(app.file_menu.is_none());
+    }
+
+    /// `PathBuf` serializes through UTF-8 in serde. Refuse an unrepresentable
+    /// path before it reaches `ServerMessage::OpenPath`, otherwise the display
+    /// client's writer exits while encoding the message.
+    #[cfg(unix)]
+    #[test]
+    fn open_path_externally_refuses_non_utf8_before_ipc() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let _env = crate::persist::test_env("files-open-externally-not-utf8");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let path = PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/not\xffutf8.pdf"));
+
+        app.open_path_externally(path);
+
+        assert!(app.pending_open_path.is_none());
+        assert_eq!(
+            app.toast.as_ref().map(|(text, _)| text.as_str()),
+            Some("path is not valid UTF-8")
         );
     }
 

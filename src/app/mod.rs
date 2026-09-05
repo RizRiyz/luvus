@@ -707,6 +707,9 @@ pub enum FileMenuItem {
     InsertPath,
     /// Open this folder as a workspace (folders only), or focus it if already open.
     OpenAsNewWorkspace,
+    /// Hand the entry to the desktop: a file opens in its default application,
+    /// a folder in the file manager. Offered for both.
+    OpenInOs,
     Divider,
     Delete,
 }
@@ -728,6 +731,7 @@ impl FileMenu {
                 }
                 None => {}
             }
+            v.push(FileMenuItem::OpenInOs);
             v.push(FileMenuItem::Divider);
         }
         v.extend([
@@ -739,6 +743,7 @@ impl FileMenu {
         ]);
         if self.is_dir {
             v.push(FileMenuItem::OpenAsNewWorkspace);
+            v.push(FileMenuItem::OpenInOs);
         }
         v.extend([FileMenuItem::Divider, FileMenuItem::Delete]);
         v
@@ -1844,6 +1849,11 @@ pub struct App {
     /// A URL to open in the client's browser (docs/58) — set by a Ctrl+click on a
     /// link in a pane, drained + broadcast by the loop like `pending_clipboard`.
     pub pending_open_url: Option<String>,
+    /// A filesystem path to open with the OS handler of the client whose input
+    /// set it — from the FILES tree. Unlike `pending_open_url` it is not
+    /// broadcast: the server drains it right after applying that client's
+    /// input and sends it to that client alone.
+    pub pending_open_path: Option<String>,
     /// The cell `hover_link` was resolved for, so holding `Ctrl` while resting on a
     /// cell does not rescan. Cleared when `Ctrl` is released, so pointing at a
     /// link *first* and pressing `Ctrl` after still lights it up.
@@ -2380,6 +2390,7 @@ impl App {
             mouse_grab: None,
             pending_clipboard: None,
             pending_open_url: None,
+            pending_open_path: None,
             link_scan_at: None,
             hover_link: None,
             link_press: None,
@@ -3013,6 +3024,7 @@ impl App {
             mouse_grab: None,
             pending_clipboard: None,
             pending_open_url: None,
+            pending_open_path: None,
             link_scan_at: None,
             hover_link: None,
             link_press: None,
