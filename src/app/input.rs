@@ -2486,18 +2486,6 @@ impl App {
             self.zoomed = !self.zoomed;
             return;
         }
-        // Clicking a pane's title strip opens the running-command overlay — the
-        // full argv from the OS, since an agent's on-screen `Bash(… …)` is
-        // elided before it ever reaches us.
-        if let Some((id, _)) = self
-            .pane_title_rects
-            .iter()
-            .find(|(_, rect)| hit(*rect))
-            .map(|(id, r)| (*id, *r))
-        {
-            self.open_cmd_inspect(id);
-            return;
-        }
         // Tab-bar scroll arrows: step to the previous / next tab.
         if self.tab_prev_rect.is_some_and(hit) {
             let a = self.ws().active_tab;
@@ -6507,10 +6495,9 @@ mod link_click_tests {
             KeyModifiers::NONE,
         ));
         assert!(
-            app.cmd_inspect.is_some(),
-            "the title click opened the command overlay (setup sanity)"
+            app.cmd_inspect.is_none(),
+            "the title click did not open the command overlay"
         );
-        app.close_cmd_inspect();
         // Reset focus *after* the title click, so only the body click can move it.
         app.layout_mut().focus = top;
         app.handle_event(mouse(

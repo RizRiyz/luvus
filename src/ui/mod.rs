@@ -837,7 +837,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         app.changelog_link_rects.clear();
         app.changelog_copy_rects.clear();
     }
-    // The running-command overlay (click a pane title) draws above that.
+    // The running-command overlay from the pane context menu draws above that.
     if let Some(c) = app.cmd_inspect.as_ref() {
         cmdinfo::draw(f, area, c, &t);
     }
