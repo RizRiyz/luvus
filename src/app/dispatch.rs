@@ -830,6 +830,7 @@ mod socket_api_tests {
         let again = app.dispatch("automation.create", &params).unwrap();
         assert_eq!(first["automation"]["id"], again["automation"]["id"]);
         assert_eq!(first["automation"]["task"]["agent_id"], "codex");
+        assert_eq!(first["automation"]["task"]["access"], "workspace");
         assert!(first["automation"]["next_run_at"].is_u64());
 
         let list = app.dispatch("automation.list", &json!({})).unwrap();
@@ -857,6 +858,19 @@ mod socket_api_tests {
             }),
         );
         assert_eq!(bad.unwrap_err().0, "invalid_timezone");
+
+        let bad_access = app.dispatch(
+            "automation.create",
+            &json!({
+                "name":"unsafe-default",
+                "trigger":{"kind":"daily","timezone":"UTC","second_of_day":0},
+                "task":{
+                    "title":"bad", "prompt":"bad", "agent_id":"aider",
+                    "workspace_id":workspace_id, "access":"workspace"
+                }
+            }),
+        );
+        assert_eq!(bad_access.unwrap_err().0, "unsupported_automation_access");
 
         let automation_id = first["automation"]["id"].as_str().unwrap();
         let run_params = json!({"id":automation_id, "idempotency_key":"run-1"});
@@ -889,6 +903,95 @@ mod socket_api_tests {
         assert_eq!(
             app.dispatch("automation.run", &run_params).unwrap_err().0,
             "no_session"
+        );
+    }
+
+    #[test]
+    fn automation_api_binds_active_agents_to_an_exact_terminal_lifetime() {
+        let (_env, mut app) = app("socket-automation-active-agent");
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "codex".into();
+        let terminal_id = app
+            .panes
+            .get(&pane)
+            .and_then(|pane| pane.terminal_runtime())
+            .unwrap()
+            .terminal_id;
+        let workspace_id = app.workspace_of_pane(pane).unwrap().id.clone();
+        let params = json!({
+            "name":"Continue review",
+            "trigger":{"kind":"once","at_utc":4_000_000_000_u64},
+            "target":{
+                "kind":"active_agent",
+                "pane_id":pane.0,
+                "terminal_id":terminal_id,
+                "if_busy":"wait"
+            },
+            "task":{
+                "title":"Continue review",
+                "prompt":":",
+                "agent_id":"codex",
+                "workspace_id":workspace_id,
+                "mode":"workspace"
+            }
+        });
+
+        let created = app.dispatch("automation.create", &params).unwrap();
+        assert_eq!(created["automation"]["target"]["kind"], "active_agent");
+        let id = created["automation"]["id"].as_str().unwrap();
+
+        app.dispatch(
+            "agent.report",
+            &json!({
+                "pane":pane.0.to_string(),
+                "source":"active-agent-test",
+                "agent":"codex",
+                "status":"working"
+            }),
+        )
+        .unwrap();
+        let waiting_run = app.dispatch("automation.run", &json!({"id":id})).unwrap();
+        let waiting_run_id = waiting_run["run"]["id"].as_str().unwrap();
+        assert_eq!(waiting_run["run"]["status"], "pending");
+
+        app.dispatch(
+            "agent.report",
+            &json!({
+                "pane":pane.0.to_string(),
+                "source":"active-agent-test",
+                "agent":"codex",
+                "status":"idle"
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            app.automation.run(waiting_run_id).unwrap().status,
+            crate::automation::RunStatus::Delivered
+        );
+        assert!(app.orch.tasks.is_empty());
+        app.dispatch(
+            "agent.release",
+            &json!({"pane":pane.0.to_string(), "source":"active-agent-test"}),
+        )
+        .unwrap();
+
+        app.dispatch("automation.disable", &json!({"id":id}))
+            .unwrap();
+        app.status.get_mut(&pane).unwrap().agent = "shell".into();
+        assert_eq!(
+            app.dispatch("automation.enable", &json!({"id":id}))
+                .unwrap_err()
+                .0,
+            "agent_not_ready"
+        );
+        assert!(!app.automation.automation(id).unwrap().enabled);
+
+        let mut stale = params;
+        stale["name"] = json!("Stale target");
+        stale["target"]["terminal_id"] = json!("00000000000000000000000000000000");
+        assert_eq!(
+            app.dispatch("automation.create", &stale).unwrap_err().0,
+            "stale_target"
         );
     }
 
@@ -1815,6 +1918,12 @@ impl App {
                     "state_source":self.status.get(&id).map(|status| status.state_source),
                 }),
             );
+            let blocked_hint = self
+                .status
+                .get(&id)
+                .and_then(|status| status.blocked_hint.clone());
+            self.sync_automation_pane_state(id, st, blocked_hint);
+            self.wake_active_agent_automations(id);
             self.check_agent_waits(id);
             // Optional sound cues (off by default). A plain shell going
             // quiet or blocking is not an agent, so it stays silent either way.
@@ -3126,6 +3235,11 @@ impl App {
                                 .get(&id)
                                 .map(|p| p.cwd.to_string_lossy().to_string())
                                 .unwrap_or_default();
+                            let terminal_id = self
+                                .panes
+                                .get(&id)
+                                .and_then(|pane| pane.terminal_runtime())
+                                .map(|runtime| runtime.terminal_id.clone());
                             // The agent's own session id, when luvus knows it
                             // exactly: reported by the integration hook, or set
                             // because luvus launched it (resume/fork). `null`
@@ -3134,12 +3248,14 @@ impl App {
                             let session = s.agent_session.as_ref().map(|a| a.session_id.clone());
                             arr.push(json!({
                                 "pane": id.0.to_string(), "agent": s.agent,
+                                "terminal_id": terminal_id,
                                 "name": self.agent_name_for(id),
                                 "status": state_str(s.state),
                                 "authority":s.identity_source,
                                 "state_source":s.state_source,
                                 "session": session,
-                                "workspace": wi.to_string(), "workspace_name": ws.name,
+                                "workspace": wi.to_string(), "workspace_id": ws.id,
+                                "workspace_name": ws.name,
                                 "project": ws.name, "cwd": cwd,
                                 "branch": branch, "repo": repo, "worktree": is_worktree,
                                 "tab": (ti + 1).to_string(), "focused": id == focus,
@@ -3479,6 +3595,7 @@ impl App {
                         "pane.agent_status_changed",
                         json!({"pane":id.0.to_string(), "status":state_str(state), "agent":agent, "cwd":cwd, "project":project, "branch":branch, "authority":"integration_report"}),
                     );
+                    self.wake_active_agent_automations(id);
                 }
                 self.check_agent_waits(id);
                 Ok(json!({
@@ -4701,12 +4818,15 @@ impl App {
                             "name",
                             "enabled",
                             "trigger",
+                            "target",
                             "task",
                             "policy",
                             "idempotency_key",
                         ]
                     } else {
-                        &["id", "name", "enabled", "trigger", "task", "policy"]
+                        &[
+                            "id", "name", "enabled", "trigger", "target", "task", "policy",
+                        ]
                     },
                 )?;
                 let now = crate::automation::unix_now();
@@ -4771,14 +4891,23 @@ impl App {
             "automation.enable" | "automation.disable" => {
                 reject_api_fields(p, &["id"])?;
                 let id = req_str(p, "id")?;
+                let enable = method == "automation.enable";
+                if enable {
+                    let automation =
+                        self.automation.automation(id).cloned().ok_or_else(|| {
+                            ("not_found".into(), format!("no such automation: {id}"))
+                        })?;
+                    if matches!(
+                        automation.target,
+                        crate::automation::AutomationTarget::ActiveAgent { .. }
+                    ) {
+                        self.validate_active_agent_target(&automation.target, &automation.task)?;
+                    }
+                }
                 let before = self.automation.clone();
                 let automation = self
                     .automation
-                    .set_enabled(
-                        id,
-                        method == "automation.enable",
-                        crate::automation::unix_now(),
-                    )
+                    .set_enabled(id, enable, crate::automation::unix_now())
                     .map_err(automation_err)?;
                 if let Err(error) = self.automation.save() {
                     self.automation = before;
@@ -6743,6 +6872,7 @@ fn automation_input(p: &Value) -> Result<crate::automation::CreateAutomation, (S
             "agent_id",
             "workspace_id",
             "mode",
+            "access",
             "paths",
             "gate",
         ],
@@ -6769,6 +6899,22 @@ fn automation_input(p: &Value) -> Result<crate::automation::CreateAutomation, (S
             return Err((
                 "invalid_request".to_string(),
                 "task.mode must be a string".to_string(),
+            ))
+        }
+    };
+    let access = match task.get("access") {
+        None => crate::automation::AutomationAccess::default(),
+        Some(Value::String(access)) => crate::automation::AutomationAccess::parse(access)
+            .ok_or_else(|| {
+                (
+                    "invalid_request".to_string(),
+                    "task.access must be read_only, workspace, or full_access".to_string(),
+                )
+            })?,
+        Some(_) => {
+            return Err((
+                "invalid_request".to_string(),
+                "task.access must be a string".to_string(),
             ))
         }
     };
@@ -6816,6 +6962,7 @@ fn automation_input(p: &Value) -> Result<crate::automation::CreateAutomation, (S
         name: req_str(p, "name")?.to_string(),
         enabled,
         trigger: automation_trigger(p.get("trigger"))?,
+        target: automation_target(p.get("target"))?,
         task: crate::automation::TaskTemplate {
             title: task
                 .get("title")
@@ -6858,6 +7005,7 @@ fn automation_input(p: &Value) -> Result<crate::automation::CreateAutomation, (S
                 })?
                 .to_string(),
             mode,
+            access,
             paths,
             gate,
         },
@@ -6865,10 +7013,90 @@ fn automation_input(p: &Value) -> Result<crate::automation::CreateAutomation, (S
     })
 }
 
+fn automation_target(
+    value: Option<&Value>,
+) -> Result<crate::automation::AutomationTarget, (String, String)> {
+    use crate::automation::{ActiveAgentBusyPolicy, AutomationTarget};
+
+    let Some(value) = value else {
+        return Ok(AutomationTarget::NewWorker);
+    };
+    let object = value.as_object().ok_or_else(|| {
+        (
+            "invalid_target".to_string(),
+            "target must be an object".to_string(),
+        )
+    })?;
+    reject_api_fields(value, &["kind", "pane_id", "terminal_id", "if_busy"])?;
+    match object.get("kind").and_then(Value::as_str) {
+        Some("new_worker") => {
+            if object.len() != 1 {
+                return Err((
+                    "invalid_target".to_string(),
+                    "new_worker target accepts only kind".to_string(),
+                ));
+            }
+            Ok(AutomationTarget::NewWorker)
+        }
+        Some("active_agent") => {
+            let pane_id = object
+                .get("pane_id")
+                .and_then(|value| {
+                    value
+                        .as_str()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .or_else(|| value.as_u64().and_then(|value| u32::try_from(value).ok()))
+                })
+                .filter(|pane| *pane != 0)
+                .ok_or_else(|| {
+                    (
+                        "invalid_target".to_string(),
+                        "active_agent target requires a non-zero pane_id".to_string(),
+                    )
+                })?;
+            let terminal_id = object
+                .get("terminal_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    (
+                        "invalid_target".to_string(),
+                        "active_agent target requires terminal_id".to_string(),
+                    )
+                })?
+                .to_string();
+            let if_busy = match object.get("if_busy").and_then(Value::as_str) {
+                None | Some("wait") => ActiveAgentBusyPolicy::Wait,
+                Some("skip") => ActiveAgentBusyPolicy::Skip,
+                Some(_) => {
+                    return Err((
+                        "invalid_target".to_string(),
+                        "target.if_busy must be wait or skip".to_string(),
+                    ))
+                }
+            };
+            Ok(AutomationTarget::ActiveAgent {
+                pane_id,
+                terminal_id,
+                if_busy,
+            })
+        }
+        _ => Err((
+            "invalid_target".to_string(),
+            "target.kind must be new_worker or active_agent".to_string(),
+        )),
+    }
+}
+
 fn validate_automation_target(
     app: &App,
     input: &mut crate::automation::CreateAutomation,
 ) -> Result<(), (String, String)> {
+    if let crate::automation::AutomationTarget::ActiveAgent { .. } = &input.target {
+        app.validate_active_agent_target(&input.target, &input.task)?;
+        return Ok(());
+    }
+
     let descriptor = crate::agent::registry::find(&input.task.agent_id).ok_or_else(|| {
         (
             "unsupported_agent".to_string(),
@@ -6879,6 +7107,19 @@ fn validate_automation_target(
         )
     })?;
     input.task.agent_id = descriptor.id.to_string();
+    if !descriptor
+        .automation
+        .is_some_and(|operations| operations.supports(input.task.access))
+    {
+        return Err((
+            "unsupported_automation_access".to_string(),
+            format!(
+                "{} does not support {} scheduled access",
+                descriptor.id,
+                input.task.access.label().to_ascii_lowercase()
+            ),
+        ));
+    }
     if !app
         .workspaces
         .iter()
@@ -7445,7 +7686,7 @@ fn process_executables(commands: &[String]) -> Vec<String> {
     result
 }
 
-fn state_str(s: State) -> &'static str {
+pub(crate) fn state_str(s: State) -> &'static str {
     match s {
         State::Blocked => "blocked",
         State::Working => "working",
@@ -8050,6 +8291,15 @@ command = ["true"]
         let row = &out["agents"][0];
         assert_eq!(row["agent"], "claude");
         assert_eq!(row["status"], "working");
+        assert_eq!(row["workspace_id"], app.workspaces[0].id);
+        assert_eq!(
+            row["terminal_id"],
+            app.panes
+                .get(&pane)
+                .and_then(|pane| pane.terminal_runtime())
+                .map(|runtime| runtime.terminal_id)
+                .expect("agent pane has a terminal lifetime")
+        );
         // The label an API client renders, and the legacy field it falls back to.
         assert_eq!(row["project"], "renamed-node");
         assert_eq!(row["workspace_name"], "renamed-node");

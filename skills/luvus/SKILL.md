@@ -187,7 +187,7 @@ above remain sufficient when `luvus skill show` is the only available file.
 
 ## Delegate and manage agents
 
-Resolve existing agents with:
+Resolve active agents with:
 
 ```sh
 luvus agent list
@@ -382,6 +382,10 @@ surface:
   idempotency key for retryable create/run requests, and never turn an
   automation into an arbitrary scheduled shell command. Disabling prevents
   future occurrences; it does not stop a live ORCH task or pane.
+  `target=new_worker` is the durable default. Use `active_agent` only with
+  the exact discovered pane, terminal lifetime, agent, and workspace identities;
+  treat `delivered` as input-queue evidence rather than completed work, and do
+  not reuse a process-bound target after pane closure or server restart.
 - Inspect module metadata, actions, settings, and logs before changing module
   state. Installation, uninstallation, and consequential setting changes need
   clear authorization.

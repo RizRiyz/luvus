@@ -40,7 +40,16 @@ Automation definitions and bounded run history live in the selected server
 session's `automations.json`. The detached server owns their deadlines, so
 closing the TUI does not pause them. Stopping the server does; on restart Luvus
 reconciles persisted ORCH provenance before starting anything and applies the
-definition's missed-run policy.
+definition's missed-run policy. A scheduled agent cannot survive its owning
+server, so an in-progress task from the previous server lifetime is recorded as
+failed instead of being left running or launched twice. A task whose durable
+provenance was saved before its worker started resumes that same pending run.
+An active-agent target is different: it creates no ORCH task and is bound to
+one live terminal lifetime. Restarting the server disables that definition
+instead of sending its prompt to a restored or unrelated pane.
+
+For schedule syntax, access profiles, missed-run policies, UHP requests, and a
+copyable example, see [Agent Automation](/docs/guides/automation/).
 
 `task start` validates the task's path lease before it creates a worktree or
 workspace worker pane. If another task already holds an overlapping path, start
@@ -60,14 +69,15 @@ in a detail panel.
 
 The header switches between **Tasks** and **Automations BETA**. The automation view
 shows the definition state, retained schedule, next UTC deadline, target agent,
-and target workspace. Use `e` to pause or re-enable the selected definition,
+target mode, and target workspace. Use `e` to pause or re-enable the selected definition,
 `r` to request one run without advancing its schedule, and `D` to delete an
 idle definition. Press `o` or `Enter` to inspect its trigger, timezone, next five
 occurrences, execution policy, task template, and bounded run history; click
 outside that detail popup or press `Esc` to close it. Armed
 definitions also appear in the sidebar's Active agents section as `scheduled`;
-the placeholder is replaced by the normal live agent row when its ORCH task
-starts. Clicking a scheduled placeholder or a Mission Control automation row
+the placeholder is replaced by the normal live agent row when a new ORCH task
+starts. An active-agent definition instead delivers into its already-visible
+agent row. Clicking a scheduled placeholder or a Mission Control automation row
 opens the same read-only detail. Mission Control shows aggregate armed, live,
 review, and failed automation health without polling usage data.
 
@@ -106,11 +116,16 @@ The form starts on a compact **Task · Automation** choice. The active board vie
 selects its matching type by default. Task shows Title, Paths, Deps, Gate, and a
 `Manual`/`Now` Start choice; Prompt and Agent appear only for `Now`. Automation
 hides concrete dependencies and owns a registry-backed Agent, an explicit
-`Run in` choice for an isolated Worktree or the existing Workspace, `Once later`,
+`Run in` choice for an isolated Worktree or the existing Workspace, an `Access`
+choice (`Read only`, `Workspace`, or `Full access`), `Once later`,
 `Hourly`, `Daily`, or `Weekly`, and Schedule, followed by a three-row Prompt editor. Use
 `Tab` to switch between Task and Automation, Down or Up to move between fields,
-and Left/Right to change the selected Agent, Run in, or Start value. Agent choices come
-from the same built-in launch-capable registry used by ORCH. Task and Automation
+Left/Right to change the selected Agent, Run in, Access, or Start value, and
+`Shift+Enter` to add a new line to the Automation prompt. Plain `Enter` creates
+the automation. Agent
+choices come from the built-in adapters that declare at least one reviewed
+unattended launch profile. A selected agent/access combination that is not supported
+is rejected before Luvus creates a task, worktree, lease, or pane. Task and Automation
 retain independent drafts while the modal is open, so switching type and returning
 restores that type's inputs, selections, and focused field.
 
@@ -186,7 +201,7 @@ luvus automation create "Morning review" \
   --title "Review changes" --prompt "Review and report risks" \
   --agent codex --workspace-id workspace_example \
   --weekly mon,tue,wed,thu,fri --at 08:00 --timezone Asia/Makassar \
-  --mode workspace
+  --mode workspace --access workspace
 
 luvus automation list
 luvus automation preview --daily 08:00 --timezone America/New_York
@@ -218,10 +233,14 @@ Events on the bus: `task.added` · `task.claimed` · `task.started` ·
 
 - **Only armed agent automations spawn unattended.** Manual tasks still start
   only when you press `s` or run `task start`. Every automation stores one
-  explicit agent, workspace, prompt, worker mode, and bounded schedule.
+  explicit agent, workspace, prompt, worker mode, access policy, and bounded schedule.
 - **No arbitrary scheduled shell action.** The scheduler launches only a
-  reviewed built-in agent adapter through ORCH; detection-only manifests do not
-  gain execution authority.
+  reviewed built-in agent adapter through its separate one-shot automation
+  profile; detection-only manifests and interactive task commands do not gain
+  unattended execution authority.
+- **No blind approval.** `Read only`, `Workspace`, and `Full access` map to the
+  selected agent's native per-run flags. Luvus never types `y` or Enter into an
+  unknown permission prompt and never rewrites the agent's permanent config.
 - **No background poller.** Definitions cache the nearest UTC deadline and use
   the existing server wake path. No thread, timer, network request, or process
   scan is created per automation.
@@ -250,7 +269,8 @@ Events on the bus: `task.added` · `task.claimed` · `task.started` ·
 | Stuck at `review` | The gate failed. `luvus task get <id>` shows the output. Fix and `d` again. |
 | `blocked` after `m` | Merge conflict. Resolve in the task's worktree, then `m` again. |
 | Worker reports that Luvus server access was denied | The agent or OS sandbox cannot reach the session socket. Approve that exact local Luvus command or adjust the agent's own reviewed permission policy. Luvus does not silently disable the sandbox. |
-| Scheduled worker stops at folder trust or approval | Trust the workspace in that agent or configure its normal automation-safe permission mode before arming the schedule. Permission bypass remains an explicit agent-level choice. |
+| Agent/access combination is unsupported | Choose an access level that the selected adapter explicitly supports. Luvus fails before creating any worker resources. |
+| Scheduled worker still needs attention | ORCH marks the automation task `blocked` and records the detected prompt. Resolve it in the visible pane; Luvus does not approve unknown requests automatically. |
 
 Clean up a finished worker with `luvus worktree remove <path>` (the branch is
 kept).

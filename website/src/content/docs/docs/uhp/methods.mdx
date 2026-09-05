@@ -136,7 +136,11 @@ leases, creates a workspace tab or worktree, and starts the exact built-in
 agent adapter. Disabling a definition prevents later occurrences but never
 kills a running pane. Detection-only manifest agents cannot be scheduled.
 Omitted `task.mode` defaults to the isolated `worktree` mode; shared
-`workspace` mode must be explicit.
+`workspace` mode must be explicit. Omitted `task.access` defaults to
+`workspace`. Access is independent of worker mode: worktrees isolate Git
+history, while `read_only`, `workspace`, and `full_access` select a reviewed
+one-shot permission profile owned by the agent adapter. Unsupported combinations
+return `unsupported_automation_access` before any ORCH resource is created.
 
 All durable deadlines and occurrence keys are UTC Unix seconds. Calendar
 triggers retain an IANA timezone and a local `second_of_day`, so `08:00` stays
@@ -150,15 +154,15 @@ the next five UTC deadlines without storing or launching anything.
 ```
 
 ```json
-→ {"id":"create","method":"automation.create","params":{"name":"Morning review","trigger":{"kind":"weekly","timezone":"Asia/Makassar","weekdays":[1,2,3,4,5],"second_of_day":28800},"task":{"title":"Review changes","prompt":"Review the workspace and report risks.","agent_id":"codex","workspace_id":"workspace_example","mode":"workspace"},"policy":{"misfire":"run_latest","overlap":"skip"},"idempotency_key":"morning-review-v1"}}
+→ {"id":"create","method":"automation.create","params":{"name":"Morning review","trigger":{"kind":"weekly","timezone":"Asia/Makassar","weekdays":[1,2,3,4,5],"second_of_day":28800},"target":{"kind":"new_worker"},"task":{"title":"Review changes","prompt":"Review the workspace and report risks.","agent_id":"codex","workspace_id":"workspace_example","mode":"workspace","access":"workspace"},"policy":{"misfire":"run_latest","overlap":"skip"},"idempotency_key":"morning-review-v1"}}
 ```
 
 | Method | Params | Access |
 |---|---|---|
-| `automation.create` | `{name, enabled?, trigger, task, policy?, idempotency_key?}` | orchestration write |
+| `automation.create` | `{name, enabled?, trigger, target?, task, policy?, idempotency_key?}` | orchestration write |
 | `automation.list` | `{}` | read |
 | `automation.get` | `{id}` | read |
-| `automation.update` | `{id, name, enabled?, trigger, task, policy?}` | orchestration write |
+| `automation.update` | `{id, name, enabled?, trigger, target?, task, policy?}` | orchestration write |
 | `automation.enable` / `automation.disable` | `{id}` | orchestration write |
 | `automation.delete` | `{id}`; rejected while a run is live | orchestration write |
 | `automation.run` | `{id, idempotency_key?}`; does not advance the schedule | orchestration write |
@@ -173,7 +177,21 @@ run history at 2,048, and idempotency records at 256. Missed occurrences use
 `skip` or `run_latest`; overlap uses `skip` or one bounded `queue_one` run.
 Task prompts are bounded to 32 KiB and reject terminal control characters
 because Luvus eventually delivers the generated briefing to an interactive
-agent pane.
+agent pane. Scheduled commands remain visible in that pane but run through the
+adapter's non-interactive profile. Luvus does not modify global agent settings
+or synthesize approval keystrokes; a detected attention prompt moves the linked
+ORCH task to `blocked` and is reflected in automation history.
+
+`target` defaults to `{"kind":"new_worker"}`. An existing live agent uses
+`{"kind":"active_agent","pane_id":7,"terminal_id":"<32 lowercase hex>","if_busy":"wait"}`.
+The pane, terminal lifetime, agent ID, and workspace ID must all match. Existing
+targets are process-bound, create no ORCH task, and report `delivered` after the
+prompt reaches the pane input queue. Server restart or pane closure disables
+them rather than retargeting another agent.
+
+`agent.list` returns the stable `workspace_id` and process-lifetime
+`terminal_id` on each live agent row so clients can construct this target
+without consulting terminal-backend methods.
 
 The read-only methods require the `read` scope. Every mutating automation
 method requires `orchestration`. A remote client should discover this contract

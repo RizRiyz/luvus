@@ -141,14 +141,33 @@
         "name": { "type": "string" },
         "enabled": { "type": "boolean" },
         "trigger": { "type": "object" },
+        "target": {
+          "oneOf": [
+            {
+              "type": "object", "additionalProperties": false, "required": ["kind"],
+              "properties": { "kind": { "const": "new_worker" } }
+            },
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["kind", "pane_id", "terminal_id", "if_busy"],
+              "properties": {
+                "kind": { "const": "active_agent" },
+                "pane_id": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+                "terminal_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+                "if_busy": { "enum": ["wait", "skip"] }
+              }
+            }
+          ]
+        },
         "task": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["agent_id", "workspace_id", "mode"],
+          "required": ["agent_id", "workspace_id", "mode", "access"],
           "properties": {
             "agent_id": { "type": "string" },
             "workspace_id": { "type": "string" },
-            "mode": { "enum": ["worktree", "workspace"] }
+            "mode": { "enum": ["worktree", "workspace"] },
+            "access": { "enum": ["read_only", "workspace", "full_access"] }
           }
         },
         "next_run_at": { "type": ["integer", "null"] }

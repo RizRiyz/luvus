@@ -1,0 +1,291 @@
+---
+title: Agent Automation
+description: Schedule reliable, bounded AI agent work from the Luvus TUI, CLI, or UHP.
+---
+
+Agent Automation turns a prompt into a durable one-time or recurring schedule.
+A definition can start a fresh ORCH worker, or deliver its prompt to one exact
+agent that is already running in Luvus.
+
+:::tip[Quick path]
+Open ORCH with `Ctrl+Space o`, press `Tab` for **Automations BETA**, then press
+`a`. Choose **Run with → New agent** or **Active agent**, then set its
+schedule. The server keeps the schedule running after the TUI closes.
+:::
+
+## Before you schedule work
+
+An automation belongs to one named Luvus server session. That server must be
+running when the deadline arrives. Closing a TUI client is safe; stopping the
+server also stops its scheduler and live worker panes.
+
+You need:
+
+- a workspace already registered with that server;
+- a built-in agent that exposes a reviewed unattended profile for the selected
+  access level;
+- the agent installed and authenticated for the server user;
+- a prompt that can finish without interactive clarification.
+
+Use `luvus workspace list` to find the stable workspace ID used by the CLI and
+UHP. If you use a named session, put `--session <name>` before `automation` on
+every command.
+
+## Create one in the TUI
+
+1. Open ORCH with `Ctrl+Space o`.
+2. Press `Tab` to select **Automations BETA**.
+3. Press `a` to open the creation form.
+4. Use `Up` and `Down` to move through fields. Use `Left` and `Right` to change
+   Run with, Agent, Run in, Access, or Start.
+5. Use `Shift+Enter` for a new line in the prompt. Plain `Enter` creates the
+   automation.
+
+The form offers these schedule shapes:
+
+| Start | Schedule input | Example |
+|---|---|---|
+| Once later | Local date and time | `2026-09-08 14:30` |
+| Hourly | Minute within the hour | `15` |
+| Daily | Local time | `08:00` |
+| Weekly | Weekdays and local time | `mon,wed,fri 09:30` |
+
+The TUI detects the server user's IANA timezone for calendar schedules. Luvus
+stores deadlines in UTC while retaining the timezone, so a daily `08:00`
+schedule stays at that local wall-clock time across daylight-saving changes.
+
+Armed definitions appear in the ORCH table and as `scheduled` rows in the
+sidebar's Active section. When a run starts, its placeholder becomes the normal
+live agent row. Open a definition to see the next occurrences and bounded run
+history; Mission Control summarizes scheduled, live, review, and failed runs.
+
+## Choose a new or active agent
+
+**New agent** is the durable default. Every occurrence creates a new ORCH task
+and launches a fresh worker with the selected workspace/worktree and access
+policy.
+
+**Active agent** sends the scheduled prompt into a recognized live agent pane
+so it continues with that interactive conversation's context. The picker shows
+only agents running in the current named server session. Luvus binds the
+definition to both the pane ID and the terminal's random lifetime ID, verifies
+the agent and workspace again at delivery, and never redirects a stale target
+to another pane.
+
+Active-agent definitions are process-bound:
+
+- they do not create an ORCH task, worktree, path lease, or quality gate;
+- `wait` leaves one occurrence pending until the agent becomes idle, while
+  `skip` records a busy occurrence as skipped;
+- successful delivery is recorded as `delivered`, not as completed work;
+- closing the target pane or restarting the server fails waiting runs and
+  disables the definition. Select the restored agent again before re-enabling.
+
+This keeps prompt delivery contextual without pretending Luvus can prove when
+an arbitrary interactive agent has finished that prompt.
+
+## Create one from the CLI
+
+Preview a calendar schedule before storing it:
+
+```sh
+luvus automation preview \
+  --weekly mon,tue,wed,thu,fri \
+  --at 08:00 \
+  --timezone Asia/Makassar
+```
+
+Then create the definition with a stable workspace ID:
+
+```sh
+luvus automation create "Weekday code review" \
+  --title "Review workspace changes" \
+  --prompt "Inspect the current changes. Report correctness, security, and test risks without modifying files." \
+  --agent codex \
+  --workspace-id workspace_example \
+  --weekly mon,tue,wed,thu,fri \
+  --at 08:00 \
+  --timezone Asia/Makassar \
+  --mode workspace \
+  --access read-only \
+  --misfire skip \
+  --misfire-grace 3600 \
+  --overlap skip \
+  --idempotency-key weekday-code-review-v1
+```
+
+The idempotency key makes a retried create safe. Sending the same input and key
+returns the original definition; reusing the key with different input returns
+`idempotency_conflict`.
+
+A copyable shell version lives in
+[`examples/automation/weekday-readonly-review.sh`](https://github.com/RizRiyz/luvus/tree/main/examples/automation).
+
+To target an already-running agent, first read its exact pane, terminal, agent,
+and workspace identities from the same named session with `luvus agent list`,
+then create the definition:
+
+```sh
+luvus automation create "Continue review" \
+  --title "Continue review" \
+  --prompt "Continue the review from our current context and summarize the next risks." \
+  --agent codex \
+  --workspace-id workspace_example \
+  --once 2026-09-08T06:30:00Z \
+  --target active-agent \
+  --pane 7 \
+  --terminal-id 0123456789abcdef0123456789abcdef \
+  --if-busy wait
+```
+
+`--agent` and `--workspace-id` are deliberate assertions about the selected
+pane. If either identity changed, creation or delivery fails closed.
+
+## Choose where it runs
+
+`Run in` and `Access` solve different problems.
+
+| Run in | Behavior |
+|---|---|
+| `worktree` | Creates an isolated branch and checkout for the occurrence. This is the CLI default and requires a Git repository. |
+| `workspace` | Creates a task tab in the existing checkout. It is useful for branchless work, but intentionally shares files with the user and other tools. |
+
+| Access | Intended use |
+|---|---|
+| `read-only` | Reviews, reports, and triage that must not edit the workspace. |
+| `workspace` | Normal implementation work within the agent's reviewed workspace policy. This is the default access level. |
+| `full` | Work that explicitly needs the agent's unrestricted native profile. Use it only when the prompt and environment are trusted. |
+
+Access is enforced through the selected agent's native per-run command-line
+profile. It is not one identical OS sandbox shared by every agent. Unsupported
+agent/access combinations fail before Luvus creates a task, lease, worktree, or
+pane. Luvus never edits the agent's permanent configuration or types approval
+answers into an unknown prompt.
+
+## Schedule types
+
+Pass exactly one trigger to `automation create`, `automation update`, or
+`automation preview`:
+
+| Trigger | CLI shape | Notes |
+|---|---|---|
+| Once | `--once 2026-09-08T06:30:00Z` | Accepts an RFC 3339 UTC instant ending in `Z`, or Unix seconds. Disables itself after the occurrence. |
+| Interval | `--every 3600` | Seconds, with a minimum of 60. Add `--anchor-utc <UTC>` for a stable phase; otherwise creation time is the anchor. |
+| Daily | `--daily 08:00 --timezone Asia/Makassar` | Requires an IANA timezone. |
+| Weekly | `--weekly mon,wed,fri --at 09:30 --timezone Asia/Makassar` | Accepts weekday names or ISO weekday numbers, Monday `1` through Sunday `7`. |
+
+For calendar schedules, a nonexistent local time is shifted forward by the
+daylight-saving transition gap. A repeated local time uses its first
+occurrence. Use `automation preview` whenever that distinction matters.
+
+## Missed and overlapping runs
+
+The scheduler creates at most one overdue occurrence for a definition. It does
+not replay an unbounded backlog after sleep or restart.
+
+| Policy | Values | Behavior |
+|---|---|---|
+| Misfire | `run_latest` (default) | Run only the newest missed occurrence. |
+| Misfire | `skip` | Skip an occurrence older than `--misfire-grace`; the default grace is 3,600 seconds. |
+| Overlap | `skip` (default) | Record the collision as skipped while another run is live. |
+| Overlap | `queue_one` | Retain at most one pending occurrence to start after the live run. Later collisions are skipped. |
+
+Luvus persists the occurrence before launching its ORCH worker and keys it by
+definition and scheduled time. A restart can therefore recover a not-yet-
+launched occurrence without creating it twice. A worker from a previous server
+lifetime cannot still be trusted as live and is recorded as failed on recovery.
+There is no automatic retry of a failed agent run.
+
+## Manage definitions and runs
+
+```sh
+# Inspect definitions, one definition, aggregate health, and run history.
+luvus automation list
+luvus automation get a1
+luvus automation health
+luvus automation history a1 --limit 20
+
+# Pause future occurrences without stopping a live worker, then re-enable it.
+luvus automation disable a1
+luvus automation enable a1
+
+# Request one run now without advancing the retained schedule.
+luvus automation run a1 --idempotency-key manual-check-2026-09-04
+
+# Delete only when the definition has no live run.
+luvus automation delete a1
+```
+
+`automation update` is a full definition replacement. Supply `--name` plus the
+same required task and trigger options as `create`; omitted optional fields
+return to their defaults. Include `--disabled` on the update if you want to
+inspect the replacement before explicitly enabling its next deadline.
+
+Paths become ORCH leases, and a gate runs when the worker reports the task done:
+
+```sh
+luvus automation create "Nightly auth work" \
+  --title "Improve auth tests" \
+  --prompt "Improve the authentication tests and finish the assigned ORCH task." \
+  --agent claude \
+  --workspace-id workspace_example \
+  --daily 23:00 --timezone UTC \
+  --mode worktree --access workspace \
+  --paths "src/auth/**" "tests/auth/**" \
+  --gate "cargo test auth"
+```
+
+A lease coordinates declared paths with other ORCH tasks. It does not prevent
+an external process or a shared-workspace agent from editing outside those
+paths. A failed gate leaves the task in `review` with its output available from
+`luvus task get <id>`.
+
+## Create and monitor through UHP
+
+UHP exposes the same server-owned definitions to remote and independent
+clients. Calendar fields are explicit at this boundary: times are UTC Unix
+seconds, while daily and weekly triggers carry an IANA timezone plus seconds
+after local midnight.
+
+```json
+{"id":"preview","method":"automation.preview","params":{"trigger":{"kind":"daily","timezone":"Asia/Makassar","second_of_day":28800}}}
+{"id":"create","method":"automation.create","params":{"name":"Morning review","trigger":{"kind":"weekly","timezone":"Asia/Makassar","weekdays":[1,2,3,4,5],"second_of_day":28800},"target":{"kind":"new_worker"},"task":{"title":"Review changes","prompt":"Review the workspace and report risks.","agent_id":"codex","workspace_id":"workspace_example","mode":"workspace","access":"read_only"},"policy":{"misfire":"run_latest","overlap":"skip","misfire_grace_seconds":3600},"idempotency_key":"morning-review-v1"}}
+{"id":"continue","method":"automation.create","params":{"name":"Continue review","trigger":{"kind":"once","at_utc":1788393600},"target":{"kind":"active_agent","pane_id":7,"terminal_id":"0123456789abcdef0123456789abcdef","if_busy":"wait"},"task":{"title":"Continue review","prompt":"Continue from our current context.","agent_id":"codex","workspace_id":"workspace_example","mode":"workspace","access":"workspace"}}}
+```
+
+Read methods require the UHP `read` scope. Creating, updating, enabling,
+disabling, running, or deleting definitions requires `orchestration`. Discover
+the live contract with `luvus uhp capabilities`, then reconcile after a remote
+reconnect with `automation.list`, `automation.history`, and
+`automation.health`. See the [UHP method reference](/docs/uhp/methods/#agent-automation)
+for every request shape and bound.
+
+## Efficiency and limits
+
+The detached server caches the nearest UTC deadline and wakes through its
+existing event loop. It does not create a thread, poller, process scan, or
+network request per automation. Due work is evaluated only when the nearest
+deadline arrives or relevant server state changes.
+
+Current bounds are 256 definitions, 2,048 retained run records, 256 retained
+idempotency records, a 32 KiB prompt, and an interval of at least 60 seconds.
+The scheduler launches only compiled-in agent adapters with reviewed
+unattended profiles; a detection-only manifest cannot gain execution authority.
+
+## Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| Nothing ran at the deadline | The owning named server must be running. Check `automation get <id>`, `automation health`, and `automation history <id>`. |
+| `workspace_not_found` | Refresh `luvus workspace list` and use the stable ID from the same named server session. |
+| `stale_target` | The existing pane closed, moved workspace, changed agents, or acquired a new terminal lifetime. Select it again and replace the definition. |
+| Active-agent run stays pending | Its busy policy is `wait`; it retries on that pane's next agent-state change without polling. |
+| `unsupported_automation_access` | Choose an access level declared by that built-in agent adapter. No ORCH resources were created. |
+| Worktree creation failed | Confirm the workspace is a Git repository and the target paths are available, or choose `--mode workspace`. |
+| Run is `blocked` | Inspect the visible pane and `luvus task get <task-id>`. Luvus detected a prompt needing attention and did not approve it automatically. |
+| Run is `review` | The quality gate failed. Fix the task output, then retry task completion. |
+| A run after sleep was skipped | Inspect its history and the definition's misfire policy and grace period. |
+| A manual request might have timed out | Retry it with the same idempotency key, then reconcile through history. |
+
+For the underlying task, lease, worktree, merge, and recovery model, continue
+with [Multi-Agent Orchestration](/docs/guides/orchestration/).

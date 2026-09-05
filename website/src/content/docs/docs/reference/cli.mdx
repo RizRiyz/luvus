@@ -233,7 +233,12 @@ orchestration (multiple agents on one project, docs/22):
 agent automation (scheduled ORCH tasks):
   automation create "<name>" --title <title> --prompt <text> --agent <id> --workspace-id <id>
                              (--once <UTC>|--every <seconds>|--daily <HH:MM>|--weekly <days> --at <HH:MM>)
-                             [--timezone <IANA>] [--mode workspace|worktree] [--paths <glob>...] [--gate <cmd>]
+                             [--timezone <IANA>] [--anchor-utc <UTC>] [--mode workspace|worktree]
+                             [--access read-only|workspace|full] [--paths <glob>...] [--gate <cmd>]
+                             [--target new-worker|active-agent --pane <id> --terminal-id <id>]
+                             [--if-busy wait|skip]
+                             [--disabled] [--misfire skip|run_latest] [--misfire-grace <seconds>]
+                             [--overlap skip|queue_one] [--idempotency-key <key>]
   automation list            list definitions and their next UTC deadlines
   automation get <id>        show one definition
   automation update <id> --name <name> <same required task and schedule options as create>
@@ -241,6 +246,8 @@ agent automation (scheduled ORCH tasks):
   automation run <id> [--idempotency-key <key>]   run once without advancing its schedule
   automation history [<id>] [--limit <1-200>]     show bounded run history
   automation preview (--once <UTC>|--every <seconds>|--daily <HH:MM>|--weekly <days> --at <HH:MM>)
+                             [--timezone <IANA>] [--anchor-utc <UTC>]
+  automation health         summarize armed, live, review, and failed runs
   automation delete <id>     remove an idle definition
 
 events:

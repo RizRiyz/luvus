@@ -26,7 +26,9 @@ mod automation;
 mod backend;
 mod board;
 mod cwd;
-pub use board::{agent_choices, task_agent_choices};
+pub use board::{
+    agent_choices, automation_agent_choices, automation_agent_choices_for, task_agent_choices,
+};
 pub(crate) mod diff;
 mod dispatch;
 pub(crate) mod files;
@@ -868,7 +870,7 @@ pub enum TabRenameError {
     NameTooLong,
 }
 
-/// Why an existing agent session could not be forked into a sibling pane.
+/// Why an active agent session could not be forked into a sibling pane.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AgentForkError {
     PaneNotFound,
@@ -1050,6 +1052,22 @@ pub enum OrchFormKind {
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum OrchAutomationTarget {
+    #[default]
+    NewWorker,
+    ActiveAgent,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct OrchActiveAgent {
+    pub pane: PaneId,
+    pub terminal_id: String,
+    pub agent: String,
+    pub workspace_id: String,
+    pub label: String,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub enum OrchFormField {
     #[default]
     Title,
@@ -1057,8 +1075,11 @@ pub enum OrchFormField {
     Deps,
     Gate,
     Prompt,
+    Target,
+    ActiveAgent,
     Agent,
     RunIn,
+    Access,
     Start,
     Schedule,
 }
@@ -1081,10 +1102,20 @@ const TASK_NOW_FIELDS: &[OrchFormField] = &[
 ];
 const AUTOMATION_FIELDS: &[OrchFormField] = &[
     OrchFormField::Title,
+    OrchFormField::Target,
     OrchFormField::Paths,
     OrchFormField::Gate,
     OrchFormField::Agent,
     OrchFormField::RunIn,
+    OrchFormField::Access,
+    OrchFormField::Start,
+    OrchFormField::Schedule,
+    OrchFormField::Prompt,
+];
+const ACTIVE_AGENT_AUTOMATION_FIELDS: &[OrchFormField] = &[
+    OrchFormField::Title,
+    OrchFormField::Target,
+    OrchFormField::ActiveAgent,
     OrchFormField::Start,
     OrchFormField::Schedule,
     OrchFormField::Prompt,
@@ -1094,7 +1125,10 @@ struct OrchFormDraft {
     title: String,
     prompt: String,
     agent: String,
+    automation_target: OrchAutomationTarget,
+    active_agent: usize,
     mode: crate::orch::TaskWorkerMode,
+    access: crate::automation::AutomationAccess,
     start: OrchFormStart,
     schedule: String,
     schedule_prefilled: bool,
@@ -1119,11 +1153,14 @@ impl OrchFormDraft {
             title: String::new(),
             prompt: String::new(),
             agent: if kind == OrchFormKind::Automation {
-                default_task_agent()
+                default_automation_agent()
             } else {
                 String::new()
             },
+            automation_target: OrchAutomationTarget::NewWorker,
+            active_agent: 0,
             mode,
+            access: crate::automation::AutomationAccess::default(),
             start,
             schedule: if kind == OrchFormKind::Automation {
                 default_schedule(start, &timezone)
@@ -1146,7 +1183,11 @@ pub struct OrchForm {
     pub title: String,
     pub prompt: String,
     pub agent: String,
+    pub automation_target: OrchAutomationTarget,
+    pub active_agent: usize,
+    pub active_agents: Vec<OrchActiveAgent>,
     pub mode: crate::orch::TaskWorkerMode,
+    pub access: crate::automation::AutomationAccess,
     pub start: OrchFormStart,
     pub schedule: String,
     /// A generated schedule remains visible but is replaced by the user's
@@ -1177,7 +1218,10 @@ impl OrchForm {
             title: std::mem::take(&mut self.title),
             prompt: std::mem::take(&mut self.prompt),
             agent: std::mem::take(&mut self.agent),
+            automation_target: self.automation_target,
+            active_agent: self.active_agent,
             mode: self.mode,
+            access: self.access,
             start: self.start,
             schedule: std::mem::take(&mut self.schedule),
             schedule_prefilled: self.schedule_prefilled,
@@ -1193,7 +1237,10 @@ impl OrchForm {
         self.title = draft.title;
         self.prompt = draft.prompt;
         self.agent = draft.agent;
+        self.automation_target = draft.automation_target;
+        self.active_agent = draft.active_agent;
         self.mode = draft.mode;
+        self.access = draft.access;
         self.start = draft.start;
         self.schedule = draft.schedule;
         self.schedule_prefilled = draft.schedule_prefilled;
@@ -1208,6 +1255,11 @@ impl OrchForm {
         match (self.kind, self.start) {
             (OrchFormKind::Task, OrchFormStart::Now) => TASK_NOW_FIELDS,
             (OrchFormKind::Task, _) => TASK_MANUAL_FIELDS,
+            (OrchFormKind::Automation, _)
+                if self.automation_target == OrchAutomationTarget::ActiveAgent =>
+            {
+                ACTIVE_AGENT_AUTOMATION_FIELDS
+            }
             (OrchFormKind::Automation, _) => AUTOMATION_FIELDS,
         }
     }
@@ -1250,6 +1302,26 @@ impl OrchForm {
 
     pub fn cycle_choice(&mut self, backwards: bool) {
         match self.field {
+            OrchFormField::Target => {
+                self.automation_target = match self.automation_target {
+                    OrchAutomationTarget::NewWorker => OrchAutomationTarget::ActiveAgent,
+                    OrchAutomationTarget::ActiveAgent => OrchAutomationTarget::NewWorker,
+                };
+                if !self.fields().contains(&self.field) {
+                    self.field = OrchFormField::Target;
+                }
+            }
+            OrchFormField::ActiveAgent => {
+                if !self.active_agents.is_empty() {
+                    self.active_agent = (self.active_agent
+                        + if backwards {
+                            self.active_agents.len() - 1
+                        } else {
+                            1
+                        })
+                        % self.active_agents.len();
+                }
+            }
             OrchFormField::Start => {
                 let choices: &[OrchFormStart] = match self.kind {
                     OrchFormKind::Task => &[OrchFormStart::Manual, OrchFormStart::Now],
@@ -1275,7 +1347,11 @@ impl OrchForm {
                 }
             }
             OrchFormField::Agent => {
-                let choices = crate::app::task_agent_choices();
+                let choices = if self.kind == OrchFormKind::Automation {
+                    crate::app::automation_agent_choices_for(self.access)
+                } else {
+                    crate::app::task_agent_choices()
+                };
                 if choices.is_empty() {
                     return;
                 }
@@ -1293,6 +1369,26 @@ impl OrchForm {
                     crate::orch::TaskWorkerMode::Workspace => crate::orch::TaskWorkerMode::Worktree,
                 };
             }
+            OrchFormField::Access => {
+                let choices = [
+                    crate::automation::AutomationAccess::ReadOnly,
+                    crate::automation::AutomationAccess::Workspace,
+                    crate::automation::AutomationAccess::FullAccess,
+                ];
+                let index = choices
+                    .iter()
+                    .position(|choice| *choice == self.access)
+                    .unwrap_or(0);
+                self.access = choices
+                    [(index + if backwards { choices.len() - 1 } else { 1 }) % choices.len()];
+                let agents = crate::app::automation_agent_choices_for(self.access);
+                if !agents
+                    .iter()
+                    .any(|agent| agent.eq_ignore_ascii_case(&self.agent))
+                {
+                    self.agent = agents.first().copied().unwrap_or_default().to_string();
+                }
+            }
             _ => {}
         }
     }
@@ -1305,7 +1401,11 @@ impl OrchForm {
             OrchFormField::Deps => Some(&mut self.deps),
             OrchFormField::Gate => Some(&mut self.gate),
             OrchFormField::Prompt => Some(&mut self.prompt),
-            OrchFormField::Agent | OrchFormField::RunIn => None,
+            OrchFormField::Target
+            | OrchFormField::ActiveAgent
+            | OrchFormField::Agent
+            | OrchFormField::RunIn
+            | OrchFormField::Access => None,
             OrchFormField::Schedule => Some(&mut self.schedule),
             OrchFormField::Start => None,
         }
@@ -1339,8 +1439,18 @@ impl OrchForm {
             OrchFormField::Deps => &self.deps,
             OrchFormField::Gate => &self.gate,
             OrchFormField::Prompt => &self.prompt,
+            OrchFormField::Target => match self.automation_target {
+                OrchAutomationTarget::NewWorker => "new_worker",
+                OrchAutomationTarget::ActiveAgent => "active_agent",
+            },
+            OrchFormField::ActiveAgent => self
+                .active_agents
+                .get(self.active_agent)
+                .map(|agent| agent.label.as_str())
+                .unwrap_or("no active agents"),
             OrchFormField::Agent => &self.agent,
             OrchFormField::RunIn => self.mode.as_str(),
+            OrchFormField::Access => self.access.as_str(),
             OrchFormField::Start => self.start.label(),
             OrchFormField::Schedule => &self.schedule,
         }
@@ -1351,6 +1461,15 @@ fn default_task_agent() -> String {
     crate::app::task_agent_choices()
         .first()
         .copied()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn default_automation_agent() -> String {
+    crate::app::automation_agent_choices_for(crate::automation::AutomationAccess::Workspace)
+        .first()
+        .copied()
+        .or_else(|| crate::app::automation_agent_choices().first().copied())
         .unwrap_or_default()
         .to_string()
 }
@@ -6472,6 +6591,11 @@ impl App {
 
     fn close_pane(&mut self, id: PaneId) {
         let owner = self.pane_location(id);
+        self.expire_active_agent_targets(
+            Some(id),
+            "active-agent automation target pane closed",
+            crate::automation::unix_now(),
+        );
         self.drop_leaf_runtime(id);
         self.release_leaf_ownership(id);
         self.session_dirty = true;
@@ -11489,6 +11613,8 @@ mod tests {
         use ratatui::backend::TestBackend;
         use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use ratatui::Terminal;
+
+        let _env = crate::persist::test_env("agent-menu-resume-dismiss");
 
         let sess = |id: &str, p: &str| crate::agent::SessionInfo {
             agent: "claude".into(),

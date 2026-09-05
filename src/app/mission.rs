@@ -14,11 +14,18 @@ impl App {
             .map(|automation| {
                 let latest = self.automation.latest_run(&automation.id);
                 let current = latest.filter(|run| run.status.is_live());
-                let available = crate::agent::registry::find(&automation.task.agent_id).is_some()
-                    && self
-                        .workspaces
-                        .iter()
-                        .any(|workspace| workspace.id == automation.task.workspace_id);
+                let available = match automation.target {
+                    crate::automation::AutomationTarget::NewWorker => {
+                        crate::agent::registry::find(&automation.task.agent_id).is_some()
+                            && self
+                                .workspaces
+                                .iter()
+                                .any(|workspace| workspace.id == automation.task.workspace_id)
+                    }
+                    crate::automation::AutomationTarget::ActiveAgent { .. } => self
+                        .validate_active_agent_target(&automation.target, &automation.task)
+                        .is_ok(),
+                };
                 let state = match current.map(|run| run.status) {
                     Some(crate::automation::RunStatus::Review) => "review",
                     Some(_) => "running",

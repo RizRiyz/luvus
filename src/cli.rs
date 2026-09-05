@@ -293,7 +293,12 @@ orchestration (multiple agents on one project, docs/22):
 agent automation (scheduled ORCH tasks):
   automation create \"<name>\" --title <title> --prompt <text> --agent <id> --workspace-id <id>
                              (--once <UTC>|--every <seconds>|--daily <HH:MM>|--weekly <days> --at <HH:MM>)
-                             [--timezone <IANA>] [--mode workspace|worktree] [--paths <glob>...] [--gate <cmd>]
+                             [--timezone <IANA>] [--anchor-utc <UTC>] [--mode workspace|worktree]
+                             [--access read-only|workspace|full] [--paths <glob>...] [--gate <cmd>]
+                             [--target new-worker|active-agent --pane <id> --terminal-id <id>]
+                             [--if-busy wait|skip]
+                             [--disabled] [--misfire skip|run_latest] [--misfire-grace <seconds>]
+                             [--overlap skip|queue_one] [--idempotency-key <key>]
   automation list            list definitions and their next UTC deadlines
   automation get <id>        show one definition
   automation update <id> --name <name> <same required task and schedule options as create>
@@ -301,6 +306,8 @@ agent automation (scheduled ORCH tasks):
   automation run <id> [--idempotency-key <key>]   run once without advancing its schedule
   automation history [<id>] [--limit <1-200>]     show bounded run history
   automation preview (--once <UTC>|--every <seconds>|--daily <HH:MM>|--weekly <days> --at <HH:MM>)
+                             [--timezone <IANA>] [--anchor-utc <UTC>]
+  automation health         summarize armed, live, review, and failed runs
   automation delete <id>     remove an idle definition
 
 events:
@@ -3702,6 +3709,9 @@ fn automation_definition_params(
     if !matches!(mode.as_str(), "workspace" | "worktree") {
         return Err(anyhow!("--mode must be workspace or worktree"));
     }
+    let access = flag(args, "--access").unwrap_or_else(|| "workspace".to_string());
+    let access = crate::automation::AutomationAccess::parse(&access)
+        .ok_or_else(|| anyhow!("--access must be read-only, workspace, or full"))?;
     let misfire = flag(args, "--misfire").unwrap_or_else(|| "run_latest".to_string());
     if !matches!(misfire.as_str(), "skip" | "run_latest") {
         return Err(anyhow!("--misfire must be skip or run_latest"));
@@ -3729,6 +3739,36 @@ fn automation_definition_params(
         json!(!args.iter().any(|arg| arg == "--disabled")),
     );
     obj.insert("trigger".into(), automation_trigger_args(args)?);
+    let target = flag(args, "--target").unwrap_or_else(|| "new-worker".to_string());
+    let target = match target.as_str() {
+        "new-worker" => {
+            if flag(args, "--pane").is_some()
+                || flag(args, "--terminal-id").is_some()
+                || flag(args, "--if-busy").is_some()
+            {
+                return Err(anyhow!(
+                    "--pane, --terminal-id, and --if-busy require --target active-agent"
+                ));
+            }
+            json!({"kind":"new_worker"})
+        }
+        "active-agent" => {
+            let pane = required("--pane")?;
+            let terminal_id = required("--terminal-id")?;
+            let if_busy = flag(args, "--if-busy").unwrap_or_else(|| "wait".to_string());
+            if !matches!(if_busy.as_str(), "wait" | "skip") {
+                return Err(anyhow!("--if-busy must be wait or skip"));
+            }
+            json!({
+                "kind":"active_agent",
+                "pane_id":pane,
+                "terminal_id":terminal_id,
+                "if_busy":if_busy,
+            })
+        }
+        _ => return Err(anyhow!("--target must be new-worker or active-agent")),
+    };
+    obj.insert("target".into(), target);
     obj.insert(
         "task".into(),
         json!({
@@ -3737,6 +3777,7 @@ fn automation_definition_params(
             "agent_id": required("--agent")?,
             "workspace_id": required("--workspace-id")?,
             "mode": mode,
+            "access": access.as_str(),
             "paths": multi_flag(args, "--paths"),
             "gate": flag(args, "--gate"),
         }),
@@ -3949,6 +3990,11 @@ mod tests {
                     || trimmed.starts_with("[--end-line ")
                     || trimmed.starts_with("(--once ")
                     || trimmed.starts_with("[--timezone ")
+                    || trimmed.starts_with("[--access ")
+                    || trimmed.starts_with("[--target ")
+                    || trimmed.starts_with("[--if-busy ")
+                    || trimmed.starts_with("[--disabled")
+                    || trimmed.starts_with("[--overlap ")
                     || command_without_description
                     || trimmed.starts_with("session attach <name>")
                     || trimmed == "(applies live if the server is up; else on next start)"
@@ -4813,6 +4859,8 @@ mod tests {
             "Asia/Makassar",
             "--mode",
             "workspace",
+            "--access",
+            "read-only",
             "--idempotency-key",
             "create-1",
         ]
@@ -4826,7 +4874,16 @@ mod tests {
         assert_eq!(params["trigger"]["second_of_day"], 30_600);
         assert_eq!(params["trigger"]["timezone"], "Asia/Makassar");
         assert_eq!(params["task"]["prompt"], "check changes");
+        assert_eq!(params["task"]["access"], "read_only");
         assert_eq!(params["idempotency_key"], "create-1");
+
+        let (_, params) = parse(&argv(
+            "luvus automation create continue --title continue --prompt next --agent codex --workspace-id workspace-a --once 2000000000 --target active-agent --pane 7 --terminal-id 0123456789abcdef0123456789abcdef --if-busy skip",
+        ))
+        .unwrap();
+        assert_eq!(params["target"]["kind"], "active_agent");
+        assert_eq!(params["target"]["pane_id"], "7");
+        assert_eq!(params["target"]["if_busy"], "skip");
 
         let (method, params) = parse(&argv(
             "luvus automation preview --weekly mon,fri --at 09:00 --timezone UTC",
@@ -4840,6 +4897,9 @@ mod tests {
             "luvus automation preview --daily 09:00",
             "luvus automation preview --once 100 --every 60",
             "luvus automation preview --weekly moons --at 09:00 --timezone UTC",
+            "luvus automation create morning --title review --prompt check --agent codex --workspace-id workspace-a --daily 09:00 --timezone UTC --access root",
+            "luvus automation create morning --title review --prompt check --agent codex --workspace-id workspace-a --once 2000000000 --pane 7",
+            "luvus automation create morning --title review --prompt check --agent codex --workspace-id workspace-a --once 2000000000 --target active-agent --pane 7",
         ] {
             assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
         }

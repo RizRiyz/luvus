@@ -7,6 +7,7 @@
 mod model;
 mod persist;
 mod schedule;
+mod worker;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -14,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use model::*;
 use serde::{Deserialize, Serialize};
+pub(crate) use worker::run as run_worker;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct AutomationHealth {
@@ -130,6 +132,7 @@ impl AutomationState {
                 .then(|| schedule::first_at_or_after(&input.trigger, now))
                 .flatten(),
             trigger: input.trigger,
+            target: input.target,
             task: input.task,
             policy: input.policy,
             created_at: now,
@@ -222,6 +225,7 @@ impl AutomationState {
         automation.name = input.name.trim().to_string();
         automation.enabled = input.enabled;
         automation.trigger = input.trigger;
+        automation.target = input.target;
         automation.task = input.task;
         automation.policy = input.policy;
         automation.next_run_at = if automation.enabled {
@@ -482,7 +486,10 @@ impl AutomationState {
         let run = self.run_mut(run_id)?;
         run.status = status;
         run.error = error.map(|value| truncate(value, MAX_ERROR_BYTES));
-        if matches!(status, RunStatus::Running | RunStatus::Review) {
+        if matches!(
+            status,
+            RunStatus::Starting | RunStatus::Running | RunStatus::Review
+        ) {
             run.started_at.get_or_insert(now);
             run.finished_at = None;
         } else if !status.is_live() {
@@ -548,6 +555,7 @@ impl AutomationState {
             error,
             trigger: Some(automation.trigger.clone()),
             policy: automation.policy.clone(),
+            target: automation.target.clone(),
             task: automation.task.clone(),
         };
         self.runs.push(run.clone());
@@ -654,6 +662,7 @@ impl AutomationState {
             validate_definition(
                 &automation.name,
                 &automation.trigger,
+                &automation.target,
                 &automation.task,
                 &automation.policy,
             )?;
@@ -693,6 +702,7 @@ impl AutomationState {
                 ));
             }
             validate_task(&run.task)?;
+            validate_target(&run.target)?;
             if let Some(trigger) = run.trigger.as_ref() {
                 schedule::validate(trigger)?;
             }
@@ -842,10 +852,12 @@ pub fn definition_event(automation: &Automation) -> serde_json::Value {
         "name": automation.name,
         "enabled": automation.enabled,
         "trigger": automation.trigger,
+        "target": automation.target,
         "task": {
             "agent_id": automation.task.agent_id,
             "workspace_id": automation.task.workspace_id,
             "mode": automation.task.mode,
+            "access": automation.task.access,
         },
         "next_run_at": automation.next_run_at,
     })
@@ -913,7 +925,13 @@ pub fn parse_weekday(value: &str) -> Result<u8, Reject> {
 }
 
 fn validate_create(input: &CreateAutomation, now: u64) -> Result<(), Reject> {
-    validate_definition(&input.name, &input.trigger, &input.task, &input.policy)?;
+    validate_definition(
+        &input.name,
+        &input.trigger,
+        &input.target,
+        &input.task,
+        &input.policy,
+    )?;
     if input.enabled && schedule::first_at_or_after(&input.trigger, now).is_none() {
         return Err(Reject::new(
             "schedule_expired",
@@ -926,22 +944,61 @@ fn validate_create(input: &CreateAutomation, now: u64) -> Result<(), Reject> {
 fn validate_definition(
     name: &str,
     trigger: &Trigger,
+    target: &AutomationTarget,
     task: &TaskTemplate,
     policy: &AutomationPolicy,
 ) -> Result<(), Reject> {
     validate_text("name", name, MAX_NAME_BYTES)?;
+    validate_target(target)?;
     validate_task(task)?;
+    if matches!(target, AutomationTarget::ActiveAgent { .. })
+        && (!task.paths.is_empty() || task.gate.is_some())
+    {
+        return Err(Reject::new(
+            "invalid_target",
+            "active-agent automation does not create ORCH leases or quality gates",
+        ));
+    }
     validate_policy(policy)?;
     schedule::validate(trigger)
+}
+
+fn validate_target(target: &AutomationTarget) -> Result<(), Reject> {
+    let AutomationTarget::ActiveAgent {
+        pane_id,
+        terminal_id,
+        ..
+    } = target
+    else {
+        return Ok(());
+    };
+    if *pane_id == 0 {
+        return Err(Reject::new(
+            "invalid_target",
+            "active-agent pane_id must be non-zero",
+        ));
+    }
+    if terminal_id.len() != 32
+        || !terminal_id
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(Reject::new(
+            "invalid_target",
+            "active-agent terminal_id must be 32 lowercase hexadecimal characters",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_task(task: &TaskTemplate) -> Result<(), Reject> {
     validate_text("task.title", &task.title, MAX_TITLE_BYTES)?;
     validate_text("task.prompt", &task.prompt, MAX_PROMPT_BYTES)?;
-    if crate::orch::contains_terminal_control(&task.prompt) {
+    if contains_unsafe_prompt_control(&task.prompt) {
         return Err(Reject::new(
             "invalid_prompt",
-            "task.prompt must not contain terminal control characters",
+            "task.prompt must not contain terminal control characters other than newlines",
         ));
     }
     validate_text("task.agent_id", &task.agent_id, 64)?;
@@ -985,6 +1042,12 @@ fn validate_task(task: &TaskTemplate) -> Result<(), Reject> {
     Ok(())
 }
 
+pub(crate) fn contains_unsafe_prompt_control(value: &str) -> bool {
+    value
+        .chars()
+        .any(|value| value.is_control() && value != '\n')
+}
+
 fn validate_policy(policy: &AutomationPolicy) -> Result<(), Reject> {
     if policy.misfire_grace_seconds > 31_536_000 {
         return Err(Reject::new(
@@ -1011,6 +1074,7 @@ fn create_fingerprint(input: &CreateAutomation) -> String {
         &input.name,
         input.enabled,
         &input.trigger,
+        &input.target,
         &input.task,
         &input.policy,
     ))
@@ -1064,12 +1128,14 @@ mod tests {
             name: "Morning review".into(),
             enabled: true,
             trigger,
+            target: AutomationTarget::NewWorker,
             task: TaskTemplate {
                 title: "Review open work".into(),
                 prompt: "Review the current changes and report risks.".into(),
                 agent_id: "codex".into(),
                 workspace_id: "workspace-1".into(),
                 mode: crate::orch::TaskWorkerMode::Workspace,
+                access: AutomationAccess::Workspace,
                 paths: vec![],
                 gate: None,
             },
@@ -1100,15 +1166,90 @@ mod tests {
     }
 
     #[test]
-    fn create_rejects_terminal_controls_in_prompt() {
+    fn legacy_task_templates_default_to_workspace_access() {
+        let task: TaskTemplate = serde_json::from_value(serde_json::json!({
+            "title":"Review",
+            "prompt":"Review changes",
+            "agent_id":"codex",
+            "workspace_id":"workspace-1",
+            "mode":"workspace"
+        }))
+        .unwrap();
+        assert_eq!(task.access, AutomationAccess::Workspace);
+    }
+
+    #[test]
+    fn legacy_definitions_and_runs_default_to_new_workers() {
+        let mut state = AutomationState::default();
+        let automation = state
+            .create(input(Trigger::Once { at_utc: 100 }), None, 10)
+            .unwrap();
+        let run = state.request_run(&automation.id, None, 20).unwrap();
+        let mut definition = serde_json::to_value(&automation).unwrap();
+        let mut run_value = serde_json::to_value(&run).unwrap();
+        definition.as_object_mut().unwrap().remove("target");
+        run_value.as_object_mut().unwrap().remove("target");
+
+        let definition: Automation = serde_json::from_value(definition).unwrap();
+        let run: AutomationRun = serde_json::from_value(run_value).unwrap();
+        assert_eq!(definition.target, AutomationTarget::NewWorker);
+        assert_eq!(run.target, AutomationTarget::NewWorker);
+    }
+
+    #[test]
+    fn active_agent_target_requires_a_lowercase_terminal_lifetime_id() {
+        let mut state = AutomationState::default();
+        let mut definition = input(Trigger::Once { at_utc: 100 });
+        definition.target = AutomationTarget::ActiveAgent {
+            pane_id: 7,
+            terminal_id: "not-a-terminal".into(),
+            if_busy: ActiveAgentBusyPolicy::Wait,
+        };
+        let error = state.create(definition, None, 10).unwrap_err();
+
+        assert_eq!(error.code, "invalid_target");
+
+        let mut valid = input(Trigger::Once { at_utc: 100 });
+        valid.target = AutomationTarget::ActiveAgent {
+            pane_id: 7,
+            terminal_id: "0123456789abcdef0123456789abcdef".into(),
+            if_busy: ActiveAgentBusyPolicy::Skip,
+        };
+        assert!(state.create(valid, None, 10).is_ok());
+    }
+
+    #[test]
+    fn pre_rename_active_agent_target_alias_loads_but_serializes_canonically() {
+        let target: AutomationTarget = serde_json::from_value(serde_json::json!({
+            "kind":"existing_agent",
+            "pane_id":7,
+            "terminal_id":"0123456789abcdef0123456789abcdef",
+            "if_busy":"wait"
+        }))
+        .unwrap();
+
+        assert!(matches!(target, AutomationTarget::ActiveAgent { .. }));
+        assert_eq!(
+            serde_json::to_value(target).unwrap()["kind"],
+            "active_agent"
+        );
+    }
+
+    #[test]
+    fn create_accepts_newlines_but_rejects_other_terminal_controls_in_prompt() {
         let mut state = AutomationState::default();
         let mut definition = input(Trigger::Once { at_utc: 100 });
         definition.task.prompt = "review this\nthen run something".into();
 
+        let automation = state.create(definition.clone(), None, 10).unwrap();
+        assert_eq!(automation.task.prompt, "review this\nthen run something");
+
+        definition.name = "unsafe review".into();
+        definition.task.prompt = "review this\x1bthen run something".into();
         let error = state.create(definition, None, 10).unwrap_err();
 
         assert_eq!(error.code, "invalid_prompt");
-        assert!(state.automations.is_empty());
+        assert_eq!(state.automations.len(), 1);
     }
 
     #[test]
@@ -1158,6 +1299,7 @@ mod tests {
         let persisted = state.run(&run.id).unwrap();
         assert_eq!(persisted.trigger.as_ref(), Some(&original_trigger));
         assert_eq!(persisted.policy, original.policy);
+        assert_eq!(persisted.target, original.target);
         assert_eq!(persisted.task.prompt, original.task.prompt);
     }
 
@@ -1315,6 +1457,7 @@ mod tests {
         assert!(!event.contains("private/path"));
         assert!(!event.contains("secret gate instructions"));
         assert_eq!(event.matches("workspace-1").count(), 1);
+        assert!(event.contains("\"access\":\"workspace\""));
     }
 
     #[test]

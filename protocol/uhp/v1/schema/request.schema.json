@@ -178,6 +178,24 @@
         "misfire_grace_seconds": { "type": "integer", "minimum": 0, "maximum": 31536000 }
       }
     },
+    "automationTarget": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind"],
+          "properties": { "kind": { "const": "new_worker" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "pane_id", "terminal_id"],
+          "properties": {
+            "kind": { "const": "active_agent" },
+            "pane_id": { "oneOf": [{ "type": "string", "pattern": "^[1-9][0-9]*$" }, { "type": "integer", "minimum": 1, "maximum": 4294967295 }] },
+            "terminal_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+            "if_busy": { "enum": ["wait", "skip"] }
+          }
+        }
+      ]
+    },
     "automationTask": {
       "type": "object", "additionalProperties": false,
       "required": ["title", "prompt", "agent_id", "workspace_id"],
@@ -187,6 +205,7 @@
         "agent_id": { "type": "string", "minLength": 1, "maxLength": 64 },
         "workspace_id": { "type": "string", "minLength": 1, "maxLength": 128 },
         "mode": { "enum": ["worktree", "workspace"] },
+        "access": { "enum": ["read_only", "workspace", "full_access"] },
         "paths": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 1024 } },
         "gate": { "type": ["string", "null"], "maxLength": 4096 }
       }
@@ -199,6 +218,7 @@
         "name": { "type": "string", "minLength": 1, "maxLength": 128 },
         "enabled": { "type": "boolean" },
         "trigger": { "$ref": "#/$defs/automationTrigger" },
+        "target": { "$ref": "#/$defs/automationTarget" },
         "task": { "$ref": "#/$defs/automationTask" },
         "policy": { "$ref": "#/$defs/automationPolicy" },
         "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 128 }

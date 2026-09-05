@@ -90,6 +90,12 @@ fn main() -> Result<()> {
     if is_backend_discovery_request(&args) {
         std::process::exit(cli::run(&args)?);
     }
+    // Private foreground route used only by scheduled worker panes. Keep it
+    // ahead of migrations and TUI/server routing: it must run exactly one
+    // adapter process, settle its ORCH task, and exit.
+    if args.get(1).map(String::as_str) == Some("__automation-worker") {
+        std::process::exit(automation::run_worker(&args)?);
+    }
 
     // One-time local cleanup of the old default-on skill installation. This
     // never downloads or installs a skill; it only removes legacy managed

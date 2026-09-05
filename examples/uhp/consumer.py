@@ -143,7 +143,16 @@ def valid_automation_trigger(value):
 
 
 def valid_automation_task(value):
-    allowed = {"title", "prompt", "agent_id", "workspace_id", "mode", "paths", "gate"}
+    allowed = {
+        "title",
+        "prompt",
+        "agent_id",
+        "workspace_id",
+        "mode",
+        "access",
+        "paths",
+        "gate",
+    }
     required = {"title", "prompt", "agent_id", "workspace_id"}
     if not isinstance(value, dict) or not required <= set(value) or not set(value) <= allowed:
         return False
@@ -156,6 +165,12 @@ def valid_automation_task(value):
     if not bounded_string(value["workspace_id"], 128, allow_empty=False):
         return False
     if "mode" in value and value["mode"] not in {"worktree", "workspace"}:
+        return False
+    if "access" in value and value["access"] not in {
+        "read_only",
+        "workspace",
+        "full_access",
+    }:
         return False
     if "gate" in value and value["gate"] is not None and not bounded_string(value["gate"], 4096):
         return False

@@ -13,6 +13,45 @@ pub const MAX_GATE_BYTES: usize = 4 * 1024;
 pub const MAX_ERROR_BYTES: usize = 4 * 1024;
 pub const MIN_INTERVAL_SECONDS: u64 = 60;
 
+/// Authority granted to one scheduled agent invocation. This is deliberately
+/// separate from [`TaskWorkerMode`]: a worktree isolates Git history, while
+/// access controls what the agent process may do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationAccess {
+    ReadOnly,
+    #[default]
+    Workspace,
+    FullAccess,
+}
+
+impl AutomationAccess {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::Workspace => "workspace",
+            Self::FullAccess => "full_access",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "Read only",
+            Self::Workspace => "Workspace",
+            Self::FullAccess => "Full access",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "read_only" | "read-only" | "readonly" => Some(Self::ReadOnly),
+            "workspace" => Some(Self::Workspace),
+            "full_access" | "full-access" | "full" => Some(Self::FullAccess),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Trigger {
@@ -59,6 +98,32 @@ pub enum OverlapPolicy {
     QueueOne,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActiveAgentBusyPolicy {
+    /// Keep the occurrence pending and deliver it after the target becomes idle.
+    #[default]
+    Wait,
+    /// Record the occurrence as skipped when the target is not ready.
+    Skip,
+}
+
+/// Where an occurrence executes. Active-agent targets bind to one exact PTY
+/// lifetime so a restored or replaced shell cannot receive a stale prompt.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AutomationTarget {
+    #[default]
+    NewWorker,
+    #[serde(alias = "existing_agent")]
+    ActiveAgent {
+        pane_id: u32,
+        terminal_id: String,
+        #[serde(default)]
+        if_busy: ActiveAgentBusyPolicy,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutomationPolicy {
     #[serde(default)]
@@ -90,6 +155,10 @@ pub struct TaskTemplate {
     pub agent_id: String,
     pub workspace_id: String,
     pub mode: crate::orch::TaskWorkerMode,
+    /// Agent-specific execution authority. Older ledgers default to the
+    /// bounded workspace policy rather than unrestricted execution.
+    #[serde(default)]
+    pub access: AutomationAccess,
     #[serde(default)]
     pub paths: Vec<String>,
     #[serde(default)]
@@ -102,6 +171,8 @@ pub struct Automation {
     pub name: String,
     pub enabled: bool,
     pub trigger: Trigger,
+    #[serde(default)]
+    pub target: AutomationTarget,
     pub task: TaskTemplate,
     #[serde(default)]
     pub policy: AutomationPolicy,
@@ -117,6 +188,9 @@ pub enum RunStatus {
     Starting,
     Running,
     Review,
+    /// The prompt reached an active agent's PTY input queue. This does not
+    /// claim that the interactive agent completed the requested work.
+    Delivered,
     Succeeded,
     Failed,
     Skipped,
@@ -151,6 +225,8 @@ pub struct AutomationRun {
     pub trigger: Option<Trigger>,
     #[serde(default)]
     pub policy: AutomationPolicy,
+    #[serde(default)]
+    pub target: AutomationTarget,
     /// Snapshot the work contract so later definition edits cannot mutate a run.
     pub task: TaskTemplate,
 }
@@ -183,6 +259,7 @@ pub struct CreateAutomation {
     pub name: String,
     pub enabled: bool,
     pub trigger: Trigger,
+    pub target: AutomationTarget,
     pub task: TaskTemplate,
     pub policy: AutomationPolicy,
 }

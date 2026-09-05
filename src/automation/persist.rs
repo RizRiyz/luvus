@@ -107,12 +107,14 @@ mod tests {
             name: "Nightly review".into(),
             enabled: true,
             trigger: Trigger::Once { at_utc: 100 },
+            target: crate::automation::AutomationTarget::NewWorker,
             task: TaskTemplate {
                 title: "Review changes".into(),
                 prompt: "Review the current changes.".into(),
                 agent_id: "codex".into(),
                 workspace_id: "workspace-1".into(),
                 mode: crate::orch::TaskWorkerMode::Workspace,
+                access: crate::automation::AutomationAccess::Workspace,
                 paths: Vec::new(),
                 gate: None,
             },
@@ -172,7 +174,7 @@ mod tests {
         state
             .create(valid_input(), None, 10)
             .expect("valid automation");
-        state.automations[0].task.prompt = "review\nthen execute".into();
+        state.automations[0].task.prompt = "review\x1bthen execute".into();
         write_ledger(&path, &state);
 
         let loaded = load(path.clone());

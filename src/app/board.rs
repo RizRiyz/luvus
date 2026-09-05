@@ -57,6 +57,39 @@ impl App {
         mode: TaskWorkerMode,
         workspace_id: Option<String>,
     ) -> Result<TaskStartResult, (String, String)> {
+        self.task_start_impl(id, branch, agent, mode, workspace_id, None)
+    }
+
+    /// Start a scheduled worker with the adapter's reviewed headless command.
+    /// This stays separate from interactive ORCH starts so automation policy
+    /// never changes the behavior of an explicit `task start`.
+    pub(crate) fn task_start_automation(
+        &mut self,
+        id: &str,
+        agent: String,
+        mode: TaskWorkerMode,
+        workspace_id: String,
+        access: crate::automation::AutomationAccess,
+    ) -> Result<TaskStartResult, (String, String)> {
+        self.task_start_impl(
+            id,
+            None,
+            Some(agent),
+            mode,
+            Some(workspace_id),
+            Some(access),
+        )
+    }
+
+    fn task_start_impl(
+        &mut self,
+        id: &str,
+        branch: Option<String>,
+        agent: Option<String>,
+        mode: TaskWorkerMode,
+        workspace_id: Option<String>,
+        automation_access: Option<crate::automation::AutomationAccess>,
+    ) -> Result<TaskStartResult, (String, String)> {
         let task = self
             .orch
             .task(id)
@@ -112,7 +145,10 @@ impl App {
         // older ledger that predates current input validation.
         let launch_line = agent
             .as_deref()
-            .map(|command| agent_launch_line(command, &task, mode))
+            .map(|command| match automation_access {
+                Some(access) => automation_agent_launch_line(command, &task, access),
+                None => agent_launch_line(command, &task, mode),
+            })
             .transpose()
             .map_err(|message| ("invalid_prompt".to_string(), message))?;
 
@@ -562,13 +598,24 @@ impl App {
     pub fn orch_unbind_pane(&mut self, pane: u32) {
         use crate::orch::TaskStatus;
         let mut requeued: Vec<String> = Vec::new();
+        let mut interrupted: Vec<String> = Vec::new();
         let mut changed = false;
         for t in &mut self.orch.tasks {
             if t.assignee != Some(pane) {
                 continue;
             }
             t.assignee = None;
-            if t.worker_mode.is_none()
+            if t.automation.is_some()
+                && matches!(
+                    t.status,
+                    TaskStatus::Claimed
+                        | TaskStatus::Running
+                        | TaskStatus::Blocked
+                        | TaskStatus::Review
+                )
+            {
+                interrupted.push(t.id.clone());
+            } else if t.worker_mode.is_none()
                 && t.worktree.is_none()
                 && matches!(t.status, TaskStatus::Claimed | TaskStatus::Running)
             {
@@ -577,11 +624,18 @@ impl App {
             }
             changed = true;
         }
-        if changed {
+        let interrupted = self.mark_automation_tasks_interrupted(
+            &interrupted,
+            "automation worker pane closed before task completion",
+        );
+        if changed && interrupted.is_empty() {
             self.orch.save();
         }
         for id in requeued {
             self.emit_event("task.released", serde_json::json!({ "id": id }));
+            self.sync_automation_task(&id);
+        }
+        for id in interrupted {
             self.sync_automation_task(&id);
         }
     }
@@ -971,11 +1025,57 @@ impl App {
         };
         let mut form = crate::app::OrchForm::for_kind(kind);
         form.mode = self.orch_flow_mode;
+        form.active_agents = self.active_agent_automation_choices();
         self.orch_form = Some(form);
+    }
+
+    fn active_agent_automation_choices(&self) -> Vec<crate::app::OrchActiveAgent> {
+        let mut choices = Vec::new();
+        for workspace in &self.workspaces {
+            for pane in workspace.tabs.iter().flat_map(|tab| tab.layout.leaves()) {
+                let Some(status) = self.status.get(&pane).filter(|_| self.is_agent_pane(pane))
+                else {
+                    continue;
+                };
+                let Some(runtime) = self
+                    .panes
+                    .get(&pane)
+                    .and_then(|pane| pane.terminal_runtime())
+                else {
+                    continue;
+                };
+                let name = self
+                    .agent_name_for(pane)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("p{}", pane.0));
+                choices.push(crate::app::OrchActiveAgent {
+                    pane,
+                    terminal_id: runtime.terminal_id,
+                    agent: status.agent.clone(),
+                    workspace_id: workspace.id.clone(),
+                    label: format!("{name} · {} · {}", status.agent, workspace.name),
+                });
+            }
+        }
+        choices
     }
 
     /// Key handling while the new-task form is open.
     pub fn handle_orch_form_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Enter
+            && key
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+            && self.orch_form.as_ref().is_some_and(|form| {
+                form.kind == crate::app::OrchFormKind::Automation
+                    && form.field == crate::app::OrchFormField::Prompt
+            })
+        {
+            if let Some(form) = self.orch_form.as_mut() {
+                form.push_char('\n');
+            }
+            return;
+        }
         // Esc/Enter act on the whole form, so handle them before borrowing it.
         match key.code {
             KeyCode::Esc => {
@@ -999,9 +1099,12 @@ impl App {
             KeyCode::Left
                 if matches!(
                     form.field,
-                    crate::app::OrchFormField::Start
+                    crate::app::OrchFormField::Target
+                        | crate::app::OrchFormField::ActiveAgent
+                        | crate::app::OrchFormField::Start
                         | crate::app::OrchFormField::Agent
                         | crate::app::OrchFormField::RunIn
+                        | crate::app::OrchFormField::Access
                 ) =>
             {
                 form.cycle_choice(true)
@@ -1009,9 +1112,12 @@ impl App {
             KeyCode::Right | KeyCode::Char(' ')
                 if matches!(
                     form.field,
-                    crate::app::OrchFormField::Start
+                    crate::app::OrchFormField::Target
+                        | crate::app::OrchFormField::ActiveAgent
+                        | crate::app::OrchFormField::Start
                         | crate::app::OrchFormField::Agent
                         | crate::app::OrchFormField::RunIn
+                        | crate::app::OrchFormField::Access
                 ) =>
             {
                 form.cycle_choice(false)
@@ -1024,7 +1130,22 @@ impl App {
     /// Create the task from the form (title required; paths/deps whitespace-split).
     /// On error the form stays open showing why.
     fn submit_orch_form(&mut self) {
-        let (kind, title, prompt, agent, mode, start, schedule, timezone, paths, deps, gate) = {
+        let (
+            kind,
+            title,
+            prompt,
+            agent,
+            automation_target,
+            active_agent,
+            mode,
+            access,
+            start,
+            schedule,
+            timezone,
+            paths,
+            deps,
+            gate,
+        ) = {
             let Some(f) = self.orch_form.as_ref() else {
                 return;
             };
@@ -1033,7 +1154,10 @@ impl App {
                 f.title.trim().to_string(),
                 f.prompt.trim().to_string(),
                 f.agent.trim().to_string(),
+                f.automation_target,
+                f.active_agents.get(f.active_agent).cloned(),
                 f.mode,
+                f.access,
                 f.start,
                 f.schedule.trim().to_string(),
                 f.timezone.clone(),
@@ -1063,7 +1187,18 @@ impl App {
                 gate,
             ),
             crate::app::OrchFormKind::Automation => self.submit_scheduled_orch_task(
-                title, prompt, agent, mode, start, schedule, timezone, paths, gate,
+                title,
+                prompt,
+                agent,
+                automation_target,
+                active_agent,
+                mode,
+                access,
+                start,
+                schedule,
+                timezone,
+                paths,
+                gate,
             ),
         };
         if let Err(message) = result {
@@ -1131,50 +1266,99 @@ impl App {
         title: String,
         prompt: String,
         agent: String,
+        automation_target: crate::app::OrchAutomationTarget,
+        active_agent: Option<crate::app::OrchActiveAgent>,
         mode: TaskWorkerMode,
+        access: crate::automation::AutomationAccess,
         start: crate::app::OrchFormStart,
         schedule: String,
         timezone: String,
         paths: Vec<String>,
         gate: Option<String>,
     ) -> Result<(), String> {
-        let descriptor = crate::agent::registry::find(&agent)
-            .ok_or_else(|| format!("unsupported agent: {agent}"))?;
         if prompt.is_empty() {
             return Err("Prompt is required for a scheduled agent".into());
         }
         let now = crate::automation::unix_now();
         let trigger = parse_orch_schedule(start, &schedule, &timezone, now)?;
-        let workspace_id = self
-            .workspaces
-            .get(self.active_ws)
-            .map(|workspace| workspace.id.clone())
-            .ok_or_else(|| "an active workspace is required".to_string())?;
+        let (target, agent_id, workspace_id, task_paths, task_gate) = match automation_target {
+            crate::app::OrchAutomationTarget::NewWorker => {
+                let descriptor = crate::agent::registry::find(&agent)
+                    .ok_or_else(|| format!("unsupported agent: {agent}"))?;
+                if !descriptor
+                    .automation
+                    .is_some_and(|operations| operations.supports(access))
+                {
+                    return Err(format!(
+                        "{} does not support {} scheduled access",
+                        descriptor.id,
+                        access.label().to_ascii_lowercase()
+                    ));
+                }
+                let workspace_id = self
+                    .workspaces
+                    .get(self.active_ws)
+                    .map(|workspace| workspace.id.clone())
+                    .ok_or_else(|| "an active workspace is required".to_string())?;
+                (
+                    crate::automation::AutomationTarget::NewWorker,
+                    descriptor.id.to_string(),
+                    workspace_id,
+                    paths,
+                    gate,
+                )
+            }
+            crate::app::OrchAutomationTarget::ActiveAgent => {
+                let target = active_agent
+                    .ok_or_else(|| "No live agent is available for this automation".to_string())?;
+                (
+                    crate::automation::AutomationTarget::ActiveAgent {
+                        pane_id: target.pane.0,
+                        terminal_id: target.terminal_id,
+                        if_busy: crate::automation::ActiveAgentBusyPolicy::Wait,
+                    },
+                    target.agent,
+                    target.workspace_id,
+                    Vec::new(),
+                    None,
+                )
+            }
+        };
         let input = crate::automation::CreateAutomation {
             name: title.clone(),
             enabled: true,
             trigger,
+            target,
             task: crate::automation::TaskTemplate {
                 title,
                 prompt,
-                agent_id: descriptor.id.to_string(),
+                agent_id,
                 workspace_id,
                 mode,
-                paths,
-                gate,
+                access,
+                paths: task_paths,
+                gate: task_gate,
             },
             policy: crate::automation::AutomationPolicy::default(),
         };
-        // Reuse ORCH validation before changing automation state.
-        let mut probe = crate::orch::OrchState::default();
-        probe
-            .add_task(
-                input.task.title.clone(),
-                input.task.paths.clone(),
-                Vec::new(),
-                input.task.gate.clone(),
-            )
-            .map_err(|error| error.message)?;
+        if matches!(
+            input.target,
+            crate::automation::AutomationTarget::ActiveAgent { .. }
+        ) {
+            self.validate_active_agent_target(&input.target, &input.task)
+                .map_err(|(_, message)| message)?;
+        } else {
+            // Reuse ORCH validation before changing automation state.
+            let mut probe = crate::orch::OrchState::default();
+            probe
+                .add_task(
+                    input.task.title.clone(),
+                    input.task.paths.clone(),
+                    Vec::new(),
+                    input.task.gate.clone(),
+                )
+                .map_err(|error| error.message)?;
+        }
         let before = self.automation.clone();
         let item = self
             .automation
@@ -1252,9 +1436,12 @@ impl App {
                         form.field = field;
                         if matches!(
                             field,
-                            crate::app::OrchFormField::Start
+                            crate::app::OrchFormField::Target
+                                | crate::app::OrchFormField::ActiveAgent
+                                | crate::app::OrchFormField::Start
                                 | crate::app::OrchFormField::Agent
                                 | crate::app::OrchFormField::RunIn
+                                | crate::app::OrchFormField::Access
                         ) {
                             form.cycle_choice(false);
                         }
@@ -1305,6 +1492,22 @@ impl App {
             .is_some_and(|item| item.enabled);
         let before = self.automation.clone();
         let now = crate::automation::unix_now();
+        if enabled {
+            let Some(automation) = self.automation.automation(&id).cloned() else {
+                return;
+            };
+            if matches!(
+                automation.target,
+                crate::automation::AutomationTarget::ActiveAgent { .. }
+            ) {
+                if let Err((_, message)) =
+                    self.validate_active_agent_target(&automation.target, &automation.task)
+                {
+                    self.show_toast(message);
+                    return;
+                }
+            }
+        }
         match self.automation.set_enabled(&id, enabled, now) {
             Ok(item) => match self.automation.save() {
                 Ok(()) => {
@@ -1800,6 +2003,43 @@ pub fn task_agent_choices() -> &'static [&'static str] {
     })
 }
 
+/// Built-in agents with at least one reviewed unattended launch profile.
+pub fn automation_agent_choices() -> &'static [&'static str] {
+    static CHOICES: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    CHOICES.get_or_init(|| {
+        crate::agent::registry::descriptors()
+            .iter()
+            .filter(|descriptor| descriptor.automation.is_some())
+            .map(|descriptor| descriptor.id)
+            .collect()
+    })
+}
+
+/// Built-in automation agents that support one exact access profile.
+pub fn automation_agent_choices_for(
+    access: crate::automation::AutomationAccess,
+) -> &'static [&'static str] {
+    static READ_ONLY: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    static WORKSPACE: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    static FULL_ACCESS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    let choices = match access {
+        crate::automation::AutomationAccess::ReadOnly => &READ_ONLY,
+        crate::automation::AutomationAccess::Workspace => &WORKSPACE,
+        crate::automation::AutomationAccess::FullAccess => &FULL_ACCESS,
+    };
+    choices.get_or_init(|| {
+        crate::agent::registry::descriptors()
+            .iter()
+            .filter(|descriptor| {
+                descriptor
+                    .automation
+                    .is_some_and(|operations| operations.supports(access))
+            })
+            .map(|descriptor| descriptor.id)
+            .collect()
+    })
+}
+
 fn task_tab_name(task: &crate::orch::Task) -> String {
     let value = format!("{} · {}", task.id, task.title.trim());
     value.chars().take(crate::app::TAB_NAME_MAX).collect()
@@ -1875,6 +2115,38 @@ fn agent_launch_line(
     }
 }
 
+fn automation_agent_launch_line(
+    agent: &str,
+    task: &crate::orch::Task,
+    access: crate::automation::AutomationAccess,
+) -> Result<String, String> {
+    let descriptor =
+        crate::agent::registry::find(agent).ok_or_else(|| format!("unsupported agent: {agent}"))?;
+    // Validate the adapter/access pair before anything is created. The private
+    // runner resolves the same immutable descriptor again and launches it with
+    // structured argv, avoiding a second layer of shell parsing.
+    let _ = agent_automation_command(descriptor.id, access)?;
+    let provenance = task
+        .automation
+        .as_ref()
+        .ok_or_else(|| "scheduled task is missing automation provenance".to_string())?;
+    // Shell startup files may reorder PATH after the PTY environment is set.
+    // Invoke the owning server binary directly so debug, release, and named
+    // sessions cannot accidentally route through a different Luvus install.
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("could not resolve the Luvus automation runner: {error}"))?;
+    let executable = shell_quote(&executable.to_string_lossy());
+    let command = format!(
+        "{executable} __automation-worker {} {} {}",
+        task.id, provenance.automation_id, provenance.run_id
+    );
+    if cfg!(windows) {
+        Ok(command)
+    } else {
+        Ok(format!("LUVUS_TASK_ID={} {command}", task.id))
+    }
+}
+
 fn agent_task_command(agent: &str) -> String {
     crate::agent::registry::find(agent)
         .map(|descriptor| {
@@ -1884,6 +2156,28 @@ fn agent_task_command(agent: &str) -> String {
                 .join(" ")
         })
         .unwrap_or_else(|| agent.to_string())
+}
+
+fn agent_automation_command(
+    agent: &str,
+    access: crate::automation::AutomationAccess,
+) -> Result<String, String> {
+    let descriptor =
+        crate::agent::registry::find(agent).ok_or_else(|| format!("unsupported agent: {agent}"))?;
+    let launch = descriptor
+        .automation
+        .and_then(|operations| operations.launch(access))
+        .ok_or_else(|| {
+            format!(
+                "{} does not support {} scheduled access",
+                descriptor.id,
+                access.label().to_ascii_lowercase()
+            )
+        })?;
+    Ok(std::iter::once(descriptor.launch_command)
+        .chain(launch.args.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" "))
 }
 
 /// Quote `s` as one shell argument: POSIX single-quoting on Unix; on Windows
@@ -2955,6 +3249,49 @@ mod tests {
     }
 
     #[test]
+    fn automation_commands_use_reviewed_headless_access_profiles() {
+        use crate::automation::AutomationAccess;
+
+        assert_eq!(
+            agent_automation_command("codex", AutomationAccess::ReadOnly).unwrap(),
+            "codex exec --sandbox read-only -c approval_policy=never"
+        );
+        assert_eq!(
+            agent_automation_command("fx", AutomationAccess::Workspace).unwrap(),
+            "fx ask --auto"
+        );
+        assert!(agent_automation_command("aider", AutomationAccess::Workspace).is_err());
+        assert!(agent_automation_command("antigravity", AutomationAccess::Workspace).is_err());
+
+        let mut state = crate::orch::OrchState::default();
+        let task = state
+            .add_task("scheduled review".into(), Vec::new(), Vec::new(), None)
+            .unwrap();
+        state
+            .set_prompt(&task.id, Some("review safely".into()))
+            .unwrap();
+        state
+            .attach_automation(
+                &task.id,
+                "review safely".into(),
+                crate::orch::AutomationProvenance {
+                    automation_id: "automation_1".into(),
+                    run_id: "run_1".into(),
+                    scheduled_at: 10,
+                },
+            )
+            .unwrap();
+        let task = state.task(&task.id).unwrap();
+        let line =
+            automation_agent_launch_line("codex", task, AutomationAccess::Workspace).unwrap();
+        assert!(line.contains("__automation-worker t1 automation_1 run_1"));
+        assert!(!line.contains("LUVUS_BIN_PATH"));
+        assert!(!line.contains("review safely"));
+        assert!(!line.contains("luvus task done"));
+        assert!(!line.contains("codex exec"));
+    }
+
+    #[test]
     fn start_picker_agents_follow_the_builtin_registry() {
         let choices = agent_choices();
         let agents = &choices[..choices.len() - 1];
@@ -3157,12 +3494,17 @@ mod tests {
         assert_eq!(form.kind, crate::app::OrchFormKind::Automation);
         assert_eq!(form.start, crate::app::OrchFormStart::Once);
         assert!(jiff::tz::db().get(&form.timezone).is_ok());
-        assert_eq!(form.agent, task_agent_choices()[0]);
+        assert_eq!(
+            form.agent,
+            automation_agent_choices_for(crate::automation::AutomationAccess::Workspace)[0]
+        );
         assert_eq!(form.mode, TaskWorkerMode::Workspace);
         assert!(crate::automation::parse_local_instant(&form.schedule, &form.timezone).is_ok());
         assert_eq!(form.field, crate::app::OrchFormField::Title);
         assert!(!form.fields().contains(&crate::app::OrchFormField::Deps));
         assert!(form.fields().contains(&crate::app::OrchFormField::RunIn));
+        assert!(form.fields().contains(&crate::app::OrchFormField::Access));
+        assert_eq!(form.access, crate::automation::AutomationAccess::Workspace);
         assert!(form.fields().contains(&crate::app::OrchFormField::Schedule));
 
         app.orch_form = None;
@@ -3171,6 +3513,52 @@ mod tests {
         assert_eq!(
             app.orch_form.as_ref().unwrap().kind,
             crate::app::OrchFormKind::Automation
+        );
+    }
+
+    #[test]
+    fn automation_form_selects_a_live_agent_and_preserves_both_drafts() {
+        let _env = crate::persist::test_env("orch-form-active-agent");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = *app.panes.keys().next().unwrap();
+        app.status.get_mut(&pane).unwrap().agent = "codex".into();
+        app.orch_view = crate::app::OrchView::Automations;
+        app.open_orch_form();
+
+        let form = app.orch_form.as_ref().unwrap();
+        assert_eq!(form.active_agents.len(), 1);
+        assert_eq!(form.active_agents[0].pane, pane);
+        assert_eq!(form.active_agents[0].agent, "codex");
+        assert_eq!(form.active_agents[0].terminal_id.len(), 32);
+
+        {
+            let form = app.orch_form.as_mut().unwrap();
+            form.title = "existing title".into();
+            form.prompt = "continue here".into();
+            form.field = crate::app::OrchFormField::Target;
+        }
+        app.handle_orch_form_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let form = app.orch_form.as_ref().unwrap();
+        assert_eq!(
+            form.automation_target,
+            crate::app::OrchAutomationTarget::ActiveAgent
+        );
+        assert!(form
+            .fields()
+            .contains(&crate::app::OrchFormField::ActiveAgent));
+        assert!(!form.fields().contains(&crate::app::OrchFormField::RunIn));
+        assert!(!form.fields().contains(&crate::app::OrchFormField::Access));
+
+        app.handle_orch_form_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.orch_form.as_mut().unwrap().title = "task title".into();
+        app.handle_orch_form_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let form = app.orch_form.as_ref().unwrap();
+        assert_eq!(form.title, "existing title");
+        assert_eq!(form.prompt, "continue here");
+        assert_eq!(
+            form.automation_target,
+            crate::app::OrchAutomationTarget::ActiveAgent
         );
     }
 
@@ -3254,6 +3642,57 @@ mod tests {
             app.orch_form.as_ref().unwrap().mode,
             TaskWorkerMode::Workspace
         );
+
+        {
+            let form = app.orch_form.as_mut().unwrap();
+            form.agent = "fx".into();
+            form.field = crate::app::OrchFormField::Access;
+        }
+        app.handle_orch_form_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        let form = app.orch_form.as_ref().unwrap();
+        assert_eq!(form.access, crate::automation::AutomationAccess::ReadOnly);
+        assert!(automation_agent_choices_for(form.access).contains(&form.agent.as_str()));
+
+        app.orch_activate_hit(crate::app::OrchHit::FormField(
+            crate::app::OrchFormField::Access,
+        ));
+        assert_eq!(
+            app.orch_form.as_ref().unwrap().access,
+            crate::automation::AutomationAccess::Workspace
+        );
+    }
+
+    #[test]
+    fn automation_prompt_shift_enter_inserts_a_newline_without_submitting() {
+        let _env = crate::persist::test_env("orch-form-multiline-prompt");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.orch_form = Some(crate::app::OrchForm {
+            kind: crate::app::OrchFormKind::Automation,
+            field: crate::app::OrchFormField::Prompt,
+            prompt: "Review the changes".into(),
+            ..crate::app::OrchForm::default()
+        });
+
+        app.handle_orch_form_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        for value in "and report risks".chars() {
+            app.handle_orch_form_key(KeyEvent::new(KeyCode::Char(value), KeyModifiers::NONE));
+        }
+
+        let form = app
+            .orch_form
+            .as_ref()
+            .expect("Shift+Enter keeps the automation form open");
+        assert_eq!(form.prompt, "Review the changes\nand report risks");
+        assert!(app.automation.automations.is_empty());
+        assert!(app.orch.tasks.is_empty());
+
+        app.handle_orch_form_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+        assert_eq!(
+            app.orch_form.as_ref().unwrap().prompt,
+            "Review the changes\nand report risks\n",
+            "Alt+Enter is the ESC-CR fallback used when a terminal cannot report Shift+Enter"
+        );
     }
 
     #[test]
@@ -3263,6 +3702,7 @@ mod tests {
         form.prompt = "Review the release.".into();
         form.agent = "codex".into();
         form.mode = TaskWorkerMode::Workspace;
+        form.access = crate::automation::AutomationAccess::ReadOnly;
         form.start = crate::app::OrchFormStart::Daily;
         form.schedule = "08:30".into();
         form.schedule_prefilled = false;
@@ -3285,6 +3725,7 @@ mod tests {
         assert_eq!(form.prompt, "Review the release.");
         assert_eq!(form.agent, "codex");
         assert_eq!(form.mode, TaskWorkerMode::Workspace);
+        assert_eq!(form.access, crate::automation::AutomationAccess::ReadOnly);
         assert_eq!(form.start, crate::app::OrchFormStart::Daily);
         assert_eq!(form.schedule, "08:30");
         assert!(!form.schedule_prefilled);
@@ -3328,6 +3769,10 @@ mod tests {
         let automation = app.automation.automation("a1").unwrap();
         assert_eq!(automation.task.agent_id, "codex");
         assert_eq!(automation.task.mode, TaskWorkerMode::Workspace);
+        assert_eq!(
+            automation.task.access,
+            crate::automation::AutomationAccess::Workspace
+        );
         assert!(matches!(
             &automation.trigger,
             crate::automation::Trigger::Daily { timezone, .. }
@@ -3474,12 +3919,14 @@ mod tests {
                         timezone: "UTC".into(),
                         second_of_day: 0,
                     },
+                    target: crate::automation::AutomationTarget::NewWorker,
                     task: crate::automation::TaskTemplate {
                         title: "Review".into(),
                         prompt: "Review changes".into(),
                         agent_id: "codex".into(),
                         workspace_id,
                         mode: TaskWorkerMode::Workspace,
+                        access: crate::automation::AutomationAccess::Workspace,
                         paths: Vec::new(),
                         gate: None,
                     },

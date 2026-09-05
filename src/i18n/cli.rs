@@ -2356,6 +2356,17 @@ static HELP: &[Translation] = &[
         "제한된 실행 기록 표시"
     ),
     tr!(
+        "summarize armed, live, review, and failed runs",
+        "resumir ejecuciones programadas, activas, en revisión y fallidas",
+        "resumir execuções programadas, ativas, em revisão e com falha",
+        "résumer les exécutions planifiées, actives, en révision et échouées",
+        "geplante, aktive, zu prüfende und fehlgeschlagene Läufe zusammenfassen",
+        "ringkas proses terjadwal, aktif, ditinjau, dan gagal",
+        "汇总已计划、运行中、待审查和失败的执行",
+        "予定済み、実行中、レビュー中、失敗の実行を集計",
+        "예약됨, 실행 중, 검토 중, 실패 실행 요약"
+    ),
+    tr!(
         "remove an idle definition",
         "eliminar una definición inactiva",
         "remover uma definição inativa",

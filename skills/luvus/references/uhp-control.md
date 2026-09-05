@@ -73,6 +73,15 @@ read current state and reconcile instead of blindly retrying.
   `automation.history`, `automation.preview`, and `automation.health`; mutate
   with `automation.create`, `automation.update`, `automation.enable`,
   `automation.disable`, `automation.run`, and `automation.delete`
+  - For create or update, set `task.access` to `read_only`, `workspace`, or
+    `full_access`; omitted access defaults to `workspace`. This is independent
+    of `task.mode`. Never retry an unsupported agent/access pair with broader
+    access unless the user explicitly selected it.
+  - `target` defaults to `new_worker`. Use `active_agent` only with the exact
+    live `pane_id`, `terminal_id`, `task.agent_id`, and `task.workspace_id`
+    returned by discovery. Its `if_busy` policy is `wait` or `skip`; it creates
+    no ORCH worker and `delivered` proves queueing, not task completion. Do not
+    reuse it after pane closure or server restart.
 - Extensions: `module.*`
 - Themes and configuration: `theme.*`, `config.*`, and `manifest.reload`
 - UI surfaces: `ui.sidebar`, `ui.dock.*`, `ui.bar.*`,

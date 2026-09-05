@@ -147,42 +147,7 @@ pub(super) fn render(
         action,
     );
     hits.push((crate::app::OrchHit::NewTask, action));
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!("   {}  ", cat.col_status.to_uppercase()),
-                Style::new().fg(t.overlay0),
-            ),
-            Span::styled(
-                fmt_count(cat.task_queued, counts[0]),
-                Style::new().fg(t.overlay1),
-            ),
-            Span::styled("  ·  ", Style::new().fg(t.surface1)),
-            Span::styled(
-                fmt_count(cat.task_running, counts[2] + counts[1] + counts[6]),
-                Style::new().fg(if counts[2] + counts[1] + counts[6] > 0 {
-                    t.mint
-                } else {
-                    t.overlay1
-                }),
-            ),
-            Span::styled("  ·  ", Style::new().fg(t.surface1)),
-            Span::styled(
-                fmt_count(cat.task_blocked, counts[3]),
-                Style::new().fg(if counts[3] > 0 { t.coral } else { t.overlay1 }),
-            ),
-            Span::styled("  ·  ", Style::new().fg(t.surface1)),
-            Span::styled(
-                fmt_count(cat.task_done, counts[5] + counts[7]),
-                Style::new().fg(if counts[5] + counts[7] > 0 {
-                    t.green
-                } else {
-                    t.overlay1
-                }),
-            ),
-        ])),
-        Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
-    );
+    draw_status_summary(f, area, view, &counts, automation, cat, t);
     hline(f, area.x + 1, area.y + 2, area.width.saturating_sub(2), t);
 
     if view == OrchView::Automations {
@@ -371,6 +336,110 @@ struct AutomationRender<'a> {
     theme: &'a Theme,
 }
 
+#[derive(Clone, Copy)]
+enum AutomationDisplayStatus {
+    Scheduled,
+    Running,
+    Review,
+    Failed,
+    Paused,
+    Completed,
+}
+
+#[derive(Clone, Copy)]
+struct AutomationColumns {
+    wide: bool,
+    title: usize,
+    schedule: usize,
+    next: usize,
+}
+
+fn automation_columns(width: u16) -> AutomationColumns {
+    if width >= 97 {
+        AutomationColumns {
+            wide: true,
+            title: 23,
+            schedule: 25,
+            next: 20,
+        }
+    } else if width >= 80 {
+        AutomationColumns {
+            wide: true,
+            title: 15,
+            schedule: 18,
+            next: 15,
+        }
+    } else {
+        AutomationColumns {
+            wide: false,
+            title: 23,
+            schedule: 0,
+            next: 20,
+        }
+    }
+}
+
+fn draw_status_summary(
+    f: &mut RenderTarget,
+    area: Rect,
+    view: OrchView,
+    task_counts: &[usize; 9],
+    automation: &AutomationState,
+    cat: &Catalog,
+    t: &Theme,
+) {
+    let entries = if view == OrchView::Automations {
+        let mut counts = [0usize; 6];
+        for item in &automation.automations {
+            let index = match automation_display_status(automation, item) {
+                AutomationDisplayStatus::Scheduled => 0,
+                AutomationDisplayStatus::Running => 1,
+                AutomationDisplayStatus::Review => 2,
+                AutomationDisplayStatus::Failed => 3,
+                AutomationDisplayStatus::Paused => 4,
+                AutomationDisplayStatus::Completed => 5,
+            };
+            counts[index] += 1;
+        }
+        vec![
+            (cat.automation_scheduled, counts[0], t.accent),
+            (cat.task_running, counts[1], t.mint),
+            (cat.task_review, counts[2], t.amber),
+            (cat.task_failed, counts[3], t.coral),
+            (cat.automation_paused, counts[4], t.overlay1),
+            (cat.automation_completed, counts[5], t.green),
+        ]
+    } else {
+        vec![
+            (cat.task_queued, task_counts[0], t.overlay1),
+            (
+                cat.task_running,
+                task_counts[2] + task_counts[1] + task_counts[6],
+                t.mint,
+            ),
+            (cat.task_blocked, task_counts[3], t.coral),
+            (cat.task_done, task_counts[5] + task_counts[7], t.green),
+        ]
+    };
+    let mut spans = vec![Span::styled(
+        format!("   {}  ", cat.col_status.to_uppercase()),
+        Style::new().fg(t.overlay0),
+    )];
+    for (index, (label, count, active_color)) in entries.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled("  ·  ", Style::new().fg(t.surface1)));
+        }
+        spans.push(Span::styled(
+            fmt_count(label, count),
+            Style::new().fg(if count > 0 { active_color } else { t.overlay1 }),
+        ));
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(spans)),
+        Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
+    );
+}
+
 fn render_automations(
     f: &mut RenderTarget,
     area: Rect,
@@ -392,8 +461,9 @@ fn render_automations(
         area.height.saturating_sub(3 + footer_h),
     );
     let header = Rect::new(body.x, body.y, body.width, 1);
+    let columns = automation_columns(body.width);
     if body.height > 0 {
-        draw_automation_header(f, header, body.width >= 80, cat, t);
+        draw_automation_header(f, header, columns, cat, t);
     }
     if state.automations.is_empty() {
         let empty = Rect::new(
@@ -426,26 +496,26 @@ fn render_automations(
             .next_run_at
             .map(super::format_utc)
             .unwrap_or_else(|| "—".into());
-        let name = pad(&automation.name, 23);
-        let line = if body.width >= 80 {
+        let name = pad(&automation.name, columns.title);
+        let line = if columns.wide {
             format!(
-                "{} {:<6} {:<11} {} {:<25} {:<20} {}",
+                "{} {} {} {} {} {} {}",
                 if selected { "▸" } else { " " },
-                automation.id,
-                status,
+                pad(&automation.id, 6),
+                pad(status, 11),
                 name,
-                schedule_label(&automation.trigger),
-                next,
+                pad(&schedule_label(&automation.trigger), columns.schedule),
+                pad(&next, columns.next),
                 automation.task.agent_id
             )
         } else {
             format!(
-                "{} {:<6} {:<11} {} {}",
+                "{} {} {} {} {}",
                 if selected { "▸" } else { " " },
-                automation.id,
-                status,
+                pad(&automation.id, 6),
+                pad(status, 11),
                 name,
-                next
+                pad(&next, 20)
             )
         };
         f.render_widget(
@@ -493,26 +563,32 @@ fn render_automations(
     BoardRender { scroll, hits }
 }
 
-fn draw_automation_header(f: &mut RenderTarget, area: Rect, wide: bool, cat: &Catalog, t: &Theme) {
+fn draw_automation_header(
+    f: &mut RenderTarget,
+    area: Rect,
+    columns: AutomationColumns,
+    cat: &Catalog,
+    t: &Theme,
+) {
     let style = Style::new().fg(t.overlay1).bold();
-    if wide {
+    if columns.wide {
         let line = format!(
-            "   {}     {}       {}                    {}                  {}             {}",
-            pad("ID", 2),
-            pad(&cat.col_status.to_uppercase(), 5),
-            pad(&cat.col_title.to_uppercase(), 4),
-            pad(&cat.board_f_schedule.to_uppercase(), 8),
-            pad(&cat.col_next_utc.to_uppercase(), 8),
-            pad(&cat.board_agent.to_uppercase(), 5),
+            "  {} {} {} {} {} {}",
+            pad("ID", 6),
+            pad(&cat.col_status.to_uppercase(), 11),
+            pad(&cat.col_title.to_uppercase(), columns.title),
+            pad(&cat.board_f_schedule.to_uppercase(), columns.schedule),
+            pad(&cat.col_next_utc.to_uppercase(), columns.next),
+            cat.board_agent.to_uppercase(),
         );
         f.render_widget(Paragraph::new(Span::styled(line, style)), area);
     } else {
         let line = format!(
-            "   {}     {}       {}                    {}",
-            pad("ID", 2),
-            pad(&cat.col_status.to_uppercase(), 5),
-            pad(&cat.col_title.to_uppercase(), 4),
-            pad(&cat.col_next_utc.to_uppercase(), 8),
+            "  {} {} {} {}",
+            pad("ID", 6),
+            pad(&cat.col_status.to_uppercase(), 11),
+            pad(&cat.col_title.to_uppercase(), columns.title),
+            cat.col_next_utc.to_uppercase(),
         );
         f.render_widget(Paragraph::new(Span::styled(line, style)), area);
     }
@@ -524,22 +600,34 @@ fn automation_status<'a>(
     cat: &'a Catalog,
     t: &'a Theme,
 ) -> (&'a str, Color) {
-    match state.latest_run(id).map(|run| run.status) {
+    let Some(item) = state.automation(id) else {
+        return (cat.automation_paused, t.overlay1);
+    };
+    match automation_display_status(state, item) {
+        AutomationDisplayStatus::Scheduled => (cat.automation_scheduled, t.accent),
+        AutomationDisplayStatus::Running => (cat.task_running, t.mint),
+        AutomationDisplayStatus::Review => (cat.task_review, t.amber),
+        AutomationDisplayStatus::Failed => (cat.task_failed, t.coral),
+        AutomationDisplayStatus::Paused => (cat.automation_paused, t.overlay1),
+        AutomationDisplayStatus::Completed => (cat.automation_completed, t.green),
+    }
+}
+
+fn automation_display_status(
+    state: &AutomationState,
+    automation: &Automation,
+) -> AutomationDisplayStatus {
+    match state.latest_run(&automation.id).map(|run| run.status) {
         Some(RunStatus::Pending | RunStatus::Starting | RunStatus::Running) => {
-            (cat.task_running, t.mint)
+            AutomationDisplayStatus::Running
         }
-        Some(RunStatus::Review) => (cat.task_review, t.amber),
-        Some(RunStatus::Failed) => (cat.task_failed, t.coral),
-        _ if state.automation(id).is_some_and(|item| item.enabled) => {
-            (cat.automation_scheduled, t.accent)
+        Some(RunStatus::Review) => AutomationDisplayStatus::Review,
+        Some(RunStatus::Failed) => AutomationDisplayStatus::Failed,
+        _ if automation.enabled => AutomationDisplayStatus::Scheduled,
+        _ if matches!(automation.trigger, Trigger::Once { .. }) => {
+            AutomationDisplayStatus::Completed
         }
-        _ if state
-            .automation(id)
-            .is_some_and(|item| matches!(item.trigger, Trigger::Once { .. })) =>
-        {
-            (cat.automation_completed, t.green)
-        }
-        _ => (cat.automation_paused, t.overlay1),
+        _ => AutomationDisplayStatus::Paused,
     }
 }
 
@@ -1508,8 +1596,13 @@ pub(super) fn draw_form(
             crate::app::OrchFormField::Deps => (cat.board_f_deps, cat.board_h_deps),
             crate::app::OrchFormField::Gate => (cat.board_f_gate, cat.board_h_gate),
             crate::app::OrchFormField::Prompt => (cat.board_f_prompt, cat.board_h_prompt),
+            crate::app::OrchFormField::Target => (cat.board_run_with, "left/right"),
+            crate::app::OrchFormField::ActiveAgent => {
+                (cat.board_f_agent, "left/right: active agents")
+            }
             crate::app::OrchFormField::Agent => (cat.board_f_agent, cat.board_h_agent),
             crate::app::OrchFormField::RunIn => (cat.board_run_in, ""),
+            crate::app::OrchFormField::Access => (cat.board_access, cat.board_h_access),
             crate::app::OrchFormField::Start => (cat.board_f_start, cat.board_h_start),
             crate::app::OrchFormField::Schedule => (cat.board_f_schedule, cat.board_h_schedule),
         };
@@ -1528,7 +1621,16 @@ pub(super) fn draw_form(
             crate::app::OrchFormStart::Daily => cat.automation_daily,
             crate::app::OrchFormStart::Weekly => cat.automation_weekly,
         };
-        let value = if field == crate::app::OrchFormField::Start {
+        let value = if field == crate::app::OrchFormField::Target {
+            match form.automation_target {
+                crate::app::OrchAutomationTarget::NewWorker => {
+                    cat.automation_target_new.to_string()
+                }
+                crate::app::OrchAutomationTarget::ActiveAgent => {
+                    cat.automation_target_active.to_string()
+                }
+            }
+        } else if field == crate::app::OrchFormField::Start {
             if form.kind == crate::app::OrchFormKind::Automation && !form.timezone.is_empty() {
                 format!("{start_label} · {}", form.timezone)
             } else {
@@ -1538,6 +1640,18 @@ pub(super) fn draw_form(
             match form.mode {
                 crate::orch::TaskWorkerMode::Worktree => cat.board_worktree.to_string(),
                 crate::orch::TaskWorkerMode::Workspace => cat.board_workspace.to_string(),
+            }
+        } else if field == crate::app::OrchFormField::Access {
+            match form.access {
+                crate::automation::AutomationAccess::ReadOnly => {
+                    cat.automation_access_read_only.to_string()
+                }
+                crate::automation::AutomationAccess::Workspace => {
+                    cat.automation_access_workspace.to_string()
+                }
+                crate::automation::AutomationAccess::FullAccess => {
+                    cat.automation_access_full.to_string()
+                }
             }
         } else {
             form.value(field).to_string()
@@ -1561,11 +1675,6 @@ pub(super) fn draw_form(
             1
         };
         let field_rect = Rect::new(inner.x, field_y, inner.width, field_height);
-        let body = if value.is_empty() && !active {
-            Span::styled(hint, Style::new().fg(t.overlay0))
-        } else {
-            Span::styled(value, Style::new().fg(t.text))
-        };
         if field == crate::app::OrchFormField::Prompt {
             const LABEL_WIDTH: u16 = 11;
             f.render_widget(
@@ -1583,15 +1692,30 @@ pub(super) fn draw_form(
                 field_rect.width.saturating_sub(LABEL_WIDTH),
                 field_rect.height,
             );
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    body,
-                    Span::styled(if active { "▏" } else { "" }, Style::new().fg(t.accent)),
-                ]))
-                .wrap(Wrap { trim: false }),
-                body_rect,
-            );
+            let mut lines = if value.is_empty() && !active {
+                vec![Line::from(Span::styled(hint, Style::new().fg(t.overlay0)))]
+            } else {
+                value
+                    .split('\n')
+                    .map(|line| Line::from(Span::styled(line.to_string(), Style::new().fg(t.text))))
+                    .collect::<Vec<_>>()
+            };
+            if active {
+                lines
+                    .last_mut()
+                    .expect("a prompt always renders at least one line")
+                    .spans
+                    .push(Span::styled("▏", Style::new().fg(t.accent)));
+            }
+            let scroll = lines.len().saturating_sub(body_rect.height as usize) as u16;
+            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+            f.render_widget(paragraph.scroll((scroll, 0)), body_rect);
         } else {
+            let body = if value.is_empty() && !active {
+                Span::styled(hint, Style::new().fg(t.overlay0))
+            } else {
+                Span::styled(value, Style::new().fg(t.text))
+            };
             f.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled(format!(" {label:<8}: "), label_style),
@@ -1612,17 +1736,20 @@ pub(super) fn draw_form(
             Rect::new(inner.x, bottom, inner.width, 1),
         );
     } else {
+        let mut shortcuts = vec![("⏎", cat.act_create)];
+        if form.kind == crate::app::OrchFormKind::Automation
+            && form.field == crate::app::OrchFormField::Prompt
+        {
+            shortcuts.push(("⇧⏎", cat.settings.shift_newline));
+        }
+        shortcuts.extend([
+            ("⇥", cat.board_switch_type),
+            ("↑↓", cat.board_move_field),
+            ("←→", cat.act_select),
+            ("esc", cat.act_cancel),
+        ]);
         f.render_widget(
-            Paragraph::new(super::hint_line(
-                &[
-                    ("⏎", cat.act_create),
-                    ("⇥", cat.board_switch_type),
-                    ("↑↓", cat.board_move_field),
-                    ("←→", cat.act_select),
-                    ("esc", cat.act_cancel),
-                ],
-                t,
-            )),
+            Paragraph::new(super::hint_line(&shortcuts, t)),
             Rect::new(inner.x, bottom, inner.width, 1),
         );
         let left_w = inner.width / 2;
@@ -2210,29 +2337,52 @@ pub(super) fn draw_automation_detail(
         &mut lines,
     );
     kv(
+        cat.board_run_with,
+        match &automation.target {
+            crate::automation::AutomationTarget::NewWorker => cat.automation_target_new.to_string(),
+            crate::automation::AutomationTarget::ActiveAgent {
+                pane_id, if_busy, ..
+            } => format!(
+                "{} · p{} · {}",
+                cat.automation_target_active,
+                pane_id,
+                match if_busy {
+                    crate::automation::ActiveAgentBusyPolicy::Wait => "wait when busy",
+                    crate::automation::ActiveAgentBusyPolicy::Skip => "skip when busy",
+                }
+            ),
+        },
+        &mut lines,
+    );
+    kv(
         cat.board_workspace,
         automation.task.workspace_id.clone(),
         &mut lines,
     );
-    kv(
-        cat.board_run_in,
-        match automation.task.mode {
-            crate::orch::TaskWorkerMode::Worktree => cat.board_worktree,
-            crate::orch::TaskWorkerMode::Workspace => cat.board_workspace,
-        }
-        .to_string(),
-        &mut lines,
-    );
-    kv(
-        cat.board_f_paths,
-        automation.task.paths.join(" "),
-        &mut lines,
-    );
-    kv(
-        cat.board_f_gate,
-        automation.task.gate.clone().unwrap_or_default(),
-        &mut lines,
-    );
+    if matches!(
+        automation.target,
+        crate::automation::AutomationTarget::NewWorker
+    ) {
+        kv(
+            cat.board_run_in,
+            match automation.task.mode {
+                crate::orch::TaskWorkerMode::Worktree => cat.board_worktree,
+                crate::orch::TaskWorkerMode::Workspace => cat.board_workspace,
+            }
+            .to_string(),
+            &mut lines,
+        );
+        kv(
+            cat.board_f_paths,
+            automation.task.paths.join(" "),
+            &mut lines,
+        );
+        kv(
+            cat.board_f_gate,
+            automation.task.gate.clone().unwrap_or_default(),
+            &mut lines,
+        );
+    }
     kv(
         cat.automation_policy,
         format!(
@@ -2359,6 +2509,7 @@ fn run_status_label(status: RunStatus, cat: &Catalog) -> &str {
         RunStatus::Starting => cat.automation_starting,
         RunStatus::Running => cat.task_running,
         RunStatus::Review => cat.task_review,
+        RunStatus::Delivered => cat.automation_delivered,
         RunStatus::Succeeded => cat.task_done,
         RunStatus::Failed => cat.task_failed,
         RunStatus::Skipped => cat.automation_skipped,
@@ -2369,7 +2520,7 @@ fn run_status_label(status: RunStatus, cat: &Catalog) -> &str {
 fn run_status_color(status: RunStatus, t: &Theme) -> Color {
     match status {
         RunStatus::Pending | RunStatus::Starting => t.accent,
-        RunStatus::Running | RunStatus::Succeeded => t.green,
+        RunStatus::Running | RunStatus::Delivered | RunStatus::Succeeded => t.green,
         RunStatus::Review => t.amber,
         RunStatus::Failed => t.coral,
         RunStatus::Skipped | RunStatus::Cancelled => t.overlay1,
@@ -2430,6 +2581,102 @@ fn pad(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automation_table_uses_full_aligned_headers_and_reports_scheduled_count() {
+        let theme = Theme::quattro_rally();
+        let header_area = Rect::new(0, 0, 120, 1);
+        let mut header_buffer = Buffer::empty(header_area);
+        let mut header_target = RenderTarget::new(&mut header_buffer, header_area);
+        draw_automation_header(
+            &mut header_target,
+            header_area,
+            automation_columns(header_area.width),
+            &crate::i18n::EN,
+            &theme,
+        );
+        let header = (0..header_area.width)
+            .map(|x| header_buffer[(x, 0)].symbol())
+            .collect::<String>();
+        assert_eq!(header.find("ID"), Some(2));
+        assert_eq!(header.find("STATUS"), Some(9));
+        assert_eq!(header.find("TITLE"), Some(21));
+        assert_eq!(header.find("SCHEDULE"), Some(45));
+        assert_eq!(header.find("NEXT UTC"), Some(71));
+        assert_eq!(header.find("AGENT"), Some(92));
+        assert!(!header.contains('…'));
+
+        let mut state = AutomationState::default();
+        state.automations.push(Automation {
+            id: "a1".into(),
+            name: "Morning review".into(),
+            enabled: true,
+            trigger: Trigger::Once { at_utc: 100 },
+            target: crate::automation::AutomationTarget::NewWorker,
+            task: crate::automation::TaskTemplate {
+                title: "Review".into(),
+                prompt: "Review changes".into(),
+                agent_id: "codex".into(),
+                workspace_id: "workspace-1".into(),
+                mode: crate::orch::TaskWorkerMode::Workspace,
+                access: crate::automation::AutomationAccess::Workspace,
+                paths: Vec::new(),
+                gate: None,
+            },
+            policy: crate::automation::AutomationPolicy::default(),
+            next_run_at: Some(100),
+            created_at: 1,
+            updated_at: 1,
+        });
+        let summary_area = Rect::new(0, 0, 120, 2);
+        let mut summary_buffer = Buffer::empty(summary_area);
+        let mut summary_target = RenderTarget::new(&mut summary_buffer, summary_area);
+        draw_status_summary(
+            &mut summary_target,
+            summary_area,
+            OrchView::Automations,
+            &[0; 9],
+            &state,
+            &crate::i18n::EN,
+            &theme,
+        );
+        let summary = (0..summary_area.width)
+            .map(|x| summary_buffer[(x, 1)].symbol())
+            .collect::<String>();
+        assert!(summary.contains("1 scheduled"));
+    }
+
+    #[test]
+    fn automation_form_keeps_the_multiline_prompt_tail_visible() {
+        let area = Rect::new(0, 0, 90, 30);
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+        let mut form = OrchForm::for_kind(crate::app::OrchFormKind::Automation);
+        form.field = crate::app::OrchFormField::Prompt;
+        form.prompt = "first line\nsecond line\nthird line\nfourth line".into();
+
+        draw_form(
+            &mut target,
+            area,
+            &form,
+            &crate::i18n::EN,
+            &Theme::quattro_rally(),
+        );
+
+        let rendered = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!rendered.contains("first line"));
+        assert!(rendered.contains("second line"));
+        assert!(rendered.contains("third line"));
+        assert!(rendered.contains("fourth line▏"));
+        assert!(rendered.contains("newline"));
+    }
 
     #[test]
     fn empty_task_and_automation_messages_share_centered_emphasis() {

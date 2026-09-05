@@ -30,3 +30,6 @@ session-server contract. Calendar triggers retain an IANA timezone while wire
 deadlines and occurrence keys use UTC Unix seconds. Read-only inspection uses
 the `read` scope; definition changes and run requests require `orchestration`.
 Create and run requests support bounded idempotency keys for safe retries.
+Targets default to a fresh ORCH worker. `active_agent` targets bind to an
+exact pane and 128-bit terminal lifetime, fail closed on identity drift, and
+expire when that pane or server lifetime ends.
