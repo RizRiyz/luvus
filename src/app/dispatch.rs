@@ -1163,6 +1163,7 @@ mod socket_api_tests {
             agent: "codex".into(),
             session_id: "private-native-session".into(),
         });
+        app.proc_scan_inflight = true;
         let terminal_id = app
             .panes
             .get(&pane)
@@ -1170,23 +1171,29 @@ mod socket_api_tests {
             .unwrap()
             .terminal_id;
         let workspace_id = app.workspace_of_pane(pane).unwrap().id.clone();
-        let created = app
-            .dispatch(
-                "automation.create",
-                &json!({
-                    "name":"Continue native review",
-                    "trigger":{"kind":"once","at_utc":4_000_000_000_u64},
-                    "target":{"kind":"active_agent","pane_id":pane.0,"terminal_id":terminal_id},
-                    "task":{
-                        "title":"Continue native review", "prompt":":", "agent_id":"codex",
-                        "workspace_id":workspace_id, "mode":"workspace"
-                    }
-                }),
-            )
-            .unwrap();
+        let params = json!({
+            "name":"Continue native review",
+            "trigger":{"kind":"once","at_utc":4_000_000_000_u64},
+            "target":{"kind":"active_agent","pane_id":pane.0,"terminal_id":terminal_id},
+            "task":{
+                "title":"Continue native review", "prompt":":", "agent_id":"codex",
+                "workspace_id":workspace_id, "mode":"workspace"
+            }
+        });
+        let created = app.dispatch("automation.create", &params).unwrap();
         let id = created["automation"]["id"].as_str().unwrap().to_string();
         assert_eq!(created["automation"]["target"]["binding"], "durable");
+        assert_eq!(created["automation"]["target_state"], "restoring");
+        assert!(!app.automation.ready_active_targets.contains(&id));
+        assert!(app.proc_scan_demand_panes_inflight.contains(&pane));
         assert!(!created.to_string().contains("private-native-session"));
+
+        let mut update = params;
+        update["id"] = json!(id);
+        update["name"] = json!("Continue native review later");
+        let updated = app.dispatch("automation.update", &update).unwrap();
+        assert_eq!(updated["automation"]["target_state"], "restoring");
+        assert!(!app.automation.ready_active_targets.contains(&id));
 
         let rebound = app
             .dispatch(
@@ -5119,13 +5126,7 @@ impl App {
                     ));
                 }
                 if automation.target.is_durable_active_agent() {
-                    self.automation
-                        .ready_active_targets
-                        .insert(automation.id.clone());
-                    self.automation.active_target_states.insert(
-                        automation.id.clone(),
-                        crate::automation::ActiveTargetState::Bound,
-                    );
+                    self.initialize_durable_active_target_state(&automation);
                 } else {
                     self.automation.ready_active_targets.remove(&automation.id);
                     self.automation.active_target_states.remove(&automation.id);

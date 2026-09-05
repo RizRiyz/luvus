@@ -1370,10 +1370,7 @@ impl App {
             return Err(format!("could not save automation: {error}"));
         }
         if item.target.is_durable_active_agent() {
-            self.automation.ready_active_targets.insert(item.id.clone());
-            self.automation
-                .active_target_states
-                .insert(item.id.clone(), crate::automation::ActiveTargetState::Bound);
+            self.initialize_durable_active_target_state(&item);
         }
         self.emit_event(
             "automation.created",
@@ -3852,6 +3849,56 @@ mod tests {
             app.orch.tasks.is_empty(),
             "future work is not a sleeping task"
         );
+    }
+
+    #[test]
+    fn board_durable_target_waits_for_fresh_readiness_evidence() {
+        let _env = crate::persist::test_env("orch-automation-durable-readiness");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "codex".into();
+        app.status.get_mut(&pane).unwrap().agent_session = Some(AgentSession {
+            agent: "codex".into(),
+            session_id: "board-native-session".into(),
+        });
+        app.proc_scan_inflight = true;
+        let terminal_id = app
+            .panes
+            .get(&pane)
+            .and_then(|pane| pane.terminal_runtime())
+            .unwrap()
+            .terminal_id;
+        let workspace_id = app.workspace_of_pane(pane).unwrap().id.clone();
+
+        app.submit_scheduled_orch_task(
+            "Continue review".into(),
+            "Check the latest changes.".into(),
+            "codex".into(),
+            crate::app::OrchAutomationTarget::ActiveAgent,
+            Some(crate::app::OrchActiveAgent {
+                pane,
+                terminal_id,
+                agent: "codex".into(),
+                workspace_id,
+                label: "codex".into(),
+            }),
+            TaskWorkerMode::Workspace,
+            crate::automation::AutomationAccess::Workspace,
+            crate::app::OrchFormStart::Daily,
+            "08:00".into(),
+            "Asia/Makassar".into(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            app.automation.active_target_states.get("a1"),
+            Some(&crate::automation::ActiveTargetState::Restoring)
+        );
+        assert!(!app.automation.ready_active_targets.contains("a1"));
+        assert!(app.proc_scan_demand_panes_inflight.contains(&pane));
     }
 
     #[test]

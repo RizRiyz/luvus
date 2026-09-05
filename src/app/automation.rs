@@ -562,6 +562,47 @@ impl App {
             })
     }
 
+    /// Initialize the ephemeral readiness state for a durable target after its
+    /// definition has been persisted. Native session identity proves which
+    /// conversation owns the pane, but a fresh report or process snapshot must
+    /// still prove that the agent is currently ready to receive input.
+    pub(crate) fn initialize_durable_active_target_state(
+        &mut self,
+        automation: &crate::automation::Automation,
+    ) {
+        let crate::automation::AutomationTarget::ActiveAgent {
+            pane_id,
+            durable: Some(identity),
+            ..
+        } = &automation.target
+        else {
+            return;
+        };
+        let pane = crate::ids::PaneId(*pane_id);
+        let ready = self.durable_target_has_ready_evidence(pane, identity);
+        if ready {
+            self.automation
+                .ready_active_targets
+                .insert(automation.id.clone());
+        } else {
+            self.automation.ready_active_targets.remove(&automation.id);
+        }
+        self.automation.active_target_states.insert(
+            automation.id.clone(),
+            if ready {
+                crate::automation::ActiveTargetState::Bound
+            } else {
+                crate::automation::ActiveTargetState::Restoring
+            },
+        );
+        if !ready {
+            // A cached non-agent command snapshot cannot satisfy readiness and
+            // must not suppress the demand for fresh process evidence.
+            self.proc_commands.remove(&pane);
+            self.request_proc_scan_if_stale(pane);
+        }
+    }
+
     pub(crate) fn durable_active_target_state(
         &self,
         automation: &crate::automation::Automation,
