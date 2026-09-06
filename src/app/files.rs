@@ -1298,6 +1298,7 @@ mod tests {
         assert!(app.move_dock(&DockKind::Files, Side::Right));
         assert_eq!(app.sidebars.side_of(&DockKind::Files), Some(Side::Right));
         app.unmount_dock(&DockKind::Files);
+        app.flush_config_for_test(&_rx);
         assert_eq!(app.sidebars.side_of(&DockKind::Files), None);
         assert_eq!(
             app.config
