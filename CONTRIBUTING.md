@@ -95,6 +95,17 @@ early child exits, retain a bounded excerpt of failure diagnostics, and use a
 child-handle cleanup guard. Tests that change process-global configuration must
 hold `persist::test_env(...)` for their entire lifetime.
 
+Detailed terminal-history inspection has an opt-in, in-process benchmark:
+
+```bash
+cargo test --locked history_inspection_benchmark -- --ignored --nocapture
+```
+
+It reports three warmed trials for 1, 20, and 50 engines with 10,000 retained
+rows each. These are engine-accounting timings, not end-to-end API latency or
+process memory measurements. Record the commit and build profile when comparing
+runs. Ordinary test runs do not execute this workload.
+
 ## Adding agent support
 
 Use a detection manifest when an agent only needs identity and live-state
