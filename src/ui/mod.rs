@@ -406,10 +406,8 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
 /// frame; a false positive could corrupt visible output.
 pub(crate) fn retained_pty_eligible(app: &App) -> bool {
     app.mode == Mode::Normal
-        // OSC title changes arrive with PTY output and can alter an agent row
-        // outside the pane. Until retained chrome has its own invalidation,
-        // keep that optional projection on the full path.
-        && !app.config.layout.agent_title
+        // The VT damage contract forces a full projection when title chrome
+        // changes. Enabling titles alone need not disable retained rendering.
         && app.selection.is_none()
         && app.copy_mode.is_none()
         && app.hover_link.is_none()

@@ -56,6 +56,12 @@ full 40-character line ~100 bytes. This is what makes
 [remote attach](/docs/guides/remote/) over plain SSH feel local, and keeps the
 local render path around a millisecond per frame.
 
+For ordinary terminal-only updates, the server can also reuse its rendered
+buffer and repaint only damaged rows. Agent titles do not disable this path:
+a changed title invalidates the full projection until that output generation
+is acknowledged. Repeated identical titles keep the row-only path available.
+Overlays, resize, and backpressure recovery retain conservative full rendering.
+
 ## And the numbers
 
 Pure Rust, a single ~3 MB binary, single-digit-MB resident memory even with

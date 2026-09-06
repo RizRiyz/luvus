@@ -1609,6 +1609,7 @@ mod tests {
         let (app_tx, _app_rx) = mpsc::channel();
         let mut app = App::new(100, 30, app_tx).expect("app starts");
         app.server_mode = true;
+        app.config.layout.agent_title = true;
         let focus = app.layout().focus;
         let (response_tx, _response_rx) = mpsc::channel();
         let engine = create_engine(

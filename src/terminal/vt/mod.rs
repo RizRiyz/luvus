@@ -344,6 +344,8 @@ pub trait VtEngine: Send {
 
     /// Capture owned visible rows affected since the last acknowledged render.
     /// Implementations may conservatively return [`DamageKind::Full`].
+    /// Title changes must return Full until acknowledged: titles can also
+    /// affect chrome outside terminal rows, including agent sidebar labels.
     fn damage_snapshot(&mut self) -> DamageSnapshot;
 
     /// Forget damage through `generation` only when no newer output exists.
