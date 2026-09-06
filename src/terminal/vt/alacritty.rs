@@ -1125,6 +1125,12 @@ fn sgr(fg: Color, bg: Color, m: Modifier) -> String {
     if m.contains(Modifier::REVERSED) {
         s.push_str(";7");
     }
+    if m.contains(Modifier::HIDDEN) {
+        s.push_str(";8");
+    }
+    if m.contains(Modifier::CROSSED_OUT) {
+        s.push_str(";9");
+    }
     push_color(&mut s, fg, 38);
     push_color(&mut s, bg, 48);
     s.push('m');
@@ -1206,7 +1212,7 @@ mod tests {
             let (tx, _rx) = channel();
             let mut source = AlacrittyEngine::new(cols, 4, tx, budget_for_rows(cols as usize, 40));
             feed_lines(&mut source, 15);
-            source.advance("\x1b[2J\x1b[H界Aé e\u{301}\r\n♥\u{fe0f}X\r\n👩\u{200d}💻Z\r\n\x1b[1;3;4;38;2;2;3;4;48;5;12m界B\x1b[0m".as_bytes());
+            source.advance("\x1b[2J\x1b[H界Aé e\u{301}\r\n♥\u{fe0f}X\r\n👩\u{200d}💻Z\r\n\x1b[1;3;4;8;9;38;2;2;3;4;48;5;12m界B\x1b[0m".as_bytes());
             let snapshot = source.snapshot_ansi();
             source.scroll(8);
             let offset = source.term.grid().display_offset();
