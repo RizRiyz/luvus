@@ -115,6 +115,16 @@ fn write_input_action(writer: &mut dyn Write, action: InputAction) -> std::io::R
     writer.flush()
 }
 
+/// Pane keyboard modes that jointly determine PTY key encoding. Keep Kitty's
+/// disambiguation and report-all flags separate: the former deliberately leaves
+/// Tab and Backspace in their legacy forms.
+#[derive(Clone, Copy, Default)]
+pub struct KeyEncodingModes {
+    pub application_cursor: bool,
+    pub disambiguate_escape_codes: bool,
+    pub report_all_keys_as_escape_codes: bool,
+}
+
 /// A pane app's mouse-tracking state (all four DECSET-derived flags in one
 /// read): whether it reports at all, whether it wants press-and-move (1002) or
 /// any-motion (1003) events, and whether reports use the SGR encoding.
@@ -1000,11 +1010,15 @@ impl Pane {
     }
 
     /// Input modes read together under one engine lock.
-    pub fn key_encoding_modes(&self) -> (bool, bool) {
+    pub fn key_encoding_modes(&self) -> KeyEncodingModes {
         self.engine
             .lock()
-            .map(|e| (e.application_cursor(), e.disambiguate_escape_codes()))
-            .unwrap_or((false, false))
+            .map(|e| KeyEncodingModes {
+                application_cursor: e.application_cursor(),
+                disambiguate_escape_codes: e.disambiguate_escape_codes(),
+                report_all_keys_as_escape_codes: e.report_all_keys_as_escape_codes(),
+            })
+            .unwrap_or_default()
     }
 
     /// `(mouse_report, sgr)` — whether the child tracks the mouse, and whether
