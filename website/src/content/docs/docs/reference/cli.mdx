@@ -295,3 +295,5 @@ inserted beside that target in the same workspace and tab. It starts in the
 target pane's live working directory; with
 `layout.new_pane_to_workspace_root = true`, it starts at the target workspace
 root instead. `--no-focus` preserves the caller's current view.
+
+`luvus uhp snapshot` includes nullable `agent_name` operator aliases on terminal rows alongside `pane_id`. Native view rows omit the field. Renames require a fresh snapshot; event sequence is not an alias ETag.

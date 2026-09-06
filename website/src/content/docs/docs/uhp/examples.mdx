@@ -29,6 +29,13 @@ long Unix paths use different discovered endpoints.
 
 ## Send a one-shot request
 
+For a fleet display, request `session.snapshot` and retain each row's `pane_id`
+for routing. A named terminal row includes
+`{"pane_id":"7","kind":"terminal","agent_name":"reviewer"}` (other fields
+omitted here). Clearing the operator alias yields `agent_name:null`; native
+view rows omit it. Backend titles do not override this alias field. Refresh
+snapshots after naming: alias changes do not advance `event_sequence`.
+
 `uhp proxy` reads one LF-terminated request from standard input, forwards it to
 the selected profile, prints one response, and exits:
 

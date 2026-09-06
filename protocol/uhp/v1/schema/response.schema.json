@@ -20,6 +20,13 @@
     {
       "if": {
         "required": ["result"],
+        "properties": { "result": { "required": ["type"], "properties": { "type": { "const": "session_snapshot" } } } }
+      },
+      "then": { "properties": { "result": { "$ref": "#/$defs/snapshotAliases" } } }
+    },
+    {
+      "if": {
+        "required": ["result"],
         "properties": {
           "result": {
             "type": "object",
@@ -32,6 +39,52 @@
     }
   ],
   "$defs": {
+    "snapshotAliases": {
+      "description": "Operator aliases only; backend titles do not override them. Other snapshot fields remain extensible.",
+      "type": "object",
+      "required": ["workspaces"],
+      "properties": {
+        "workspaces": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["tabs"],
+            "properties": { "tabs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["panes"],
+                "properties": { "panes": { "type": "array", "items": { "$ref": "#/$defs/snapshotAliasRow" } } }
+              }
+            } }
+          }
+        }
+      }
+    },
+    "snapshotAliasRow": {
+      "type": "object",
+      "required": ["pane_id", "kind"],
+      "properties": {
+        "pane_id": { "type": "string", "pattern": "^[1-9][0-9]{0,9}$" },
+        "kind": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "terminal" } }, "required": ["kind"] },
+          "then": {
+            "required": ["agent_name"],
+            "properties": { "agent_name": { "anyOf": [
+              { "type": "null" },
+              { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z]", "not": { "pattern": "[^a-z0-9_-]" } }
+            ] } }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "view" } }, "required": ["kind"] },
+          "then": { "not": { "required": ["agent_name"] } }
+        }
+      ]
+    },
     "agentWaitResult": {
       "type": "object",
       "additionalProperties": false,
