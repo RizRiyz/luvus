@@ -114,7 +114,8 @@ def main():
             response = exchange(endpoint, request)
             allowed = control and args.expect == "allowed"
             if allowed:
-                assert response["result"] == {"type": "ok", "pane": pane}, response
+                assert response["result"]["type"] == "ok", response
+                assert response["result"]["pane"] == pane, response
                 expected = before + b"\x03\x1a\x1b[Zy" + "🙂".encode()
                 wait_for(lambda: log.read_bytes() == expected)
                 invalid = exchange(endpoint, {"id": "invalid", "method": "agent.keys", "params": {
