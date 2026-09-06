@@ -8,6 +8,43 @@ struct Receipt {
     saved: Arc<AtomicBool>,
 }
 
+struct ExplicitPatch {
+    value: Value,
+    desired: crate::config::Config,
+}
+
+impl ExplicitPatch {
+    fn refresh(&mut self, desired: &crate::config::Config) {
+        // Preserve explicit no-op intent (including null deletions), but let
+        // later UI edits supersede the leaves captured by an older patch.
+        refresh_explicit(
+            &mut self.value,
+            &serde_json::to_value(&self.desired).expect("config serializes"),
+            &serde_json::to_value(desired).expect("config serializes"),
+        );
+        self.desired = desired.clone();
+    }
+}
+
+fn refresh_explicit(patch: &mut Value, previous: &Value, desired: &Value) {
+    if previous == desired {
+        return;
+    }
+    if let (Value::Object(patch), Value::Object(previous), Value::Object(desired)) =
+        (&mut *patch, previous, desired)
+    {
+        for (key, value) in patch {
+            refresh_explicit(
+                value,
+                previous.get(key).unwrap_or(&Value::Null),
+                desired.get(key).unwrap_or(&Value::Null),
+            );
+        }
+    } else {
+        *patch = desired.clone();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,6 +126,87 @@ mod tests {
     }
 
     #[test]
+    fn failed_explicit_patch_yields_to_newer_ui_edits_before_and_after_ack() {
+        for edit_before_ack in [true, false] {
+            let _env = persist::test_env("config-retry-ui-precedence");
+            let (tx, rx) = mpsc::channel();
+            let mut app = App::new(80, 24, tx).unwrap();
+            let lock = persist::config_dir().join("config.lock");
+            std::fs::create_dir_all(&lock).unwrap();
+            app.config.agents_active_only = true;
+            app.persist_config_patch(&json!({"agents_active_only": true}));
+            let failed = next_completion(&rx);
+            if edit_before_ack {
+                assert!(app.set_agents_filter(false));
+            }
+            failed.apply(&mut app);
+            if !edit_before_ack {
+                assert!(app.set_agents_filter(false));
+            }
+            std::fs::remove_dir(lock).unwrap();
+            app.schedule_config_save(Instant::now() + Duration::from_secs(3));
+            app.flush_config_for_test(&rx);
+            assert!(!crate::config::load().agents_active_only);
+            assert!(!app.config_baseline.agents_active_only);
+            assert!(!app.config_save_pending());
+        }
+    }
+
+    #[test]
+    fn unadmitted_explicit_patch_yields_to_newer_ui_edits() {
+        let _env = persist::test_env("config-full-queue-ui-precedence");
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        // Completed but unapplied jobs still consume the bounded queue budget.
+        while app
+            .io_jobs
+            .submit(app.app_tx.clone(), || Box::new(|_| false))
+            .is_ok()
+        {}
+        app.config.agents_active_only = true;
+        app.persist_config_patch(&json!({"agents_active_only": true}));
+        assert!(!app.config_persistence.inflight);
+        assert!(app.config_persistence.retry_at.is_some());
+        assert!(app.set_agents_filter(false));
+        next_completion(&rx).apply(&mut app);
+        app.schedule_config_save(Instant::now() + Duration::from_secs(3));
+        app.flush_config_for_test(&rx);
+        assert!(!crate::config::load().agents_active_only);
+        assert!(!app.config_baseline.agents_active_only);
+    }
+
+    #[test]
+    fn shutdown_failed_receipt_yields_to_newer_ui_edits() {
+        let _env = persist::test_env("config-shutdown-failed-ui-precedence");
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let lock = persist::config_dir().join("config.lock");
+        std::fs::create_dir_all(&lock).unwrap();
+        app.config.agents_active_only = true;
+        app.persist_config_patch(&json!({"agents_active_only": true}));
+        let unapplied_ack = next_completion(&rx);
+        assert!(app.set_agents_filter(false));
+        std::fs::remove_dir(lock).unwrap();
+        assert!(app.final_config_save()());
+        assert!(!crate::config::load().agents_active_only);
+        drop(unapplied_ack);
+    }
+
+    #[test]
+    fn refreshing_explicit_intent_preserves_unchanged_nulls_and_nested_siblings() {
+        let mut patch = json!({"layout": {"first": true, "second": null}, "theme": "same"});
+        refresh_explicit(
+            &mut patch,
+            &json!({"layout": {"first": true, "second": "default"}, "theme": "same"}),
+            &json!({"layout": {"first": false, "second": "default"}, "theme": "same"}),
+        );
+        assert_eq!(
+            patch,
+            json!({"layout": {"first": false, "second": null}, "theme": "same"})
+        );
+    }
+
+    #[test]
     fn reload_waits_for_accepted_settings_write() {
         let _env = persist::test_env("config-reload-order");
         let (tx, rx) = mpsc::channel();
@@ -140,7 +258,7 @@ pub(super) struct ConfigPersistence {
     pub(super) inflight: bool,
     pub(super) dirty: bool,
     pub(super) retry_at: Option<Instant>,
-    explicit: Option<Value>,
+    explicit: Option<ExplicitPatch>,
     epoch: u64,
     receipt: Option<Receipt>,
     revision: u64,
@@ -191,11 +309,17 @@ impl App {
         let state = &mut self.config_persistence;
         state.revision = state.revision.wrapping_add(1);
         state.dirty = true;
+        if let Some(pending) = &mut state.explicit {
+            pending.refresh(&self.config);
+        }
         if let Some(patch) = patch {
             if let Some(pending) = &mut state.explicit {
-                merge_explicit(pending, patch);
+                merge_explicit(&mut pending.value, patch);
             } else {
-                state.explicit = Some(patch.clone());
+                state.explicit = Some(ExplicitPatch {
+                    value: patch.clone(),
+                    desired: self.config.clone(),
+                });
             }
         }
         self.schedule_config_save(Instant::now());
@@ -207,7 +331,7 @@ impl App {
             return;
         }
         let desired = self.config.clone();
-        let explicit = state.explicit.clone();
+        let explicit = state.explicit.as_ref().map(|patch| patch.value.clone());
         let epoch = state.epoch;
         let saved_flag = Arc::new(AtomicBool::new(false));
         let worker_saved = saved_flag.clone();
@@ -236,10 +360,18 @@ impl App {
                         state.dirty = true;
                         state.retry_at = Some(Instant::now() + Duration::from_secs(2));
                         if let Some(mut old) = explicit {
+                            refresh_explicit(
+                                &mut old,
+                                &serde_json::to_value(&desired).expect("config serializes"),
+                                &serde_json::to_value(&app.config).expect("config serializes"),
+                            );
                             if let Some(newer) = &state.explicit {
-                                merge_explicit(&mut old, newer);
+                                merge_explicit(&mut old, &newer.value);
                             }
-                            state.explicit = Some(old);
+                            state.explicit = Some(ExplicitPatch {
+                                value: old,
+                                desired: app.config.clone(),
+                            });
                         }
                     }
                 }
@@ -341,11 +473,18 @@ impl App {
     pub(super) fn final_config_save(&self) -> impl FnOnce() -> bool + Send + 'static {
         let state = &self.config_persistence;
         let mut failed_explicit = state.receipt.as_ref().and_then(|r| r.explicit.clone());
+        if let (Some(patch), Some(receipt)) = (&mut failed_explicit, &state.receipt) {
+            refresh_explicit(
+                patch,
+                &serde_json::to_value(&receipt.desired).expect("config serializes"),
+                &serde_json::to_value(&self.config).expect("config serializes"),
+            );
+        }
         if let Some(newer) = &state.explicit {
             if let Some(old) = &mut failed_explicit {
-                merge_explicit(old, newer);
+                merge_explicit(old, &newer.value);
             } else {
-                failed_explicit = Some(newer.clone());
+                failed_explicit = Some(newer.value.clone());
             }
         }
         let failure = crate::config::SaveRequest::new(
@@ -359,7 +498,7 @@ impl App {
                 crate::config::SaveRequest::new(
                     receipt.desired.clone(),
                     self.config.clone(),
-                    state.explicit.clone(),
+                    state.explicit.as_ref().map(|patch| patch.value.clone()),
                 ),
             )
         });
