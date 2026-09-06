@@ -57,6 +57,9 @@ pub use settings::{
 /// How recently a pane must have produced PTY output to read as *raw* Working.
 const ACTIVITY_WINDOW: Duration = Duration::from_millis(700);
 
+/// Shared paste-to-Enter settling policy for direct and DIFF agent messages.
+const AGENT_MESSAGE_SETTLE: Duration = Duration::from_millis(45);
+
 /// Anti-jitter dwell: how long a pane must stay *quiet* before its published
 /// status is allowed to fall back to Idle/Done. Agents stream in bursts — a
 /// single turn has natural gaps (thinking, tool calls, API latency) far longer
