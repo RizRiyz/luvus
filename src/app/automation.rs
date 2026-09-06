@@ -111,7 +111,7 @@ impl App {
             }
         }
         if changed {
-            let _ = self.automation.save();
+            self.persist_automation();
         }
         changed |= self.reconcile_durable_active_targets(None);
         let restoring_panes = self
@@ -194,6 +194,9 @@ impl App {
     /// O(1) on ordinary server ticks. Definition scans happen only when the
     /// cached nearest UTC deadline is due.
     pub fn tick_automations(&mut self, now: u64) -> bool {
+        if self.automation_save_pending() {
+            return false;
+        }
         let due = self
             .automation
             .next_deadline()
@@ -201,26 +204,19 @@ impl App {
         if !due {
             return false;
         }
-        let created = self.automation.collect_due(now);
+        self.automation.collect_due(now);
         // Persist the advanced deadline and every occurrence outcome before an
         // ORCH task or PTY can be created. A skipped overlap has no pending run
         // to launch, but its occurrence key and next deadline are still durable.
-        if let Err(error) = self.automation.save() {
-            for run_id in created {
-                let _ = self.automation.set_run_status(
-                    &run_id,
-                    RunStatus::Failed,
-                    Some(format!("automation persistence failed: {error}")),
-                    now,
-                );
-            }
-            return true;
-        }
+        self.persist_automation();
         self.start_pending_automation_runs(now);
         true
     }
 
     pub fn start_pending_automation_runs(&mut self, now: u64) -> bool {
+        if self.automation_save_pending() {
+            return false;
+        }
         let pending = self.automation.pending_runs();
         let mut changed = false;
         for run_id in pending {
@@ -230,6 +226,9 @@ impl App {
     }
 
     pub fn start_automation_run(&mut self, run_id: &str, now: u64) -> bool {
+        if self.automation_save_pending() {
+            return false;
+        }
         let Some(run) = self.automation.run(run_id).cloned() else {
             return false;
         };
@@ -252,7 +251,7 @@ impl App {
                 Some(message.clone()),
                 now,
             );
-            let _ = self.automation.save();
+            self.persist_automation();
             self.emit_event(
                 "automation.run_failed",
                 json!({"run_id": run_id, "automation_id": run.automation_id, "code": "no_session"}),
@@ -271,7 +270,7 @@ impl App {
                     Some(message.clone()),
                     now,
                 );
-                let _ = self.automation.save();
+                self.persist_automation();
                 self.emit_event(
                     "automation.run_failed",
                     json!({"run_id": run_id, "automation_id": run.automation_id, "code": code}),
@@ -281,6 +280,13 @@ impl App {
                 return true;
             }
         };
+
+        // A new ORCH provenance/link checkpoint must become durable before the
+        // worker is started. Acknowledgement re-enters this path with the same
+        // run/task IDs, so no second task is materialized.
+        if self.automation_save_pending() {
+            return true;
+        }
 
         // A scheduled launch must not steal the attached client's workspace or
         // active tab. Snapshot presentation selection and restore it afterwards.
@@ -324,7 +330,7 @@ impl App {
                 let _ = self
                     .automation
                     .set_run_status(run_id, RunStatus::Running, None, now);
-                let _ = self.automation.save();
+                self.persist_automation();
                 self.emit_event(
                     "automation.run_started",
                     json!({
@@ -342,7 +348,7 @@ impl App {
                 let _ =
                     self.automation
                         .set_run_status(run_id, RunStatus::Failed, Some(message), now);
-                let _ = self.automation.save();
+                self.persist_automation();
                 self.emit_event(
                     "automation.run_failed",
                     json!({"automation_id": run.automation_id, "run_id": run_id, "task_id": task_id, "code": code}),
@@ -821,7 +827,7 @@ impl App {
             }
         }
         if changed {
-            let _ = self.automation.save();
+            self.persist_automation();
         }
         for (id, state) in events {
             if let Some(automation) = self.automation.automation(&id).cloned() {
@@ -913,7 +919,6 @@ impl App {
                 "selected pane belongs to a different native agent conversation".into(),
             ));
         }
-        let before = self.automation.clone();
         let item = self
             .automation
             .replace_active_target(automation_id, target, crate::automation::unix_now())
@@ -934,10 +939,7 @@ impl App {
                 crate::automation::ActiveTargetState::Restoring
             },
         );
-        if let Err(error) = self.automation.save() {
-            self.automation = before;
-            return Err(persistence_err(error));
-        }
+        self.persist_automation();
         if ready {
             self.wake_active_agent_automations(pane);
         } else {
@@ -1011,7 +1013,7 @@ impl App {
                 let _ =
                     self.automation
                         .set_run_status(&run.id, RunStatus::Pending, Some(waiting), now);
-                let _ = self.automation.save();
+                self.persist_automation();
                 self.emit_event(
                     "automation.run_updated",
                     serde_json::json!({
@@ -1032,17 +1034,73 @@ impl App {
         let _ = self
             .automation
             .set_run_status(&run.id, RunStatus::Starting, None, now);
-        if let Err(error) = self.automation.save() {
+        self.persist_automation();
+        let run = run.clone();
+        let was_enabled = self
+            .automation
+            .automation(&run.automation_id)
+            .is_some_and(|a| a.enabled);
+        self.after_automation_save(move |app, result| {
+            app.deliver_checkpointed_active_run(&run, was_enabled, result);
+        });
+        true
+    }
+
+    fn deliver_checkpointed_active_run(
+        &mut self,
+        run: &AutomationRun,
+        was_enabled: bool,
+        saved: Result<(), String>,
+    ) {
+        // The app kept processing input and lifecycle events during storage I/O.
+        // Never revive a cancelled run or deliver to a replaced/rebound target.
+        if !self.automation.run(&run.id).is_some_and(|current| {
+            current.status == RunStatus::Starting && current.target == run.target
+        }) {
+            return;
+        }
+        let now = crate::automation::unix_now();
+        if was_enabled
+            && !self
+                .automation
+                .automation(&run.automation_id)
+                .is_some_and(|a| a.enabled)
+        {
             self.finish_active_agent_run(
                 run,
-                RunStatus::Failed,
-                Some(format!(
-                    "could not persist active-agent dispatch intent: {error}"
-                )),
+                RunStatus::Cancelled,
+                Some("automation was disabled while saving dispatch intent".into()),
                 now,
                 false,
             );
-            return true;
+            return;
+        }
+        if let Err(message) = saved {
+            self.finish_active_agent_run(run, RunStatus::Failed, Some(message), now, false);
+            return;
+        }
+        let (pane_id, state) = match self.validate_active_agent_target(&run.target, &run.task) {
+            Ok(valid) => valid,
+            Err((_, message)) => {
+                self.finish_active_agent_run(run, RunStatus::Failed, Some(message), now, true);
+                return;
+            }
+        };
+        if !matches!(state, State::Idle | State::Done)
+            || (run.target.is_durable_active_agent()
+                && !self
+                    .automation
+                    .ready_active_targets
+                    .contains(&run.automation_id))
+        {
+            let _ = self.automation.set_run_status(
+                &run.id,
+                RunStatus::Pending,
+                Some("target readiness changed while saving dispatch intent".into()),
+                now,
+            );
+            self.persist_automation();
+            return;
         }
         self.emit_event(
             "automation.run_updated",
@@ -1065,7 +1123,6 @@ impl App {
                 self.finish_active_agent_run(run, RunStatus::Failed, Some(message), now, true)
             }
         }
-        true
     }
 
     fn wait_for_durable_active_target(
@@ -1086,7 +1143,7 @@ impl App {
         let _ = self
             .automation
             .set_run_status(&run.id, RunStatus::Pending, Some(waiting), now);
-        let _ = self.automation.save();
+        self.persist_automation();
         self.emit_event(
             "automation.run_updated",
             serde_json::json!({
@@ -1111,7 +1168,7 @@ impl App {
         if disable {
             let _ = self.automation.set_enabled(&run.automation_id, false, now);
         }
-        let _ = self.automation.save();
+        self.persist_automation();
         self.emit_event(
             if status == RunStatus::Failed {
                 "automation.run_failed"
@@ -1226,7 +1283,7 @@ impl App {
                 }
             }
         }
-        let _ = self.automation.save();
+        self.persist_automation();
         true
     }
 
@@ -1241,7 +1298,7 @@ impl App {
                 self.automation
                     .bind_task(&run.id, task_id.clone(), now)
                     .map_err(automation_err)?;
-                self.automation.save().map_err(persistence_err)?;
+                self.persist_automation();
             }
             return Ok(task_id);
         }
@@ -1277,7 +1334,7 @@ impl App {
         self.automation
             .bind_task(&run.id, task.id.clone(), now)
             .map_err(automation_err)?;
-        self.automation.save().map_err(persistence_err)?;
+        self.persist_automation();
         self.emit_event(
             "automation.run_materialized",
             json!({"automation_id": run.automation_id, "run_id": run.id, "task_id": task.id}),
@@ -1317,7 +1374,7 @@ impl App {
         let automation_id = run.automation_id.clone();
         let terminal = !status.is_live();
         let _ = self.automation.set_run_status(&run_id, status, error, now);
-        let _ = self.automation.save();
+        self.persist_automation();
         self.emit_event(
             if terminal {
                 "automation.run_finished"
@@ -1784,7 +1841,7 @@ mod tests {
     #[test]
     fn skipped_overlap_and_advanced_deadline_are_persisted() {
         let _env = crate::persist::test_env("automation-persist-skipped-overlap");
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let path = crate::persist::session_dir().join("automations.json");
         app.automation.persist_path = Some(path.clone());
@@ -1810,6 +1867,7 @@ mod tests {
         app.automation.save().unwrap();
 
         assert!(app.tick_automations(160));
+        app.flush_automation_for_test(&rx);
 
         let persisted: crate::automation::AutomationState =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
@@ -1877,6 +1935,89 @@ mod tests {
         assert!(run.task_id.is_none());
         assert!(run.error.is_none());
         assert!(app.orch.tasks.is_empty());
+    }
+
+    #[test]
+    fn active_checkpoint_revalidates_cancel_busy_identity_and_storage_failure() {
+        for scenario in [
+            "deliver", "disable", "toggle", "busy", "identity", "failure",
+        ] {
+            let _env = crate::persist::test_env(&format!("automation-checkpoint-{scenario}"));
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut app = App::new(80, 24, tx).unwrap();
+            let (pane, input) = active_agent_input(
+                &mut app,
+                State::Idle,
+                crate::automation::ActiveAgentBusyPolicy::Wait,
+            );
+            let definition = app.automation.create(input, None, 10).unwrap();
+            let run = app
+                .automation
+                .request_run(&definition.id, None, 20)
+                .unwrap();
+            let path = crate::persist::session_dir().join("automations.json");
+            if scenario == "failure" {
+                std::fs::create_dir_all(&path).unwrap();
+            }
+            app.automation.persist_path = Some(path.clone());
+            let (release, wait) = std::sync::mpsc::channel();
+            app.io_jobs
+                .submit(app.app_tx.clone(), move || {
+                    wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Box::new(|_| false)
+                })
+                .unwrap();
+            assert!(app.start_automation_run(&run.id, 20));
+            assert_eq!(
+                app.automation.run(&run.id).unwrap().status,
+                RunStatus::Starting
+            );
+            assert!(!app.start_automation_run(&run.id, 21));
+            match scenario {
+                "disable" | "toggle" => {
+                    app.automation
+                        .set_enabled(&definition.id, false, 21)
+                        .unwrap();
+                    if scenario == "toggle" {
+                        app.automation
+                            .set_enabled(&definition.id, true, 22)
+                            .unwrap();
+                    }
+                    app.persist_automation();
+                }
+                "busy" => app.status.get_mut(&pane).unwrap().state = State::Working,
+                "identity" => app.status.get_mut(&pane).unwrap().agent = "claude".into(),
+                _ => {}
+            }
+            release.send(()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while app.automation.run(&run.id).unwrap().status == RunStatus::Starting {
+                if let AppEvent::IoCompleted(done) = rx
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .unwrap()
+                {
+                    done.apply(&mut app);
+                }
+            }
+            let expected = match scenario {
+                "deliver" => RunStatus::Delivered,
+                "disable" | "toggle" => RunStatus::Cancelled,
+                "busy" => RunStatus::Pending,
+                _ => RunStatus::Failed,
+            };
+            assert_eq!(
+                app.automation.run(&run.id).unwrap().status,
+                expected,
+                "{scenario}"
+            );
+            assert!(app.orch.tasks.is_empty());
+            if scenario != "failure" {
+                app.flush_automation_for_test(&rx);
+                let saved: crate::automation::AutomationState =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                assert_eq!(saved.run(&run.id).unwrap().status, expected);
+            }
+        }
     }
 
     #[test]

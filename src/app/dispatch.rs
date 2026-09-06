@@ -1571,7 +1571,14 @@ impl App {
             );
         }
 
-        if let Some(at_utc) = self.automation.next_deadline() {
+        if let Some(retry) = self.automation_save_deadline() {
+            consider(retry, true);
+        }
+        if let Some(at_utc) = self
+            .automation
+            .next_deadline()
+            .filter(|_| !self.automation_save_pending())
+        {
             let now_unix = crate::automation::unix_now();
             let instant = if at_utc <= now_unix {
                 now
@@ -1757,6 +1764,7 @@ impl App {
 
     pub(crate) fn detect_tick_with(&mut self, now: Instant, clients_attached: bool) -> bool {
         self.schedule_config_save(now);
+        self.schedule_automation_save(now);
         // No node open (docs/43 §3.3 — the session was closed). Closing the last
         // node also closed every pane, so there is nothing to classify, and
         // `layout()` below would index an empty `workspaces`. The server keeps
@@ -2328,6 +2336,12 @@ impl App {
 
     /// Validate and execute one bounded local API method against server-owned state.
     pub(crate) fn dispatch(&mut self, method: &str, p: &Value) -> Result<Value, (String, String)> {
+        if Self::is_automation_mutation(method) && self.automation_admission_full() {
+            return Err((
+                "busy".into(),
+                "automation checkpoint queue is full; retry later".into(),
+            ));
+        }
         match method {
             "ping" => Ok(json!({
                 "type":"pong",
@@ -5151,7 +5165,6 @@ impl App {
                     }
                 }
                 validate_automation_target(self, &mut input)?;
-                let before = self.automation.clone();
                 let automation = if method == "automation.create" {
                     self.automation
                         .create(input, opt_borrowed_str(p, "idempotency_key"), now)
@@ -5162,13 +5175,7 @@ impl App {
                         .update(id, input, now)
                         .map_err(automation_err)?
                 };
-                if let Err(error) = self.automation.save() {
-                    self.automation = before;
-                    return Err((
-                        "persistence_failed".into(),
-                        format!("could not persist automation: {error}"),
-                    ));
-                }
+                self.persist_automation();
                 if automation.target.is_durable_active_agent() {
                     self.initialize_durable_active_target_state(&automation);
                 } else {
@@ -5233,15 +5240,11 @@ impl App {
                         self.validate_active_agent_target(&automation.target, &automation.task)?;
                     }
                 }
-                let before = self.automation.clone();
                 let automation = self
                     .automation
                     .set_enabled(id, enable, crate::automation::unix_now())
                     .map_err(automation_err)?;
-                if let Err(error) = self.automation.save() {
-                    self.automation = before;
-                    return Err(("persistence_failed".into(), error.to_string()));
-                }
+                self.persist_automation();
                 self.emit_event(
                     if automation.enabled {
                         "automation.enabled"
@@ -5290,12 +5293,8 @@ impl App {
             "automation.delete" => {
                 reject_api_fields(p, &["id"])?;
                 let id = req_str(p, "id")?;
-                let before = self.automation.clone();
                 let automation = self.automation.delete(id).map_err(automation_err)?;
-                if let Err(error) = self.automation.save() {
-                    self.automation = before;
-                    return Err(("persistence_failed".into(), error.to_string()));
-                }
+                self.persist_automation();
                 self.emit_event("automation.deleted", json!({"id":id}));
                 Ok(
                     json!({"type":"automation", "automation":crate::automation::public_automation(&automation, None)}),
@@ -5317,15 +5316,11 @@ impl App {
                         json!({"type":"automation_run", "run":crate::automation::public_run(&run)}),
                     );
                 }
-                let before = self.automation.clone();
                 let run = self
                     .automation
                     .request_run(&id, opt_borrowed_str(p, "idempotency_key"), now)
                     .map_err(automation_err)?;
-                if let Err(error) = self.automation.save() {
-                    self.automation = before;
-                    return Err(("persistence_failed".into(), error.to_string()));
-                }
+                self.persist_automation();
                 self.emit_event(
                     "automation.run_queued",
                     json!({"automation_id":run.automation_id, "run_id":run.id, "scheduled_at":run.scheduled_at}),

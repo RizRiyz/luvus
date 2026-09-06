@@ -38,9 +38,13 @@ impl App {
             .submit(self.app_tx.clone(), || Box::new(|_| false));
         let capture = persist::capture_session(self);
         let config = self.final_config_save();
+        let automation = self
+            .automation_save_pending()
+            .then(|| self.automation.clone());
         if !self.io_jobs.finish(Duration::from_secs(2), move || {
             let config_saved = config();
-            capture.write() && config_saved
+            let automation_saved = automation.is_none_or(|snapshot| snapshot.save().is_ok());
+            capture.write() && config_saved && automation_saved
         }) {
             eprintln!("Luvus: final session save failed or exceeded the shutdown deadline");
         }

@@ -23,6 +23,7 @@ use crate::terminal::pty::Pane;
 use crate::ui::theme::{State, Theme};
 
 mod automation;
+mod automation_persistence;
 mod backend;
 mod board;
 mod config_persistence;
@@ -2148,6 +2149,7 @@ pub struct App {
     config_baseline: crate::config::Config,
     config_persistence: config_persistence::ConfigPersistence,
     io_jobs: io_jobs::IoJobs,
+    automation_persistence: automation_persistence::AutomationPersistence,
     file_metadata_inflight: bool,
     file_metadata_cursor: usize,
     file_mutation_inflight: bool,
@@ -2840,6 +2842,7 @@ impl App {
             config_baseline,
             config_persistence: config_persistence::ConfigPersistence::default(),
             io_jobs: io_jobs::IoJobs::default(),
+            automation_persistence: automation_persistence::AutomationPersistence::default(),
             file_metadata_inflight: false,
             file_metadata_cursor: 0,
             file_mutation_inflight: false,
@@ -3490,6 +3493,7 @@ impl App {
             config_baseline,
             config_persistence: config_persistence::ConfigPersistence::default(),
             io_jobs: io_jobs::IoJobs::default(),
+            automation_persistence: automation_persistence::AutomationPersistence::default(),
             file_metadata_inflight: false,
             file_metadata_cursor: 0,
             file_mutation_inflight: false,
