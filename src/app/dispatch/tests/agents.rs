@@ -1202,20 +1202,21 @@ fn snapshot_preserves_agent_alias_across_inactive_tabs() {
     let snapshot = app.dispatch("session.snapshot", &json!({})).unwrap();
     drop(guard); // Snapshot must not need the terminal-engine lock.
     let row = |snapshot: &Value, pane: PaneId| -> Value {
+        let pane_id = pane.0.to_string();
         snapshot["workspaces"]
             .as_array()
             .unwrap()
             .iter()
             .flat_map(|w| w["tabs"].as_array().unwrap())
             .flat_map(|t| t["panes"].as_array().unwrap())
-            .find(|r| r["pane_id"] == pane.0.to_string())
+            .find(|r| r["pane_id"].as_str() == Some(pane_id.as_str()))
             .unwrap()
             .clone()
     };
     assert_eq!(row(&snapshot, first)["agent_name"], "reviewer");
     assert_eq!(row(&snapshot, second)["agent_name"], "worker");
     assert_eq!(row(&snapshot, third).get("agent_name"), Some(&Value::Null));
-    assert_eq!(app.agent_name_for(first).as_deref(), Some("backend-title"));
+    assert_eq!(app.agent_name_for(first), Some("backend-title"));
     assert_eq!(app.active_ws, active_ws);
     assert_eq!(app.layout().focus, third);
     assert_eq!(app.panes.len(), pane_count);
