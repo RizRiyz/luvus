@@ -788,13 +788,28 @@ pub struct PaneCwdEvidence {
 /// Resolve CWD evidence and, optionally, process identities from one platform
 /// snapshot. The optional command projection is used only when the independent
 /// agent-detection deadline coincides with this CWD scan.
+#[cfg(test)]
 pub fn scan_pane_runtime(
     roots: &[u32],
     include_commands: bool,
 ) -> (Vec<PaneCwdEvidence>, Option<ProcessCommands>) {
+    scan_pane_runtime_scoped(roots, include_commands.then_some(roots))
+}
+
+/// One OS snapshot, with independent CWD and command-projection demands.
+pub fn scan_pane_runtime_scoped(
+    cwd_roots: &[u32],
+    command_roots: Option<&[u32]>,
+) -> (Vec<PaneCwdEvidence>, Option<ProcessCommands>) {
+    let mut roots = cwd_roots.to_vec();
+    if let Some(commands) = command_roots {
+        roots.extend_from_slice(commands);
+        roots.sort_unstable();
+        roots.dedup();
+    }
     let mut cache = std::collections::HashMap::new();
-    let (trees, commands) = pane_process_snapshot(roots, true, include_commands);
-    let evidence = roots
+    let (trees, commands) = pane_process_snapshot(&roots, true, command_roots.is_some());
+    let evidence = cwd_roots
         .iter()
         .map(|&root| {
             let nodes = trees.get(&root).map(Vec::as_slice).unwrap_or(&[]);
@@ -1079,6 +1094,15 @@ mod tests {
         let (cwd_only, commands) = super::scan_pane_runtime(&[pid], false);
         assert_eq!(cwd_only.len(), 1);
         assert!(commands.is_none(), "command projection is demand-driven");
+        let (no_cwds, commands) = super::scan_pane_runtime_scoped(&[], Some(&[pid]));
+        assert!(
+            no_cwds.is_empty(),
+            "unrequested CWDs do not receive Git probes"
+        );
+        assert!(
+            commands.unwrap().contains_key(&pid),
+            "independent process demand remains represented"
+        );
     }
 
     #[cfg(unix)]
