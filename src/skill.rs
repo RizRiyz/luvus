@@ -54,7 +54,7 @@ static INSTALL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 pub enum SkillHost {
     Claude,
     /// The open `~/.agents/skills` location shared by Codex, Copilot, Gemini,
-    /// Pi, Cursor, Amp, Droid, fx, and Kilo Code.
+    /// Pi, Cursor, Amp, Droid, fx, Kilo Code, and Devin.
     Shared,
     Opencode,
     Kimi,
@@ -543,6 +543,7 @@ fn host_commands(host: SkillHost) -> &'static [&'static str] {
             "fx",
             "kilo",
             "kilocode",
+            "devin",
         ],
         SkillHost::Opencode => &["opencode", "opencode2"],
         SkillHost::Kimi => &["kimi"],
@@ -583,6 +584,7 @@ fn host_config_dirs(
             home.join(".factory"),
             home.join(".fx"),
             home.join(".kilo"),
+            xdg.join("devin"),
         ],
         SkillHost::Opencode => vec![xdg.join("opencode")],
         SkillHost::Kimi => vec![kimi_home
@@ -1180,6 +1182,7 @@ mod tests {
             "fx",
             "kilo",
             "kilocode",
+            "devin",
         ] {
             assert!(
                 shared.contains(&agent),

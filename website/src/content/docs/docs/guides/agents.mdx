@@ -11,8 +11,8 @@ back after a restart, all without wrapping or modifying the agents themselves.
 
 Every pane running a recognized agent (Claude Code, Copilot, Codex, opencode,
 OpenCode 2 Preview, Kimi, Grok, Hermes CLI, Muse Code, Pi, Oh My Pi (OMP),
-Cursor, Gemini, Qwen, Kilo Code, Kiro, Aider, Amp, Droid, or fx) appears in the
-sidebar with a live state:
+Cursor, Gemini, Qwen, Kilo Code, Kiro, Aider, Amp, Droid, Devin, or fx) appears
+in the sidebar with a live state:
 
 | State | Meaning | How it's detected |
 |---|---|---|
@@ -79,10 +79,10 @@ Click a session row to select it and update the Selected Agent panel. Use
 | Gemini and Qwen | project chat records |
 | fx | session usage snapshot |
 
-Aider, OpenCode 2 Preview, Kilo Code, Kiro, Cursor, Amp, Droid, Muse, and
-manifest-defined agents still receive live identity and state detection, but
-show `—` for usage until they expose a stable per-session counter or report one
-through an integration. Luvus never estimates tokens from transcript text.
+Aider, OpenCode 2 Preview, Kilo Code, Kiro, Cursor, Amp, Droid, Muse, Devin,
+and manifest-defined agents still receive live identity and state detection,
+but show `—` for usage until they expose a stable per-session counter or report
+one through an integration. Luvus never estimates tokens from transcript text.
 
 Usage parsing runs off the render path only when Mission Control becomes active,
 its scope changes, or you choose **Refresh**. A hidden dashboard schedules no
@@ -147,6 +147,7 @@ not sufficient, and Luvus runs the agent's own resume command:
 | fx | its session store (`~/.fx/sessions`) |
 | Cursor | resume command (when the session id is known) |
 | Kilo Code | `kilo --session <id>` (when the exact session id is known) |
+| Devin | `devin --resume <id>` (when the exact session id is known) |
 
 OpenCode 2 Preview runs beside OpenCode V1 under the distinct `opencode2`
 executable. Luvus does not scan the V2 service's live SQLite database or reuse

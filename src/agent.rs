@@ -22,6 +22,7 @@ pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod copilot;
 pub(crate) mod cursor;
+pub(crate) mod devin;
 pub(crate) mod droid;
 pub(crate) mod fx;
 pub(crate) mod gemini;
@@ -430,6 +431,11 @@ mod tests {
             Some("hermes --resume '20260830_120000_a1b2c3'\r")
         );
         assert!(is_resumable("hermes"));
+        assert_eq!(
+            resume_command("devin", "quiet-meadow").as_deref(),
+            Some("devin --resume 'quiet-meadow'\r")
+        );
+        assert!(is_resumable("devin"));
         assert!(resume_command("unknown", "x").is_none());
         assert!(resume_command("claude", "").is_none()); // empty id
         assert!(resume_command("claude", "a b").is_none()); // unsafe char
@@ -863,6 +869,7 @@ mod tests {
         // Resume-capable, but no native fork (the copy-then-resume tier is future).
         assert!(!can_fork("copilot"));
         assert!(!can_fork("cursor"));
+        assert!(!can_fork("devin"));
         // Unknown agent / unsafe / empty id all refuse.
         assert!(fork_command("unknown", "x").is_none());
         assert!(fork_command("claude", "a b").is_none());
