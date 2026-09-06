@@ -25,6 +25,7 @@ struct TitleState {
     // Title chrome must be fully projected before terminal-only patching can
     // resume. Cleared only by a generation-matched damage acknowledgement.
     changed: bool,
+    generation: u64,
 }
 
 type TitleSlot = Arc<Mutex<TitleState>>;
@@ -67,6 +68,7 @@ impl EventListener for EventProxy {
                     if g.value.as_ref() != Some(&t) {
                         g.value = Some(t);
                         g.changed = true;
+                        g.generation = g.generation.wrapping_add(1);
                     }
                 }
             }
@@ -74,6 +76,7 @@ impl EventListener for EventProxy {
                 if let Ok(mut g) = self.title.lock() {
                     if g.value.take().is_some() {
                         g.changed = true;
+                        g.generation = g.generation.wrapping_add(1);
                     }
                 }
             }
@@ -864,6 +867,10 @@ impl VtEngine for AlacrittyEngine {
 
     fn title(&self) -> Option<String> {
         self.title.lock().ok().and_then(|g| g.value.clone())
+    }
+
+    fn title_generation(&self) -> u64 {
+        self.title.lock().map_or(0, |title| title.generation)
     }
 
     fn set_history_budget(&mut self, bytes: usize) {

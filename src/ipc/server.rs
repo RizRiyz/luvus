@@ -612,7 +612,10 @@ pub fn run() -> Result<()> {
         // flag still set here means un-rendered output → schedule a frame.
         if last_rearm.elapsed() >= REARM_INTERVAL {
             last_rearm = Instant::now();
-            let (visible, background) = app.rearm_pty_notify_by_visibility();
+            let (visible, background, title_changed) = app.rearm_pty_notify_by_visibility();
+            if title_changed {
+                render_request.record(RenderCause::Metadata);
+            }
             if visible {
                 render_request.record_visible_pty();
             }
@@ -651,7 +654,10 @@ pub fn run() -> Result<()> {
             // Re-arm the PTY readers now that their output is on screen. A flag
             // set during this frame = more output already waiting → stay dirty
             // so the burst keeps rendering at the frame cap, tail included.
-            let (visible, background) = app.rearm_pty_notify_by_visibility();
+            let (visible, background, title_changed) = app.rearm_pty_notify_by_visibility();
+            if title_changed {
+                render_request.record(RenderCause::Metadata);
+            }
             if visible {
                 render_request.record_visible_pty();
             }
@@ -823,6 +829,9 @@ enum EventRenderSource {
 fn event_render_source(app: &App, event: &AppEvent) -> EventRenderSource {
     match event {
         AppEvent::PtyData(id) if app.pane_is_visible(*id) => EventRenderSource::VisiblePty,
+        AppEvent::PtyData(id) if app.hidden_title_changed(*id) => {
+            EventRenderSource::Cause(RenderCause::Metadata)
+        }
         AppEvent::PtyData(_) => EventRenderSource::HiddenPty,
         AppEvent::ClientConnected { .. }
         | AppEvent::ClientInput {
@@ -1601,6 +1610,53 @@ mod tests {
             ServerMessage::FrameDiff(frame) => (frame.width, frame.height),
             _ => panic!("expected rendered frame"),
         }
+    }
+
+    #[test]
+    fn hidden_agent_titles_present_once_including_coalesced_output() {
+        let _env = crate::persist::test_env("hidden-agent-title");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let hidden = app.layout().focus;
+        app.status.get_mut(&hidden).unwrap().agent = "claude".into();
+        let (tx, _rx) = mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            100,
+            30,
+            tx,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes.get_mut(&hidden).unwrap().engine = engine.clone();
+        app.dispatch("tab.new", &serde_json::json!({})).unwrap();
+        assert!(!app.pane_is_visible(hidden));
+        app.config.layout.agent_title = true;
+
+        engine.lock().unwrap().advance(b"\x1b]2;reviewing\x07");
+        let source = super::event_render_source(&app, &AppEvent::PtyData(hidden));
+        let mut request = RenderRequest::default();
+        record_event_render_request(source, true, &mut request);
+        assert!(request.needs_render());
+        assert!(matches!(
+            source,
+            EventRenderSource::Cause(RenderCause::Metadata)
+        ));
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"ordinary output\x1b]2;reviewing\x07");
+        assert!(matches!(
+            super::event_render_source(&app, &AppEvent::PtyData(hidden)),
+            EventRenderSource::HiddenPty
+        ));
+
+        // Output may arrive while the reader's notification is already set.
+        engine.lock().unwrap().advance(b"\x1b]2;finished\x07");
+        app.panes[&hidden].mark_data_pending_for_test();
+        assert!(app.rearm_pty_notify_by_visibility().2);
+        app.panes[&hidden].mark_data_pending_for_test();
+        assert!(!app.rearm_pty_notify_by_visibility().2);
     }
 
     #[test]

@@ -394,6 +394,12 @@ pub trait VtEngine: Send {
     /// Latest window title set by the child via OSC 0/2, if any.
     fn title(&self) -> Option<String>;
 
+    /// Changes only when title chrome changes, including reset. Engines with
+    /// mutable titles must override this for hidden-pane presentation.
+    fn title_generation(&self) -> u64 {
+        0
+    }
+
     /// Scroll the viewport `delta` lines through scrollback: **positive scrolls
     /// up into history**, negative back toward the live bottom. Clamped to the
     /// retained history. No-op while on the alternate screen.

@@ -62,6 +62,11 @@ a changed title invalidates the full projection until that output generation
 is acknowledged. Repeated identical titles keep the row-only path available.
 Overlays, resize, and backpressure recovery retain conservative full rendering.
 
+A hidden agent's changed title can still update a visible sidebar label. That
+change schedules a presentation through the existing PTY notification path,
+including coalesced output. Unchanged titles and ordinary hidden output do not
+request a redraw just because title display is enabled.
+
 ## And the numbers
 
 Pure Rust, a single ~3 MB binary, single-digit-MB resident memory even with
