@@ -107,7 +107,7 @@ impl App {
     }
 
     /// Open the folder picker starting at `start` (falls back to `$HOME` if it's
-    /// not a directory). Used by the workspace menu's "Open worktree".
+    /// not a directory).
     pub fn open_folder_picker_at(&mut self, start: PathBuf) {
         let start = start
             .is_dir()

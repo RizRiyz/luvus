@@ -193,14 +193,31 @@ pub(super) fn draw_picker(
     rects
 }
 
-/// Truncate a string to `max` columns, keeping the **tail** (the useful end of a
-/// path) with a leading `…`.
+/// Truncate a string to `max` display columns, keeping the **tail** (the useful
+/// end of a path) with a leading `…`. Width-aware like [`truncate`] (a CJK glyph
+/// counts as two, and is never split), so a wide-glyph path can't overflow its
+/// row and clip whatever renders after it. A zero budget yields nothing — never
+/// the full string — so a caller whose budget collapsed can't overflow either.
 fn trunc_tail(s: &str, max: usize) -> String {
-    let n = s.chars().count();
-    if n <= max || max == 0 {
+    if max == 0 {
+        return String::new();
+    }
+    if display_width(s) <= max {
         return s.to_string();
     }
-    let tail: String = s.chars().skip(n - max.saturating_sub(1)).collect();
+    // Reserve one column for the ellipsis.
+    let budget = max - 1;
+    let mut used = 0;
+    let mut tail: Vec<char> = Vec::new();
+    for ch in s.chars().rev() {
+        let cw = display_width(&ch.to_string());
+        if used + cw > budget {
+            break;
+        }
+        tail.push(ch);
+        used += cw;
+    }
+    let tail: String = tail.into_iter().rev().collect();
     format!("…{tail}")
 }
 
@@ -215,7 +232,7 @@ pub(super) fn draw_worktree_prompt(
     hover: Option<(u16, u16)>,
     cat: &Catalog,
     t: &Theme,
-) -> (Option<Rect>, Option<Rect>) {
+) -> (Option<Rect>, Option<Rect>, Rect) {
     dim_backdrop(f, area, t);
     let w = area.width.saturating_sub(6).clamp(36, 64).min(area.width);
     let modal = centered_rect(area, w, 6);
@@ -250,11 +267,160 @@ pub(super) fn draw_worktree_prompt(
             Paragraph::new(Span::styled(format!(" {e}"), Style::new().fg(t.coral))),
             bottom,
         );
-        (None, None) // no hint buttons while the error occupies the line
+        (None, None, modal) // no hint buttons while the error occupies the line
     } else {
         let (c, x) = footer_hints(f, bottom, cat.act_create, cat.act_cancel, hover, t);
-        (Some(c), Some(x))
+        (Some(c), Some(x), modal)
     }
+}
+
+/// A path for on-screen use: control characters (a newline in a worktree
+/// path, which `git worktree list -z` preserves) become their escapes, so the
+/// cell writer can't silently drop them and the column budget measures what
+/// actually renders.
+fn visible_path(p: &std::path::Path) -> String {
+    p.display()
+        .to_string()
+        .chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+/// The open-worktree list modal (docs/18 WT): every checkout of the repo from
+/// `git worktree list` — branch (or short head when detached), path, and an
+/// "open" badge when the checkout is already a workspace. ⏎ opens (or focuses)
+/// the highlighted row, esc closes.
+///
+/// Returns the footer's ⏎/esc button rects (as the text-input modals do, for the
+/// hover pills and the shared button routing) plus the clickable list rects: one
+/// [`PickerHit::Row`] per rendered row, then [`PickerHit::Modal`] for the modal
+/// body, so the input layer can tell a row from inert chrome from the backdrop.
+pub(super) fn draw_worktree_open(
+    f: &mut RenderTarget,
+    area: Rect,
+    list: &crate::app::WorktreeOpenList,
+    hover: Option<(u16, u16)>,
+    cat: &Catalog,
+    t: &Theme,
+) -> (Option<Rect>, Option<Rect>, Vec<(PickerHit, Rect)>) {
+    dim_backdrop(f, area, t);
+    let w = area.width.saturating_sub(6).clamp(46, 76).min(area.width);
+    // Borders (2) + title (1) + gap (1) + hints (1) around the rows.
+    let h = (list.entries.len() as u16)
+        .saturating_add(5)
+        .clamp(7, 20)
+        .min(area.height);
+    let modal = centered_rect(area, w, h);
+    f.render_widget(Clear, modal);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(t.border_focus).bg(t.surface0))
+        .style(Style::new().bg(t.surface0));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!(" {}", cat.menu_open_worktree),
+            Style::new().fg(t.text).bold(),
+        )),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+
+    let bottom_y = inner.bottom().saturating_sub(1);
+    let listing = Rect::new(
+        inner.x + 1,
+        inner.y + 2,
+        inner.width.saturating_sub(2),
+        bottom_y.saturating_sub(inner.y + 2),
+    );
+    let mut rects = Vec::new();
+    // The rows arrive off-loop (docs/18 WT): a placeholder while the scan
+    // runs, the git error if it failed, the checkouts once it lands.
+    if list.loading {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!(" {}", cat.worktree_loading),
+                Style::new().fg(t.overlay1),
+            )),
+            Rect::new(listing.x, listing.y, listing.width, 1),
+        );
+    } else if let Some(error) = list.error.as_deref() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                truncate(error, listing.width as usize),
+                Style::new().fg(t.coral),
+            )),
+            Rect::new(listing.x, listing.y, listing.width, 1),
+        );
+    }
+    let avail = listing.height.max(1) as usize;
+    let scroll = list.cursor.saturating_sub(avail.saturating_sub(1));
+    for (vi, i) in (scroll..list.entries.len()).take(avail).enumerate() {
+        let e = &list.entries[i];
+        let y = listing.y + vi as u16;
+        let row_rect = Rect::new(listing.x, y, listing.width, 1);
+        let sel = i == list.cursor;
+        // Hover speaks the app's pointer language (accent fill, dark text) — the
+        // same as a context-menu row — while the keyboard cursor keeps its own
+        // subtler `sel_bg`, so the pointer and the cursor stay tellable apart
+        // when they sit on different rows.
+        let hot =
+            hover.is_some_and(|(hc, hr)| hr == y && hc >= row_rect.x && hc < row_rect.right());
+        if hot {
+            fill_bg(f, row_rect, t.accent);
+        } else if sel {
+            fill_bg(f, row_rect, t.sel_bg);
+        }
+        // ⌂ marks the main checkout, ⎇ a linked worktree; a detached checkout
+        // is labelled by its short head instead of a branch.
+        let icon = if e.is_main { "⌂" } else { "⎇" };
+        let label = e
+            .branch
+            .clone()
+            .unwrap_or_else(|| e.head.chars().take(8).collect());
+        let badge = if e.open {
+            format!(" ● {}", cat.worktree_already_open)
+        } else {
+            String::new()
+        };
+        // One shared budget for the whole row: the fixed chrome (cursor, icon,
+        // gap, badge) comes off first; the label leads but is capped so the
+        // path keeps at least a third of what's left. Otherwise a long branch
+        // name would push the path's tail and the badge off the row.
+        let prefix = format!("▸ {icon} ");
+        let path_full = visible_path(&e.path);
+        let room = (listing.width as usize)
+            .saturating_sub(display_width(&prefix) + 2 + display_width(&badge));
+        let path_reserve = (room / 3).min(display_width(&path_full));
+        let label = truncate(&label, room.saturating_sub(path_reserve));
+        let path = trunc_tail(&path_full, room.saturating_sub(display_width(&label)));
+        // Over the accent fill every span switches to the dark ink the theme
+        // pairs with it; the per-span colours only read on the plain background.
+        let ink = |fg: Color| Style::new().fg(if hot { t.crust } else { fg });
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(if sel { "▸ " } else { "  " }, ink(t.accent)),
+                Span::styled(format!("{icon} "), ink(t.accent)),
+                Span::styled(label, ink(t.text)),
+                Span::styled(format!("  {path}"), ink(t.subtext0)),
+                Span::styled(badge, ink(t.accent)),
+            ])),
+            row_rect,
+        );
+        rects.push((PickerHit::Row(i), row_rect));
+    }
+    // Last, so a row wins the hit test and only a click on neither is outside.
+    rects.push((PickerHit::Modal, modal));
+
+    let bottom = Rect::new(inner.x, bottom_y, inner.width, 1);
+    let (c, x) = footer_hints(f, bottom, cat.act_select, cat.act_cancel, hover, t);
+    (Some(c), Some(x), rects)
 }
 
 /// The tab-rename modal (docs/28): a single text field pre-filled with the tab's
@@ -489,5 +655,36 @@ fn fill_bg(f: &mut RenderTarget, rect: Rect, color: Color) {
         for x in rect.x..rect.right() {
             buf[(x, y)].set_bg(color);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trunc_tail_measures_display_columns() {
+        // ASCII: keep the tail, lead with `…`.
+        assert_eq!(trunc_tail("abcdef", 10), "abcdef");
+        assert_eq!(trunc_tail("abcdef", 4), "…def");
+        // A collapsed budget yields nothing (never the full string), and a
+        // one-column budget fits only the ellipsis.
+        assert_eq!(trunc_tail("abcdef", 0), "");
+        assert_eq!(trunc_tail("abcdef", 1), "…");
+        // CJK: each glyph is two columns; the result must fit the column
+        // budget, not the char count, and never split a wide glyph.
+        let s = "宽".repeat(10); // 20 columns
+        let cut = trunc_tail(&s, 9);
+        assert!(cut.starts_with('…'));
+        assert!(
+            display_width(&cut) <= 9,
+            "{} columns leak past the budget",
+            display_width(&cut)
+        );
+        // 9 columns = 1 (…) + an 8-column budget: exactly four 2-column glyphs.
+        assert_eq!(cut, format!("…{}", "宽".repeat(4)));
+        // An 8-column cap leaves a 7-column budget; the fourth glyph would need
+        // 8, so it's dropped whole rather than split (7 used, one column spare).
+        assert_eq!(trunc_tail(&s, 8), format!("…{}", "宽".repeat(3)));
     }
 }

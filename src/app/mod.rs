@@ -495,6 +495,38 @@ pub struct TabRename {
     pub buffer: String,
 }
 
+/// One row of the open-worktree modal (docs/18 WT): a checkout of the repo, as
+/// reported by `git worktree list` — so every worktree shows, no matter which
+/// tool created it or where it lives on disk.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorktreeOpenEntry {
+    pub path: PathBuf,
+    /// `None` for a detached checkout (the short head labels it instead).
+    pub branch: Option<String>,
+    pub head: String,
+    pub is_main: bool,
+    /// Already open as a workspace — resolved on the worker against the
+    /// workspaces snapshotted when the modal opened, for the row badge. The
+    /// confirm re-resolves by path against live workspaces.
+    pub open: bool,
+}
+
+/// The open-worktree list modal: `Some` ⇒ open. ⏎ opens (or focuses) the
+/// highlighted checkout, esc closes.
+///
+/// It opens `loading` and fills in when [`App::apply_worktree_list`] receives
+/// the off-loop scan (the named-session menu's shape): `generation` is the
+/// request this modal is waiting on, so a result for an earlier, since-closed
+/// or reopened modal is dropped instead of resurrecting it.
+pub struct WorktreeOpenList {
+    pub generation: u64,
+    pub loading: bool,
+    /// The git error when the scan failed; shown in place of the rows.
+    pub error: Option<String>,
+    pub entries: Vec<WorktreeOpenEntry>,
+    pub cursor: usize,
+}
+
 /// Stable-enough identity for a tab context-menu target. A tab's complete leaf
 /// set is unique inside a live session, including dashboard placeholder leaves.
 /// Resolving this snapshot at click time prevents an intervening API reorder
@@ -2192,6 +2224,20 @@ pub struct App {
     /// New-worktree branch-name prompt (docs/18 WT): `Some(buf)` ⇒ the modal is
     /// open, holding the branch being typed.
     pub worktree_prompt: Option<String>,
+    /// The new-worktree prompt's modal body, set by the renderer each frame so
+    /// a click on the dimmed backdrop around it cancels the prompt (the same
+    /// gesture as the open-worktree list), while a click on the body is inert.
+    pub worktree_prompt_rect: Option<Rect>,
+    /// The open-worktree list modal (docs/18 WT): every checkout of the repo
+    /// from `git worktree list`, openable or focusable. `None` when closed.
+    pub worktree_open: Option<WorktreeOpenList>,
+    /// Bumped on every open and close of the open-worktree list, so a scan
+    /// result carrying an older value is stale and ignored.
+    worktree_open_generation: u64,
+    /// Clickable targets in the open-worktree list, set by the renderer each
+    /// frame. Rows precede the modal body in hit-test order, so a click lands on
+    /// the row under it and only a click on neither is "outside".
+    pub worktree_open_rects: Vec<(PickerHit, Rect)>,
     /// Active tab-rename modal (docs/28); `None` when closed.
     pub tab_rename: Option<TabRename>,
     /// Active tab context menu; `None` when closed.
@@ -2863,6 +2909,10 @@ impl App {
             cmd_inspect: None,
             pane_title_rects: Vec::new(),
             worktree_prompt: None,
+            worktree_prompt_rect: None,
+            worktree_open: None,
+            worktree_open_generation: 0,
+            worktree_open_rects: Vec::new(),
             tab_rename: None,
             tab_menu: None,
             ws_menu: None,
@@ -3514,6 +3564,10 @@ impl App {
             cmd_inspect: None,
             pane_title_rects: Vec::new(),
             worktree_prompt: None,
+            worktree_prompt_rect: None,
+            worktree_open: None,
+            worktree_open_generation: 0,
+            worktree_open_rects: Vec::new(),
             tab_rename: None,
             tab_menu: None,
             ws_menu: None,
@@ -5545,12 +5599,11 @@ impl App {
                     self.worktree_error = None;
                 }
             }
+            // No repo check here: it would run git on the loop, and the worker
+            // reports "not a git repository" in the modal anyway.
             WsMenuItem::OpenWorktree => {
-                if let Some(cwd) = cwd.filter(|p| crate::git::local::is_repo(p)) {
-                    // Land in this repo's worktrees folder so its checkouts list.
-                    let wt = worktrees_dir_for(&cwd);
-                    let start = if wt.is_dir() { wt } else { cwd };
-                    self.open_folder_picker_at(start);
+                if let Some(cwd) = cwd {
+                    self.open_worktree_list(&cwd);
                 }
             }
             // Both switch to the node first, then open (or focus) its dashboard.
@@ -6442,6 +6495,134 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// The workspace menu's "Open Worktree": list every checkout of the repo at
+    /// `cwd` (`git worktree list`) in a picker modal. The modal opens at once in
+    /// its loading state; the scan runs on a worker thread and lands through
+    /// [`AppEvent::WorktreeListLoaded`] → [`App::apply_worktree_list`]. It
+    /// must not run on the loop: git stats every checkout to flag prunable
+    /// ones, and a sibling checkout can sit on a stale network mount, which
+    /// would freeze every attached client for as long as that stat hangs.
+    pub fn open_worktree_list(&mut self, cwd: &std::path::Path) {
+        self.worktree_open_generation = self.worktree_open_generation.wrapping_add(1);
+        let generation = self.worktree_open_generation;
+        self.worktree_open = Some(WorktreeOpenList {
+            generation,
+            loading: true,
+            error: None,
+            entries: Vec::new(),
+            cursor: 0,
+        });
+        let cwd = cwd.to_path_buf();
+        // Snapshot the open workspace roots: the "already open" badge needs a
+        // canonicalize per checkout, which is exactly the kind of stat the
+        // worker exists to keep off the loop. A workspace opened mid-scan is
+        // only missed on the badge — ⏎ re-resolves against live workspaces.
+        let open_cwds: Vec<PathBuf> = self.workspaces.iter().map(|w| w.cwd.clone()).collect();
+        let tx = self.app_tx.clone();
+        std::thread::spawn(move || {
+            let result = openable_worktrees(&cwd, &open_cwds);
+            let _ = tx.send(AppEvent::WorktreeListLoaded { generation, result });
+        });
+    }
+
+    /// Close the open-worktree list. Bumps the generation so a scan still in
+    /// flight for it is discarded on arrival rather than reopening the modal.
+    pub fn close_worktree_list(&mut self) {
+        self.worktree_open_generation = self.worktree_open_generation.wrapping_add(1);
+        self.worktree_open = None;
+    }
+
+    /// Fill the open-worktree list with the scan started by
+    /// [`App::open_worktree_list`]. A result whose `generation` isn't the one
+    /// the current modal waits on (closed, or reopened since) is dropped. An
+    /// empty listing closes the modal with a toast, as there's nothing to pick;
+    /// a git failure shows in the modal so the user sees what went wrong. The
+    /// entries arrive fully resolved; nothing here touches the filesystem.
+    pub fn apply_worktree_list(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<WorktreeOpenEntry>, String>,
+    ) {
+        if self
+            .worktree_open
+            .as_ref()
+            .is_none_or(|list| list.generation != generation)
+        {
+            return;
+        }
+        let entries = match result {
+            Ok(entries) => entries,
+            Err(e) => {
+                if let Some(list) = self.worktree_open.as_mut() {
+                    list.loading = false;
+                    list.error = Some(e);
+                }
+                return;
+            }
+        };
+        if entries.is_empty() {
+            self.close_worktree_list();
+            self.show_toast(self.catalog.no_worktrees_found);
+            return;
+        }
+        if let Some(list) = self.worktree_open.as_mut() {
+            list.loading = false;
+            list.entries = entries;
+            list.cursor = 0;
+        }
+    }
+
+    /// The workspace already showing `path`, if any (see [`checkout_idx_in`]).
+    /// Stats `path` and every workspace root, so it's for the user's own pick
+    /// on ⏎ — the listing resolves its badges on the worker instead.
+    fn workspace_idx_for_path(&self, path: &std::path::Path) -> Option<usize> {
+        checkout_idx_in(path, self.workspaces.iter().map(|w| w.cwd.as_path()))
+    }
+
+    /// Keys for the open-worktree list modal: ↑/↓ (or k/j) move, ⏎ opens the
+    /// highlighted checkout — focusing the existing workspace when it's already
+    /// open, a worktree is one place — esc closes.
+    pub fn handle_worktree_open_key(&mut self, key: KeyEvent) {
+        let Some(list) = self.worktree_open.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.close_worktree_list(),
+            KeyCode::Up | KeyCode::Char('k') => list.cursor = list.cursor.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                list.cursor = (list.cursor + 1).min(list.entries.len().saturating_sub(1));
+            }
+            // Nothing to pick yet; the rows are still being listed.
+            KeyCode::Enter if list.loading => {}
+            KeyCode::Enter => {
+                let path = list.entries.get(list.cursor).map(|e| e.path.clone());
+                self.close_worktree_list();
+                if let Some(path) = path {
+                    if let Some(idx) = self.workspace_idx_for_path(&path) {
+                        self.active_ws = idx;
+                    } else {
+                        self.create_workspace_at(path);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A click on open-worktree list row `i`: highlight it, then open it by the
+    /// same path ⏎ takes, so the mouse and the keyboard can't diverge. An index
+    /// from a stale frame is ignored rather than opening the wrong checkout.
+    pub fn worktree_open_click(&mut self, i: usize) {
+        let Some(list) = self.worktree_open.as_mut() else {
+            return;
+        };
+        if i >= list.entries.len() {
+            return;
+        }
+        list.cursor = i;
+        self.handle_worktree_open_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     }
 
     /// Focus an exact zero-based tab position in the active workspace.
@@ -7496,6 +7677,47 @@ fn group_worktrees(nodes: &[(Option<&std::path::Path>, bool)]) -> Vec<(usize, bo
     out
 }
 
+/// The checkouts of the repo at `cwd` a user can open as a workspace: every
+/// entry of `git worktree list` except bare ones (no working files) and
+/// prunable leftovers whose folder is already gone, each flagged `open` when
+/// one of `open_cwds` (the workspace roots) is the same checkout. Runs git,
+/// a stat and a canonicalize per entry, so callers on the app loop hand it to
+/// a worker thread.
+fn openable_worktrees(
+    cwd: &std::path::Path,
+    open_cwds: &[PathBuf],
+) -> Result<Vec<WorktreeOpenEntry>, String> {
+    let wts = crate::git::local::worktrees(cwd)?;
+    Ok(wts
+        .into_iter()
+        .filter(|w| !w.bare && w.path.is_dir())
+        .map(|w| WorktreeOpenEntry {
+            open: checkout_idx_in(&w.path, open_cwds.iter().map(PathBuf::as_path)).is_some(),
+            path: w.path,
+            branch: w.branch,
+            head: w.head,
+            is_main: w.is_main,
+        })
+        .collect())
+}
+
+/// The position in `cwds` of the folder that is the same checkout as `path`,
+/// if any. Both sides are canonicalized so a symlinked cwd (macOS `/tmp`)
+/// still matches, and the final comparison is [`crate::platform::same_path`]
+/// so spelling variance (Windows case, separators, the `\\?\` prefix) can't
+/// read as "not open" when canonicalization falls back to the raw path
+/// (docs/43 WIN-6). Stats every path it's given: keep it off the app loop
+/// unless the paths are the user's own pick.
+fn checkout_idx_in<'a>(
+    path: &std::path::Path,
+    cwds: impl IntoIterator<Item = &'a std::path::Path>,
+) -> Option<usize> {
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let target = canon(path);
+    cwds.into_iter()
+        .position(|cwd| crate::platform::same_path(&canon(cwd), &target))
+}
+
 /// `~/.luvus/worktrees/<repo>/` — the folder that holds all of `repo`'s luvus
 /// worktrees. Nested under the **main** worktree's name so every checkout of one
 /// repo groups under a single folder (same rule `create_worktree` uses).
@@ -8183,6 +8405,621 @@ mod tests {
         // Esc tears the whole prompt down.
         app.handle_worktree_prompt_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.worktree_prompt.is_none() && app.worktree_repo.is_none());
+    }
+
+    /// Build a repo with one commit and a **sibling-path** worktree — the layout
+    /// the old "Open Worktree" folder picker (which only browsed
+    /// `~/.luvus/worktrees/`) never showed. Returns `(base, repo, worktree)`.
+    fn repo_with_sibling_worktree(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("luvus-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x",
+        ]);
+        let wt = base.join("wt-feature");
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            wt.to_str().unwrap(),
+        ]);
+        (base, repo, wt)
+    }
+
+    /// Open the worktree list and apply its scan inline — the worker thread's
+    /// job, done synchronously so a test can assert on the rows at once.
+    fn open_worktree_list_now(app: &mut App, repo: &std::path::Path) {
+        app.open_worktree_list(repo);
+        let generation = app.worktree_open.as_ref().unwrap().generation;
+        let cwds: Vec<PathBuf> = app.workspaces.iter().map(|w| w.cwd.clone()).collect();
+        app.apply_worktree_list(generation, openable_worktrees(repo, &cwds));
+    }
+
+    #[test]
+    fn open_worktree_list_scans_off_loop_and_lands_through_the_event() {
+        let _env = crate::persist::test_env("worktree-open-event");
+        let (base, repo, _wt) = repo_with_sibling_worktree("wtevent");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_worktree_list(&repo);
+        let list = app.worktree_open.as_ref().expect("modal opens at once");
+        assert!(list.loading, "rows arrive later; the modal shows loading");
+        assert!(list.entries.is_empty());
+
+        // ⏎ while loading is a no-op: there's nothing to pick yet, and the
+        // modal must not close under the user.
+        app.handle_worktree_open_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.worktree_open.is_some());
+
+        // The worker's result comes back as an event (other events may be
+        // interleaved; wait for ours) and fills the rows.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let ev = rx
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .expect("worktree scan result arrives");
+            let ours = matches!(ev, AppEvent::WorktreeListLoaded { .. });
+            app.handle_event(ev);
+            if ours {
+                break;
+            }
+        }
+        let list = app.worktree_open.as_ref().expect("modal stays open");
+        assert!(!list.loading);
+        assert_eq!(list.entries.len(), 2, "main + sibling worktree both list");
+        assert!(list.entries[0].is_main);
+        assert_eq!(list.entries[1].branch.as_deref(), Some("feature"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn stale_worktree_list_result_is_dropped() {
+        let _env = crate::persist::test_env("worktree-open-stale");
+        let (base, repo, _wt) = repo_with_sibling_worktree("wtstale");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        // Closed before the scan landed: the result must not reopen the modal.
+        app.open_worktree_list(&repo);
+        let first = app.worktree_open.as_ref().unwrap().generation;
+        app.handle_worktree_open_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.worktree_open.is_none());
+        app.apply_worktree_list(first, openable_worktrees(&repo, &[]));
+        assert!(app.worktree_open.is_none(), "a closed modal stays closed");
+
+        // Reopened before the first scan landed: the old result is ignored and
+        // the modal keeps waiting for its own.
+        app.open_worktree_list(&repo);
+        app.open_worktree_list(&repo);
+        let second = app.worktree_open.as_ref().unwrap().generation;
+        assert_ne!(first, second);
+        app.apply_worktree_list(first, openable_worktrees(&repo, &[]));
+        assert!(app.worktree_open.as_ref().unwrap().loading, "still waiting");
+        app.apply_worktree_list(second, openable_worktrees(&repo, &[]));
+        let list = app.worktree_open.as_ref().unwrap();
+        assert!(!list.loading);
+        assert_eq!(list.entries.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn worktree_list_shows_the_git_error_in_the_modal() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let _env = crate::persist::test_env("worktree-open-error");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let not_repo = std::env::temp_dir();
+        app.open_worktree_list(&not_repo);
+        let generation = app.worktree_open.as_ref().unwrap().generation;
+        app.apply_worktree_list(generation, Err("fatal: not a git repository".into()));
+        let list = app
+            .worktree_open
+            .as_ref()
+            .expect("modal stays open with the error");
+        assert!(!list.loading);
+        assert_eq!(list.error.as_deref(), Some("fatal: not a git repository"));
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            screen.contains("not a git repository"),
+            "error renders in the modal"
+        );
+
+        // ⏎ on an empty (errored) list just closes it.
+        app.handle_worktree_open_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.worktree_open.is_none());
+    }
+
+    #[test]
+    fn worktree_list_resolves_the_open_badge_on_the_worker() {
+        // The badge is matched against the workspace roots snapshotted at
+        // request time, on the worker — nothing in `apply_worktree_list`
+        // stats a path. A symlinked spelling of the root still matches.
+        let _env = crate::persist::test_env("worktree-open-badge");
+        let (base, repo, wt) = repo_with_sibling_worktree("wtbadge");
+        let feature = |entries: &[WorktreeOpenEntry]| {
+            entries
+                .iter()
+                .find(|e| e.branch.as_deref() == Some("feature"))
+                .map(|e| e.open)
+                .expect("sibling worktree listed")
+        };
+        assert!(!feature(&openable_worktrees(&repo, &[]).unwrap()));
+        assert!(feature(
+            &openable_worktrees(&repo, std::slice::from_ref(&wt)).unwrap()
+        ));
+        #[cfg(unix)]
+        {
+            let link = base.join("wt-link");
+            std::os::unix::fs::symlink(&wt, &link).unwrap();
+            assert!(feature(&openable_worktrees(&repo, &[link]).unwrap()));
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn worktree_list_renders_control_characters_in_paths_visibly() {
+        use ratatui::{backend::TestBackend, Terminal};
+        // `git worktree list -z` keeps a newline inside a path; the cell
+        // writer would drop it, gluing the halves together. It renders as
+        // its escape instead, so the row shows what the path really is.
+        let _env = crate::persist::test_env("worktree-open-ctrl");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.worktree_open = Some(WorktreeOpenList {
+            generation: 1,
+            loading: false,
+            error: None,
+            entries: vec![WorktreeOpenEntry {
+                path: PathBuf::from("/repo/odd\nname"),
+                branch: Some("odd".into()),
+                head: "bbbb2222".into(),
+                is_main: false,
+                open: false,
+            }],
+            cursor: 0,
+        });
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            screen.contains("/repo/odd\\nname"),
+            "newline shows as its escape"
+        );
+        assert!(
+            !screen.contains("/repo/oddname"),
+            "halves are not glued together"
+        );
+    }
+
+    #[test]
+    fn worktree_list_renders_its_loading_row() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let _env = crate::persist::test_env("worktree-open-loading");
+        let (base, repo, _wt) = repo_with_sibling_worktree("wtloading");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_worktree_list(&repo);
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains(app.catalog.menu_open_worktree));
+        assert!(screen.contains(app.catalog.worktree_loading));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn open_worktree_lists_every_checkout_and_opens_one() {
+        let _env = crate::persist::test_env("worktree-open-list");
+        let (base, repo, wt) = repo_with_sibling_worktree("wtopen");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        open_worktree_list_now(&mut app, &repo);
+        let list = app.worktree_open.as_ref().expect("modal opens");
+        assert_eq!(list.entries.len(), 2, "main + sibling worktree both list");
+        assert!(list.entries[0].is_main);
+        assert_eq!(list.entries[1].branch.as_deref(), Some("feature"));
+        assert!(!list.entries[1].open);
+
+        // ⏎ on the sibling worktree opens it as a workspace.
+        let before = app.workspaces.len();
+        app.worktree_open.as_mut().unwrap().cursor = 1;
+        app.handle_worktree_open_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.worktree_open.is_none(), "modal closes");
+        assert_eq!(app.workspaces.len(), before + 1);
+        assert_eq!(
+            std::fs::canonicalize(&app.workspaces.last().unwrap().cwd).unwrap(),
+            std::fs::canonicalize(&wt).unwrap()
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn open_worktree_modal_click_opens_the_row_under_the_pointer() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("worktree-open-click");
+        let (base, repo, wt) = repo_with_sibling_worktree("wtclick");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        open_worktree_list_now(&mut app, &repo);
+
+        // Render once so the modal records its clickable rects.
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let row1 = app
+            .worktree_open_rects
+            .iter()
+            .find_map(|(hit, rect)| matches!(*hit, PickerHit::Row(1)).then_some(*rect))
+            .expect("the sibling worktree row is clickable");
+
+        // The keyboard cursor still sits on row 0, so a click that opened the
+        // *highlighted* row instead of the clicked one would fail here.
+        let before = app.workspaces.len();
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: row1.x + 2,
+            row: row1.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.worktree_open.is_none(), "modal closes");
+        assert_eq!(app.workspaces.len(), before + 1);
+        assert_eq!(
+            std::fs::canonicalize(&app.workspaces.last().unwrap().cwd).unwrap(),
+            std::fs::canonicalize(&wt).unwrap()
+        );
+
+        // The dimmed backdrop cancels, like the folder picker's.
+        open_worktree_list_now(&mut app, &repo);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let after = app.workspaces.len();
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.worktree_open.is_none(), "backdrop click cancels");
+        assert_eq!(app.workspaces.len(), after, "cancelling opens nothing");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The new-worktree prompt cancels on a backdrop click like the
+    /// open-worktree list does, so the two worktree modals share one gesture. A
+    /// click on the modal body (off the footer buttons) is inert: it must not
+    /// close the prompt or lose what was typed.
+    #[test]
+    fn new_worktree_prompt_backdrop_click_cancels_but_body_click_is_inert() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("worktree-prompt-click");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.worktree_prompt = Some("feature".into());
+        app.worktree_repo = Some(std::path::PathBuf::from("/definitely/not/a/repo"));
+
+        // Render once so the prompt records its modal rect.
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let modal = app
+            .worktree_prompt_rect
+            .expect("prompt records its modal rect");
+        let click = |column, row| {
+            AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+
+        // The title row of the modal body: neither a footer button nor backdrop.
+        app.handle_event(click(modal.x + 2, modal.y + 1));
+        assert_eq!(
+            app.worktree_prompt.as_deref(),
+            Some("feature"),
+            "a click on the modal body keeps the prompt and its text"
+        );
+
+        // The dimmed backdrop cancels, like the open-worktree list's.
+        assert!(
+            modal.x > 0 && modal.y > 0,
+            "the modal is centered, so (0,0) is backdrop"
+        );
+        app.handle_event(click(0, 0));
+        assert!(app.worktree_prompt.is_none(), "backdrop click cancels");
+        assert!(
+            app.worktree_repo.is_none(),
+            "cancel clears the pending repo"
+        );
+        assert!(app.worktree_error.is_none());
+    }
+
+    #[test]
+    fn open_worktree_modal_hovering_a_row_repaints_it() {
+        use ratatui::crossterm::event::{MouseEvent, MouseEventKind};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("worktree-open-hover");
+        let (base, repo, _wt) = repo_with_sibling_worktree("wthover");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        open_worktree_list_now(&mut app, &repo);
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let row_rect = |app: &App, i: usize| {
+            app.worktree_open_rects
+                .iter()
+                .find_map(|(hit, rect)| {
+                    matches!(*hit, PickerHit::Row(n) if n == i).then_some(*rect)
+                })
+                .expect("row is recorded")
+        };
+        let (row0, row1) = (row_rect(&app, 0), row_rect(&app, 1));
+
+        // Moving onto a row is a changed frame: without it the highlight would
+        // never repaint, which is what "hover does nothing" looked like.
+        let moved = |column, row| {
+            AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Moved,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        assert!(
+            app.handle_event(moved(row1.x + 2, row1.y)),
+            "moving onto a row redraws"
+        );
+        assert!(
+            !app.handle_event(moved(row1.x + 5, row1.y)),
+            "moving within one row does not"
+        );
+        assert!(
+            app.handle_event(moved(row0.x + 2, row0.y)),
+            "crossing to another row redraws"
+        );
+
+        // And the hovered row is actually painted: the pointer sits on row 0,
+        // the keyboard cursor too, so hovering row 1 must light a *second* row.
+        app.handle_event(moved(row1.x + 2, row1.y));
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let bg_of = |rect: Rect| buf[(rect.x + 2, rect.y)].bg;
+        assert_ne!(
+            bg_of(row1),
+            bg_of(row0),
+            "the hovered row is filled differently from the cursor row"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn open_worktree_enter_focuses_an_already_open_checkout() {
+        let _env = crate::persist::test_env("worktree-open-focus");
+        let (base, repo, wt) = repo_with_sibling_worktree("wtfocus");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        // The worktree is already open as workspace 0; the repo is workspace 1
+        // (and focused, so the ⏎ below must actually switch focus).
+        app.workspaces[0].cwd = wt.clone();
+        assert!(app.create_workspace_at(repo.clone()));
+        assert_eq!(app.active_ws, 1);
+
+        open_worktree_list_now(&mut app, &repo);
+        let list = app.worktree_open.as_ref().expect("modal opens");
+        let idx = list
+            .entries
+            .iter()
+            .position(|e| e.branch.as_deref() == Some("feature"))
+            .unwrap();
+        assert!(list.entries[idx].open, "already-open checkout is badged");
+
+        let before = app.workspaces.len();
+        app.worktree_open.as_mut().unwrap().cursor = idx;
+        app.handle_worktree_open_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.workspaces.len(), before, "no duplicate workspace");
+        assert_eq!(app.active_ws, 0, "the existing workspace is focused");
+
+        // Esc just closes the modal.
+        open_worktree_list_now(&mut app, &repo);
+        app.handle_worktree_open_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.worktree_open.is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn open_worktree_modal_renders_branches_and_badges() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("worktree-open-render");
+        let (base, repo, wt) = repo_with_sibling_worktree("wtrender");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].cwd = wt; // the sibling worktree is already open
+        open_worktree_list_now(&mut app, &repo);
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("Open Worktree"), "modal title renders");
+        assert!(screen.contains("feature"), "the sibling worktree row lists");
+        assert!(screen.contains("● open"), "already-open badge renders");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn open_worktree_modal_truncates_wide_glyph_paths_by_columns() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("worktree-open-cjk");
+        let (base, repo, _wt) = repo_with_sibling_worktree("wtcjk");
+        // A worktree whose path is mostly double-width glyphs: 40 CJK chars are
+        // 80 columns, far past the row's path budget, so the path must be
+        // truncated by *columns* — char-count truncation overflows the row and
+        // clips the trailing "open" badge.
+        let cjk = base.join(format!("树{}", "宽".repeat(40)));
+        let out = std::process::Command::new("git")
+            .args(["worktree", "add", "-q", "-b", "wide", cjk.to_str().unwrap()])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].cwd = cjk; // the wide-path worktree is already open
+        open_worktree_list_now(&mut app, &repo);
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("wide"), "the wide-path worktree row lists");
+        assert!(
+            screen.contains("● open"),
+            "badge survives a wide-glyph path (column-aware truncation)"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn open_worktree_modal_keeps_path_and_badge_under_a_long_branch_name() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("worktree-open-long-branch");
+        let (base, repo, _wt) = repo_with_sibling_worktree("wtlong");
+        // A 70-column branch name is wider than the whole row budget. The label
+        // must be truncated to share the row with the path's tail and the
+        // "open" badge — an untruncated label pushes both off the row.
+        let branch = format!("topic/{}", "x".repeat(64));
+        let long = base.join("wt-long");
+        let out = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                &branch,
+                long.to_str().unwrap(),
+            ])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].cwd = long; // the long-branch worktree is already open
+        open_worktree_list_now(&mut app, &repo);
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            screen.contains("topic/xxx"),
+            "the branch label still leads the row"
+        );
+        assert!(
+            screen.contains("wt-long"),
+            "the path's tail survives a long branch name"
+        );
+        assert!(
+            screen.contains("● open"),
+            "the badge survives a long branch name"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

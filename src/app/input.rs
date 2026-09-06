@@ -536,6 +536,10 @@ impl App {
                 self.apply_named_sessions_loaded(generation, result);
                 return true;
             }
+            AppEvent::WorktreeListLoaded { generation, result } => {
+                self.apply_worktree_list(generation, result);
+                return true;
+            }
             AppEvent::NamedSessionPrepared {
                 generation,
                 name,
@@ -1083,6 +1087,7 @@ impl App {
             | AppEvent::SearchHandoffReady { .. } => unreachable!(),
             AppEvent::NamedSessionsLoaded { .. }
             | AppEvent::NamedSessionPrepared { .. }
+            | AppEvent::WorktreeListLoaded { .. }
             | AppEvent::NamedSessionStopped { .. } => {
                 unreachable!()
             }
@@ -1142,6 +1147,11 @@ impl App {
         // The picker owns both text sub-modes and direct path navigation.
         if self.picker.is_some() {
             self.picker_paste(s);
+            return true;
+        }
+        // The open-worktree list has no text input; swallow the paste so it
+        // can't leak into the pane under the modal.
+        if self.worktree_open.is_some() {
             return true;
         }
         let handler: fn(&mut Self, KeyEvent) = if self.worktree_prompt.is_some() {
@@ -1309,6 +1319,22 @@ impl App {
         }
         if let Some(menu) = &self.dock_menu {
             return first(&menu.rects);
+        }
+        // The open-worktree list hovers per row, not just on its footer buttons:
+        // without the row rects here, crossing from one row to the next would not
+        // count as a changed frame and the highlight would never repaint.
+        if self.worktree_open.is_some() {
+            return self
+                .worktree_open_rects
+                .iter()
+                .filter(|(target, _)| matches!(*target, PickerHit::Row(_)))
+                .map(|(_, rect)| *rect)
+                .chain(
+                    [self.modal_commit_rect, self.modal_cancel_rect]
+                        .into_iter()
+                        .flatten(),
+                )
+                .find(|rect| hit(*rect));
         }
         let modal_owns_mouse = self.file_prompt.is_some()
             || self.file_delete.is_some()
@@ -1838,14 +1864,69 @@ impl App {
         if self.compact && m.row < self.last_pane_area.y {
             return;
         }
-        // Text-input modals: only the ⏎/esc footer buttons respond to the mouse;
-        // any other click is swallowed (the centered modal owns the screen).
+        // The new-worktree prompt: the ⏎/esc footer buttons act as those keys,
+        // a click on the modal body is inert, and a click on the dimmed backdrop
+        // cancels — the same gesture as the open-worktree list below.
         if self.worktree_prompt.is_some() {
             if let Some(k) = self.modal_button_key(&m) {
                 self.handle_worktree_prompt_key(k);
+            } else if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                // Only a rendered prompt knows where its body is; until then
+                // the click is swallowed rather than guessed as "outside".
+                let outside = self.worktree_prompt_rect.is_some_and(|rect| {
+                    m.column < rect.x
+                        || m.column >= rect.right()
+                        || m.row < rect.y
+                        || m.row >= rect.bottom()
+                });
+                if outside {
+                    self.handle_worktree_prompt_key(KeyEvent::new(
+                        KeyCode::Esc,
+                        KeyModifiers::NONE,
+                    ));
+                }
             }
             return;
         }
+        // The open-worktree list is a list, not a text field: it owns the mouse
+        // the way the folder picker does — a click opens the row under it, the
+        // wheel moves the cursor, and the dimmed backdrop cancels.
+        if self.worktree_open.is_some() {
+            match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    // The footer buttons come first: they overlay the modal body,
+                    // which would otherwise swallow them as inert chrome.
+                    if let Some(k) = self.modal_button_key(&m) {
+                        self.handle_worktree_open_key(k);
+                        return;
+                    }
+                    let (c, r) = (m.column, m.row);
+                    let hit = self
+                        .worktree_open_rects
+                        .iter()
+                        .find(|(_, rect)| {
+                            c >= rect.x && c < rect.right() && r >= rect.y && r < rect.bottom()
+                        })
+                        .map(|(hit, _)| *hit);
+                    match hit {
+                        Some(PickerHit::Row(i)) => self.worktree_open_click(i),
+                        // Inert modal surface; the footer is handled above.
+                        Some(PickerHit::Hint(_)) | Some(PickerHit::Modal) => {}
+                        None => self.close_worktree_list(), // click outside cancels
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    self.handle_worktree_open_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+                }
+                MouseEventKind::ScrollDown => {
+                    self.handle_worktree_open_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+                }
+                _ => {}
+            }
+            return;
+        }
+        // Text-input modals: only the ⏎/esc footer buttons respond to the mouse;
+        // any other click is swallowed (the centered modal owns the screen).
         if self.tab_rename.is_some() {
             if let Some(k) = self.modal_button_key(&m) {
                 self.handle_tab_rename_key(k);
@@ -3728,6 +3809,11 @@ impl App {
         // The new-worktree branch prompt captures all input while open.
         if self.worktree_prompt.is_some() {
             self.handle_worktree_prompt_key(key);
+            return true;
+        }
+        // The open-worktree list modal captures all input while open.
+        if self.worktree_open.is_some() {
+            self.handle_worktree_open_key(key);
             return true;
         }
         // The tab-rename modal (docs/28) captures all input while open.

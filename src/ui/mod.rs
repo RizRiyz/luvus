@@ -174,6 +174,8 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> Vec<(Pan
     let module_dock_rects = std::mem::take(&mut app.module_dock_rects);
     let dock_dividers = std::mem::take(&mut app.dock_dividers);
     let picker_rects = std::mem::take(&mut app.picker_rects);
+    let worktree_open_rects = std::mem::take(&mut app.worktree_open_rects);
+    let worktree_prompt_rect = app.worktree_prompt_rect;
     let settings_tab_rects = std::mem::take(&mut app.settings_tab_rects);
     let settings_ctl_rects = std::mem::take(&mut app.settings_ctl_rects);
     let settings_theme_remove_rects = std::mem::take(&mut app.settings_theme_remove_rects);
@@ -316,6 +318,8 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> Vec<(Pan
     app.module_dock_rects = module_dock_rects;
     app.dock_dividers = dock_dividers;
     app.picker_rects = picker_rects;
+    app.worktree_open_rects = worktree_open_rects;
+    app.worktree_prompt_rect = worktree_prompt_rect;
     app.settings_tab_rects = settings_tab_rects;
     app.settings_ctl_rects = settings_ctl_rects;
     app.settings_theme_remove_rects = settings_theme_remove_rects;
@@ -850,12 +854,24 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.modal_commit_rect = None;
     app.modal_cancel_rect = None;
     // The new-worktree branch prompt (docs/18 WT).
+    app.worktree_prompt_rect = None;
     if let Some(buf) = app.worktree_prompt.clone() {
         let err = app.worktree_error.clone();
-        let (c, x) = picker::draw_worktree_prompt(f, area, &buf, err.as_deref(), hover, cat, &t);
+        let (c, x, modal) =
+            picker::draw_worktree_prompt(f, area, &buf, err.as_deref(), hover, cat, &t);
         app.modal_commit_rect = c;
         app.modal_cancel_rect = x;
+        app.worktree_prompt_rect = Some(modal);
     }
+    // The open-worktree list modal (docs/18 WT).
+    let mut worktree_open_rects = Vec::new();
+    if let Some(list) = app.worktree_open.as_ref() {
+        let (c, x, rects) = picker::draw_worktree_open(f, area, list, hover, cat, &t);
+        app.modal_commit_rect = c;
+        app.modal_cancel_rect = x;
+        worktree_open_rects = rects;
+    }
+    app.worktree_open_rects = worktree_open_rects;
     // The tab-rename modal (docs/28).
     if let Some(buf) = app.tab_rename.as_ref().map(|r| r.buffer.clone()) {
         let (c, x) = picker::draw_tab_rename(f, area, &buf, hover, cat, &t);
@@ -1025,6 +1041,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         || app.help_open
         || app.named_session_menu.is_some()
         || app.worktree_prompt.is_some()
+        || app.worktree_open.is_some()
         || app.tab_rename.is_some()
         || app.tab_menu.is_some()
         || app.ws_rename.is_some()
