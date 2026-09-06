@@ -17,6 +17,20 @@ An operating-system filesystem call cannot be forcibly cancelled safely, so a
 timeout is not a successful completion guarantee. This worker adds no per-pane
 thread and does not change PTY ownership or public API acknowledgement semantics.
 
+Session persistence captures immutable layout and identity evidence on the app
+loop, then discovers native sessions, serializes, and atomically replaces the
+selected session file on this worker. Only one ordinary capture is outstanding.
+An acknowledgement cannot clear changes made after admission; failed writes
+retain retry intent at the normal debounce cadence. Explicitly closed workspace
+paths remain persisted even when no workspace is open.
+
+Shutdown queues one final capture after previously admitted writes, with the same
+two-second deadline. It never falls back to a competing synchronous write after
+timeout. Terminal screen capture still runs under the existing short engine lock;
+this does not introduce a second persistent screen cache or promise constant-time
+capture for an arbitrary number of panes. Automation dispatch-intent persistence
+is a separate contract and is not made asynchronous by session saving.
+
 Three design decisions explain most of luvus's behavior.
 
 ## A headless server, a thin client
