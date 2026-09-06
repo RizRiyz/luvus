@@ -187,7 +187,7 @@ above remain sufficient when `luvus skill show` is the only available file.
 
 ## Delegate and manage agents
 
-Resolve existing agents with:
+Resolve active agents with:
 
 ```sh
 luvus agent list
@@ -251,6 +251,9 @@ identity is recognized. `unknown` is not proof of completion, but it does not
 undo a matching identity. When `agent start` returns `ready: true`, accept its
 name, pane, and kind without another status lookup. Use `wait agent-status` for
 a requested lifecycle transition after work is sent, not for startup identity.
+Repeat `--status` or pass a comma-separated set when any of several terminal
+states should unblock the workflow. Unknown options and positional arguments
+are rejected instead of being ignored.
 
 For a blocked agent:
 
@@ -258,6 +261,10 @@ For a blocked agent:
 2. Run `luvus agent read <target> --source visible --lines 120`.
 3. Identify the exact approval or question.
 4. Send `agent keys` only when the user's request authorizes that effect.
+
+`agent keys` accepts only a recognized agent pane and a non-empty list of known
+key names. It validates the entire list before queuing one ordered action; any
+invalid entry sends nothing, and a closed target returns `send_failed`.
 
 ## Control panes, tabs, and workspaces
 
@@ -375,6 +382,24 @@ surface:
   retrying. Leases coordinate declared paths but do not sandbox a shared
   checkout. `task release` requeues an
   active task and releases its path leases; it does not stop the worker pane.
+  Report work progress only with `task update --note`. `task heartbeat
+  --context-used <0..1>` means the fraction of the model context window already
+  consumed, never task-completion progress; `0.6` means 60% consumed. Omit the
+  heartbeat when context-window usage is unknown.
+- Inspect `automation.list`, `automation.get`, and `automation.history` before
+  changing an agent schedule. Creating, updating, enabling, disabling,
+  deleting, or manually running an automation requires explicit authorization.
+  Preview calendar triggers first, retain the user's IANA timezone, use an
+  idempotency key for retryable create/run requests, and never turn an
+  automation into an arbitrary scheduled shell command. Disabling prevents
+  future occurrences; it does not stop a live ORCH task or pane.
+  `target=new_worker` is the durable default. Use `active_agent` only with
+  the exact discovered pane, terminal lifetime, agent, and workspace identities;
+  treat `delivered` as input-queue evidence rather than completed work, and do
+  not reuse a process-bound target after pane closure or server restart. A
+  target advertised as `binding=durable` may recover only the same private
+  native conversation. When it reports `needs_rebind`, inspect the intended
+  pane first and use `automation.rebind`; never substitute another session.
 - Inspect module metadata, actions, settings, and logs before changing module
   state. Installation, uninstallation, and consequential setting changes need
   clear authorization.
@@ -395,8 +420,14 @@ surface:
   optional native session-resume hooks and must not be used merely to make an
   agent appear in the sidebar. Install or remove an integration only when the
   user explicitly requests that lifecycle integration.
+- For Antigravity CLI, `luvus integration install antigravity` adds exact
+  conversation identity for restore. It is session-only; native screen
+  detection remains authoritative for agent state.
+- For OpenCode, `luvus integration install opencode` adds exact TUI-local root
+  session ownership and structured usage. Without it, usage stays unavailable.
 - For Hermes, `luvus integration install hermes` adds exact per-pane session
-  ownership while native read-only session discovery remains the fallback.
+  ownership for restart resume. Detection remains native, but Luvus does not
+  scan Hermes's private history store.
 - Subscribe to events only for a live monitoring request. Stop when its
   condition is satisfied and never retain an unbounded stream.
 

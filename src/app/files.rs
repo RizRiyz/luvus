@@ -266,6 +266,7 @@ impl App {
     /// command does not hide any sidebar. `Ctrl+Space b` remains the visibility
     /// control; Esc/q return input to the unchanged terminal-pane focus.
     pub fn focus_files_tree(&mut self) {
+        self.sidebar_focus = None;
         if self.sidebars.side_of(&DockKind::Files).is_none() {
             let target = self.sidebars.files_side;
             if !self.move_dock(&DockKind::Files, target) {
@@ -295,7 +296,7 @@ impl App {
         self.file_tree.show_hidden = show;
         self.file_tree.scroll = 0;
         self.config.layout.files_show_hidden = show;
-        crate::config::save(&self.config);
+        self.persist_config();
     }
 
     /// What a plain left click on a FILES row does, from `layout.file_click`

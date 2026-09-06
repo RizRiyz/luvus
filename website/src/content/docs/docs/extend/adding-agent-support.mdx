@@ -79,6 +79,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     aliases: &["my-agent"],
     launch_command: "myagent-cli",
     task_prompt_args: &[],
+    automation: None,
     identity: IdentityDescriptor {
         distinct: &["myagent-cli"],
         ambiguous: &["myagent"],
@@ -158,6 +159,12 @@ Resume and fork builders must treat session IDs as data and preserve arguments
 exactly. Add fixtures for hostile-looking IDs and platform path variants rather
 than interpolating them into a shell program.
 
+An exact session identity can also make an active-agent automation durable.
+Luvus keeps that identity private and rebinds only after the restored pane
+proves the same agent, native session, workspace, and canonical directory plus
+fresh readiness evidence. A detection-only adapter or guessed transcript ID
+must remain process-bound.
+
 ## Optional integrations
 
 An integration is appropriate only when the upstream agent documents a hook,
@@ -193,6 +200,14 @@ descriptor registry. Add a skill destination only when that agent actually
 supports the relevant skill layout, then update its focused tests and the user
 guidance. Detection must remain independent of both skills and integrations.
 
+Scheduled execution is a separate capability from interactive ORCH launch.
+Only set `AgentDescriptor::automation` when the upstream CLI has a documented
+one-shot entrypoint and a reviewed per-run mapping for at least one of Luvus's
+`read_only`, `workspace`, or `full_access` policies. Put only static arguments
+in the adapter. Do not change user configuration, guess approval input, or
+advertise an access level that the upstream process cannot enforce or fail
+closed. Unsupported levels stay `None` and are rejected before worker creation.
+
 ## Registration and parity
 
 After creating the adapter:
@@ -220,6 +235,7 @@ At minimum, cover:
 
 - unique canonical ID, aliases, and interpreter package identities;
 - native capability projection and stable presentation order;
+- valid static automation argv and every supported/unsupported access mapping;
 - direct executable and interpreter-launched process detection;
 - scoped package collisions and intentional overlap priority;
 - Unix and Windows paths, npm shims, wrappers, and false-positive prose;

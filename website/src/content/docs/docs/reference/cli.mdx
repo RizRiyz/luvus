@@ -116,7 +116,7 @@ panes / agents:
   skill disable              remove unchanged Luvus-managed installations
   skill show                 print the bundled, version-matched SKILL.md
   wait output <id> --match <text> [--timeout <s>]    block until output appears
-  wait agent-status <id> --status done|blocked|working|idle [--timeout <s>]
+  wait agent-status <id> --status <state[,state...]> [--status <state>] [--timeout <s>]
   attach <id>                open the TUI into a single fullscreen pane
 
 search:
@@ -214,11 +214,13 @@ orchestration (multiple agents on one project, docs/22):
   task list                  list all tasks + their status/assignee
   task get <id>              show one task
   task claim <id>            claim a task for this pane (deps must be done)
-  task next [--start] [--agent <cmd>] [--mode worktree|workspace]
+  task next [--start] [--agent <cmd>] [--mode worktree|workspace] [--workspace-id <id>]
                              claim the next ready task (--start creates a worker)
-  task start <id> [--branch <b>] [--agent <cmd>] [--mode worktree|workspace]
+  task start <id> [--branch <b>] [--agent <cmd>] [--mode worktree|workspace] [--workspace-id <id>]
                              start a worker (worktree default; workspace shares checkout)
-  task heartbeat <id> --context <0..1>   report context usage (blocks done at >85%)
+  task heartbeat <id> --context-used <0..1>
+                             report model context-window use, not task progress
+                             (>85% blocks done; --context remains accepted)
   task update <id> [--status <s>] [--output <o>] [--note <n>]
   task done <id>             mark done + release its leases
   task merge <id>            integrate the task's branch into luvus/integration
@@ -229,6 +231,27 @@ orchestration (multiple agents on one project, docs/22):
                              (denied if they overlap another task)
   lease release <id>         release a lease
   lease list                 list active path leases
+
+agent automation (scheduled ORCH tasks):
+  automation create "<name>" --title <title> --prompt <text> --agent <id> --workspace-id <id>
+                             (--once <UTC>|--every <seconds>|--daily <HH:MM>|--weekly <days> --at <HH:MM>)
+                             [--timezone <IANA>] [--anchor-utc <UTC>] [--mode workspace|worktree]
+                             [--access read-only|workspace|full] [--paths <glob>...] [--gate <cmd>]
+                             [--target new-worker|active-agent --pane <id> --terminal-id <id>]
+                             [--if-busy wait|skip]
+                             [--disabled] [--misfire skip|run_latest] [--misfire-grace <seconds>]
+                             [--overlap skip|queue_one] [--idempotency-key <key>]
+  automation list            list definitions and their next UTC deadlines
+  automation get <id>        show one definition
+  automation update <id> --name <name> <same required task and schedule options as create>
+  automation enable|disable <id>
+  automation rebind <id> --pane <id> [--terminal-id <id>]   reattach the same native conversation
+  automation run <id> [--idempotency-key <key>]   run once without advancing its schedule
+  automation history [<id>] [--limit <1-200>]     show bounded run history
+  automation preview (--once <UTC>|--every <seconds>|--daily <HH:MM>|--weekly <days> --at <HH:MM>)
+                             [--timezone <IANA>] [--anchor-utc <UTC>]
+  automation health         summarize armed, live, review, and failed runs
+  automation delete <id>     remove an idle definition
 
 events:
   events                     stream live status changes
@@ -257,7 +280,7 @@ server:
   server restart             stop + start (load a newly-installed binary)
   server update-manifest     fetch the latest agent-detection rules from luvus.dev
                              (applies live if the server is up; else on next start)
-  integration install|uninstall <claude|copilot|codex|opencode|kimi|grok|hermes|omp>
+  integration install|uninstall <claude|copilot|codex|antigravity|opencode|kimi|grok|hermes|omp>
                              add/remove luvus's session-resume hook (uninstall
                              removes only luvus's hook, never the agent)
 

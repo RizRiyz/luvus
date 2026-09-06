@@ -144,6 +144,12 @@ pub enum AppEvent {
         generation: u64,
         result: Result<Vec<crate::app::WorktreeOpenEntry>, String>,
     },
+    /// A stop request for a named session finished (from the session-menu context menu).
+    NamedSessionStopped {
+        generation: u64,
+        name: String,
+        result: Result<(), String>,
+    },
     /// A selected named session is ready for this client to attach.
     NamedSessionPrepared {
         generation: u64,
@@ -247,6 +253,10 @@ pub enum AppEvent {
         scanned: Vec<crate::mission::UsageKey>,
         usage: std::collections::HashMap<crate::mission::UsageKey, crate::mission::AgentUsage>,
         mtimes: std::collections::HashMap<crate::mission::UsageKey, std::time::SystemTime>,
+        /// Integration-owned keys excluded when this worker started. Carrying
+        /// the snapshot prevents a late result from reclassifying report data
+        /// as native after pane ownership changes.
+        report_owned: Vec<crate::mission::UsageKey>,
     },
     /// A git-tab fetch finished; apply it to the matching `GitView`.
     GitData {
@@ -292,7 +302,10 @@ pub enum AppEvent {
     /// only validates and swaps the resulting live configuration.
     ConfigReloaded {
         id: String,
-        config: crate::config::Config,
+        /// Boxed: the whole config is by far the largest thing any event
+        /// carries, and every other `AppEvent` in the channel would otherwise
+        /// be padded to its size.
+        config: Box<crate::config::Config>,
         reply: Sender<String>,
     },
     /// Agent manifest IO and parsing completed on the socket worker.
@@ -324,7 +337,7 @@ pub enum AppEvent {
     AgentWait {
         id: String,
         pane: String,
-        state: String,
+        states: Vec<String>,
         timeout: Option<std::time::Duration>,
         reply: Sender<String>,
         cancelled: Arc<AtomicBool>,
@@ -347,4 +360,9 @@ pub enum AppEvent {
         reply: Sender<String>,
         cancelled: Arc<AtomicBool>,
     },
+    /// A termination signal arrived. The handler only writes a self-pipe; this
+    /// event wakes a sleeping event loop so shutdown does not wait on a timer.
+    /// Windows has no POSIX signals; the detached server stops via `server stop`.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Shutdown,
 }

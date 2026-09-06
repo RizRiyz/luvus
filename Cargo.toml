@@ -81,22 +81,13 @@ fs2 = "0.4"
 # protocol. This calls the operating-system RNG directly; identifiers are not
 # derived from pane routes, PIDs, clocks, or process-global counters.
 getrandom = "0.3"
-
+# Calendar-safe IANA timezone conversion for daily and weekly automations.
+# Jiff is local-only: it reads the OS timezone database (with a Windows bundle)
+# and performs no runtime network access.
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 # `libc` (setsid + macOS proc_pidinfo) is only needed on Unix.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-# OpenCode 1.18+ stores per-session token and cost aggregates in SQLite. Read it
-# in-process and read-only: spawning the OpenCode/Bun runtime every Mission
-# Control refresh is both slower and substantially heavier. The one-shot query
-# does not use rusqlite's optional statement cache. macOS ships a stable SQLite
-# system library; other platforms retain the bundled engine so Cargo installs
-# and static release artifacts stay self-contained.
-[target.'cfg(target_os = "macos")'.dependencies]
-rusqlite = { version = "0.40", default-features = false }
-
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
 
 # Native Windows terminal-backend safety: owner verification for named-pipe
 # peers, PID-reuse-safe process creation timestamps, and one bounded ToolHelp

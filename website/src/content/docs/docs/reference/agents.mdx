@@ -8,10 +8,11 @@ description: What luvus supports per agent, covering live status, session resume
 | Claude Code | ✓ | ✓ | ✓ | ✓ |
 | GitHub Copilot CLI | ✓ | ✓ | no | ✓ |
 | Codex | ✓ | ✓ | ✓ | ✓ |
+| Antigravity CLI (`agy`) | ✓ | ✓ | no | session only |
 | opencode | ✓ | ✓ | no | ✓ |
 | Kimi Code CLI | ✓ | ✓ | no | ✓ |
 | Grok Build | ✓ | ✓ | ✓ | ✓ |
-| Hermes CLI | ✓ | ✓ | no | no |
+| Hermes CLI | ✓ | ✓ with integration | no | session only |
 | Pi | ✓ | ✓ | ✓ | no |
 | Oh My Pi (omp) | ✓ | ✓ | ✓ | ✓ |
 | Muse Code | ✓ | ✓ | no | no |
@@ -52,16 +53,32 @@ description: What luvus supports per agent, covering live status, session resume
   file is edited. Named profiles, `PI_CODING_AGENT_DIR`, `PI_CONFIG_DIR`, and
   OMP's XDG session store remain supported.
 
+  Antigravity CLI publishes its newest conversation per workspace in
+  `~/.gemini/antigravity-cli/cache/last_conversations.json`, which Luvus reads
+  offline and with a strict size bound. `luvus integration install
+  antigravity` additionally registers one Luvus-owned `PreInvocation` hook
+  under `~/.gemini/config/hooks.json` for exact live pane ownership. Luvus
+  restores either source with `agy --conversation <id>`. Screen detection
+  remains responsible for idle/working/blocked state, and uninstall preserves
+  every other named hook.
+
+  OpenCode installs `~/.config/opencode/luvus-tui.mjs`, or the equivalent under
+  `XDG_CONFIG_HOME`, and adds only that file to the TUI plugin list. The plugin
+  binds the root session selected by that specific TUI and reports its
+  structured usage over the inherited local Luvus endpoint. Background and
+  child-session events cannot claim the pane. Without the integration,
+  OpenCode detection and legacy JSON session discovery still work while usage
+  remains unavailable.
+
   Hermes installs `~/.hermes/plugins/luvus-agent-state`, or the equivalent
   directory under `HERMES_HOME`, and enables only that plugin in
   `config.yaml`. Its callbacks report each exact CLI session once. Native
-  read-only database discovery continues to work when the plugin is absent.
+  detection continues to work when the plugin is absent, but offline history
+  discovery does not.
 
-Hermes CLI sessions are discovered read-only from the active
-`$HERMES_HOME/state.db`, or `~/.hermes/state.db` when `HERMES_HOME` is unset.
-Luvus resumes them with `hermes --resume <id>`. Hermes currently exposes
-branching only from inside its own TUI, so Luvus does not present **Fork to New
-Pane** for Hermes.
+Luvus resumes an exactly reported Hermes session with `hermes --resume <id>`.
+Hermes currently exposes branching only from inside its own TUI, so Luvus does
+not present **Fork to New Pane** for Hermes.
 
 Missing your agent? You can add it yourself without waiting for a release: drop
 an `[identity]` block in `~/.luvus/manifests/<agent>.toml` and luvus will

@@ -107,7 +107,8 @@ pub struct PrDetail {
     pub deletions: u64,
     pub changed_files: u64,
     pub commits: u64,
-    pub comments: u64,
+    pub comment_count: u64,
+    pub comments: Vec<DiscussionComment>,
     pub mergeable: String,       // MERGEABLE / CONFLICTING / UNKNOWN
     pub review_decision: String, // APPROVED / CHANGES_REQUESTED / REVIEW_REQUIRED / ""
     pub reviews: Vec<Review>,    // latest decision per reviewer
@@ -128,6 +129,14 @@ pub struct Review {
 pub struct Check {
     pub name: String,
     pub bucket: Checks, // Passing / Failing / Pending
+}
+
+/// One bounded GitHub discussion comment shown below a PR or issue body.
+#[derive(Clone, Debug)]
+pub struct DiscussionComment {
+    pub author: String,
+    pub body: String,
+    pub created_at: String,
 }
 
 /// A GitHub issue (GIT-2).
@@ -152,7 +161,8 @@ pub struct IssueDetail {
     pub body: String,
     pub labels: Vec<String>,
     pub assignees: Vec<String>,
-    pub comments: u64,
+    pub comment_count: u64,
+    pub comments: Vec<DiscussionComment>,
     pub updated_at: String, // ISO timestamp (we show the date)
 }
 

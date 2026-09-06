@@ -6,6 +6,8 @@ use super::canvas::Canvas;
 use super::glyphs::Glyphs;
 use super::routing;
 
+mod layout;
+
 const MAX_NODES: usize = 128;
 const MAX_EDGES: usize = 256;
 const MAX_LABEL: usize = 80;
@@ -230,6 +232,11 @@ pub fn render(flow: &Flowchart, width: usize, ascii: bool) -> Vec<String> {
     let mut order: Vec<usize> = (0..flow.nodes.len()).collect();
     if matches!(flow.direction, Direction::RightLeft | Direction::BottomUp) {
         order.reverse();
+    }
+    if layout::supports_spatial_layout(width) {
+        if let Some(rendered) = layout::render(flow, width, ascii) {
+            return rendered;
+        }
     }
     let chain = is_chain(flow);
     if chain {
@@ -506,7 +513,8 @@ mod tests {
         let graph = parse("graph TD\n A-->B\n B-->A").unwrap();
         let first = render(&graph, 30, false);
         assert_eq!(first, render(&graph, 30, false));
-        assert!(first.len() < 10);
+        assert!(first.len() < 20);
+        assert!(first.join("\n").contains('▼'));
     }
 
     #[test]
@@ -520,9 +528,9 @@ mod tests {
         assert_eq!(graph.nodes[1].shape, NodeShape::Decision);
 
         let rendered = render(&graph, 120, false).join("\n");
-        assert!(rendered.contains("launch"));
-        assert!(rendered.contains('›'));
-        assert!(rendered.contains('◇'));
+        assert!(rendered.contains("launch"), "{rendered}");
+        assert!(rendered.contains('╭'));
+        assert!(rendered.contains('╱'));
     }
 
     #[test]
@@ -530,8 +538,10 @@ mod tests {
         let graph = parse("flowchart LR\n A[你好你好你好你好你好你好]").unwrap();
         let rendered = render(&graph, 24, false);
 
-        assert_eq!(rendered[2].chars().next(), Some('│'));
-        assert_eq!(rendered[2].chars().last(), Some('│'));
+        assert!(rendered.iter().any(|line| {
+            let line = line.trim();
+            line.starts_with('│') && line.ends_with('│')
+        }));
         assert!(rendered.iter().all(|line| line.width() <= 24));
     }
 }

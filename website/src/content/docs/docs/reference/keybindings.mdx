@@ -18,7 +18,7 @@ the live cheat-sheet. Remap anything, change the prefix, or apply a preset in
 | `r` | resize mode (then arrows) | `G` | new worktree |
 | `f` | fork agent session | `g` | git tab |
 | `b` / `B` | toggle both / right sidebar | `o` | orchestration board |
-| `a` | agents All/Active | `m` | Mission Control |
+| `a` / `A` | agents All/Active / All workspaces/Here | `m` | Mission Control |
 | `e` | focus FILES tree | `i` | focus DIFF review |
 | `M` | jump palette (tabs / workspaces / agents) | `/` | global fuzzy finder |
 | `t` | named sessions | `=` | Settings |
@@ -116,14 +116,20 @@ Keys.
 
 ## Focused modes and menus
 
-`Shift+↑` enters [scroll mode](/docs/guides/scrollback/). `Ctrl+Space e` focuses
-the FILES tree, while `Ctrl+Space i` focuses the DIFF review list. Both accept
-arrows or `j` / `k`, and `Esc` returns to the pane. After `Enter` opens a file
-view, `x` closes that view. An opened DIFF review closes with `q` or `Esc`.
+`Shift+↑` enters [scroll mode](/docs/guides/scrollback/). The built-in sidebar
+lists have matching focus commands: `Ctrl+Space w` for WORKSPACES,
+`Ctrl+Space a` for AGENTS, `Ctrl+Space e` for FILES, and `Ctrl+Space i` for
+DIFF. Use arrows or `j` / `k` to move, `Enter` to open the selected row, `a` to
+open its right-click actions, and `Esc` or `q` to return input to the pane.
+AGENTS also accepts `f` for All / Active and `s` for all workspaces / this
+workspace. FILES additionally uses `h` / `l` to collapse or expand folders.
+After `Enter` opens a file view, `x` closes that view. An opened DIFF review
+closes with `q` or `Esc`.
 
 **Right-click menus** (no key needed): a **tab** to rename it, a **workspace** row
-for its menu (rename / close / worktrees / git / board), a **pane** to split or
-close it, an **agent** row for quick actions, or a **FILES** row to open it
+for its menu (rename / close / path visibility / worktrees / git / board), a
+**pane** to split or close it, an **agent** row for quick actions and path
+visibility, or a **FILES** row to open it
 read-only or in an editor, explicitly preview Markdown/Mermaid, or manage the
 entry (new / rename / delete). See
 [Panes, Tabs & Workspaces](/docs/guides/layout/) and

@@ -22,10 +22,13 @@ use crate::persist::{self, SessionSnapshot};
 use crate::terminal::pty::Pane;
 use crate::ui::theme::{State, Theme};
 
+mod automation;
 mod backend;
 mod board;
 mod cwd;
-pub use board::agent_choices;
+pub use board::{
+    agent_choices, automation_agent_choices, automation_agent_choices_for, task_agent_choices,
+};
 pub(crate) mod diff;
 mod dispatch;
 pub(crate) mod files;
@@ -94,6 +97,23 @@ pub enum DockKind {
     /// The native file tree of the active node (docs/38).
     Files,
     Module(String),
+}
+
+/// A built-in sidebar list that currently owns normal-mode keyboard input.
+/// Pane focus stays unchanged so Esc/q can return directly to the terminal.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidebarListFocus {
+    Workspaces,
+    Agents,
+}
+
+/// One row in the AGENTS dock's keyboard projection, in rendered order.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum AgentDockTarget {
+    Live(PaneId),
+    Automation(String),
+    Session(usize),
+    Elsewhere(PaneId),
 }
 
 impl DockKind {
@@ -219,19 +239,37 @@ pub struct SideState {
     pub visible: bool,
     pub width: u16,
     pub docks: Vec<DockKind>,
+    /// Relative height share per mounted dock, parallel to `docks`. Empty means
+    /// an equal split. Topology changes go through [`SideState::push_dock`] /
+    /// [`SideState::remove_dock`], which keep this vector aligned by dock
+    /// identity — or clear it when it was already unusable — so a stale list
+    /// cannot be reassigned positionally. See [`SideState::dock_weights`].
+    pub weights: Vec<u16>,
 }
 
 impl SideState {
+    /// Load a sidebar. Dock ids beyond [`MAX_DOCKS_PER_SIDE`] are dropped.
+    /// Weights are kept only when they already match the mounted docks
+    /// one-for-one and every share is positive; any other list (wrong length
+    /// after the cap truncation, or a zero) is discarded so it cannot be
+    /// reassigned to different docks.
     fn from_config(c: &crate::config::SideConfig) -> SideState {
         let mut docks: Vec<DockKind> = c.docks.iter().map(|s| DockKind::from_id(s)).collect();
         // Enforce the per-side cap on load: a hand-edited or pre-cap config with
         // more than `MAX_DOCKS_PER_SIDE` here keeps the first few; the overflow
         // falls to "off" (unmounted, still in the registry to re-place).
         docks.truncate(MAX_DOCKS_PER_SIDE);
+        let weights =
+            if c.dock_weights.len() == docks.len() && c.dock_weights.iter().all(|w| *w > 0) {
+                c.dock_weights.clone()
+            } else {
+                Vec::new()
+            };
         SideState {
             visible: c.visible,
             width: c.width.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX),
             docks,
+            weights,
         }
     }
     fn to_config(&self) -> crate::config::SideConfig {
@@ -239,6 +277,19 @@ impl SideState {
             visible: self.visible,
             width: self.width,
             docks: self.docks.iter().map(|d| d.id().to_string()).collect(),
+            dock_weights: self.weights.clone(),
+        }
+    }
+    /// Height shares for the mounted docks, always exactly `docks.len()` long.
+    ///
+    /// Anything unusable — never set, gone stale because a dock was mounted or
+    /// removed since, or containing a zero that would collapse a dock to
+    /// nothing — falls back to an equal split rather than to a broken layout.
+    pub fn dock_weights(&self) -> Vec<u16> {
+        if self.weights.len() == self.docks.len() && self.weights.iter().all(|w| *w > 0) {
+            self.weights.clone()
+        } else {
+            vec![1; self.docks.len()]
         }
     }
     /// True if this sidebar should occupy screen space (shown and non-empty).
@@ -248,6 +299,46 @@ impl SideState {
     /// True if `kind` is mounted in this sidebar.
     pub fn has(&self, kind: &DockKind) -> bool {
         self.docks.contains(kind)
+    }
+
+    /// Remove every occurrence of `kind`, dropping the weight at the same
+    /// index when the two vectors still line up. A stale or mismatched weight
+    /// list is cleared instead of being left for a later positional truncate.
+    pub fn remove_dock(&mut self, kind: &DockKind) {
+        if self.weights.len() == self.docks.len() {
+            let mut i = 0;
+            while i < self.docks.len() {
+                if self.docks[i] == *kind {
+                    self.docks.remove(i);
+                    self.weights.remove(i);
+                } else {
+                    i += 1;
+                }
+            }
+        } else {
+            self.docks.retain(|d| d != kind);
+            self.weights.clear();
+        }
+    }
+
+    /// Append `kind`. When the existing weights already describe the mounted
+    /// docks, the new dock gets the rounded average of those shares (minimum 1)
+    /// so it opens at a fair size instead of a sliver. Empty or unusable
+    /// weights stay empty so [`SideState::dock_weights`] falls back to an even
+    /// split.
+    pub fn push_dock(&mut self, kind: DockKind) {
+        let append_weight = !self.weights.is_empty()
+            && self.weights.len() == self.docks.len()
+            && self.weights.iter().all(|w| *w > 0);
+        if append_weight {
+            let sum: u32 = self.weights.iter().map(|w| u32::from(*w)).sum();
+            let n = self.weights.len() as u32;
+            let avg = sum.saturating_add(n / 2).checked_div(n).unwrap_or(1).max(1) as u16;
+            self.weights.push(avg);
+        } else {
+            self.weights.clear();
+        }
+        self.docks.push(kind);
     }
 }
 
@@ -483,6 +574,8 @@ pub struct WsMenu {
     pub anchor: (u16, u16),
     /// Each visible item + its clickable rect, filled in by the renderer.
     pub items: Vec<(WsMenuItem, Rect)>,
+    /// Keyboard-selected rendered item. Mouse-opened menus start without one.
+    pub selected: Option<usize>,
     /// Module actions offered here, snapshotted when the menu opened (docs/13
     /// §3.8) so a registry change mid-menu can't shift what a click runs.
     pub module_actions: Vec<ModuleMenuAction>,
@@ -496,6 +589,8 @@ pub struct WsMenu {
 pub enum WsMenuItem {
     Pin,
     Unpin,
+    /// Toggle the persisted cwd line for every WORKSPACES row.
+    TogglePath,
     Close,
     Rename,
     /// Delete a **linked worktree** and its files (git worktree remove + folder).
@@ -828,7 +923,7 @@ pub enum TabRenameError {
     NameTooLong,
 }
 
-/// Why an existing agent session could not be forked into a sibling pane.
+/// Why an active agent session could not be forked into a sibling pane.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AgentForkError {
     PaneNotFound,
@@ -898,34 +993,47 @@ impl PaneMenuItem {
     ];
 }
 
-/// What an [`AgentMenu`] targets: a resumable on-disk session (by list index) or
-/// a live agent pane.
-#[derive(Clone, Copy)]
+/// What an [`AgentMenu`] targets: a resumable on-disk session (by list index),
+/// a live agent pane, or an automation placeholder that does not currently own
+/// a live pane.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum AgentTarget {
     Session(usize),
     Live(PaneId),
+    Automation(String),
 }
 
 /// A right-click context menu on an AGENTS-list row. A resumable session offers
 /// **Resume** (reopen) + **Close** (remove from the list); a live agent offers
-/// **Close** (close its pane).
+/// pane actions; and a scheduled placeholder offers definition-safe automation
+/// actions until it owns a live pane.
 pub struct AgentMenu {
     pub target: AgentTarget,
     pub anchor: (u16, u16),
     pub items: Vec<(AgentMenuItem, Rect)>,
+    /// Keyboard-selected rendered item. Mouse-opened menus start without one.
+    pub selected: Option<usize>,
     /// Module actions offered here, snapshotted when the menu opened (docs/13 §3.8).
     pub module_actions: Vec<ModuleMenuAction>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AgentMenuItem {
+    /// Toggle between all workspaces and the active workspace in the AGENTS dock.
+    ToggleWorkspaceScope,
     Resume,
     /// "Rename" a live agent's pane (sets its live name). Live agents only.
     RenamePane,
     Close,
+    AutomationDetails,
+    AutomationRun,
+    AutomationToggle,
+    AutomationDelete,
     /// Pin a live agent to the top of the AGENTS list (per-session).
     Pin,
     Unpin,
+    /// Toggle the persisted path/detail line for every AGENTS row.
+    TogglePath,
     Divider,
     /// The `i`-th module action declaring `contexts = ["agent"]` (docs/13 §3.8).
     Module(usize),
@@ -937,8 +1045,26 @@ impl AgentMenu {
         match target {
             AgentTarget::Session(_) => vec![AgentMenuItem::Resume, AgentMenuItem::Close],
             AgentTarget::Live(_) => vec![AgentMenuItem::RenamePane, AgentMenuItem::Close],
+            AgentTarget::Automation(_) => vec![
+                AgentMenuItem::AutomationDetails,
+                AgentMenuItem::AutomationRun,
+                AgentMenuItem::AutomationToggle,
+                AgentMenuItem::AutomationDelete,
+            ],
         }
     }
+}
+
+/// Right-click context menu on a named-session row (sessions switcher).
+pub struct SessionMenu {
+    pub name: String,
+    pub anchor: (u16, u16),
+    pub items: Vec<(SessionMenuItem, Rect)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SessionMenuItem {
+    Stop,
 }
 
 /// The workspace-rename modal: like [`TabRename`] but for a node's **label** (the
@@ -976,33 +1102,471 @@ const PANE_NAME_MAX: usize = 32;
 
 /// The in-TUI **new-task form** (ORCH-7): create an orchestration task without the
 /// CLI. Fields are plain text; `paths`/`deps` are whitespace-split on submit.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum OrchFormStart {
+    #[default]
+    Manual,
+    Now,
+    Once,
+    Hourly,
+    Daily,
+    Weekly,
+}
+
+impl OrchFormStart {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "Manual",
+            Self::Now => "Now",
+            Self::Once => "Once later",
+            Self::Hourly => "Hourly",
+            Self::Daily => "Daily",
+            Self::Weekly => "Weekly",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum OrchFormKind {
+    #[default]
+    Task,
+    Automation,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum OrchAutomationTarget {
+    #[default]
+    NewWorker,
+    ActiveAgent,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct OrchActiveAgent {
+    pub pane: PaneId,
+    pub terminal_id: String,
+    pub agent: String,
+    pub workspace_id: String,
+    pub label: String,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum OrchFormField {
+    #[default]
+    Title,
+    Paths,
+    Deps,
+    Gate,
+    Prompt,
+    Target,
+    ActiveAgent,
+    Agent,
+    RunIn,
+    Access,
+    Start,
+    Schedule,
+}
+
+const TASK_MANUAL_FIELDS: &[OrchFormField] = &[
+    OrchFormField::Title,
+    OrchFormField::Paths,
+    OrchFormField::Deps,
+    OrchFormField::Gate,
+    OrchFormField::Start,
+];
+const TASK_NOW_FIELDS: &[OrchFormField] = &[
+    OrchFormField::Title,
+    OrchFormField::Paths,
+    OrchFormField::Deps,
+    OrchFormField::Gate,
+    OrchFormField::Start,
+    OrchFormField::Agent,
+    OrchFormField::Prompt,
+];
+const AUTOMATION_FIELDS: &[OrchFormField] = &[
+    OrchFormField::Title,
+    OrchFormField::Target,
+    OrchFormField::Paths,
+    OrchFormField::Gate,
+    OrchFormField::Agent,
+    OrchFormField::RunIn,
+    OrchFormField::Access,
+    OrchFormField::Start,
+    OrchFormField::Schedule,
+    OrchFormField::Prompt,
+];
+const ACTIVE_AGENT_AUTOMATION_FIELDS: &[OrchFormField] = &[
+    OrchFormField::Title,
+    OrchFormField::Target,
+    OrchFormField::ActiveAgent,
+    OrchFormField::Start,
+    OrchFormField::Schedule,
+    OrchFormField::Prompt,
+];
+
+struct OrchFormDraft {
+    title: String,
+    prompt: String,
+    agent: String,
+    automation_target: OrchAutomationTarget,
+    active_agent: usize,
+    mode: crate::orch::TaskWorkerMode,
+    access: crate::automation::AutomationAccess,
+    start: OrchFormStart,
+    schedule: String,
+    schedule_prefilled: bool,
+    timezone: String,
+    paths: String,
+    deps: String,
+    gate: String,
+    field: OrchFormField,
+}
+
+impl OrchFormDraft {
+    fn for_kind(kind: OrchFormKind, mode: crate::orch::TaskWorkerMode) -> Self {
+        let start = match kind {
+            OrchFormKind::Task => OrchFormStart::Manual,
+            OrchFormKind::Automation => OrchFormStart::Once,
+        };
+        let timezone = match kind {
+            OrchFormKind::Task => String::new(),
+            OrchFormKind::Automation => crate::automation::system_timezone_name(),
+        };
+        Self {
+            title: String::new(),
+            prompt: String::new(),
+            agent: if kind == OrchFormKind::Automation {
+                default_automation_agent()
+            } else {
+                String::new()
+            },
+            automation_target: OrchAutomationTarget::NewWorker,
+            active_agent: 0,
+            mode,
+            access: crate::automation::AutomationAccess::default(),
+            start,
+            schedule: if kind == OrchFormKind::Automation {
+                default_schedule(start, &timezone)
+            } else {
+                String::new()
+            },
+            schedule_prefilled: kind == OrchFormKind::Automation,
+            timezone,
+            paths: String::new(),
+            deps: String::new(),
+            gate: String::new(),
+            field: OrchFormField::Title,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct OrchForm {
+    pub kind: OrchFormKind,
     pub title: String,
+    pub prompt: String,
+    pub agent: String,
+    pub automation_target: OrchAutomationTarget,
+    pub active_agent: usize,
+    pub active_agents: Vec<OrchActiveAgent>,
+    pub mode: crate::orch::TaskWorkerMode,
+    pub access: crate::automation::AutomationAccess,
+    pub start: OrchFormStart,
+    pub schedule: String,
+    /// A generated schedule remains visible but is replaced by the user's
+    /// first edit instead of forcing them to erase it character by character.
+    pub schedule_prefilled: bool,
+    pub timezone: String,
     pub paths: String,
     pub deps: String,
     pub gate: String,
-    /// Active field: 0=title · 1=paths · 2=deps · 3=gate.
-    pub field: usize,
+    pub field: OrchFormField,
     pub error: Option<String>,
+    task_draft: Option<OrchFormDraft>,
+    automation_draft: Option<OrchFormDraft>,
 }
 
 impl OrchForm {
-    pub const FIELDS: usize = 4;
+    pub fn for_kind(kind: OrchFormKind) -> Self {
+        let mut form = Self {
+            kind,
+            ..Self::default()
+        };
+        form.restore_draft(OrchFormDraft::for_kind(kind, form.mode));
+        form
+    }
 
-    /// The currently-edited field's text.
-    pub fn active_mut(&mut self) -> &mut String {
-        match self.field {
-            0 => &mut self.title,
-            1 => &mut self.paths,
-            2 => &mut self.deps,
-            _ => &mut self.gate,
+    fn take_draft(&mut self) -> OrchFormDraft {
+        OrchFormDraft {
+            title: std::mem::take(&mut self.title),
+            prompt: std::mem::take(&mut self.prompt),
+            agent: std::mem::take(&mut self.agent),
+            automation_target: self.automation_target,
+            active_agent: self.active_agent,
+            mode: self.mode,
+            access: self.access,
+            start: self.start,
+            schedule: std::mem::take(&mut self.schedule),
+            schedule_prefilled: self.schedule_prefilled,
+            timezone: std::mem::take(&mut self.timezone),
+            paths: std::mem::take(&mut self.paths),
+            deps: std::mem::take(&mut self.deps),
+            gate: std::mem::take(&mut self.gate),
+            field: self.field,
         }
     }
 
-    /// The four fields' current values, in order, for rendering.
-    pub fn values(&self) -> [&String; 4] {
-        [&self.title, &self.paths, &self.deps, &self.gate]
+    fn restore_draft(&mut self, draft: OrchFormDraft) {
+        self.title = draft.title;
+        self.prompt = draft.prompt;
+        self.agent = draft.agent;
+        self.automation_target = draft.automation_target;
+        self.active_agent = draft.active_agent;
+        self.mode = draft.mode;
+        self.access = draft.access;
+        self.start = draft.start;
+        self.schedule = draft.schedule;
+        self.schedule_prefilled = draft.schedule_prefilled;
+        self.timezone = draft.timezone;
+        self.paths = draft.paths;
+        self.deps = draft.deps;
+        self.gate = draft.gate;
+        self.field = draft.field;
+    }
+
+    pub fn fields(&self) -> &'static [OrchFormField] {
+        match (self.kind, self.start) {
+            (OrchFormKind::Task, OrchFormStart::Now) => TASK_NOW_FIELDS,
+            (OrchFormKind::Task, _) => TASK_MANUAL_FIELDS,
+            (OrchFormKind::Automation, _)
+                if self.automation_target == OrchAutomationTarget::ActiveAgent =>
+            {
+                ACTIVE_AGENT_AUTOMATION_FIELDS
+            }
+            (OrchFormKind::Automation, _) => AUTOMATION_FIELDS,
+        }
+    }
+
+    pub fn set_kind(&mut self, kind: OrchFormKind) {
+        if self.kind == kind {
+            return;
+        }
+        let outgoing = self.take_draft();
+        match self.kind {
+            OrchFormKind::Task => self.task_draft = Some(outgoing),
+            OrchFormKind::Automation => self.automation_draft = Some(outgoing),
+        }
+        let incoming = match kind {
+            OrchFormKind::Task => self.task_draft.take(),
+            OrchFormKind::Automation => self.automation_draft.take(),
+        }
+        .unwrap_or_else(|| OrchFormDraft::for_kind(kind, self.mode));
+        self.kind = kind;
+        self.restore_draft(incoming);
+        self.error = None;
+    }
+
+    pub fn toggle_kind(&mut self) {
+        let kind = match self.kind {
+            OrchFormKind::Task => OrchFormKind::Automation,
+            OrchFormKind::Automation => OrchFormKind::Task,
+        };
+        self.set_kind(kind);
+    }
+
+    pub fn cycle_field(&mut self, backwards: bool) {
+        let fields = self.fields();
+        let index = fields
+            .iter()
+            .position(|field| *field == self.field)
+            .unwrap_or(0);
+        self.field = fields[(index + if backwards { fields.len() - 1 } else { 1 }) % fields.len()];
+    }
+
+    pub fn cycle_choice(&mut self, backwards: bool) {
+        match self.field {
+            OrchFormField::Target => {
+                self.automation_target = match self.automation_target {
+                    OrchAutomationTarget::NewWorker => OrchAutomationTarget::ActiveAgent,
+                    OrchAutomationTarget::ActiveAgent => OrchAutomationTarget::NewWorker,
+                };
+                if !self.fields().contains(&self.field) {
+                    self.field = OrchFormField::Target;
+                }
+            }
+            OrchFormField::ActiveAgent => {
+                if !self.active_agents.is_empty() {
+                    self.active_agent = (self.active_agent
+                        + if backwards {
+                            self.active_agents.len() - 1
+                        } else {
+                            1
+                        })
+                        % self.active_agents.len();
+                }
+            }
+            OrchFormField::Start => {
+                let choices: &[OrchFormStart] = match self.kind {
+                    OrchFormKind::Task => &[OrchFormStart::Manual, OrchFormStart::Now],
+                    OrchFormKind::Automation => &[
+                        OrchFormStart::Once,
+                        OrchFormStart::Hourly,
+                        OrchFormStart::Daily,
+                        OrchFormStart::Weekly,
+                    ],
+                };
+                let index = choices
+                    .iter()
+                    .position(|choice| *choice == self.start)
+                    .unwrap_or(0);
+                self.start = choices
+                    [(index + if backwards { choices.len() - 1 } else { 1 }) % choices.len()];
+                if self.start == OrchFormStart::Now && self.agent.is_empty() {
+                    self.agent = default_task_agent();
+                }
+                if self.kind == OrchFormKind::Automation {
+                    self.schedule = default_schedule(self.start, &self.timezone);
+                    self.schedule_prefilled = true;
+                }
+            }
+            OrchFormField::Agent => {
+                let choices = if self.kind == OrchFormKind::Automation {
+                    crate::app::automation_agent_choices_for(self.access)
+                } else {
+                    crate::app::task_agent_choices()
+                };
+                if choices.is_empty() {
+                    return;
+                }
+                let index = choices
+                    .iter()
+                    .position(|choice| choice.eq_ignore_ascii_case(&self.agent))
+                    .unwrap_or(0);
+                self.agent = choices
+                    [(index + if backwards { choices.len() - 1 } else { 1 }) % choices.len()]
+                .to_string();
+            }
+            OrchFormField::RunIn => {
+                self.mode = match self.mode {
+                    crate::orch::TaskWorkerMode::Worktree => crate::orch::TaskWorkerMode::Workspace,
+                    crate::orch::TaskWorkerMode::Workspace => crate::orch::TaskWorkerMode::Worktree,
+                };
+            }
+            OrchFormField::Access => {
+                let choices = [
+                    crate::automation::AutomationAccess::ReadOnly,
+                    crate::automation::AutomationAccess::Workspace,
+                    crate::automation::AutomationAccess::FullAccess,
+                ];
+                let index = choices
+                    .iter()
+                    .position(|choice| *choice == self.access)
+                    .unwrap_or(0);
+                self.access = choices
+                    [(index + if backwards { choices.len() - 1 } else { 1 }) % choices.len()];
+                let agents = crate::app::automation_agent_choices_for(self.access);
+                if !agents
+                    .iter()
+                    .any(|agent| agent.eq_ignore_ascii_case(&self.agent))
+                {
+                    self.agent = agents.first().copied().unwrap_or_default().to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The currently-edited field's text.
+    pub fn active_mut(&mut self) -> Option<&mut String> {
+        match self.field {
+            OrchFormField::Title => Some(&mut self.title),
+            OrchFormField::Paths => Some(&mut self.paths),
+            OrchFormField::Deps => Some(&mut self.deps),
+            OrchFormField::Gate => Some(&mut self.gate),
+            OrchFormField::Prompt => Some(&mut self.prompt),
+            OrchFormField::Target
+            | OrchFormField::ActiveAgent
+            | OrchFormField::Agent
+            | OrchFormField::RunIn
+            | OrchFormField::Access => None,
+            OrchFormField::Schedule => Some(&mut self.schedule),
+            OrchFormField::Start => None,
+        }
+    }
+
+    pub fn push_char(&mut self, value: char) {
+        if self.field == OrchFormField::Schedule && self.schedule_prefilled {
+            self.schedule.clear();
+            self.schedule_prefilled = false;
+        }
+        if let Some(field) = self.active_mut() {
+            field.push(value);
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        if self.field == OrchFormField::Schedule && self.schedule_prefilled {
+            self.schedule.clear();
+            self.schedule_prefilled = false;
+            return;
+        }
+        if let Some(field) = self.active_mut() {
+            field.pop();
+        }
+    }
+
+    pub fn value(&self, field: OrchFormField) -> &str {
+        match field {
+            OrchFormField::Title => &self.title,
+            OrchFormField::Paths => &self.paths,
+            OrchFormField::Deps => &self.deps,
+            OrchFormField::Gate => &self.gate,
+            OrchFormField::Prompt => &self.prompt,
+            OrchFormField::Target => match self.automation_target {
+                OrchAutomationTarget::NewWorker => "new_worker",
+                OrchAutomationTarget::ActiveAgent => "active_agent",
+            },
+            OrchFormField::ActiveAgent => self
+                .active_agents
+                .get(self.active_agent)
+                .map(|agent| agent.label.as_str())
+                .unwrap_or("no active agents"),
+            OrchFormField::Agent => &self.agent,
+            OrchFormField::RunIn => self.mode.as_str(),
+            OrchFormField::Access => self.access.as_str(),
+            OrchFormField::Start => self.start.label(),
+            OrchFormField::Schedule => &self.schedule,
+        }
+    }
+}
+
+fn default_task_agent() -> String {
+    crate::app::task_agent_choices()
+        .first()
+        .copied()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn default_automation_agent() -> String {
+    crate::app::automation_agent_choices_for(crate::automation::AutomationAccess::Workspace)
+        .first()
+        .copied()
+        .or_else(|| crate::app::automation_agent_choices().first().copied())
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn default_schedule(start: OrchFormStart, timezone: &str) -> String {
+    match start {
+        OrchFormStart::Once => crate::automation::format_local_instant(
+            crate::automation::unix_now().saturating_add(3_600),
+            timezone,
+        )
+        .unwrap_or_default(),
+        OrchFormStart::Hourly => "00".to_string(),
+        OrchFormStart::Daily => "09:00".to_string(),
+        OrchFormStart::Weekly => "mon 09:00".to_string(),
+        OrchFormStart::Manual | OrchFormStart::Now => String::new(),
     }
 }
 
@@ -1025,6 +1589,13 @@ pub enum OrchStartStep {
     Agent,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum OrchView {
+    #[default]
+    Tasks,
+    Automations,
+}
+
 pub struct OrchStart {
     /// The task a worker is being started for.
     pub task: String,
@@ -1040,10 +1611,13 @@ pub struct OrchStart {
 /// frame, so hit testing never derives a task index from stale screen math.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum OrchHit {
+    View(OrchView),
     Task(String),
+    Automation(String),
     Worker(String),
     NewTask,
-    FormField(usize),
+    FormKind(OrchFormKind),
+    FormField(OrchFormField),
     FormCreate,
     FormCancel,
     /// The new-task form surface. Kept behind the form's actionable hit
@@ -1055,6 +1629,10 @@ pub enum OrchHit {
     StartCommit,
     StartCancel,
     DetailClose,
+    /// The inert task/automation detail surface. Its backdrop closes the
+    /// overlay without allowing the click to reach the board behind it.
+    DetailModal,
+    DetailOpenTarget,
 }
 
 /// ORCH shows the selected task beside the fleet at this viewport size.
@@ -1321,10 +1899,10 @@ pub struct ResizeDrag {
 /// makes the seam comfortably grabbable without stealing clicks from content.
 const RESIZE_GRAB_TOL: u16 = 2;
 
-/// How many columns onto the content side of a sidebar's edge still grab it for a
-/// resize (docs/29). Widens the 1-column seam into a comfortable target without
-/// reaching into the sidebar body (where dock rows own the width).
-const SIDEBAR_GRAB_TOL: u16 = 2;
+/// Rows a dock keeps no matter how far its divider is dragged: enough for the
+/// header plus one line of content, so a dock can be made small but never
+/// squeezed into nothing the user then cannot grab back.
+pub(crate) const MIN_DOCK_HEIGHT: u16 = 3;
 
 impl Selection {
     /// (start, end) terminal cells in reading order (top-left → bottom-right).
@@ -1440,6 +2018,7 @@ pub enum PopupId {
     File,
     Dock,
     Orch,
+    Session,
 }
 
 /// Scroll state for context menus taller than the space they are drawn in.
@@ -1589,6 +2168,9 @@ pub struct App {
     pub catalog: &'static crate::i18n::Catalog,
     /// Persisted user configuration (theme, layout, notifications, keys).
     pub config: crate::config::Config,
+    /// This server's last local config snapshot. Persistence diffs against this
+    /// snapshot so another named server's newer, unrelated fields survive.
+    config_baseline: crate::config::Config,
     /// Active `key → Cmd` map for prefix mode (defaults + config overrides).
     pub keymap: std::collections::HashMap<String, Cmd>,
     /// Explicit normal-mode shortcuts. Empty by default so pane input remains
@@ -1652,6 +2234,8 @@ pub struct App {
     pub pane_menu: Option<PaneMenu>,
     /// Active AGENTS-list context menu (right-click a row); `None` when closed.
     pub agent_menu: Option<AgentMenu>,
+    /// Context menu on a session row (right-click → Stop session).
+    pub session_menu: Option<SessionMenu>,
     /// Live agents pinned to the top of the AGENTS list (right-click → Pin).
     /// Per-session: pane ids are reallocated each run, so this is not persisted;
     /// pruned when a pane closes.
@@ -1694,19 +2278,28 @@ pub struct App {
     /// Multi-agent orchestration ledger + path leases (docs/22, ORCH-1/2). Kept
     /// in its own file (`orch.json`), independent of the session snapshot.
     pub orch: crate::orch::OrchState,
-    /// Scroll offset of the orchestration board tab (docs/22, ORCH-7).
+    /// Durable agent automation definitions and bounded run history. The app
+    /// event loop remains their only mutable owner.
+    pub automation: crate::automation::AutomationState,
+    /// Scroll offset of the active orchestration board list (docs/22, ORCH-7).
     pub orch_scroll: usize,
+    /// Active ORCH dashboard projection: concrete tasks or future definitions.
+    pub orch_view: OrchView,
     /// Informational lifecycle selected in the empty-board Flow panel.
     pub orch_flow_mode: crate::orch::TaskWorkerMode,
     /// Selected task row on the board (for keyboard/mouse actions).
     pub orch_cursor: usize,
+    pub orch_automation_cursor: usize,
     /// The in-TUI new-task form, when open (ORCH-7).
     pub orch_form: Option<OrchForm>,
     /// The board's "start worker with…" agent picker, when open.
     pub orch_start: Option<OrchStart>,
-    /// Task whose detail overlay is open on the board (`o`), plus its scroll.
+    /// Task or automation whose detail overlay is open, plus its scroll.
     pub orch_detail: Option<String>,
     pub orch_detail_scroll: usize,
+    /// Next automation occurrences captured when its detail is opened. Keeping
+    /// this bounded preview out of rendering avoids calendar work per frame.
+    pub orch_automation_preview: Vec<u64>,
     /// Last agent chosen in the start picker — the next picker opens on it.
     pub orch_last_agent: usize,
     /// The board's content rect, for mouse-wheel hit-testing.
@@ -1728,6 +2321,8 @@ pub struct App {
     pub mission_scope: crate::mission::MissionScope,
     /// Click targets for the two scope tabs and visible agent rows.
     pub mission_scope_rects: Vec<(crate::mission::MissionScope, Rect)>,
+    /// Read-only automation rows in Mission Control, keyed by stable definition ID.
+    pub mission_automation_rects: Vec<(String, Rect)>,
     pub mission_row_rects: Vec<(usize, Rect)>,
     /// Click target for the explicit Mission Control usage refresh action.
     pub mission_refresh_rect: Option<Rect>,
@@ -1750,6 +2345,11 @@ pub struct App {
     /// path (docs/54 MC-2/MC-4).
     pub agent_usage:
         std::collections::HashMap<crate::mission::UsageKey, crate::mission::AgentUsage>,
+    /// Entries whose exact session and counters came from a live integration.
+    /// Kept separately from native mtimes so a background native-store refresh
+    /// cannot erase or overwrite the stronger pane-local authority.
+    pub(crate) reported_usage:
+        std::collections::HashMap<crate::mission::UsageKey, crate::mission::ReportedUsage>,
     /// Each scanned transcript's mtime, so the next usage scan re-reads a session
     /// only when its file actually changed (docs/54) — an idle session costs one
     /// `stat`, not a full read+parse.
@@ -1788,6 +2388,8 @@ pub struct App {
     /// Active mouse text selection in a pane (drag to select). Cleared on a new
     /// click; on release its text is queued to `pending_clipboard`.
     pub selection: Option<Selection>,
+    /// When set, a copied mouse selection stays highlighted until this instant.
+    selection_clear_at: Option<Instant>,
     /// Keyboard copy selection. This deliberately owns navigation keys so they
     /// cannot reach the child while text is being selected.
     pub copy_mode: Option<CopyMode>,
@@ -1845,11 +2447,34 @@ pub struct App {
     pub(crate) proc_commands: HashMap<PaneId, Vec<String>>,
     /// One process scan at a time, same guard as the session scan.
     proc_scan_inflight: bool,
+    /// A one-shot process scan explicitly requested by an API or by the first
+    /// confirmed absence of a bound agent. Unlike PTY dirtiness, this demand
+    /// survives detach and is consumed only by a successful scan.
+    proc_scan_requested: bool,
+    /// Whether the in-flight worker consumed an explicit one-shot demand.
+    proc_scan_demand_inflight: bool,
+    /// Panes whose explicit process request must be represented by the next
+    /// successful snapshot. Keeping the identities avoids treating an older
+    /// in-flight snapshot as satisfying a request for a newly created pane.
+    proc_scan_requested_panes: HashSet<PaneId>,
+    /// Requested panes assigned to the current process snapshot. Requests that
+    /// arrive while it runs join this set and are retried when absent.
+    proc_scan_demand_panes_inflight: HashSet<PaneId>,
+    /// Remaining retries after a demanded worker cannot read the process table
+    /// or its snapshot predates a requested pane. Bounded so a persistent
+    /// platform failure cannot become an idle heartbeat.
+    proc_scan_failure_retries: u8,
     /// Session ids the user removed from the sidebar list (hidden, not deleted).
     pub dismissed_sessions: HashSet<String>,
     /// Throttle for rescanning the agents' on-disk session stores.
     last_sessions_at: Instant,
     last_proc_at: Instant,
+    /// CWD/git follow-up is scheduled from PTY activity, not a 1s heartbeat.
+    runtime_cwd_dirty: bool,
+    /// Attached PTY activity dirties process identity without creating a heartbeat.
+    runtime_proc_dirty: bool,
+    /// Resumable-session disk scans run on attach/demand, not a 4s walk.
+    runtime_sessions_dirty: bool,
     /// Mission Control usage is demand-driven: opening/focusing the dashboard,
     /// changing its scope, or choosing refresh queues one off-loop scan. No
     /// usage reader runs merely because a hidden Mission Control tab exists.
@@ -1896,6 +2521,11 @@ pub struct App {
     pub agents_scroll: usize,
     pub workspaces_area: Rect,
     pub agents_area: Rect,
+    /// Explicit keyboard ownership for WORKSPACES or AGENTS.
+    pub sidebar_focus: Option<SidebarListFocus>,
+    /// Display-order cursors for the two built-in sidebar lists.
+    pub workspace_cursor: usize,
+    pub agent_cursor: usize,
     /// The FILES dock (docs/38): the tree model, its scroll region, and the
     /// clickable rect per visible row (`(row index, rect)`), re-set each frame.
     pub file_tree: crate::files::FileTree,
@@ -1995,6 +2625,12 @@ pub struct App {
     /// AGENTS list filter: `true` shows only live (active) agents; `false`
     /// (the default) also shows the resumable session history.
     pub agents_active_only: bool,
+    /// AGENTS scope: `true` shows only the active workspace's agents and
+    /// resumable sessions; `false` (the default) shows every workspace. This is
+    /// independent of `agents_active_only` — lifecycle and scope are separate
+    /// axes. The chip is hidden while only one workspace is open, but the saved
+    /// choice still scopes resumable history by that workspace's cwd.
+    pub agents_this_workspace: bool,
     /// Last active workspace shown, to auto-reveal it on a programmatic change.
     pub last_active_ws_shown: usize,
     /// Last mouse position, for hover affordances (the session delete ✕).
@@ -2029,6 +2665,14 @@ pub struct App {
     /// `sidebar_seam_at`.
     pub left_seam: Option<Rect>,
     pub right_seam: Option<Rect>,
+    /// The horizontal rule between two stacked docks: `(side, index, row)`,
+    /// where `index` is the divider's position in that sidebar (the boundary
+    /// between dock `index` and `index + 1`). Rebuilt every frame like the
+    /// seams above, so a hidden sidebar leaves nothing here and its drag can
+    /// never fire.
+    pub dock_dividers: Vec<(Side, usize, u16)>,
+    /// The dock divider currently being dragged, as `(side, index)`.
+    pub dock_resize: Option<(Side, usize)>,
     /// The full content area (frame minus the status bar), stored so an in-flight
     /// sidebar drag can turn a cursor column into a width off the correct edge.
     pub last_main_area: Rect,
@@ -2039,7 +2683,14 @@ pub struct App {
     pub git_section_rects: Vec<(crate::git::Section, Rect)>,
     /// The All/Active filter toggle in the AGENTS header (`bool` = active_only).
     pub agents_filter_rects: Vec<(bool, Rect)>,
+    /// The "blocked in other workspaces" overflow line, paired with the first
+    /// hidden blocked pane so clicking jumps to an agent the view actually hid.
+    pub agents_elsewhere_rect: Option<(PaneId, Rect)>,
     pub agent_rects: Vec<(PaneId, Rect)>,
+    /// Armed automation placeholders in the AGENTS dock. Their stable IDs open
+    /// details on left click and an automation-safe AGENTS menu on right click
+    /// when no pane exists to receive the live-agent menu.
+    pub automation_rects: Vec<(String, Rect)>,
     /// Resumable-session rows in the sidebar (index into `resumable`).
     pub session_rects: Vec<(usize, Rect)>,
     /// The ✕ delete buttons on hovered resumable rows (index into `resumable`).
@@ -2138,8 +2789,10 @@ impl App {
         let name = ws_name(&cwd);
 
         let config = crate::config::load();
+        let config_baseline = config.clone();
         let files_show_hidden = config.layout.files_show_hidden;
         let agents_active_only = config.agents_active_only;
+        let agents_this_workspace = config.agents_this_workspace;
         crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
         let theme_registry = crate::theme::ThemeRegistry::load();
         let theme = theme_registry.theme_or_default(&config.theme);
@@ -2210,6 +2863,7 @@ impl App {
             theme_registry,
             catalog,
             config,
+            config_baseline,
             keymap,
             direct_keymap,
             prefix,
@@ -2235,6 +2889,7 @@ impl App {
             worktree_delete: None,
             pane_menu: None,
             agent_menu: None,
+            session_menu: None,
             pinned_agents: std::collections::HashSet::new(),
             ws_rename: None,
             pane_rename: None,
@@ -2253,13 +2908,17 @@ impl App {
             session_dirty: true,
             events: api::new_bus(),
             orch: crate::orch::OrchState::load(),
+            automation: crate::automation::AutomationState::load(),
             orch_scroll: 0,
+            orch_view: OrchView::Tasks,
             orch_flow_mode: crate::orch::TaskWorkerMode::Worktree,
             orch_cursor: 0,
+            orch_automation_cursor: 0,
             orch_form: None,
             orch_start: None,
             orch_detail: None,
             orch_detail_scroll: 0,
+            orch_automation_preview: Vec::new(),
             orch_last_agent: 0,
             orch_area: Rect::ZERO,
             orch_hits: Vec::new(),
@@ -2269,6 +2928,7 @@ impl App {
             mission_cursor: 0,
             mission_scope: crate::mission::MissionScope::Workspace,
             mission_scope_rects: Vec::new(),
+            mission_automation_rects: Vec::new(),
             mission_row_rects: Vec::new(),
             mission_refresh_rect: None,
             mission_area: Rect::ZERO,
@@ -2278,6 +2938,7 @@ impl App {
             mission_burn: None,
             mission_last_cost: None,
             agent_usage: std::collections::HashMap::new(),
+            reported_usage: std::collections::HashMap::new(),
             usage_mtimes: std::collections::HashMap::new(),
             last_cursor: None,
             detach_requested: false,
@@ -2293,6 +2954,7 @@ impl App {
             pending_notify: Vec::new(),
             pending_sound: None,
             selection: None,
+            selection_clear_at: None,
             copy_mode: None,
             mouse_grab: None,
             pending_clipboard: None,
@@ -2311,12 +2973,20 @@ impl App {
             sessions_scan_inflight: false,
             proc_commands: HashMap::new(),
             proc_scan_inflight: false,
+            proc_scan_requested: false,
+            proc_scan_demand_inflight: false,
+            proc_scan_requested_panes: HashSet::new(),
+            proc_scan_demand_panes_inflight: HashSet::new(),
+            proc_scan_failure_retries: 0,
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
             mission_usage_requested: None,
             mission_active_workspace: None,
             usage_scan_inflight: false,
             last_proc_at: Instant::now(),
+            runtime_cwd_dirty: false,
+            runtime_proc_dirty: false,
+            runtime_sessions_dirty: false,
             last_detect_at: Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
@@ -2337,8 +3007,12 @@ impl App {
             workspaces_scroll: 0,
             agents_scroll: 0,
             agents_active_only,
+            agents_this_workspace,
             workspaces_area: Rect::ZERO,
             agents_area: Rect::ZERO,
+            sidebar_focus: None,
+            workspace_cursor: 0,
+            agent_cursor: 0,
             // Rooted at nothing; the first detect tick re-roots it to the active
             // node (set_root is a no-op when already correct).
             file_tree: {
@@ -2408,12 +3082,16 @@ impl App {
             hover_sidebar: None,
             left_seam: None,
             right_seam: None,
+            dock_dividers: Vec::new(),
+            dock_resize: None,
             last_main_area: Rect::ZERO,
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
             git_section_rects: Vec::new(),
             agents_filter_rects: Vec::new(),
+            agents_elsewhere_rect: None,
             agent_rects: Vec::new(),
+            automation_rects: Vec::new(),
             session_rects: Vec::new(),
             tab_close_rects: Vec::new(),
             new_ws_rect: None,
@@ -2449,6 +3127,7 @@ impl App {
         // previous server run, so rebind/clear them (same as `from_snapshot`).
         app.orch_reconcile();
         app.refresh_core_bar_widgets();
+        app.mark_runtime_scans_dirty();
         Ok(app)
     }
 
@@ -2458,6 +3137,7 @@ impl App {
             if let Some(mut app) = App::from_snapshot(snap, app_tx.clone()) {
                 // Kick off the async fetch for any restored git tabs.
                 app.refetch_git_tabs();
+                app.mark_runtime_scans_dirty();
                 return Ok(app);
             }
         }
@@ -2466,8 +3146,10 @@ impl App {
 
     fn from_snapshot(snap: SessionSnapshot, app_tx: Sender<AppEvent>) -> Option<App> {
         let config = crate::config::load();
+        let config_baseline = config.clone();
         let files_show_hidden = config.layout.files_show_hidden;
         let agents_active_only = config.agents_active_only;
+        let agents_this_workspace = config.agents_this_workspace;
         let theme_registry = crate::theme::ThemeRegistry::load();
         let theme = theme_registry.theme_or_default(&config.theme);
         let pane_appearance = child_appearance(&theme_registry, &config.theme, &theme, None);
@@ -2827,6 +3509,7 @@ impl App {
             theme_registry,
             catalog,
             config,
+            config_baseline,
             keymap,
             direct_keymap,
             prefix,
@@ -2852,6 +3535,7 @@ impl App {
             worktree_delete: None,
             pane_menu: None,
             agent_menu: None,
+            session_menu: None,
             pinned_agents: std::collections::HashSet::new(),
             ws_rename: None,
             pane_rename: None,
@@ -2870,13 +3554,17 @@ impl App {
             session_dirty: false,
             events: api::new_bus(),
             orch: crate::orch::OrchState::load(),
+            automation: crate::automation::AutomationState::load(),
             orch_scroll: 0,
+            orch_view: OrchView::Tasks,
             orch_flow_mode: crate::orch::TaskWorkerMode::Worktree,
             orch_cursor: 0,
+            orch_automation_cursor: 0,
             orch_form: None,
             orch_start: None,
             orch_detail: None,
             orch_detail_scroll: 0,
+            orch_automation_preview: Vec::new(),
             orch_last_agent: 0,
             orch_area: Rect::ZERO,
             orch_hits: Vec::new(),
@@ -2886,6 +3574,7 @@ impl App {
             mission_cursor: 0,
             mission_scope: crate::mission::MissionScope::Workspace,
             mission_scope_rects: Vec::new(),
+            mission_automation_rects: Vec::new(),
             mission_row_rects: Vec::new(),
             mission_refresh_rect: None,
             mission_area: Rect::ZERO,
@@ -2895,6 +3584,7 @@ impl App {
             mission_burn: None,
             mission_last_cost: None,
             agent_usage: std::collections::HashMap::new(),
+            reported_usage: std::collections::HashMap::new(),
             usage_mtimes: std::collections::HashMap::new(),
             last_cursor: None,
             detach_requested: false,
@@ -2910,6 +3600,7 @@ impl App {
             pending_notify: Vec::new(),
             pending_sound: None,
             selection: None,
+            selection_clear_at: None,
             copy_mode: None,
             mouse_grab: None,
             pending_clipboard: None,
@@ -2928,12 +3619,20 @@ impl App {
             sessions_scan_inflight: false,
             proc_commands: HashMap::new(),
             proc_scan_inflight: false,
+            proc_scan_requested: false,
+            proc_scan_demand_inflight: false,
+            proc_scan_requested_panes: HashSet::new(),
+            proc_scan_demand_panes_inflight: HashSet::new(),
+            proc_scan_failure_retries: 0,
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
             mission_usage_requested: None,
             mission_active_workspace: None,
             usage_scan_inflight: false,
             last_proc_at: Instant::now(),
+            runtime_cwd_dirty: false,
+            runtime_proc_dirty: false,
+            runtime_sessions_dirty: false,
             last_detect_at: Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
@@ -2954,8 +3653,12 @@ impl App {
             workspaces_scroll: 0,
             agents_scroll: 0,
             agents_active_only,
+            agents_this_workspace,
             workspaces_area: Rect::ZERO,
             agents_area: Rect::ZERO,
+            sidebar_focus: None,
+            workspace_cursor: 0,
+            agent_cursor: 0,
             // Rooted at nothing; the first detect tick re-roots it to the active
             // node (set_root is a no-op when already correct).
             file_tree: {
@@ -3025,12 +3728,16 @@ impl App {
             hover_sidebar: None,
             left_seam: None,
             right_seam: None,
+            dock_dividers: Vec::new(),
+            dock_resize: None,
             last_main_area: Rect::ZERO,
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
             git_section_rects: Vec::new(),
             agents_filter_rects: Vec::new(),
+            agents_elsewhere_rect: None,
             agent_rects: Vec::new(),
+            automation_rects: Vec::new(),
             session_rects: Vec::new(),
             tab_close_rects: Vec::new(),
             new_ws_rect: None,
@@ -3135,7 +3842,30 @@ impl App {
     pub fn save_sidebars(&mut self) {
         self.config.sidebars = Some(self.sidebars.to_config());
         self.config.sidebar_width = self.sidebars.left.width;
-        crate::config::save(&self.config);
+        self.persist_config();
+    }
+
+    /// Merge only this server's local changes into the shared home-level config.
+    /// A failed best-effort write keeps the old baseline so the next mutation
+    /// retries every unsaved field.
+    pub(crate) fn persist_config(&mut self) {
+        if crate::config::save_changes(&self.config_baseline, &self.config) {
+            self.config_baseline = self.config.clone();
+        }
+    }
+
+    /// Persist local changes while forcing an explicit user/API patch even when
+    /// this server already held the requested value in memory.
+    pub(crate) fn persist_config_patch(&mut self, patch: &serde_json::Value) {
+        if crate::config::save_changes_with_patch(&self.config_baseline, &self.config, Some(patch))
+        {
+            self.config_baseline = self.config.clone();
+        }
+    }
+
+    /// Adopt an externally reloaded config without writing it back to disk.
+    pub(crate) fn reset_config_baseline(&mut self) {
+        self.config_baseline = self.config.clone();
     }
 
     /// Apply the AGENTS All / Active projection without performing I/O. This is
@@ -3147,6 +3877,7 @@ impl App {
         }
         self.agents_active_only = active_only;
         self.agents_scroll = 0;
+        self.agent_cursor = 0;
         true
     }
 
@@ -3157,9 +3888,345 @@ impl App {
         let config_changed = self.config.agents_active_only != active_only;
         if config_changed {
             self.config.agents_active_only = active_only;
-            crate::config::save(&self.config);
+            self.persist_config();
         }
         runtime_changed || config_changed
+    }
+
+    /// Whether the AGENTS dock is scoped to the active workspace. Rendering may
+    /// hide the chip when only one workspace is open, but the persisted choice
+    /// still applies to resumable history: lifecycle and scope preferences do
+    /// not silently change as workspaces open or close.
+    pub fn agents_scope_active(&self) -> bool {
+        self.agents_this_workspace
+    }
+
+    /// Apply the AGENTS scope projection without performing I/O. Mirrors
+    /// `apply_agents_filter` so config reloads and direct clicks agree.
+    pub(crate) fn apply_agents_scope(&mut self, this_workspace: bool) -> bool {
+        if self.agents_this_workspace == this_workspace {
+            return false;
+        }
+        self.agents_this_workspace = this_workspace;
+        self.agents_scroll = 0;
+        self.agent_cursor = 0;
+        true
+    }
+
+    /// Persist a direct scope selection. Same infrequent-write contract as
+    /// `set_agents_filter`.
+    pub(crate) fn set_agents_scope(&mut self, this_workspace: bool) -> bool {
+        let runtime_changed = self.apply_agents_scope(this_workspace);
+        let config_changed = self.config.agents_this_workspace != this_workspace;
+        if config_changed {
+            self.config.agents_this_workspace = this_workspace;
+            self.persist_config();
+        }
+        runtime_changed || config_changed
+    }
+
+    /// Mount and reveal a built-in dock so an explicit focus command is always
+    /// useful, including after the user has hidden or unmounted that dock.
+    fn reveal_builtin_dock(&mut self, kind: DockKind) -> bool {
+        if self.sidebars.side_of(&kind).is_none() {
+            let target = if self.sidebars.has_room(Side::Left) {
+                Side::Left
+            } else {
+                Side::Right
+            };
+            if !self.move_dock(&kind, target) {
+                return false;
+            }
+        }
+        let Some(side) = self.sidebars.side_of(&kind) else {
+            return false;
+        };
+        self.sidebars.get_mut(side).visible = true;
+        true
+    }
+
+    /// Give normal-mode keyboard input to the WORKSPACES list without moving
+    /// terminal-pane focus. Esc/q returns input to the same pane.
+    pub fn focus_workspaces_dock(&mut self) {
+        if !self.reveal_builtin_dock(DockKind::Workspaces) {
+            return;
+        }
+        self.files_focused = false;
+        self.sidebar_focus = Some(SidebarListFocus::Workspaces);
+        self.workspace_cursor = self.workspace_display_position(self.active_ws).unwrap_or(0);
+    }
+
+    /// Give normal-mode keyboard input to the AGENTS list. The cursor starts at
+    /// the currently focused live agent when that row is visible.
+    pub fn focus_agents_dock(&mut self) {
+        if !self.reveal_builtin_dock(DockKind::Agents) {
+            return;
+        }
+        self.files_focused = false;
+        self.sidebar_focus = Some(SidebarListFocus::Agents);
+        let current = self
+            .workspaces
+            .get(self.active_ws)
+            .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
+            .map(|tab| tab.layout.focus);
+        let rows = self.agent_dock_targets();
+        self.agent_cursor = current
+            .and_then(|pane| {
+                rows.iter()
+                    .position(|target| *target == AgentDockTarget::Live(pane))
+            })
+            .unwrap_or_else(|| self.agent_cursor.min(rows.len().saturating_sub(1)));
+    }
+
+    /// Build the AGENTS rows in the same order as the renderer. This runs only
+    /// for explicit keyboard input, not on the app loop or detection path.
+    pub fn agent_dock_targets(&self) -> Vec<AgentDockTarget> {
+        let scoped = self.agents_scope_active();
+        let mut live = Vec::new();
+        let mut blocked_elsewhere = Vec::new();
+        for (workspace_index, workspace) in self.workspaces.iter().enumerate() {
+            let visible = !scoped || workspace_index == self.active_ws;
+            for tab in &workspace.tabs {
+                for pane in tab.layout.leaves() {
+                    let Some(status) = self.status.get(&pane) else {
+                        continue;
+                    };
+                    if !self.manifests.is_agent(&status.agent) && status.agent_session.is_none() {
+                        continue;
+                    }
+                    if visible {
+                        live.push(pane);
+                    } else if status.state == State::Blocked {
+                        blocked_elsewhere.push(pane);
+                    }
+                }
+            }
+        }
+        if !self.pinned_agents.is_empty() {
+            live.sort_by_key(|pane| !self.pinned_agents.contains(pane));
+        }
+
+        let mut rows: Vec<AgentDockTarget> = live.into_iter().map(AgentDockTarget::Live).collect();
+        let mut scheduled: Vec<(u64, String)> = self
+            .automation
+            .automations
+            .iter()
+            .filter_map(|automation| {
+                if !automation.enabled {
+                    return None;
+                }
+                let (workspace_index, _) = self
+                    .workspaces
+                    .iter()
+                    .enumerate()
+                    .find(|(_, workspace)| workspace.id == automation.task.workspace_id)?;
+                if scoped && workspace_index != self.active_ws {
+                    return None;
+                }
+                let live_run = self
+                    .automation
+                    .runs
+                    .iter()
+                    .rev()
+                    .find(|run| run.automation_id == automation.id && run.status.is_live());
+                let pane_backed = live_run
+                    .and_then(|run| run.task_id.as_deref())
+                    .and_then(|task| self.orch.task(task))
+                    .and_then(|task| task.assignee)
+                    .is_some_and(|pane| self.panes.contains_key(&PaneId(pane)));
+                if pane_backed
+                    || live_run.is_some_and(|run| {
+                        matches!(
+                            run.status,
+                            crate::automation::RunStatus::Running
+                                | crate::automation::RunStatus::Review
+                        )
+                    })
+                {
+                    return None;
+                }
+                let deadline = live_run
+                    .map(|run| run.scheduled_at)
+                    .or(automation.next_run_at)?;
+                Some((deadline, automation.id.clone()))
+            })
+            .collect();
+        scheduled.sort_by_key(|item| item.0);
+        rows.extend(
+            scheduled
+                .into_iter()
+                .map(|(_, id)| AgentDockTarget::Automation(id)),
+        );
+
+        if !self.agents_active_only {
+            let session_owner = |cwd: &std::path::Path| {
+                self.workspaces
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, workspace)| crate::platform::is_subpath(cwd, &workspace.cwd))
+                    .max_by_key(|(_, workspace)| workspace.cwd.as_os_str().len())
+                    .map(|(workspace_index, _)| workspace_index)
+            };
+            rows.extend(
+                self.resumable
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, session)| {
+                        !scoped || session_owner(&session.cwd) == Some(self.active_ws)
+                    })
+                    .map(|(index, _)| AgentDockTarget::Session(index)),
+            );
+        }
+        if scoped {
+            if let Some(pane) = blocked_elsewhere.first().copied() {
+                rows.push(AgentDockTarget::Elsewhere(pane));
+            }
+        }
+        rows
+    }
+
+    fn move_sidebar_cursor(cursor: &mut usize, len: usize, delta: isize) {
+        if len == 0 {
+            *cursor = 0;
+            return;
+        }
+        *cursor = cursor
+            .saturating_add_signed(delta)
+            .min(len.saturating_sub(1));
+    }
+
+    /// Keyboard navigation for WORKSPACES, mirroring FILES and DIFF.
+    pub fn handle_workspaces_key(&mut self, key: KeyEvent) -> bool {
+        let order = self.workspace_display_order();
+        let page = (usize::from(self.workspaces_area.height) / 2).max(1) as isize;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.sidebar_focus = None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), -1)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), 1)
+            }
+            KeyCode::PageUp => {
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), -page)
+            }
+            KeyCode::PageDown => {
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), page)
+            }
+            KeyCode::Home | KeyCode::Char('g') => self.workspace_cursor = 0,
+            KeyCode::End | KeyCode::Char('G') => {
+                self.workspace_cursor = order.len().saturating_sub(1)
+            }
+            KeyCode::Enter => {
+                if let Some(&(workspace, _)) = order.get(self.workspace_cursor) {
+                    self.active_ws = workspace;
+                    self.sidebar_focus = None;
+                }
+            }
+            KeyCode::Char('a') => {
+                if let Some(&(workspace, _)) = order.get(self.workspace_cursor) {
+                    let anchor = self
+                        .ws_rects
+                        .iter()
+                        .find(|(index, _)| *index == workspace)
+                        .map(|(_, rect)| (rect.x.saturating_add(2), rect.y))
+                        .unwrap_or((
+                            self.workspaces_area.x.saturating_add(2),
+                            self.workspaces_area.y,
+                        ));
+                    self.open_ws_menu(workspace, anchor.0, anchor.1);
+                    if let Some(menu) = self.ws_menu.as_mut() {
+                        menu.selected = Some(0);
+                    }
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// Keyboard navigation for AGENTS. `f` changes All/Active and `s` changes
+    /// workspace scope; row activation matches the existing mouse behavior.
+    pub fn handle_agents_key(&mut self, key: KeyEvent) -> bool {
+        let rows = self.agent_dock_targets();
+        let page = (usize::from(self.agents_area.height) / 2).max(1) as isize;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.sidebar_focus = None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), -1)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), 1)
+            }
+            KeyCode::PageUp => Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), -page),
+            KeyCode::PageDown => {
+                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), page)
+            }
+            KeyCode::Home | KeyCode::Char('g') => self.agent_cursor = 0,
+            KeyCode::End | KeyCode::Char('G') => self.agent_cursor = rows.len().saturating_sub(1),
+            KeyCode::Char('f') => {
+                self.set_agents_filter(!self.agents_active_only);
+                self.agent_cursor = 0;
+            }
+            KeyCode::Char('s') => {
+                self.set_agents_scope(!self.agents_this_workspace);
+                self.agent_cursor = 0;
+            }
+            KeyCode::Enter => {
+                if let Some(target) = rows.get(self.agent_cursor).cloned() {
+                    self.sidebar_focus = None;
+                    self.activate_agent_dock_target(target);
+                }
+            }
+            KeyCode::Char('a') => {
+                if let Some(target) = rows.get(self.agent_cursor).cloned() {
+                    self.open_agent_dock_action(target);
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn activate_agent_dock_target(&mut self, target: AgentDockTarget) {
+        match target {
+            AgentDockTarget::Live(pane) | AgentDockTarget::Elsewhere(pane) => {
+                self.focus_pane_global(pane)
+            }
+            AgentDockTarget::Automation(id) => self.open_automation_detail(&id),
+            AgentDockTarget::Session(index) => self.resume_session(index),
+        }
+    }
+
+    fn open_agent_dock_action(&mut self, target: AgentDockTarget) {
+        match target {
+            AgentDockTarget::Live(pane) => {
+                let anchor = self
+                    .agent_rects
+                    .iter()
+                    .find(|(id, _)| *id == pane)
+                    .map(|(_, rect)| (rect.x.saturating_add(2), rect.y))
+                    .unwrap_or((self.agents_area.x.saturating_add(2), self.agents_area.y));
+                self.open_agent_menu(AgentTarget::Live(pane), anchor.0, anchor.1);
+                if let Some(menu) = self.agent_menu.as_mut() {
+                    menu.selected = Some(0);
+                }
+            }
+            AgentDockTarget::Session(index) => {
+                let anchor = self
+                    .session_rects
+                    .iter()
+                    .find(|(session, _)| *session == index)
+                    .map(|(_, rect)| (rect.x.saturating_add(2), rect.y))
+                    .unwrap_or((self.agents_area.x.saturating_add(2), self.agents_area.y));
+                self.open_agent_menu(AgentTarget::Session(index), anchor.0, anchor.1);
+                if let Some(menu) = self.agent_menu.as_mut() {
+                    menu.selected = Some(0);
+                }
+            }
+            AgentDockTarget::Automation(id) => self.open_automation_detail(&id),
+            AgentDockTarget::Elsewhere(pane) => self.focus_pane_global(pane),
+        }
     }
 
     /// Every mounted dock in display order: left sidebar top→bottom, then right.
@@ -3178,18 +4245,21 @@ impl App {
     /// the side. Placing a dock onto the side it already occupies is never "full".
     pub fn move_dock(&mut self, kind: &DockKind, target: Side) -> bool {
         let dst = self.sidebars.get(target);
-        if !dst.has(kind) && dst.docks.len() >= MAX_DOCKS_PER_SIDE {
+        // Already there: honour the no-op. Removing and re-appending would
+        // push the dock to the bottom of its stack and, now that weights
+        // follow dock identity, swap its share for the average of the rest.
+        if dst.has(kind) {
+            return true;
+        }
+        if dst.docks.len() >= MAX_DOCKS_PER_SIDE {
             let msg = self.catalog.sidebar_full;
             self.show_toast(msg);
             return false;
         }
         for side in [Side::Left, Side::Right] {
-            self.sidebars.get_mut(side).docks.retain(|d| d != kind);
+            self.sidebars.get_mut(side).remove_dock(kind);
         }
-        let dst = self.sidebars.get_mut(target);
-        if !dst.docks.contains(kind) {
-            dst.docks.push(kind.clone());
-        }
+        self.sidebars.get_mut(target).push_dock(kind.clone());
         if kind == &DockKind::Files {
             self.sidebars.files_side = target;
         }
@@ -3206,8 +4276,15 @@ impl App {
     /// nowhere, without dropping any module content cache (it stays in the
     /// registry and can be re-placed). Persists.
     pub fn unmount_dock(&mut self, kind: &DockKind) {
+        if matches!(
+            (self.sidebar_focus, kind),
+            (Some(SidebarListFocus::Workspaces), DockKind::Workspaces)
+                | (Some(SidebarListFocus::Agents), DockKind::Agents)
+        ) {
+            self.sidebar_focus = None;
+        }
         for side in [Side::Left, Side::Right] {
-            self.sidebars.get_mut(side).docks.retain(|d| d != kind);
+            self.sidebars.get_mut(side).remove_dock(kind);
         }
         // Remember an explicit "off" for a module dock so its own `ui.dock.push`
         // (startup / `workspace.created` / a refresh) can't resurrect it on the
@@ -3329,7 +4406,7 @@ impl App {
         for id in ids {
             let kind = DockKind::Module(id.clone());
             for side in [Side::Left, Side::Right] {
-                self.sidebars.get_mut(side).docks.retain(|d| d != &kind);
+                self.sidebars.get_mut(side).remove_dock(&kind);
             }
             self.module_docks.remove(id);
         }
@@ -4287,6 +5364,7 @@ impl App {
                 is_repo,
                 anchor: (col, row),
                 items: Vec::new(),
+                selected: None,
                 module_actions: self.module_menu_actions("workspace"),
             });
         }
@@ -4317,7 +5395,12 @@ impl App {
         } else {
             WsMenuItem::Pin
         };
-        let mut items = vec![WsMenuItem::Close, WsMenuItem::Rename, pin];
+        let mut items = vec![
+            WsMenuItem::Close,
+            WsMenuItem::Rename,
+            pin,
+            WsMenuItem::TogglePath,
+        ];
         if is_worktree {
             items.push(WsMenuItem::DeleteWorktree);
         }
@@ -4397,7 +5480,7 @@ impl App {
     /// The AGENTS-list context-menu items for `target`, plus module actions
     /// declaring `contexts = ["agent"]`.
     pub fn agent_menu_items(&self, target: AgentTarget) -> Vec<AgentMenuItem> {
-        let mut items = AgentMenu::items_for(target);
+        let mut items = AgentMenu::items_for(target.clone());
         // A live agent can be pinned to the top of the AGENTS list, below its
         // Rename/Close actions (per-session, since pane ids are reallocated).
         if let AgentTarget::Live(id) = target {
@@ -4407,6 +5490,9 @@ impl App {
                 AgentMenuItem::Pin
             });
         }
+        items.push(AgentMenuItem::TogglePath);
+        items.push(AgentMenuItem::Divider);
+        items.push(AgentMenuItem::ToggleWorkspaceScope);
         let extras = self
             .agent_menu
             .as_ref()
@@ -4457,6 +5543,10 @@ impl App {
             // (docs), persisted across restarts.
             WsMenuItem::Pin | WsMenuItem::Unpin => {
                 let _ = self.set_workspace_pinned(index, item == WsMenuItem::Pin);
+            }
+            WsMenuItem::TogglePath => {
+                self.config.layout.workspace_paths = !self.config.layout.workspace_paths;
+                self.persist_config();
             }
             // The right-clicked node, which needn't be the focused one.
             WsMenuItem::Module(i) => {
@@ -4652,10 +5742,48 @@ impl App {
         }
     }
 
-    /// Key handling while the workspace context menu is open: `Esc` closes it.
+    /// Keyboard navigation for the workspace context menu. Dividers are skipped;
+    /// mouse-opened menus acquire a selection on the first navigation key.
     pub fn handle_ws_menu_key(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Esc {
+        let Some(index) = self.ws_menu_target_index() else {
             self.ws_menu = None;
+            return;
+        };
+        let items = self.ws_menu_items(index);
+        let selectable: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| (*item != WsMenuItem::Divider).then_some(index))
+            .collect();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.ws_menu = None,
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
+                if selectable.is_empty() {
+                    return;
+                }
+                let current = self
+                    .ws_menu
+                    .as_ref()
+                    .and_then(|menu| menu.selected)
+                    .and_then(|selected| selectable.iter().position(|index| *index == selected));
+                let next = if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
+                    current
+                        .map(|position| position.checked_sub(1).unwrap_or(selectable.len() - 1))
+                        .unwrap_or(selectable.len() - 1)
+                } else {
+                    current.map_or(0, |position| (position + 1) % selectable.len())
+                };
+                if let Some(menu) = self.ws_menu.as_mut() {
+                    menu.selected = Some(selectable[next]);
+                }
+            }
+            KeyCode::Enter => {
+                let selected = self.ws_menu.as_ref().and_then(|menu| menu.selected);
+                if let Some(item) = selected.and_then(|index| items.get(index)).copied() {
+                    self.ws_menu_action(item);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -5074,18 +6202,18 @@ impl App {
         }
     }
 
-    /// Open the AGENTS-list context menu for `target` (a resumable session or a
-    /// live agent), anchored at the click.
+    /// Open the AGENTS-list context menu for `target`, anchored at the click.
     pub fn open_agent_menu(&mut self, target: AgentTarget, col: u16, row: u16) {
         // Only a live agent has a pane for an action to act on.
-        let module_actions = match target {
+        let module_actions = match &target {
             AgentTarget::Live(_) => self.module_menu_actions("agent"),
-            AgentTarget::Session(_) => Vec::new(),
+            AgentTarget::Session(_) | AgentTarget::Automation(_) => Vec::new(),
         };
         self.agent_menu = Some(AgentMenu {
             target,
             anchor: (col, row),
             items: Vec::new(),
+            selected: None,
             module_actions,
         });
     }
@@ -5105,49 +6233,191 @@ impl App {
         }
     }
 
-    /// Run an AGENTS-menu action, then close the menu. Resume/Close act on a
-    /// session; Close on a live agent jumps to and closes its pane.
+    /// Run an AGENTS-menu action, then close the menu. Pane and automation
+    /// actions remain distinct so a scheduled placeholder cannot mutate an
+    /// unrelated live pane.
     pub fn agent_menu_action(&mut self, item: AgentMenuItem) {
         let Some((target, actions)) = self
             .agent_menu
             .as_ref()
-            .map(|m| (m.target, m.module_actions.clone()))
+            .map(|m| (m.target.clone(), m.module_actions.clone()))
         else {
             return;
         };
         self.agent_menu = None;
         match (item, target) {
+            (AgentMenuItem::ToggleWorkspaceScope, _) => {
+                self.set_agents_scope(!self.agents_this_workspace);
+            }
+            (AgentMenuItem::TogglePath, _) => {
+                self.config.layout.agent_paths = !self.config.layout.agent_paths;
+                self.persist_config();
+            }
             (AgentMenuItem::Resume, AgentTarget::Session(i)) => self.resume_session(i),
             (AgentMenuItem::Close, AgentTarget::Session(i)) => self.dismiss_session(i),
             (AgentMenuItem::Close, AgentTarget::Live(id)) => {
                 self.focus_pane_global(id); // switch to its tab so close targets it
                 self.close_pane(id);
             }
+            (AgentMenuItem::Close, AgentTarget::Automation(_)) => {}
+            (AgentMenuItem::AutomationDetails, AgentTarget::Automation(id)) => {
+                self.open_automation_detail(&id);
+            }
+            (AgentMenuItem::AutomationRun, AgentTarget::Automation(id)) => {
+                self.orch_run_automation(&id);
+            }
+            (AgentMenuItem::AutomationToggle, AgentTarget::Automation(id)) => {
+                self.orch_toggle_automation(&id);
+            }
+            (AgentMenuItem::AutomationDelete, AgentTarget::Automation(id)) => {
+                self.orch_delete_automation(&id);
+            }
             (AgentMenuItem::RenamePane, AgentTarget::Live(id)) => self.open_pane_rename(id),
-            (AgentMenuItem::RenamePane, AgentTarget::Session(_)) => {} // no live pane
+            (AgentMenuItem::RenamePane, AgentTarget::Session(_) | AgentTarget::Automation(_)) => {}
             (AgentMenuItem::Pin, AgentTarget::Live(id)) => {
                 self.pinned_agents.insert(id);
             }
             (AgentMenuItem::Unpin, AgentTarget::Live(id)) => {
                 self.pinned_agents.remove(&id);
             }
-            (AgentMenuItem::Pin | AgentMenuItem::Unpin, AgentTarget::Session(_)) => {} // no pane
-            (AgentMenuItem::Resume, AgentTarget::Live(_)) => {} // n/a for a live agent
+            (
+                AgentMenuItem::Pin | AgentMenuItem::Unpin,
+                AgentTarget::Session(_) | AgentTarget::Automation(_),
+            ) => {}
+            (AgentMenuItem::Resume, AgentTarget::Live(_) | AgentTarget::Automation(_)) => {}
             (AgentMenuItem::Module(i), AgentTarget::Live(id)) => {
                 if let Some(a) = actions.get(i).cloned() {
                     self.run_module_menu_action("agent", a, Target::pane(id));
                 }
             }
-            (AgentMenuItem::Module(_), AgentTarget::Session(_)) => {} // no live pane
+            (AgentMenuItem::Module(_), AgentTarget::Session(_) | AgentTarget::Automation(_)) => {}
+            (
+                AgentMenuItem::AutomationDetails
+                | AgentMenuItem::AutomationRun
+                | AgentMenuItem::AutomationToggle
+                | AgentMenuItem::AutomationDelete,
+                AgentTarget::Session(_) | AgentTarget::Live(_),
+            ) => {}
             (AgentMenuItem::Divider, _) => {}
         }
     }
 
-    /// Key handling while the AGENTS menu is open: `Esc` closes it.
+    /// Keyboard navigation for the AGENTS menu, with the same wrapping and
+    /// divider-skipping behavior as FILES and DIFF menus.
     pub fn handle_agent_menu_key(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Esc {
-            self.agent_menu = None;
+        let Some(target) = self.agent_menu.as_ref().map(|menu| menu.target.clone()) else {
+            return;
+        };
+        let items = self.agent_menu_items(target);
+        let selectable: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| (*item != AgentMenuItem::Divider).then_some(index))
+            .collect();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.agent_menu = None,
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
+                if selectable.is_empty() {
+                    return;
+                }
+                let current = self
+                    .agent_menu
+                    .as_ref()
+                    .and_then(|menu| menu.selected)
+                    .and_then(|selected| selectable.iter().position(|index| *index == selected));
+                let next = if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
+                    current
+                        .map(|position| position.checked_sub(1).unwrap_or(selectable.len() - 1))
+                        .unwrap_or(selectable.len() - 1)
+                } else {
+                    current.map_or(0, |position| (position + 1) % selectable.len())
+                };
+                if let Some(menu) = self.agent_menu.as_mut() {
+                    menu.selected = Some(selectable[next]);
+                }
+            }
+            KeyCode::Enter => {
+                let selected = self.agent_menu.as_ref().and_then(|menu| menu.selected);
+                if let Some(item) = selected.and_then(|index| items.get(index)).copied() {
+                    self.agent_menu_action(item);
+                }
+            }
+            _ => {}
         }
+    }
+
+    pub fn open_session_menu(
+        &mut self,
+        name: String,
+        col: u16,
+        row: u16,
+        running: bool,
+        current: bool,
+    ) {
+        // Guard: only running non-current sessions are stoppable; opening on a
+        // stopped/current row would show an empty menu, so treat as no-op.
+        if !running || current {
+            self.session_menu = None;
+            return;
+        }
+        self.session_menu = Some(SessionMenu {
+            name,
+            anchor: (col, row),
+            items: Vec::new(),
+        });
+    }
+
+    pub fn session_menu_click(&mut self, col: u16, row: u16) {
+        let hit = self.session_menu.as_ref().and_then(|m| {
+            m.items
+                .iter()
+                .find(|(_, r)| col >= r.x && col < r.right() && row >= r.y && row < r.bottom())
+                .map(|(it, _)| *it)
+        });
+        match hit {
+            Some(it) => self.session_menu_action(it),
+            None => self.session_menu = None,
+        }
+    }
+
+    pub fn session_menu_action(&mut self, item: SessionMenuItem) {
+        let Some(menu) = self.session_menu.take() else {
+            return;
+        };
+        match item {
+            SessionMenuItem::Stop => self.stop_named_session(menu.name),
+        }
+    }
+
+    pub fn handle_session_menu_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.session_menu = None;
+        }
+    }
+
+    fn stop_named_session(&mut self, name: String) {
+        // Must match CLI behavior: stop only the named session, never the
+        // current one. Current is already excluded at open time, but keep
+        // a second guard here.
+        let current = crate::session::display_name();
+        if name == current {
+            self.show_toast(self.catalog.session_open_failed);
+            return;
+        }
+        let generation = self.named_session_generation;
+        let tx = self.app_tx.clone();
+        // Keep the sessions list visible while stopping; close the context menu
+        // but not the sessions popup itself.
+        std::thread::spawn(move || {
+            let result = crate::session::stop_session(Some(&name))
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            let _ = tx.send(crate::event::AppEvent::NamedSessionStopped {
+                generation,
+                name,
+                result,
+            });
+        });
     }
 
     /// Key handling while the new-worktree prompt is open.
@@ -5404,13 +6674,63 @@ impl App {
     /// agent back to text-only detection.
     pub(crate) fn apply_proc_scan(&mut self, found: Option<HashMap<u32, Vec<String>>>) -> bool {
         self.proc_scan_inflight = false;
-        let Some(by_pid) = found else { return false };
+        let demand_inflight = std::mem::take(&mut self.proc_scan_demand_inflight);
+        let demanded_panes = std::mem::take(&mut self.proc_scan_demand_panes_inflight);
+        let Some(by_pid) = found else {
+            if demand_inflight && self.proc_scan_failure_retries > 0 {
+                self.proc_scan_failure_retries -= 1;
+                self.proc_scan_requested = true;
+                self.proc_scan_requested_panes.extend(
+                    demanded_panes
+                        .into_iter()
+                        .filter(|id| self.panes.contains_key(id)),
+                );
+            } else {
+                self.proc_scan_failure_retries = 0;
+                let affected = self
+                    .automation
+                    .automations
+                    .iter()
+                    .filter_map(|automation| match automation.target {
+                        crate::automation::AutomationTarget::ActiveAgent {
+                            pane_id,
+                            durable: Some(_),
+                            ..
+                        } if demanded_panes.contains(&PaneId(pane_id)) => {
+                            Some(automation.id.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let changed = !affected.is_empty();
+                for id in affected {
+                    self.automation.ready_active_targets.remove(&id);
+                    self.automation
+                        .active_target_states
+                        .insert(id, crate::automation::ActiveTargetState::NeedsRebind);
+                }
+                return changed;
+            }
+            return false;
+        };
         let mut next: HashMap<PaneId, Vec<String>> = HashMap::new();
         for (id, pane) in self.panes.iter() {
             let pid = pane.child_pid.load(std::sync::atomic::Ordering::SeqCst);
             if let Some(cmds) = (pid != 0).then(|| by_pid.get(&pid)).flatten() {
                 next.insert(*id, cmds.clone());
             }
+        }
+        let missing_demanded_panes: Vec<PaneId> = demanded_panes
+            .into_iter()
+            .filter(|id| self.panes.contains_key(id) && !next.contains_key(id))
+            .collect();
+        if !missing_demanded_panes.is_empty() && self.proc_scan_failure_retries > 0 {
+            self.proc_scan_failure_retries -= 1;
+            self.proc_scan_requested = true;
+            self.proc_scan_requested_panes
+                .extend(missing_demanded_panes);
+        } else if demand_inflight {
+            self.proc_scan_failure_retries = 0;
         }
         let mut lifecycle_changed = false;
         for (id, cmds) in &next {
@@ -5439,6 +6759,8 @@ impl App {
 
             st.agent_absent_scans = st.agent_absent_scans.saturating_add(1);
             if st.agent_absent_scans < 2 {
+                self.proc_scan_requested = true;
+                self.proc_scan_failure_retries = dispatch::PROC_SCAN_FAILURE_RETRIES;
                 continue;
             }
 
@@ -5643,13 +6965,12 @@ impl App {
     /// which for a stacked pane lands exactly on the horizontal divider. Resize
     /// must yield there, or the divider grab zone swallows every click on the ✕
     /// and the pane can't be closed by mouse.
-    /// True if `(c, r)` lands on a pane's interactive **border chrome**: a title
-    /// strip (the command-inspector button), the ⤢/⤡ zoom toggle, or the ✕ close
-    /// button. These live on the top border row — exactly the cells a resize grab
-    /// band would otherwise swallow — so every resize path (grab, Ctrl-grab, hover
-    /// highlight) excludes them: the seam between panes stays grabbable, but a
-    /// click on a title or button always wins. On a stacked split this matters
-    /// most, since the divider line *is* the lower pane's top border.
+    /// True if `(c, r)` lands on pane **border chrome**: a title strip, the ⤢/⤡
+    /// zoom toggle, or the ✕ close button. These live on the top border row,
+    /// exactly where a resize grab band would otherwise claim the press, so every
+    /// resize path excludes them. A title click can then focus its pane without
+    /// unexpectedly starting a resize. On a stacked split this matters most,
+    /// since the divider line is the lower pane's top border.
     fn on_pane_chrome(&self, c: u16, r: u16) -> bool {
         fn hit(rc: Rect, c: u16, r: u16) -> bool {
             c >= rc.x && c < rc.right() && r >= rc.y && r < rc.bottom()
@@ -5661,10 +6982,8 @@ impl App {
 
     pub fn begin_resize(&mut self, c: u16, r: u16) -> bool {
         // Pane border chrome (title, ⤢ zoom, ✕ close) always wins the click, even
-        // though it sits on the seam a resize would otherwise grab — see
-        // `on_pane_chrome`. This is what makes those buttons and the title
-        // clickable on a stacked split, where the divider line lands on the lower
-        // pane's top border row.
+        // though it sits on the seam a resize would otherwise grab. This keeps
+        // title focus and the two buttons reliable on stacked splits.
         if self.active_is_git() || self.active_is_orch() || self.on_pane_chrome(c, r) {
             return false;
         }
@@ -5762,12 +7081,10 @@ impl App {
     }
 
     /// The sidebar whose draggable edge seam is at `(c, r)`, if any (docs/29).
-    /// The seam `│` column always grabs; the grab band also reaches
-    /// `SIDEBAR_GRAB_TOL` columns onto the **content side** — but only over cells
-    /// that are *not* a mouse-tracking pane, so an agent's own edge clicks (Claude
-    /// Code expanding a tool result at its left edge) still forward, and a
-    /// split's border/gap stays grabbable. It never reaches into the sidebar body,
-    /// where dock rows own the width, so it can't steal a workspace/agent click.
+    /// Only the rendered `│` rule grabs. Pane borders and content remain owned by
+    /// the pane, while the sidebar body remains owned by its docks. Keeping one
+    /// exact visual target makes the hover affordance match the drag behavior on
+    /// both sides and prevents an invisible grab band from stealing edge input.
     fn sidebar_seam_at(&self, c: u16, r: u16) -> Option<Side> {
         // The seam spans the full frame visually, but only the pane lane is a
         // resize target. The tab and status rows own their cells; in particular,
@@ -5784,26 +7101,122 @@ impl App {
             if c == seam.x {
                 return Some(side);
             }
-            // Distance onto the content side (right of a left seam, left of a
-            // right seam); `None` when the cursor is on the sidebar side.
-            let dist = match side {
-                Side::Left => c.checked_sub(seam.x),
-                Side::Right => seam.x.checked_sub(c),
-            };
-            let Some(d) = dist else { continue };
-            let over_agent = self
-                .pane_content_at(c, r)
-                .and_then(|(id, _)| self.panes.get(&id))
-                .is_some_and(|p| p.mouse_mode().report);
-            if (1..=SIDEBAR_GRAB_TOL).contains(&d) && !over_agent {
-                return Some(side);
-            }
         }
         None
     }
 
     /// Start dragging a sidebar's edge to resize it (docs/29). Returns whether a
     /// drag began, so the mouse handler can claim the press before selection.
+    /// The dock divider under `(c, r)`, if any.
+    ///
+    /// Exact row, deliberately: unlike a pane divider — which sits in a gap
+    /// between borders and can afford [`RESIZE_GRAB_TOL`] slack — this rule has
+    /// dock rows immediately above and below it, and any tolerance at all would
+    /// swallow clicks meant for a file or an agent. The target is still a
+    /// full-width row, so it stays easy to hit.
+    pub fn dock_divider_at(&self, c: u16, r: u16) -> Option<(Side, usize)> {
+        self.dock_dividers
+            .iter()
+            .find(|(side, _, dy)| {
+                let within = match side {
+                    Side::Left => self.left_seam.is_some_and(|s| c <= s.x),
+                    Side::Right => self.right_seam.is_some_and(|s| c >= s.x),
+                };
+                within && r == *dy
+            })
+            .map(|(side, index, _)| (*side, *index))
+    }
+
+    pub fn begin_dock_resize(&mut self, c: u16, r: u16) -> bool {
+        match self.dock_divider_at(c, r) {
+            Some(target) => {
+                self.dock_resize = Some(target);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drive the active dock resize from the cursor row: the dragged divider
+    /// moves to `r`, and the two docks it separates absorb the change. Every
+    /// other dock on that side keeps its height.
+    ///
+    /// Like the sidebar-width drag this updates live but does **not** persist;
+    /// `save_sidebars` runs once on release, keeping the disk write off the
+    /// drag path.
+    pub fn update_dock_resize(&mut self, _c: u16, r: u16) {
+        let Some((side, index)) = self.dock_resize else {
+            return;
+        };
+        // Rebuild the current pixel heights from the rendered dividers, so the
+        // drag works from what the user can see rather than from weights that
+        // may have been normalised differently.
+        let dividers: Vec<u16> = self
+            .dock_dividers
+            .iter()
+            .filter(|(s, _, _)| *s == side)
+            .map(|(_, _, dy)| *dy)
+            .collect();
+        let state = self.sidebars.get(side);
+        let n = state.docks.len();
+        if n < 2 || index >= dividers.len() {
+            return;
+        }
+        let mut heights = self.dock_heights(side);
+        if heights.len() != n {
+            return;
+        }
+        // The pair either side of this divider trade rows; the total they own
+        // is fixed, so nothing below shifts.
+        let pair = heights[index].saturating_add(heights[index + 1]);
+        // Below twice the floor there is no split that keeps both docks at it,
+        // and clamping only the first would push the second under. Refuse the
+        // drag instead of breaking the invariant.
+        if pair < MIN_DOCK_HEIGHT.saturating_mul(2) {
+            return;
+        }
+        let top = dividers[index];
+        let start = top.saturating_sub(heights[index]);
+        let want = r.saturating_sub(start);
+        let max = pair.saturating_sub(MIN_DOCK_HEIGHT);
+        let first = want.clamp(MIN_DOCK_HEIGHT, max.max(MIN_DOCK_HEIGHT));
+        heights[index] = first;
+        heights[index + 1] = pair.saturating_sub(first);
+        self.sidebars.get_mut(side).weights = heights;
+    }
+
+    /// The rendered height of each dock on `side`, derived from the dividers.
+    fn dock_heights(&self, side: Side) -> Vec<u16> {
+        let dividers: Vec<u16> = self
+            .dock_dividers
+            .iter()
+            .filter(|(s, _, _)| *s == side)
+            .map(|(_, _, dy)| *dy)
+            .collect();
+        let n = self.sidebars.get(side).docks.len();
+        let seam = match side {
+            Side::Left => self.left_seam,
+            Side::Right => self.right_seam,
+        };
+        let Some(seam) = seam else {
+            return Vec::new();
+        };
+        let mut heights = Vec::with_capacity(n);
+        let mut y = seam.y.saturating_add(crate::ui::SIDEBAR_CHROME_ROWS);
+        for i in 0..n {
+            let end = dividers.get(i).copied().unwrap_or(seam.bottom());
+            heights.push(end.saturating_sub(y));
+            y = end.saturating_add(1);
+        }
+        heights
+    }
+
+    pub fn end_dock_resize(&mut self) {
+        if self.dock_resize.take().is_some() {
+            self.save_sidebars();
+        }
+    }
+
     pub fn begin_sidebar_resize(&mut self, c: u16, r: u16) -> bool {
         match self.sidebar_seam_at(c, r) {
             Some(side) => {
@@ -5882,6 +7295,16 @@ impl App {
         self.backend_terminal_index.retain(|_, pane| *pane != id);
         self.backend_labels.remove(&id);
         self.cancel_backend_revision_waits(id);
+        let reported = self
+            .reported_usage
+            .iter()
+            .filter_map(|(key, owner)| (owner.pane == id).then_some(key.clone()))
+            .collect::<Vec<_>>();
+        for key in reported {
+            self.reported_usage.remove(&key);
+            self.agent_usage.remove(&key);
+            self.usage_mtimes.remove(&key);
+        }
         self.panes.remove(&id);
         self.status.remove(&id);
         self.views.remove(&id);
@@ -5931,6 +7354,40 @@ impl App {
 
     fn close_pane(&mut self, id: PaneId) {
         let owner = self.pane_location(id);
+        let durable = self
+            .automation
+            .automations
+            .iter()
+            .filter_map(|automation| match automation.target {
+                crate::automation::AutomationTarget::ActiveAgent {
+                    pane_id,
+                    durable: Some(_),
+                    ..
+                } if pane_id == id.0 => Some(automation.id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for automation_id in durable {
+            self.automation.ready_active_targets.remove(&automation_id);
+            self.automation.active_target_states.insert(
+                automation_id.clone(),
+                crate::automation::ActiveTargetState::NeedsRebind,
+            );
+            if let Some(automation) = self.automation.automation(&automation_id).cloned() {
+                self.emit_event(
+                    "automation.rebound",
+                    crate::automation::definition_target_event(
+                        &automation,
+                        crate::automation::ActiveTargetState::NeedsRebind,
+                    ),
+                );
+            }
+        }
+        self.expire_active_agent_targets(
+            Some(id),
+            "active-agent automation target pane closed",
+            crate::automation::unix_now(),
+        );
         self.drop_leaf_runtime(id);
         self.release_leaf_ownership(id);
         self.session_dirty = true;
@@ -6353,6 +7810,17 @@ mod tests {
         app.active_ws = 0;
     }
 
+    fn api_call(app: &mut App, method: &str, params: serde_json::Value) -> serde_json::Value {
+        let (reply, _rx) = mpsc::channel();
+        serde_json::from_str(&app.handle_api(&ApiRequest {
+            id: "test".into(),
+            method: method.into(),
+            params,
+            reply,
+        }))
+        .unwrap()
+    }
+
     /// The new-pane cwd resolver hands back the chain of directories that still
     /// exist, in preference order, and never a directory it has already found
     /// missing. Regression for `spawn_cwd`'s old `unwrap_or(root)`, which
@@ -6608,6 +8076,10 @@ mod tests {
             !app.agents_active_only,
             "missing preference defaults to All"
         );
+        assert!(
+            !app.agents_this_workspace,
+            "missing scope defaults to All workspaces"
+        );
         let snapshot = serde_json::to_string(&persist::snapshot(&app)).unwrap();
 
         let (tx2, _rx2) = std::sync::mpsc::channel();
@@ -6616,14 +8088,23 @@ mod tests {
             !restored.agents_active_only,
             "snapshot restoration also defaults to All"
         );
+        assert!(
+            !restored.agents_this_workspace,
+            "snapshot restoration also defaults to All workspaces"
+        );
 
         let mut config = crate::config::load();
         config.agents_active_only = true;
+        config.agents_this_workspace = true;
         crate::config::save(&config);
 
         let (tx3, _rx3) = std::sync::mpsc::channel();
         let fresh = App::new(80, 24, tx3).unwrap();
         assert!(fresh.agents_active_only, "fresh construction reads Active");
+        assert!(
+            fresh.agents_this_workspace,
+            "fresh construction reads This workspace"
+        );
 
         let (tx4, _rx4) = std::sync::mpsc::channel();
         let restored = App::from_snapshot(serde_json::from_str(&snapshot).unwrap(), tx4).unwrap();
@@ -6631,6 +8112,38 @@ mod tests {
             restored.agents_active_only,
             "snapshot restoration reads config instead of snapshot state"
         );
+        assert!(
+            restored.agents_this_workspace,
+            "snapshot restoration reads scope from config"
+        );
+    }
+
+    #[test]
+    fn stale_named_app_change_does_not_restore_an_old_theme() {
+        let _env = crate::persist::test_env("named-app-config-merge");
+        let initial = crate::config::Config {
+            theme: "gruvbox-light".into(),
+            ..crate::config::Config::default()
+        };
+        crate::config::save(&initial);
+
+        let (alpha_tx, _alpha_rx) = mpsc::channel();
+        let (beta_tx, _beta_rx) = mpsc::channel();
+        let mut alpha = App::new(80, 24, alpha_tx).unwrap();
+        let mut beta = App::new(80, 24, beta_tx).unwrap();
+        assert_eq!(alpha.config.theme, "gruvbox-light");
+        assert_eq!(beta.config.theme, "gruvbox-light");
+
+        alpha.apply_theme("quattro-rally");
+        assert!(beta.set_agents_filter(true));
+
+        let merged = crate::config::load();
+        assert_eq!(merged.theme, "quattro-rally");
+        assert!(merged.agents_active_only);
+
+        let (restarted_tx, _restarted_rx) = mpsc::channel();
+        let restarted = App::new(80, 24, restarted_tx).unwrap();
+        assert_eq!(restarted.config.theme, "quattro-rally");
     }
 
     // A saved pane whose cwd no longer exists (deleted project dir) must not
@@ -7805,6 +9318,220 @@ mod tests {
     }
 
     #[test]
+    fn reported_session_usage_is_validated_ordered_and_scan_safe() {
+        let _env = crate::persist::test_env("reported-session-usage");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let valid = json!({
+            "pane": pane.0.to_string(),
+            "agent": "opencode",
+            "session_id": "ses_live",
+            "usage": {
+                "model": "anthropic/claude-sonnet-4",
+                "tokens_in": 1200,
+                "tokens_out": 340,
+                "cache_read": 800,
+                "cache_write": 40,
+                "cost": 0.42,
+                "updated_at": 1000
+            }
+        });
+        let response = api_call(&mut app, "pane.report_session", valid);
+        assert_eq!(response["result"]["type"], "ok");
+
+        let key = crate::mission::UsageKey::new("opencode", "ses_live");
+        let usage = app.agent_usage.get(&key).unwrap();
+        assert_eq!(
+            (usage.tokens_in, usage.tokens_out, usage.cache),
+            (1200, 340, 840)
+        );
+        assert_eq!(usage.cost, Some(0.42));
+        assert_eq!(app.reported_usage[&key].pane, pane);
+
+        let mut stale = json!({
+            "pane": pane.0.to_string(), "agent": "opencode", "session_id": "ses_live",
+            "usage": {
+                "model": "wrong", "tokens_in": 1, "tokens_out": 1,
+                "cache_read": 0, "cache_write": 0, "cost": 1.0, "updated_at": 999
+            }
+        });
+        let response = api_call(&mut app, "pane.report_session", stale.clone());
+        assert_eq!(response["error"]["code"], "stale_report");
+        assert_eq!(app.agent_usage[&key].tokens_in, 1200);
+
+        stale["usage"]["tokens_in"] = json!(1.5);
+        stale["usage"]["updated_at"] = json!(1001);
+        let response = api_call(&mut app, "pane.report_session", stale);
+        assert_eq!(response["error"]["code"], "invalid_request");
+        assert_eq!(app.agent_usage[&key].tokens_in, 1200);
+
+        app.handle_event(crate::event::AppEvent::UsageScanned {
+            scope: crate::mission::MissionScope::All,
+            scanned: vec![key.clone()],
+            usage: std::collections::HashMap::new(),
+            mtimes: std::collections::HashMap::new(),
+            report_owned: vec![key.clone()],
+        });
+        assert_eq!(app.agent_usage[&key].tokens_in, 1200);
+
+        let response = api_call(
+            &mut app,
+            "pane.report_session",
+            json!({"pane":pane.0.to_string(),"agent":"opencode","session_id":"ses_next"}),
+        );
+        assert_eq!(response["result"]["type"], "ok");
+        assert!(!app.agent_usage.contains_key(&key));
+        assert!(!app.reported_usage.contains_key(&key));
+    }
+
+    #[test]
+    fn late_native_scan_cannot_reclassify_removed_reported_usage() {
+        let _env = crate::persist::test_env("reported-session-late-scan");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let old = crate::mission::UsageKey::new("opencode", "ses_old");
+        let response = api_call(
+            &mut app,
+            "pane.report_session",
+            json!({
+                "pane": pane.0.to_string(),
+                "agent": "opencode",
+                "session_id": "ses_old",
+                "usage": {
+                    "model": "openai/gpt-5",
+                    "tokens_in": 100,
+                    "tokens_out": 20,
+                    "cache_read": 5,
+                    "cache_write": 1,
+                    "cost": 0.01,
+                    "updated_at": 100
+                }
+            }),
+        );
+        assert_eq!(response["result"]["type"], "ok");
+        let stale = app.agent_usage[&old].clone();
+
+        let response = api_call(
+            &mut app,
+            "pane.report_session",
+            json!({
+                "pane": pane.0.to_string(),
+                "agent": "opencode",
+                "session_id": "ses_new"
+            }),
+        );
+        assert_eq!(response["result"]["type"], "ok");
+        assert!(!app.reported_usage.contains_key(&old));
+
+        app.handle_event(crate::event::AppEvent::UsageScanned {
+            scope: crate::mission::MissionScope::All,
+            scanned: vec![old.clone()],
+            usage: [(old.clone(), stale)].into(),
+            mtimes: [(old.clone(), std::time::SystemTime::UNIX_EPOCH)].into(),
+            report_owned: vec![old.clone()],
+        });
+        assert!(!app.agent_usage.contains_key(&old));
+        assert!(!app.usage_mtimes.contains_key(&old));
+    }
+
+    #[test]
+    fn reported_session_rejects_unknown_fields_agents_and_unsafe_ids_without_mutation() {
+        let _env = crate::persist::test_env("reported-session-invalid");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        for params in [
+            json!({"pane":pane.0.to_string(),"agent":"claude","session_id":"ok","extra":true}),
+            json!({"pane":pane.0.to_string(),"agent":"manifest-only","session_id":"ok"}),
+            json!({"pane":pane.0.to_string(),"agent":"claude","session_id":"unsafe id"}),
+            json!({"pane":pane.0.to_string(),"agent":"claude","session_id":""}),
+        ] {
+            let response = api_call(&mut app, "pane.report_session", params);
+            assert!(
+                response.get("error").is_some(),
+                "unexpected response: {response}"
+            );
+            assert!(app.status[&pane].agent_session.is_none());
+        }
+    }
+
+    #[test]
+    fn reported_session_has_one_owner_and_closing_that_pane_prunes_its_usage() {
+        let _env = crate::persist::test_env("reported-session-owner");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.run_cmd(crate::app::keys::Cmd::SplitRight);
+        let panes = app.layout().leaves();
+        assert_eq!(panes.len(), 2);
+        let owner = panes[0];
+        let other = panes[1];
+        let payload = |pane: PaneId| {
+            json!({
+                "pane": pane.0.to_string(),
+                "agent": "opencode",
+                "session_id": "ses_owned",
+                "usage": {
+                    "model": "openai/gpt-5",
+                    "tokens_in": 10,
+                    "tokens_out": 5,
+                    "cache_read": 2,
+                    "cache_write": 1,
+                    "cost": 0.01,
+                    "updated_at": 100
+                }
+            })
+        };
+
+        assert_eq!(
+            api_call(&mut app, "pane.report_session", payload(owner))["result"]["type"],
+            "ok"
+        );
+        let key = crate::mission::UsageKey::new("opencode", "ses_owned");
+        let rejected = api_call(&mut app, "pane.report_session", payload(other));
+        assert_eq!(rejected["error"]["code"], "conflict");
+        assert_eq!(app.reported_usage[&key].pane, owner);
+        assert!(app.status[&other].agent_session.is_none());
+
+        app.close_pane(owner);
+        assert!(!app.reported_usage.contains_key(&key));
+        assert!(!app.agent_usage.contains_key(&key));
+    }
+
+    #[test]
+    fn reported_usage_uses_the_same_pricing_override_as_native_usage() {
+        let _env = crate::persist::test_env("reported-session-pricing");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.config
+            .mission_pricing
+            .insert("custom-model".to_string(), [2.0, 8.0, 1.0]);
+        let pane = app.layout().focus;
+        let response = api_call(
+            &mut app,
+            "pane.report_session",
+            json!({
+                "pane": pane.0.to_string(),
+                "agent": "opencode",
+                "session_id": "ses_priced",
+                "usage": {
+                    "model": "provider/custom-model-v1",
+                    "tokens_in": 1_000_000,
+                    "tokens_out": 1_000_000,
+                    "cache_read": 1_000_000,
+                    "cache_write": 0,
+                    "cost": 999.0,
+                    "updated_at": 100
+                }
+            }),
+        );
+        assert_eq!(response["result"]["type"], "ok");
+        let key = crate::mission::UsageKey::new("opencode", "ses_priced");
+        assert_eq!(app.agent_usage[&key].cost, Some(11.0));
+    }
+
+    #[test]
     fn exited_agent_becomes_shell_and_is_not_resumed() {
         let _env = crate::persist::test_env("agent-exit-shell");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -7836,12 +9563,30 @@ mod tests {
         // One shell-only observation is not enough: an agent may be starting or
         // re-execing. Seeing it again resets the exit candidate, even when a
         // different recognised agent appears earlier in the same process tree.
+        let first_absence_at = Instant::now();
+        app.last_proc_at = first_absence_at;
         assert!(
             !app.apply_proc_scan(scan(&[&shell])),
             "the first missing scan only updates the process cache"
         );
         assert!(app.status.get(&id).unwrap().agent_session.is_some());
         assert_eq!(app.status.get(&id).unwrap().agent_absent_scans, 1);
+        assert!(
+            app.proc_scan_requested,
+            "the first confirmed absence queues exactly one follow-up scan"
+        );
+        for status in app.status.values_mut() {
+            status.force_detect = false;
+            status.candidate = status.state;
+            status.last_activity = first_absence_at - Duration::from_secs(60);
+        }
+        app.last_detection_audit_at = first_absence_at;
+        let follow_up = app
+            .next_runtime_deadline(first_absence_at, false)
+            .expect("the follow-up scan must wake a detached server");
+        assert!(follow_up > first_absence_at);
+        assert!(follow_up <= first_absence_at + Duration::from_secs(2));
+        app.proc_scan_requested = false;
         assert!(
             !app.apply_proc_scan(scan(&[&shell, "codex", "claude"])),
             "seeing the bound agent again does not change visible lifecycle state"
@@ -7855,6 +9600,11 @@ mod tests {
         app.session_dirty = false;
         assert!(!app.handle_event(AppEvent::ProcScanned(scan(&[&shell]))));
         assert!(app.status.get(&id).unwrap().agent_session.is_some());
+        assert!(
+            app.proc_scan_requested,
+            "the first absence re-arms confirmation"
+        );
+        app.proc_scan_requested = false;
         assert!(
             app.handle_event(AppEvent::ProcScanned(scan(&[&shell]))),
             "the confirmed exit dirties the sidebar through the event path"
@@ -7963,6 +9713,39 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_path_toggles_persist_independently() {
+        let _env = crate::persist::test_env("sidebar-path-toggles");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+
+        assert!(app.config.layout.workspace_paths);
+        assert!(app.config.layout.agent_paths);
+        assert!(app.ws_menu_items(0).contains(&WsMenuItem::TogglePath));
+        assert!(app
+            .agent_menu_items(AgentTarget::Live(pane))
+            .contains(&AgentMenuItem::TogglePath));
+
+        app.open_ws_menu(0, 0, 0);
+        app.ws_menu_action(WsMenuItem::TogglePath);
+        let stored = crate::config::load();
+        assert!(!stored.layout.workspace_paths);
+        assert!(stored.layout.agent_paths);
+
+        app.open_agent_menu(AgentTarget::Live(pane), 0, 0);
+        app.agent_menu_action(AgentMenuItem::TogglePath);
+        let stored = crate::config::load();
+        assert!(!stored.layout.workspace_paths);
+        assert!(!stored.layout.agent_paths);
+
+        drop(app);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let restarted = App::new(80, 24, tx).unwrap();
+        assert!(!restarted.config.layout.workspace_paths);
+        assert!(!restarted.config.layout.agent_paths);
+    }
+
+    #[test]
     fn open_workspace_menu_reuses_snapshotted_repo_capability() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
@@ -7975,6 +9758,7 @@ mod tests {
             is_repo: true,
             anchor: (0, 0),
             items: Vec::new(),
+            selected: None,
             module_actions: Vec::new(),
         });
 
@@ -9031,6 +10815,121 @@ mod tests {
     }
 
     #[test]
+    fn pane_content_edge_starts_selection_instead_of_sidebar_resize() {
+        let _env = crate::persist::test_env("sidebar-edge-selection");
+        use crate::event::AppEvent;
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let pane = app.layout().focus;
+        app.panes
+            .get(&pane)
+            .expect("focused pane exists")
+            .engine
+            .lock()
+            .expect("terminal engine lock")
+            .advance(b"\x1b[H\x1b[2Jedge");
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let seam = app.left_seam.expect("visible left sidebar has a seam");
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("focused pane has a content rect");
+        assert!(
+            content.x > seam.x,
+            "the first content column is on the pane side of the rule"
+        );
+
+        let mouse = |kind, column| {
+            AppEvent::Mouse(MouseEvent {
+                kind,
+                column,
+                row: content.y,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), content.x));
+
+        assert!(
+            app.sidebar_resize.is_none(),
+            "pane content must not begin a sidebar resize"
+        );
+        assert!(
+            app.selection.is_some(),
+            "the first content column begins text selection"
+        );
+        app.handle_event(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            content.x + 3,
+        ));
+        app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), content.x + 3));
+        assert_eq!(app.pending_clipboard.as_deref(), Some("edge"));
+    }
+
+    #[test]
+    fn only_the_rendered_sidebar_rules_resize_and_highlight() {
+        let _env = crate::persist::test_env("sidebar-exact-resize-rule");
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.move_dock(&DockKind::Agents, Side::Right);
+        app.sidebars.right.visible = true;
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let pane = app.layout().focus;
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("focused pane has a content rect");
+        let row = content.y + 1;
+        let left = app.left_seam.expect("left rule is rendered");
+        let right = app.right_seam.expect("right rule is rendered");
+        let cases = [
+            (Side::Left, left.x, left.x + 1, content.x),
+            (
+                Side::Right,
+                right.x,
+                right.x.saturating_sub(1),
+                content.right().saturating_sub(1),
+            ),
+        ];
+
+        for (side, rule, pane_border, content_edge) in cases {
+            app.update_hover_sidebar(rule, row);
+            assert_eq!(app.hover_sidebar, Some(side), "{side:?} rule highlights");
+            assert!(
+                app.begin_sidebar_resize(rule, row),
+                "{side:?} rule begins resizing"
+            );
+            assert_eq!(app.sidebar_resize, Some(side));
+            app.end_sidebar_resize();
+
+            for column in [pane_border, content_edge] {
+                app.update_hover_sidebar(column, row);
+                assert_eq!(
+                    app.hover_sidebar, None,
+                    "{side:?} pane column {column} does not highlight the sidebar rule"
+                );
+                assert!(
+                    !app.begin_sidebar_resize(column, row),
+                    "{side:?} pane column {column} does not begin sidebar resizing"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn clicks_forward_to_a_mouse_tracking_app_instead_of_selecting() {
         // A pane app that requested mouse tracking (a TUI agent) receives
         // clicks — e.g. clicking a collapsed tool result expands it — instead
@@ -9301,9 +11200,9 @@ mod tests {
     }
 
     /// End-to-end through the real mouse pipeline (`handle_event`), the user's
-    /// exact report: on a stacked split, clicking the bottom pane's title opens
-    /// its command overlay, clicking its ⤢ zoom toggles zoom, and clicking its
-    /// content focuses it — none of them get eaten by a divider resize.
+    /// exact report: on a stacked split, clicking the bottom pane's title focuses
+    /// it, clicking its ⤢ zoom toggles zoom, and clicking its content focuses it.
+    /// None of them get eaten by a divider resize.
     #[test]
     fn stacked_bottom_pane_title_zoom_and_body_are_all_clickable() {
         let _env = crate::persist::test_env("stacked-clickable");
@@ -9340,19 +11239,17 @@ mod tests {
         app.zoomed = false;
         render(&mut app, &mut term);
 
-        // 2. The title strip opens the running-command overlay.
+        // 2. The title strip focuses its pane without opening an overlay.
         let (_, title) = *app
             .pane_title_rects
             .iter()
             .max_by_key(|(_, rc)| rc.y)
             .expect("bottom pane has a title strip");
+        app.layout_mut().focus = top;
         click(&mut app, title.x + 1, title.y);
-        assert!(
-            app.cmd_inspect.is_some(),
-            "clicking the title opened the command overlay"
-        );
+        assert_eq!(app.layout().focus, bottom, "title click focused its pane");
+        assert!(app.cmd_inspect.is_none(), "title click opened no overlay");
         assert!(app.resize_drag.is_none(), "title did not start a resize");
-        app.close_cmd_inspect();
         render(&mut app, &mut term);
 
         // 3. Focus the top pane, then a click in the bottom pane's *body* focuses
@@ -9581,6 +11478,395 @@ mod tests {
     /// built-in *or* a user module dock — leaves in the app's click geometry, one
     /// frame where that dock isn't drawn (its sidebar hidden) must zero it, so no
     /// stale rect can fire under a widened pane area or a relocated dock. This is
+    /// Weights are only trusted when they still describe the mounted docks.
+    /// A dock added or removed since, or a zero that would collapse one to
+    /// nothing, falls back to an even split rather than to a broken sidebar.
+    #[test]
+    fn stale_or_degenerate_dock_weights_fall_back_to_an_even_split() {
+        let mut side = SideState {
+            visible: true,
+            width: 30,
+            docks: vec![DockKind::Workspaces, DockKind::Agents],
+            weights: vec![3, 1],
+        };
+        assert_eq!(side.dock_weights(), vec![3, 1], "a matching set is used");
+
+        side.docks.push(DockKind::Files);
+        assert_eq!(
+            side.dock_weights(),
+            vec![1, 1, 1],
+            "a dock was mounted since; the stale pair is discarded"
+        );
+
+        side.weights = vec![1, 0, 1];
+        assert_eq!(
+            side.dock_weights(),
+            vec![1, 1, 1],
+            "a zero would collapse a dock to nothing"
+        );
+    }
+
+    /// Removing a dock drops the weight at the same index; a config round-trip
+    /// keeps that identity mapping instead of truncating positionally.
+    #[test]
+    fn removing_a_dock_keeps_sibling_weights_and_round_trips() {
+        let mut side = SideState {
+            visible: true,
+            width: 30,
+            docks: vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files],
+            weights: vec![5, 3, 2],
+        };
+        side.remove_dock(&DockKind::Agents);
+        assert_eq!(
+            side.docks,
+            vec![DockKind::Workspaces, DockKind::Files],
+            "the middle dock is gone"
+        );
+        assert_eq!(side.weights, vec![5, 2], "its neighbours keep their shares");
+
+        let loaded = SideState::from_config(&side.to_config());
+        assert_eq!(loaded.docks, side.docks);
+        assert_eq!(loaded.weights, side.weights);
+    }
+
+    /// A persisted weight list of the wrong length is discarded, not truncated
+    /// onto whichever docks happen to remain.
+    #[test]
+    fn from_config_discards_a_weight_list_of_the_wrong_length() {
+        let cfg = crate::config::SideConfig {
+            visible: true,
+            width: 30,
+            docks: vec!["workspaces".into(), "agents".into()],
+            dock_weights: vec![5, 3, 2],
+        };
+        let side = SideState::from_config(&cfg);
+        assert!(
+            side.weights.is_empty(),
+            "stale weights are not kept: {:?}",
+            side.weights
+        );
+        assert_eq!(
+            side.dock_weights(),
+            vec![1, 1],
+            "the even-split fallback applies"
+        );
+    }
+
+    /// A newly mounted dock on a weighted side gets the rounded average of the
+    /// existing shares, not a leftover sliver.
+    #[test]
+    fn mounting_a_dock_appends_the_rounded_average_weight() {
+        let mut side = SideState {
+            visible: true,
+            width: 30,
+            docks: vec![DockKind::Workspaces, DockKind::Agents],
+            weights: vec![5, 3],
+        };
+        side.push_dock(DockKind::Files);
+        assert_eq!(
+            side.docks,
+            vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files]
+        );
+        assert_eq!(
+            side.weights,
+            vec![5, 3, 4],
+            "the new dock gets round((5+3)/2) = 4"
+        );
+    }
+
+    /// Moving a dock to the other side keeps the source weights aligned with
+    /// the docks that stayed, and the destination receives the dock without
+    /// inheriting a positional leftover.
+    #[test]
+    fn move_dock_keeps_remaining_weights_aligned_on_both_sides() {
+        let _env = crate::persist::test_env("dock-move-weights");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files];
+        app.sidebars.left.weights = vec![5, 3, 2];
+        app.sidebars.right.docks = Vec::new();
+        app.sidebars.right.weights = Vec::new();
+
+        assert!(app.move_dock(&DockKind::Agents, Side::Right));
+        assert_eq!(
+            app.sidebars.left.docks,
+            vec![DockKind::Workspaces, DockKind::Files]
+        );
+        assert_eq!(
+            app.sidebars.left.weights,
+            vec![5, 2],
+            "source keeps the weights of the docks that stayed"
+        );
+        assert_eq!(app.sidebars.right.docks, vec![DockKind::Agents]);
+        assert!(
+            app.sidebars.right.weights.is_empty(),
+            "empty destination stays on the even-split fallback: {:?}",
+            app.sidebars.right.weights
+        );
+        assert_eq!(app.sidebars.right.dock_weights(), vec![1]);
+    }
+
+    /// Moving a dock onto the side it already occupies is the documented
+    /// no-op: its position in the stack and its share must both survive.
+    #[test]
+    fn move_dock_onto_its_own_side_keeps_order_and_weights() {
+        let _env = crate::persist::test_env("dock-move-same-side");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files];
+        app.sidebars.left.weights = vec![5, 3, 2];
+
+        assert!(app.move_dock(&DockKind::Agents, Side::Left));
+        assert_eq!(
+            app.sidebars.left.docks,
+            vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files],
+            "the dock stays where it was, not at the bottom"
+        );
+        assert_eq!(
+            app.sidebars.left.weights,
+            vec![5, 3, 2],
+            "its share is untouched"
+        );
+    }
+
+    /// Dragging a divider moves the boundary between the two docks it separates
+    /// and leaves the rest of the sidebar alone. Neither side can be squeezed
+    /// past `MIN_DOCK_HEIGHT`, so a dock can always be grabbed back.
+    #[test]
+    fn dragging_a_dock_divider_trades_rows_between_its_pair_only() {
+        let _env = crate::persist::test_env("dock-divider-drag");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 40, tx).unwrap();
+
+        app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents];
+        app.sidebars.left.weights = Vec::new();
+        // Stand in for a frame: a 30-row sidebar whose two chrome rows sit
+        // above the dock body. The pair owns 27 rows (chrome plus the divider
+        // itself take the rest); the rule sits at row 15.
+        app.left_seam = Some(Rect::new(29, 0, 1, 30));
+        app.dock_dividers = vec![(Side::Left, 0, 15)];
+
+        app.dock_resize = Some((Side::Left, 0));
+        app.update_dock_resize(10, 22);
+        let weights = app.sidebars.left.weights.clone();
+        assert_eq!(weights.len(), 2);
+        assert!(
+            weights[0] > weights[1],
+            "dragging down grows the upper dock: {weights:?}"
+        );
+        assert_eq!(
+            weights[0] + weights[1],
+            27,
+            "the pair's combined rows are conserved"
+        );
+
+        // Far past the top: the upper dock stops at the floor instead of vanishing.
+        app.update_dock_resize(10, 0);
+        assert_eq!(
+            app.sidebars.left.weights[0], MIN_DOCK_HEIGHT,
+            "the upper dock keeps its floor"
+        );
+        // ...and the other one never falls under it either.
+        assert!(
+            app.sidebars.left.weights[1] >= MIN_DOCK_HEIGHT,
+            "the lower dock keeps its floor too: {:?}",
+            app.sidebars.left.weights
+        );
+    }
+
+    /// A pair with fewer rows than two floors cannot be split without pushing
+    /// one dock under the minimum, so the drag must decline rather than
+    /// produce a dock the user can no longer grab.
+    #[test]
+    fn a_pair_too_small_for_two_floors_refuses_the_drag() {
+        let _env = crate::persist::test_env("dock-divider-too-small");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 40, tx).unwrap();
+
+        app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents];
+        app.sidebars.left.weights = Vec::new();
+        // Five rows for two docks: 2 * MIN_DOCK_HEIGHT would need six.
+        app.left_seam = Some(Rect::new(29, 0, 1, 5));
+        app.dock_dividers = vec![(Side::Left, 0, 2)];
+
+        app.dock_resize = Some((Side::Left, 0));
+        app.update_dock_resize(10, 4);
+        assert!(
+            app.sidebars.left.weights.is_empty(),
+            "no split was written: {:?}",
+            app.sidebars.left.weights
+        );
+    }
+
+    /// Dragging a rendered divider by exactly one row must move that published
+    /// rule by one row, not jump, and must conserve the pair's combined height.
+    /// Fails while `dock_heights` measures from the seam origin (chrome rows
+    /// inflate the first dock) and passes once it starts at the dock body.
+    #[test]
+    fn dragging_a_rendered_dock_divider_by_one_row_moves_it_exactly_one_row() {
+        let _env = crate::persist::test_env("dock-divider-one-row");
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 40, tx).unwrap();
+        app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents];
+        app.sidebars.left.visible = true;
+        app.sidebars.left.weights = Vec::new();
+
+        let mut term = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let dy = app
+            .dock_dividers
+            .iter()
+            .find(|(side, _, _)| *side == Side::Left)
+            .map(|(_, _, y)| *y)
+            .expect("two stacked docks publish a left divider");
+        let col = app
+            .left_seam
+            .expect("left sidebar is shown")
+            .x
+            .saturating_sub(1);
+        let sum_before: u16 = app.dock_heights(Side::Left).iter().sum();
+        assert!(
+            sum_before > 0,
+            "rendered docks have a measurable pair: {:?}",
+            app.dock_heights(Side::Left)
+        );
+
+        assert!(
+            app.begin_dock_resize(col, dy),
+            "the published divider is a hit target"
+        );
+        app.update_dock_resize(col, dy + 1);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let down = app
+            .dock_dividers
+            .iter()
+            .find(|(side, _, _)| *side == Side::Left)
+            .map(|(_, _, y)| *y)
+            .expect("divider still published after a one-row drag down");
+        assert_eq!(down, dy + 1, "the rule moved down by exactly one row");
+        assert_eq!(
+            app.dock_heights(Side::Left).iter().sum::<u16>(),
+            sum_before,
+            "the pair's combined rows are conserved after dragging down"
+        );
+
+        app.sidebars.left.weights = Vec::new();
+        app.end_dock_resize();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let reset = app
+            .dock_dividers
+            .iter()
+            .find(|(side, _, _)| *side == Side::Left)
+            .map(|(_, _, y)| *y)
+            .expect("even split republishes a divider");
+        assert_eq!(reset, dy, "clearing weights restores the original split");
+
+        assert!(app.begin_dock_resize(col, dy));
+        app.update_dock_resize(col, dy - 1);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let up = app
+            .dock_dividers
+            .iter()
+            .find(|(side, _, _)| *side == Side::Left)
+            .map(|(_, _, y)| *y)
+            .expect("divider still published after a one-row drag up");
+        assert_eq!(up, dy - 1, "the rule moved up by exactly one row");
+        assert_eq!(
+            app.dock_heights(Side::Left).iter().sum::<u16>(),
+            sum_before,
+            "the pair's combined rows are conserved after dragging up"
+        );
+    }
+
+    /// Three stacked docks: dragging one divider must not resize the dock that
+    /// is not in the pair, the divider must follow the cursor by one row, and
+    /// a second render must not drift. Covers both dividers.
+    #[test]
+    fn dragging_one_of_three_dock_dividers_leaves_the_untouched_dock_still() {
+        let _env = crate::persist::test_env("dock-divider-three");
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 40, tx).unwrap();
+        app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files];
+        app.sidebars.left.visible = true;
+        app.sidebars.left.weights = Vec::new();
+
+        let mut term = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        let col = {
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            app.left_seam
+                .expect("left sidebar is shown")
+                .x
+                .saturating_sub(1)
+        };
+
+        for index in 0..2 {
+            app.sidebars.left.weights = Vec::new();
+            app.end_dock_resize();
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+            let before = app.dock_heights(Side::Left);
+            assert_eq!(before.len(), 3, "three docks after even split: {before:?}");
+            let dy = app
+                .dock_dividers
+                .iter()
+                .find(|(side, i, _)| *side == Side::Left && *i == index)
+                .map(|(_, _, y)| *y)
+                .unwrap_or_else(|| panic!("divider {index} is published"));
+            let untouched = if index == 0 { 2 } else { 0 };
+
+            assert!(
+                app.begin_dock_resize(col, dy),
+                "divider {index} is a hit target"
+            );
+            app.update_dock_resize(col, dy + 1);
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+            let after = app.dock_heights(Side::Left);
+            assert_eq!(
+                after[untouched], before[untouched],
+                "divider {index}: dock {untouched} is not in the pair: before={before:?} after={after:?}"
+            );
+            assert_eq!(
+                after[index].saturating_add(after[index + 1]),
+                before[index].saturating_add(before[index + 1]),
+                "divider {index}: the pair's rows are conserved: before={before:?} after={after:?}"
+            );
+            let moved = app
+                .dock_dividers
+                .iter()
+                .find(|(side, i, _)| *side == Side::Left && *i == index)
+                .map(|(_, _, y)| *y)
+                .unwrap_or_else(|| panic!("divider {index} still published after the drag"));
+            assert_eq!(
+                moved,
+                dy + 1,
+                "divider {index} followed the cursor by exactly one row"
+            );
+
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            let again = app.dock_heights(Side::Left);
+            assert_eq!(
+                again, after,
+                "divider {index}: a second render must not drift: {after:?} -> {again:?}"
+            );
+            let still = app
+                .dock_dividers
+                .iter()
+                .find(|(side, i, _)| *side == Side::Left && *i == index)
+                .map(|(_, _, y)| *y)
+                .unwrap_or_else(|| panic!("divider {index} still published after a second render"));
+            assert_eq!(
+                still, moved,
+                "divider {index} must not walk on a second render"
+            );
+        }
+    }
+
     /// the invariant the WORKSPACES-vs-FILES bug violated; it now covers every
     /// dock geometry field at once, so a future dock can't reintroduce it.
     #[test]
@@ -9600,6 +11886,7 @@ mod tests {
         app.files_area = junk;
         app.file_tree_rects = vec![(0, junk)];
         app.agents_filter_rects = vec![(true, junk)];
+        app.agents_elsewhere_rect = Some((app.layout().focus, junk));
         app.module_dock_rects = vec![("example.buzz".into(), 0, junk)]; // a user module dock
 
         // Hide both sidebars so no dock draws this frame — the worst stale case.
@@ -9614,6 +11901,10 @@ mod tests {
         assert_eq!(app.files_area, Rect::ZERO, "FILES area cleared");
         assert!(app.file_tree_rects.is_empty(), "FILES row rects cleared");
         assert!(app.agents_filter_rects.is_empty(), "AGENTS filter cleared");
+        assert!(
+            app.agents_elsewhere_rect.is_none(),
+            "AGENTS overflow line cleared"
+        );
         assert!(
             app.module_dock_rects.is_empty(),
             "user module dock rects cleared — a stale module dock can't fire"
@@ -10751,6 +13042,8 @@ mod tests {
         use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use ratatui::Terminal;
 
+        let _env = crate::persist::test_env("agent-menu-resume-dismiss");
+
         let sess = |id: &str, p: &str| crate::agent::SessionInfo {
             agent: "claude".into(),
             session_id: id.into(),
@@ -10765,7 +13058,8 @@ mod tests {
         let mut term = Terminal::new(TestBackend::new(80, 20)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
 
-        // Right-click the second session row → an AGENTS menu with Resume + Close.
+        // Right-click the second session row → its normal actions plus the
+        // workspace-scope toggle.
         let row = app.session_rects.iter().find(|(i, _)| *i == 1).unwrap().1;
         app.handle_event(AppEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Right),
@@ -10779,11 +13073,47 @@ mod tests {
         );
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         let items = &app.agent_menu.as_ref().unwrap().items;
-        assert_eq!(items.len(), 2, "session menu has Resume + Close");
+        assert_eq!(
+            items.len(),
+            5,
+            "session menu has Resume + Close + path + divider + workspace scope"
+        );
         assert_eq!(items[0].0, AgentMenuItem::Resume);
+        assert_eq!(items[2].0, AgentMenuItem::TogglePath);
+        assert_eq!(items[3].0, AgentMenuItem::Divider);
+        assert_eq!(items[4].0, AgentMenuItem::ToggleWorkspaceScope);
+        let rendered = |term: &Terminal<TestBackend>| {
+            term.backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        assert!(rendered(&term).contains("Show Workspace Only"));
 
-        // Click "Close" → the session leaves the list and stays dismissed.
-        let close = items[1].1;
+        // The scope row describes the action that will be taken. Clicking it
+        // persists the choice; reopening any AGENTS row offers the inverse.
+        let scope = items[4].1;
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: scope.x + 1,
+            row: scope.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.agents_this_workspace);
+        assert!(crate::config::load().agents_this_workspace);
+        app.open_agent_menu(AgentTarget::Session(1), row.x + 1, row.y);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(rendered(&term).contains("Show All Workspaces"));
+        app.agent_menu_action(AgentMenuItem::ToggleWorkspaceScope);
+        assert!(!app.agents_this_workspace);
+
+        // Reopen the row menu and click Close: the session leaves the list and
+        // stays dismissed.
+        app.open_agent_menu(AgentTarget::Session(1), row.x + 1, row.y);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let close = app.agent_menu.as_ref().unwrap().items[1].1;
         app.handle_event(AppEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: close.x + 1,
@@ -11195,19 +13525,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    // Clicking a pane's title opens the running-command overlay. The point is
-    // that the command comes from the OS, not the screen: an agent's own UI
-    // elides long commands and those characters never reach luvus at all.
+    // The pane context menu keeps the running-command overlay available. The
+    // command comes from the OS, not the screen, because an agent's own UI can
+    // elide characters before they ever reach luvus.
     #[test]
-    fn clicking_a_pane_title_shows_the_real_command() {
-        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    fn pane_menu_shows_the_real_running_command() {
         use ratatui::{backend::TestBackend, Terminal};
         let _env = crate::persist::test_env("cmd-inspect");
         let (tx, rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
 
-        // Titles (and borders) only render on split panes, so split first — the
-        // single-pane case is covered by the pane context menu instead.
+        // Split first so this continues to exercise the same live child process
+        // setup as the pane-title regression tests.
         app.split(Axis::Col);
         let id = app.layout().focus;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -11223,22 +13552,16 @@ mod tests {
                 Err(error) => panic!("the split pane never became ready: {error}"),
             }
         }
-        // Render once so the title strips are registered as click targets.
+        // The right-click menu action remains the explicit path to inspection.
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
-        let (_, title) = *app
-            .pane_title_rects
-            .iter()
-            .find(|(pid, _)| *pid == id)
-            .expect("the focused pane has a clickable title");
-
         assert!(app.cmd_inspect.is_none());
-        app.handle_event(AppEvent::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: title.x + 1,
-            row: title.y,
-            modifiers: KeyModifiers::NONE,
-        }));
+        app.open_pane_menu(id, 1, 1);
+        assert!(
+            app.pane_menu_items().contains(&PaneMenuItem::RunningCmd),
+            "the pane menu offers running-command inspection"
+        );
+        app.pane_menu_action(PaneMenuItem::RunningCmd);
         let c = app.cmd_inspect.as_ref().expect("the overlay opened");
         assert_eq!(c.pane, id);
         // The pane's own shell is the root of the tree, with its real argv.
@@ -11467,7 +13790,7 @@ mod tests {
     // burst must not flip an idle pane to a lingering "working". Detection is
     // frozen for `RESIZE_GRACE` after a resize, then resumes normally.
     #[test]
-    fn resize_grace_suppresses_a_transient_working_after_a_switch() {
+    fn resize_grace_expiry_wakes_and_reclassifies_once() {
         use crate::ui::theme::State;
         let _env = crate::persist::test_env("resize-grace");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -11492,6 +13815,8 @@ mod tests {
             "a repaint right after a resize must not flip the pane to working"
         );
 
+        let considered = app.detection_panes_considered;
+
         // Past the grace window the same reading commits normally.
         let t1 = t0 + RESIZE_GRACE + std::time::Duration::from_millis(150);
         {
@@ -11499,13 +13824,19 @@ mod tests {
             s.last_activity = t1;
             s.last_input = t1 - std::time::Duration::from_secs(5);
         }
-        app.detection_dirty.insert(id);
+        assert_eq!(
+            app.next_runtime_deadline(t1, false),
+            Some(t1),
+            "expired resize grace is a due event even without a TUI"
+        );
         app.detect_tick(t1);
         assert_eq!(
             app.status.get(&id).unwrap().state,
             State::Working,
             "once the grid settles, a genuinely active pane reads working again"
         );
+        assert_eq!(app.status.get(&id).unwrap().last_resize, None);
+        assert_eq!(app.detection_panes_considered, considered + 1);
     }
 
     // docs/29: config with no `sidebars` migrates to today's default layout.
@@ -11612,11 +13943,13 @@ mod tests {
                     "files".into(),
                     "mod:y".into(),
                 ],
+                dock_weights: Vec::new(),
             },
             right: crate::config::SideConfig {
                 visible: false,
                 width: 26,
                 docks: Vec::new(),
+                dock_weights: Vec::new(),
             },
             files_side: None,
         };
@@ -11913,6 +14246,7 @@ mod tests {
             )]
             .into(),
             mtimes: [(first.clone(), refreshed)].into(),
+            report_owned: Vec::new(),
         });
         assert_eq!(app.agent_usage[&first].tokens_in, 3);
         assert_eq!(app.agent_usage[&second].tokens_in, 2);
@@ -11928,6 +14262,7 @@ mod tests {
             scanned: vec![first.clone()],
             usage: [(first.clone(), app.agent_usage[&first].clone())].into(),
             mtimes: [(first.clone(), refreshed)].into(),
+            report_owned: Vec::new(),
         });
         assert!(app.agent_usage.contains_key(&first));
         assert!(!app.agent_usage.contains_key(&second));

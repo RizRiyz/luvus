@@ -7,6 +7,95 @@ use super::*;
 use crate::mission::{MissionRow, MissionRowView, MissionScope, MissionUsageRequest};
 
 impl App {
+    pub(crate) fn automation_views(&self) -> Vec<crate::automation::AutomationView> {
+        self.automation
+            .automations
+            .iter()
+            .map(|automation| {
+                let latest = self.automation.latest_run(&automation.id);
+                let current = latest.filter(|run| run.status.is_live());
+                let target_state = self.durable_active_target_state(automation);
+                let available = match automation.target {
+                    crate::automation::AutomationTarget::NewWorker => {
+                        crate::agent::registry::find(&automation.task.agent_id).is_some()
+                            && self
+                                .workspaces
+                                .iter()
+                                .any(|workspace| workspace.id == automation.task.workspace_id)
+                    }
+                    crate::automation::AutomationTarget::ActiveAgent { .. } => self
+                        .validate_active_agent_target(&automation.target, &automation.task)
+                        .is_ok(),
+                };
+                let state = match current.map(|run| run.status) {
+                    Some(crate::automation::RunStatus::Pending)
+                        if matches!(target_state, Some("restoring" | "needs_rebind")) =>
+                    {
+                        target_state.unwrap()
+                    }
+                    Some(crate::automation::RunStatus::Review) => "review",
+                    Some(_) => "running",
+                    None if latest
+                        .is_some_and(|run| run.status == crate::automation::RunStatus::Failed) =>
+                    {
+                        "failed"
+                    }
+                    None if !automation.enabled
+                        && matches!(
+                            automation.trigger,
+                            crate::automation::Trigger::Once { .. }
+                        ) =>
+                    {
+                        "completed"
+                    }
+                    None if !automation.enabled => "paused",
+                    None if matches!(target_state, Some("restoring" | "needs_rebind")) => {
+                        target_state.unwrap()
+                    }
+                    None if !available => "unavailable",
+                    None => "scheduled",
+                };
+                crate::automation::AutomationView {
+                    id: automation.id.clone(),
+                    name: automation.name.clone(),
+                    state: state.into(),
+                    next_run_at: automation.next_run_at,
+                    current_run_id: current.map(|run| run.id.clone()),
+                    latest_run_id: latest.map(|run| run.id.clone()),
+                    latest_status: latest.map(|run| run.status),
+                    latest_error: latest.and_then(|run| run.error.clone()),
+                    agent_id: automation.task.agent_id.clone(),
+                    workspace_id: automation.task.workspace_id.clone(),
+                    target_state: target_state.map(str::to_string),
+                }
+            })
+            .collect()
+    }
+
+    /// Remove integration usage whose owning pane is gone or no longer bound
+    /// to the same agent session. This is event-driven and bounded by the
+    /// reported cache size; it adds no idle scan or timer.
+    pub(crate) fn prune_reported_usage(&mut self) {
+        let stale = self
+            .reported_usage
+            .iter()
+            .filter_map(|(key, owner)| {
+                let live = self.panes.contains_key(&owner.pane)
+                    && self.status.get(&owner.pane).is_some_and(|status| {
+                        status.agent_session.as_ref().is_some_and(|session| {
+                            session.agent == key.agent && session.session_id == key.session_id
+                        })
+                    });
+                (!live).then_some(key.clone())
+            })
+            .collect::<Vec<_>>();
+        for key in stale {
+            self.reported_usage.remove(&key);
+            self.agent_usage.remove(&key);
+            self.usage_mtimes.remove(&key);
+        }
+    }
+
     /// Structured Mission Control data for automation. This deliberately omits
     /// native session identifiers and blocked-output snippets: the read scope
     /// exposes the same operational summary as the dashboard, not credentials
@@ -66,6 +155,8 @@ impl App {
             .iter()
             .filter_map(|row| row["usage"]["total_tokens"].as_u64())
             .sum::<u64>();
+        let automation = self.automation.health();
+        let automation_rows = self.automation_views();
         serde_json::json!({
             "type": "mission_snapshot",
             "scope": match scope { MissionScope::Workspace => "workspace", MissionScope::All => "all" },
@@ -78,6 +169,7 @@ impl App {
                 "cost_usd": total_cost,
                 "burn_usd_per_hour": self.mission_burn,
             },
+            "automation": {"summary": automation, "rows": automation_rows},
             "rows": rows,
         })
     }

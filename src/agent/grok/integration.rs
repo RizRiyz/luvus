@@ -11,6 +11,7 @@ pub(super) const OPERATIONS: IntegrationOperations = IntegrationOperations {
     install,
     uninstall,
     is_installed,
+    hook: None,
 };
 
 fn hooks_dir() -> PathBuf {

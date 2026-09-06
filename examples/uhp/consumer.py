@@ -5,6 +5,7 @@ import json
 import pathlib
 import re
 import sys
+import unicodedata
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "protocol" / "uhp" / "v1"
@@ -22,6 +23,11 @@ SESSION_TARGET_METHODS = {
     "session.status", "session.start", "session.stop", "session.restart",
 }
 STATES = {"idle", "working", "blocked", "done"}
+KEY_NAMES = {
+    "enter", "return", "cr", "esc", "escape", "tab", "space", "backspace", "bs",
+    "delete", "del", "up", "down", "right", "left", "home", "end", "pageup",
+    "pgup", "pagedown", "pgdn",
+}
 RESULT_TYPES = {
     "uhp_capabilities",
     "session_snapshot",
@@ -68,7 +74,8 @@ FIELDS = {
     "agent.release": {"pane", "source"},
     "agent.start": {"name", "kind", "pane", "anchor", "direction", "args", "timeout_s"},
     "agent.prompt": {"target", "text", "wait", "until", "timeout_s"},
-    "agent.wait": {"pane", "status", "timeout_s"},
+    "agent.wait": {"pane", "status", "statuses", "timeout_s"},
+    "agent.keys": {"target", "keys"},
     "events.subscribe": set(),
 }
 
@@ -103,6 +110,193 @@ def session_name(value):
         isinstance(value, str)
         and value not in {".", ".."}
         and SESSION_NAME.fullmatch(value) is not None
+    )
+
+
+def valid_agent_wait_params(params):
+    if not isinstance(params, dict) or not set(params) <= FIELDS["agent.wait"]:
+        return False
+    if not pane(params.get("pane")):
+        return False
+    has_status = "status" in params
+    has_statuses = "statuses" in params
+    if has_status == has_statuses:
+        return False
+    if has_status and params["status"] not in STATES:
+        return False
+    if has_statuses:
+        statuses = params["statuses"]
+        if not isinstance(statuses, list) or not 1 <= len(statuses) <= len(STATES):
+            return False
+        if any(not isinstance(status, str) for status in statuses):
+            return False
+        if len(set(statuses)) != len(statuses) or not set(statuses) <= STATES:
+            return False
+    timeout = params.get("timeout_s", 0)
+    return type(timeout) in {int, float} and 0 <= timeout <= 3600
+
+
+def valid_automation_trigger(value):
+    if not isinstance(value, dict) or not isinstance(value.get("kind"), str):
+        return False
+    kind = value["kind"]
+    if kind == "once":
+        return set(value) == {"kind", "at_utc"} and integer(value["at_utc"]) and value["at_utc"] >= 1
+    if kind == "interval":
+        return (
+            set(value) == {"kind", "every_seconds", "anchor_utc"}
+            and integer(value["every_seconds"])
+            and value["every_seconds"] >= 60
+            and integer(value["anchor_utc"])
+            and value["anchor_utc"] >= 1
+        )
+    if kind == "daily":
+        return (
+            set(value) == {"kind", "timezone", "second_of_day"}
+            and bounded_string(value["timezone"], 128, allow_empty=False)
+            and integer(value["second_of_day"])
+            and 0 <= value["second_of_day"] <= 86399
+        )
+    if kind == "weekly":
+        weekdays = value.get("weekdays")
+        return (
+            set(value) == {"kind", "timezone", "weekdays", "second_of_day"}
+            and bounded_string(value["timezone"], 128, allow_empty=False)
+            and isinstance(weekdays, list)
+            and 1 <= len(weekdays) <= 7
+            and len(set(weekdays)) == len(weekdays)
+            and all(integer(day) and 1 <= day <= 7 for day in weekdays)
+            and integer(value["second_of_day"])
+            and 0 <= value["second_of_day"] <= 86399
+        )
+    return False
+
+
+def valid_automation_task(value):
+    allowed = {
+        "title",
+        "prompt",
+        "agent_id",
+        "workspace_id",
+        "mode",
+        "access",
+        "paths",
+        "gate",
+    }
+    required = {"title", "prompt", "agent_id", "workspace_id"}
+    if not isinstance(value, dict) or not required <= set(value) or not set(value) <= allowed:
+        return False
+    if not bounded_string(value["title"], 256, allow_empty=False):
+        return False
+    if not bounded_string(value["prompt"], 32768, allow_empty=False):
+        return False
+    if not bounded_string(value["agent_id"], 64, allow_empty=False):
+        return False
+    if not bounded_string(value["workspace_id"], 128, allow_empty=False):
+        return False
+    if "mode" in value and value["mode"] not in {"worktree", "workspace"}:
+        return False
+    if "access" in value and value["access"] not in {
+        "read_only",
+        "workspace",
+        "full_access",
+    }:
+        return False
+    if "gate" in value and value["gate"] is not None and not bounded_string(value["gate"], 4096):
+        return False
+    paths = value.get("paths", [])
+    return (
+        isinstance(paths, list)
+        and len(paths) <= 64
+        and len(set(paths)) == len(paths)
+        and all(bounded_string(path, 1024, allow_empty=False) for path in paths)
+    )
+
+
+def valid_automation_policy(value):
+    if not isinstance(value, dict) or not set(value) <= {
+        "misfire", "overlap", "misfire_grace_seconds"
+    }:
+        return False
+    if "misfire" in value and value["misfire"] not in {"skip", "run_latest"}:
+        return False
+    if "overlap" in value and value["overlap"] not in {"skip", "queue_one"}:
+        return False
+    grace = value.get("misfire_grace_seconds", 0)
+    return integer(grace) and 0 <= grace <= 31536000
+
+
+def valid_automation_target(value):
+    if not isinstance(value, dict):
+        return False
+    if value.get("kind") == "new_worker":
+        return set(value) == {"kind"}
+    if value.get("kind") != "active_agent":
+        return False
+    if not {"kind", "pane_id", "terminal_id"} <= set(value):
+        return False
+    if not set(value) <= {"kind", "pane_id", "terminal_id", "if_busy"}:
+        return False
+    pane_id = value["pane_id"]
+    if isinstance(pane_id, str):
+        valid_pane = PANE.fullmatch(pane_id) is not None and int(pane_id) <= 4294967295
+    else:
+        valid_pane = integer(pane_id) and 1 <= pane_id <= 4294967295
+    return (
+        valid_pane
+        and isinstance(value["terminal_id"], str)
+        and re.fullmatch(r"[0-9a-f]{32}", value["terminal_id"]) is not None
+        and value.get("if_busy", "wait") in {"wait", "skip"}
+    )
+
+
+def valid_automation_definition(params, *, update):
+    allowed = {
+        "id", "name", "enabled", "trigger", "target", "task", "policy", "idempotency_key"
+    }
+    required = {"name", "trigger", "task"} | ({"id"} if update else set())
+    if not required <= set(params) or not set(params) <= allowed:
+        return False
+    if (update and "idempotency_key" in params) or (not update and "id" in params):
+        return False
+    if "id" in params and not bounded_string(params["id"], 128, allow_empty=False):
+        return False
+    if not bounded_string(params["name"], 128, allow_empty=False):
+        return False
+    if "enabled" in params and type(params["enabled"]) is not bool:
+        return False
+    if not valid_automation_trigger(params["trigger"]):
+        return False
+    if "target" in params and not valid_automation_target(params["target"]):
+        return False
+    if not valid_automation_task(params["task"]):
+        return False
+    if "policy" in params and not valid_automation_policy(params["policy"]):
+        return False
+    return "idempotency_key" not in params or bounded_string(
+        params["idempotency_key"], 128, allow_empty=False
+    )
+
+
+def agent_key(value):
+    if not isinstance(value, str):
+        return False
+    if value.isascii():
+        lower = value.lower()
+        if lower in KEY_NAMES:
+            return True
+        if re.fullmatch(r"(?:ctrl\+|c-)[a-z]", lower) is not None:
+            return True
+    return len(value) == 1 and unicodedata.category(value) not in {"Cc", "Cs"}
+
+
+def valid_agent_keys_params(params):
+    return (
+        set(params) == {"target", "keys"}
+        and bounded_string(params["target"], 128, allow_empty=False)
+        and isinstance(params["keys"], list)
+        and bool(params["keys"])
+        and all(agent_key(key) for key in params["keys"])
     )
 
 
@@ -195,10 +389,9 @@ def valid_request(value):
         timeout = params.get("timeout_s", 300)
         return type(timeout) in {int, float} and 0 <= timeout <= 3600
     if method == "agent.wait":
-        if not pane(params.get("pane")) or not {"pane", "status"} <= set(params) or params["status"] not in STATES:
-            return False
-        timeout = params.get("timeout_s", 0)
-        return type(timeout) in {int, float} and 0 <= timeout <= 3600
+        return valid_agent_wait_params(params)
+    if method == "agent.keys":
+        return valid_agent_keys_params(params)
     return False
 
 
@@ -296,6 +489,10 @@ def valid_response(value):
                 type(result["matched"]) is bool
                 and (result["pane"] is None or pane(result["pane"]))
                 and (result["status"] is None or result["status"] in STATES)
+                and (
+                    not result["matched"]
+                    or (pane(result["pane"]) and result["status"] in STATES)
+                )
             )
         return (
             integer(result["sequence"])
@@ -347,6 +544,10 @@ def valid_global_request(value, methods):
     if value["method"] == "events.subscribe":
         after = value["params"].get("after_sequence", 0)
         return integer(after) and after >= 0
+    if value["method"] == "agent.wait":
+        return valid_agent_wait_params(value["params"])
+    if value["method"] == "agent.keys":
+        return valid_agent_keys_params(value["params"])
     if value["method"] in EMPTY_HOST_METHODS:
         return not value["params"]
     if value["method"] in SESSION_TARGET_METHODS:
@@ -388,21 +589,91 @@ def valid_global_request(value, methods):
             return False
         if mode == "workspace" and "branch" in params:
             return False
-        if mode == "worktree" and "workspace_id" in params:
-            return False
+    if value["method"] == "task.heartbeat":
+        params = value["params"]
+        context = params.get("context")
+        return (
+            set(params) == {"id", "context"}
+            and bounded_string(params["id"], 128, allow_empty=False)
+            and isinstance(context, (int, float))
+            and not isinstance(context, bool)
+            and 0 <= context <= 1
+        )
+    if value["method"] in {"automation.list", "automation.health"}:
+        return not value["params"]
+    if value["method"] in {
+        "automation.get", "automation.enable", "automation.disable", "automation.delete"
+    }:
+        params = value["params"]
+        return (
+            set(params) == {"id"}
+            and bounded_string(params["id"], 128, allow_empty=False)
+        )
+    if value["method"] == "automation.run":
+        params = value["params"]
+        return (
+            set(params) <= {"id", "idempotency_key"}
+            and "id" in params
+            and bounded_string(params["id"], 128, allow_empty=False)
+            and (
+                "idempotency_key" not in params
+                or bounded_string(params["idempotency_key"], 128, allow_empty=False)
+            )
+        )
+    if value["method"] == "automation.history":
+        params = value["params"]
+        return (
+            set(params) <= {"id", "limit"}
+            and (
+                "id" not in params
+                or bounded_string(params["id"], 128, allow_empty=False)
+            )
+            and (
+                "limit" not in params
+                or integer(params["limit"])
+                and 1 <= params["limit"] <= 200
+            )
+        )
+    if value["method"] == "automation.preview":
+        params = value["params"]
+        return (
+            set(params) <= {"trigger", "from_utc"}
+            and "trigger" in params
+            and valid_automation_trigger(params["trigger"])
+            and (
+                "from_utc" not in params
+                or integer(params["from_utc"])
+                and params["from_utc"] >= 0
+            )
+        )
+    if value["method"] == "automation.create":
+        return valid_automation_definition(value["params"], update=False)
+    if value["method"] == "automation.update":
+        return valid_automation_definition(value["params"], update=True)
     return True
 
 
 def valid_global_response(value):
-    return (
+    if not (
         isinstance(value, dict)
         and isinstance(value.get("id"), str)
         and REQUEST_ID.fullmatch(value["id"]) is not None
         and ((set(value) == {"id", "result"}) != (set(value) == {"id", "error"}))
-    )
+    ):
+        return False
+    if set(value) == {"id", "result"} and not isinstance(value["result"], dict):
+        return False
+    if set(value) == {"id", "error"} and not isinstance(value["error"], dict):
+        return False
+    result = value.get("result")
+    if isinstance(result, dict) and result.get("type") == "agent_wait":
+        return valid_response(value)
+    return True
 
 
 def main():
+    assert not agent_key("\ud800"), "Unicode surrogates are not valid key scalars"
+    assert not agent_key("ctrl+K"), "Ctrl aliases accept ASCII letters only"
     manifest = json.loads((PACKAGE / "fixtures" / "manifest.json").read_text())
     assert manifest["protocol"] == {"name": "luvus-uhp", "major": 1, "minor": 0}
     request_schema = json.loads((PACKAGE / "schema" / "request.schema.json").read_text())

@@ -10,8 +10,8 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{anyhow, Result};
 
 use super::types::{
-    AgentDescriptor, DiscoveryOperations, IdentityDescriptor, IntegrationOperations,
-    SessionOperations,
+    AgentDescriptor, AutomationLaunch, AutomationOperations, DiscoveryOperations,
+    IdentityDescriptor, IntegrationOperations, SessionOperations,
 };
 use super::SessionInfo;
 
@@ -24,6 +24,21 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     aliases: &[],
     launch_command: "omp",
     task_prompt_args: &[],
+    automation: Some(AutomationOperations {
+        read_only: Some(AutomationLaunch {
+            args: &[
+                "--print",
+                "--tools=read,grep,find,ls",
+                "--approval-mode=always-ask",
+            ],
+        }),
+        workspace: Some(AutomationLaunch {
+            args: &["--print", "--approval-mode=write"],
+        }),
+        full_access: Some(AutomationLaunch {
+            args: &["--print", "--approval-mode=yolo"],
+        }),
+    }),
     identity: IdentityDescriptor {
         distinct: DISTINCT_IDENTITIES,
         ambiguous: AMBIGUOUS_IDENTITIES,
@@ -45,6 +60,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         install: || install_extension().map(|_| ()),
         uninstall: uninstall_extension,
         is_installed: extension_installed,
+        hook: None,
     }),
 };
 

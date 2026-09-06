@@ -134,6 +134,11 @@ Branch-backed dependencies unblock only after they are merged into the shared
 integration history.
 `task release` requeues active work and releases its path leases, but it does
 not stop the worker pane or discard its worktree.
+Use `task update --note` for work progress. `task heartbeat --context-used
+<0..1>` reports only the fraction of the model context window already consumed,
+where `0.6` means 60% consumed, not 60% task progress. Omit the heartbeat when
+that measurement is unknown. The older `--context` spelling remains a CLI
+compatibility alias; UHP keeps the stable `context` field.
 `task start` checks path leases before creating a worker. Its default
 `mode=worktree` creates an isolated branch and checkout. Explicit
 `mode=workspace` creates a dedicated task tab in an existing shared checkout;
@@ -152,6 +157,8 @@ Every managed pane receives context:
 - `LUVUS_ENV=1` identifies a Luvus-managed environment.
 - `LUVUS_PANE_ID` identifies the current pane.
 - `LUVUS_SOCKET_PATH` identifies the selected session's control endpoint.
+- `LUVUS_API_ADDRESS` identifies the platform-native address used by direct
+  local integrations, including the complete named-pipe address on Windows.
 
 Preserve these variables when invoking `luvus`. They keep development, named,
 remote, and default sessions isolated. Do not replace the endpoint with a
@@ -259,7 +266,8 @@ luvus pane split --down
 luvus pane run <pane-id> <command> [args...]
 luvus agent start reviewer --kind codex --anchor <pane-id> --timeout 60
 luvus agent prompt reviewer "Review the current diff" --wait --timeout 600
-luvus wait agent-status <pane-id> --status done --timeout 600
+luvus agent keys reviewer esc
+luvus wait agent-status <pane-id> --status done,blocked --timeout 600
 ```
 
 The neutral home workspace supports ordinary tabs and panes, and its displayed
@@ -269,6 +277,10 @@ user named a specific project.
 `agent prompt` submits one complete prompt and can wait semantically. Prefer it
 to separate text and Enter operations. A timeout does not prove that an agent
 failed or stopped. Inspect it before deciding what to do next.
+
+`agent keys` refuses plain shells, validates every named key before sending any
+bytes, and queues a valid list as one ordered action. A closed target returns a
+structured `send_failed` error.
 
 Identity, live state, lifecycle hooks, usage, native resume, and fork support
 are separate capabilities. An agent can be detected without supporting every
@@ -282,9 +294,17 @@ discovery rather than inferring support from an agent name.
   and terminal state.
 - Supported agents can reopen their own conversation through native session
   discovery and resume commands.
-- Hermes session discovery works without setup. When exact pane ownership is
-  required, `luvus integration install hermes` adds an opt-in Hermes plugin
-  that reports each session once while retaining the native database fallback.
+- Antigravity CLI is detected natively. Its optional
+  `luvus integration install antigravity` hook reports only the exact
+  conversation id needed for `agy --conversation <id>` restore; screen
+  detection remains authoritative for state.
+- OpenCode detection and legacy JSON session discovery work without setup.
+  `luvus integration install opencode` adds a TUI-local plugin that reports
+  only the root session selected in that pane plus structured usage. Without
+  it, Mission Control leaves OpenCode usage unavailable instead of guessing.
+- `luvus integration install hermes` adds exact per-pane session ownership for
+  restart resume. Hermes detection still works without it, but Luvus does not
+  scan Hermes's private history database or guess a session.
 
 Do not claim every shell command resumes after restart. Do not guess native
 session IDs. List sessions and use the exact returned identifier.
@@ -293,13 +313,40 @@ session IDs. List sessions and use the exact returned identifier.
 
 Universal Harness Protocol 1.0 is Luvus's public automation contract for
 workspaces, tabs, panes, agents, terminals, files, Git, DIFF, Mission Control,
-tasks, leases, modules, bars, configuration, and events.
+tasks, agent schedules, leases, modules, bars, configuration, and events.
 
 Open Mission Control in the active workspace with `luvus mission open`, target
 a zero-based workspace with `luvus mission open <workspace>`, or call the
 workspace-scoped UHP method `mission.open`. Use `mission.snapshot` to read agent
 and usage data without changing the UI. `mission.refresh` requests one explicit
 off-render-path usage scan rather than enabling background polling.
+
+Use `automation.preview` before storing a calendar trigger, then
+`automation.create` with a canonical built-in agent, stable workspace ID,
+explicit prompt, IANA timezone, and the narrowest `task.access` value:
+`read_only`, `workspace` (the default), or `full_access`. Access is separate from
+the worktree/workspace Git mode, and unsupported agent/access pairs are rejected
+before a worker is created. Read definitions with `automation.list`,
+runs with `automation.history`, and fleet health with `automation.health`.
+Create and manual-run requests accept idempotency keys for safe retries.
+Use `automation.rebind` only to reconnect a durable active-agent definition to
+a pane that proves the same native conversation; it requires orchestration
+authority and is safe to repeat with the same pane.
+Disabling a definition prevents future occurrences but never kills its current
+ORCH task or pane. Detection-only manifest agents cannot be scheduled.
+Luvus uses reviewed one-shot flags from the built-in adapter and never types a
+blind approval response or changes an agent's permanent permission config.
+
+To continue an existing interactive conversation, set `target.kind` to
+`active_agent` and provide the exact `pane_id`, 32-character `terminal_id`,
+matching `task.agent_id`, and matching `task.workspace_id` from `agent.list`.
+Use `target.if_busy` as `wait` or `skip`. If Luvus has a trusted native session
+identity, it can recover the route after restart only from an exact unique
+match; public automation data exposes `binding` and `target_state` but never
+the native session ID. Otherwise the target remains valid only for that PTY and
+server lifetime. Active targets create no ORCH worker and record queue
+acceptance as `delivered`, not task completion. Never guess a terminal ID or
+rebind to a different conversation.
 
 Start with capability discovery and validate against the installed JSON Schema
 bundle. Do not infer method support from a release number alone.

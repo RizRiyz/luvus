@@ -109,7 +109,8 @@ pub(super) fn draw_pane_titles(
         ]);
         let title_rect = Rect::new(rect.x + 1, rect.y, text_w, 1);
         f.render_widget(Paragraph::new(title), title_rect);
-        // Clicking the title opens the running-command overlay.
+        // Keep the title geometry so clicks focus the pane and never become an
+        // accidental divider resize on a stacked layout.
         title_rects.push((*id, title_rect));
         draw_title_buttons(f, *rect, focused, app.zoomed, title_w, bg, t);
     }
@@ -203,6 +204,86 @@ pub(super) fn draw_panes(
     app.diff_note_rects = diff_note_rects;
     app.preview_link_rects = preview_link_rects;
     cursor
+}
+
+/// Patch only terminal rows captured by the VT damage ledger into a retained
+/// client buffer. The caller has already proved that geometry and every
+/// non-terminal layer are unchanged. Any uncertainty returns `Err(())` and the
+/// server immediately uses the ordinary full renderer.
+pub(super) fn patch_terminal_damage(
+    f: &mut RenderTarget,
+    app: &App,
+    content_rects: &[(PaneId, Rect)],
+    snapshots: &std::collections::HashMap<PaneId, crate::terminal::vt::DamageSnapshot>,
+) -> Result<(), ()> {
+    let leaves = app.layout().leaves();
+    if leaves.len() != content_rects.len()
+        || leaves.iter().any(|id| app.views.contains_key(id))
+        || leaves
+            .iter()
+            .any(|id| !snapshots.contains_key(id) || !app.panes.contains_key(id))
+    {
+        return Err(());
+    }
+
+    let theme = &app.theme;
+    let focus = app.layout().focus;
+    let mut cursor = None;
+    for id in leaves {
+        let content = content_rects
+            .iter()
+            .find_map(|(candidate, rect)| (*candidate == id).then_some(*rect))
+            .ok_or(())?;
+        let snapshot = snapshots.get(&id).ok_or(())?;
+        if snapshot.kind != crate::terminal::vt::DamageKind::Partial
+            || snapshot.composer_region.is_some()
+            || snapshot.scroll_offset != 0
+            || app
+                .status
+                .get(&id)
+                .is_some_and(|status| status.agent == "pi")
+        {
+            return Err(());
+        }
+
+        let blank = Style::new().bg(theme.mantle);
+        let buffer = f.buffer_mut();
+        let mut stack = [0u8; 4];
+        let mut combined = String::new();
+        for row in &snapshot.rows {
+            if row.row >= content.height {
+                continue;
+            }
+            let y = content.y + row.row;
+            for x in content.x..content.x.saturating_add(content.width) {
+                let cell = &mut buffer[(x, y)];
+                cell.reset();
+                cell.set_symbol(" ");
+                cell.set_style(blank);
+            }
+            for cell in &row.cells {
+                let style = terminal_cell_style(cell.style, theme, app.downsample);
+                let symbol: &str = if cell.zero_width.is_empty() {
+                    cell.character.encode_utf8(&mut stack)
+                } else {
+                    combined.clear();
+                    combined.push(cell.character);
+                    combined.extend(cell.zero_width.iter());
+                    &combined
+                };
+                paint_terminal_cell(buffer, content, row.row, cell.column, symbol, style);
+            }
+        }
+
+        if id == focus {
+            cursor = pane_ime_cursor(content, snapshot.cursor);
+        }
+    }
+
+    if let Some((x, y, visible)) = cursor {
+        f.set_cursor_anchor(x, y, visible);
+    }
+    Ok(())
 }
 
 fn draw_one_pane(
@@ -345,25 +426,7 @@ fn draw_one_pane(
                     }
                     let x = content.x + col;
                     let y = content.y + row;
-                    let conv = |c: Color| {
-                        if downsample {
-                            crate::ipc::protocol::to_256(c)
-                        } else {
-                            c
-                        }
-                    };
-                    let fg = if cell.fg == Color::Reset {
-                        t.text
-                    } else {
-                        conv(cell.fg)
-                    };
-                    let mut style = Style::new().fg(fg);
-                    if !cell.mods.is_empty() {
-                        style = style.add_modifier(cell.mods);
-                    }
-                    if cell.bg != Color::Reset {
-                        style = style.bg(conv(cell.bg));
-                    }
+                    let mut style = terminal_cell_style(cell, t, downsample);
                     // Highlight the cell if it's inside the mouse selection.
                     if sel.is_some_and(|selection| {
                         selection.retained.map_or_else(
@@ -405,33 +468,7 @@ fn draw_one_pane(
                             .fg(t.accent)
                             .add_modifier(ratatui::style::Modifier::UNDERLINED);
                     }
-                    // ratatui panics if a control char reaches the buffer; the VT
-                    // grid can hold stray C0/C1 bytes, so render those blank. `sym`
-                    // is the whole grapheme cluster (base + combining/VS16/ZWJ), so
-                    // emoji and accents print whole instead of losing their modifier
-                    // chars to a tofu box.
-                    let sym = if sym.starts_with(|c: char| c.is_control()) {
-                        " "
-                    } else {
-                        sym
-                    };
-                    let target = &mut buf[(x, y)];
-                    target.set_symbol(sym);
-                    target.set_style(style);
-                    // A double-width glyph (emoji / CJK) spans this cell *and* the
-                    // next. The VT engine skips the spacer, so that next cell keeps
-                    // the reset blank — which the client would blit as a space over
-                    // the glyph's right half (crossterm advances its cursor +1 per
-                    // cell, but the terminal advances +2 for the glyph), corrupting
-                    // it and shifting the row. Mark it as a wide-char continuation:
-                    // an empty symbol prints nothing, realigning the accounting.
-                    if x + 1 < content.x + content.width
-                        && unicode_width::UnicodeWidthStr::width(sym) == 2
-                    {
-                        let next = &mut buf[(x + 1, y)];
-                        next.set_symbol("");
-                        next.set_style(style); // carry bg so a highlight stays contiguous
-                    }
+                    paint_terminal_cell(buf, content, row, col, sym, style);
                 });
             }
             scrolled = engine.scroll_offset();
@@ -507,6 +544,66 @@ fn pane_ime_cursor(content: Rect, cur: crate::terminal::vt::Cursor) -> Option<(u
         return None;
     }
     Some((content.x + cur.x, content.y + cur.y, cur.visible))
+}
+
+fn terminal_cell_style(
+    cell: crate::terminal::vt::RenderCell,
+    t: &Theme,
+    downsample: bool,
+) -> Style {
+    let convert = |color: Color| {
+        if downsample {
+            crate::ipc::protocol::to_256(color)
+        } else {
+            color
+        }
+    };
+    let foreground = if cell.fg == Color::Reset {
+        t.text
+    } else {
+        convert(cell.fg)
+    };
+    let mut style = Style::new().fg(foreground);
+    if !cell.mods.is_empty() {
+        style = style.add_modifier(cell.mods);
+    }
+    if cell.bg != Color::Reset {
+        style = style.bg(convert(cell.bg));
+    }
+    style
+}
+
+fn paint_terminal_cell(
+    buf: &mut Buffer,
+    content: Rect,
+    row: u16,
+    column: u16,
+    symbol: &str,
+    style: Style,
+) {
+    if row >= content.height || column >= content.width {
+        return;
+    }
+    // Ratatui rejects C0/C1 text. The symbol is otherwise the complete
+    // grapheme cluster, including combining marks and emoji joiners.
+    let symbol = if symbol.starts_with(char::is_control) {
+        " "
+    } else {
+        symbol
+    };
+    let x = content.x + column;
+    let y = content.y + row;
+    let target = &mut buf[(x, y)];
+    target.set_symbol(symbol);
+    target.set_style(style);
+
+    // The engine omits a wide glyph's spacer cell. Preserve it as an empty
+    // Ratatui symbol so the client does not print a space over the right half.
+    if x + 1 < content.x + content.width && unicode_width::UnicodeWidthStr::width(symbol) == 2 {
+        let next = &mut buf[(x + 1, y)];
+        next.set_symbol("");
+        next.set_style(style);
+    }
 }
 
 /// Pi's `CURSOR_MARKER` (`ESC_pi:c BEL`) is stripped in `extractCursorPosition`

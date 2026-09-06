@@ -37,7 +37,8 @@
 - **Git and GitHub:** View status, branches, commits, contributors, pull
   requests, issues, and repository activity without leaving Luvus.
 - **Worktrees and orchestration:** Create worktrees, coordinate dependent tasks,
-  reserve file paths, assign agents, run quality gates, and merge completed work.
+  reserve file paths, assign agents, schedule timezone-aware recurring work,
+  run quality gates, and merge completed work.
 - **Remote and multi-client use:** Attach over SSH, connect several clients with
   independent viewport sizes, and use the compact switcher on narrow screens.
 - **Terminal tools:** Configure per-pane Scrollback Memory, search across pane
@@ -90,10 +91,11 @@ Keyboard → Keyboard Shortcuts → Input Sources** to free `Ctrl+Space`.
 | Claude Code | ✓ | ✓ | ✓ |
 | GitHub Copilot CLI | ✓ | ✓ | ✓ |
 | Codex | ✓ | ✓ | ✓ |
+| Antigravity CLI | ✓ | ✓ | session only |
 | opencode | ✓ | ✓ | ✓ |
 | Kimi | ✓ | ✓ | ✓ |
 | Grok | ✓ | ✓ | ✓ |
-| Hermes CLI | ✓ | ✓ | No |
+| Hermes CLI | ✓ | ✓ with integration | session only |
 | Pi | ✓ | ✓ | No |
 | Oh My Pi (omp) | ✓ | ✓ | ✓ |
 | Muse Code | ✓ | ✓ | No |

@@ -176,6 +176,16 @@ lock scopes short and never hold it across unrelated slow work.
 - Named-session listing and startup are user-triggered background work. Fence
   results by generation so a closed or replaced selector cannot apply stale
   discovery or launch results; do not add idle session polling.
+- Active-agent automations initially bind to an exact pane and terminal
+  lifetime. When a resumable built-in adapter supplies a trusted native session
+  ID, the private durable identity may rebind after restart only to one exact
+  agent/session/workspace/cwd match with fresh readiness evidence. Public
+  projections expose only `binding` and `target_state`, never native session
+  IDs or recovery paths. Process-bound targets retain fail-closed restart
+  behavior. Active targets create no ORCH worker, report prompt queueing as
+  `delivered` rather than task completion, and fail closed on ambiguity,
+  identity drift, or stale terminal routes. Busy `wait` targets and restoring
+  targets wake from existing lifecycle events; do not add polling.
 - File, DIFF, Markdown, and Mermaid views are native layout leaves, not hidden
   PTYs. Keep reads/layout off-loop, generation-checked, bounded, reusable, and
   independent of the configured file editor.
@@ -264,6 +274,11 @@ For a built-in adapter:
    do not put flags or shell syntax in this field. Put a required static
    ORCH prompt subcommand or flag such as `ask` in `task_prompt_args`; never
    embed user data.
+   Scheduled execution is separate: set `automation` only when the upstream
+   agent has a documented one-shot entrypoint and reviewed per-run arguments
+   for at least one `read_only`, `workspace`, or `full_access` policy. Leave
+   unsupported policies as `None`; never guess approval input or rewrite the
+   user's permanent agent configuration.
 2. Declare identity evidence accurately. Put unmistakable executable names in
    `distinct`, ordinary words in `ambiguous`, versioned executable logic in a
    narrow `binary_matcher`, and exact interpreter package names—including npm
@@ -290,7 +305,8 @@ For a built-in adapter:
 Required parity work:
 
 - Add registry tests for unique IDs, aliases, interpreter packages, capability
-  projection, presentation order, and every intentional identity overlap.
+  projection, presentation order, static automation argv, supported and
+  unsupported automation access policies, and every intentional identity overlap.
 - Add detection fixtures for direct binaries, interpreter launchers, scoped
   packages, wrappers, false-positive prose, and both Unix and Windows path
   forms. Detection must work with skills and integrations absent.

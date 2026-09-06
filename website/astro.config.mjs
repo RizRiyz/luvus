@@ -85,6 +85,7 @@ export default defineConfig({
             { label: 'Agents Talking to Agents', slug: 'docs/guides/agent-messaging' },
             { label: 'Control Luvus from Codex', slug: 'docs/guides/codex-plugin' },
             { label: 'Multi-Agent Orchestration', slug: 'docs/guides/orchestration' },
+            { label: 'Agent Automation', slug: 'docs/guides/automation' },
             { label: 'The Git Tab', slug: 'docs/guides/git' },
             { label: 'Browsing & Opening Files', slug: 'docs/guides/files' },
             { label: 'Global Fuzzy Finder', slug: 'docs/guides/search' },

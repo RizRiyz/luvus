@@ -411,7 +411,7 @@ fn write_decoded_input(
 }
 
 fn event_message(event: Event) -> Option<ClientMessage> {
-    match event {
+    match crate::terminal::host_key::normalize_platform_modifiers(event) {
         Event::Key(k) => Some(ClientMessage::Key(k)),
         Event::Mouse(m) => Some(ClientMessage::Mouse(m)),
         Event::Resize(cols, rows) => {

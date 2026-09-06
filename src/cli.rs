@@ -37,6 +37,7 @@ pub fn is_cli(args: &[String]) -> bool {
                 | "worktree"
                 | "task"
                 | "lease"
+                | "automation"
                 | "wait"
                 | "search"
                 | "help"
@@ -68,6 +69,7 @@ Commands:
   diff         Review Git diffs, notes, and agent feedback
   worktree     Create, open, list, and remove Git worktrees
   task         Coordinate work across multiple coding agents
+  automation   Schedule agents through the ORCH task engine
   lease        Reserve file paths for active tasks
   module       Find, install, configure, and run extensions
   theme        List, create, validate, install, and select themes
@@ -85,7 +87,6 @@ Commands:
   doctor       Check optional external tools
   update       Check for and install a newer Luvus release
   ping         Check whether the selected server responds
-
 Examples:
   luvus agent list                       See every active coding agent
   luvus pane split --down                Add a pane below the focused pane
@@ -175,7 +176,7 @@ panes / agents:
   skill disable              remove unchanged Luvus-managed installations
   skill show                 print the bundled, version-matched SKILL.md
   wait output <id> --match <text> [--timeout <s>]    block until output appears
-  wait agent-status <id> --status done|blocked|working|idle [--timeout <s>]
+  wait agent-status <id> --status <state[,state...]> [--status <state>] [--timeout <s>]
   attach <id>                open the TUI into a single fullscreen pane
 
 search:
@@ -273,11 +274,13 @@ orchestration (multiple agents on one project, docs/22):
   task list                  list all tasks + their status/assignee
   task get <id>              show one task
   task claim <id>            claim a task for this pane (deps must be done)
-  task next [--start] [--agent <cmd>] [--mode worktree|workspace]
+  task next [--start] [--agent <cmd>] [--mode worktree|workspace] [--workspace-id <id>]
                              claim the next ready task (--start creates a worker)
-  task start <id> [--branch <b>] [--agent <cmd>] [--mode worktree|workspace]
+  task start <id> [--branch <b>] [--agent <cmd>] [--mode worktree|workspace] [--workspace-id <id>]
                              start a worker (worktree default; workspace shares checkout)
-  task heartbeat <id> --context <0..1>   report context usage (blocks done at >85%)
+  task heartbeat <id> --context-used <0..1>
+                             report model context-window use, not task progress
+                             (>85% blocks done; --context remains accepted)
   task update <id> [--status <s>] [--output <o>] [--note <n>]
   task done <id>             mark done + release its leases
   task merge <id>            integrate the task's branch into luvus/integration
@@ -288,6 +291,27 @@ orchestration (multiple agents on one project, docs/22):
                              (denied if they overlap another task)
   lease release <id>         release a lease
   lease list                 list active path leases
+
+agent automation (scheduled ORCH tasks):
+  automation create \"<name>\" --title <title> --prompt <text> --agent <id> --workspace-id <id>
+                             (--once <UTC>|--every <seconds>|--daily <HH:MM>|--weekly <days> --at <HH:MM>)
+                             [--timezone <IANA>] [--anchor-utc <UTC>] [--mode workspace|worktree]
+                             [--access read-only|workspace|full] [--paths <glob>...] [--gate <cmd>]
+                             [--target new-worker|active-agent --pane <id> --terminal-id <id>]
+                             [--if-busy wait|skip]
+                             [--disabled] [--misfire skip|run_latest] [--misfire-grace <seconds>]
+                             [--overlap skip|queue_one] [--idempotency-key <key>]
+  automation list            list definitions and their next UTC deadlines
+  automation get <id>        show one definition
+  automation update <id> --name <name> <same required task and schedule options as create>
+  automation enable|disable <id>
+  automation rebind <id> --pane <id> [--terminal-id <id>]   reattach the same native conversation
+  automation run <id> [--idempotency-key <key>]   run once without advancing its schedule
+  automation history [<id>] [--limit <1-200>]     show bounded run history
+  automation preview (--once <UTC>|--every <seconds>|--daily <HH:MM>|--weekly <days> --at <HH:MM>)
+                             [--timezone <IANA>] [--anchor-utc <UTC>]
+  automation health         summarize armed, live, review, and failed runs
+  automation delete <id>     remove an idle definition
 
 events:
   events                     stream live status changes
@@ -316,7 +340,7 @@ server:
   server restart             stop + start (load a newly-installed binary)
   server update-manifest     fetch the latest agent-detection rules from luvus.dev
                              (applies live if the server is up; else on next start)
-  integration install|uninstall <claude|copilot|codex|opencode|kimi|grok|hermes|omp>
+  integration install|uninstall <claude|copilot|codex|antigravity|opencode|kimi|grok|hermes|omp>
                              add/remove luvus's session-resume hook (uninstall
                              removes only luvus's hook, never the agent)
 ";
@@ -483,14 +507,8 @@ fn run_inner(args: &[String]) -> Result<i32> {
     }
     let (method, params) = parse(args)?;
     let path = crate::persist::cli_socket_path();
-    let mut stream = crate::ipc::transport::connect(&path).map_err(|_| {
-        let context = crate::i18n::cli::Context::configured();
-        anyhow!(
-            "{} (socket: {})",
-            context.text("no luvus server running"),
-            path.display()
-        )
-    })?;
+    let mut stream = crate::ipc::transport::connect(&path)
+        .map_err(|error| server_connect_error(&path, error))?;
 
     let req = json!({ "id": "1", "method": method, "params": params });
     writeln!(stream, "{req}")?;
@@ -579,6 +597,7 @@ fn help_topic_has_subcommands(topic: &str) -> bool {
             | "worktree"
             | "task"
             | "lease"
+            | "automation"
             | "module"
             | "theme"
             | "bar"
@@ -595,9 +614,9 @@ fn help_topic_has_subcommands(topic: &str) -> bool {
 fn normalize_help_topic(topic: &str) -> Option<&str> {
     match topic {
         "workspace" | "tab" | "pane" | "agent" | "files" | "git" | "mission" | "worktree"
-        | "task" | "lease" | "module" | "theme" | "bar" | "ui" | "session" | "server"
-        | "integration" | "diff" | "skill" | "wait" | "search" | "events" | "uhp" | "ping"
-        | "doctor" | "update" | "attach" => Some(topic),
+        | "task" | "lease" | "automation" | "module" | "theme" | "bar" | "ui" | "session"
+        | "server" | "integration" | "diff" | "skill" | "wait" | "search" | "events" | "uhp"
+        | "ping" | "doctor" | "update" | "attach" => Some(topic),
         "node" => Some("pane"),
         "remote" | "--remote" => Some("remote"),
         _ => None,
@@ -766,6 +785,10 @@ fn write_topic_help_english(
                 "orchestration (multiple agents on one project, docs/22):\n",
                 "\nevents:\n",
             ),
+        ),
+        "automation" => (
+            "luvus automation <command> [args]",
+            detailed_section("agent automation (scheduled ORCH tasks):\n", "\nevents:\n"),
         ),
         "lease" => (
             "luvus lease <acquire|release|list> [args]",
@@ -1226,8 +1249,15 @@ fn theme_cmd(args: &[String], context: crate::i18n::cli::Context) -> Result<i32>
                 }
                 Ok(_) | Err(_) => {
                     let mut config = crate::config::load();
+                    let baseline = config.clone();
                     config.theme = selected;
-                    crate::config::save(&config);
+                    if !crate::config::save_changes_with_patch(
+                        &baseline,
+                        &config,
+                        Some(&json!({"theme": config.theme.clone()})),
+                    ) {
+                        return Err(anyhow!(context.text("could not save the theme selection")));
+                    }
                     println!(
                         "{} {} — {}",
                         context.text("using theme"),
@@ -1641,8 +1671,8 @@ fn module_search(args: &[String], context: crate::i18n::cli::Context) -> Result<
 enum WaitFor {
     /// `wait output <id> --match <text>`: the pane's recent output contains `text`.
     Output { needle: String },
-    /// `wait agent-status <id> --status <s>`: the pane's agent reaches `status`.
-    AgentStatus { status: String },
+    /// `wait agent-status <id> --status <s>`: the pane's agent reaches any status.
+    AgentStatus { statuses: Vec<String> },
 }
 
 #[derive(Debug, PartialEq)]
@@ -1682,9 +1712,7 @@ fn parse_wait(args: &[String]) -> Result<WaitSpec> {
             })?,
         },
         "agent-status" => WaitFor::AgentStatus {
-            status: flag(args, "--status").ok_or_else(|| {
-                anyhow!("usage: luvus wait agent-status <id> --status done|blocked|working|idle [--timeout <s>]")
-            })?,
+            statuses: parse_wait_statuses(args)?,
         },
         _ => return Err(anyhow!("usage: luvus wait output|agent-status <id> …")),
     };
@@ -1693,6 +1721,50 @@ fn parse_wait(args: &[String]) -> Result<WaitSpec> {
         condition,
         timeout,
     })
+}
+
+fn parse_wait_statuses(args: &[String]) -> Result<Vec<String>> {
+    let usage = "usage: luvus wait agent-status <id> --status idle|working|blocked|done[,STATE...] [--status STATE] [--timeout <s>]";
+    let mut statuses = Vec::new();
+    let mut saw_timeout = false;
+    let mut index = 3;
+    if args
+        .get(index)
+        .is_some_and(|value| value.parse::<u32>().is_ok())
+    {
+        index += 1;
+    }
+    while index < args.len() {
+        match args[index].as_str() {
+            "--status" => {
+                let raw = args
+                    .get(index + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or_else(|| anyhow!(usage))?;
+                for status in raw.split(',') {
+                    if !matches!(status, "idle" | "working" | "blocked" | "done") {
+                        return Err(anyhow!(usage));
+                    }
+                    if !statuses.iter().any(|existing| existing == status) {
+                        statuses.push(status.to_string());
+                    }
+                }
+                index += 2;
+            }
+            "--timeout" if !saw_timeout => {
+                args.get(index + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or_else(|| anyhow!(usage))?;
+                saw_timeout = true;
+                index += 2;
+            }
+            _ => return Err(anyhow!(usage)),
+        }
+    }
+    if statuses.is_empty() {
+        return Err(anyhow!(usage));
+    }
+    Ok(statuses)
 }
 
 /// `luvus wait …` — block until the condition holds (exit 0) or the timeout
@@ -1759,8 +1831,13 @@ fn wait_cmd(args: &[String]) -> Result<i32> {
             }
             Ok(2)
         }
-        WaitFor::AgentStatus { status } => {
-            let mut params = json!({"pane":spec.pane, "status":status});
+        WaitFor::AgentStatus { statuses } => {
+            let uses_statuses = statuses.len() > 1;
+            let mut params = if uses_statuses {
+                json!({"pane":spec.pane, "statuses":statuses})
+            } else {
+                json!({"pane":spec.pane, "status":statuses[0]})
+            };
             if let Some(timeout) = spec.timeout {
                 params["timeout_s"] = json!(timeout);
             }
@@ -1773,13 +1850,11 @@ fn wait_cmd(args: &[String]) -> Result<i32> {
             {
                 return Ok(0);
             }
-            let unknown = response
-                .get("error")
-                .and_then(|error| error.get("message"))
-                .and_then(Value::as_str)
-                .is_some_and(|message| message.starts_with("unknown method"));
-            if unknown {
-                return wait_status_stream(&spec.pane, &status, deadline);
+            match agent_wait_fallback(&response, uses_statuses) {
+                AgentWaitFallback::Stream => {
+                    return wait_status_stream(&spec.pane, &statuses, deadline)
+                }
+                AgentWaitFallback::None => {}
             }
             if let Some(error) = response.get("error") {
                 eprintln!(
@@ -1793,6 +1868,41 @@ fn wait_cmd(args: &[String]) -> Result<i32> {
             Ok(2)
         }
     }
+}
+
+/// Which compatibility path a rejected `agent.wait` should take.
+#[derive(Debug, PartialEq, Eq)]
+enum AgentWaitFallback {
+    /// The rejection is a real error: report it instead of waiting again.
+    None,
+    /// No `agent.wait` at all. Subscribe to the event stream, then poll once,
+    /// so a transition between the two is buffered rather than lost.
+    Stream,
+}
+
+/// Fail closed: only the two envelopes an older server actually produces earn a
+/// fallback. Anything else (`not_found`, a bad pane id, a bare message with no
+/// code) is the server's answer and is reported as such.
+fn agent_wait_fallback(response: &Value, uses_statuses: bool) -> AgentWaitFallback {
+    let Some(error) = response.get("error") else {
+        return AgentWaitFallback::None;
+    };
+    if error.get("code").and_then(Value::as_str) != Some("invalid_request") {
+        return AgentWaitFallback::None;
+    }
+    let Some(message) = error.get("message").and_then(Value::as_str) else {
+        return AgentWaitFallback::None;
+    };
+    if message.starts_with("unknown method") {
+        return AgentWaitFallback::Stream;
+    }
+    if uses_statuses
+        && (message == "agent.wait contains an unknown parameter"
+            || message.starts_with("agent.wait needs a pane and status"))
+    {
+        return AgentWaitFallback::Stream;
+    }
+    AgentWaitFallback::None
 }
 
 #[derive(Debug, PartialEq)]
@@ -2100,74 +2210,125 @@ fn agent_send_cmd(args: &[String]) -> Result<i32> {
     })
 }
 
-/// Current agent status of `pane` (global lookup via `pane.status`).
-fn pane_status(pane: &str) -> Result<Option<String>> {
-    let v = send_request("pane.status", json!({ "pane": pane }))?;
-    Ok(v.get("result")
+fn pane_status_from_response(response: &Value) -> Result<Option<&str>> {
+    if let Some(error) = response.get("error") {
+        let code = error
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("request_failed");
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("pane.status failed");
+        return Err(anyhow!("pane.status {code}: {message}"));
+    }
+    Ok(response
+        .get("result")
         .and_then(|r| r.get("status"))
-        .and_then(|x| x.as_str())
-        .map(String::from))
+        .and_then(Value::as_str))
 }
 
-/// Block until `pane`'s agent reaches `target` (exit 0), or `deadline` passes
-/// (exit 2). Subscribes to the event stream **first**, then polls the current
-/// status — so a transition that happens between the poll and the subscribe is
-/// never missed (it's already buffered on the stream).
-fn wait_status_stream(pane: &str, target: &str, deadline: Option<Instant>) -> Result<i32> {
+fn wait_status_poll_with<Request, Pause>(
+    pane: &str,
+    targets: &[String],
+    deadline: Option<Instant>,
+    mut request: Request,
+    mut pause: Pause,
+) -> Result<bool>
+where
+    Request: FnMut(&str) -> Result<Value>,
+    Pause: FnMut(Duration),
+{
+    loop {
+        let response = request(pane)?;
+        if pane_status_from_response(&response)?
+            .is_some_and(|status| targets.iter().any(|target| target == status))
+        {
+            return Ok(true);
+        }
+        if deadline.is_some_and(|end| Instant::now() >= end) {
+            return Ok(false);
+        }
+        pause(Duration::from_millis(25));
+    }
+}
+
+/// Current agent status of `pane` (global lookup via `pane.status`).
+fn pane_status(pane: &str) -> Result<Option<String>> {
+    let response = send_request("pane.status", json!({ "pane": pane }))?;
+    Ok(pane_status_from_response(&response)?.map(String::from))
+}
+
+/// Compatibility path for servers with no status-set-aware `agent.wait`. Blocks
+/// until `pane`'s agent reaches any target (exit 0) or `deadline` passes (exit 2).
+///
+/// The subscription is sent **before** the initial status poll, so a transition
+/// that lands between the two is already buffered on the stream instead of
+/// being missed. A finite wait recomputes the remaining absolute deadline before
+/// every frame read, so unrelated events cannot extend the timeout. Transports
+/// without a safe kernel receive timeout (currently Windows named pipes) retain
+/// bounded status polling instead of leaving a blocked stream reader behind.
+fn wait_status_stream(pane: &str, targets: &[String], deadline: Option<Instant>) -> Result<i32> {
     let path = crate::persist::cli_socket_path();
-    let stream = crate::ipc::transport::connect(&path).map_err(|_| {
-        anyhow!(
-            "{}",
-            crate::i18n::cli::Context::configured().text("no luvus server running")
-        )
-    })?;
+    let stream = crate::ipc::transport::connect(&path)
+        .map_err(|error| server_connect_error(&path, error))?;
     let mut writer = stream.clone();
     writeln!(
         writer,
         "{}",
         json!({"id":"1","method":"events.subscribe","params":{}})
     )?;
-    let mut reader = BufReader::new(stream);
 
-    let (tx, rx) = std::sync::mpsc::channel();
-    let (pane_s, target_s) = (pane.to_string(), target.to_string());
-    std::thread::spawn(move || {
-        while let Ok(Some(l)) = crate::ipc::api::read_stream_frame(&mut reader) {
-            if let Ok(v) = serde_json::from_str::<Value>(&l) {
-                let is_status =
-                    v.get("event").and_then(|e| e.as_str()) == Some("pane.agent_status_changed");
-                let data = v.get("data");
-                let p = data.and_then(|d| d.get("pane")).and_then(|x| x.as_str());
-                let s = data.and_then(|d| d.get("status")).and_then(|x| x.as_str());
-                if is_status && p == Some(pane_s.as_str()) && s == Some(target_s.as_str()) {
-                    let _ = tx.send(());
-                    break;
-                }
-            }
-        }
-    });
-
-    // Now that we're listening, an initial poll handles the already-there case.
-    if pane_status(pane)?.as_deref() == Some(target) {
+    // Now that the server is queueing events for us, the already-there case is
+    // answered without ever starting a reader.
+    if pane_status(pane)?
+        .as_deref()
+        .is_some_and(|status| targets.iter().any(|target| target == status))
+    {
         return Ok(0);
     }
 
-    match deadline {
-        Some(d) => {
-            let now = Instant::now();
-            if d <= now {
-                return Ok(2);
+    let mut reader = BufReader::new(stream);
+    loop {
+        let read = match deadline {
+            Some(end) => crate::ipc::api::read_stream_frame_with_deadline(&mut reader, end),
+            None => crate::ipc::api::read_stream_frame(&mut reader),
+        };
+        let line = match read {
+            Ok(Some(line)) => line,
+            Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+                return wait_status_poll(pane, targets, deadline)
             }
-            match rx.recv_timeout(d - now) {
-                Ok(()) => Ok(0),
-                Err(_) => Ok(2),
-            }
-        }
-        None => {
-            let _ = rx.recv();
-            Ok(0)
+            // A closed stream or elapsed receive deadline did not match.
+            Ok(None) | Err(_) => return Ok(2),
+        };
+        let Ok(event) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let data = event.get("data");
+        let observed = data.and_then(|d| d.get("pane")).and_then(Value::as_str);
+        let state = data.and_then(|d| d.get("status")).and_then(Value::as_str);
+        if event.get("event").and_then(Value::as_str) == Some("pane.agent_status_changed")
+            && observed == Some(pane)
+            && state.is_some_and(|state| targets.iter().any(|target| target == state))
+        {
+            return Ok(0);
         }
     }
+}
+
+/// Transport fallback when a status event stream cannot be given a safe receive
+/// deadline. Poll until one target matches (exit 0) or the deadline passes (exit
+/// 2). Keeping this synchronous ensures every return closes its connection.
+fn wait_status_poll(pane: &str, targets: &[String], deadline: Option<Instant>) -> Result<i32> {
+    let matched = wait_status_poll_with(
+        pane,
+        targets,
+        deadline,
+        |pane| send_request("pane.status", json!({ "pane": pane })),
+        std::thread::sleep,
+    )?;
+    Ok(if matched { 0 } else { 2 })
 }
 
 /// Focus + zoom a pane via `attach.pane` (docs/18 WA-2). Used by `luvus attach`.
@@ -2178,17 +2339,33 @@ pub fn request_attach(pane: &str) -> Result<()> {
 /// One request/response over the control socket.
 pub(crate) fn send_request(method: &str, params: Value) -> Result<Value> {
     let path = crate::persist::cli_socket_path();
-    let mut stream = crate::ipc::transport::connect(&path).map_err(|_| {
-        anyhow!(
-            "{}",
-            crate::i18n::cli::Context::configured().text("no luvus server running")
-        )
-    })?;
+    let mut stream = crate::ipc::transport::connect(&path)
+        .map_err(|error| server_connect_error(&path, error))?;
     let req = json!({ "id": "1", "method": method, "params": params });
     writeln!(stream, "{req}")?;
     let mut reader = BufReader::new(stream);
     let line = crate::ipc::api::read_response_frame(&mut reader)?;
     serde_json::from_str(&line).map_err(|e| anyhow!("bad reply: {e}"))
+}
+
+fn server_connect_error(path: &std::path::Path, error: std::io::Error) -> anyhow::Error {
+    let context = crate::i18n::cli::Context::configured();
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        anyhow!(
+            "{} (socket: {}): {}. {}",
+            context.text("Luvus server access was denied"),
+            path.display(),
+            error,
+            context.text("an agent or OS sandbox may be blocking the selected socket")
+        )
+    } else {
+        anyhow!(
+            "{} (socket: {}): {}",
+            context.text("no luvus server running"),
+            path.display(),
+            error
+        )
+    }
 }
 
 /// Transport-neutral one-frame bridge for harnesses that cannot use Unix
@@ -2207,7 +2384,7 @@ fn uhp_proxy() -> Result<i32> {
     }
     let path = crate::persist::cli_socket_path();
     let mut stream = crate::ipc::transport::connect(&path)
-        .map_err(|_| anyhow!("no luvus server running (socket: {})", path.display()))?;
+        .map_err(|error| server_connect_error(&path, error))?;
     writeln!(stream, "{request}")?;
     let mut reader = BufReader::new(stream);
     let response = crate::ipc::api::read_response_frame(&mut reader)?;
@@ -2587,7 +2764,18 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             }
             ("agent.read".into(), Value::Object(obj))
         }
-        ("agent", _) => ("agent.list".into(), json!({})),
+        ("agent", "" | "list") if rest.is_empty() => ("agent.list".into(), json!({})),
+        ("agent", "list") => {
+            return Err(anyhow!(
+                "unexpected agent list argument `{}`. Try `luvus help agent`.",
+                rest[0]
+            ));
+        }
+        ("agent", other) => {
+            return Err(anyhow!(
+                "unknown agent command `{other}`. Try `luvus help agent`."
+            ));
+        }
 
         ("ui", "sidebar") => {
             let mut obj = serde_json::Map::new();
@@ -3436,6 +3624,110 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         ("worktree", "remove") => ("worktree.remove".into(), one("path", arg0())),
         ("worktree", _) => ("worktree.list".into(), json!({})),
 
+        ("automation", "create") => {
+            let name = rest
+                .first()
+                .filter(|value| !value.starts_with("--"))
+                .cloned()
+                .ok_or_else(|| anyhow!("automation create requires a name"))?;
+            (
+                "automation.create".into(),
+                automation_definition_params(args, name, None)?,
+            )
+        }
+        ("automation", "update") => {
+            let id = rest
+                .first()
+                .filter(|value| !value.starts_with("--"))
+                .cloned()
+                .ok_or_else(|| anyhow!("automation update requires an id"))?;
+            let name =
+                flag(args, "--name").ok_or_else(|| anyhow!("automation update requires --name"))?;
+            (
+                "automation.update".into(),
+                automation_definition_params(args, name, Some(id))?,
+            )
+        }
+        ("automation", "get") => ("automation.get".into(), one("id", arg0())),
+        ("automation", "enable") => ("automation.enable".into(), one("id", arg0())),
+        ("automation", "disable") => ("automation.disable".into(), one("id", arg0())),
+        ("automation", "rebind") => {
+            let id = rest
+                .first()
+                .filter(|value| !value.starts_with("--"))
+                .cloned()
+                .ok_or_else(|| anyhow!("automation rebind requires an id"))?;
+            let mut pane = None;
+            let mut terminal_id = None;
+            let mut index = 1;
+            while index < rest.len() {
+                let option = rest[index].as_str();
+                if !matches!(option, "--pane" | "--terminal-id") {
+                    return Err(anyhow!(
+                        "unexpected automation rebind argument `{}`",
+                        rest[index]
+                    ));
+                }
+                let value = rest
+                    .get(index + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .cloned()
+                    .ok_or_else(|| anyhow!("{option} requires a value"))?;
+                let slot = if option == "--pane" {
+                    &mut pane
+                } else {
+                    &mut terminal_id
+                };
+                if slot.replace(value).is_some() {
+                    return Err(anyhow!("duplicate automation rebind option `{option}`"));
+                }
+                index += 2;
+            }
+            let pane = pane.ok_or_else(|| anyhow!("automation rebind requires --pane"))?;
+            let mut obj = serde_json::Map::new();
+            obj.insert("id".into(), json!(id));
+            obj.insert("pane".into(), json!(pane));
+            if let Some(terminal_id) = terminal_id {
+                obj.insert("terminal_id".into(), json!(terminal_id));
+            }
+            ("automation.rebind".into(), Value::Object(obj))
+        }
+        ("automation", "delete") => ("automation.delete".into(), one("id", arg0())),
+        ("automation", "run") => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("id".into(), json!(arg0().unwrap_or_default()));
+            if let Some(key) = flag(args, "--idempotency-key") {
+                obj.insert("idempotency_key".into(), json!(key));
+            }
+            ("automation.run".into(), Value::Object(obj))
+        }
+        ("automation", "history") => {
+            let mut obj = serde_json::Map::new();
+            if let Some(id) = arg0() {
+                obj.insert("id".into(), json!(id));
+            }
+            if let Some(limit) = flag(args, "--limit") {
+                let limit = limit
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|limit| (1..=200).contains(limit))
+                    .ok_or_else(|| anyhow!("--limit must be between 1 and 200"))?;
+                obj.insert("limit".into(), json!(limit));
+            }
+            ("automation.history".into(), Value::Object(obj))
+        }
+        ("automation", "preview") => (
+            "automation.preview".into(),
+            json!({"trigger": automation_trigger_args(args)?}),
+        ),
+        ("automation", "health") => ("automation.health".into(), json!({})),
+        ("automation", "list" | "") => ("automation.list".into(), json!({})),
+        ("automation", other) => {
+            return Err(anyhow!(
+                "unknown automation command `{other}`. Try `luvus help automation`."
+            ))
+        }
+
         // ── orchestration (docs/22, M0): task ledger + path leases ──────────
         ("task", "add") => {
             let title = rest.iter().find(|a| !a.starts_with("--")).cloned();
@@ -3477,9 +3769,10 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             if let Some(id) = arg0() {
                 obj.insert("id".into(), json!(id));
             }
-            if let Some(c) = flag(args, "--context").and_then(|s| s.parse::<f64>().ok()) {
-                obj.insert("context".into(), json!(c));
-            }
+            // `--context` remains a compatibility alias. Keep the UHP field
+            // stable while making the CLI spelling explicit enough that an
+            // agent cannot reasonably confuse it with task progress.
+            obj.insert("context".into(), json!(heartbeat_context(args)?));
             ("task.heartbeat".into(), Value::Object(obj))
         }
         ("task", "start") => {
@@ -3582,11 +3875,202 @@ fn multi_flag(args: &[String], name: &str) -> Vec<String> {
     out
 }
 
+fn automation_definition_params(
+    args: &[String],
+    name: String,
+    id: Option<String>,
+) -> Result<Value> {
+    let required = |flag_name: &str| {
+        flag(args, flag_name)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow!("{flag_name} is required"))
+    };
+    let mode = flag(args, "--mode").unwrap_or_else(|| "worktree".to_string());
+    if !matches!(mode.as_str(), "workspace" | "worktree") {
+        return Err(anyhow!("--mode must be workspace or worktree"));
+    }
+    let access = flag(args, "--access").unwrap_or_else(|| "workspace".to_string());
+    let access = crate::automation::AutomationAccess::parse(&access)
+        .ok_or_else(|| anyhow!("--access must be read-only, workspace, or full"))?;
+    let misfire = flag(args, "--misfire").unwrap_or_else(|| "run_latest".to_string());
+    if !matches!(misfire.as_str(), "skip" | "run_latest") {
+        return Err(anyhow!("--misfire must be skip or run_latest"));
+    }
+    let overlap = flag(args, "--overlap").unwrap_or_else(|| "skip".to_string());
+    if !matches!(overlap.as_str(), "skip" | "queue_one") {
+        return Err(anyhow!("--overlap must be skip or queue_one"));
+    }
+    let grace = flag(args, "--misfire-grace")
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| anyhow!("--misfire-grace must be seconds"))
+        })
+        .transpose()?
+        .unwrap_or(3600);
+    let mut obj = serde_json::Map::new();
+    let updating = id.is_some();
+    if let Some(id) = id {
+        obj.insert("id".into(), json!(id));
+    }
+    obj.insert("name".into(), json!(name));
+    obj.insert(
+        "enabled".into(),
+        json!(!args.iter().any(|arg| arg == "--disabled")),
+    );
+    obj.insert("trigger".into(), automation_trigger_args(args)?);
+    let target = flag(args, "--target").unwrap_or_else(|| "new-worker".to_string());
+    let target = match target.as_str() {
+        "new-worker" => {
+            if flag(args, "--pane").is_some()
+                || flag(args, "--terminal-id").is_some()
+                || flag(args, "--if-busy").is_some()
+            {
+                return Err(anyhow!(
+                    "--pane, --terminal-id, and --if-busy require --target active-agent"
+                ));
+            }
+            json!({"kind":"new_worker"})
+        }
+        "active-agent" => {
+            let pane = required("--pane")?;
+            let terminal_id = required("--terminal-id")?;
+            let if_busy = flag(args, "--if-busy").unwrap_or_else(|| "wait".to_string());
+            if !matches!(if_busy.as_str(), "wait" | "skip") {
+                return Err(anyhow!("--if-busy must be wait or skip"));
+            }
+            json!({
+                "kind":"active_agent",
+                "pane_id":pane,
+                "terminal_id":terminal_id,
+                "if_busy":if_busy,
+            })
+        }
+        _ => return Err(anyhow!("--target must be new-worker or active-agent")),
+    };
+    obj.insert("target".into(), target);
+    obj.insert(
+        "task".into(),
+        json!({
+            "title": required("--title")?,
+            "prompt": required("--prompt")?,
+            "agent_id": required("--agent")?,
+            "workspace_id": required("--workspace-id")?,
+            "mode": mode,
+            "access": access.as_str(),
+            "paths": multi_flag(args, "--paths"),
+            "gate": flag(args, "--gate"),
+        }),
+    );
+    obj.insert(
+        "policy".into(),
+        json!({
+            "misfire":misfire,
+            "overlap":overlap,
+            "misfire_grace_seconds":grace,
+        }),
+    );
+    if updating && flag(args, "--idempotency-key").is_some() {
+        return Err(anyhow!(
+            "--idempotency-key is only valid for automation create"
+        ));
+    }
+    if !updating {
+        if let Some(key) = flag(args, "--idempotency-key") {
+            obj.insert("idempotency_key".into(), json!(key));
+        }
+    }
+    Ok(Value::Object(obj))
+}
+
+fn automation_trigger_args(args: &[String]) -> Result<Value> {
+    let kinds = ["--once", "--every", "--daily", "--weekly"];
+    let selected = kinds
+        .iter()
+        .filter_map(|name| flag(args, name).map(|value| (*name, value)))
+        .collect::<Vec<_>>();
+    if selected.len() != 1 {
+        return Err(anyhow!(
+            "pass exactly one of --once, --every, --daily, or --weekly"
+        ));
+    }
+    let (kind, value) = &selected[0];
+    match *kind {
+        "--once" => Ok(json!({"kind":"once", "at_utc":parse_utc_instant(value)?})),
+        "--every" => {
+            let every_seconds = value
+                .parse::<u64>()
+                .ok()
+                .filter(|seconds| *seconds >= crate::automation::MIN_INTERVAL_SECONDS)
+                .ok_or_else(|| anyhow!("--every must be at least 60 seconds"))?;
+            let anchor_utc = flag(args, "--anchor-utc")
+                .map(|value| parse_utc_instant(&value))
+                .transpose()?
+                .unwrap_or_else(crate::automation::unix_now);
+            Ok(json!({"kind":"interval", "every_seconds":every_seconds, "anchor_utc":anchor_utc}))
+        }
+        "--daily" => {
+            let timezone = flag(args, "--timezone")
+                .ok_or_else(|| anyhow!("--timezone is required for daily schedules"))?;
+            Ok(json!({
+                "kind":"daily",
+                "timezone":timezone,
+                "second_of_day":parse_wall_time(value)?,
+            }))
+        }
+        "--weekly" => {
+            let timezone = flag(args, "--timezone")
+                .ok_or_else(|| anyhow!("--timezone is required for weekly schedules"))?;
+            let at = flag(args, "--at")
+                .ok_or_else(|| anyhow!("--at HH:MM is required for weekly schedules"))?;
+            let weekdays = value
+                .split(',')
+                .map(parse_weekday)
+                .collect::<Result<Vec<_>>>()?;
+            Ok(json!({
+                "kind":"weekly",
+                "timezone":timezone,
+                "weekdays":weekdays,
+                "second_of_day":parse_wall_time(&at)?,
+            }))
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn parse_utc_instant(value: &str) -> Result<u64> {
+    crate::automation::parse_utc_instant(value).map_err(|error| anyhow!(error.message))
+}
+
+fn parse_wall_time(value: &str) -> Result<u32> {
+    crate::automation::parse_wall_time(value).map_err(|error| anyhow!(error.message))
+}
+
+fn parse_weekday(value: &str) -> Result<u8> {
+    crate::automation::parse_weekday(value).map_err(|error| anyhow!(error.message))
+}
+
 /// Value following `--name` in argv, if present.
 fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter()
         .position(|a| a == name)
         .and_then(|i| args.get(i + 1).cloned())
+}
+
+/// Parse the model context-window fraction for `task heartbeat`. The explicit
+/// spelling wins whenever both aliases are present, including when its value is
+/// invalid, so a malformed primary flag cannot silently fall back to legacy
+/// input.
+fn heartbeat_context(args: &[String]) -> Result<f64> {
+    let flag_name = if args.iter().any(|arg| arg == "--context-used") {
+        "--context-used"
+    } else {
+        "--context"
+    };
+    flag(args, flag_name)
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        .ok_or_else(|| anyhow!("--context-used requires a finite number from 0 to 1"))
 }
 
 /// A module-setting value typed on the command line. `true`/`false` and whole
@@ -3608,6 +4092,31 @@ fn parse_setting_value(s: &str) -> Value {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::BufRead;
+
+    #[test]
+    fn socket_permission_errors_are_not_reported_as_an_offline_server() {
+        let path = std::path::Path::new("/private/luvus.sock");
+        let denied = server_connect_error(
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "operation not permitted",
+            ),
+        )
+        .to_string();
+        assert!(denied.contains("server access was denied"));
+        assert!(denied.contains("sandbox"));
+        assert!(denied.contains("/private/luvus.sock"));
+        assert!(!denied.contains("no luvus server running"));
+
+        let absent = server_connect_error(
+            path,
+            std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
+        )
+        .to_string();
+        assert!(absent.contains("no luvus server running"));
+    }
 
     #[test]
     fn status_card_keeps_the_bug_and_rows_aligned() {
@@ -3668,6 +4177,7 @@ mod tests {
                             | "module"
                             | "diff"
                             | "task"
+                            | "automation"
                             | "integration"
                     )
                 ) && !trimmed.contains("  ");
@@ -3675,6 +4185,13 @@ mod tests {
                     || trimmed.starts_with("[--limit ")
                     || trimmed.starts_with("[--placement ")
                     || trimmed.starts_with("[--end-line ")
+                    || trimmed.starts_with("(--once ")
+                    || trimmed.starts_with("[--timezone ")
+                    || trimmed.starts_with("[--access ")
+                    || trimmed.starts_with("[--target ")
+                    || trimmed.starts_with("[--if-busy ")
+                    || trimmed.starts_with("[--disabled")
+                    || trimmed.starts_with("[--overlap ")
                     || command_without_description
                     || trimmed.starts_with("session attach <name>")
                     || trimmed == "(applies live if the server is up; else on next start)"
@@ -3953,6 +4470,26 @@ mod tests {
     }
 
     #[test]
+    fn agent_list_requires_an_exact_subcommand_shape() {
+        for raw in ["luvus agent", "luvus agent list"] {
+            let (method, params) = parse(&argv(raw)).unwrap();
+            assert_eq!(method, "agent.list", "{raw}");
+            assert_eq!(params, json!({}), "{raw}");
+        }
+
+        assert_eq!(
+            parse(&argv("luvus agent lsit")).unwrap_err().to_string(),
+            "unknown agent command `lsit`. Try `luvus help agent`."
+        );
+        assert_eq!(
+            parse(&argv("luvus agent list extra"))
+                .unwrap_err()
+                .to_string(),
+            "unexpected agent list argument `extra`. Try `luvus help agent`."
+        );
+    }
+
+    #[test]
     fn normal_and_group_help_detection_remains_intact() {
         for (raw, expected) in [
             ("luvus pane --help", Some(("pane", None))),
@@ -4011,6 +4548,22 @@ mod tests {
                 "{invalid:?}"
             );
         }
+    }
+
+    #[test]
+    fn theme_use_reports_a_config_write_failure() {
+        let _env = crate::persist::test_env("theme-write-failure");
+        let home = crate::persist::config_dir();
+        fs::write(&home, "not a directory").unwrap();
+
+        let result = theme_cmd(
+            &["use".into(), "quattro-rally".into()],
+            crate::i18n::cli::Context::for_language(crate::i18n::cli::Language::En),
+        );
+        fs::remove_file(home).unwrap();
+
+        let error = result.unwrap_err();
+        assert_eq!(error.to_string(), "could not save the theme selection");
     }
 
     #[test]
@@ -4472,13 +5025,123 @@ mod tests {
 
         assert!(parse(&argv("luvus task start t1 --mode unsafe")).is_err());
 
-        let (m, p) = parse(&argv("luvus task heartbeat t1 --context 0.7")).unwrap();
+        let (m, p) = parse(&argv("luvus task heartbeat t1 --context-used 0.7")).unwrap();
         assert_eq!(m, "task.heartbeat");
         assert_eq!(p.get("context").and_then(|v| v.as_f64()), Some(0.7));
+
+        let (m, p) = parse(&argv("luvus task heartbeat t1 --context 0.4")).unwrap();
+        assert_eq!(m, "task.heartbeat");
+        assert_eq!(p.get("context").and_then(|v| v.as_f64()), Some(0.4));
+
+        let (_, p) = parse(&argv(
+            "luvus task heartbeat t1 --context 0.4 --context-used 0.7",
+        ))
+        .unwrap();
+        assert_eq!(p.get("context").and_then(|v| v.as_f64()), Some(0.7));
+
+        for invalid in [
+            "luvus task heartbeat t1",
+            "luvus task heartbeat t1 --context-used",
+            "luvus task heartbeat t1 --context-used nope",
+            "luvus task heartbeat t1 --context-used NaN",
+            "luvus task heartbeat t1 --context-used inf",
+            "luvus task heartbeat t1 --context-used -0.1",
+            "luvus task heartbeat t1 --context-used 1.1",
+            "luvus task heartbeat t1 --context nope",
+            "luvus task heartbeat t1 --context -0.1",
+            "luvus task heartbeat t1 --context 1.1",
+            "luvus task heartbeat t1 --context 0.4 --context-used nope",
+        ] {
+            assert!(parse(&argv(invalid)).is_err(), "{invalid} must be rejected");
+        }
 
         let (m, p) = parse(&argv("luvus task merge t1")).unwrap();
         assert_eq!(m, "task.merge");
         assert_eq!(p.get("id").and_then(|v| v.as_str()), Some("t1"));
+    }
+
+    #[test]
+    fn maps_agent_automation_commands() {
+        assert!(is_cli(&argv("luvus automation list")));
+        let args = vec![
+            "luvus",
+            "automation",
+            "create",
+            "morning",
+            "--title",
+            "review",
+            "--prompt",
+            "check changes",
+            "--agent",
+            "codex",
+            "--workspace-id",
+            "workspace-a",
+            "--daily",
+            "08:30",
+            "--timezone",
+            "Asia/Makassar",
+            "--mode",
+            "workspace",
+            "--access",
+            "read-only",
+            "--idempotency-key",
+            "create-1",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let (method, params) = parse(&args).unwrap();
+        assert_eq!(method, "automation.create");
+        assert_eq!(params["name"], "morning");
+        assert_eq!(params["trigger"]["kind"], "daily");
+        assert_eq!(params["trigger"]["second_of_day"], 30_600);
+        assert_eq!(params["trigger"]["timezone"], "Asia/Makassar");
+        assert_eq!(params["task"]["prompt"], "check changes");
+        assert_eq!(params["task"]["access"], "read_only");
+        assert_eq!(params["idempotency_key"], "create-1");
+
+        let (_, params) = parse(&argv(
+            "luvus automation create continue --title continue --prompt next --agent codex --workspace-id workspace-a --once 2000000000 --target active-agent --pane 7 --terminal-id 0123456789abcdef0123456789abcdef --if-busy skip",
+        ))
+        .unwrap();
+        assert_eq!(params["target"]["kind"], "active_agent");
+        assert_eq!(params["target"]["pane_id"], "7");
+        assert_eq!(params["target"]["if_busy"], "skip");
+
+        let (method, params) = parse(&argv(
+            "luvus automation rebind a7 --pane 9 --terminal-id 0123456789abcdef0123456789abcdef",
+        ))
+        .unwrap();
+        assert_eq!(method, "automation.rebind");
+        assert_eq!(params["id"], "a7");
+        assert_eq!(params["pane"], "9");
+        assert_eq!(params["terminal_id"], "0123456789abcdef0123456789abcdef");
+
+        let (method, params) = parse(&argv(
+            "luvus automation preview --weekly mon,fri --at 09:00 --timezone UTC",
+        ))
+        .unwrap();
+        assert_eq!(method, "automation.preview");
+        assert_eq!(params["trigger"]["weekdays"], json!([1, 5]));
+
+        for bad in [
+            "luvus automation create morning --title review",
+            "luvus automation preview --daily 09:00",
+            "luvus automation preview --once 100 --every 60",
+            "luvus automation preview --weekly moons --at 09:00 --timezone UTC",
+            "luvus automation create morning --title review --prompt check --agent codex --workspace-id workspace-a --daily 09:00 --timezone UTC --access root",
+            "luvus automation create morning --title review --prompt check --agent codex --workspace-id workspace-a --once 2000000000 --pane 7",
+            "luvus automation rebind a7",
+            "luvus automation rebind a7 --pane",
+            "luvus automation rebind a7 --pane 9 --terminal-id",
+            "luvus automation rebind a7 --pane 9 --pane 10",
+            "luvus automation rebind a7 --pane 9 --terminal-id one --terminal-id two",
+            "luvus automation rebind a7 --pane 9 --unknown value",
+            "luvus automation rebind a7 --pane 9 trailing",
+            "luvus automation create morning --title review --prompt check --agent codex --workspace-id workspace-a --once 2000000000 --target active-agent --pane 7",
+        ] {
+            assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
+        }
     }
 
     #[test]
@@ -4506,6 +5169,164 @@ mod tests {
         assert_eq!(p.get("id").and_then(|v| v.as_str()), Some("my-mod"));
     }
 
+    fn wait_test_server() -> crate::ipc::transport::Listener {
+        let root = crate::persist::config_dir();
+        fs::create_dir_all(&root).expect("create wait test home");
+        // Keep the macOS Unix-domain socket below sockaddr_un::sun_path.
+        let path = root.join("w");
+        let _ = fs::remove_file(&path);
+        std::env::set_var("LUVUS_SOCKET_PATH", &path);
+        crate::ipc::transport::bind(&path).expect("bind wait test server")
+    }
+
+    fn accept_wait_request(
+        listener: &crate::ipc::transport::Listener,
+    ) -> (crate::ipc::transport::Conn, Value) {
+        let connection = crate::ipc::transport::incoming(listener)
+            .next()
+            .expect("accept wait request");
+        let mut line = String::new();
+        BufReader::new(connection.clone())
+            .read_line(&mut line)
+            .expect("read wait request");
+        let request = serde_json::from_str(&line).expect("parse wait request");
+        (connection, request)
+    }
+
+    #[test]
+    fn wait_status_stream_keeps_an_absolute_deadline_during_unrelated_events() {
+        let _env = crate::persist::test_env("w-ad");
+        let listener = wait_test_server();
+        let server = std::thread::spawn(move || {
+            let (mut events, subscribe) = accept_wait_request(&listener);
+            assert_eq!(subscribe["method"], "events.subscribe");
+            writeln!(events, r#"{{"id":"1","result":{{"type":"subscribed"}}}}"#).unwrap();
+
+            let (mut status, request) = accept_wait_request(&listener);
+            assert_eq!(request["method"], "pane.status");
+            writeln!(status, r#"{{"id":"1","result":{{"status":"idle"}}}}"#).unwrap();
+
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_millis(350) {
+                if writeln!(events, r#"{{"event":"pane.output","data":{{"pane":"7"}}}}"#).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+
+        let timeout = Duration::from_millis(75);
+        let started = Instant::now();
+        let result = wait_status_stream("7", &["done".into()], Some(started + timeout));
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+
+        assert_eq!(result.unwrap(), 2);
+        assert!(
+            elapsed <= timeout + Duration::from_millis(125),
+            "absolute timeout took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn wait_agent_status_set_uses_old_server_event_stream_for_transient_match() {
+        let _env = crate::persist::test_env("w-set");
+        let listener = wait_test_server();
+        let server = std::thread::spawn(move || {
+            let (mut agent_wait, request) = accept_wait_request(&listener);
+            assert_eq!(request["method"], "agent.wait");
+            assert_eq!(request["params"]["statuses"], json!(["working", "blocked"]));
+            writeln!(
+                agent_wait,
+                r#"{{"id":"1","error":{{"code":"invalid_request","message":"agent.wait contains an unknown parameter"}}}}"#
+            )
+            .unwrap();
+
+            let (mut next, request) = accept_wait_request(&listener);
+            if request["method"] == "pane.status" {
+                // The old polling fallback observes idle, while the matching state
+                // exists only during the gap before its next 25 ms connection.
+                writeln!(next, r#"{{"id":"1","result":{{"status":"idle"}}}}"#).unwrap();
+                std::thread::sleep(Duration::from_millis(5));
+                std::thread::sleep(Duration::from_millis(5));
+                return;
+            }
+
+            assert_eq!(request["method"], "events.subscribe");
+            writeln!(next, r#"{{"id":"1","result":{{"type":"subscribed"}}}}"#).unwrap();
+            let mut events = next;
+            let (mut status, request) = accept_wait_request(&listener);
+            assert_eq!(request["method"], "pane.status");
+            writeln!(status, r#"{{"id":"1","result":{{"status":"idle"}}}}"#).unwrap();
+
+            std::thread::sleep(Duration::from_millis(5));
+            writeln!(events, r#"{{"event":"pane.agent_status_changed","data":{{"pane":"7","status":"blocked"}}}}"#).unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+            let _ = writeln!(
+                events,
+                r#"{{"event":"pane.agent_status_changed","data":{{"pane":"7","status":"idle"}}}}"#
+            );
+        });
+
+        let result = wait_cmd(&argv(
+            "luvus wait agent-status 7 --status working,blocked --timeout 0.15",
+        ));
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn wait_agent_status_singular_keeps_old_server_event_stream_fallback() {
+        let _env = crate::persist::test_env("w-one");
+        let listener = wait_test_server();
+        let server = std::thread::spawn(move || {
+            let (mut agent_wait, request) = accept_wait_request(&listener);
+            assert_eq!(request["method"], "agent.wait");
+            assert_eq!(request["params"]["status"], "done");
+            assert!(request["params"].get("timeout_s").is_none());
+            writeln!(
+                agent_wait,
+                r#"{{"id":"1","error":{{"code":"invalid_request","message":"unknown method agent.wait"}}}}"#
+            )
+            .unwrap();
+
+            let (mut events, subscribe) = accept_wait_request(&listener);
+            assert_eq!(subscribe["method"], "events.subscribe");
+            writeln!(events, r#"{{"id":"1","result":{{"type":"subscribed"}}}}"#).unwrap();
+            let (mut status, request) = accept_wait_request(&listener);
+            assert_eq!(request["method"], "pane.status");
+            writeln!(status, r#"{{"id":"1","result":{{"status":"working"}}}}"#).unwrap();
+            writeln!(
+                events,
+                r#"{{"event":"pane.agent_status_changed","data":{{"pane":"7","status":"done"}}}}"#
+            )
+            .unwrap();
+        });
+
+        let result = wait_cmd(&argv("luvus wait agent-status 7 --status done"));
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn wait_status_stream_returns_timeout_code_when_stream_closes_mid_wait() {
+        let _env = crate::persist::test_env("w-eof");
+        let listener = wait_test_server();
+        let server = std::thread::spawn(move || {
+            let (mut events, subscribe) = accept_wait_request(&listener);
+            assert_eq!(subscribe["method"], "events.subscribe");
+            writeln!(events, r#"{{"id":"1","result":{{"type":"subscribed"}}}}"#).unwrap();
+            let (mut status, request) = accept_wait_request(&listener);
+            assert_eq!(request["method"], "pane.status");
+            writeln!(status, r#"{{"id":"1","result":{{"status":"idle"}}}}"#).unwrap();
+            drop(events);
+        });
+
+        let result = wait_status_stream("7", &["done".into()], None);
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), 2);
+    }
+
     #[test]
     fn parses_wait() {
         std::env::remove_var("LUVUS_PANE_ID");
@@ -4525,9 +5346,51 @@ mod tests {
         assert_eq!(
             s.condition,
             WaitFor::AgentStatus {
-                status: "blocked".into()
+                statuses: vec!["blocked".into()]
             }
         );
+
+        let repeated = parse_wait(&argv(
+            "luvus wait agent-status 7 --status working --status done,blocked",
+        ))
+        .unwrap();
+        assert_eq!(
+            repeated.condition,
+            WaitFor::AgentStatus {
+                statuses: vec!["working".into(), "done".into(), "blocked".into()]
+            }
+        );
+        let comma = parse_wait(&argv("luvus wait agent-status 7 --status working,done")).unwrap();
+        assert_eq!(
+            comma.condition,
+            WaitFor::AgentStatus {
+                statuses: vec!["working".into(), "done".into()]
+            }
+        );
+        let reordered = parse_wait(&argv(
+            "luvus wait agent-status 7 --timeout 5 --status done,done",
+        ))
+        .unwrap();
+        assert_eq!(reordered.timeout, Some(5.0));
+        assert_eq!(
+            reordered.condition,
+            WaitFor::AgentStatus {
+                statuses: vec!["done".into()]
+            }
+        );
+        assert!(parse_wait(&argv("luvus wait agent-status 7 --status")).is_err());
+        assert!(parse_wait(&argv("luvus wait agent-status 7 --status done --timeout")).is_err());
+        assert!(parse_wait(&argv("luvus wait agent-status 7 --status done,")).is_err());
+        assert!(parse_wait(&argv("luvus wait agent-status 7 --status unknown")).is_err());
+        assert!(parse_wait(&argv(
+            "luvus wait agent-status 7 --status done --typo value"
+        ))
+        .is_err());
+        assert!(parse_wait(&argv("luvus wait agent-status 7 unexpected --status done")).is_err());
+        assert!(parse_wait(&argv(
+            "luvus wait agent-status 7 --status done --timeout 1 --timeout 2"
+        ))
+        .is_err());
 
         // missing --match is an error
         assert!(parse_wait(&argv("luvus wait output 3")).is_err());
@@ -4536,6 +5399,127 @@ mod tests {
         let s = parse_wait(&argv("luvus wait output --match hi")).unwrap();
         assert_eq!(s.pane, "9");
         std::env::remove_var("LUVUS_PANE_ID");
+    }
+
+    #[test]
+    fn agent_wait_status_sets_fall_back_for_older_servers() {
+        // A server with no `agent.wait` uses the subscribe-first stream for both
+        // a single state and a complete status set.
+        let unknown_method =
+            json!({"error":{"code":"invalid_request","message":"unknown method agent.wait"}});
+        assert_eq!(
+            agent_wait_fallback(&unknown_method, false),
+            AgentWaitFallback::Stream
+        );
+        assert_eq!(
+            agent_wait_fallback(&unknown_method, true),
+            AgentWaitFallback::Stream
+        );
+
+        let old_parameter = json!({"error":{
+            "code":"invalid_request",
+            "message":"agent.wait contains an unknown parameter"
+        }});
+        assert_eq!(
+            agent_wait_fallback(&old_parameter, true),
+            AgentWaitFallback::Stream
+        );
+        assert_eq!(
+            agent_wait_fallback(&old_parameter, false),
+            AgentWaitFallback::None
+        );
+
+        let message_only = json!({"error":{"message":"agent.wait contains an unknown parameter"}});
+        assert_eq!(
+            agent_wait_fallback(&message_only, true),
+            AgentWaitFallback::None
+        );
+
+        let needs_status = json!({"error":{
+            "code":"invalid_request",
+            "message":"agent.wait needs a pane and status idle|working|blocked|done"
+        }});
+        assert_eq!(
+            agent_wait_fallback(&needs_status, true),
+            AgentWaitFallback::Stream
+        );
+        assert_eq!(
+            agent_wait_fallback(&needs_status, false),
+            AgentWaitFallback::None
+        );
+
+        let unrelated =
+            json!({"error":{"code":"invalid_request","message":"pane must be a pane id"}});
+        assert_eq!(
+            agent_wait_fallback(&unrelated, true),
+            AgentWaitFallback::None
+        );
+
+        // Fail closed: a resolved-but-missing pane is an answer, not an old
+        // server, so neither compatibility path may run.
+        let not_found = json!({"error":{"code":"not_found","message":"pane not found"}});
+        assert_eq!(
+            agent_wait_fallback(&not_found, false),
+            AgentWaitFallback::None
+        );
+        assert_eq!(
+            agent_wait_fallback(&not_found, true),
+            AgentWaitFallback::None
+        );
+
+        // A successful reply never takes a fallback.
+        assert_eq!(
+            agent_wait_fallback(&json!({"result":{"matched":false}}), true),
+            AgentWaitFallback::None
+        );
+    }
+
+    #[test]
+    fn wait_status_poll_is_bounded_and_propagates_server_errors() {
+        use std::cell::Cell;
+
+        fn poll_once(
+            response: Value,
+            deadline: Option<Instant>,
+        ) -> (Result<bool>, usize, usize, usize) {
+            let requests = Cell::new(0);
+            let in_flight = Cell::new(0);
+            let sleeps = Cell::new(0);
+            let result = wait_status_poll_with(
+                "7",
+                &["working".to_string(), "done".to_string()],
+                deadline,
+                |pane| {
+                    assert_eq!(pane, "7");
+                    requests.set(requests.get() + 1);
+                    in_flight.set(in_flight.get() + 1);
+                    let response = response.clone();
+                    in_flight.set(in_flight.get() - 1);
+                    Ok(response)
+                },
+                |_| sleeps.set(sleeps.get() + 1),
+            );
+            (result, requests.get(), in_flight.get(), sleeps.get())
+        }
+
+        let (matched, requests, in_flight, sleeps) =
+            poll_once(json!({"result":{"status":"working"}}), None);
+        assert!(matched.unwrap());
+        assert_eq!((requests, in_flight, sleeps), (1, 0, 0));
+
+        let (matched, requests, in_flight, sleeps) =
+            poll_once(json!({"result":{"status":"idle"}}), Some(Instant::now()));
+        assert!(!matched.unwrap());
+        assert_eq!((requests, in_flight, sleeps), (1, 0, 0));
+
+        let (error, requests, in_flight, sleeps) = poll_once(
+            json!({"error":{"code":"not_found","message":"pane not found"}}),
+            None,
+        );
+        let error = error.unwrap_err();
+        assert!(error.to_string().contains("not_found"));
+        assert!(error.to_string().contains("pane not found"));
+        assert_eq!((requests, in_flight, sleeps), (1, 0, 0));
     }
 
     #[test]

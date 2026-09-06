@@ -33,6 +33,8 @@ cleanly across versions because unknown fields get defaults.
 | `layout.resume_in_new_workspace` | resume a session into its own workspace instead of a new tab |
 | `layout.file_open` | which viewer opens a file: `readonly` (default) or an editor command such as `vim` (see [Browsing & Opening Files](/docs/guides/files/)) |
 | `layout.file_click` | what a plain click in the FILES dock does: `preview` (default) reuses one read-only preview pane, `tab` opens a whole tab through `layout.file_open`. Only `tab` can launch an editor. |
+| `layout.workspace_paths` | show the cwd line beneath WORKSPACES rows; defaults to `true` and can be toggled from any workspace row menu |
+| `layout.agent_paths` | show the workspace/path detail line beneath AGENTS rows; defaults to `true` and can be toggled from any agent row menu |
 | `layout.diff_layout` | default native DIFF layout: `auto`, `split`, or `stack` |
 | `layout.diff_wrap` | wrap long diff rows instead of using horizontal navigation |
 | `layout.diff_context_lines` | unchanged Git context lines per hunk, from `0` to `20` |
@@ -44,6 +46,7 @@ cleanly across versions because unknown fields get defaults.
 | `notifications.sound_on_done` | play the selected done cue after an agent finishes; defaults to `false` |
 | `notifications.sound_on_blocked` | play the selected blocked cue when an agent needs attention; defaults to `false` |
 | `agents_active_only` | show only live agents in the AGENTS dock when `true`; defaults to `false`, which also shows resumable sessions |
+| `agents_this_workspace` | scope live agents and resumable sessions to the active workspace; defaults to `false` and is independent of `agents_active_only`. Toggle it with prefix `A` or the dynamic workspace-scope action in any AGENTS row's right-click menu. |
 | `sidebars.files_side` | last side used by the FILES dock (`left` or `right`), retained while the dock is hidden |
 | `prefix` | the command-mode prefix (default `ctrl+space`). Accepts `f1`–`f12` as safe single keys, or a character/Space chord containing `Ctrl` or `Alt`, such as `ctrl+b`, `alt+\`, or `shift+f12` (see [Keybindings](/docs/reference/keybindings/)) |
 | `keybindings` | command id → key, overriding the defaults |
@@ -59,3 +62,4 @@ cleanly across versions because unknown fields get defaults.
 | `EDITOR` | offered as an "open with" choice for files, alongside the editors found on `PATH` |
 | `LUVUS_PANE_ID` | *injected into every pane*, the pane's own id |
 | `LUVUS_SOCKET_PATH` | *injected into every pane*, the control socket |
+| `LUVUS_API_ADDRESS` | *injected into every pane*, the platform-native local API address for direct integrations |

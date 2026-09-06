@@ -1,24 +1,23 @@
 //! `alacritty_terminal` implementation of `VtEngine`. Pure Rust — no Zig, no FFI.
 
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{Color as VtColor, NamedColor, Processor, Rgb};
 
 use ratatui::style::{Color, Modifier};
 
 use super::{
-    AlignedRows, CodexComposerRegion, Cursor, HistoryMetrics, RenderCell, RetainedRowLayout,
-    VtEngine, ALIGNED_WIDE_CELL,
+    AlignedRows, CodexComposerRegion, Cursor, DamageCell, DamageKind, DamageRow, DamageSnapshot,
+    HistoryMetrics, RenderCell, RetainedRowLayout, VtEngine, ALIGNED_WIDE_CELL,
 };
 use crate::terminal::appearance::PaneAppearance;
 use crate::terminal::backend::{CaptureMode, CaptureResult};
-use crate::terminal::pty::InputAction;
+use crate::terminal::pty::{InputAction, InputSender};
 
 type TitleSlot = Arc<Mutex<Option<String>>>;
 
@@ -27,7 +26,7 @@ type TitleSlot = Arc<Mutex<Option<String>>>;
 /// Also captures the window title (OSC 0/2) for agent detection.
 #[derive(Clone)]
 pub struct EventProxy {
-    tx: Sender<InputAction>,
+    tx: InputSender,
     title: TitleSlot,
     appearance: Arc<Mutex<PaneAppearance>>,
 }
@@ -93,18 +92,23 @@ pub struct AlacrittyEngine {
     term: Term<EventProxy>,
     parser: Processor,
     title: TitleSlot,
-    response_tx: Sender<InputAction>,
+    response_tx: InputSender,
     appearance: Arc<Mutex<PaneAppearance>>,
     history_budget_bytes: usize,
     output_generation: u64,
+    damage_line_indices: Vec<u16>,
+    damage_rows: Vec<DamageRow>,
 }
+
+const MAX_PARTIAL_DAMAGE_ROWS: usize = 8;
+const MAX_PARTIAL_DAMAGE_CELLS: usize = 2_048;
 
 impl AlacrittyEngine {
     #[cfg(test)]
     pub fn new(
         cols: u16,
         rows: u16,
-        resp_tx: Sender<InputAction>,
+        resp_tx: impl Into<InputSender>,
         history_budget_bytes: usize,
     ) -> Self {
         Self::with_appearance(
@@ -119,10 +123,11 @@ impl AlacrittyEngine {
     pub(crate) fn with_appearance(
         cols: u16,
         rows: u16,
-        resp_tx: Sender<InputAction>,
+        resp_tx: impl Into<InputSender>,
         history_budget_bytes: usize,
         initial_appearance: PaneAppearance,
     ) -> Self {
+        let resp_tx = resp_tx.into();
         let dims = Dims {
             cols: cols.max(1) as usize,
             rows: rows.max(1) as usize,
@@ -152,6 +157,8 @@ impl AlacrittyEngine {
             appearance,
             history_budget_bytes,
             output_generation: 0,
+            damage_line_indices: Vec::new(),
+            damage_rows: Vec::new(),
         }
     }
 
@@ -460,6 +467,126 @@ impl VtEngine for AlacrittyEngine {
         }
     }
 
+    fn damage_snapshot(&mut self) -> DamageSnapshot {
+        self.term.finish_output_batch();
+        self.damage_line_indices.clear();
+        let kind = match self.term.damage() {
+            TermDamage::Full => DamageKind::Full,
+            TermDamage::Partial(lines) => {
+                self.damage_line_indices
+                    .extend(lines.map(|line| line.line as u16));
+                DamageKind::Partial
+            }
+        };
+
+        let cursor = self.cursor();
+        let composer_region = self.codex_composer_region();
+        let scroll_offset = self.term.grid().display_offset();
+        let columns = self.term.grid().columns();
+        let too_large = self.damage_line_indices.len() > MAX_PARTIAL_DAMAGE_ROWS
+            || self.damage_line_indices.len().saturating_mul(columns) > MAX_PARTIAL_DAMAGE_CELLS;
+        if kind == DamageKind::Full || too_large {
+            return DamageSnapshot {
+                generation: self.output_generation,
+                kind: DamageKind::Full,
+                cursor,
+                composer_region,
+                scroll_offset,
+                rows: Vec::new(),
+            };
+        }
+
+        let mut row_indices = std::mem::take(&mut self.damage_line_indices);
+        let screen_lines = self.term.grid().screen_lines();
+        row_indices.retain(|row| (*row as usize) < screen_lines);
+        let grid = self.term.grid();
+        let display_offset = grid.display_offset() as i32;
+        let mut damaged_rows = std::mem::take(&mut self.damage_rows);
+        while damaged_rows.len() < row_indices.len() {
+            damaged_rows.push(DamageRow {
+                row: 0,
+                cells: Vec::with_capacity(columns),
+            });
+        }
+        damaged_rows.truncate(row_indices.len());
+        for (damaged_row, row) in damaged_rows.iter_mut().zip(row_indices.iter().copied()) {
+            if row as usize >= grid.screen_lines() {
+                continue;
+            }
+            damaged_row.row = row;
+            let line = Line(row as i32 - display_offset);
+            let mut used = 0;
+            for column in 0..columns {
+                let cell = &grid[line][Column(column)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                let style = RenderCell {
+                    fg: map_color(cell.fg),
+                    bg: map_color(cell.bg),
+                    mods: map_flags(cell.flags),
+                };
+                if let Some(damage_cell) = damaged_row.cells.get_mut(used) {
+                    damage_cell.column = column as u16;
+                    damage_cell.character = cell.c;
+                    damage_cell.zero_width.clear();
+                    if let Some(zero_width) = cell.zerowidth() {
+                        damage_cell.zero_width.extend(zero_width);
+                    }
+                    damage_cell.style = style;
+                } else {
+                    damaged_row.cells.push(DamageCell {
+                        column: column as u16,
+                        character: cell.c,
+                        zero_width: cell.zerowidth().unwrap_or_default().to_vec(),
+                        style,
+                    });
+                }
+                used += 1;
+            }
+            damaged_row.cells.truncate(used);
+        }
+        row_indices.clear();
+        self.damage_line_indices = row_indices;
+
+        DamageSnapshot {
+            generation: self.output_generation,
+            kind: DamageKind::Partial,
+            cursor,
+            composer_region,
+            scroll_offset,
+            rows: damaged_rows,
+        }
+    }
+
+    fn acknowledge_damage(&mut self, generation: u64) -> bool {
+        if self.output_generation != generation {
+            return false;
+        }
+        self.term.reset_damage();
+        true
+    }
+
+    fn recycle_damage_snapshot(&mut self, mut snapshot: DamageSnapshot) {
+        if snapshot.kind != DamageKind::Partial
+            || snapshot.rows.len() > MAX_PARTIAL_DAMAGE_ROWS
+            || snapshot
+                .rows
+                .iter()
+                .map(|row| row.cells.capacity())
+                .sum::<usize>()
+                > MAX_PARTIAL_DAMAGE_CELLS
+        {
+            return;
+        }
+        for row in &mut snapshot.rows {
+            for cell in &mut row.cells {
+                cell.zero_width.clear();
+            }
+        }
+        self.damage_rows = snapshot.rows;
+    }
+
     fn detection_text(&self, n: u16) -> String {
         // Index the grid by `Line` rather than using `display_iter()`: line
         // indexing is relative to the **live** screen (`Storage::compute_index`
@@ -574,6 +701,14 @@ impl VtEngine for AlacrittyEngine {
             } else {
                 indexed.cell.zerowidth()
             };
+            if let Some(hyperlink) = indexed.cell.hyperlink() {
+                lines.push_hyperlink_cell(
+                    r as u16,
+                    indexed.point.column.0 as u16,
+                    hyperlink.id(),
+                    hyperlink.uri(),
+                );
+            }
             lines.push_cell(r as u16, indexed.point.column.0 as u16, c, zero_width);
         }
         lines
@@ -1061,6 +1196,131 @@ mod tests {
 
     fn budget_for_rows(cols: usize, rows: usize) -> usize {
         estimated_row_bytes(cols).saturating_mul(rows)
+    }
+
+    #[test]
+    fn visible_rows_retain_osc8_targets_and_spans() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(24, 2, tx, budget_for_rows(24, 20));
+        engine.advance(
+            b"before \x1b]8;id=claude;file:///repo/src/main.rs\x1b\\main.rs\x1b]8;;\x1b\\ after",
+        );
+
+        let rows = engine.visible_rows_aligned();
+        let hyperlink = rows.hyperlink_at(0, 8).expect("OSC 8 target retained");
+        assert_eq!(hyperlink.uri(), "file:///repo/src/main.rs");
+        assert_eq!(hyperlink.spans(), &[(0, 7, 14)]);
+        assert!(rows.hyperlink_at(0, 6).is_none());
+        assert!(rows.hyperlink_at(0, 14).is_none());
+    }
+
+    #[test]
+    fn damage_snapshot_is_owned_bounded_and_generation_safe() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(8, 3, tx, budget_for_rows(8, 20));
+
+        let initial = engine.damage_snapshot();
+        assert_eq!(initial.kind, DamageKind::Full);
+        assert!(initial.rows.is_empty());
+        assert!(engine.acknowledge_damage(initial.generation));
+        engine.recycle_damage_snapshot(initial);
+
+        engine.advance("A界e\u{301}".as_bytes());
+        let first = engine.damage_snapshot();
+        assert_eq!(first.kind, DamageKind::Partial);
+        assert_eq!(first.rows.len(), 1);
+        assert_eq!(first.rows[0].row, 0);
+        assert!(first.rows[0].cells.len() <= 8);
+        assert!(first.rows[0]
+            .cells
+            .iter()
+            .any(|cell| cell.character == '界' && cell.zero_width.is_empty()));
+        assert!(first.rows[0]
+            .cells
+            .iter()
+            .any(|cell| cell.character == 'e' && cell.zero_width.as_ref() == ['\u{301}']));
+
+        // Output arriving after capture invalidates the acknowledgement. The
+        // newer byte and the old damage must both survive in the next snapshot.
+        engine.advance(b"Z");
+        assert!(!engine.acknowledge_damage(first.generation));
+        let first_generation = first.generation;
+        engine.recycle_damage_snapshot(first);
+        let second = engine.damage_snapshot();
+        assert!(second.generation > first_generation);
+        assert!(second.rows.iter().any(|row| row.row == 0));
+        assert!(engine.acknowledge_damage(second.generation));
+        engine.recycle_damage_snapshot(second);
+        let cursor_only = engine.damage_snapshot();
+        assert!(cursor_only.rows.len() <= 1, "only cursor damage remains");
+        engine.recycle_damage_snapshot(cursor_only);
+    }
+
+    #[test]
+    fn partial_damage_reuses_row_and_cell_storage() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 20));
+
+        let initial = engine.damage_snapshot();
+        assert!(engine.acknowledge_damage(initial.generation));
+        engine.recycle_damage_snapshot(initial);
+
+        engine.advance(b"first");
+        let first = engine.damage_snapshot();
+        assert_eq!(first.kind, DamageKind::Partial);
+        assert_eq!(first.rows.len(), 1);
+        let row_ptr = first.rows.as_ptr();
+        let cell_ptr = first.rows[0].cells.as_ptr();
+        let row_capacity = first.rows.capacity();
+        let cell_capacity = first.rows[0].cells.capacity();
+        assert!(engine.acknowledge_damage(first.generation));
+        engine.recycle_damage_snapshot(first);
+
+        engine.advance(b"\rsecond");
+        let second = engine.damage_snapshot();
+        assert_eq!(second.kind, DamageKind::Partial);
+        assert_eq!(second.rows.as_ptr(), row_ptr);
+        assert_eq!(second.rows.capacity(), row_capacity);
+        assert_eq!(second.rows[0].cells.as_ptr(), cell_ptr);
+        assert_eq!(second.rows[0].cells.capacity(), cell_capacity);
+        assert!(engine.acknowledge_damage(second.generation));
+        engine.recycle_damage_snapshot(second);
+    }
+
+    #[test]
+    fn structural_terminal_changes_force_full_damage() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(8, 3, tx, budget_for_rows(8, 20));
+
+        let initial = engine.damage_snapshot();
+        assert!(engine.acknowledge_damage(initial.generation));
+        engine.recycle_damage_snapshot(initial);
+
+        engine.advance(b"\x1b[31;1mX");
+        let styled = engine.damage_snapshot();
+        assert_eq!(styled.kind, DamageKind::Partial);
+        let cell = styled.rows[0]
+            .cells
+            .iter()
+            .find(|cell| cell.character == 'X')
+            .expect("styled cell captured");
+        assert_eq!(cell.style.fg, Color::Indexed(1));
+        assert!(cell.style.mods.contains(Modifier::BOLD));
+        assert!(engine.acknowledge_damage(styled.generation));
+        engine.recycle_damage_snapshot(styled);
+
+        engine.resize(10, 4);
+        let resized = engine.damage_snapshot();
+        assert_eq!(resized.kind, DamageKind::Full);
+        assert!(resized.rows.is_empty());
+        assert!(engine.acknowledge_damage(resized.generation));
+        engine.recycle_damage_snapshot(resized);
+
+        engine.advance(b"\x1b[?1049h");
+        let alternate_screen = engine.damage_snapshot();
+        assert_eq!(alternate_screen.kind, DamageKind::Full);
+        assert!(engine.acknowledge_damage(alternate_screen.generation));
+        engine.recycle_damage_snapshot(alternate_screen);
     }
 
     // docs/07: agent detection must read the **live** screen, never the

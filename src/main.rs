@@ -5,6 +5,7 @@
 mod agent;
 mod api;
 mod app;
+mod automation;
 mod bar;
 mod changelog;
 mod cli;
@@ -88,6 +89,12 @@ fn main() -> Result<()> {
     // endpoints without changing the selected Luvus home in any way.
     if is_backend_discovery_request(&args) {
         std::process::exit(cli::run(&args)?);
+    }
+    // Private foreground route used only by scheduled worker panes. Keep it
+    // ahead of migrations and TUI/server routing: it must run exactly one
+    // adapter process, settle its ORCH task, and exit.
+    if args.get(1).map(String::as_str) == Some("__automation-worker") {
+        std::process::exit(automation::run_worker(&args)?);
     }
 
     // One-time local cleanup of the old default-on skill installation. This
@@ -1365,6 +1372,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
             emit_clipboard(&text);
         }
         app.tick_toast(Instant::now());
+        app.tick_copy_highlight(Instant::now());
         app.tick_search_flash(Instant::now());
         app.tick_bar_notifications(Instant::now());
         // A forced redraw (resize / regained focus) wipes the terminal so the next
@@ -1469,7 +1477,7 @@ fn send_decoded_input(
 }
 
 fn app_event(event: Event) -> Option<AppEvent> {
-    match event {
+    match crate::terminal::host_key::normalize_platform_modifiers(event) {
         Event::Key(k) => Some(AppEvent::Key(k)),
         Event::Mouse(m) => Some(AppEvent::Mouse(m)),
         Event::Resize(_, _) => Some(AppEvent::Resize),
@@ -2399,11 +2407,17 @@ mod tests {
     fn tiny_terminal_shows_guard_not_garbage() {
         let (tx, _rx) = mpsc::channel::<AppEvent>();
         let mut app = App::new(80, 24, tx).expect("spawn pane");
+        app.automation_rects
+            .push(("stale".into(), ratatui::layout::Rect::new(1, 1, 5, 2)));
 
         for (w, h) in [(1, 1), (5, 2), (23, 5), (20, 4)] {
             let backend = TestBackend::new(w, h);
             let mut terminal = Terminal::new(backend).unwrap();
             terminal.draw(|f| ui::render(f, &mut app)).unwrap(); // must not panic
+            assert!(
+                app.automation_rects.is_empty(),
+                "tiny frames must clear stale automation hit geometry"
+            );
         }
 
         // At a small-but-writable size the guard message is visible.
@@ -2453,6 +2467,10 @@ mod tests {
         }
 
         // A genuinely tiny phone-keyboard-open viewport shows the guard, not garbage.
+        // Seed AGENTS overflow geometry first: the early return must not leave an
+        // invisible jump target clickable over the friendly message.
+        let junk = ratatui::layout::Rect::new(0, 0, 20, 4);
+        app.agents_elsewhere_rect = Some((app.layout().focus, junk));
         let mut term = Terminal::new(TestBackend::new(20, 4)).unwrap();
         term.draw(|f| ui::render(f, &mut app)).unwrap();
         let all: String = (0..4).map(|r| full_row(&term, r)).collect();
@@ -2460,6 +2478,7 @@ mod tests {
             all.contains("enlarge terminal"),
             "a tiny viewport gets the friendly guard"
         );
+        assert!(app.agents_elsewhere_rect.is_none());
     }
 
     /// The orchestration board tab (docs/22, ORCH-7) renders its header, a task

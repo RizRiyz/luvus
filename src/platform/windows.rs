@@ -6,11 +6,16 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::mem::size_of;
+use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
 
 use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
 use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Security::{
     EqualSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
 use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -25,6 +30,38 @@ use windows_sys::Win32::System::Threading::{
 const MAX_PROCESS_ENTRIES: usize = 16_384;
 const MAX_DESCENDANTS_PER_ROOT: usize = 64;
 const MAX_COMMAND_LINE_BYTES: usize = 64 * 1024;
+
+pub(super) fn atomic_replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fn wide(path: &Path) -> std::io::Result<Vec<u16>> {
+        let mut value: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if value.contains(&0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path contains a null character",
+            ));
+        }
+        value.push(0);
+        Ok(value)
+    }
+
+    let source = wide(source)?;
+    let destination = wide(destination)?;
+    // SAFETY: both pointers reference live, null-terminated UTF-16 buffers for
+    // the duration of the call. The files share a directory, so replacement
+    // stays on one volume and MOVEFILE_WRITE_THROUGH waits for completion.
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
 
 struct OwnedHandle(HANDLE);
 

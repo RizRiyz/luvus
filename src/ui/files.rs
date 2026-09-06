@@ -189,6 +189,8 @@ fn draw_diff_list(
     t: &Theme,
     line_at: &impl Fn(&mut RenderTarget, u16, Line),
 ) {
+    let cx = area.x + 2;
+    let cw = area.width.saturating_sub(3);
     if !app.diff_snapshot_matches_active_workspace() {
         line_at(
             f,
@@ -265,10 +267,6 @@ fn draw_diff_list(
                 } else {
                     file.key.display_path().to_string()
                 };
-                let stats = match (file.additions, file.deletions) {
-                    (Some(add), Some(del)) => format!(" +{add} -{del}"),
-                    _ => String::new(),
-                };
                 let notes = diff_note_count(file.unresolved_notes);
                 let marker = if file.modified_since_review() {
                     "↻"
@@ -283,19 +281,52 @@ fn draw_diff_list(
                     Style::new().fg(t.subtext0)
                 };
                 let badge_style = if selected { style } else { Style::new().fg(fg) };
-                line_at(
-                    f,
+                let stats = diff_list_stats(file.additions, file.deletions, t);
+                let stats_width = stats.as_ref().map_or(0, Line::width) as u16;
+                // Keep enough room for the review marker, status badge, and a
+                // useful path fragment. Very narrow docks omit counts instead
+                // of allowing the right column to overwrite the file label.
+                let show_stats = stats_width > 0 && cw >= stats_width.saturating_add(8);
+                let label_width = if show_stats {
+                    cw.saturating_sub(stats_width).saturating_sub(1)
+                } else {
+                    cw
+                };
+                f.buffer_mut().set_line(
+                    cx,
                     y,
-                    Line::from(vec![
+                    &Line::from(vec![
                         Span::styled(format!("{marker} {} ", file.status.badge()), badge_style),
-                        Span::styled(format!("{path}{stats}{notes}"), style),
+                        Span::styled(format!("{path}{notes}"), style),
                     ]),
+                    label_width,
                 );
+                if show_stats {
+                    f.buffer_mut().set_line(
+                        cx + cw - stats_width,
+                        y,
+                        stats.as_ref().expect("visible stats require a line"),
+                        stats_width,
+                    );
+                }
                 app.diff_row_rects
                     .push((row_index, Rect::new(area.x, y, area.width, 1)));
             }
         }
     }
+}
+
+fn diff_list_stats(
+    additions: Option<u32>,
+    deletions: Option<u32>,
+    t: &Theme,
+) -> Option<Line<'static>> {
+    let (additions, deletions) = additions.zip(deletions)?;
+    Some(Line::from(vec![
+        Span::styled(format!("+{additions}"), Style::new().fg(t.mint)),
+        Span::styled(" ", Style::new().fg(t.subtext0)),
+        Span::styled(format!("-{deletions}"), Style::new().fg(t.coral)),
+    ]))
 }
 
 /// Draw a native file view (docs/38 FILE-3) into `area`, the pane's content
@@ -669,16 +700,38 @@ pub(super) fn draw_delete_confirm(
 
 #[cfg(test)]
 mod tests {
-    use super::{diff_note_count, file_selection_contains};
+    use super::{diff_list_stats, diff_note_count, file_selection_contains};
     use crate::app::Selection;
     use crate::ids::PaneId;
-    use ratatui::layout::Rect;
+    use crate::ui::{theme::Theme, RenderTarget};
+    use ratatui::{buffer::Buffer, layout::Rect};
 
     #[test]
     fn diff_note_count_uses_singular_and_plural_labels() {
         assert_eq!(diff_note_count(0), "");
         assert_eq!(diff_note_count(1), "  1 note");
         assert_eq!(diff_note_count(2), "  2 notes");
+    }
+
+    #[test]
+    fn diff_stats_are_colored_and_right_aligned() {
+        let theme = Theme::quattro_rally();
+        let area = Rect::new(0, 0, 24, 1);
+        let stats = diff_list_stats(Some(114), Some(25), &theme).unwrap();
+        let width = stats.width() as u16;
+        let mut buffer = Buffer::empty(area);
+        {
+            let mut target = RenderTarget::new(&mut buffer, area);
+            target
+                .buffer_mut()
+                .set_line(area.right() - width, 0, &stats, width);
+        }
+
+        let screen: String = (0..area.width).map(|x| buffer[(x, 0)].symbol()).collect();
+        assert!(screen.ends_with("+114 -25"));
+        assert_eq!(buffer[(area.right() - width, 0)].fg, theme.mint);
+        assert_eq!(buffer[(area.right() - 3, 0)].fg, theme.coral);
+        assert_ne!(buffer[(area.right() - width, 0)].bg, theme.accent);
     }
 
     #[test]

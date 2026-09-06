@@ -1,4 +1,7 @@
-use super::types::{AgentDescriptor, DiscoveryOperations, IdentityDescriptor, SessionOperations};
+use super::types::{
+    AgentDescriptor, AutomationLaunch, AutomationOperations, DiscoveryOperations,
+    IdentityDescriptor, SessionOperations,
+};
 
 pub(in crate::agent) mod sessions;
 #[cfg(test)]
@@ -9,6 +12,13 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     aliases: &[],
     launch_command: "pi",
     task_prompt_args: &[],
+    automation: Some(AutomationOperations {
+        read_only: Some(AutomationLaunch {
+            args: &["--no-approve", "--tools", "read,grep,find,ls", "--print"],
+        }),
+        workspace: None,
+        full_access: None,
+    }),
     identity: IdentityDescriptor {
         distinct: &["pi-coding-agent"],
         ambiguous: &["pi"],

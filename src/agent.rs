@@ -17,6 +17,7 @@ use std::time::SystemTime;
 
 pub(crate) mod aider;
 pub(crate) mod amp;
+pub(crate) mod antigravity;
 pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod copilot;
@@ -107,7 +108,7 @@ pub fn sessions_for(agent: &str, cwd: &Path) -> Vec<String> {
 /// The shell command that resumes an agent's native session, if supported.
 /// Returns `None` for unknown agents or unsafe ids.
 pub fn resume_command(agent: &str, session_id: &str) -> Option<String> {
-    if !safe_id(session_id) {
+    if !safe_session_id(session_id) {
         return None;
     }
     let src = source(agent)?;
@@ -143,6 +144,19 @@ fn filter_launch_flags(agent: &str, launch: &[String]) -> Vec<String> {
     while i < launch.len() {
         let t = launch[i].as_str();
         let head = t.split('=').next().unwrap_or(t);
+        // Antigravity resumes by conversation id and uses `-c` for the newest
+        // conversation. Neither selector may survive beside the exact id Luvus
+        // is restoring.
+        if agent == antigravity::NAME && matches!(head, "--conversation" | "-c") {
+            i += 1;
+            if head == "--conversation"
+                && !t.contains('=')
+                && launch.get(i).is_some_and(|value| !value.starts_with('-'))
+            {
+                i += 1;
+            }
+            continue;
+        }
         // Hermes accepts an optional name after continue. Neither the selector
         // nor its value may survive into an exact-id restore.
         if agent == "hermes" && matches!(head, "--continue" | "-c") {
@@ -236,7 +250,7 @@ pub fn fork_session_id(agent: &str, bound: Option<&str>, cwd: &Path) -> Option<S
 /// full context in a new, diverging session (the original is left untouched).
 /// `None` for agents without a native fork, unknown agents, or unsafe ids.
 pub fn fork_command(agent: &str, session_id: &str) -> Option<String> {
-    if !safe_id(session_id) {
+    if !safe_session_id(session_id) {
         return None;
     }
     let f = source(agent)?.fork?;
@@ -249,12 +263,18 @@ pub fn can_fork(agent: &str) -> bool {
     source(agent).and_then(|s| s.fork).is_some()
 }
 
-fn safe_id(id: &str) -> bool {
+pub(crate) fn safe_session_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 256
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/'))
+}
+
+/// Canonical built-in agent id for trusted integration reports. Manifest-only
+/// identities do not gain native session capabilities through this path.
+pub(crate) fn canonical_builtin(agent: &str) -> Option<&'static str> {
+    registry::find(agent).map(|descriptor| descriptor.id)
 }
 
 fn home() -> PathBuf {
@@ -377,6 +397,11 @@ mod tests {
             resume_command("gemini", "g1").as_deref(),
             Some("gemini --resume 'g1'\r")
         );
+        assert_eq!(
+            resume_command("agy", "ec33ebf9-0cba-4100-8142-c61503f6c587").as_deref(),
+            Some("agy --conversation 'ec33ebf9-0cba-4100-8142-c61503f6c587'\r")
+        );
+        assert!(is_resumable("antigravity-cli"));
         assert_eq!(
             resume_command("qwen", "q1").as_deref(),
             Some("qwen --resume 'q1'\r")
@@ -682,6 +707,17 @@ mod tests {
             f("hermes", &["--continue", "old title", "--tui"]),
             vec!["--tui"],
             "Hermes drops its optional continue title"
+        );
+        assert_eq!(
+            f(
+                "antigravity",
+                &["--conversation", "old-id", "--model", "gemini-3.1-pro"]
+            ),
+            vec!["--model", "gemini-3.1-pro"]
+        );
+        assert_eq!(
+            f("antigravity", &["--conversation=old-id", "-c", "--sandbox"]),
+            vec!["--sandbox"]
         );
         // A kept flag keeps its value.
         assert_eq!(

@@ -164,6 +164,10 @@ enum Cond {
     /// (U+2800..=U+28FF, what most CLIs animate) or a moon phase (U+1F311..=
     /// U+1F318, Kimi's background-agent spinner). A running spinner means work.
     Spinner,
+    /// A line starts with one of these branded prefixes and the next character
+    /// is a spinner. Some agents keep their brand before the live state glyph
+    /// in the OSC title, so the generic start-of-line spinner rule cannot see it.
+    SpinnerAfterPrefix(Vec<String>),
 }
 
 impl Cond {
@@ -176,6 +180,14 @@ impl Cond {
             Cond::Spinner => low
                 .lines()
                 .any(|l| l.trim_start().chars().next().is_some_and(is_spinner_glyph)),
+            Cond::SpinnerAfterPrefix(prefixes) => low.lines().any(|line| {
+                let line = line.trim_start();
+                prefixes.iter().any(|prefix| {
+                    line.strip_prefix(prefix)
+                        .and_then(|rest| rest.chars().next())
+                        .is_some_and(is_spinner_glyph)
+                })
+            }),
         }
     }
 }
@@ -308,6 +320,9 @@ fn all(subs: &[&str]) -> Cond {
 fn starts_with(prefixes: &[&str]) -> Cond {
     Cond::StartsWith(prefixes.iter().map(|value| value.to_lowercase()).collect())
 }
+fn spinner_after_prefix(prefixes: &[&str]) -> Cond {
+    Cond::SpinnerAfterPrefix(prefixes.iter().map(|value| value.to_lowercase()).collect())
+}
 
 /// How much of the live terminal grid must reach the rule engine. Most agents
 /// keep state beside their bottom prompt, but fx can pin its transient activity
@@ -412,6 +427,47 @@ fn builtin_rules() -> Vec<Rule> {
             105,
             Region::Screen,
             vec![any(&["ctrl+c to stop"])],
+        ),
+        // OMP publishes its state in the OSC title as `π <state> label`.
+        // Current builds use `:` while working, `!` for attention, and `>` for
+        // the user's turn. Older builds animated a braille spinner after `π `
+        // instead of `:`; keep that form so both contracts classify.
+        //
+        // On some Windows ConPTY paths the brand glyph arrives as U+87FA
+        // (UTF-8 E8 9F BA) instead of Greek pi U+03C0. Live inventory on this
+        // host shows that consistently while ASCII state markers stay intact,
+        // so match both brand codepoints until the title encoding path is fixed.
+        // Scope the rules to OMP: the generic spinner rule requires a
+        // line-leading spinner, and weakening it would create false positives
+        // for ordinary branded titles. The explicit idle title outranks
+        // retained screen activity but not a live confirmation panel.
+        per(
+            "omp",
+            State::Blocked,
+            325,
+            Region::Title,
+            vec![starts_with(&["π !", "\u{87FA} !"])],
+        ),
+        per(
+            "omp",
+            State::Working,
+            125,
+            Region::Title,
+            vec![starts_with(&["π :", "\u{87FA} :"])],
+        ),
+        per(
+            "omp",
+            State::Working,
+            124,
+            Region::Title,
+            vec![spinner_after_prefix(&["π ", "\u{87FA} "])],
+        ),
+        per(
+            "omp",
+            State::Idle,
+            210,
+            Region::Title,
+            vec![starts_with(&["π >", "\u{87FA} >"])],
         ),
         // fx suppresses its activity row while it needs user input. Its
         // narrowest approval and question hints retain these paired controls,
@@ -1622,6 +1678,58 @@ Would you like to proceed?
     }
 
     #[test]
+    fn omp_title_states_work_without_the_optional_integration() {
+        let manifests = Manifests::builtin();
+        let omp_process = vec!["bun /Users/me/.bun/bin/omp".to_string()];
+        let detect = |title: &str, screen: &str| {
+            classify(
+                Some(title),
+                screen,
+                false,
+                false,
+                "zsh",
+                "",
+                &omp_process,
+                &manifests,
+            )
+        };
+
+        let working = detect("π : sudos", "");
+        assert_eq!(working.agent, "omp");
+        assert_eq!(working.identity_source, "process_tree");
+        assert_eq!(working.state, State::Working);
+        assert_eq!(working.state_source, "manifest_rule");
+
+        assert_eq!(detect("π ⠋ sudos", "").state, State::Working);
+        assert_eq!(detect("π ! sudos", "").state, State::Blocked);
+        assert_eq!(detect("π > sudos", "esc to interrupt").state, State::Idle);
+        // Windows ConPTY-mangled brand observed in live inventory titles.
+        assert_eq!(detect("\u{87FA} : sudos", "").state, State::Working);
+        assert_eq!(detect("\u{87FA} ! sudos", "").state, State::Blocked);
+        assert_eq!(
+            detect("\u{87FA} > sudos", "esc to interrupt").state,
+            State::Idle
+        );
+
+        let pi = classify(
+            Some("π ⠙ sudos"),
+            "",
+            false,
+            false,
+            "zsh",
+            "",
+            &["/usr/local/bin/pi".to_string()],
+            &manifests,
+        );
+        assert_eq!(pi.agent, "pi");
+        assert_eq!(
+            pi.state,
+            State::Idle,
+            "OMP's branded title contract must not change Pi state"
+        );
+    }
+
+    #[test]
     fn muse_identity_replace_disables_the_versioned_binary_matcher() {
         let mut m = Manifests::builtin();
         toml::from_str::<ManifestFile>(
@@ -1837,6 +1945,28 @@ Would you like to proceed?
                 r#"node C:\work\node_modules\@earendil-works\pi-coding-agent\dist\cli.js"#.into()
             ]),
             Some("pi".into())
+        );
+        let antigravity_unix = "/Users/me/.local/bin/agy --conversation ec33ebf9-0cba-4100-8142-c61503f6c587 --sandbox";
+        assert_eq!(
+            m.agent_in_processes(&[antigravity_unix.into()]),
+            Some("antigravity".into())
+        );
+        assert_eq!(
+            m.launch_args_for(&[antigravity_unix.into()], "antigravity"),
+            Some(vec![
+                "--conversation".into(),
+                "ec33ebf9-0cba-4100-8142-c61503f6c587".into(),
+                "--sandbox".into(),
+            ])
+        );
+        let antigravity_windows = r#"C:\Users\me\AppData\Local\agy\bin\agy.exe -p "fix the tests""#;
+        assert_eq!(
+            m.agent_in_processes(&[antigravity_windows.into()]),
+            Some("antigravity".into())
+        );
+        assert_eq!(
+            m.launch_args_for(&[antigravity_windows.into()], "antigravity"),
+            Some(vec!["-p".into(), "fix the tests".into()])
         );
     }
 
@@ -2587,6 +2717,47 @@ Would you like to proceed?
             "zsh"
         );
         assert_eq!(named("gemini is a constellation\n", &proc("-zsh")), "zsh");
+        assert_eq!(
+            named("read the Antigravity documentation\n", &proc("-zsh")),
+            "zsh"
+        );
+        assert_eq!(
+            named(
+                "",
+                &proc("/Applications/Antigravity.app/Contents/MacOS/Antigravity")
+            ),
+            "zsh",
+            "the desktop editor binary is not the Antigravity CLI"
+        );
+        assert_eq!(
+            named(
+                "Requesting permission for:\nDo you want to proceed?",
+                &proc("/Users/me/.local/bin/agy")
+            ),
+            "antigravity"
+        );
+        let blocked = classify(
+            Some("agy"),
+            "Requesting permission for:\nDo you want to proceed?",
+            true,
+            false,
+            "zsh",
+            "",
+            &proc("/Users/me/.local/bin/agy"),
+            &m,
+        );
+        assert_eq!(blocked.state, State::Blocked);
+        let working = classify(
+            Some("agy"),
+            "⠹ Working on the task",
+            true,
+            false,
+            "zsh",
+            "",
+            &proc("C:\\Users\\me\\AppData\\Local\\agy\\bin\\agy.exe"),
+            &m,
+        );
+        assert_eq!(working.state, State::Working);
 
         // Flags never count as the binary, and .exe is stripped.
         assert_eq!(named("", &proc("cargo test --example amp")), "zsh");

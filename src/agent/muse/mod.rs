@@ -10,7 +10,10 @@ use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use super::types::{AgentDescriptor, DiscoveryOperations, IdentityDescriptor, SessionOperations};
+use super::types::{
+    AgentDescriptor, AutomationLaunch, AutomationOperations, DiscoveryOperations,
+    IdentityDescriptor, SessionOperations,
+};
 use super::SessionInfo;
 
 pub const NAME: &str = "muse";
@@ -22,6 +25,29 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     aliases: &[],
     launch_command: "muse",
     task_prompt_args: &[],
+    automation: Some(AutomationOperations {
+        read_only: Some(AutomationLaunch {
+            args: &[
+                "exec",
+                "--disable-write",
+                "--disable-shell",
+                "--approval-mode",
+                "never",
+            ],
+        }),
+        workspace: Some(AutomationLaunch {
+            args: &[
+                "exec",
+                "--trust-workspace",
+                "--approval-mode",
+                "never",
+                "--user-input-auto-resolve",
+            ],
+        }),
+        full_access: Some(AutomationLaunch {
+            args: &["exec", "--yolo", "--user-input-auto-resolve"],
+        }),
+    }),
     identity: IdentityDescriptor {
         distinct: DISTINCT_IDENTITIES,
         ambiguous: AMBIGUOUS_IDENTITIES,

@@ -13,7 +13,7 @@ worktree branches without touching your checkout.
 :::tip[TL;DR]
 Open the board (`Ctrl+Space o`), press `a` to add a task, then `s` to choose
 worktree or workspace mode and an agent. Press `d` to finish; worktree tasks
-can then use `m` to merge.
+can then use `m` to merge. Press `Tab` to manage scheduled agent automations.
 :::
 
 ## The concepts
@@ -21,6 +21,7 @@ can then use `m` to merge.
 | Concept | What it is |
 |---|---|
 | **Task** | A unit of work: title, the file globs it will touch, dependencies, and an optional quality-gate command. Gets an id like `t1`. |
+| **Automation** | A durable one-time or recurring definition. Each due occurrence creates a fresh ORCH task and starts its configured agent. Future work owns no pane, lease, or worktree before it is due. |
 | **Lease** | A reservation on file paths. Two workers can't hold overlapping globs, so conflicting work can't be assigned. |
 | **Worker** | A task-owned pane. Worktree mode uses a dedicated branch and checkout; workspace mode uses a dedicated task tab in an existing shared checkout. |
 | **Quality gate** | A command (e.g. `cargo test`) that runs when a task is marked done. It must pass before the task can merge. |
@@ -34,6 +35,21 @@ integrates at a time. An interrupted integration restores its prior `done` or
 `blocked` state after restart. Branch-backed dependents wait for `merged`, so
 they never start before their dependency is available in the integration
 history. The ledger lives in `~/.luvus/orch.json`, separate from your session.
+
+Automation definitions and bounded run history live in the selected server
+session's `automations.json`. The detached server owns their deadlines, so
+closing the TUI does not pause them. Stopping the server does; on restart Luvus
+reconciles persisted ORCH provenance before starting anything and applies the
+definition's missed-run policy. A scheduled agent cannot survive its owning
+server, so an in-progress task from the previous server lifetime is recorded as
+failed instead of being left running or launched twice. A task whose durable
+provenance was saved before its worker started resumes that same pending run.
+An active-agent target is different: it creates no ORCH task and is bound to
+one live terminal lifetime. Restarting the server disables that definition
+instead of sending its prompt to a restored or unrelated pane.
+
+For schedule syntax, access profiles, missed-run policies, UHP requests, and a
+copyable example, see [Agent Automation](/docs/guides/automation/).
 
 `task start` validates the task's path lease before it creates a worktree or
 workspace worker pane. If another task already holds an overlapping path, start
@@ -51,6 +67,20 @@ leases, live. Navigate with `j`/`k`, the wheel, or click a row. On a wide
 terminal, the selected task's branch, paths, gate, output, and notes stay visible
 in a detail panel.
 
+The header switches between **Tasks** and **Automations BETA**. The automation view
+shows the definition state, retained schedule, next UTC deadline, target agent,
+target mode, and target workspace. Use `e` to pause or re-enable the selected definition,
+`r` to request one run without advancing its schedule, and `D` to delete an
+idle definition. Press `o` or `Enter` to inspect its trigger, timezone, next five
+occurrences, execution policy, task template, and bounded run history; click
+outside that detail popup or press `Esc` to close it. Armed
+definitions also appear in the sidebar's Active agents section as `scheduled`;
+the placeholder is replaced by the normal live agent row when a new ORCH task
+starts. An active-agent definition instead delivers into its already-visible
+agent row. Clicking a scheduled placeholder or a Mission Control automation row
+opens the same read-only detail. Mission Control shows aggregate armed, live,
+review, and failed automation health without polling usage data.
+
 Mouse controls follow the same validated actions as the keyboard and CLI:
 
 - click a task to select it;
@@ -59,7 +89,8 @@ Mouse controls follow the same validated actions as the keyboard and CLI:
 - use `o` or **Details** in the context menu for longer output and note history;
 - click its worker label to jump to the worker pane;
 - right click a task for the actions valid in its current state;
-- click **New task** to open the form, then click fields and form actions;
+- click **New task** or **New automation** to open the contextual form, then
+  click the Task/Automation tab, fields, and form actions;
 - choose **worktree** or **workspace** in the first start-worker step, then
   choose an agent in the second step;
 - when the board is empty, click the Worktree/Workspace labels in the Flow
@@ -71,13 +102,52 @@ before an action is chosen.
 
 | Key | Action |
 |-----|--------|
-| `a` | **new task**: a Title / Paths / Deps / Gate form (`⇥` between fields, `⏎` creates) |
+| `Tab` | switch between the Tasks and Automations views |
+| `a` | **new**: open Task creation from Tasks or Automation creation from Automations (`Tab` switches type, `↑`/`↓` moves fields, `⏎` creates) |
+| `o` / `Enter` | inspect the selected automation when the Automations view is active |
 | `s` | **start**: choose worktree/workspace mode, then choose an agent |
 | `d` | **done**: runs its quality gate (pass → done, fail → held at review) |
 | `m` | **merge** into `luvus/integration` |
 | `⏎` | **jump** to its worker pane |
 | `x` | **release** an active task and its path leases |
 | `q` | close the board without stopping tasks or workers |
+
+The form starts on a compact **Task · Automation** choice. The active board view
+selects its matching type by default. Task shows Title, Paths, Deps, Gate, and a
+`Manual`/`Now` Start choice; Prompt and Agent appear only for `Now`. Automation
+hides concrete dependencies and owns a registry-backed Agent, an explicit
+`Run in` choice for an isolated Worktree or the existing Workspace, an `Access`
+choice (`Read only`, `Workspace`, or `Full access`), `Once later`,
+`Hourly`, `Daily`, or `Weekly`, and Schedule, followed by a three-row Prompt editor. Use
+`Tab` to switch between Task and Automation, Down or Up to move between fields,
+Left/Right to change the selected Agent, Run in, Access, or Start value, and
+`Shift+Enter` to add a new line to the Automation prompt. Plain `Enter` creates
+the automation. Agent
+choices come from the built-in adapters that declare at least one reviewed
+unattended launch profile. A selected agent/access combination that is not supported
+is rejected before Luvus creates a task, worktree, lease, or pane. Task and Automation
+retain independent drafts while the modal is open, so switching type and returning
+restores that type's inputs, selections, and focused field.
+
+`Manual` preserves ordinary task creation. `Now` creates and starts one ORCH
+task. Automations store a template and do not create the concrete task until it
+is due. The form detects the server user's IANA timezone and shows it beside the
+Automation Start choice. Schedule input uses that local wall-clock time:
+`YYYY-MM-DD HH:MM` for Once, a minute from
+`00` through `59` for Hourly, `HH:MM` for Daily, and `mon,fri HH:MM` for
+Weekly. Changing Start fills Schedule with a valid editable value; the first
+typed character replaces that suggestion. CLI and UHP continue to require
+explicit UTC or timezone fields.
+
+Calendar schedules retain their IANA timezone but persist each execution
+deadline as UTC. Across daylight-saving changes, Luvus keeps the requested
+wall-clock time, shifts a nonexistent time forward by the transition gap, and
+uses only the first occurrence of a repeated time. Preview deadlines before
+arming remote definitions when timezone behavior matters.
+
+The current beta is time-triggered. ORCH task dependencies can make a task
+ready after another task completes, but they do not automatically trigger an
+Automation definition.
 
 ## A worked example
 
@@ -119,12 +189,23 @@ luvus task next --start --agent "claude"   # claim + start the next ready task
 luvus task start t2 --mode workspace --agent "codex"
 
 # finish + merge
-luvus task heartbeat t1 --context 0.6      # context gate: >0.85 blocks `done`
+luvus task heartbeat t1 --context-used 0.6 # 60% of the model context window is used
 luvus task done t1                          # runs the quality gate
 luvus task merge t1
 
 # leases (usually automatic via task start)
 luvus lease acquire "src/auth/**" --task t1
+
+# schedule a weekday agent in a retained IANA timezone
+luvus automation create "Morning review" \
+  --title "Review changes" --prompt "Review and report risks" \
+  --agent codex --workspace-id workspace_example \
+  --weekly mon,tue,wed,thu,fri --at 08:00 --timezone Asia/Makassar \
+  --mode workspace --access workspace
+
+luvus automation list
+luvus automation preview --daily 08:00 --timezone America/New_York
+luvus automation run a1 --idempotency-key manual-review-1
 
 # react to everything, live (newline-delimited JSON)
 luvus events
@@ -132,17 +213,43 @@ luvus events
 
 Inside a luvus pane, commands default to the calling pane via
 `$LUVUS_PANE_ID`, so a worker agent can `luvus task heartbeat` itself.
+`--context-used` is the fraction of the model's context window already consumed:
+`0.6` means 60% consumed. It is not task-completion progress. Use `task update
+--note` for work progress and omit the heartbeat when context-window usage is
+unknown. The older `--context` spelling remains accepted for compatibility.
+
+Luvus also puts the running server binary first in that pane's `PATH`. A worker
+created by a debug server therefore reports through the matching debug CLI,
+while an installed server uses its matching release CLI. The existing `PATH`
+entries remain available after it.
 
 Events on the bus: `task.added` · `task.claimed` · `task.started` ·
 `task.ready` · `task.gate_running` · `task.gate_passed` · `task.gate_failed` ·
 `task.needs_compaction` · `task.done` · `task.merge_started` · `task.merged` ·
 `task.merge_conflict` · `task.merge_failed` · `task.released` ·
-`lease.acquired` · `lease.released`.
+`lease.acquired` · `lease.released` · `automation.created` ·
+`automation.updated` · `automation.enabled` · `automation.disabled` ·
+`automation.rebound` ·
+`automation.deleted` · `automation.run_queued` ·
+`automation.run_materialized` · `automation.run_started` ·
+`automation.run_updated` · `automation.run_finished` ·
+`automation.run_failed`.
 
 ## The safety model
 
-- **Nothing spawns unattended.** Workers start only when you press `s` or run
-  `task start`.
+- **Only armed agent automations spawn unattended.** Manual tasks still start
+  only when you press `s` or run `task start`. Every automation stores one
+  explicit agent, workspace, prompt, worker mode, access policy, and bounded schedule.
+- **No arbitrary scheduled shell action.** The scheduler launches only a
+  reviewed built-in agent adapter through its separate one-shot automation
+  profile; detection-only manifests and interactive task commands do not gain
+  unattended execution authority.
+- **No blind approval.** `Read only`, `Workspace`, and `Full access` map to the
+  selected agent's native per-run flags. Luvus never types `y` or Enter into an
+  unknown permission prompt and never rewrites the agent's permanent config.
+- **No background poller.** Definitions cache the nearest UTC deadline and use
+  the existing server wake path. No thread, timer, network request, or process
+  scan is created per automation.
 - **Worktree mode is isolated by default.** Workers edit in their own worktrees
   and merges happen in a dedicated integration worktree.
 - **Workspace mode is intentionally shared.** It creates a task tab without a
@@ -153,9 +260,10 @@ Events on the bus: `task.added` · `task.claimed` · `task.started` ·
 - **Two layers of isolation.** Leases prevent overlapping work from being
   *assigned*, and worktrees mean even a misbehaving agent's clash only surfaces
   (safely) at merge time.
-- **A context gate.** Workers report context usage via `heartbeat`. Above 85%,
-  `done` is blocked until the agent compacts, so there are no half-remembered
-  finishes.
+- **A context gate.** Workers may report model context-window consumption via
+  `heartbeat`. Above 85%, `done` is blocked until the agent compacts, hands off,
+  or corrects a mistaken heartbeat to 85% or below, so there are no
+  half-remembered finishes. This value is never work progress.
 
 ## Troubleshooting
 
@@ -164,9 +272,12 @@ Events on the bus: `task.added` · `task.claimed` · `task.started` ·
 | `s` → *not a git repo* | Worktree mode needs Git. Select workspace mode to run a branchless worker in the current directory. |
 | `s` → *deps not done* | A dependency task isn't `done` yet. |
 | `s` → *lease conflict* | Another task owns an overlapping path. Finish or release that task before retrying. No worker was created. |
-| `d` → *needs compaction* | The worker's context is over 85%, so compact (e.g. `/compact`), then retry. |
+| `d` → *needs compaction* | The worker's model context window is over 85%. Compact if the agent supports it, hand off, or correct a mistaken report with `luvus task heartbeat <id> --context-used <0..1>`, then retry. |
 | Stuck at `review` | The gate failed. `luvus task get <id>` shows the output. Fix and `d` again. |
 | `blocked` after `m` | Merge conflict. Resolve in the task's worktree, then `m` again. |
+| Worker reports that Luvus server access was denied | The agent or OS sandbox cannot reach the session socket. Approve that exact local Luvus command or adjust the agent's own reviewed permission policy. Luvus does not silently disable the sandbox. |
+| Agent/access combination is unsupported | Choose an access level that the selected adapter explicitly supports. Luvus fails before creating any worker resources. |
+| Scheduled worker still needs attention | ORCH marks the automation task `blocked` and records the detected prompt. Resolve it in the visible pane; Luvus does not approve unknown requests automatically. |
 
 Clean up a finished worker with `luvus worktree remove <path>` (the branch is
 kept).
