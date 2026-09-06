@@ -387,6 +387,12 @@ read-only and control access both default to 24 hours. `--no-expiry` binds the
 client token to the foreground access process and keeps it valid until that
 process closes.
 
+Control Access permits `agent.keys` for recognized agent panes with the local
+key grammar, including `ctrl+z`, printable Unicode and `["esc","[","Z"]`.
+Read-only Access denies it. A rejected batch queues no prefix; success returns
+the resolved `pane` and means queued, not consumed. This does not authorize
+`agent.send`, raw pane input, launch, fork, or close through the gateway.
+
 ## Remote use
 
 ```sh
