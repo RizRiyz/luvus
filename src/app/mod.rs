@@ -2209,6 +2209,10 @@ pub struct App {
     /// New-worktree branch-name prompt (docs/18 WT): `Some(buf)` ⇒ the modal is
     /// open, holding the branch being typed.
     pub worktree_prompt: Option<String>,
+    /// The new-worktree prompt's modal body, set by the renderer each frame so
+    /// a click on the dimmed backdrop around it cancels the prompt (the same
+    /// gesture as the open-worktree list), while a click on the body is inert.
+    pub worktree_prompt_rect: Option<Rect>,
     /// The open-worktree list modal (docs/18 WT): every checkout of the repo
     /// from `git worktree list`, openable or focusable. `None` when closed.
     pub worktree_open: Option<WorktreeOpenList>,
@@ -2880,6 +2884,7 @@ impl App {
             cmd_inspect: None,
             pane_title_rects: Vec::new(),
             worktree_prompt: None,
+            worktree_prompt_rect: None,
             worktree_open: None,
             worktree_open_generation: 0,
             worktree_open_rects: Vec::new(),
@@ -3526,6 +3531,7 @@ impl App {
             cmd_inspect: None,
             pane_title_rects: Vec::new(),
             worktree_prompt: None,
+            worktree_prompt_rect: None,
             worktree_open: None,
             worktree_open_generation: 0,
             worktree_open_rects: Vec::new(),
@@ -8702,6 +8708,58 @@ mod tests {
         assert_eq!(app.workspaces.len(), after, "cancelling opens nothing");
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The new-worktree prompt cancels on a backdrop click like the
+    /// open-worktree list does, so the two worktree modals share one gesture. A
+    /// click on the modal body (off the footer buttons) is inert: it must not
+    /// close the prompt or lose what was typed.
+    #[test]
+    fn new_worktree_prompt_backdrop_click_cancels_but_body_click_is_inert() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("worktree-prompt-click");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.worktree_prompt = Some("feature".into());
+        app.worktree_repo = Some(std::path::PathBuf::from("/definitely/not/a/repo"));
+
+        // Render once so the prompt records its modal rect.
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let modal = app
+            .worktree_prompt_rect
+            .expect("prompt records its modal rect");
+        let click = |column, row| {
+            AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+
+        // The title row of the modal body: neither a footer button nor backdrop.
+        app.handle_event(click(modal.x + 2, modal.y + 1));
+        assert_eq!(
+            app.worktree_prompt.as_deref(),
+            Some("feature"),
+            "a click on the modal body keeps the prompt and its text"
+        );
+
+        // The dimmed backdrop cancels, like the open-worktree list's.
+        assert!(
+            modal.x > 0 && modal.y > 0,
+            "the modal is centered, so (0,0) is backdrop"
+        );
+        app.handle_event(click(0, 0));
+        assert!(app.worktree_prompt.is_none(), "backdrop click cancels");
+        assert!(
+            app.worktree_repo.is_none(),
+            "cancel clears the pending repo"
+        );
+        assert!(app.worktree_error.is_none());
     }
 
     #[test]

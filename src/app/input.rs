@@ -1839,11 +1839,27 @@ impl App {
         if self.compact && m.row < self.last_pane_area.y {
             return;
         }
-        // Text-input modals: only the ⏎/esc footer buttons respond to the mouse;
-        // any other click is swallowed (the centered modal owns the screen).
+        // The new-worktree prompt: the ⏎/esc footer buttons act as those keys,
+        // a click on the modal body is inert, and a click on the dimmed backdrop
+        // cancels — the same gesture as the open-worktree list below.
         if self.worktree_prompt.is_some() {
             if let Some(k) = self.modal_button_key(&m) {
                 self.handle_worktree_prompt_key(k);
+            } else if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                // Only a rendered prompt knows where its body is; until then
+                // the click is swallowed rather than guessed as "outside".
+                let outside = self.worktree_prompt_rect.is_some_and(|rect| {
+                    m.column < rect.x
+                        || m.column >= rect.right()
+                        || m.row < rect.y
+                        || m.row >= rect.bottom()
+                });
+                if outside {
+                    self.handle_worktree_prompt_key(KeyEvent::new(
+                        KeyCode::Esc,
+                        KeyModifiers::NONE,
+                    ));
+                }
             }
             return;
         }
@@ -1884,6 +1900,8 @@ impl App {
             }
             return;
         }
+        // Text-input modals: only the ⏎/esc footer buttons respond to the mouse;
+        // any other click is swallowed (the centered modal owns the screen).
         if self.tab_rename.is_some() {
             if let Some(k) = self.modal_button_key(&m) {
                 self.handle_tab_rename_key(k);

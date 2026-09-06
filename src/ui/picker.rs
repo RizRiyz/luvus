@@ -232,7 +232,7 @@ pub(super) fn draw_worktree_prompt(
     hover: Option<(u16, u16)>,
     cat: &Catalog,
     t: &Theme,
-) -> (Option<Rect>, Option<Rect>) {
+) -> (Option<Rect>, Option<Rect>, Rect) {
     dim_backdrop(f, area, t);
     let w = area.width.saturating_sub(6).clamp(36, 64).min(area.width);
     let modal = centered_rect(area, w, 6);
@@ -267,10 +267,10 @@ pub(super) fn draw_worktree_prompt(
             Paragraph::new(Span::styled(format!(" {e}"), Style::new().fg(t.coral))),
             bottom,
         );
-        (None, None) // no hint buttons while the error occupies the line
+        (None, None, modal) // no hint buttons while the error occupies the line
     } else {
         let (c, x) = footer_hints(f, bottom, cat.act_create, cat.act_cancel, hover, t);
-        (Some(c), Some(x))
+        (Some(c), Some(x), modal)
     }
 }
 

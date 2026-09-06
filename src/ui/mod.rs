@@ -173,6 +173,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     let dock_dividers = std::mem::take(&mut app.dock_dividers);
     let picker_rects = std::mem::take(&mut app.picker_rects);
     let worktree_open_rects = std::mem::take(&mut app.worktree_open_rects);
+    let worktree_prompt_rect = app.worktree_prompt_rect;
     let settings_tab_rects = std::mem::take(&mut app.settings_tab_rects);
     let settings_ctl_rects = std::mem::take(&mut app.settings_ctl_rects);
     let settings_theme_remove_rects = std::mem::take(&mut app.settings_theme_remove_rects);
@@ -316,6 +317,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     app.dock_dividers = dock_dividers;
     app.picker_rects = picker_rects;
     app.worktree_open_rects = worktree_open_rects;
+    app.worktree_prompt_rect = worktree_prompt_rect;
     app.settings_tab_rects = settings_tab_rects;
     app.settings_ctl_rects = settings_ctl_rects;
     app.settings_theme_remove_rects = settings_theme_remove_rects;
@@ -851,11 +853,14 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.modal_commit_rect = None;
     app.modal_cancel_rect = None;
     // The new-worktree branch prompt (docs/18 WT).
+    app.worktree_prompt_rect = None;
     if let Some(buf) = app.worktree_prompt.clone() {
         let err = app.worktree_error.clone();
-        let (c, x) = picker::draw_worktree_prompt(f, area, &buf, err.as_deref(), hover, cat, &t);
+        let (c, x, modal) =
+            picker::draw_worktree_prompt(f, area, &buf, err.as_deref(), hover, cat, &t);
         app.modal_commit_rect = c;
         app.modal_cancel_rect = x;
+        app.worktree_prompt_rect = Some(modal);
     }
     // The open-worktree list modal (docs/18 WT).
     let mut worktree_open_rects = Vec::new();
