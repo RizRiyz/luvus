@@ -1226,10 +1226,15 @@ fn matching_event(line: &str, event: &str, predicate: &Value) -> Option<Value> {
         .then_some(value)
 }
 
+struct TerminalStreamFrame {
+    serialized: String,
+    content_revision: u64,
+}
+
 fn terminal_stream_frame(
     target: &crate::terminal::backend::ObserveTarget,
     sequence: u64,
-) -> Result<String, &'static str> {
+) -> Result<TerminalStreamFrame, &'static str> {
     let engine = target
         .engine
         .lock()
@@ -1260,7 +1265,10 @@ fn terminal_stream_frame(
     })
     .to_string();
     (frame.len().saturating_add(1) <= crate::terminal::backend::MAX_FRAME_BYTES)
-        .then_some(frame)
+        .then_some(TerminalStreamFrame {
+            serialized: frame,
+            content_revision,
+        })
         .ok_or("serialized terminal frame exceeded protocol limit")
 }
 
@@ -1484,11 +1492,11 @@ fn handle_terminal_stream(
         .spawn(move || {
             let mut last_revision = u64::MAX;
             if let Ok(frame) = terminal_stream_frame(&forward_target, sequence) {
-                if write_shared_frame(&forward_writer, &frame).is_err() {
+                if write_shared_frame(&forward_writer, &frame.serialized).is_err() {
                     forward_active.store(false, Ordering::Release);
                     return;
                 }
-                last_revision = forward_target.content_revision.load(Ordering::Acquire);
+                last_revision = frame.content_revision;
             }
             for line in receiver {
                 if !forward_active.load(Ordering::Acquire) {
@@ -1515,11 +1523,11 @@ fn handle_terminal_stream(
                         forward_active.store(false, Ordering::Release);
                         break;
                     };
-                    if write_shared_frame(&forward_writer, &frame).is_err() {
+                    if write_shared_frame(&forward_writer, &frame.serialized).is_err() {
                         forward_active.store(false, Ordering::Release);
                         break;
                     }
-                    last_revision = revision;
+                    last_revision = frame.content_revision;
                 } else if matches!(event.as_str(), "terminal.exited" | "terminal.closed") {
                     let _ = write_shared_frame(&forward_writer, &line);
                     forward_active.store(false, Ordering::Release);
@@ -2853,7 +2861,8 @@ mod tests {
     fn terminal_stream_frame_is_bounded_and_identified() {
         let target = observe_target();
         let frame = terminal_stream_frame(&target, 12).unwrap();
-        let frame: Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(frame.content_revision, 3);
+        let frame: Value = serde_json::from_str(&frame.serialized).unwrap();
         assert_eq!(frame["event"], "terminal.frame");
         assert_eq!(frame["sequence"], 12);
         assert_eq!(frame["data"]["terminal_id"], "terminal");
@@ -2943,6 +2952,7 @@ mod tests {
 
         let client_path = path.clone();
         let (initial_tx, initial_rx) = mpsc::channel();
+        let (updated_tx, updated_rx) = mpsc::channel();
         let client = thread::spawn(move || {
             let mut stream = transport::connect(&client_path).unwrap();
             stream
@@ -2959,12 +2969,15 @@ mod tests {
             .unwrap();
             let mut reader = BufReader::new(stream);
             let mut lines = Vec::new();
-            for index in 0..3 {
+            for index in 0..4 {
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();
                 lines.push(serde_json::from_str::<Value>(&line).unwrap());
                 if index == 1 {
                     initial_tx.send(()).unwrap();
+                }
+                if index == 2 {
+                    updated_tx.send(()).unwrap();
                 }
             }
             lines
@@ -2978,6 +2991,11 @@ mod tests {
         let revision = Arc::clone(&target.content_revision);
         reply.send(Ok(target)).unwrap();
         initial_rx.recv().unwrap();
+        publish_event(
+            &bus,
+            "terminal.output_ready",
+            json!({"terminal_id":"other-terminal","content_revision":99}),
+        );
         engine.lock().unwrap().advance(b"\r\nupdated");
         revision.fetch_add(1, Ordering::AcqRel);
         publish_event(
@@ -2986,6 +3004,16 @@ mod tests {
             json!({"terminal_id":"terminal","pane":"7","content_revision":4}),
         );
 
+        updated_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        publish_event(
+            &bus,
+            "terminal.output_ready",
+            json!({"terminal_id":"terminal","content_revision":4}),
+        );
+        publish_event(&bus, "terminal.exited", json!({"terminal_id":"terminal"}));
+
         let lines = client.join().unwrap();
         assert_eq!(lines[0]["result"]["type"], "terminal_backend_stream");
         assert_eq!(lines[0]["result"]["queue_capacity"], 2);
@@ -2993,6 +3021,10 @@ mod tests {
         assert_eq!(lines[1]["data"]["content_revision"], 3);
         assert_eq!(lines[2]["event"], "terminal.frame");
         assert_eq!(lines[2]["data"]["content_revision"], 4);
+        assert_eq!(
+            lines[3]["event"], "terminal.exited",
+            "duplicate revisions must not emit another frame"
+        );
         assert!(lines[2]["data"]["text"]
             .as_str()
             .unwrap()

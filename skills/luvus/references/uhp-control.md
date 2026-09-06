@@ -127,6 +127,9 @@ required and authorized.
 - Handle `terminal.frame`, `terminal.output_ready`, exit, close, and resync
   events by their exact terminal ID and sequence.
 - Treat the control stream as an exclusive lease and release it promptly.
+- Apply `terminal.frame` as a complete replacement at its captured revision;
+  the acknowledgment revision is not an emitted-frame cursor. Reconnect for a
+  fresh frame after EOF or resync, including when the child is quiet.
 - Use typed literal, submit, and key actions instead of inventing escape
   sequences.
 - Never replace semantic agent or pane commands with terminal control merely
