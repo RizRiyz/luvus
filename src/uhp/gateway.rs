@@ -411,6 +411,7 @@ fn allowed_method(mode: AccessMode, method: &str) -> bool {
                     | "tab.focus"
                     | "pane.focus"
                     | "agent.prompt"
+                    | "agent.keys"
                     | "automation.create"
                     | "automation.update"
                     | "automation.enable"

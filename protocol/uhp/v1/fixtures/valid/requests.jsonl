@@ -42,3 +42,4 @@
 {"id":"41","method":"task.start","params":{"id":"t4","branch":"luvus/t4","mode":"worktree","workspace_id":"workspace_example","agent":"codex"}}
 {"id":"42","method":"task.heartbeat","params":{"id":"t1","context":0.6}}
 {"id":"43","method":"agent.keys","params":{"target":"reviewer","keys":["up","enter","CTRL+C","x","\u00e9"]}}
+{"id":"access-keys","method":"agent.keys","params":{"target":"7","keys":["ctrl+z","esc","[","Z","🙂"]},"auth":"example-client-token"}

@@ -65,12 +65,19 @@ its upstream server tokens bounded and rotates them internally, so
 `--no-expiry` does not create a permanent token in the server.
 
 Control mode does not expose every local mutation. The gateway allows the
-advertised read surface plus selected focus, prompt, terminal-control, and
+advertised read surface plus selected focus, prompt, agent-key, terminal-control, and
 automation methods. An automation created remotely is durable and can run
 after the pairing token or access command expires; disable or delete it
 explicitly when that is not intended. Discover the exact live method set after
 pairing rather than treating a scope name as permission to call every method in
 that namespace.
+
+`agent.keys` is allowed only in control mode and only for a recognized agent
+pane. It uses the same key vocabulary as local `luvus agent keys`, including
+`ctrl+z`, printable Unicode, and composed sequences such as `["esc","[","Z"]`.
+This vocabulary is wider than a terminal control stream's `send_key` action.
+A bad batch queues no prefix; success means queued, not consumed. `agent.send`,
+raw pane input, agent launch/fork, and pane close remain forbidden.
 
 ## Connection sequence
 

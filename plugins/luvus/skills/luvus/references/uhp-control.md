@@ -39,6 +39,13 @@ The client pairs once, then uses the returned token on ordinary UHP frames.
 Keep the loopback endpoint private and require an encrypted, authenticated
 transport.
 
+Control Access permits `agent.keys` for recognized agent panes; read-only
+Access denies it. The RPC retains local key grammar, including `ctrl+z`,
+printable Unicode, and `["esc","[","Z"]` for Shift+Tab, which is wider than
+control-stream `send_key`. Invalid batches queue no prefix. Success identifies
+the resolved `pane` and means queued, not consumed. Inspect before answering;
+do not infer permission for `agent.send`, raw pane input, launch, fork, or close.
+
 ## Bootstrap and maintain state
 
 Use this order for a stateful harness:

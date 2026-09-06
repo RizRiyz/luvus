@@ -44,6 +44,12 @@ accepted the submission, not that the agent completed it. A closed queue fails
 without recording a successful handoff. Submission uses the existing PTY writer
 and does not create a delayed-send thread.
 
+Paired control Access also permits this exact RPC; read-only Access refuses
+it. The key grammar stays identical to local `agent keys`, including `ctrl+z`
+and printable Unicode. `["esc","[","Z"]` sends Shift+Tab as one ordered batch.
+Inspect the prompt before answering; Enter remains a separate intentional
+action. Access does not permit the compatibility `agent.send` method.
+
 For line-specific feedback, the native [DIFF review](/docs/guides/diff/) uses
 the same target validation. It groups selected local notes into one bounded
 message, quotes source context as untrusted review data, and records delivery
