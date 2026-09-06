@@ -395,7 +395,30 @@ def valid_request(value):
     return False
 
 
+def valid_effective_access(result):
+    """Validate optional endpoint authority while accepting future additive fields."""
+    if "access" not in result:
+        return True  # Owner endpoints and older gateways omit this projection.
+    access = result["access"]
+    if not isinstance(access, dict) or access.get("mode") not in ("read_only", "control"):
+        return False
+    methods = result.get("methods")
+    allowed = access.get("allowed_methods")
+    limits = access.get("limits")
+    if not isinstance(methods, list) or not methods or not all(isinstance(m, str) and m for m in methods):
+        return False
+    if not isinstance(allowed, list) or not allowed or not all(isinstance(m, str) and m for m in allowed):
+        return False
+    if len(set(allowed)) != len(allowed) or not set(allowed) <= set(methods):
+        return False
+    return isinstance(limits, dict) and all(
+        type(limits.get(key)) is int and limits[key] > 0
+        for key in ("connections", "requests_per_minute")
+    )
+
+
 def valid_response(value):
+    """Validate app-level results, including optional effective Access authority."""
     if not isinstance(value, dict) or not isinstance(value.get("id"), str) or REQUEST_ID.fullmatch(value["id"]) is None:
         return False
     if set(value) == {"id", "result"}:
@@ -414,7 +437,8 @@ def valid_response(value):
                 return False
             if kind == "uhp_capabilities":
                 return (
-                    isinstance(result["methods"], list)
+                    valid_effective_access(result)
+                    and isinstance(result["methods"], list)
                     and isinstance(result["agent_authorities"], list)
                     and isinstance(result["agent_states"], list)
                     and set(result["agent_states"]) <= STATES
@@ -654,6 +678,7 @@ def valid_global_request(value, methods):
 
 
 def valid_global_response(value):
+    """Validate global envelopes and specialized Access capability projections."""
     if not (
         isinstance(value, dict)
         and isinstance(value.get("id"), str)
@@ -666,6 +691,8 @@ def valid_global_response(value):
     if set(value) == {"id", "error"} and not isinstance(value["error"], dict):
         return False
     result = value.get("result")
+    if isinstance(result, dict) and result.get("type") == "uhp_capabilities":
+        return valid_effective_access(result)
     if isinstance(result, dict) and result.get("type") == "agent_wait":
         return valid_response(value)
     return True

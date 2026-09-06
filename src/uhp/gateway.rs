@@ -359,11 +359,72 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) -> Result<()> {
                 return Ok(());
             }
         };
-        validate_response_id(&response, &id)?;
+        let response = if method == "uhp.capabilities" {
+            match project_access_capabilities(&response, &id, shared.mode) {
+                Ok(response) => response,
+                Err(_) => {
+                    write_gateway_error(stream, id, "unavailable")?;
+                    return Ok(());
+                }
+            }
+        } else {
+            validate_response_id(&response, &id)?;
+            response
+        };
         writeln!(stream, "{response}")?;
         stream.flush()?;
         Ok(())
     }
+}
+
+/// Add endpoint authority without replacing the owner's supported-method catalog.
+/// The effective set is compiled, advertised upstream, and permitted by this gateway.
+fn project_access_capabilities(response: &str, id: &Value, mode: AccessMode) -> Result<String> {
+    validate_response_id(response, id)?;
+    let mut value: Value = serde_json::from_str(response)?;
+    if let Some(error) = value.get("error") {
+        if value.get("result").is_none()
+            && error.get("code").is_some_and(Value::is_string)
+            && error.get("message").is_some_and(Value::is_string)
+        {
+            return Ok(response.to_owned());
+        }
+        return Err(anyhow!("invalid owner capabilities error"));
+    }
+    let result = value
+        .get_mut("result")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("missing owner capabilities result"))?;
+    if result.get("type").and_then(Value::as_str) != Some("uhp_capabilities") {
+        return Err(anyhow!("invalid owner capabilities type"));
+    }
+    let methods = result
+        .get("methods")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing owner method catalog"))?;
+    let advertised: Option<std::collections::HashSet<_>> = methods
+        .iter()
+        .map(|method| method.as_str().filter(|method| !method.is_empty()))
+        .collect();
+    let advertised = advertised.ok_or_else(|| anyhow!("invalid owner method catalog"))?;
+    let allowed: Vec<_> = crate::api::capabilities::METHODS
+        .iter()
+        .copied()
+        .filter(|method| advertised.contains(method) && allowed_method(mode, method))
+        .collect();
+    if allowed.is_empty() {
+        return Err(anyhow!("empty effective method catalog"));
+    }
+    result.insert("access".into(), json!({
+        "mode":match mode { AccessMode::ReadOnly => "read_only", AccessMode::Control => "control" },
+        "allowed_methods":allowed,
+        "limits":{"connections":MAX_CONNECTIONS,"requests_per_minute":MAX_REQUESTS_PER_MINUTE},
+    }));
+    let response = serde_json::to_string(&value)?;
+    if response.len().saturating_add(1) > crate::terminal::backend::MAX_FRAME_BYTES {
+        return Err(anyhow!("projected capabilities exceed frame limit"));
+    }
+    Ok(response)
 }
 
 fn handle_pairing(mut stream: TcpStream, shared: &Shared, value: &Value) -> Result<()> {
@@ -1392,7 +1453,8 @@ mod tests {
     }
 
     /// Relay one injected owner reply while proving capabilities never enqueue input.
-    fn capabilities_reply(mode: AccessMode, response: Value) -> Value {
+    fn capabilities_reply(mode: AccessMode, response: impl ToString) -> Value {
+        let response = response.to_string();
         let _env = crate::persist::test_env("access-capabilities");
         let path = crate::persist::ensure_config_dir().join("capabilities.sock");
         let listener = crate::ipc::transport::bind(&path).unwrap();
@@ -1540,12 +1602,38 @@ mod tests {
             crate::terminal::backend::MAX_FRAME_BYTES
         );
         cases.push(large);
+        let malformed = capabilities_reply(AccessMode::Control, "{");
+        assert_eq!(malformed["id"], "caps");
+        assert_eq!(malformed["error"]["code"], "unavailable");
         for response in cases {
             let result = capabilities_reply(AccessMode::Control, response);
             assert_eq!(result["id"], "caps");
             assert_eq!(result["error"]["code"], "unavailable");
             assert!(result.get("result").is_none());
         }
+    }
+
+    /// Projection accepts the exact newline-inclusive frame limit and rejects one extra byte.
+    #[test]
+    fn access_capabilities_respect_projected_frame_boundary() {
+        let mut owner = json!({"id":"caps","result":{"type":"uhp_capabilities",
+            "methods":["uhp.capabilities"],"padding":""}});
+        let projected =
+            project_access_capabilities(&owner.to_string(), &json!("caps"), AccessMode::Control)
+                .unwrap();
+        let padding = crate::terminal::backend::MAX_FRAME_BYTES - projected.len() - 1;
+        owner["result"]["padding"] = json!("x".repeat(padding));
+        let result = capabilities_reply(AccessMode::Control, owner.clone());
+        assert_eq!(
+            result.to_string().len() + 1,
+            crate::terminal::backend::MAX_FRAME_BYTES
+        );
+        assert!(result["result"]["access"].is_object());
+        owner["result"]["padding"] = json!("x".repeat(padding + 1));
+        assert_eq!(
+            capabilities_reply(AccessMode::Control, owner)["error"]["code"],
+            "unavailable"
+        );
     }
 
     /// Structured owner errors retain their original identity and payload.

@@ -79,6 +79,37 @@ This vocabulary is wider than a terminal control stream's `send_key` action.
 A bad batch queues no prefix; success means queued, not consumed. `agent.send`,
 raw pane input, agent launch/fork, and pane close remain forbidden.
 
+## Effective permissions
+
+After pairing, `uhp.capabilities` retains the full owner `methods` catalog and
+adds an endpoint-specific projection (excerpt):
+
+```json
+{"access":{"mode":"control","allowed_methods":["uhp.capabilities","agent.keys"],"limits":{"connections":16,"requests_per_minute":120}}}
+```
+
+The abbreviated list above is illustrative. The live list includes every
+compiled method advertised by the owner that the gateway's authorization
+predicate permits. `access.mode` is `read_only` or `control`;
+`access.allowed_methods` is the effective RPC set for this gateway.
+`access.limits.connections` and `requests_per_minute` describe the gateway,
+not the owner server's capacity. The owner endpoint does not add `access`.
+
+Clients should intersect supported `methods` with `access.allowed_methods`
+and their own product action support. Keep unknown additive fields valid.
+Control includes `agent.keys` and existing `automation.*` writes. This does
+not mean every allowed method should become a UI action. Standalone terminal
+input methods and `uhp.token.*` remain absent, even when a terminal control
+stream can accept input actions.
+
+An older gateway may omit `access`; absence is not evidence of owner authority
+or permission to write. Re-discover after pairing/reconnect. This projection
+contains no owner socket or token, introduces no event, and does not replace
+normal authentication, expiry, rate, scope or target validation. Malformed
+capabilities, mismatched response IDs, missing/invalid method lists, an empty
+effective set, or projection beyond the frame limit return `unavailable`
+with the original request ID; valid owner error replies pass through.
+
 ## Connection sequence
 
 1. A provider launches `luvus uhp access` for the selected session.
