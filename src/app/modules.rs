@@ -714,6 +714,8 @@ command = ["sh", "-c", "echo ran=$LUVUS_MODULE_ACTION_ID port=$LUVUS_MODULE_ROW_
         let mk = |text: &str, port: &str| crate::app::DockRow {
             text: text.into(),
             dot: None,
+            tone: None,
+            spans: Vec::new(),
             action: Some("select".into()),
             value: Some(port.into()),
             menu: vec![crate::app::DockRowMenuItem {
@@ -782,6 +784,8 @@ command = ["sh", "-c", "echo ran=$LUVUS_MODULE_ACTION_ID port=$LUVUS_MODULE_ROW_
             vec![crate::app::DockRow {
                 text: "build".into(),
                 dot: None,
+                tone: None,
+                spans: Vec::new(),
                 action: Some("erase".into()),
                 value: Some("build".into()),
                 menu: vec![crate::app::DockRowMenuItem {
@@ -839,6 +843,8 @@ command = ["sh", "-c", "echo ran=$LUVUS_MODULE_ACTION_ID port=$LUVUS_MODULE_ROW_
         let row = || crate::app::DockRow {
             text: "esp32s3".into(),
             dot: None,
+            tone: None,
+            spans: Vec::new(),
             action: Some("select".into()),
             value: None,
             menu: vec![],

@@ -4039,6 +4039,30 @@ impl App {
                                     .unwrap_or("")
                                     .to_string(),
                                 dot: r.get("dot").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                tone: r
+                                    .get("tone")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string()),
+                                spans: r
+                                    .get("spans")
+                                    .and_then(|v| v.as_array())
+                                    .map(|items| {
+                                        items
+                                            .iter()
+                                            .map(|sp| crate::app::DockSpan {
+                                                text: sp
+                                                    .get("text")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("")
+                                                    .to_string(),
+                                                tone: sp
+                                                    .get("tone")
+                                                    .and_then(|v| v.as_str())
+                                                    .map(|s| s.to_string()),
+                                            })
+                                            .collect()
+                                    })
+                                    .unwrap_or_default(),
                                 action: r
                                     .get("action")
                                     .and_then(|v| v.as_str())
