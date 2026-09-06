@@ -1,4 +1,4 @@
-// pi-luvus v0.1.2 — Luvus control plane client for Pi — Apache-2.0
+// pi-luvus v0.1.3 — Luvus control plane client for Pi — Apache-2.0
 // Self-contained extension bundle. Load with `pi -e` or install to
 // ~/.pi/agent/extensions/. Pi-owned packages stay external (peer deps).
 // @bun
@@ -942,6 +942,9 @@ class LuvusCliClient {
 // src/policy/validators.ts
 var MAX_PANE_ID_U642 = 18446744073709551615n;
 var U64_PATTERN2 = /^[1-9][0-9]*$/;
+var MAX_INSPECT_PANE_U32 = 4294967295;
+var INSPECT_PANE_PATTERN = /^(0|[1-9][0-9]*)$/;
+var MAX_FIND_QUERY_LENGTH = 128;
 var MAX_TASK_ID_LENGTH2 = 256;
 var MAX_AGENT_KIND_LENGTH = 128;
 var MAX_PROMPT_BYTES = 64 * 1024;
@@ -969,6 +972,31 @@ function validatePaneId(value) {
     }
   } catch {
     return { valid: false, reason: "pane id must be a canonical positive integer" };
+  }
+  return { valid: true, sanitized: value };
+}
+function validateInspectPaneId(value) {
+  if (typeof value !== "string" || !INSPECT_PANE_PATTERN.test(value)) {
+    return {
+      valid: false,
+      reason: "pane id must be canonical decimal (0 or nonzero without leading zeros)"
+    };
+  }
+  const numeric = Number(value);
+  if (!Number.isSafeInteger(numeric) || numeric > MAX_INSPECT_PANE_U32) {
+    return { valid: false, reason: "pane id exceeds u32 range (max 4294967295)" };
+  }
+  return { valid: true, sanitized: value };
+}
+function validateFindQuery(value) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return { valid: false, reason: "query must be non-empty" };
+  }
+  if (value.length > MAX_FIND_QUERY_LENGTH) {
+    return { valid: false, reason: "query exceeds 128 chars" };
+  }
+  if (value.includes("\x00")) {
+    return { valid: false, reason: "query contains forbidden characters" };
   }
   return { valid: true, sanitized: value };
 }
@@ -2790,8 +2818,8 @@ class DefaultPolicyEngine {
       requiresConfirmation = true;
       failClosedWithoutUI = true;
     } else {
-      requiresConfirmation = highImpact;
-      failClosedWithoutUI = highImpact;
+      requiresConfirmation = false;
+      failClosedWithoutUI = false;
     }
     return {
       action,
@@ -3512,7 +3540,7 @@ var DEFAULT_MAX_WAIT_MS = 600000;
 var DEFAULT_AGENT_NAME = "luvus-delegate";
 var DelegateParams = Type.Object({
   target: Type.Optional(Type.String({
-    description: "Existing agent pane id or name. Omit to start a new agent."
+    description: 'Existing agent numeric pane id from fleet/list pane=... or agent/find (example "12"). Omit to start a new agent.'
   })),
   prompt: Type.String({
     description: "Complete task description for the delegate agent."
@@ -3575,7 +3603,12 @@ function validateParams(params) {
   if (!promptCheck.valid)
     fail3(`invalid prompt: ${promptCheck.reason}`);
   const hasTarget = params.target !== undefined && params.target.length > 0;
+  let target;
   if (hasTarget) {
+    const checked = validatePaneId(params.target);
+    if (!checked.valid)
+      fail3(`invalid target: ${checked.reason}`);
+    target = checked.sanitized;
     const setters = [
       ["kind", params.kind],
       ["name", params.name],
@@ -3645,7 +3678,7 @@ function validateParams(params) {
     fail3("timeoutSeconds must be an integer within [1, 600]");
   }
   return {
-    target: hasTarget ? params.target : undefined,
+    target,
     prompt: params.prompt,
     kind,
     name,
@@ -3667,7 +3700,8 @@ function registerDelegateTool(pi, deps) {
     promptSnippet: "Delegate work to a Luvus agent, optionally with an ORCH task and quality gate",
     promptGuidelines: [
       "Use luvus_delegate when a task should run in a separate Luvus agent instead of the current session.",
-      "Use luvus_delegate with mutation for code changes so paths are leased and a worktree is used; luvus_delegate never merges."
+      "Existing target must be a numeric pane id from fleet/list pane=... or agent/find (never a name); mutation requires paths and defaults to a worktree.",
+      "luvus_delegate never auto-merges and never retries uncertain writes."
     ],
     parameters: DelegateParams,
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
@@ -3966,11 +4000,11 @@ function registerTaskTool(pi, deps) {
   pi.registerTool({
     name: TASK_TOOL_NAME,
     label: "Luvus Task",
-    description: "Manage Luvus ORCH tasks: add, claim, start, update, done, release, next, gate status (merge/delete require reinforced confirmation)",
+    description: "Manage Luvus ORCH tasks: add, claim, start, update, done, release, next, gate status (merge/delete are explicit-only high-impact; opt-in confirm/restricted add protection)",
     promptSnippet: "Manage Luvus ORCH task lifecycle: create, claim, start, update, finish, or release tasks",
     promptGuidelines: [
-      "Use luvus_task for ORCH task writes (add, claim, start, update, done, release); use luvus_inspect for read-only task queries.",
-      "Use luvus_task merge only when explicitly asked; luvus_task never merges automatically."
+      "Reads use luvus_inspect; writes use luvus_task (add needs a title, plus paths for the leased mutation workflow).",
+      "Use luvus_task merge/delete only when explicitly asked; both are explicit-only and execute without a second authorization in default auto, and never run automatically (confirm/restricted are opt-in protections)."
     ],
     parameters: TaskParams,
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
@@ -4193,7 +4227,7 @@ var DISCOVER_TOOL_NAME = "luvus_capabilities";
 var INSPECT_TOOL_NAME = "luvus_inspect";
 var DiscoverParams = Type3.Object({
   query: Type3.String({
-    description: "What capability are you looking for? e.g. 'inspect agents', 'list tasks'"
+    description: "What capability are you looking for? e.g. 'inspect agents', 'find agent by name', 'list tasks', 'delegate work', 'claim task'"
   })
 });
 var CAPABILITY_CATALOG = [
@@ -4211,7 +4245,7 @@ var CAPABILITY_CATALOG = [
       "workspace"
     ],
     tool: INSPECT_TOOL_NAME,
-    description: "Inspect agents, tasks, leases, workspaces, and fleet status"
+    description: "Inspect agents, tasks, leases, workspaces, and fleet status (fleet/list; agent/find by name; agent/get needs a numeric paneId; task/get needs a taskId)"
   },
   {
     keywords: [
@@ -4284,6 +4318,9 @@ function registerDiscoverTool(pi, deps) {
           additiveSetActiveTools(pi, [entry.tool]);
           lines.push(`Activated ${entry.tool}: ${entry.description}.`);
         }
+        if (matches.some((entry) => entry.tool === INSPECT_TOOL_NAME)) {
+          lines.push('Recipe: fleet/list or agent/find query="\u2026"; agent/get paneId="7" (numeric only); ' + "task/get needs taskId; on failure use connection/status, don't retry blindly.");
+        }
         return bound(lines.join(" "));
       };
       const text = await run();
@@ -4298,21 +4335,30 @@ function registerDiscoverTool(pi, deps) {
 // src/tools/commands.ts
 var POLICY_MODES = ["auto", "confirm", "restricted"];
 var POLICY_CHOICES = [
-  "auto \u2014 default: execute ordinary tasks/actions without asking (high-impact still asks)",
+  "auto \u2014 YOLO default: execute all known actions without asking (including high-impact)",
   "confirm \u2014 ask on every task/action (explicit per-session opt-in)",
   "restricted \u2014 ask on ordinary tasks/actions; block high-impact"
 ];
 var POLICY_MODE_DESCRIPTIONS = {
-  auto: "ordinary writes execute without asking; high-impact still requires confirmation",
-  confirm: "every task/action asks for confirmation",
-  restricted: "ordinary writes ask for confirmation; high-impact is blocked"
+  auto: "YOLO default: execute all known actions without asking (including high-impact)",
+  confirm: "ask on every task/action",
+  restricted: "ask on ordinary tasks/actions; block high-impact"
 };
+var POLICY_USAGE = "Usage: /luvus-policy [auto|confirm|restricted] (no args opens a selector; invalid mode leaves the mode unchanged)";
 function parsePolicyMode(picked) {
   const normalized = picked.trim().toLowerCase();
   for (const mode of POLICY_MODES) {
     if (normalized === mode || normalized.startsWith(`${mode} `) || normalized.startsWith(`${mode} \u2014`) || normalized.startsWith(`${mode} -`)) {
       return mode;
     }
+  }
+  return;
+}
+function parseExplicitPolicyMode(arg) {
+  const normalized = arg.trim().toLowerCase();
+  for (const mode of POLICY_MODES) {
+    if (normalized === mode)
+      return mode;
   }
   return;
 }
@@ -4330,12 +4376,25 @@ function shortText3(value, max = 120) {
 }
 function registerPhase4Commands(pi, deps) {
   pi.registerCommand("luvus-policy", {
-    description: "Show or change the Luvus mutation policy mode (default auto executes ordinary writes without asking; confirm opts into asking every time)",
+    description: "Show or change the Luvus mutation policy mode (default auto YOLO executes all known actions without asking, including high-impact; confirm asks all; restricted asks ordinary/blocks high-impact)",
     handler: async (_args, ctx) => {
-      if (!ctx.hasUI) {
-        ctx.ui.notify("luvus-policy requires UI", "error");
+      const explicit = (_args ?? "").trim();
+      if (explicit.length > 0) {
+        const mode = parseExplicitPolicyMode(explicit);
+        if (mode === undefined) {
+          if (ctx.hasUI) {
+            ctx.ui.notify(bound2(POLICY_USAGE), "info");
+          }
+          return;
+        }
+        deps.policy.setMode(mode, "user");
+        if (ctx.hasUI) {
+          ctx.ui.notify(`Luvus policy mode set to ${mode} \u2014 ${POLICY_MODE_DESCRIPTIONS[mode]}`, "info");
+        }
         return;
       }
+      if (!ctx.hasUI)
+        return;
       const current = deps.policy.mode();
       const picked = await ctx.ui.select(`Luvus policy: ${current} (${POLICY_MODE_DESCRIPTIONS[current] ?? current})`, [...POLICY_CHOICES]);
       if (picked === undefined)
@@ -4429,14 +4488,39 @@ import { Type as Type4 } from "typebox";
 
 // src/inspection/cli-inspector.ts
 var MAX_INSPECT_OUTPUT_BYTES = 64 * 1024;
+var CLI_INSPECT_ERROR_CODES = [
+  "not_found",
+  "invalid_request",
+  "invalid_params"
+];
 
 class CliInspectError extends Error {
   action;
-  constructor(action, detail) {
+  code;
+  constructor(action, detail, code) {
     super(detail !== undefined ? `cli inspect ${action} failed: ${detail}` : `cli inspect ${action} failed`);
     this.name = "CliInspectError";
     this.action = action;
+    if (code !== undefined)
+      this.code = code;
   }
+}
+function isRecord7(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isAllowedCode(value) {
+  return CLI_INSPECT_ERROR_CODES.includes(value);
+}
+function extractErrorCode(value) {
+  if (!isRecord7(value))
+    return;
+  const nested = value.error;
+  if (!isRecord7(nested))
+    return;
+  return typeof nested.code === "string" ? nested.code : undefined;
+}
+function isSuccessEnvelope(value) {
+  return isRecord7(value) && "id" in value && "result" in value && value.error === undefined;
 }
 
 class CliInspector {
@@ -4457,6 +4541,8 @@ class CliInspector {
       throw new CliInspectError(action, "aborted");
     }
     let stdout;
+    let code;
+    let killed;
     try {
       const result = signal === undefined ? await this.exec(this.bin, [...args, "--json"], {
         timeout: this.timeoutMs
@@ -4464,10 +4550,9 @@ class CliInspector {
         timeout: this.timeoutMs,
         signal
       });
-      if (result.killed || result.code !== 0) {
-        throw new CliInspectError(action, "command failed");
-      }
-      stdout = truncateOutput(result.stdout, MAX_INSPECT_OUTPUT_BYTES);
+      stdout = truncateOutput(result.stdout ?? "", MAX_INSPECT_OUTPUT_BYTES);
+      code = result.code;
+      killed = result.killed;
     } catch (error) {
       if (error instanceof CliInspectError)
         throw error;
@@ -4476,13 +4561,34 @@ class CliInspector {
       }
       throw new CliInspectError(action, "execution failed");
     }
-    if (stdout.trim().length === 0)
-      return [];
+    if (killed) {
+      throw new CliInspectError(action, "command killed");
+    }
+    if (stdout.trim().length === 0) {
+      if (code === 0)
+        return [];
+      throw new CliInspectError(action, "command failed");
+    }
+    let parsed;
     try {
-      return JSON.parse(stdout);
+      parsed = JSON.parse(stdout);
     } catch {
       throw new CliInspectError(action, "invalid json output");
     }
+    const errorCode = extractErrorCode(parsed);
+    if (errorCode !== undefined) {
+      if (isAllowedCode(errorCode)) {
+        throw new CliInspectError(action, errorCode, errorCode);
+      }
+      throw new CliInspectError(action, "request failed");
+    }
+    if (code !== 0) {
+      throw new CliInspectError(action, "command failed");
+    }
+    if (isSuccessEnvelope(parsed)) {
+      return parsed.result;
+    }
+    return parsed;
   }
   async agentList(signal) {
     return this.runJson("fleet/list", ["agent", "list"], signal);
@@ -4492,11 +4598,8 @@ class CliInspector {
       throw new CliInspectError("agent/get", "empty pane id");
     return this.runJson("agent/get", ["agent", "get", paneId], signal);
   }
-  async agentExplain(paneId, signal) {
-    if (paneId.length === 0) {
-      throw new CliInspectError("agent/explain", "empty pane id");
-    }
-    return this.runJson("agent/explain", ["agent", "explain", paneId], signal);
+  async agentExplain(_paneId, _signal) {
+    throw new CliInspectError("agent/explain", "unavailable over CLI: agent explanation is only available over UHP; use agent/get or fleet/list instead");
   }
   async taskList(signal) {
     return this.runJson("task/list", ["task", "list"], signal);
@@ -4521,6 +4624,7 @@ class CliInspector {
 var INSPECT_TOOL_NAME2 = "luvus_inspect";
 var INSPECT_ACTIONS = [
   "fleet/list",
+  "agent/find",
   "agent/get",
   "agent/explain",
   "task/list",
@@ -4530,19 +4634,27 @@ var INSPECT_ACTIONS = [
   "workspace/list",
   "connection/status"
 ];
+var PANE_ID_EXAMPLE = '{ action: "agent/get", paneId: "12" }';
 var InspectParams = Type4.Object({
   action: StringEnum3(INSPECT_ACTIONS, {
-    description: "Read-only inspection action"
+    description: "Read-only inspection action. Start with fleet/list or agent/find; detail reads need identifiers from results."
   }),
-  target: Type4.Optional(Type4.String({
-    description: "Pane id for agent/get|agent/explain, or task id for task/get"
+  paneId: Type4.Optional(Type4.String({
+    pattern: "^(0|[1-9][0-9]*)$",
+    maxLength: 10,
+    description: 'Canonical decimal pane id for agent/get|agent/explain only (max 4294967295, e.g. "12" from fleet/list pane=... or agent/find). Names and workspaces are not valid here.'
+  })),
+  taskId: Type4.Optional(Type4.String({
+    minLength: 1,
+    maxLength: 256,
+    description: "Task id for task/get only, from task/list id=... ."
+  })),
+  query: Type4.Optional(Type4.String({
+    minLength: 1,
+    maxLength: 128,
+    description: 'Case-insensitive search text for agent/find only (e.g. "reviewer"). Resolves display names, workspaces, and pane ids to candidates.'
   }))
 });
-var TARGET_REQUIRED = [
-  "agent/get",
-  "agent/explain",
-  "task/get"
-];
 var MAX_TABLE_ROWS = 50;
 function truncate3(text) {
   const result = truncateHead(text, {
@@ -4555,7 +4667,7 @@ function truncate3(text) {
 
 [Output truncated: showing ${result.outputLines} of ` + `${result.totalLines} lines. Full output via CLI: luvus <cmd> --json]`;
 }
-function isRecord7(value) {
+function isRecord8(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function shortText4(value, max = 120) {
@@ -4564,27 +4676,190 @@ function shortText4(value, max = 120) {
   const flat = value.replace(/\s+/g, " ").trim();
   return flat.length <= max ? flat : `${flat.slice(0, max - 3)}...`;
 }
+function cleanToken(value, max = 80) {
+  const flat = value.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  return flat.length <= max ? flat : `${flat.slice(0, max - 3)}...`;
+}
+function quoteBounded(value, max = 80) {
+  return `"${cleanToken(value, max).replace(/"/g, "'")}"`;
+}
+function pickText(row, keys) {
+  for (const key of keys) {
+    const value = row[key];
+    if (typeof value === "string" && value.length > 0)
+      return value;
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+      return String(value);
+    }
+  }
+  return;
+}
+function pickBool(row, keys) {
+  for (const key of keys) {
+    const value = row[key];
+    if (typeof value === "boolean")
+      return value;
+  }
+  return;
+}
+function pickCount(row, keys) {
+  for (const key of keys) {
+    const value = row[key];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+      return value;
+    }
+    if (Array.isArray(value))
+      return value.length;
+  }
+  return;
+}
 function projectRows(value) {
   if (Array.isArray(value)) {
-    return value.filter(isRecord7).slice(0, MAX_TABLE_ROWS);
+    return value.filter(isRecord8).slice(0, MAX_TABLE_ROWS);
   }
-  if (isRecord7(value)) {
+  if (isRecord8(value)) {
     for (const key of ["agents", "tasks", "leases", "workspaces", "panes", "items", "rows"]) {
       if (Array.isArray(value[key])) {
-        return value[key].filter(isRecord7).slice(0, MAX_TABLE_ROWS);
+        return value[key].filter(isRecord8).slice(0, MAX_TABLE_ROWS);
       }
     }
     return [value];
   }
   return [];
 }
-function formatRowCells(row) {
-  const pane = typeof row.pane === "string" ? row.pane : typeof row.pane_id === "string" ? row.pane_id : typeof row.id === "string" ? row.id : "?";
-  const agent = typeof row.agent === "string" ? row.agent : typeof row.name === "string" ? row.name : "?";
-  const status = typeof row.status === "string" ? row.status : typeof row.agent_status === "string" ? row.agent_status : typeof row.state === "string" ? row.state : "?";
-  const authority = typeof row.authority === "string" ? row.authority : typeof row.source === "string" ? row.source : "?";
-  const workspace = typeof row.workspace === "string" ? row.workspace : typeof row.workspaceName === "string" ? row.workspaceName : "";
-  return `${pane} ${agent} ${status} ${authority}${workspace.length > 0 ? ` ${workspace}` : ""}`;
+function collectAllRows(value) {
+  if (Array.isArray(value)) {
+    return value.filter(isRecord8);
+  }
+  if (isRecord8(value)) {
+    for (const key of ["agents", "tasks", "leases", "workspaces", "panes", "items", "rows"]) {
+      if (Array.isArray(value[key])) {
+        return value[key].filter(isRecord8);
+      }
+    }
+    return [value];
+  }
+  return [];
+}
+function formatFleetRow(row) {
+  const parts = [];
+  const pane = pickText(row, ["pane", "pane_id", "paneId", "id"]);
+  parts.push(`pane=${pane !== undefined ? cleanToken(pane, 16) : "?"}`);
+  const agent = pickText(row, ["agent", "kind", "type", "agent_kind", "agentKind"]);
+  const rawName = pickText(row, ["name"]);
+  let display = pickText(row, ["display_name", "displayName"]);
+  if (display === undefined && rawName !== undefined && rawName !== agent) {
+    display = rawName;
+  }
+  const kind = agent ?? (rawName !== undefined && display === undefined ? rawName : undefined);
+  if (display !== undefined)
+    parts.push(`name=${quoteBounded(display, 64)}`);
+  if (kind !== undefined)
+    parts.push(`agent=${cleanToken(kind, 32)}`);
+  const status = pickText(row, ["status", "state", "agent_status", "agentStatus"]);
+  if (status !== undefined)
+    parts.push(`status=${cleanToken(status, 24)}`);
+  const humanWorkspace = pickText(row, ["workspace_name", "workspaceName"]);
+  if (humanWorkspace !== undefined) {
+    parts.push(`workspace=${quoteBounded(humanWorkspace, 64)}`);
+    const numericId = pickText(row, [
+      "workspace",
+      "workspace_id",
+      "workspaceId",
+      "workspace_index",
+      "workspaceIndex"
+    ]);
+    if (numericId !== undefined && numericId !== humanWorkspace && /^(0|[1-9][0-9]*)$/.test(numericId)) {
+      parts.push(`workspaceId=${cleanToken(numericId, 16)}`);
+    }
+  } else {
+    const workspace = pickText(row, [
+      "workspace",
+      "workspace_id",
+      "workspaceId",
+      "workspace_name",
+      "workspaceName"
+    ]);
+    if (workspace !== undefined)
+      parts.push(`workspace=${cleanToken(workspace, 64)}`);
+  }
+  const authority = pickText(row, ["authority", "source"]);
+  if (authority !== undefined)
+    parts.push(`authority=${cleanToken(authority, 64)}`);
+  return parts.join(" ");
+}
+function formatTaskRow(row) {
+  const parts = [];
+  const id = pickText(row, ["id", "task_id", "taskId", "task", "name"]);
+  parts.push(`id=${id !== undefined ? cleanToken(id, 64) : "?"}`);
+  const status = pickText(row, ["status", "state"]);
+  if (status !== undefined)
+    parts.push(`status=${cleanToken(status, 24)}`);
+  const assignee = pickText(row, [
+    "assignee",
+    "pane",
+    "pane_id",
+    "paneId",
+    "worker",
+    "agent"
+  ]);
+  parts.push(`assignee=${assignee !== undefined ? cleanToken(assignee, 24) : "unassigned"}`);
+  const title = pickText(row, ["title", "summary", "description", "subject"]);
+  if (title !== undefined)
+    parts.push(`title=${quoteBounded(title, 80)}`);
+  return parts.join(" ");
+}
+function formatLeaseRow(row) {
+  const parts = [];
+  const id = pickText(row, ["id", "lease_id", "leaseId", "name"]);
+  parts.push(`id=${id !== undefined ? cleanToken(id, 64) : "?"}`);
+  const task = pickText(row, ["task", "task_id", "taskId"]);
+  if (task !== undefined)
+    parts.push(`task=${cleanToken(task, 64)}`);
+  const owner = pickText(row, [
+    "owner",
+    "holder",
+    "pane",
+    "pane_id",
+    "paneId",
+    "assignee",
+    "agent"
+  ]);
+  if (owner !== undefined)
+    parts.push(`owner=${cleanToken(owner, 64)}`);
+  const rawPaths = row.paths ?? row.path ?? row.glob ?? row.globs;
+  let summary;
+  if (Array.isArray(rawPaths)) {
+    const entries = rawPaths.filter((entry) => typeof entry === "string" && entry.length > 0);
+    if (entries.length > 0)
+      summary = entries.join(", ");
+  } else if (typeof rawPaths === "string" && rawPaths.length > 0) {
+    summary = rawPaths;
+  }
+  if (summary !== undefined)
+    parts.push(`paths=${cleanToken(summary, 120)}`);
+  return parts.join(" ");
+}
+function formatWorkspaceRow(row) {
+  const parts = [];
+  const id = pickText(row, [
+    "workspace",
+    "workspace_id",
+    "workspaceId",
+    "id",
+    "index"
+  ]);
+  parts.push(`workspace=${id !== undefined ? cleanToken(id, 64) : "?"}`);
+  const name = pickText(row, ["name", "workspaceName", "workspace_name", "title"]);
+  if (name !== undefined)
+    parts.push(`name=${quoteBounded(name, 80)}`);
+  const active = pickBool(row, ["active", "is_active", "isActive", "focused"]);
+  if (active !== undefined)
+    parts.push(`active=${active}`);
+  const tabs = pickCount(row, ["tabs", "tab_count", "tabCount", "panes", "pane_count"]);
+  if (tabs !== undefined)
+    parts.push(`tabs=${tabs}`);
+  return parts.join(" ");
 }
 async function readThrough(deps, method, runUhp, runCli, signal) {
   const caps = deps.router.cachedCapabilities();
@@ -4592,14 +4867,59 @@ async function readThrough(deps, method, runUhp, runCli, signal) {
   if (announced) {
     try {
       return { payload: await runUhp(signal), via: "uhp" };
-    } catch {}
+    } catch {
+      if (signal?.aborted === true)
+        throw new Error("luvus_inspect aborted");
+    }
   }
   return { payload: await runCli(signal), via: "cli" };
+}
+function cacheEntryToRow(entry) {
+  const row = {
+    pane: entry.paneId,
+    agent: entry.agent,
+    status: entry.status,
+    authority: entry.authority,
+    cwd: entry.cwd
+  };
+  if (entry.workspaceName !== undefined)
+    row.workspace = entry.workspaceName;
+  return row;
+}
+function cwdBasename(cwd) {
+  const parts = cwd.split(/[\\/]/).filter((part) => part.length > 0);
+  return parts.length > 0 ? parts[parts.length - 1] : "";
+}
+function findSearchTexts(row) {
+  const texts = [];
+  const pushEach = (keys) => {
+    for (const key of keys) {
+      const value = row[key];
+      if (typeof value === "string" && value.length > 0) {
+        texts.push(value);
+      } else if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+        texts.push(String(value));
+      }
+    }
+  };
+  pushEach(["pane", "pane_id", "paneId", "id"]);
+  pushEach(["agent", "kind", "type", "agent_kind", "agentKind"]);
+  pushEach(["display_name", "displayName", "name"]);
+  pushEach(["workspace", "workspace_name", "workspaceName"]);
+  pushEach(["project", "project_name", "projectName"]);
+  pushEach(["cwd", "path", "workdir", "directory"]);
+  const cwd = pickText(row, ["cwd", "path", "workdir", "directory"]);
+  if (cwd !== undefined) {
+    const base = cwdBasename(cwd);
+    if (base.length > 0)
+      texts.push(base);
+  }
+  return texts;
 }
 async function handleFleetList(deps, signal) {
   const cached = deps.fleetCache.list();
   if (cached.length > 0) {
-    const lines = cached.slice(0, MAX_TABLE_ROWS).map((entry) => `${entry.paneId} ${entry.agent} ${entry.status} ${entry.authority}` + `${entry.workspaceName !== undefined ? ` ${entry.workspaceName}` : ""}`);
+    const lines = cached.slice(0, MAX_TABLE_ROWS).map((entry) => formatFleetRow(cacheEntryToRow(entry)));
     return truncate3(`Fleet (${cached.length} cached):
 ${lines.join(`
 `)}`);
@@ -4608,45 +4928,163 @@ ${lines.join(`
   const rows = projectRows(payload);
   if (rows.length === 0)
     return "Fleet is empty.";
-  const lines = rows.map(formatRowCells);
+  const lines = rows.map(formatFleetRow);
   return truncate3(`Fleet (${rows.length} via ${via}):
 ${lines.join(`
 `)}`);
 }
-async function handleAgentGet(deps, target, explain, signal) {
-  const method = explain ? INSPECT_UHP_METHODS.agentExplain : INSPECT_UHP_METHODS.agentGet;
-  if (!explain) {
-    const cached = deps.fleetCache.get(target);
-    if (cached !== undefined) {
-      return truncate3(`Agent ${cached.paneId}: ${cached.agent} ${cached.status} ${cached.authority} cwd=${shortText4(cached.cwd, 80)}`);
+async function handleAgentFind(deps, query, signal) {
+  const checked = validateFindQuery(query);
+  if (!checked.valid) {
+    throw new Error(`inspect action agent/find requires a non-empty query (max 128 chars): ${checked.reason}. ` + `Example: { action: "agent/find", query: "reviewer" }`);
+  }
+  const needle = query.trim().toLowerCase();
+  let rows;
+  let via;
+  try {
+    const read = await readThrough(deps, INSPECT_UHP_METHODS.agentList, (sig) => deps.uhpInspector.agentList(sig), (sig) => deps.cliInspector.agentList(sig), signal);
+    rows = collectAllRows(read.payload);
+    via = read.via;
+  } catch (error) {
+    if (signal?.aborted === true)
+      throw new Error("luvus_inspect aborted");
+    if (error instanceof Error && error.message.includes("aborted"))
+      throw error;
+    rows = deps.fleetCache.list().map(cacheEntryToRow);
+    via = "cache";
+  }
+  let exactTotal = 0;
+  let partialTotal = 0;
+  const exactShown = [];
+  const partialShown = [];
+  for (const row of rows) {
+    const texts = findSearchTexts(row).map((text) => text.toLowerCase());
+    if (texts.some((text) => text === needle)) {
+      exactTotal += 1;
+      if (exactShown.length < MAX_TABLE_ROWS) {
+        exactShown.push({ row, label: formatFleetRow(row) });
+      }
+    } else if (needle.length > 0 && texts.some((text) => text.includes(needle))) {
+      partialTotal += 1;
+      if (partialShown.length < MAX_TABLE_ROWS) {
+        partialShown.push({ row, label: formatFleetRow(row) });
+      }
     }
   }
-  const { payload, via } = await readThrough(deps, method, (sig) => explain ? deps.uhpInspector.agentExplain(target, sig) : deps.uhpInspector.agentGet(target, sig), (sig) => explain ? deps.cliInspector.agentExplain(target, sig) : deps.cliInspector.agentGet(target, sig), signal);
-  if (payload === undefined || payload === null || Array.isArray(payload) && payload.length === 0) {
-    return `Agent ${target} not found.`;
+  const scope = exactTotal > 0 ? "exact" : "substring";
+  const total = exactTotal > 0 ? exactTotal : partialTotal;
+  const shownEntries = exactTotal > 0 ? exactShown : partialShown;
+  const shown = quoteBounded(query.trim(), 64);
+  if (total === 0) {
+    return truncate3(`No agents match ${shown} (searched ${rows.length} via ${via}). ` + `Run fleet/list to browse, or refine the query.`);
   }
-  if (isRecord7(payload) && payload.found === false) {
-    return `Agent ${target} not found.`;
+  if (total === 1) {
+    const only = shownEntries[0];
+    const rawPane = pickText(only.row, ["pane", "pane_id", "paneId", "id"]);
+    const paneChecked = rawPane !== undefined ? validateInspectPaneId(rawPane) : undefined;
+    if (paneChecked !== undefined && paneChecked.valid) {
+      return truncate3(`1 ${scope} match for ${shown} (via ${via}):
+${only.label}
+` + `Use agent/get with paneId="${cleanToken(paneChecked.sanitized, 16)}".`);
+    }
+    return truncate3(`1 ${scope} match for ${shown} (via ${via}):
+${only.label}
+` + `Candidate lacks a canonical pane id; run fleet/list to locate the agent.`);
+  }
+  const lines = shownEntries.map((entry) => entry.label);
+  const truncated = total > shownEntries.length;
+  return truncate3(`${total} ${scope} matches for ${shown} (via ${via}` + `${truncated ? `, showing first ${shownEntries.length} of ${total}` : ""}):
+${lines.join(`
+`)}
+` + `Disambiguate with a numeric paneId: Use agent/get with paneId="...".`);
+}
+function agentNotFound(paneId) {
+  return `Agent pane=${paneId} not found. Run fleet/list or agent/find first.`;
+}
+async function handleAgentGet(deps, paneId, signal) {
+  const cached = deps.fleetCache.get(paneId);
+  if (cached !== undefined) {
+    const row = formatFleetRow(cacheEntryToRow(cached));
+    const cwd = cleanToken(cached.cwd, 80);
+    return truncate3(`Agent pane=${cached.paneId}: ${row} cwd=${cwd}`);
+  }
+  let payload;
+  let via;
+  try {
+    const read = await readThrough(deps, INSPECT_UHP_METHODS.agentGet, (sig) => deps.uhpInspector.agentGet(paneId, sig), (sig) => deps.cliInspector.agentGet(paneId, sig), signal);
+    payload = read.payload;
+    via = read.via;
+  } catch (error) {
+    if (error instanceof CliInspectError && error.code === "not_found") {
+      return agentNotFound(paneId);
+    }
+    throw error;
+  }
+  if (payload === undefined || payload === null || Array.isArray(payload) && payload.length === 0) {
+    return agentNotFound(paneId);
+  }
+  if (isRecord8(payload) && payload.found === false) {
+    return agentNotFound(paneId);
   }
   const text = JSON.stringify(payload, null, 2);
-  return truncate3(`${explain ? "Explanation" : "Agent"} for ${target} (via ${via}):
+  return truncate3(`Agent for ${paneId} (via ${via}):
 ${text}`);
 }
-async function handleCollection(deps, method, label, runUhp, runCli, signal) {
+async function handleAgentExplain(deps, paneId, signal) {
+  const caps = deps.router.cachedCapabilities();
+  const announced = caps !== undefined && deps.router.healthSnapshot().supportedMethods.includes(INSPECT_UHP_METHODS.agentExplain);
+  if (!announced) {
+    return `Agent explanation for pane=${paneId} is unavailable over UHP ` + `(method unannounced). Use agent/get with paneId="${paneId}" or ` + `fleet/list to locate the agent.`;
+  }
+  let payload;
+  try {
+    payload = await deps.uhpInspector.agentExplain(paneId, signal);
+  } catch (error) {
+    if (signal?.aborted === true)
+      throw new Error("luvus_inspect aborted");
+    if (error instanceof Error && error.message.includes("aborted"))
+      throw error;
+    return `Agent explanation for pane=${paneId} is unavailable over UHP ` + `(request failed). Use agent/get with paneId="${paneId}" or ` + `fleet/list to locate the agent.`;
+  }
+  if (payload === undefined || payload === null || Array.isArray(payload) && payload.length === 0) {
+    return agentNotFound(paneId);
+  }
+  if (isRecord8(payload) && payload.found === false) {
+    return agentNotFound(paneId);
+  }
+  const text = JSON.stringify(payload, null, 2);
+  return truncate3(`Explanation for ${paneId} (via uhp):
+${text}`);
+}
+async function handleCollection(deps, method, label, format, runUhp, runCli, signal) {
   const { payload, via } = await readThrough(deps, method, runUhp, runCli, signal);
   const rows = projectRows(payload);
   if (rows.length === 0)
     return `${label} is empty.`;
   return truncate3(`${label} (${rows.length} via ${via}):
-${rows.map(formatRowCells).join(`
+${rows.map(format).join(`
 `)}`);
 }
-async function handleTaskGet(deps, target, signal) {
-  const { payload, via } = await readThrough(deps, INSPECT_UHP_METHODS.taskGet, (sig) => deps.uhpInspector.taskGet(target, sig), (sig) => deps.cliInspector.taskGet(target, sig), signal);
-  if (payload === undefined || payload === null || Array.isArray(payload) && payload.length === 0) {
-    return `Task ${target} not found.`;
+async function handleTaskGet(deps, taskId, signal) {
+  let payload;
+  let via;
+  try {
+    const read = await readThrough(deps, INSPECT_UHP_METHODS.taskGet, (sig) => deps.uhpInspector.taskGet(taskId, sig), (sig) => deps.cliInspector.taskGet(taskId, sig), signal);
+    payload = read.payload;
+    via = read.via;
+  } catch (error) {
+    if (error instanceof CliInspectError && error.code === "not_found") {
+      return `Task ${taskId} not found. Run task/list first.`;
+    }
+    throw error;
   }
-  return truncate3(`Task ${target} (via ${via}):
+  if (payload === undefined || payload === null || Array.isArray(payload) && payload.length === 0) {
+    return `Task ${taskId} not found. Run task/list first.`;
+  }
+  if (isRecord8(payload) && payload.found === false) {
+    return `Task ${taskId} not found. Run task/list first.`;
+  }
+  return truncate3(`Task ${taskId} (via ${via}):
 ${JSON.stringify(payload, null, 2)}`);
 }
 function handleConnectionStatus(deps) {
@@ -4676,27 +5114,90 @@ function handleConnectionStatus(deps) {
   }
   return truncate3(parts.join(" \xB7 "));
 }
-async function dispatch(deps, action, target, signal) {
+function identifierHelp() {
+  return `Use paneId for agent/get|agent/explain (example ${PANE_ID_EXAMPLE} with the numeric ` + `pane id from fleet/list pane=... or agent/find), taskId for task/get, query for agent/find.`;
+}
+function paneGuidance() {
+  return `Names and workspaces are not pane ids; use agent/find with query="name" ` + `or workspace/list first. Example: ${PANE_ID_EXAMPLE}`;
+}
+function requirePaneId(value, action) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`inspect action ${action} requires paneId="12" (numeric pane id from ` + `fleet/list pane=... or agent/find). ${paneGuidance()}`);
+  }
+  const checked = validateInspectPaneId(value);
+  if (!checked.valid) {
+    throw new Error(`invalid paneId "${shortText4(value, 32)}": ${checked.reason}. ` + `Use a canonical decimal pane id from fleet/list pane=... or agent/find. ${paneGuidance()}`);
+  }
+  return checked.sanitized;
+}
+function requireTaskIdValue(value, action) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`inspect action ${action} requires a non-empty taskId from task/list id=.... ` + `Example: { action: "task/get", taskId: "t1" }. ${identifierHelp()}`);
+  }
+  const checked = validateTaskId(value);
+  if (!checked.valid) {
+    throw new Error(`invalid taskId "${shortText4(value, 64)}": ${checked.reason}. ` + `Use a taskId from task/list id=.... Example: { action: "task/get", taskId: "t1" }`);
+  }
+  return checked.sanitized;
+}
+function requireQuery(value, action) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`inspect action ${action} requires a non-empty query (max 128 chars). ` + `Example: { action: "agent/find", query: "reviewer" }. ${identifierHelp()}`);
+  }
+  const checked = validateFindQuery(value);
+  if (!checked.valid) {
+    throw new Error(`invalid query "${shortText4(value, 64)}": ${checked.reason}. ` + `Example: { action: "agent/find", query: "reviewer" }`);
+  }
+  return checked.sanitized;
+}
+function rejectExtraFields(action, ids, allowed) {
+  const extras = [];
+  if (ids.paneId !== undefined && !allowed.includes("paneId")) {
+    extras.push(`paneId="${shortText4(ids.paneId, 32)}"`);
+  }
+  if (ids.taskId !== undefined && !allowed.includes("taskId")) {
+    extras.push(`taskId="${shortText4(ids.taskId, 64)}"`);
+  }
+  if (ids.query !== undefined && !allowed.includes("query")) {
+    extras.push(`query="${shortText4(ids.query, 64)}"`);
+  }
+  if (extras.length > 0) {
+    throw new Error(`inspect action ${action} takes only ${allowed.length > 0 ? allowed.join(", ") : "no identifiers"}; ` + `remove ${extras.join(", ")}. ${identifierHelp()}`);
+  }
+}
+async function dispatch(deps, action, ids, signal) {
   if (!INSPECT_ACTIONS.includes(action)) {
     throw new Error(`unknown inspect action: ${shortText4(action, 64)}. Available: ${INSPECT_ACTIONS.join(", ")}`);
   }
-  if (TARGET_REQUIRED.includes(action) && (target === undefined || target.length === 0)) {
-    throw new Error(`inspect action ${action} requires a non-empty target`);
+  const params = ids ?? {};
+  if (params.target !== undefined) {
+    throw new Error(`inspect no longer accepts "target" (got "${shortText4(params.target, 64)}"). ${identifierHelp()}`);
   }
   switch (action) {
     case "fleet/list":
+      rejectExtraFields(action, params, []);
       return handleFleetList(deps, signal);
+    case "agent/find": {
+      rejectExtraFields(action, params, ["query"]);
+      return handleAgentFind(deps, requireQuery(params.query, action), signal);
+    }
     case "agent/get":
-      return handleAgentGet(deps, target, false, signal);
+      rejectExtraFields(action, params, ["paneId"]);
+      return handleAgentGet(deps, requirePaneId(params.paneId, action), signal);
     case "agent/explain":
-      return handleAgentGet(deps, target, true, signal);
+      rejectExtraFields(action, params, ["paneId"]);
+      return handleAgentExplain(deps, requirePaneId(params.paneId, action), signal);
     case "task/list":
-      return handleCollection(deps, INSPECT_UHP_METHODS.taskList, "Tasks", (sig) => deps.uhpInspector.taskList(sig), (sig) => deps.cliInspector.taskList(sig), signal);
+      rejectExtraFields(action, params, []);
+      return handleCollection(deps, INSPECT_UHP_METHODS.taskList, "Tasks", formatTaskRow, (sig) => deps.uhpInspector.taskList(sig), (sig) => deps.cliInspector.taskList(sig), signal);
     case "task/get":
-      return handleTaskGet(deps, target, signal);
+      rejectExtraFields(action, params, ["taskId"]);
+      return handleTaskGet(deps, requireTaskIdValue(params.taskId, action), signal);
     case "lease/list":
-      return handleCollection(deps, INSPECT_UHP_METHODS.leaseList, "Leases", (sig) => deps.uhpInspector.leaseList(sig), (sig) => deps.cliInspector.leaseList(sig), signal);
+      rejectExtraFields(action, params, []);
+      return handleCollection(deps, INSPECT_UHP_METHODS.leaseList, "Leases", formatLeaseRow, (sig) => deps.uhpInspector.leaseList(sig), (sig) => deps.cliInspector.leaseList(sig), signal);
     case "mission/snapshot": {
+      rejectExtraFields(action, params, []);
       const caps = deps.router.cachedCapabilities();
       const announced = caps !== undefined && deps.router.healthSnapshot().supportedMethods.includes(INSPECT_UHP_METHODS.missionSnapshot);
       if (announced) {
@@ -4707,8 +5208,10 @@ ${JSON.stringify(payload, null, 2)}`);
       return "Mission snapshot is only available over UHP. Use fleet/list or workspace/list instead.";
     }
     case "workspace/list":
-      return handleCollection(deps, INSPECT_UHP_METHODS.workspaceList, "Workspaces", (sig) => deps.uhpInspector.workspaceList(sig), (sig) => deps.cliInspector.workspaceList(sig), signal);
+      rejectExtraFields(action, params, []);
+      return handleCollection(deps, INSPECT_UHP_METHODS.workspaceList, "Workspaces", formatWorkspaceRow, (sig) => deps.uhpInspector.workspaceList(sig), (sig) => deps.cliInspector.workspaceList(sig), signal);
     case "connection/status":
+      rejectExtraFields(action, params, []);
       return handleConnectionStatus(deps);
   }
 }
@@ -4716,19 +5219,22 @@ function registerInspectTool(pi, deps) {
   pi.registerTool({
     name: INSPECT_TOOL_NAME2,
     label: "Luvus Inspect",
-    description: "Inspect Luvus agents, tasks, leases, and fleet status (read-only)",
-    promptSnippet: "Inspect Luvus agents, tasks, leases, and fleet status (read-only)",
+    description: "Inspect Luvus agents, tasks, leases, and fleet status (read-only). Start with fleet/list or agent/find; agent/get and agent/explain need a numeric paneId from results; task/get needs a taskId.",
+    promptSnippet: "Start with fleet/list to browse or agent/find with query to resolve names; agent/get and agent/explain require a numeric paneId from results",
     promptGuidelines: [
-      "Use luvus_inspect for read-only queries about agents, tasks, leases, and fleet health.",
+      'Start with fleet/list to browse or agent/find with query="name" to resolve names; agent/get and agent/explain require a numeric paneId from results (example paneId="12").',
+      "Workspace or display names are not pane ids: resolve them via agent/find or workspace/list first; task/get requires a taskId from task/list.",
+      "On command failure run connection/status to inspect the bridge; do not blindly retry.",
       "luvus_inspect never mutates workspace or agent state."
     ],
     parameters: InspectParams,
     async execute(toolCallId, params, signal, _onUpdate, _ctx) {
       if (signal?.aborted === true)
         throw new Error("luvus_inspect aborted");
+      const ids = params;
       let text;
       try {
-        text = await dispatch(deps, params.action, params.target, signal ?? undefined);
+        text = await dispatch(deps, params.action, ids, signal ?? undefined);
       } catch (error) {
         if (error instanceof Error) {
           throw new Error(error.message);
@@ -4862,7 +5368,7 @@ class UhpCapabilityError extends Error {
     this.reason = reason;
   }
 }
-function isRecord8(value) {
+function isRecord9(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function fail5(hint) {
@@ -4877,12 +5383,12 @@ function checkString(value, hint, maxLength, pattern) {
   return value;
 }
 function parseUhpCapabilities(result) {
-  if (!isRecord8(result))
+  if (!isRecord9(result))
     fail5("result object");
   const root = result;
   if (root.type !== "uhp_capabilities")
     fail5("type");
-  if (!isRecord8(root.protocol))
+  if (!isRecord9(root.protocol))
     fail5("protocol");
   const protocol = root.protocol;
   if (protocol.name !== UHP_PROTOCOL_NAME)
@@ -4913,7 +5419,7 @@ function parseUhpCapabilities(result) {
     fail5("method_contracts");
   const contracts = Object.create(null);
   for (const entry of root.method_contracts) {
-    if (!isRecord8(entry))
+    if (!isRecord9(entry))
       fail5("method_contracts");
     const record = entry;
     if (typeof record.method !== "string" || !seen.has(record.method)) {
@@ -4939,7 +5445,7 @@ function parseUhpCapabilities(result) {
     if (!(method in contracts))
       fail5("method_contracts");
   }
-  if (!isRecord8(root.limits))
+  if (!isRecord9(root.limits))
     fail5("limits");
   const frameBytes = root.limits.frame_bytes;
   if (typeof frameBytes !== "number" || !Number.isSafeInteger(frameBytes) || frameBytes <= 0 || frameBytes > MAX_FRAME_BYTES) {
@@ -5103,7 +5609,7 @@ class UhpSnapshotError extends Error {
 function fail6(hint) {
   throw new UhpSnapshotError("invalid-shape", hint);
 }
-function isRecord9(value) {
+function isRecord10(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function checkInt(value, hint, minimum) {
@@ -5133,7 +5639,7 @@ function checkPaneId(value) {
   return id;
 }
 function parsePane(value, workspace, tabIndex, tabName) {
-  if (!isRecord9(value))
+  if (!isRecord10(value))
     fail6("pane");
   const pane = value;
   if (pane.kind !== "terminal")
@@ -5163,12 +5669,12 @@ function parsePane(value, workspace, tabIndex, tabName) {
   });
 }
 function parseSessionSnapshot(result) {
-  if (!isRecord9(result))
+  if (!isRecord10(result))
     fail6("result object");
   const root = result;
   if (root.type !== "session_snapshot")
     fail6("type");
-  if (!isRecord9(root.protocol))
+  if (!isRecord10(root.protocol))
     fail6("protocol");
   const protocol = root.protocol;
   if (protocol.name !== "luvus-uhp")
@@ -5194,7 +5700,7 @@ function parseSessionSnapshot(result) {
     workspaceCount += 1;
     if (workspaceCount > MAX_SNAPSHOT_WORKSPACES)
       fail6("workspaces");
-    if (!isRecord9(workspaceValue))
+    if (!isRecord10(workspaceValue))
       fail6("workspace");
     const workspace = workspaceValue;
     const workspaceIndex = checkInt(workspace.index, "workspace.index", 0);
@@ -5210,7 +5716,7 @@ function parseSessionSnapshot(result) {
       tabCount += 1;
       if (tabCount > MAX_SNAPSHOT_TABS)
         fail6("tabs");
-      if (!isRecord9(tabValue))
+      if (!isRecord10(tabValue))
         fail6("tab");
       const tab = tabValue;
       if (tab.kind !== "panes")
