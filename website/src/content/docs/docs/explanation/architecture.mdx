@@ -56,6 +56,17 @@ full 40-character line ~100 bytes. This is what makes
 [remote attach](/docs/guides/remote/) over plain SSH feel local, and keeps the
 local render path around a millisecond per frame.
 
+For ordinary terminal-only updates, the server can also reuse its rendered
+buffer and repaint only damaged rows. Agent titles do not disable this path:
+a changed title invalidates the full projection until that output generation
+is acknowledged. Repeated identical titles keep the row-only path available.
+Overlays, resize, and backpressure recovery retain conservative full rendering.
+
+A hidden agent's changed title can still update a visible sidebar label. That
+change schedules a presentation through the existing PTY notification path,
+including coalesced output. Unchanged titles and ordinary hidden output do not
+request a redraw just because title display is enabled.
+
 ## And the numbers
 
 Pure Rust, a single ~3 MB binary, single-digit-MB resident memory even with

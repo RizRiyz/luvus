@@ -4385,7 +4385,7 @@ impl App {
     /// active tab from output owned by another tab or workspace. The server
     /// uses this to keep focused rendering responsive without repeatedly
     /// diffing an unchanged UI for background-only bursts.
-    pub fn rearm_pty_notify_by_visibility(&self) -> (bool, bool) {
+    pub fn rearm_pty_notify_by_visibility(&self) -> (bool, bool, bool) {
         let layout = self.workspaces.get(self.active_ws).and_then(|workspace| {
             workspace
                 .tabs
@@ -4394,6 +4394,7 @@ impl App {
         });
         let mut visible = false;
         let mut background = false;
+        let mut title_changed = false;
         for (id, pane) in &self.panes {
             if !pane.take_data_pending() {
                 continue;
@@ -4402,9 +4403,19 @@ impl App {
                 visible = true;
             } else {
                 background = true;
+                title_changed |= self.hidden_title_changed(*id);
             }
         }
-        (visible, background)
+        (visible, background, title_changed)
+    }
+
+    pub(crate) fn hidden_title_changed(&self, id: PaneId) -> bool {
+        self.config.layout.agent_title
+            && self.is_agent_pane(id)
+            && self
+                .panes
+                .get(&id)
+                .is_some_and(|pane| pane.take_title_change())
     }
 
     /// Whether any PTY reader is currently coalescing an output notification.

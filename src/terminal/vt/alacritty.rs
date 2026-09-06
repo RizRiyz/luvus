@@ -19,7 +19,16 @@ use crate::terminal::appearance::PaneAppearance;
 use crate::terminal::backend::{CaptureMode, CaptureResult};
 use crate::terminal::pty::{InputAction, InputSender};
 
-type TitleSlot = Arc<Mutex<Option<String>>>;
+#[derive(Default)]
+struct TitleState {
+    value: Option<String>,
+    // Title chrome must be fully projected before terminal-only patching can
+    // resume. Cleared only by a generation-matched damage acknowledgement.
+    changed: bool,
+    generation: u64,
+}
+
+type TitleSlot = Arc<Mutex<TitleState>>;
 
 /// Receives terminal-generated responses (cursor reports, device attributes,
 /// etc.) and forwards them back to the child via the shared write channel.
@@ -56,12 +65,19 @@ impl EventListener for EventProxy {
             }
             Event::Title(t) => {
                 if let Ok(mut g) = self.title.lock() {
-                    *g = Some(t);
+                    if g.value.as_ref() != Some(&t) {
+                        g.value = Some(t);
+                        g.changed = true;
+                        g.generation = g.generation.wrapping_add(1);
+                    }
                 }
             }
             Event::ResetTitle => {
                 if let Ok(mut g) = self.title.lock() {
-                    *g = None;
+                    if g.value.take().is_some() {
+                        g.changed = true;
+                        g.generation = g.generation.wrapping_add(1);
+                    }
                 }
             }
             _ => {}
@@ -132,7 +148,7 @@ impl AlacrittyEngine {
             cols: cols.max(1) as usize,
             rows: rows.max(1) as usize,
         };
-        let title: TitleSlot = Arc::new(Mutex::new(None));
+        let title: TitleSlot = Arc::new(Mutex::new(TitleState::default()));
         let appearance = Arc::new(Mutex::new(initial_appearance));
         let proxy = EventProxy {
             tx: resp_tx.clone(),
@@ -469,7 +485,7 @@ impl VtEngine for AlacrittyEngine {
 
     fn damage_snapshot(&mut self) -> DamageSnapshot {
         self.damage_line_indices.clear();
-        let kind = match self.term.damage() {
+        let mut kind = match self.term.damage() {
             TermDamage::Full => DamageKind::Full,
             TermDamage::Partial(lines) => {
                 self.damage_line_indices
@@ -477,6 +493,9 @@ impl VtEngine for AlacrittyEngine {
                 DamageKind::Partial
             }
         };
+        if self.title.lock().map_or(true, |title| title.changed) {
+            kind = DamageKind::Full;
+        }
 
         let cursor = self.cursor();
         let composer_region = self.codex_composer_region();
@@ -563,6 +582,9 @@ impl VtEngine for AlacrittyEngine {
             return false;
         }
         self.term.reset_damage();
+        if let Ok(mut title) = self.title.lock() {
+            title.changed = false;
+        }
         true
     }
 
@@ -844,7 +866,11 @@ impl VtEngine for AlacrittyEngine {
     }
 
     fn title(&self) -> Option<String> {
-        self.title.lock().ok().and_then(|g| g.clone())
+        self.title.lock().ok().and_then(|g| g.value.clone())
+    }
+
+    fn title_generation(&self) -> u64 {
+        self.title.lock().map_or(0, |title| title.generation)
     }
 
     fn set_history_budget(&mut self, bytes: usize) {
@@ -1204,6 +1230,25 @@ mod tests {
 
     fn budget_for_rows(cols: usize, rows: usize) -> usize {
         estimated_row_bytes(cols).saturating_mul(rows)
+    }
+
+    #[test]
+    fn title_changes_force_full_damage_until_matching_acknowledgement() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(24, 4, tx, budget_for_rows(24, 20));
+        assert!(engine.acknowledge_damage(engine.output_generation()));
+        engine.advance(b"\x1b[22;0t\x1b]2;review\x07");
+        let changed = engine.damage_snapshot();
+        assert_eq!(changed.kind, DamageKind::Full);
+        engine.advance(b"ordinary output");
+        assert!(!engine.acknowledge_damage(changed.generation));
+        assert_eq!(engine.damage_snapshot().kind, DamageKind::Full);
+        assert!(engine.acknowledge_damage(engine.output_generation()));
+        engine.advance(b"\x1b]2;review\x07!");
+        assert_eq!(engine.damage_snapshot().kind, DamageKind::Partial);
+        engine.advance(b"\x1b[23;0t");
+        assert_eq!(engine.damage_snapshot().kind, DamageKind::Full);
+        assert!(engine.title().is_none());
     }
 
     #[test]

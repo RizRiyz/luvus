@@ -149,6 +149,7 @@ pub struct Pane {
     /// it while holding the VT lock, so capture can return a revision that
     /// exactly matches the screen snapshot it serialized.
     content_revision: Arc<AtomicU64>,
+    observed_title_generation: AtomicU64,
     /// `PtyData` coalescing: set by the reader when it announces new output,
     /// cleared by the app loop when it consumes the event. While set, further
     /// reads skip the send — a saturated PTY (thousands of 8 KB reads/s) wakes
@@ -511,6 +512,7 @@ impl Pane {
             child_pid: Arc::new(AtomicU32::new(child_pid)),
             terminal_runtime: Arc::new(Mutex::new(Some(terminal_runtime))),
             content_revision,
+            observed_title_generation: AtomicU64::new(0),
             master: Arc::new(Mutex::new(Some(pair.master))),
             input_tx,
             cwd,
@@ -717,6 +719,7 @@ impl Pane {
             child_pid,
             terminal_runtime,
             content_revision,
+            observed_title_generation: AtomicU64::new(0),
             master,
             input_tx,
             cwd,
@@ -754,6 +757,22 @@ impl Pane {
     /// a pane actually has pending bytes, instead of waking forever when idle.
     pub fn has_data_pending(&self) -> bool {
         self.data_pending.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Coalesce title-only presentation with the existing PTY output wake.
+    pub(crate) fn take_title_change(&self) -> bool {
+        let Ok(engine) = self.engine.lock() else {
+            return false;
+        };
+        let generation = engine.title_generation();
+        self.observed_title_generation
+            .swap(generation, Ordering::AcqRel)
+            != generation
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_data_pending_for_test(&self) {
+        self.data_pending.store(true, Ordering::Release);
     }
 
     /// Clear the pending-output coalescing flag so the reader's next

@@ -344,6 +344,8 @@ pub trait VtEngine: Send {
 
     /// Capture owned visible rows affected since the last acknowledged render.
     /// Implementations may conservatively return [`DamageKind::Full`].
+    /// Title changes must return Full until acknowledged: titles can also
+    /// affect chrome outside terminal rows, including agent sidebar labels.
     fn damage_snapshot(&mut self) -> DamageSnapshot;
 
     /// Forget damage through `generation` only when no newer output exists.
@@ -391,6 +393,12 @@ pub trait VtEngine: Send {
 
     /// Latest window title set by the child via OSC 0/2, if any.
     fn title(&self) -> Option<String>;
+
+    /// Changes only when title chrome changes, including reset. Engines with
+    /// mutable titles must override this for hidden-pane presentation.
+    fn title_generation(&self) -> u64 {
+        0
+    }
 
     /// Scroll the viewport `delta` lines through scrollback: **positive scrolls
     /// up into history**, negative back toward the live bottom. Clamped to the
