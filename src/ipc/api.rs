@@ -1226,11 +1226,13 @@ fn matching_event(line: &str, event: &str, predicate: &Value) -> Option<Value> {
         .then_some(value)
 }
 
+/// A capture and the revision observed while its engine lock was held.
 struct TerminalStreamFrame {
     serialized: String,
     content_revision: u64,
 }
 
+/// Capture one bounded replacement frame together with its exact revision.
 fn terminal_stream_frame(
     target: &crate::terminal::backend::ObserveTarget,
     sequence: u64,
@@ -1284,6 +1286,7 @@ fn stream_event_for_target(line: &str, terminal_id: &str) -> Option<(String, u64
     })
 }
 
+/// Serialize writes from the output forwarder and correlated control replies.
 fn write_shared_frame(writer: &Mutex<Conn>, frame: &str) -> io::Result<()> {
     #[cfg(test)]
     tests::pause_initial_frame_write(frame);
@@ -1371,6 +1374,7 @@ fn control_action_response(
         })
 }
 
+/// Own a bounded observe/control subscription until disconnect or cancellation.
 fn handle_terminal_stream(
     reader: &mut BufReader<Conn>,
     writer: Conn,
@@ -2721,6 +2725,7 @@ mod tests {
         Mutex<std::collections::HashMap<String, FrameWriteBarrier>>,
     > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
+    /// Apply a terminal-specific, one-shot barrier after capture in tests only.
     pub(super) fn pause_initial_frame_write(frame: &str) {
         let value: Value = serde_json::from_str(frame).unwrap();
         if value["event"] != "terminal.frame" {
@@ -2739,6 +2744,7 @@ mod tests {
         }
     }
 
+    /// Force the quiet-final-update schedule through the real IPC forwarder.
     fn assert_final_update_during_initial_write(control: bool) {
         let _env = crate::persist::test_env("observe-write-race");
         let root = crate::persist::ensure_config_dir();
@@ -2830,11 +2836,13 @@ mod tests {
     }
 
     #[test]
+    /// Pin observe delivery when output advances before the first write finishes.
     fn observe_does_not_skip_output_during_initial_frame_write() {
         assert_final_update_during_initial_write(false);
     }
 
     #[test]
+    /// Pin the same initial-write invariant on the shared control forwarder.
     fn control_does_not_skip_output_during_initial_frame_write() {
         assert_final_update_during_initial_write(true);
     }
@@ -2858,6 +2866,7 @@ mod tests {
     }
 
     #[test]
+    /// Keep serialized identity, captured revision and payload bounds coupled.
     fn terminal_stream_frame_is_bounded_and_identified() {
         let target = observe_target();
         let frame = terminal_stream_frame(&target, 12).unwrap();
@@ -2939,6 +2948,7 @@ mod tests {
     }
 
     #[test]
+    /// Preserve initial/change frames, exact filtering, deduplication and exit.
     fn observe_stream_sends_initial_and_change_driven_frames() {
         let _env = crate::persist::test_env("terminal-observe-stream");
         let root = crate::persist::ensure_config_dir();
