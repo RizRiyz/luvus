@@ -25,6 +25,7 @@ use crate::ui::theme::{State, Theme};
 mod automation;
 mod backend;
 mod board;
+mod config_persistence;
 mod cwd;
 pub use board::{
     agent_choices, automation_agent_choices, automation_agent_choices_for, task_agent_choices,
@@ -2145,6 +2146,7 @@ pub struct App {
     /// This server's last local config snapshot. Persistence diffs against this
     /// snapshot so another named server's newer, unrelated fields survive.
     config_baseline: crate::config::Config,
+    config_persistence: config_persistence::ConfigPersistence,
     io_jobs: io_jobs::IoJobs,
     file_metadata_inflight: bool,
     file_metadata_cursor: usize,
@@ -2836,6 +2838,7 @@ impl App {
             catalog,
             config,
             config_baseline,
+            config_persistence: config_persistence::ConfigPersistence::default(),
             io_jobs: io_jobs::IoJobs::default(),
             file_metadata_inflight: false,
             file_metadata_cursor: 0,
@@ -3485,6 +3488,7 @@ impl App {
             catalog,
             config,
             config_baseline,
+            config_persistence: config_persistence::ConfigPersistence::default(),
             io_jobs: io_jobs::IoJobs::default(),
             file_metadata_inflight: false,
             file_metadata_cursor: 0,
@@ -3821,29 +3825,6 @@ impl App {
         self.config.sidebars = Some(self.sidebars.to_config());
         self.config.sidebar_width = self.sidebars.left.width;
         self.persist_config();
-    }
-
-    /// Merge only this server's local changes into the shared home-level config.
-    /// A failed best-effort write keeps the old baseline so the next mutation
-    /// retries every unsaved field.
-    pub(crate) fn persist_config(&mut self) {
-        if crate::config::save_changes(&self.config_baseline, &self.config) {
-            self.config_baseline = self.config.clone();
-        }
-    }
-
-    /// Persist local changes while forcing an explicit user/API patch even when
-    /// this server already held the requested value in memory.
-    pub(crate) fn persist_config_patch(&mut self, patch: &serde_json::Value) {
-        if crate::config::save_changes_with_patch(&self.config_baseline, &self.config, Some(patch))
-        {
-            self.config_baseline = self.config.clone();
-        }
-    }
-
-    /// Adopt an externally reloaded config without writing it back to disk.
-    pub(crate) fn reset_config_baseline(&mut self) {
-        self.config_baseline = self.config.clone();
     }
 
     /// Apply the AGENTS All / Active projection without performing I/O. This is
@@ -7963,6 +7944,8 @@ mod tests {
 
         alpha.apply_theme("quattro-rally");
         assert!(beta.set_agents_filter(true));
+        alpha.flush_config_for_test(&_alpha_rx);
+        beta.flush_config_for_test(&_beta_rx);
 
         let merged = crate::config::load();
         assert_eq!(merged.theme, "quattro-rally");
@@ -8992,12 +8975,14 @@ mod tests {
 
         app.open_ws_menu(0, 0, 0);
         app.ws_menu_action(WsMenuItem::TogglePath);
+        app.flush_config_for_test(&_rx);
         let stored = crate::config::load();
         assert!(!stored.layout.workspace_paths);
         assert!(stored.layout.agent_paths);
 
         app.open_agent_menu(AgentTarget::Live(pane), 0, 0);
         app.agent_menu_action(AgentMenuItem::TogglePath);
+        app.flush_config_for_test(&_rx);
         let stored = crate::config::load();
         assert!(!stored.layout.workspace_paths);
         assert!(!stored.layout.agent_paths);
@@ -9993,6 +9978,7 @@ mod tests {
             "the left sidebar widened by the drag distance"
         );
         // Released width is persisted for the next launch.
+        app.flush_config_for_test(&_rx);
         assert_eq!(
             crate::config::load().sidebars.unwrap().left.width,
             before + 6,
@@ -12366,6 +12352,7 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         }));
         assert!(app.agents_this_workspace);
+        app.flush_config_for_test(&_rx);
         assert!(crate::config::load().agents_this_workspace);
         app.open_agent_menu(AgentTarget::Session(1), row.x + 1, row.y);
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
@@ -12663,6 +12650,7 @@ mod tests {
             crate::i18n::by_code(&app.config.language).workspaces,
             "catalog swapped live"
         );
+        app.flush_config_for_test(&_rx);
         assert_eq!(
             crate::config::load().language,
             app.config.language,

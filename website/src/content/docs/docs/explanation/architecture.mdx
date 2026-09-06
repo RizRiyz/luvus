@@ -31,6 +31,21 @@ this does not introduce a second persistent screen cache or promise constant-tim
 capture for an arbitrary number of panes. Automation dispatch-intent persistence
 is a separate contract and is not made asynchronous by session saving.
 
+Settings changes apply to the running UI immediately and are persisted through
+the same shared worker. Rapid changes coalesce behind one in-flight write.
+Acknowledged baselines preserve newer local edits and unrelated changes from
+other named sessions. Explicit API patches remain authoritative even when the
+requested value matches this server's old in-memory value. Cross-process lock
+acquisition is bounded to one second, and failures retain intent for a later
+retry and display an error. The worker pins the config path before admission.
+
+Socket config reloads that arrive during a save wait for its outcome and read
+the shared file again. A failed save or a concurrent edit during that fresh read
+returns a structured error instead of silently replacing newer settings.
+Shutdown uses the in-flight write receipt to avoid replaying already-saved fields
+over changes another session made afterward. This is not a multi-file transaction
+between configuration and the session snapshot.
+
 Three design decisions explain most of luvus's behavior.
 
 ## A headless server, a thin client

@@ -1433,6 +1433,7 @@ mod tests {
         }));
         assert!(app.agents_active_only);
         assert_eq!(app.agents_scroll, 0);
+        app.flush_config_for_test(&_rx);
         assert!(crate::config::load().agents_active_only);
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         assert!(
@@ -1465,6 +1466,7 @@ mod tests {
         }));
         assert!(!app.agents_active_only);
         assert_eq!(app.agents_scroll, 0);
+        app.flush_config_for_test(&_rx);
         assert!(!crate::config::load().agents_active_only);
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         assert!(buffer_contains(&term, "resume"));
@@ -1563,6 +1565,7 @@ mod tests {
         assert!(app.agents_this_workspace);
         assert!(!app.agents_active_only, "scope is independent of lifecycle");
         assert_eq!(app.agents_scroll, 0);
+        app.flush_config_for_test(&_rx);
         assert!(crate::config::load().agents_this_workspace);
 
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();

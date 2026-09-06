@@ -1468,6 +1468,12 @@ impl App {
         clients_attached: bool,
     ) -> Option<Instant> {
         let mut deadline = None;
+        if self.config_persistence.dirty && !self.config_persistence.inflight {
+            Self::sooner_deadline(
+                &mut deadline,
+                self.config_persistence.retry_at.unwrap_or(now),
+            );
+        }
         let mut consider = |candidate: Instant, due: bool| {
             if candidate > now {
                 Self::sooner_deadline(&mut deadline, candidate);
@@ -1750,6 +1756,7 @@ impl App {
     }
 
     pub(crate) fn detect_tick_with(&mut self, now: Instant, clients_attached: bool) -> bool {
+        self.schedule_config_save(now);
         // No node open (docs/43 §3.3 — the session was closed). Closing the last
         // node also closed every pane, so there is nothing to classify, and
         // `layout()` below would index an empty `workspaces`. The server keeps

@@ -118,6 +118,18 @@ turn count, and per-turn p95/p99/maximum lock-held work, not end-to-end
 input/scroll latency. Run separate live
 latency checks before changing maintenance scheduling, especially on Windows.
 
+To check CLI/UHP responsiveness while configuration storage is locked (Unix):
+
+```bash
+cargo build --locked
+python3 examples/uhp/terminal/io_responsiveness.py --luvus target/debug/luvus
+```
+
+This starts its own isolated development server, reports baseline and contended
+request timings, deliberately exercises the lock timeout, and verifies that retry
+persists the setting. It never attaches to an existing session. Timings are host
+measurements, not hard CI thresholds or proof of Windows/TUI rendering latency.
+
 ## Adding agent support
 
 Use a detection manifest when an agent only needs identity and live-state

@@ -467,6 +467,10 @@ impl App {
                 return true;
             }
             AppEvent::ConfigReloaded { id, config, reply } => {
+                if self.config_save_pending() {
+                    self.defer_config_reload(id, reply);
+                    return false;
+                }
                 let response = match self.apply_socket_config(*config, None) {
                     Ok(()) => {
                         json!({"id":id,"result":{"type":"config_reloaded","config":self.config}})

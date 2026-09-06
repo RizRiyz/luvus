@@ -142,6 +142,16 @@ impl App {
     }
 }
 
+impl Drop for IoJobs {
+    fn drop(&mut self) {
+        // Covers early startup/test exits as well as the explicit server drain.
+        // A completed explicit drain has already taken the sender.
+        if self.sender.is_some() {
+            let _ = self.finish(Duration::from_secs(2), || true);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
