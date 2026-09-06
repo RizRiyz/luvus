@@ -788,6 +788,15 @@ impl Pane {
     /// success is dispatch evidence only; it does not claim the child consumed
     /// or acted on the bytes.
     pub fn try_submit_text(&self, text: &str) -> Result<(), String> {
+        self.try_submit_text_with_settle(text, std::time::Duration::from_millis(30))
+    }
+
+    /// Admit paste and Enter together, preserving the caller's settle policy.
+    pub(crate) fn try_submit_text_with_settle(
+        &self,
+        text: &str,
+        settle: std::time::Duration,
+    ) -> Result<(), String> {
         let bracketed = self
             .engine
             .lock()
@@ -801,7 +810,7 @@ impl Pane {
                 } else {
                     wrap_paste(text, bracketed)
                 },
-                settle: std::time::Duration::from_millis(30),
+                settle,
             })
             .map_err(|_| "target pane closed before input was queued".to_string())
     }
@@ -823,19 +832,6 @@ impl Pane {
 
     pub fn child_exited(&self) -> bool {
         self.child_exited.load(Ordering::SeqCst)
-    }
-
-    /// Enqueue `bytes` after `delay`, off-thread. Used to follow a pasted prompt
-    /// with a submit key once the child has ingested the paste: an agent's input
-    /// widget needs the paste to land before the Enter, or the Enter is swallowed
-    /// into the paste. The cloned input channel keeps the writer alive for exactly
-    /// this one deferred send.
-    pub fn send_after(&self, bytes: Vec<u8>, delay: std::time::Duration) {
-        let tx = self.input_tx.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(delay);
-            let _ = tx.send(InputAction::Bytes(bytes));
-        });
     }
 
     /// Apply a new per-pane history memory budget (Settings → Layout). Shrinks
@@ -1045,12 +1041,7 @@ impl Pane {
     /// dropped file's path as literal text instead of attaching the file, and
     /// vim auto-indents pasted code. Re-wrapping restores the distinction.
     pub fn send_paste(&self, text: &str) {
-        let bracketed = self
-            .engine
-            .lock()
-            .map(|e| e.bracketed_paste())
-            .unwrap_or(false);
-        self.send(&wrap_paste(text, bracketed));
+        let _ = self.try_send_paste(text);
     }
 
     pub fn try_send_paste(&self, text: &str) -> Result<(), String> {

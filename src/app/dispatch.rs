@@ -3603,10 +3603,14 @@ impl App {
                         "agent send text must not be empty".to_string(),
                     ));
                 }
-                if let Some(pane) = self.panes.get(&id) {
-                    pane.send_paste(text);
-                    pane.send_after(b"\r".to_vec(), std::time::Duration::from_millis(45));
-                }
+                let pane = self.panes.get(&id).ok_or_else(|| {
+                    (
+                        "send_failed".to_string(),
+                        "target pane closed before input was queued".to_string(),
+                    )
+                })?;
+                pane.try_submit_text_with_settle(text, AGENT_MESSAGE_SETTLE)
+                    .map_err(|message| ("send_failed".to_string(), message))?;
                 let (agent, status) = self
                     .status
                     .get(&id)
@@ -9049,6 +9053,48 @@ command = ["true"]
                 .0,
             "not_found"
         );
+    }
+
+    #[test]
+    fn agent_send_admits_one_ordered_submission_and_reports_closed_queue() {
+        let _env = crate::persist::test_env("agent-send-atomic");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "claude".into();
+        app.panes[&pane]
+            .engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b[?2004h");
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+        for text in ["first\nsecond", "next"] {
+            app.dispatch(
+                "agent.send",
+                &json!({"target": pane.0.to_string(), "text": text}),
+            )
+            .unwrap();
+            let crate::terminal::pty::InputAction::Submit { paste, settle } =
+                input_rx.try_recv().unwrap()
+            else {
+                panic!("paste and Enter must be a single action")
+            };
+            assert_eq!(paste, format!("\x1b[200~{text}\x1b[201~").as_bytes());
+            assert_eq!(settle, std::time::Duration::from_millis(45));
+            assert!(input_rx.try_recv().is_err());
+        }
+        drop(input_rx);
+        let error = app
+            .dispatch(
+                "agent.send",
+                &json!({"target": pane.0.to_string(), "text": "closed"}),
+            )
+            .unwrap_err();
+        assert_eq!(error.0, "send_failed");
     }
 
     #[test]

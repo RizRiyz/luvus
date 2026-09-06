@@ -1545,8 +1545,7 @@ impl App {
             .panes
             .get(&target)
             .ok_or_else(|| "target pane closed before delivery".to_string())?;
-        pane.try_send_paste(&message)?;
-        pane.send_after(b"\r".to_vec(), std::time::Duration::from_millis(45));
+        pane.try_submit_text_with_settle(&message, super::AGENT_MESSAGE_SETTLE)?;
         let delivered_at = crate::diff::notes::now_ms();
         for selected_note in &selected {
             if let Some(index) = self
