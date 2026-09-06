@@ -2147,6 +2147,7 @@ pub struct App {
     io_jobs: io_jobs::IoJobs,
     file_metadata_inflight: bool,
     file_metadata_cursor: usize,
+    file_mutation_inflight: bool,
     /// Active `key → Cmd` map for prefix mode (defaults + config overrides).
     pub keymap: std::collections::HashMap<String, Cmd>,
     /// Explicit normal-mode shortcuts. Empty by default so pane input remains
@@ -2836,6 +2837,7 @@ impl App {
             io_jobs: io_jobs::IoJobs::default(),
             file_metadata_inflight: false,
             file_metadata_cursor: 0,
+            file_mutation_inflight: false,
             keymap,
             direct_keymap,
             prefix,
@@ -3483,6 +3485,7 @@ impl App {
             io_jobs: io_jobs::IoJobs::default(),
             file_metadata_inflight: false,
             file_metadata_cursor: 0,
+            file_mutation_inflight: false,
             keymap,
             direct_keymap,
             prefix,
