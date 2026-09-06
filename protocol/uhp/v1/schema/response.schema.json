@@ -42,8 +42,12 @@
     "snapshotAliases": {
       "description": "Operator aliases only; backend titles do not override them. Other snapshot fields remain extensible.",
       "type": "object",
-      "required": ["workspaces"],
+      "required": ["protocol", "session", "server_generation", "event_sequence", "workspaces"],
       "properties": {
+        "protocol": { "const": { "name": "luvus-uhp", "major": 1, "minor": 0 } },
+        "session": { "type": "string" },
+        "server_generation": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "event_sequence": { "type": "integer" },
         "workspaces": {
           "type": "array",
           "items": {
@@ -72,7 +76,6 @@
         {
           "if": { "properties": { "kind": { "const": "terminal" } }, "required": ["kind"] },
           "then": {
-            "required": ["agent_name"],
             "properties": { "agent_name": { "anyOf": [
               { "type": "null" },
               { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z]", "not": { "pattern": "[^a-z0-9_-]" } }

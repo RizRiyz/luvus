@@ -410,9 +410,8 @@ def valid_snapshot_alias_rows(result):
                 if not isinstance(row, dict) or not pane(row.get("pane_id")) or not isinstance(row.get("kind"), str):
                     return False
                 if row["kind"] == "terminal":
-                    if "agent_name" not in row:
-                        return False
-                    alias = row["agent_name"]
+                    # Older servers predate the additive alias projection.
+                    alias = row.get("agent_name")
                     if alias is not None and (not isinstance(alias, str) or re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", alias) is None):
                         return False
                 elif row["kind"] == "view" and "agent_name" in row:
@@ -696,7 +695,7 @@ def valid_global_response(value):
     if isinstance(result, dict) and result.get("type") == "agent_wait":
         return valid_response(value)
     if isinstance(result, dict) and result.get("type") == "session_snapshot":
-        return valid_snapshot_alias_rows(result)
+        return valid_response(value)
     return True
 
 
