@@ -880,7 +880,7 @@ fn snapshot_layout(
 /// Save the app's session atomically. A truly empty session can only remain after
 /// restore or shell startup failure; clear its stale snapshot so the next start
 /// cannot resurrect panes the user already closed.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub fn save(app: &App) -> bool {
     capture_session(app).write()
 }
