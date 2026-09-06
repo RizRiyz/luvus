@@ -1315,6 +1315,44 @@ mod tests {
         }
     }
 
+    /// Measure the lock-held maintenance boundary separately from ingestion.
+    /// Opt-in only: no timers, production instrumentation, or child processes.
+    #[test]
+    #[ignore]
+    fn history_maintenance_benchmark() {
+        use std::{hint::black_box, io::Write, time::Instant};
+        for styled in [false, true] {
+            let mut corpus = Vec::new();
+            for row in 0..10_024usize {
+                for column in 0..80usize {
+                    let value = row.wrapping_mul(7919).wrapping_add(column * 104729);
+                    if styled {
+                        write!(
+                            &mut corpus,
+                            "\x1b[38;2;{};{};{}m",
+                            value % 256,
+                            (value >> 8) % 256,
+                            (value >> 16) % 256
+                        )
+                        .unwrap();
+                    }
+                    corpus.push(b'!' + (value % 94) as u8);
+                }
+                corpus.extend_from_slice(b"\r\n");
+            }
+            for trial in 1..=3 {
+                let (tx, _rx) = channel();
+                let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 10_000));
+                engine.advance(&corpus);
+                let start = Instant::now();
+                engine.finish_output_batch();
+                let elapsed = start.elapsed();
+                let metrics = black_box(engine.history_metrics());
+                eprintln!("history_maintenance styled={styled} trial={trial} rows={} packed_rows={} milliseconds={:.3}", metrics.retained_rows, metrics.packed_rows.unwrap_or(0), elapsed.as_secs_f64() * 1000.0);
+            }
+        }
+    }
+
     #[test]
     fn title_changes_force_full_damage_until_matching_acknowledgement() {
         let (tx, _rx) = channel();

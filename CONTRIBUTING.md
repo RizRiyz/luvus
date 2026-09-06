@@ -106,6 +106,17 @@ rows each. These are engine-accounting timings, not end-to-end API latency or
 process memory measurements. Record the commit and build profile when comparing
 runs. Ordinary test runs do not execute this workload.
 
+To isolate cold-history maintenance from ingestion, run:
+
+```bash
+cargo test --release --locked history_maintenance_benchmark -- --ignored --nocapture
+```
+
+This uses 80x24 engines with 10,000 retained rows, both printable text and
+per-cell RGB styling, and three trials per corpus. It measures the synchronous
+maintenance boundary, not end-to-end input/scroll latency. Run separate live
+latency checks before changing maintenance scheduling, especially on Windows.
+
 ## Adding agent support
 
 Use a detection manifest when an agent only needs identity and live-state
