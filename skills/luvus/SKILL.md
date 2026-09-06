@@ -393,6 +393,10 @@ surface:
   idempotency key for retryable create/run requests, and never turn an
   automation into an arbitrary scheduled shell command. Disabling prevents
   future occurrences; it does not stop a live ORCH task or pane.
+  Mutation success waits for the ledger checkpoint. After `persistence_failed`
+  or a lost response, inspect state and retry the same idempotency key; do not
+  assume the definition is absent or create a duplicate schedule. A failed
+  prelaunch occurrence is not automatically relaunched on storage recovery.
   `target=new_worker` is the durable default. Use `active_agent` only with
   the exact discovered pane, terminal lifetime, agent, and workspace identities;
   treat `delivered` as input-queue evidence rather than completed work, and do

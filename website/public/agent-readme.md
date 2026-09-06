@@ -329,6 +329,10 @@ the worktree/workspace Git mode, and unsupported agent/access pairs are rejected
 before a worker is created. Read definitions with `automation.list`,
 runs with `automation.history`, and fleet health with `automation.health`.
 Create and manual-run requests accept idempotency keys for safe retries.
+Mutation success waits for its ledger checkpoint. After `persistence_failed`
+or a lost response, inspect state and retry the same idempotency key instead of
+creating a duplicate schedule. Failed prelaunch runs do not automatically
+relaunch when storage recovers.
 Use `automation.rebind` only to reconnect a durable active-agent definition to
 a pane that proves the same native conversation; it requires orchestration
 authority and is safe to repeat with the same pane.

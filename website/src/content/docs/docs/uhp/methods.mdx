@@ -146,6 +146,13 @@ repository, while workspace mode creates a dedicated branchless task tab there.
 
 ## Agent automation
 
+Mutating automation responses wait for a durable ledger checkpoint, including
+idempotent retries of records whose save is still pending. Unrelated requests do
+not wait for automation storage. Admission is bounded and can return `busy`;
+storage failure returns `persistence_failed`. After an error or lost response,
+inspect state or retry the same idempotency key rather than creating a second
+schedule. Read-only projections can include changes awaiting persistence.
+
 Automations are durable agent-task templates owned by one named Luvus server.
 Each due occurrence is persisted before Luvus creates a fresh ORCH task, takes
 leases, creates a workspace tab or worktree, and starts the exact built-in

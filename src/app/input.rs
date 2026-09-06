@@ -337,7 +337,7 @@ impl App {
             return true;
         };
         let response = self.handle_api(&req);
-        let _ = req.reply.send(response);
+        self.reply_after_automation_save(req, response);
         true
     }
 
@@ -591,7 +591,7 @@ impl App {
                         return true;
                     }
                     let resp = self.handle_api(&req);
-                    let _ = req.reply.send(resp);
+                    self.reply_after_automation_save(req, resp);
                     return true;
                 }
                 AppEvent::WaitOutput { id, reply, .. } => {

@@ -1360,15 +1360,11 @@ impl App {
                 )
                 .map_err(|error| error.message)?;
         }
-        let before = self.automation.clone();
         let item = self
             .automation
             .create(input, None, now)
             .map_err(|error| error.message)?;
-        if let Err(error) = self.automation.save() {
-            self.automation = before;
-            return Err(format!("could not save automation: {error}"));
-        }
+        self.persist_automation();
         if item.target.is_durable_active_agent() {
             self.initialize_durable_active_target_state(&item);
         }
@@ -1500,7 +1496,6 @@ impl App {
             .automation
             .automation(&id)
             .is_some_and(|item| item.enabled);
-        let before = self.automation.clone();
         let now = crate::automation::unix_now();
         if enabled {
             let Some(automation) = self.automation.automation(&id).cloned() else {
@@ -1519,26 +1514,21 @@ impl App {
             }
         }
         match self.automation.set_enabled(&id, enabled, now) {
-            Ok(item) => match self.automation.save() {
-                Ok(()) => {
-                    self.emit_event(
-                        if enabled {
-                            "automation.enabled"
-                        } else {
-                            "automation.disabled"
-                        },
-                        crate::automation::definition_event(&item),
-                    );
-                    self.show_toast(format!(
-                        "{id}: {}",
-                        if enabled { "scheduled" } else { "paused" }
-                    ));
-                }
-                Err(error) => {
-                    self.automation = before;
-                    self.show_toast(format!("could not save automation: {error}"));
-                }
-            },
+            Ok(item) => {
+                self.persist_automation();
+                self.emit_event(
+                    if enabled {
+                        "automation.enabled"
+                    } else {
+                        "automation.disabled"
+                    },
+                    crate::automation::definition_event(&item),
+                );
+                self.show_toast(format!(
+                    "{id}: {}",
+                    if enabled { "scheduled" } else { "paused" }
+                ));
+            }
             Err(error) => self.show_toast(error.message),
         }
     }
@@ -1554,23 +1544,17 @@ impl App {
         let Some(id) = self.selected_automation_id() else {
             return;
         };
-        let before = self.automation.clone();
         let now = crate::automation::unix_now();
         match self.automation.request_run(&id, None, now) {
-            Ok(run) => match self.automation.save() {
-                Ok(()) => {
-                    let run_id = run.id.clone();
-                    self.emit_event(
-                        "automation.run_queued",
-                        serde_json::json!({"automation_id": id, "run_id": run_id, "scheduled_at": now}),
-                    );
-                    self.start_pending_automation_runs(now);
-                }
-                Err(error) => {
-                    self.automation = before;
-                    self.show_toast(format!("could not save automation: {error}"));
-                }
-            },
+            Ok(run) => {
+                self.persist_automation();
+                let run_id = run.id.clone();
+                self.emit_event(
+                    "automation.run_queued",
+                    serde_json::json!({"automation_id": id, "run_id": run_id, "scheduled_at": now}),
+                );
+                self.start_pending_automation_runs(now);
+            }
             Err(error) => self.show_toast(error.message),
         }
     }
@@ -1606,21 +1590,15 @@ impl App {
         let Some(id) = self.selected_automation_id() else {
             return;
         };
-        let before = self.automation.clone();
         match self.automation.delete(&id) {
-            Ok(item) => match self.automation.save() {
-                Ok(()) => {
-                    self.orch_automation_cursor = self
-                        .orch_automation_cursor
-                        .min(self.automation.automations.len().saturating_sub(1));
-                    self.emit_event("automation.deleted", serde_json::json!({"id": item.id}));
-                    self.show_toast(format!("{id} deleted"));
-                }
-                Err(error) => {
-                    self.automation = before;
-                    self.show_toast(format!("could not save automation: {error}"));
-                }
-            },
+            Ok(item) => {
+                self.persist_automation();
+                self.orch_automation_cursor = self
+                    .orch_automation_cursor
+                    .min(self.automation.automations.len().saturating_sub(1));
+                self.emit_event("automation.deleted", serde_json::json!({"id": item.id}));
+                self.show_toast(format!("{id} deleted"));
+            }
             Err(error) => self.show_toast(error.message),
         }
     }
