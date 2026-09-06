@@ -75,7 +75,16 @@ impl App {
                         // An API error must not turn into a later automatic launch
                         // when storage recovers. Terminalize unlaunched occurrences;
                         // retry only their bookkeeping, never the failed effect.
-                        let pending = app.automation.pending_runs();
+                        // pending_runs() is the launch-ready projection: it
+                        // excludes queue-one occurrences behind a live run.
+                        // Those occurrences also belong to the failed ledger.
+                        let pending: Vec<_> = app
+                            .automation
+                            .runs
+                            .iter()
+                            .filter(|run| run.status == crate::automation::RunStatus::Pending)
+                            .map(|run| run.id.clone())
+                            .collect();
                         let now = crate::automation::unix_now();
                         for id in &pending {
                             let _ = app.automation.set_run_status(
@@ -260,6 +269,22 @@ mod tests {
             },
             policy: crate::automation::AutomationPolicy::default(),
         };
+        let mut queued_input = input.clone();
+        queued_input.trigger = crate::automation::Trigger::Interval {
+            every_seconds: 60,
+            anchor_utc: 100,
+        };
+        queued_input.policy.overlap = crate::automation::OverlapPolicy::QueueOne;
+        let queued_definition = app.automation.create(queued_input, None, 10).unwrap();
+        let running = app
+            .automation
+            .request_run(&queued_definition.id, None, 20)
+            .unwrap();
+        app.automation
+            .set_run_status(&running.id, crate::automation::RunStatus::Running, None, 20)
+            .unwrap();
+        let queued = app.automation.collect_due(100).pop().unwrap();
+        assert!(!app.automation.pending_runs().contains(&queued));
         let definition = app.automation.create(input, None, 10).unwrap();
         let run = app
             .automation
@@ -296,6 +321,15 @@ mod tests {
             app.automation.run(&run.id).unwrap().status,
             crate::automation::RunStatus::Failed
         );
+        assert_eq!(
+            app.automation.run(&queued).unwrap().status,
+            crate::automation::RunStatus::Failed,
+            "failed checkpoint must also terminalize occurrences blocked by a live run"
+        );
+        app.automation
+            .set_run_status(&running.id, crate::automation::RunStatus::Failed, None, 200)
+            .unwrap();
+        assert!(!app.start_pending_automation_runs(200));
         assert!(
             app.orch.tasks.is_empty(),
             "storage recovery must not launch the failed occurrence"

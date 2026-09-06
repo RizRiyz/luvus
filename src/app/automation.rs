@@ -1298,6 +1298,9 @@ impl App {
                 self.automation
                     .bind_task(&run.id, task_id.clone(), now)
                     .map_err(automation_err)?;
+                self.automation
+                    .set_run_status(&run.id, RunStatus::Pending, None, now)
+                    .map_err(automation_err)?;
                 self.persist_automation();
             }
             return Ok(task_id);
@@ -1333,6 +1336,12 @@ impl App {
         // startup reconciliation recover the link without duplicating the task.
         self.automation
             .bind_task(&run.id, task.id.clone(), now)
+            .map_err(automation_err)?;
+        // Linking is not launching. Keep this occurrence eligible for the
+        // checkpoint acknowledgement's pending-run pump (and cancellation or
+        // failed-checkpoint terminalization) until the worker actually starts.
+        self.automation
+            .set_run_status(&run.id, RunStatus::Pending, None, now)
             .map_err(automation_err)?;
         self.persist_automation();
         self.emit_event(
@@ -1836,6 +1845,84 @@ mod tests {
             app.automation.run(&run.id).unwrap().status,
             RunStatus::Running
         );
+    }
+
+    #[test]
+    fn worker_link_checkpoint_resumes_once_or_fails_closed() {
+        for scenario in ["resume", "failure", "disable"] {
+            let _env = crate::persist::test_env(&format!("worker-link-{scenario}"));
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut app = App::new(80, 24, tx).unwrap();
+            let mut input = automation_input(
+                app.workspaces[0].id.clone(),
+                crate::automation::Trigger::Once {
+                    at_utc: 4_000_000_000,
+                },
+            );
+            // Reach the launch validation path without spawning a real agent.
+            input.task.agent_id = "checkpoint-test-unknown-agent".into();
+            let definition = app.automation.create(input, None, 10).unwrap();
+            let run = app
+                .automation
+                .request_run(&definition.id, None, 20)
+                .unwrap();
+            let path = crate::persist::session_dir().join("automations.json");
+            if scenario == "failure" {
+                std::fs::create_dir_all(&path).unwrap();
+            }
+            app.automation.persist_path = Some(path.clone());
+
+            assert!(app.start_automation_run(&run.id, 20));
+            let linked = app.automation.run(&run.id).unwrap();
+            assert_eq!(linked.status, RunStatus::Pending);
+            let task_id = linked.task_id.clone().unwrap();
+            assert_eq!(app.orch.task(&task_id).unwrap().status, TaskStatus::Queued);
+            assert!(!app.start_automation_run(&run.id, 21));
+            assert_eq!(app.orch.tasks.len(), 1);
+            if scenario == "disable" {
+                app.automation
+                    .set_enabled(&definition.id, false, 21)
+                    .unwrap();
+                app.persist_automation();
+            }
+            loop {
+                if let AppEvent::IoCompleted(done) =
+                    rx.recv_timeout(Duration::from_secs(5)).unwrap()
+                {
+                    done.apply(&mut app);
+                    break;
+                }
+            }
+            if scenario == "failure" {
+                assert_eq!(
+                    app.automation.run(&run.id).unwrap().status,
+                    RunStatus::Failed
+                );
+                std::fs::remove_dir(&path).unwrap();
+                app.schedule_automation_save(Instant::now() + Duration::from_secs(3));
+            }
+            app.flush_automation_for_test(&rx);
+            assert_eq!(app.orch.tasks.len(), 1, "{scenario}: no duplicate task");
+            let task = app.orch.task(&task_id).unwrap();
+            assert_eq!(task.automation.as_ref().unwrap().run_id, run.id);
+            if scenario == "resume" {
+                // Failed launch validation proves acknowledgement resumed the
+                // linked run, rather than leaving it stranded before launch.
+                assert_eq!(task.status, TaskStatus::Failed);
+            } else {
+                assert_eq!(task.status, TaskStatus::Queued, "must not attempt launch");
+            }
+            let expected = if scenario == "disable" {
+                RunStatus::Cancelled
+            } else {
+                RunStatus::Failed
+            };
+            assert_eq!(app.automation.run(&run.id).unwrap().status, expected);
+            let saved: crate::automation::AutomationState =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            assert_eq!(saved.run(&run.id).unwrap().status, expected);
+            assert!(!app.start_pending_automation_runs(30));
+        }
     }
 
     #[test]
