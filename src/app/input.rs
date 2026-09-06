@@ -420,6 +420,9 @@ impl App {
         // off-loop. Apply its completed registry before the empty-workspace guard
         // so the single writer always observes the result.
         let ev = match ev {
+            AppEvent::IoCompleted(completion) => {
+                return completion.apply(self);
+            }
             AppEvent::BackendCreateReady {
                 id,
                 reply,
@@ -1063,7 +1066,8 @@ impl App {
             | AppEvent::ClientInput { .. }
             | AppEvent::Shutdown => false,
             // Consumed by the pre-dispatch worker-result branch above.
-            AppEvent::ThemeUninstalled { .. }
+            AppEvent::IoCompleted(_)
+            | AppEvent::ThemeUninstalled { .. }
             | AppEvent::ConfigReloaded { .. }
             | AppEvent::ManifestsReloaded { .. }
             | AppEvent::BackendCreateReady { .. }

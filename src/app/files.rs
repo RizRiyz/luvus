@@ -221,44 +221,10 @@ impl App {
         }
     }
 
-    /// Live refresh (docs/38 FILE-5): re-read any open file view whose file
-    /// changed on disk since we last read it. One `stat` per open view, ~1s —
-    /// cheap (there are rarely more than a couple). Called from `detect_tick`.
+    /// Live refresh uses one bounded metadata job, never filesystem calls on
+    /// the app loop. Results are fenced by path and read token.
     pub fn ensure_file_views(&mut self) {
-        if self.views.is_empty() {
-            return;
-        }
-        let mut stale_files = Vec::new();
-        let mut stale_previews = Vec::new();
-        for (id, view) in self.views.iter() {
-            match view {
-                ViewKind::File(v) => {
-                    let disk = std::fs::metadata(&v.path).and_then(|m| m.modified()).ok();
-                    if disk.is_some() && disk != v.mtime {
-                        stale_files.push((*id, v.path.clone(), disk));
-                    }
-                }
-                ViewKind::Preview(v) => {
-                    let disk = std::fs::metadata(&v.path).and_then(|m| m.modified()).ok();
-                    if disk.is_some() && disk != v.mtime {
-                        stale_previews.push((*id, v.path.clone(), disk));
-                    }
-                }
-                ViewKind::Diff(_) => {}
-            }
-        }
-        for (id, path, mtime) in stale_files {
-            if let Some(ViewKind::File(v)) = self.views.get_mut(&id) {
-                v.mtime = mtime; // record now so we don't reschedule until it changes again
-            }
-            self.schedule_file_read(id, path);
-        }
-        for (id, path, mtime) in stale_previews {
-            if let Some(ViewKind::Preview(v)) = self.views.get_mut(&id) {
-                v.mtime = mtime;
-            }
-            self.schedule_preview_read(id, path);
-        }
+        self.schedule_file_metadata();
     }
 
     /// Give normal-mode keyboard input to the FILES tree. The dock is mounted
@@ -1198,7 +1164,7 @@ impl App {
         self.recent_files.truncate(RECENT_FILE_CAP);
     }
 
-    fn schedule_file_read(&mut self, id: PaneId, path: PathBuf) {
+    pub(super) fn schedule_file_read(&mut self, id: PaneId, path: PathBuf) {
         // Claim the next token for this view and record the mtime now, so live
         // refresh (FILE-5) only re-reads on a real change rather than
         // immediately after this read. No view means nothing could apply the

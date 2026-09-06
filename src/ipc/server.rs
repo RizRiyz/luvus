@@ -667,6 +667,7 @@ pub fn run() -> Result<()> {
         }
     }
 
+    app.drain_io_jobs();
     persist::save(&app);
     Ok(())
 }

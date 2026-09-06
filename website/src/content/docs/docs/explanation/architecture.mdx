@@ -3,6 +3,20 @@ title: Architecture
 description: Why luvus is fast and why sessions survive, thanks to the server/client split, one event loop, and frame diffs.
 ---
 
+## Shared filesystem work
+
+Native file and document-preview refresh checks use one lazily started `luvus-io`
+worker per server. It sleeps on a channel when idle. Admission is nonblocking and
+limited to eight outstanding jobs, including completed results not yet applied.
+Metadata refresh admits only one batch at a time, covering at most 128 views.
+Results return to the app loop and must match the view path and read generation.
+A closed or replaced view cannot receive a stale refresh.
+
+Shutdown allows two seconds for admitted work to finish and reports a timeout.
+An operating-system filesystem call cannot be forcibly cancelled safely, so a
+timeout is not a successful completion guarantee. This worker adds no per-pane
+thread and does not change PTY ownership or public API acknowledgement semantics.
+
 Three design decisions explain most of luvus's behavior.
 
 ## A headless server, a thin client
