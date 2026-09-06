@@ -426,8 +426,9 @@ pub fn run() -> Result<()> {
         // Otherwise sleep until the next real deadline, or block on the
         // channel when nothing is due (PTY/API/client/signal wake the loop).
         let now = Instant::now();
-        let persist_due = (app.persist_session_now && !immediate_save_attempted)
-            || (app.session_dirty && last_save.elapsed() >= SESSION_SAVE_DEBOUNCE);
+        let persist_due = !app.session_save_inflight
+            && ((app.persist_session_now && !immediate_save_attempted)
+                || (app.session_dirty && last_save.elapsed() >= SESSION_SAVE_DEBOUNCE));
         let rearm_due = app.has_pending_pty_output() && last_rearm.elapsed() >= REARM_INTERVAL;
         let received = if persist_due || rearm_due {
             // Already-due persist/re-arm must not `recv_timeout(0)`: that busy-loops
@@ -444,7 +445,7 @@ pub fn run() -> Result<()> {
             }
         } else {
             let mut deadline = app.next_runtime_deadline(now, !clients.is_empty());
-            if app.session_dirty {
+            if app.session_dirty && !app.session_save_inflight {
                 App::sooner_deadline(&mut deadline, last_save + SESSION_SAVE_DEBOUNCE);
             }
             if app.has_pending_pty_output() {
@@ -533,13 +534,9 @@ pub fn run() -> Result<()> {
         // retain both flags and retry at the normal cadence instead of hot-looping.
         let immediate_save_due = app.persist_session_now && !immediate_save_attempted;
         let debounced_save_due = app.session_dirty && last_save.elapsed() >= SESSION_SAVE_DEBOUNCE;
-        if immediate_save_due || debounced_save_due {
+        if !app.session_save_inflight && (immediate_save_due || debounced_save_due) {
             immediate_save_attempted = app.persist_session_now;
-            if persist::save(&app) {
-                app.persist_session_now = false;
-                app.session_dirty = false;
-                immediate_save_attempted = false;
-            }
+            app.schedule_session_save();
             last_save = Instant::now();
         }
         if app.detach_requested {
@@ -667,8 +664,7 @@ pub fn run() -> Result<()> {
         }
     }
 
-    app.drain_io_jobs();
-    persist::save(&app);
+    app.finish_session_persistence();
     Ok(())
 }
 

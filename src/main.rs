@@ -1343,13 +1343,9 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
         // retain both flags and retry at the normal cadence instead of hot-looping.
         let immediate_save_due = app.persist_session_now && !immediate_save_attempted;
         let debounced_save_due = app.session_dirty && last_save.elapsed() > Duration::from_secs(2);
-        if immediate_save_due || debounced_save_due {
+        if !app.session_save_inflight && (immediate_save_due || debounced_save_due) {
             immediate_save_attempted = app.persist_session_now;
-            if persist::save(&app) {
-                app.persist_session_now = false;
-                app.session_dirty = false;
-                immediate_save_attempted = false;
-            }
+            app.schedule_session_save();
             last_save = Instant::now();
         }
 
@@ -1390,8 +1386,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     }
 
     let detached = app.detach_requested;
-    app.drain_io_jobs();
-    persist::save(&app);
+    app.finish_session_persistence();
     Ok(detached)
 }
 

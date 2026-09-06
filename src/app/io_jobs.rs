@@ -41,7 +41,7 @@ impl Completion {
 
 enum Message {
     Job(Work, Permit),
-    Drain(mpsc::Sender<()>),
+    Drain(Box<dyn FnOnce() -> bool + Send>, mpsc::Sender<bool>),
 }
 
 #[derive(Default)]
@@ -90,8 +90,8 @@ impl IoJobs {
                                     _permit: permit,
                                 }));
                             }
-                            Message::Drain(reply) => {
-                                let _ = reply.send(());
+                            Message::Drain(final_work, reply) => {
+                                let _ = reply.send(final_work());
                                 break;
                             }
                         }
@@ -111,17 +111,30 @@ impl IoJobs {
 
     /// Shutdown-only FIFO barrier. Never wait on storage in the interactive loop.
     /// OS filesystem calls cannot safely be cancelled; timeout reports uncertainty.
+    #[cfg(test)]
     pub(super) fn drain(&mut self, timeout: Duration) -> bool {
+        self.finish(timeout, || true)
+    }
+
+    pub(super) fn finish(
+        &mut self,
+        timeout: Duration,
+        final_work: impl FnOnce() -> bool + Send + 'static,
+    ) -> bool {
         self.closing = true;
         let Some(sender) = self.sender.take() else {
-            return true;
+            return false;
         };
         let (tx, rx) = mpsc::channel();
-        sender.send(Message::Drain(tx)).is_ok() && rx.recv_timeout(timeout).is_ok()
+        sender
+            .send(Message::Drain(Box::new(final_work), tx))
+            .is_ok()
+            && rx.recv_timeout(timeout).unwrap_or(false)
     }
 }
 
 impl App {
+    #[cfg(test)]
     pub(crate) fn drain_io_jobs(&mut self) {
         if !self.io_jobs.drain(Duration::from_secs(2)) {
             eprintln!("Luvus: filesystem work did not finish within the shutdown deadline");

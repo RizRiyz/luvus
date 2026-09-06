@@ -304,6 +304,7 @@ mod server_pid_file_tests {
 
 /// Create the selected runtime directory with the same owner-only protection as
 /// the global root. This is the startup-lock namespace for one server only.
+#[cfg(test)]
 pub fn ensure_session_dir() -> PathBuf {
     let dir = session_dir();
     ensure_private_dir(&dir);
@@ -499,7 +500,13 @@ pub fn client_socket_path() -> PathBuf {
 /// between tabs on restart. When discovery cannot prove ownership, the pane
 /// restores as a shell instead. That is recoverable and safe; resuming the wrong
 /// conversation is neither.
-fn resolve_pane_sessions(app: &App) -> HashMap<PaneId, Option<(String, String)>> {
+struct SessionEvidence {
+    out: HashMap<PaneId, Option<(String, String)>>,
+    claimed: HashSet<(String, String)>,
+    unbound: HashMap<(String, PathBuf), Vec<PaneId>>,
+}
+
+fn capture_session_evidence(app: &App) -> SessionEvidence {
     let mut out: HashMap<PaneId, Option<(String, String)>> = HashMap::new();
     let mut claimed: HashSet<(String, String)> = HashSet::new();
     let mut ids: Vec<PaneId> = app.status.keys().copied().collect();
@@ -550,6 +557,19 @@ fn resolve_pane_sessions(app: &App) -> HashMap<PaneId, Option<(String, String)>>
                 .push(id);
         }
     }
+    SessionEvidence {
+        out,
+        claimed,
+        unbound,
+    }
+}
+
+fn resolve_pane_sessions(evidence: SessionEvidence) -> HashMap<PaneId, Option<(String, String)>> {
+    let SessionEvidence {
+        mut out,
+        mut claimed,
+        unbound,
+    } = evidence;
     for ((agent, cwd), pane_ids) in unbound {
         let sessions: Vec<String> = crate::agent::sessions_for(&agent, &cwd)
             .into_iter()
@@ -586,8 +606,82 @@ fn snapshot_agent(
         .unwrap_or_else(|| fallback.to_string())
 }
 
+/// Immutable layout and native-identity evidence captured by the app owner.
+/// Native store discovery and JSON/file work happen only in `write`.
+pub(crate) struct SessionCapture {
+    snapshot: SessionSnapshot,
+    evidence: SessionEvidence,
+    launch_args: HashMap<PaneId, Vec<String>>,
+    path: PathBuf,
+}
+
+impl SessionCapture {
+    fn finish(mut self) -> SessionSnapshot {
+        let sessions = resolve_pane_sessions(self.evidence);
+        for workspace in &mut self.snapshot.workspaces {
+            for tab in &mut workspace.tabs {
+                for (id, pane) in &mut tab.panes {
+                    let id = PaneId(*id);
+                    pane.agent_session = sessions.get(&id).cloned().flatten();
+                    if pane.agent_session.is_some() {
+                        pane.agent_launch = self.launch_args.remove(&id);
+                    }
+                }
+            }
+        }
+        self.snapshot
+    }
+
+    pub(crate) fn write(self) -> bool {
+        let path = self.path.clone();
+        write_snapshot(&self.finish(), &path)
+    }
+}
+
+pub(crate) fn capture_session(app: &App) -> SessionCapture {
+    let evidence = capture_session_evidence(app);
+    let mut launch_args = HashMap::new();
+    for (id, status) in &app.status {
+        let agent = evidence
+            .out
+            .get(id)
+            .and_then(Option::as_ref)
+            .map(|(agent, _)| agent.clone())
+            .unwrap_or_else(|| {
+                snapshot_agent(
+                    &app.manifests,
+                    app.proc_commands.get(id).map(Vec::as_slice),
+                    &status.agent,
+                )
+            });
+        if app.manifests.is_agent(&agent) {
+            if let Some(args) = app
+                .proc_commands
+                .get(id)
+                .and_then(|cmds| app.manifests.launch_args_for(cmds, &agent))
+                .filter(|v| !v.is_empty())
+            {
+                launch_args.insert(*id, args);
+            }
+        }
+    }
+    SessionCapture {
+        snapshot: snapshot_layout(app, &evidence.out),
+        evidence,
+        launch_args,
+        path: session_path(),
+    }
+}
+
+#[cfg(test)]
 pub fn snapshot(app: &App) -> SessionSnapshot {
-    let sessions = resolve_pane_sessions(app);
+    capture_session(app).finish()
+}
+
+fn snapshot_layout(
+    app: &App,
+    sessions: &HashMap<PaneId, Option<(String, String)>>,
+) -> SessionSnapshot {
     let mut workspaces = Vec::new();
     for ws in &app.workspaces {
         let mut tabs = Vec::new();
@@ -786,10 +880,14 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
 /// Save the app's session atomically. A truly empty session can only remain after
 /// restore or shell startup failure; clear its stale snapshot so the next start
 /// cannot resurrect panes the user already closed.
+#[cfg(test)]
 pub fn save(app: &App) -> bool {
-    let snap = snapshot(app);
-    if snap.workspaces.is_empty() {
-        if let Err(error) = fs::remove_file(session_path()) {
+    capture_session(app).write()
+}
+
+fn write_snapshot(snap: &SessionSnapshot, path: &std::path::Path) -> bool {
+    if snap.workspaces.is_empty() && snap.closed_workspace_paths.is_empty() {
+        if let Err(error) = fs::remove_file(path) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 log_persist_failure("persist_clear");
                 return false;
@@ -801,7 +899,10 @@ pub fn save(app: &App) -> bool {
         );
         return true;
     }
-    let dir = ensure_session_dir();
+    let Some(dir) = path.parent() else {
+        return false;
+    };
+    ensure_private_dir(dir);
     if !dir.is_dir() {
         log_persist_failure("persist_dir");
         return false;
@@ -810,7 +911,6 @@ pub fn save(app: &App) -> bool {
         log_persist_failure("persist_serialize");
         return false;
     };
-    let path = session_path();
     let tmp = path.with_extension("json.tmp");
     let Ok(mut file) = fs::File::create(&tmp) else {
         log_persist_failure("persist_create");
@@ -824,7 +924,7 @@ pub fn save(app: &App) -> bool {
         log_persist_failure("persist_flush");
         return false;
     }
-    if fs::rename(&tmp, &path).is_err() {
+    if crate::platform::atomic_replace_file(&tmp, path).is_err() {
         log_persist_failure("persist_rename");
         return false;
     }

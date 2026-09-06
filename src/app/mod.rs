@@ -39,6 +39,7 @@ pub(crate) mod io_jobs;
 mod keys;
 mod mission;
 mod modules;
+mod persistence;
 mod picker;
 mod preview;
 mod search;
@@ -2148,6 +2149,7 @@ pub struct App {
     file_metadata_inflight: bool,
     file_metadata_cursor: usize,
     file_mutation_inflight: bool,
+    pub(crate) session_save_inflight: bool,
     /// Active `key → Cmd` map for prefix mode (defaults + config overrides).
     pub keymap: std::collections::HashMap<String, Cmd>,
     /// Explicit normal-mode shortcuts. Empty by default so pane input remains
@@ -2838,6 +2840,7 @@ impl App {
             file_metadata_inflight: false,
             file_metadata_cursor: 0,
             file_mutation_inflight: false,
+            session_save_inflight: false,
             keymap,
             direct_keymap,
             prefix,
@@ -3486,6 +3489,7 @@ impl App {
             file_metadata_inflight: false,
             file_metadata_cursor: 0,
             file_mutation_inflight: false,
+            session_save_inflight: false,
             keymap,
             direct_keymap,
             prefix,
