@@ -14,6 +14,7 @@ import time
 
 
 def stop(process):
+    """Terminate and reap only a process launched by this fixture."""
     if process is not None and process.poll() is None:
         process.terminate()
         try:
@@ -24,6 +25,7 @@ def stop(process):
 
 
 def wait_for(predicate):
+    """Wait at most ten seconds for observable fixture readiness."""
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         if predicate():
@@ -33,6 +35,7 @@ def wait_for(predicate):
 
 
 def main():
+    """Pair both Access modes and compare responses with raw child input."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True)
     parser.add_argument("--home", required=True)
@@ -50,6 +53,7 @@ def main():
     command = [binary, "--session", args.session]
 
     def owner(method, params):
+        """Issue one owner RPC to the explicitly isolated home and session."""
         response = subprocess.run(
             command + ["uhp", "proxy"], env=env,
             input=json.dumps({"id": "owner", "method": method, "params": params}) + "\n",
@@ -60,6 +64,7 @@ def main():
         return value["result"]
 
     def exchange(endpoint, request):
+        """Exchange one bounded NDJSON frame on the private loopback endpoint."""
         with socket.create_connection((endpoint["host"], endpoint["port"]), timeout=5) as stream:
             stream.sendall(json.dumps(request).encode() + b"\n")
             with stream.makefile("rb") as reader:
@@ -72,6 +77,7 @@ def main():
         # The explicit home/session is used by every owner request, including
         # the readiness probe; no inherited socket can select production.
         def server_ready():
+            """Retry startup connection failures without masking server exit."""
             if server.poll() is not None:
                 raise RuntimeError("isolated server exited during startup")
             try:
