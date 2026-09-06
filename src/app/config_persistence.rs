@@ -110,6 +110,29 @@ mod tests {
         assert_eq!(result["result"]["config"]["agents_this_workspace"], true);
         assert!(app.agents_this_workspace);
     }
+
+    #[test]
+    fn shutdown_receipt_does_not_replay_a_saved_field_over_another_session() {
+        let _env = persist::test_env("config-shutdown-receipt");
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.config.agents_active_only = true;
+        app.persist_config();
+        let unapplied_ack = next_completion(&rx);
+        let mut external = crate::config::load();
+        external.agents_active_only = false;
+        crate::config::save(&external);
+        app.config.agents_this_workspace = true;
+        app.persist_config();
+        app.finish_session_persistence();
+        let saved = crate::config::load();
+        assert!(
+            !saved.agents_active_only,
+            "already saved field belongs to latest external writer"
+        );
+        assert!(saved.agents_this_workspace);
+        drop(unapplied_ack);
+    }
 }
 
 #[derive(Default)]
@@ -282,13 +305,18 @@ impl App {
         let revision = self.config_persistence.revision;
         let path = persist::config_dir().join("config.json");
         if self.io_jobs.submit(self.app_tx.clone(), move || {
-            let config = std::fs::read_to_string(path).ok()
-                .and_then(|text| serde_json::from_str(&text).ok())
-                .map(crate::config::normalize_config).unwrap_or_default();
+            let config = std::fs::read_to_string(path).map_err(|error| error.to_string())
+                .and_then(|text| serde_json::from_str(&text).map_err(|error| error.to_string()))
+                .map(crate::config::normalize_config);
             Box::new(move |app| {
                 let result = if app.config_persistence.revision != revision {
                     Err(("state_changed".into(), "settings changed during reload; retry reload".into()))
-                } else { app.apply_socket_config(config, None) };
+                } else {
+                    match config {
+                        Ok(config) => app.apply_socket_config(config, None),
+                        Err(error) => Err(("io_error".into(), format!("could not reload saved settings: {error}"))),
+                    }
+                };
                 for (id, reply) in reloads {
                     let response = match &result {
                         Ok(()) => json!({"id":id,"result":{"type":"config_reloaded","config":app.config}}),
@@ -300,6 +328,10 @@ impl App {
             })
         }).is_ok() {
             self.config_persistence.reloads.clear();
+        } else {
+            for (id, reply) in self.config_persistence.reloads.drain(..) {
+                let _ = reply.send(json!({"id":id,"error":{"code":"busy","message":"settings reload could not be queued; retry reload"}}).to_string());
+            }
         }
     }
 
