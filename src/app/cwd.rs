@@ -505,6 +505,11 @@ mod tests {
     #[test]
     fn pane_cwd_follows_cd_without_moving_its_workspace() {
         let _env = crate::persist::test_env("pane-cwd-follows-cd");
+        // Exercise CWD tracking, not the developer's interactive shell plugins.
+        crate::config::save(&crate::config::Config {
+            shell: "/bin/sh".into(),
+            ..Default::default()
+        });
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let id = app.layout().focus;
@@ -521,11 +526,17 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
             app.refresh_cwds();
             got = app.panes.get(&id).unwrap().cwd.display().to_string();
-            if got.contains("tmp") {
+            if std::path::Path::new(&got).canonicalize().ok()
+                == std::path::Path::new("/tmp").canonicalize().ok()
+            {
                 break;
             }
         }
-        assert!(got.contains("tmp"), "cwd did not follow cd: got '{got}'");
+        assert_eq!(
+            std::path::Path::new(&got).canonicalize().unwrap(),
+            std::path::Path::new("/tmp").canonicalize().unwrap(),
+            "cwd did not follow cd"
+        );
         assert_eq!(
             app.ws().cwd,
             workspace_cwd,

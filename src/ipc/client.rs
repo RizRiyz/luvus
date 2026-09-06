@@ -842,6 +842,7 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         let config = crate::config::Config {
             theme: "terminal".into(),
+            shell: "/bin/sh".into(),
             ..Default::default()
         };
         std::fs::write(
@@ -850,6 +851,9 @@ mod tests {
         )
         .unwrap();
 
+        // Keep startup diagnostics out of pipes, which can fill and block the
+        // child. Only a bounded excerpt is read if startup fails.
+        let diagnostics = std::fs::File::create(home.join("startup.log")).unwrap();
         // A real server on a scratch home.
         let server = Command::new(&bin)
             .args([
@@ -863,9 +867,12 @@ mod tests {
             // An agent pane inherits the live session's socket. The scratch
             // server and its cleanup must never escape this test home.
             .env_remove("LUVUS_SOCKET_PATH")
+            .env_remove("LUVUS_SESSION")
+            .env_remove("LUVUS_PANE_ID")
+            .env_remove("LUVUS_TASK_ID")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(diagnostics.try_clone().unwrap())
+            .stderr(diagnostics)
             .spawn()
             .unwrap();
         struct ScratchServer {
@@ -879,7 +886,7 @@ mod tests {
                 let _ = std::fs::remove_dir_all(&self.home);
             }
         }
-        let _server = ScratchServer {
+        let mut server = ScratchServer {
             child: server,
             home: home.clone(),
         };
@@ -888,11 +895,26 @@ mod tests {
             if sock.exists() {
                 break;
             }
+            if server.child.try_wait().unwrap().is_some() {
+                break;
+            }
             thread::sleep(std::time::Duration::from_millis(100));
         }
-        assert!(sock.exists(), "server never created its client socket");
+        if !sock.exists() {
+            let mut diagnostics = String::new();
+            std::io::Read::take(std::fs::File::open(home.join("startup.log")).unwrap(), 8192)
+                .read_to_string(&mut diagnostics)
+                .unwrap();
+            panic!("server never created its client socket: {diagnostics}");
+        }
 
         let conn = crate::ipc::transport::connect(&sock).unwrap();
+        assert_eq!(
+            conn.set_timeouts(std::time::Duration::from_secs(5))
+                .unwrap(),
+            crate::ipc::transport::TimeoutMode::Kernel,
+            "Unix lifecycle tests require bounded blocking reads and writes"
+        );
         let mut writer = conn.clone();
         let mut reader = std::io::BufReader::new(conn);
 
@@ -954,7 +976,7 @@ mod tests {
             "the server returned a real frame after palette negotiation"
         );
 
-        // `_server` kills only the child handle spawned above, even if an
+        // `server` kills only the child handle spawned above, even if an
         // assertion panics. It never addresses an inherited production socket.
     }
 
