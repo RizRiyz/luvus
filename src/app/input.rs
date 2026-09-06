@@ -673,6 +673,20 @@ impl App {
                 self.force_redraw = true;
                 true
             }
+            AppEvent::PtyInputRejected(id) => {
+                crate::logging::event(
+                    crate::logging::EventKind::PtyInputRejected,
+                    &[crate::logging::Field::PaneId(u64::from(id.0))],
+                );
+                if let Some(pane) = self.panes.get(&id) {
+                    pane.acknowledge_input_rejection();
+                    self.show_toast(format!(
+                        "pane {} input queue full: input rejected; wait for the child to read",
+                        id.0
+                    ));
+                }
+                true
+            }
             AppEvent::PtyData(id) => {
                 // The reader's coalescing flag is deliberately NOT cleared here
                 // — it re-arms on the frame/detect cadence (`rearm_pty_notify`),

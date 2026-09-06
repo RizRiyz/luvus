@@ -10,13 +10,13 @@ use crate::event::AppEvent;
 use crate::ids::PaneId;
 use crate::terminal::vt::VtEngine;
 
-use super::super::{read_loop, write_input_action, InputAction};
+use super::super::{input::QueuedInput, read_loop, write_input_action};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn start(
     id: PaneId,
     master: &(dyn MasterPty + Send),
-    input: mpsc::Receiver<InputAction>,
+    input: mpsc::Receiver<QueuedInput>,
     engine: Arc<Mutex<dyn VtEngine>>,
     app_tx: mpsc::Sender<AppEvent>,
     data_pending: Arc<AtomicBool>,
@@ -28,10 +28,15 @@ pub(super) fn start(
     thread::Builder::new()
         .name(format!("luvus-pty-writer-{}", id.0))
         .spawn(move || {
-            while let Ok(action) = input.recv() {
+            while let Ok(QueuedInput {
+                action,
+                reservation,
+            }) = input.recv()
+            {
                 if write_input_action(writer.as_mut(), action).is_err() {
                     break;
                 }
+                drop(reservation);
             }
         })?;
 

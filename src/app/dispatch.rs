@@ -2562,18 +2562,20 @@ impl App {
             "pane.run" => {
                 let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 let cmd = p.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                if let Some(pane) = self.panes.get(&id) {
-                    pane.send(cmd.as_bytes());
-                    pane.send(b"\r");
-                }
+                let pane = self.panes.get(&id).ok_or_else(not_found)?;
+                let mut bytes = Vec::with_capacity(cmd.len() + 1);
+                bytes.extend_from_slice(cmd.as_bytes());
+                bytes.push(b'\r');
+                pane.try_send(&bytes)
+                    .map_err(|message| ("send_failed".to_string(), message))?;
                 Ok(json!({"type":"ok"}))
             }
             "pane.send_input" => {
                 let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                if let Some(pane) = self.panes.get(&id) {
-                    pane.send(text.as_bytes());
-                }
+                let pane = self.panes.get(&id).ok_or_else(not_found)?;
+                pane.try_send(text.as_bytes())
+                    .map_err(|message| ("send_failed".to_string(), message))?;
                 Ok(json!({"type":"ok"}))
             }
             "pane.read" => {
@@ -9053,6 +9055,42 @@ command = ["true"]
                 .0,
             "not_found"
         );
+    }
+
+    #[test]
+    fn pane_input_methods_report_rejection_and_run_is_one_action() {
+        let _env = crate::persist::test_env("pane-input-admission");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(tx);
+        app.dispatch(
+            "pane.run",
+            &json!({"pane": pane.0.to_string(), "command": "echo hi"}),
+        )
+        .unwrap();
+        let crate::terminal::pty::InputAction::Bytes(bytes) = rx.try_recv().unwrap() else {
+            panic!("expected raw command")
+        };
+        assert_eq!(bytes, b"echo hi\r");
+        assert!(rx.try_recv().is_err());
+        drop(rx);
+        for (method, params) in [
+            (
+                "pane.run",
+                json!({"pane": pane.0.to_string(), "command": "echo hi"}),
+            ),
+            (
+                "pane.send_input",
+                json!({"pane": pane.0.to_string(), "text": "hi"}),
+            ),
+        ] {
+            assert_eq!(app.dispatch(method, &params).unwrap_err().0, "send_failed");
+        }
     }
 
     #[test]
