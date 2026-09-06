@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://luvus.dev/protocol/uhp/v1/event-catalog.schema.json",
   "title": "Luvus Universal Harness Protocol general event payload catalog",
+  "$comment": "session.snapshot terminal agent_name is a read projection of operator aliases. Rename/clear emits no new event and does not advance event_sequence; consumers refresh snapshots to observe aliases.",
   "description": "Payload schemas for events currently emitted by the general UHP event stream. The event envelope remains forward-compatible with future names.",
   "type": "object",
   "additionalProperties": false,

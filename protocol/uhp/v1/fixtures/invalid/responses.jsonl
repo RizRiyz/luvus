@@ -1,4 +1,20 @@
-{"id":"unicode-é","result":{}}
+{"id":"unicode-\u00e9","result":{}}
 {"id":"bad-agent-wait-match","result":{"type":"agent_wait","matched":true,"pane":null,"status":null}}
 {"id":"non-object-result","result":[]}
 {"id":"non-object-error","error":"bad"}
+{"id":"alias-type","result":{"type":"session_snapshot","protocol":{"name":"luvus-uhp","major":1,"minor":0},"session":"default","server_generation":"example-generation","event_sequence":1,"workspaces":[{"tabs":[{"panes":[{"pane_id":"7","kind":"terminal","agent_name":4}]}]}]}}
+{"id":"alias-grammar","result":{"type":"session_snapshot","protocol":{"name":"luvus-uhp","major":1,"minor":0},"session":"default","server_generation":"example-generation","event_sequence":1,"workspaces":[{"tabs":[{"panes":[{"pane_id":"7","kind":"terminal","agent_name":"Backend Title"}]}]}]}}
+{"id":"alias-view","result":{"type":"session_snapshot","protocol":{"name":"luvus-uhp","major":1,"minor":0},"session":"default","server_generation":"example-generation","event_sequence":1,"workspaces":[{"tabs":[{"panes":[{"pane_id":"7","kind":"view","agent_name":null}]}]}]}}
+{"id":"alias-bad-workspaces","result":{"type":"session_snapshot","protocol":{"name":"luvus-uhp","major":1,"minor":0},"session":"default","server_generation":"example-generation","event_sequence":1,"workspaces":{}}}
+{"id":"alias-bad-workspace","result":{"type":"session_snapshot","protocol":{"name":"luvus-uhp","major":1,"minor":0},"session":"default","server_generation":"example-generation","event_sequence":1,"workspaces":[null]}}
+{"id":"alias-bad-tabs","result":{"type":"session_snapshot","protocol":{"name":"luvus-uhp","major":1,"minor":0},"session":"default","server_generation":"example-generation","event_sequence":1,"workspaces":[{"tabs":{}}]}}
+{"id":"alias-bad-tab","result":{"type":"session_snapshot","protocol":{"name":"luvus-uhp","major":1,"minor":0},"session":"default","server_generation":"example-generation","event_sequence":1,"workspaces":[{"tabs":[null]}]}}
+{"id":"alias-bad-panes","result":{"type":"session_snapshot","protocol":{"name":"luvus-uhp","major":1,"minor":0},"session":"default","server_generation":"example-generation","event_sequence":1,"workspaces":[{"tabs":[{"panes":{}}]}]}}
+{"id":"alias-bad-row","result":{"type":"session_snapshot","protocol":{"name":"luvus-uhp","major":1,"minor":0},"session":"default","server_generation":"example-generation","event_sequence":1,"workspaces":[{"tabs":[{"panes":[null]}]}]}}
+{"id":"alias-bad-pane-id","result":{"type":"session_snapshot","protocol":{"name":"luvus-uhp","major":1,"minor":0},"session":"default","server_generation":"example-generation","event_sequence":1,"workspaces":[{"tabs":[{"panes":[{"pane_id":7,"kind":"terminal","agent_name":null}]}]}]}}
+{"id":"alias-bad-kind","result":{"type":"session_snapshot","protocol":{"name":"luvus-uhp","major":1,"minor":0},"session":"default","server_generation":"example-generation","event_sequence":1,"workspaces":[{"tabs":[{"panes":[{"pane_id":"7","kind":true}]}]}]}}
+{"id":"alias-newline","result":{"type":"session_snapshot","workspaces":[{"tabs":[{"panes":[{"pane_id":"7","kind":"terminal","agent_name":"a\n"}]}]}],"protocol":{"name":"luvus-uhp","major":1,"minor":0},"session":"default","server_generation":"fixture","event_sequence":1}}
+{"id":"snapshot-missing-protocol","result":{"session":"default","server_generation":"fixture","event_sequence":1,"type":"session_snapshot","workspaces":[]}}
+{"id":"snapshot-missing-session","result":{"protocol":{"name":"luvus-uhp","major":1,"minor":0},"server_generation":"fixture","event_sequence":1,"type":"session_snapshot","workspaces":[]}}
+{"id":"snapshot-missing-server_generation","result":{"protocol":{"name":"luvus-uhp","major":1,"minor":0},"session":"default","event_sequence":1,"type":"session_snapshot","workspaces":[]}}
+{"id":"snapshot-missing-event_sequence","result":{"protocol":{"name":"luvus-uhp","major":1,"minor":0},"session":"default","server_generation":"fixture","type":"session_snapshot","workspaces":[]}}

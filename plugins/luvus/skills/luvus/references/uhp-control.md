@@ -52,6 +52,12 @@ Use this order for a stateful harness:
 6. Resnapshot after a gap, overflow, reconnect, generation change, or
    `resync_required` event.
 
+Snapshot terminal rows carry `pane_id` and nullable `agent_name`, the operator
+alias only; backend titles do not override it. Native view rows omit the field.
+Use the ID for routing and the alias for display. Alias changes do not emit an
+event or advance `event_sequence`, so refresh snapshots rather than treating
+the sequence as an alias ETag. Older servers may omit the field.
+
 Use `events.wait` for one bounded semantic condition. Use `events.subscribe`
 only when the user asked for continuous monitoring or a harness genuinely needs
 a stream. Stop the subscription when the condition or integration ends.

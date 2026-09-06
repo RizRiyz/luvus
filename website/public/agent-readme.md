@@ -389,6 +389,12 @@ process closes.
 
 ## Remote use
 
+For a fleet display, `session.snapshot` terminal rows include `pane_id` plus
+nullable `agent_name` from the operator alias map. Backend titles do not mask
+aliases; native view rows omit the field. Refresh snapshots after alias changes,
+which do not emit an event or advance `event_sequence`. Use pane IDs for routing
+and as display fallback when an older server omits the alias field.
+
 ```sh
 ssh <host>             # run Luvus on that machine
 luvus --remote <host>  # local thin client, remote Luvus server

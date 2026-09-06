@@ -5659,6 +5659,13 @@ impl App {
     /// presentation-oriented list methods this spans every workspace and tab,
     /// includes non-terminal views explicitly, and never reads terminal text.
     pub(crate) fn runtime_snapshot(&self) -> Value {
+        // Invert once per snapshot rather than scanning every alias per pane.
+        // Backend titles intentionally do not override operator-assigned names.
+        let agent_names: HashMap<_, _> = self
+            .agent_names
+            .iter()
+            .map(|(name, pane)| (*pane, name))
+            .collect();
         let mut workspaces = Vec::with_capacity(self.workspaces.len());
         for (workspace_index, workspace) in self.workspaces.iter().enumerate() {
             let mut tabs = Vec::with_capacity(workspace.tabs.len());
@@ -5693,6 +5700,7 @@ impl App {
                                     "start_marker":runtime.start_marker,
                                 })),
                                 "content_revision":pane.content_revision(),
+                                "agent_name":agent_names.get(&pane_id).copied(),
                                 "agent":status.map(|status| status.agent.clone()),
                                 "agent_status":status.map(|status| state_str(status.state)),
                                 "agent_authority":status.map(|status| status.identity_source),
@@ -9370,6 +9378,102 @@ command = ["true"]
         .unwrap();
         assert!(app.status[&pane].agent_report.is_none());
         assert!(app.status[&pane].force_detect);
+    }
+
+    #[test]
+    /// Preserve operator aliases independently of backend titles and focus.
+    fn snapshot_preserves_agent_alias_across_inactive_tabs() {
+        let _env = crate::persist::test_env("snapshot-aliases");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let first = app.layout().focus;
+        app.set_agent_name(first, Some("reviewer"));
+        app.backend_labels.insert(first, "backend-title".into());
+        app.dispatch("tab.new", &json!({})).unwrap();
+        let second = app.layout().focus;
+        app.set_agent_name(second, Some("worker"));
+        assert!(app.create_workspace_at(crate::persist::ensure_config_dir()));
+        let third = app.layout().focus;
+        let active_ws = app.active_ws;
+        let pane_count = app.panes.len();
+        let engine = std::sync::Arc::clone(&app.panes[&first].engine);
+        let guard = engine.lock().unwrap();
+        let snapshot = app.dispatch("session.snapshot", &json!({})).unwrap();
+        drop(guard); // Snapshot must not need the terminal-engine lock.
+        let row = |snapshot: &Value, pane: PaneId| -> Value {
+            let pane_id = pane.0.to_string();
+            snapshot["workspaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|w| w["tabs"].as_array().unwrap())
+                .flat_map(|t| t["panes"].as_array().unwrap())
+                .find(|r| r["pane_id"].as_str() == Some(pane_id.as_str()))
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(row(&snapshot, first)["agent_name"], "reviewer");
+        assert_eq!(row(&snapshot, second)["agent_name"], "worker");
+        assert_eq!(row(&snapshot, third).get("agent_name"), Some(&Value::Null));
+        assert_eq!(app.agent_name_for(first), Some("backend-title"));
+        assert_eq!(app.active_ws, active_ws);
+        assert_eq!(app.layout().focus, third);
+        assert_eq!(app.panes.len(), pane_count);
+        assert_eq!(snapshot["workspaces"][0]["index"], 1);
+        assert_eq!(snapshot["workspaces"][0]["tabs"][1]["index"], 2);
+
+        let sequence = snapshot["event_sequence"].clone();
+        app.set_agent_name(first, Some("renamed"));
+        let renamed = app.runtime_snapshot();
+        assert_eq!(row(&renamed, first)["agent_name"], "renamed");
+        assert_eq!(renamed["event_sequence"], sequence);
+        app.set_agent_name(second, Some("renamed"));
+        let reassigned = app.runtime_snapshot();
+        assert_eq!(
+            row(&reassigned, first).get("agent_name"),
+            Some(&Value::Null)
+        );
+        assert_eq!(row(&reassigned, second)["agent_name"], "renamed");
+        app.workspaces[0].tabs.swap(0, 1);
+        assert_eq!(
+            row(&app.runtime_snapshot(), second)["agent_name"],
+            "renamed"
+        );
+        app.set_agent_name(second, None);
+        assert_eq!(
+            row(&app.runtime_snapshot(), second).get("agent_name"),
+            Some(&Value::Null)
+        );
+        assert_eq!(app.runtime_snapshot()["event_sequence"], sequence);
+    }
+
+    #[test]
+    /// Names belong only to terminal rows; empty sessions stay valid.
+    fn snapshot_alias_excludes_native_views_and_handles_no_workspace() {
+        let _env = crate::persist::test_env("snapshot-alias-views");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let terminal = app.layout().focus;
+        app.open_document_preview_tab(
+            crate::persist::ensure_config_dir().join("preview.md"),
+            crate::files::preview::PreviewKind::Markdown,
+        );
+        let view = app.layout().focus;
+        assert_ne!(terminal, view);
+        app.set_agent_name(view, Some("view-alias"));
+        let snapshot = app.runtime_snapshot();
+        let panes = &snapshot["workspaces"][0]["tabs"][1]["panes"];
+        assert_eq!(panes[0]["kind"], "view");
+        assert!(panes[0].get("agent_name").is_none());
+        assert_eq!(
+            snapshot["workspaces"][0]["tabs"][0]["panes"][0].get("agent_name"),
+            Some(&Value::Null)
+        );
+        app.workspaces.clear();
+        assert_eq!(
+            app.dispatch("session.snapshot", &json!({})).unwrap()["workspaces"],
+            json!([])
+        );
     }
 
     #[test]

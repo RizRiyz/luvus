@@ -395,7 +395,32 @@ def valid_request(value):
     return False
 
 
+def valid_snapshot_alias_rows(result):
+    """Validate alias projection while preserving unknown additive row fields."""
+    workspaces = result.get("workspaces")
+    if not isinstance(workspaces, list):
+        return False
+    for workspace in workspaces:
+        if not isinstance(workspace, dict) or not isinstance(workspace.get("tabs"), list):
+            return False
+        for tab in workspace["tabs"]:
+            if not isinstance(tab, dict) or not isinstance(tab.get("panes"), list):
+                return False
+            for row in tab["panes"]:
+                if not isinstance(row, dict) or not pane(row.get("pane_id")) or not isinstance(row.get("kind"), str):
+                    return False
+                if row["kind"] == "terminal":
+                    # Older servers predate the additive alias projection.
+                    alias = row.get("agent_name")
+                    if alias is not None and (not isinstance(alias, str) or re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", alias) is None):
+                        return False
+                elif row["kind"] == "view" and "agent_name" in row:
+                    return False
+    return True
+
+
 def valid_response(value):
+    """Validate the documented app-level response profiles and alias rows."""
     if not isinstance(value, dict) or not isinstance(value.get("id"), str) or REQUEST_ID.fullmatch(value["id"]) is None:
         return False
     if set(value) == {"id", "result"}:
@@ -422,7 +447,7 @@ def valid_response(value):
                 )
             return (
                 bounded_string(result["server_generation"], 512, allow_empty=False)
-                and isinstance(result["workspaces"], list)
+                and valid_snapshot_alias_rows(result)
             )
         if kind == "pane_processes":
             return (
@@ -654,6 +679,7 @@ def valid_global_request(value, methods):
 
 
 def valid_global_response(value):
+    """Validate the global envelope plus its explicitly specialized results."""
     if not (
         isinstance(value, dict)
         and isinstance(value.get("id"), str)
@@ -667,6 +693,8 @@ def valid_global_response(value):
         return False
     result = value.get("result")
     if isinstance(result, dict) and result.get("type") == "agent_wait":
+        return valid_response(value)
+    if isinstance(result, dict) and result.get("type") == "session_snapshot":
         return valid_response(value)
     return True
 

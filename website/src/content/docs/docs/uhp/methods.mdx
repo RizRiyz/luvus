@@ -377,6 +377,16 @@ It includes the current event sequence, so a consumer can subscribe first and
 reconcile later events without a snapshot race. Neither method reads terminal
 text or starts a process.
 
+Every snapshot terminal row includes `pane_id` and nullable `agent_name`.
+`agent_name` is the operator alias set by `agent.name`; a terminal-backend title
+does not mask it. This differs from the presentation name in `agent.get` and
+`agent.list`, which prefer a backend title. Clearing an alias returns JSON
+`null`; native `kind:"view"` rows omit `agent_name`. Workspace and tab indices
+remain 1-based in this snapshot (agent-list workspace indices are 0-based).
+Alias changes do not emit an event or advance `event_sequence`: refresh the
+snapshot to observe them and do not use its event sequence as an alias ETag.
+Older servers may omit the field; retain pane-ID display as a fallback.
+
 `pane.processes` returns the already-cached executable names from Luvus's shared
 off-loop process scan. Full argument vectors are never exposed because they can
 contain prompts, credentials, or tokens. `scan:"unavailable"` is uncertainty,
