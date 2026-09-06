@@ -79,9 +79,15 @@ impl App {
                 app.file_mutation_inflight = false;
                 match result {
                     Ok(message) => {
-                        // A workspace switch must not reveal an old path in the
-                        // new workspace's tree or alter another open prompt.
-                        if app.file_tree.root() == root {
+                        // The tree can retain its old root after a workspace
+                        // switch or failed replacement-shell startup. Refresh
+                        // only while its owning workspace is still active.
+                        if app.file_tree.root() == root
+                            && app
+                                .workspaces
+                                .get(app.active_ws)
+                                .is_some_and(|ws| crate::platform::same_path(&ws.cwd, &root))
+                        {
                             app.after_fs_change(operation.path());
                         }
                         app.show_toast(message);
@@ -179,6 +185,46 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mutation_completion_skips_closed_or_replaced_workspace() {
+        let _env = crate::persist::test_env("file-mutation-workspace");
+        let root = crate::persist::config_dir();
+        std::fs::create_dir_all(&root).unwrap();
+        for scenario in ["closed", "workspace-switched", "tree-replaced"] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut app = App::new(80, 24, tx).unwrap();
+            app.workspaces[app.active_ws].cwd = root.clone();
+            app.file_tree.set_root(root.clone());
+            let path = root.join(scenario);
+            app.schedule_file_mutation(FileMutation::CreateFile(path.clone()))
+                .unwrap();
+            let completion = loop {
+                let event = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                if let AppEvent::IoCompleted(completion) = event {
+                    break completion;
+                }
+            };
+            match scenario {
+                "closed" => app.workspaces.clear(),
+                "workspace-switched" => {
+                    app.workspaces[app.active_ws].cwd = root.join("other");
+                }
+                "tree-replaced" => app.file_tree.set_root(root.join("other")),
+                _ => unreachable!(),
+            }
+            let last_git_status_at = app.last_git_status_at;
+            assert!(app.handle_event(AppEvent::IoCompleted(completion)));
+            assert!(path.exists(), "accepted mutation must still complete");
+            assert!(!app.file_mutation_inflight);
+            assert_eq!(app.last_git_status_at, last_git_status_at);
+            assert_eq!(
+                app.toast.as_ref().map(|(message, _)| message.as_str()),
+                Some("created")
+            );
+            app.drain_io_jobs();
+        }
+    }
 
     #[test]
     fn create_never_truncates_existing_content() {
