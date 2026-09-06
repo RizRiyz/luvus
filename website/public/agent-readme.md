@@ -389,6 +389,11 @@ process closes.
 
 ## Remote use
 
+Observe/control `terminal.frame` messages replace the previous capture at the
+frame's own `content_revision`. The acknowledgment revision is not an emitted
+frame cursor. A quiet final update must remain deliverable after an in-flight
+write; reconnect for a fresh frame after EOF or `terminal.resync_required`.
+
 ```sh
 ssh <host>             # run Luvus on that machine
 luvus --remote <host>  # local thin client, remote Luvus server

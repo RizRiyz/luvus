@@ -58,6 +58,21 @@ conformance. The event queue overflow path itself remains a deterministic Rust
 unit test because operating-system socket buffer sizes make a deliberately slow
 live reader nondeterministic.
 
+The initial-write regression is also deterministic: Rust tests pause the writer
+after capturing revision 3, publish one final revision 4, and require both
+frames for observe and control. The Unix transport check below adds live
+evidence but is not the race's red proof:
+
+```sh
+test_home=$(mktemp -d "$PWD/target/observe-revision.XXXXXX")
+python3 examples/uhp/terminal/observe_revision_conformance.py \
+  --binary target/debug/luvus --home "$test_home" --session luvus-pr-test
+```
+
+The runner starts and stops only its fresh named test namespace and paired
+gateways, clearing inherited socket/session selectors. It prints actual frames
+for observe/control without exposing pairing codes or tokens.
+
 On Windows, build the debug binary and run the independent PowerShell consumer:
 
 ```powershell

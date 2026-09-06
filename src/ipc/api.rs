@@ -1226,10 +1226,17 @@ fn matching_event(line: &str, event: &str, predicate: &Value) -> Option<Value> {
         .then_some(value)
 }
 
+/// A capture and the revision observed while its engine lock was held.
+struct TerminalStreamFrame {
+    serialized: String,
+    content_revision: u64,
+}
+
+/// Capture one bounded replacement frame together with its exact revision.
 fn terminal_stream_frame(
     target: &crate::terminal::backend::ObserveTarget,
     sequence: u64,
-) -> Result<String, &'static str> {
+) -> Result<TerminalStreamFrame, &'static str> {
     let engine = target
         .engine
         .lock()
@@ -1260,7 +1267,10 @@ fn terminal_stream_frame(
     })
     .to_string();
     (frame.len().saturating_add(1) <= crate::terminal::backend::MAX_FRAME_BYTES)
-        .then_some(frame)
+        .then_some(TerminalStreamFrame {
+            serialized: frame,
+            content_revision,
+        })
         .ok_or("serialized terminal frame exceeded protocol limit")
 }
 
@@ -1276,7 +1286,10 @@ fn stream_event_for_target(line: &str, terminal_id: &str) -> Option<(String, u64
     })
 }
 
+/// Serialize writes from the output forwarder and correlated control replies.
 fn write_shared_frame(writer: &Mutex<Conn>, frame: &str) -> io::Result<()> {
+    #[cfg(test)]
+    tests::pause_initial_frame_write(frame);
     let mut writer = writer
         .lock()
         .map_err(|_| io::Error::other("terminal stream writer unavailable"))?;
@@ -1361,6 +1374,7 @@ fn control_action_response(
         })
 }
 
+/// Own a bounded observe/control subscription until disconnect or cancellation.
 fn handle_terminal_stream(
     reader: &mut BufReader<Conn>,
     writer: Conn,
@@ -1482,11 +1496,11 @@ fn handle_terminal_stream(
         .spawn(move || {
             let mut last_revision = u64::MAX;
             if let Ok(frame) = terminal_stream_frame(&forward_target, sequence) {
-                if write_shared_frame(&forward_writer, &frame).is_err() {
+                if write_shared_frame(&forward_writer, &frame.serialized).is_err() {
                     forward_active.store(false, Ordering::Release);
                     return;
                 }
-                last_revision = forward_target.content_revision.load(Ordering::Acquire);
+                last_revision = frame.content_revision;
             }
             for line in receiver {
                 if !forward_active.load(Ordering::Acquire) {
@@ -1513,11 +1527,11 @@ fn handle_terminal_stream(
                         forward_active.store(false, Ordering::Release);
                         break;
                     };
-                    if write_shared_frame(&forward_writer, &frame).is_err() {
+                    if write_shared_frame(&forward_writer, &frame.serialized).is_err() {
                         forward_active.store(false, Ordering::Release);
                         break;
                     }
-                    last_revision = revision;
+                    last_revision = frame.content_revision;
                 } else if matches!(event.as_str(), "terminal.exited" | "terminal.closed") {
                     let _ = write_shared_frame(&forward_writer, &line);
                     forward_active.store(false, Ordering::Release);
@@ -2702,6 +2716,137 @@ mod tests {
         assert!(reject_duplicate_keys(br#"{"id":"1","params":{"x":2}}"#).is_ok());
     }
 
+    struct FrameWriteBarrier {
+        captured: Sender<()>,
+        resume: mpsc::Receiver<()>,
+    }
+
+    static FRAME_WRITE_BARRIERS: std::sync::LazyLock<
+        Mutex<std::collections::HashMap<String, FrameWriteBarrier>>,
+    > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+    /// Apply a terminal-specific, one-shot barrier after capture in tests only.
+    pub(super) fn pause_initial_frame_write(frame: &str) {
+        let value: Value = serde_json::from_str(frame).unwrap();
+        if value["event"] != "terminal.frame" {
+            return;
+        }
+        let barrier = FRAME_WRITE_BARRIERS
+            .lock()
+            .unwrap()
+            .remove(value["data"]["terminal_id"].as_str().unwrap());
+        if let Some(barrier) = barrier {
+            barrier.captured.send(()).unwrap();
+            barrier
+                .resume
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+        }
+    }
+
+    /// Force the quiet-final-update schedule through the real IPC forwarder.
+    fn assert_final_update_during_initial_write(control: bool) {
+        let _env = crate::persist::test_env("observe-write-race");
+        let root = crate::persist::ensure_config_dir();
+        let path = root.join("race.sock");
+        let lock = transport::acquire_server_startup_lock(&root).unwrap();
+        let listener = bind_server(&path, &lock).unwrap();
+        let (events, event_rx) = mpsc::channel();
+        let bus = new_bus();
+        start_server(listener, events, bus.clone());
+        drop(lock);
+        let mut target = observe_target();
+        target.terminal_id = format!("initial-write-race-{control}");
+        let terminal_id = target.terminal_id.clone();
+        let engine = Arc::clone(&target.engine);
+        let revision = Arc::clone(&target.content_revision);
+        let (captured_tx, captured_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        FRAME_WRITE_BARRIERS.lock().unwrap().insert(
+            terminal_id.clone(),
+            FrameWriteBarrier {
+                captured: captured_tx,
+                resume: resume_rx,
+            },
+        );
+        let client_terminal = terminal_id.clone();
+        let client =
+            thread::spawn(move || {
+                let mut stream = transport::connect(&path).unwrap();
+                stream
+                    .set_timeouts(std::time::Duration::from_secs(5))
+                    .unwrap();
+                writeln!(stream, "{}", json!({"id":"race","method":if control {
+                "terminal.backend.control"
+            } else { "terminal.backend.observe" },"params":{
+                "server_generation":"generation","terminal_id":client_terminal,"pane_id":"7",
+                "mode":"visible","lines":4,"ansi":true
+            }})).unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut frames = Vec::new();
+                loop {
+                    let frame: Value =
+                        serde_json::from_str(&read_response_frame(&mut reader).unwrap()).unwrap();
+                    if frame["event"] == "terminal.closed" {
+                        break;
+                    }
+                    if frame["event"] == "terminal.frame" {
+                        frames.push(frame);
+                    }
+                }
+                frames
+            });
+        let AppEvent::BackendObserve { reply, .. } = event_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+        else {
+            panic!("stream must resolve its target");
+        };
+        reply.send(Ok(target)).unwrap();
+        captured_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        {
+            let mut engine = engine.lock().unwrap();
+            engine.advance(b"\r\nfinal-quiet-marker");
+            revision.fetch_add(1, Ordering::AcqRel);
+        }
+        publish_event(
+            &bus,
+            "terminal.output_ready",
+            json!({"terminal_id":terminal_id,"content_revision":4}),
+        );
+        // Both events fit the bounded queue. Close gives a deterministic end
+        // marker even on the buggy baseline; no timeout is the red proof.
+        publish_event(&bus, "terminal.closed", json!({"terminal_id":terminal_id}));
+        resume_tx.send(()).unwrap();
+        let frames = client.join().unwrap();
+        assert_eq!(
+            frames
+                .iter()
+                .map(|f| f["data"]["content_revision"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![3, 4],
+            "the final quiet revision must follow the emitted initial frame"
+        );
+        assert!(frames[1]["data"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("final-quiet-marker"));
+    }
+
+    #[test]
+    /// Pin observe delivery when output advances before the first write finishes.
+    fn observe_does_not_skip_output_during_initial_frame_write() {
+        assert_final_update_during_initial_write(false);
+    }
+
+    #[test]
+    /// Pin the same initial-write invariant on the shared control forwarder.
+    fn control_does_not_skip_output_during_initial_frame_write() {
+        assert_final_update_during_initial_write(true);
+    }
+
     fn observe_target() -> crate::terminal::backend::ObserveTarget {
         use crate::terminal::vt::VtEngine;
 
@@ -2721,10 +2866,12 @@ mod tests {
     }
 
     #[test]
+    /// Keep serialized identity, captured revision and payload bounds coupled.
     fn terminal_stream_frame_is_bounded_and_identified() {
         let target = observe_target();
         let frame = terminal_stream_frame(&target, 12).unwrap();
-        let frame: Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(frame.content_revision, 3);
+        let frame: Value = serde_json::from_str(&frame.serialized).unwrap();
         assert_eq!(frame["event"], "terminal.frame");
         assert_eq!(frame["sequence"], 12);
         assert_eq!(frame["data"]["terminal_id"], "terminal");
@@ -2801,6 +2948,7 @@ mod tests {
     }
 
     #[test]
+    /// Preserve initial/change frames, exact filtering, deduplication and exit.
     fn observe_stream_sends_initial_and_change_driven_frames() {
         let _env = crate::persist::test_env("terminal-observe-stream");
         let root = crate::persist::ensure_config_dir();
@@ -2814,6 +2962,7 @@ mod tests {
 
         let client_path = path.clone();
         let (initial_tx, initial_rx) = mpsc::channel();
+        let (updated_tx, updated_rx) = mpsc::channel();
         let client = thread::spawn(move || {
             let mut stream = transport::connect(&client_path).unwrap();
             stream
@@ -2830,12 +2979,15 @@ mod tests {
             .unwrap();
             let mut reader = BufReader::new(stream);
             let mut lines = Vec::new();
-            for index in 0..3 {
+            for index in 0..4 {
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();
                 lines.push(serde_json::from_str::<Value>(&line).unwrap());
                 if index == 1 {
                     initial_tx.send(()).unwrap();
+                }
+                if index == 2 {
+                    updated_tx.send(()).unwrap();
                 }
             }
             lines
@@ -2849,6 +3001,11 @@ mod tests {
         let revision = Arc::clone(&target.content_revision);
         reply.send(Ok(target)).unwrap();
         initial_rx.recv().unwrap();
+        publish_event(
+            &bus,
+            "terminal.output_ready",
+            json!({"terminal_id":"other-terminal","content_revision":99}),
+        );
         engine.lock().unwrap().advance(b"\r\nupdated");
         revision.fetch_add(1, Ordering::AcqRel);
         publish_event(
@@ -2857,6 +3014,16 @@ mod tests {
             json!({"terminal_id":"terminal","pane":"7","content_revision":4}),
         );
 
+        updated_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        publish_event(
+            &bus,
+            "terminal.output_ready",
+            json!({"terminal_id":"terminal","content_revision":4}),
+        );
+        publish_event(&bus, "terminal.exited", json!({"terminal_id":"terminal"}));
+
         let lines = client.join().unwrap();
         assert_eq!(lines[0]["result"]["type"], "terminal_backend_stream");
         assert_eq!(lines[0]["result"]["queue_capacity"], 2);
@@ -2864,6 +3031,10 @@ mod tests {
         assert_eq!(lines[1]["data"]["content_revision"], 3);
         assert_eq!(lines[2]["event"], "terminal.frame");
         assert_eq!(lines[2]["data"]["content_revision"], 4);
+        assert_eq!(
+            lines[3]["event"], "terminal.exited",
+            "duplicate revisions must not emit another frame"
+        );
         assert!(lines[2]["data"]["text"]
             .as_str()
             .unwrap()

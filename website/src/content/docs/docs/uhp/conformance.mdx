@@ -111,6 +111,12 @@ cargo build --locked
 Never point live mutation or failure tests at `~/.luvus/`, an installed server,
 or a production named session.
 
+For final quiet output on Unix, run
+`examples/uhp/terminal/observe_revision_conformance.py --binary target/debug/luvus --home <fresh-empty-home> --session luvus-pr-test`.
+It checks both paired observe/control streams and stops its own processes.
+The Rust initial-write barrier tests provide the deterministic race proof;
+successful live delivery alone does not force that interleaving.
+
 ## Benchmark the protocol path
 
 Use an optimized build and equivalent workloads:
