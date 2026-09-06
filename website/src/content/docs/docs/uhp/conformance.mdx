@@ -162,3 +162,5 @@ A production client should:
 For the wire model, see the [UHP overview](/docs/uhp/). For callable fields,
 use the [method reference](/docs/uhp/methods/) and
 [terminal methods](/docs/uhp/terminal/).
+
+The `examples/uhp/access_capabilities_conformance.py` harness accepts an exact `--binary`, fresh `--home`, and `--session luvus-pr-test`. Run `--expect missing` against an older gateway and `--expect present` against the projection build. It compares paired read/control capability catalogs with owner capabilities, validates permission examples, proves rejected input stays empty, and stops its isolated processes.

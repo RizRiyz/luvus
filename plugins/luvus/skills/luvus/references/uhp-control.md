@@ -46,6 +46,15 @@ control-stream `send_key`. Invalid batches queue no prefix. Success identifies
 the resolved `pane` and means queued, not consumed. Inspect before answering;
 do not infer permission for `agent.send`, raw pane input, launch, fork, or close.
 
+After pairing through Access, `uhp.capabilities` retains owner `methods` and
+adds `access.mode`, `access.allowed_methods`, and gateway-specific
+`access.limits.connections` / `requests_per_minute`. Intersect the allowed set
+with server methods and your supported actions. Owner endpoints omit `access`;
+older gateways may omit it too, which never proves write permission. Control
+includes keys and existing automation writes, but excludes standalone terminal
+input and token administration. Re-discover after reconnect; accept unknown
+additive fields. No owner socket/token or new event is exposed.
+
 ## Bootstrap and maintain state
 
 Use this order for a stateful harness:
