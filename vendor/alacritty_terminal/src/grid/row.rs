@@ -220,6 +220,9 @@ impl<T: Default> Row<T> {
         }
 
         self.inflate();
+        // Growth introduces a default suffix which may differ from the old
+        // template. Preserve the entire old row when compacting after reflow.
+        self.occ = self.columns;
         self.dense_mut().resize_with(columns, T::default);
         self.columns = u32::try_from(columns).expect("terminal row width exceeds u32");
     }
@@ -855,6 +858,30 @@ mod tests {
         assert!(row.compact_trailing());
         assert_eq!(row.dense(), &['x', '-']);
         assert_eq!(row.into_iter().copied().collect::<String>(), "x-----");
+    }
+
+    #[test]
+    fn growing_template_row_preserves_suffix_metadata_on_compaction() {
+        let mut fill = Cell::default();
+        fill.flags.insert(crate::term::cell::Flags::BOLD);
+        fill.push_zerowidth('\u{301}');
+        for compact_first in [false, true] {
+            let mut row = Row::new_uniform(6, Arc::new(fill.clone()));
+            row[Column(0)].c = 'x';
+            if compact_first {
+                row.compact_trailing();
+            }
+            row.grow(10);
+            row.grow(12);
+            row.compact_trailing();
+            for column in 1..6 {
+                assert_eq!(row[Column(column)], fill);
+            }
+            for column in 6..12 {
+                assert_eq!(row[Column(column)], Cell::default());
+            }
+            assert_eq!(row[Column(0)].c, 'x');
+        }
     }
 
     #[test]

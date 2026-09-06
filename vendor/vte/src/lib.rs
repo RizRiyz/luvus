@@ -144,14 +144,15 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     ) -> usize {
         let mut i = 0;
 
-        // Handle partial codepoints from previous calls to `advance`.
-        if self.partial_utf8_len != 0 {
-            i += self.advance_partial_utf8(performer, bytes);
-        }
-
         while i != bytes.len() && !performer.terminated() {
+            if self.partial_utf8_len != 0 {
+                i += self.advance_partial_utf8(performer, &bytes[i..i + 1]);
+                continue;
+            }
             match self.state {
-                State::Ground => i += self.advance_ground(performer, &bytes[i..]),
+                // A performer may terminate on any printed character or
+                // control byte. Do not consume the remainder of a text run.
+                State::Ground => i += self.advance_ground(performer, &bytes[i..i + 1]),
                 _ => {
                     // Inlining it results in worse codegen.
                     let byte = bytes[i];
@@ -862,6 +863,31 @@ mod tests {
     use std::vec::Vec;
 
     use super::*;
+
+    #[test]
+    fn termination_preserves_unconsumed_text() {
+        struct StopOn {
+            stop: char,
+            text: std::string::String,
+        }
+        impl Perform for StopOn {
+            fn print(&mut self, c: char) {
+                self.text.push(c);
+            }
+            fn terminated(&self) -> bool {
+                self.text.ends_with(self.stop)
+            }
+        }
+        for (input, stop, expected) in [("abcdef", 'c', "abc"), ("aé終z", '終', "aé終")] {
+            let mut parser = Parser::new();
+            let mut performer = StopOn { stop, text: std::string::String::new() };
+            let consumed = parser.advance_until_terminated(&mut performer, input.as_bytes());
+            assert_eq!(consumed, expected.len());
+            assert_eq!(performer.text, expected);
+            parser.advance(&mut performer, &input.as_bytes()[consumed..]);
+            assert_eq!(performer.text, input);
+        }
+    }
 
     const OSC_BYTES: &[u8] = &[
         0x1B, 0x5D, // Begin OSC
