@@ -2,9 +2,9 @@
   "protocol": { "name": "luvus-uhp", "major": 1, "minor": 0 },
   "files": [
     { "path": "valid/requests.jsonl", "kind": "request", "expect": "valid", "count": 49 },
-    { "path": "valid/responses.jsonl", "kind": "response", "expect": "valid", "count": 24 },
+    { "path": "valid/responses.jsonl", "kind": "response", "expect": "valid", "count": 27 },
     { "path": "valid/events.jsonl", "kind": "event", "expect": "valid", "count": 3 },
     { "path": "invalid/requests.jsonl", "kind": "request", "expect": "invalid", "count": 36 },
-    { "path": "invalid/responses.jsonl", "kind": "response", "expect": "invalid", "count": 33 }
+    { "path": "invalid/responses.jsonl", "kind": "response", "expect": "invalid", "count": 46 }
   ]
 }

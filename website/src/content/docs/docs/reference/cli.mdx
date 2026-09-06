@@ -302,6 +302,8 @@ root instead. `--no-focus` preserves the caller's current view.
 
 `luvus uhp capabilities` on the owner endpoint reports supported methods. The same RPC through paired `luvus uhp access` adds `access.mode`, `access.allowed_methods`, and gateway connection/request limits; use that effective set for permission-aware clients.
 
+`luvus uhp snapshot` includes nullable `agent_name` operator aliases on terminal rows alongside `pane_id`. Native view rows omit the field. Renames require a fresh snapshot; event sequence is not an alias ETag.
+
 ## Prompt wait observation
 
 With `--wait`, `agent prompt` (also `agent send`) requires a new `working` or

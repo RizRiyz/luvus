@@ -440,6 +440,12 @@ read-only Access denies it. Rename retains the owner name validation and
 
 ## Remote use
 
+For a fleet display, `session.snapshot` terminal rows include `pane_id` plus
+nullable `agent_name` from the operator alias map. Backend titles do not mask
+aliases; native view rows omit the field. Refresh snapshots after alias changes,
+which do not emit an event or advance `event_sequence`. Use pane IDs for routing
+and as display fallback when an older server omits the alias field.
+
 Observe/control `terminal.frame` messages replace the previous capture at the
 frame's own `content_revision`. The acknowledgment revision is not an emitted
 frame cursor. A quiet final update must remain deliverable after an in-flight

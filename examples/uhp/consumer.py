@@ -428,8 +428,33 @@ def valid_effective_access(result):
     )
 
 
+def valid_snapshot_alias_rows(result):
+    """Validate alias projection while preserving unknown additive row fields."""
+    workspaces = result.get("workspaces")
+    if not isinstance(workspaces, list):
+        return False
+    for workspace in workspaces:
+        if not isinstance(workspace, dict) or not isinstance(workspace.get("tabs"), list):
+            return False
+        for tab in workspace["tabs"]:
+            if not isinstance(tab, dict) or not isinstance(tab.get("panes"), list):
+                return False
+            for row in tab["panes"]:
+                if not isinstance(row, dict) or not pane(row.get("pane_id")) or not isinstance(row.get("kind"), str):
+                    return False
+                if row["kind"] == "terminal":
+                    if "agent_name" not in row:
+                        return False
+                    alias = row["agent_name"]
+                    if alias is not None and (not isinstance(alias, str) or re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", alias) is None):
+                        return False
+                elif row["kind"] == "view" and "agent_name" in row:
+                    return False
+    return True
+
+
 def valid_response(value):
-    """Validate app-level results, including optional effective Access authority."""
+    """Validate app-level results, effective Access authority, and alias rows."""
     if not isinstance(value, dict) or not isinstance(value.get("id"), str) or REQUEST_ID.fullmatch(value["id"]) is None:
         return False
     if set(value) == {"id", "result"}:
@@ -457,7 +482,7 @@ def valid_response(value):
                 )
             return (
                 bounded_string(result["server_generation"], 512, allow_empty=False)
-                and isinstance(result["workspaces"], list)
+                and valid_snapshot_alias_rows(result)
             )
         if kind == "pane_processes":
             return (
@@ -690,7 +715,7 @@ def valid_global_request(value, methods):
 
 
 def valid_global_response(value):
-    """Validate global envelopes and specialized Access capability projections."""
+    """Validate global envelopes and specialized Access and snapshot results."""
     if not (
         isinstance(value, dict)
         and isinstance(value.get("id"), str)
@@ -731,6 +756,8 @@ def valid_global_response(value):
                 or (result["evidence"] == "timeout" and result["matched"] is False)
             )
         )
+    if isinstance(result, dict) and result.get("type") == "session_snapshot":
+        return valid_snapshot_alias_rows(result)
     if isinstance(result, dict) and result.get("type") == "agent_wait":
         return valid_response(value)
     return True
