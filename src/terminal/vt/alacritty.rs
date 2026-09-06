@@ -1,5 +1,6 @@
 //! `alacritty_terminal` implementation of `VtEngine`. Pure Rust — no Zig, no FFI.
 
+use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener};
@@ -112,6 +113,9 @@ pub struct AlacrittyEngine {
     appearance: Arc<Mutex<PaneAppearance>>,
     history_budget_bytes: usize,
     output_generation: u64,
+    // One bounded summary, invalidated at every storage mutation boundary.
+    // Output generation alone is insufficient: quiet packing changes storage.
+    history_metrics_cache: Cell<Option<HistoryMetrics>>,
     damage_line_indices: Vec<u16>,
     damage_rows: Vec<DamageRow>,
 }
@@ -173,12 +177,14 @@ impl AlacrittyEngine {
             appearance,
             history_budget_bytes,
             output_generation: 0,
+            history_metrics_cache: Cell::new(None),
             damage_line_indices: Vec::new(),
             damage_rows: Vec::new(),
         }
     }
 
     fn apply_history_budget(&mut self) {
+        self.history_metrics_cache.set(None);
         self.term.set_options(Config {
             scrolling_history: history_rows_for_budget(
                 self.history_budget_bytes,
@@ -358,11 +364,13 @@ fn history_rows_for_budget(bytes: usize, cols: u16) -> usize {
 
 impl VtEngine for AlacrittyEngine {
     fn advance(&mut self, bytes: &[u8]) {
+        self.history_metrics_cache.set(None);
         self.parser.advance(&mut self.term, bytes);
         self.output_generation = self.output_generation.wrapping_add(1);
     }
 
     fn finish_output_batch(&mut self) {
+        self.history_metrics_cache.set(None);
         self.term.finish_output_batch();
     }
 
@@ -913,11 +921,17 @@ impl VtEngine for AlacrittyEngine {
     }
 
     fn history_metrics(&self) -> HistoryMetrics {
+        if let Some(mut metrics) = self.history_metrics_cache.get() {
+            // Viewport movement changes no allocation. Keep it live without
+            // traversing history or invalidating the storage summary.
+            metrics.offset = self.scroll_offset();
+            return metrics;
+        }
         let retained_rows = self.history_len();
         let retained_bytes =
             retained_rows.saturating_mul(estimated_row_bytes(self.term.grid().columns()));
         let storage = self.term.history_storage_metrics();
-        HistoryMetrics {
+        let metrics = HistoryMetrics {
             offset: self.scroll_offset(),
             retained_rows,
             budget_bytes: self.history_budget_bytes,
@@ -933,7 +947,9 @@ impl VtEngine for AlacrittyEngine {
             row_descriptor_bytes: Some(storage.row_descriptor_bytes),
             allocation_count: Some(storage.allocations),
             exact_bytes: false,
-        }
+        };
+        self.history_metrics_cache.set(Some(metrics));
+        metrics
     }
 
     fn retained_row_count(&self) -> usize {
@@ -1230,6 +1246,73 @@ mod tests {
 
     fn budget_for_rows(cols: usize, rows: usize) -> usize {
         estimated_row_bytes(cols).saturating_mul(rows)
+    }
+
+    #[test]
+    fn history_metrics_cache_tracks_storage_changes_and_live_scroll() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 1000));
+        feed_lines(&mut engine, 800);
+        let dense = engine.history_metrics();
+        assert_eq!(engine.history_metrics_cache.get(), Some(dense));
+        let output_generation = engine.output_generation();
+        engine.finish_output_batch();
+        assert!(engine.history_metrics_cache.get().is_none());
+        assert_eq!(engine.output_generation(), output_generation);
+        let packed = engine.history_metrics();
+        assert!(packed.packed_rows > dense.packed_rows);
+        engine.scroll(10);
+        let scrolled = engine.history_metrics();
+        assert_eq!(scrolled.offset, 10);
+        assert_eq!(scrolled.estimated_grid_bytes, packed.estimated_grid_bytes);
+        assert_eq!(engine.history_metrics_cache.get(), Some(packed));
+        engine.advance(b"\x1b[?1049hhello");
+        assert!(engine.history_metrics_cache.get().is_none());
+        assert_eq!(engine.history_metrics().retained_rows, 0);
+        engine.advance(b"\x1b[?1049l");
+        assert_eq!(engine.history_metrics().retained_rows, packed.retained_rows);
+        engine.resize(40, 12);
+        assert!(engine.history_metrics_cache.get().is_none());
+        engine.history_metrics();
+        engine.set_history_budget(budget_for_rows(40, 30));
+        assert!(engine.history_metrics_cache.get().is_none());
+        let small = engine.history_metrics();
+        assert!(small.retained_rows <= 30);
+        // Compare against a forced fresh computation, not another cache hit.
+        engine.history_metrics_cache.set(None);
+        assert_eq!(engine.history_metrics(), small);
+    }
+
+    /// Opt-in inspection benchmark. No child processes or production sessions.
+    #[test]
+    #[ignore]
+    fn history_inspection_benchmark() {
+        use std::{hint::black_box, time::Instant};
+        for count in [1, 20, 50] {
+            let mut engines = Vec::new();
+            for _ in 0..count {
+                let (tx, _rx) = channel();
+                let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 10_000));
+                feed_lines(&mut engine, 10_024);
+                engine.finish_output_batch();
+                engines.push(engine);
+            }
+            for trial in 1..=3 {
+                for engine in &engines {
+                    black_box(engine.history_metrics());
+                }
+                let start = Instant::now();
+                for _ in 0..100 {
+                    for engine in &engines {
+                        black_box(engine.history_metrics());
+                    }
+                }
+                eprintln!(
+                    "history_inspection panes={count} rows=10000 trial={trial} us_per_fleet={:.3}",
+                    start.elapsed().as_secs_f64() * 1_000_000.0 / 100.0
+                );
+            }
+        }
     }
 
     #[test]

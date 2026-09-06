@@ -73,6 +73,12 @@ owned terminal damage before it is acknowledged. A passive display cannot
 change the active client's focus, PTY dimensions, scroll state, or hit targets.
 A client that falls behind receives a full repair frame.
 
+Detailed history accounting is cached once per terminal storage state. Output,
+resize, budget changes, and quiet history packing invalidate the summary.
+Scrolling updates the reported offset without traversing retained rows. The
+reported byte fields remain allocation estimates, not process RSS or an exact
+byte-enforced history limit.
+
 ## And the numbers
 
 Pure Rust, a single ~3 MB binary, single-digit-MB resident memory even with
