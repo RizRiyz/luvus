@@ -711,7 +711,8 @@ impl Pane {
         #[cfg(windows)]
         if pending || self.history_maintenance_pending.load(Ordering::Acquire) {
             if let Ok(mut engine) = self.engine.lock() {
-                let more = engine.finish_output_batch_step();
+                let more =
+                    engine.finish_output_batch_step() || engine.history_maintenance_pending();
                 self.history_maintenance_pending
                     .store(more, Ordering::Release);
             }
