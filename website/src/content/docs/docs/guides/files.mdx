@@ -37,6 +37,15 @@ pane, show up on their own within a couple of seconds.
 New Folder, Rename, Copy Path, Insert Path, Open as Workspace (folders), and
 Delete (Delete always asks first).
 
+Create, rename, and confirmed delete run on the shared filesystem worker. The
+prompt closes after admission and a pending message appears; completion or failure
+is reported afterward. Only one mutation is admitted at a time. If the queue is
+busy, the prompt remains available to retry. Confirmation is the cancellation
+boundary: an admitted operation is not cancelled by switching workspace or closing
+a modal. Its result never closes a newer prompt or reveals a path in a different
+workspace. New-file creation cannot truncate an existing entry, and deleting a
+directory symlink removes the link rather than its target.
+
 | Key | FILES tree action |
 |---|---|
 | `j` / `k`, `↓` / `↑` | next / previous row |

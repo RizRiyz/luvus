@@ -915,28 +915,21 @@ impl App {
         }
         let dest = p.dir.join(&name);
         let (kind, target) = (p.kind, p.target.clone());
-        let result = match kind {
-            FilePromptKind::NewFile => {
-                if dest.exists() {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::AlreadyExists,
-                        "already exists",
-                    ))
-                } else {
-                    std::fs::write(&dest, b"")
+        use super::file_jobs::FileMutation;
+        let operation = match kind {
+            FilePromptKind::NewFile => FileMutation::CreateFile(dest),
+            FilePromptKind::NewFolder => FileMutation::CreateFolder(dest),
+            FilePromptKind::Rename => {
+                let Some(source) = target else { return };
+                FileMutation::Rename {
+                    source,
+                    destination: dest,
                 }
             }
-            FilePromptKind::NewFolder => std::fs::create_dir(&dest),
-            FilePromptKind::Rename => std::fs::rename(target.as_ref().unwrap(), &dest),
         };
-        match result {
+        match self.schedule_file_mutation(operation) {
             Ok(()) => {
                 self.file_prompt = None;
-                self.after_fs_change(&dest);
-                self.show_toast(match kind {
-                    FilePromptKind::Rename => "renamed",
-                    _ => "created",
-                });
             }
             Err(e) => {
                 if let Some(pr) = self.file_prompt.as_mut() {
@@ -958,22 +951,16 @@ impl App {
         let Some(path) = self.file_delete.take() else {
             return;
         };
-        let result = if path.is_dir() {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_file(&path)
-        };
-        match result {
-            Ok(()) => {
-                self.after_fs_change(&path);
-                self.show_toast("deleted");
-            }
-            Err(e) => self.show_toast(format!("delete failed: {e}")),
+        if let Err(error) =
+            self.schedule_file_mutation(super::file_jobs::FileMutation::Delete(path.clone()))
+        {
+            self.file_delete = Some(path);
+            self.show_toast(error);
         }
     }
 
     /// After a create/rename/delete: re-read the tree, reveal the path, re-tint.
-    fn after_fs_change(&mut self, path: &Path) {
+    pub(super) fn after_fs_change(&mut self, path: &Path) {
         self.file_tree.invalidate();
         self.load_pending_dirs();
         self.file_tree.reveal(path);
@@ -3492,6 +3479,7 @@ mod tests {
         app.file_menu_action_pub(crate::app::FileMenuItem::NewFile);
         typ(&mut app, "created.rs");
         app.file_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        pump_file_mutation(&rx, &mut app);
         assert!(
             root.join("src/created.rs").exists(),
             "new file created on disk"
@@ -3515,6 +3503,7 @@ mod tests {
         }
         typ(&mut app, "new.rs");
         app.file_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        pump_file_mutation(&rx, &mut app);
         assert!(
             root.join("src/new.rs").exists() && !root.join("src/old.rs").exists(),
             "renamed"
@@ -3533,6 +3522,7 @@ mod tests {
         app.open_file_menu(c_idx, 5, 7);
         app.file_menu_action_pub(crate::app::FileMenuItem::Delete);
         app.file_delete_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        pump_file_mutation(&rx, &mut app);
         assert!(!root.join("src/created.rs").exists(), "deleted");
 
         let _ = std::fs::remove_dir_all(&root);
@@ -3584,9 +3574,21 @@ mod tests {
         app.open_file_menu(idx, 5, 5);
         app.file_menu_action_pub(crate::app::FileMenuItem::Delete);
         app.file_delete_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        pump_file_mutation(&rx, &mut app);
         assert!(!file.exists(), "confirmed delete removes it");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn pump_file_mutation(rx: &std::sync::mpsc::Receiver<AppEvent>, app: &mut App) {
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while app.file_mutation_inflight {
+            let event = rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("file mutation completion");
+            app.handle_event(event);
+        }
     }
 
     // ── Insert Path (docs/38 FILE-6) ─────────────────────────────────────────
