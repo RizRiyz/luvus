@@ -1315,6 +1315,13 @@ where
     }
 
     #[inline]
+    fn ascii_print_never_terminates(&self) -> bool {
+        // Only escape/control dispatch changes this performer's termination
+        // state; Handler::input_ascii has no access to that state.
+        true
+    }
+
+    #[inline]
     fn execute(&mut self, byte: u8) {
         match byte {
             C0::HT => self.handler.put_tab(1),

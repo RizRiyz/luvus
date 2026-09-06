@@ -150,6 +150,15 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                 continue;
             }
             match self.state {
+                State::Ground if performer.ascii_print_never_terminates()
+                    && matches!(bytes[i], b' '..=b'~') =>
+                {
+                    let start = i;
+                    while i < bytes.len() && matches!(bytes[i], b' '..=b'~') {
+                        i += 1;
+                    }
+                    performer.print_ascii(&bytes[start..i]);
+                },
                 // A performer may terminate on any printed character or
                 // control byte. Do not consume the remainder of a text run.
                 State::Ground => i += self.advance_ground(performer, &bytes[i..i + 1]),
@@ -791,6 +800,13 @@ pub trait Perform {
         }
     }
 
+    /// Opt into ASCII batching in the terminating parser only when printing
+    /// printable ASCII can never change `terminated()` from false to true.
+    /// Control characters and escape sequences still check termination.
+    fn ascii_print_never_terminates(&self) -> bool {
+        false
+    }
+
     /// Execute a C0 or C1 control function.
     fn execute(&mut self, _byte: u8) {}
 
@@ -887,6 +903,25 @@ mod tests {
             parser.advance(&mut performer, &input.as_bytes()[consumed..]);
             assert_eq!(performer.text, input);
         }
+    }
+
+    #[test]
+    fn terminating_parser_batches_opted_in_ascii_but_stops_at_control() {
+        #[derive(Default)]
+        struct Batch {
+            runs: Vec<Vec<u8>>,
+            stopped: bool,
+        }
+        impl Perform for Batch {
+            fn ascii_print_never_terminates(&self) -> bool { true }
+            fn print_ascii(&mut self, bytes: &[u8]) { self.runs.push(bytes.to_vec()); }
+            fn execute(&mut self, _: u8) { self.stopped = true; }
+            fn terminated(&self) -> bool { self.stopped }
+        }
+        let mut parser = Parser::new();
+        let mut performer = Batch::default();
+        assert_eq!(parser.advance_until_terminated(&mut performer, b"abc\ndef"), 4);
+        assert_eq!(performer.runs, vec![b"abc".to_vec()]);
     }
 
     const OSC_BYTES: &[u8] = &[
