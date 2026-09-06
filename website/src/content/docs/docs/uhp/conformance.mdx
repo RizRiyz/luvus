@@ -111,6 +111,19 @@ cargo build --locked
 Never point live mutation or failure tests at `~/.luvus/`, an installed server,
 or a production named session.
 
+On Unix, validate control Access key admission with a raw fixture child:
+
+```sh
+test_home=$(mktemp -d "$PWD/target/access-keys.XXXXXX")
+python3 examples/uhp/access_keys_conformance.py --binary target/debug/luvus \
+  --home "$test_home" --session luvus-pr-test --expect allowed
+```
+
+The runner requires an empty home, removes inherited socket/session selectors,
+pairs read-only and control gateways, checks admitted bytes and rejected
+batches, and stops its own processes. Use `--expect forbidden` against a build
+before control Access permitted `agent.keys`.
+
 ## Benchmark the protocol path
 
 Use an optimized build and equivalent workloads:
@@ -149,3 +162,5 @@ A production client should:
 For the wire model, see the [UHP overview](/docs/uhp/). For callable fields,
 use the [method reference](/docs/uhp/methods/) and
 [terminal methods](/docs/uhp/terminal/).
+
+The `examples/uhp/access_capabilities_conformance.py` harness accepts an exact `--binary`, fresh `--home`, and `--session luvus-pr-test`. Run `--expect missing` against an older gateway and `--expect present` against the projection build. It compares paired read/control capability catalogs with owner capabilities, validates permission examples, proves rejected input stays empty, and stops its isolated processes.

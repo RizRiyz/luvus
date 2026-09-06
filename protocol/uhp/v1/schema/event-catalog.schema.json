@@ -1,4 +1,5 @@
 {
+  "$comment": "Effective Access permissions are returned by uhp.capabilities on the Access endpoint only; no new event or event-sequence semantics.",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://luvus.dev/protocol/uhp/v1/event-catalog.schema.json",
   "title": "Luvus Universal Harness Protocol general event payload catalog",

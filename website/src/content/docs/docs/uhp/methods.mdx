@@ -31,6 +31,13 @@ CLI commands map to these methods. Session lifecycle and theme acquisition are
 local helpers: theme files are validated and installed client-side, then only a
 bounded registry reload is sent to the selected server.
 
+When `uhp.capabilities` is called through a paired Access gateway, the result
+adds `access.mode`, `access.allowed_methods`, and gateway-specific
+`access.limits` (`connections`, `requests_per_minute`). The owner method catalog
+and contracts are preserved; the owner endpoint omits `access`. Use the
+intersection of supported and allowed methods when enabling a client action.
+See [effective permissions](/docs/uhp/remote-access/#effective-permissions).
+
 ## Wire format
 
 One request per connection, newline-terminated, and one JSON reply:

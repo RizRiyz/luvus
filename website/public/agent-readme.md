@@ -387,6 +387,12 @@ read-only and control access both default to 24 hours. `--no-expiry` binds the
 client token to the foreground access process and keeps it valid until that
 process closes.
 
+Control Access permits `agent.keys` for recognized agent panes with the local
+key grammar, including `ctrl+z`, printable Unicode and `["esc","[","Z"]`.
+Read-only Access denies it. A rejected batch queues no prefix; success returns
+the resolved `pane` and means queued, not consumed. This does not authorize
+`agent.send`, raw pane input, launch, fork, or close through the gateway.
+
 ## Remote use
 
 ```sh
@@ -398,6 +404,15 @@ Both require Luvus on the remote machine. `--remote` uses the user's existing
 SSH transport. It does not create a Luvus network daemon. For diagnosis,
 identify the server host, selected session, remote binary, noninteractive PATH,
 and inherited endpoint.
+
+After pairing through Access, `uhp.capabilities` retains owner `methods` and
+adds `access.mode`, `access.allowed_methods`, and gateway-specific
+`access.limits.connections` / `requests_per_minute`. Intersect the allowed set
+with server methods and your supported actions. Owner endpoints omit `access`;
+older gateways may omit it too, which never proves write permission. Control
+includes keys and existing automation writes, but excludes standalone terminal
+input and token administration. Re-discover after reconnect; accept unknown
+additive fields. No owner socket/token or new event is exposed.
 
 ## Troubleshooting order
 

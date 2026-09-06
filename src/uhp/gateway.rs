@@ -359,11 +359,72 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) -> Result<()> {
                 return Ok(());
             }
         };
-        validate_response_id(&response, &id)?;
+        let response = if method == "uhp.capabilities" {
+            match project_access_capabilities(&response, &id, shared.mode) {
+                Ok(response) => response,
+                Err(_) => {
+                    write_gateway_error(stream, id, "unavailable")?;
+                    return Ok(());
+                }
+            }
+        } else {
+            validate_response_id(&response, &id)?;
+            response
+        };
         writeln!(stream, "{response}")?;
         stream.flush()?;
         Ok(())
     }
+}
+
+/// Add endpoint authority without replacing the owner's supported-method catalog.
+/// The effective set is compiled, advertised upstream, and permitted by this gateway.
+fn project_access_capabilities(response: &str, id: &Value, mode: AccessMode) -> Result<String> {
+    validate_response_id(response, id)?;
+    let mut value: Value = serde_json::from_str(response)?;
+    if let Some(error) = value.get("error") {
+        if value.get("result").is_none()
+            && error.get("code").is_some_and(Value::is_string)
+            && error.get("message").is_some_and(Value::is_string)
+        {
+            return Ok(response.to_owned());
+        }
+        return Err(anyhow!("invalid owner capabilities error"));
+    }
+    let result = value
+        .get_mut("result")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("missing owner capabilities result"))?;
+    if result.get("type").and_then(Value::as_str) != Some("uhp_capabilities") {
+        return Err(anyhow!("invalid owner capabilities type"));
+    }
+    let methods = result
+        .get("methods")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing owner method catalog"))?;
+    let advertised: Option<std::collections::HashSet<_>> = methods
+        .iter()
+        .map(|method| method.as_str().filter(|method| !method.is_empty()))
+        .collect();
+    let advertised = advertised.ok_or_else(|| anyhow!("invalid owner method catalog"))?;
+    let allowed: Vec<_> = crate::api::capabilities::METHODS
+        .iter()
+        .copied()
+        .filter(|method| advertised.contains(method) && allowed_method(mode, method))
+        .collect();
+    if allowed.is_empty() {
+        return Err(anyhow!("empty effective method catalog"));
+    }
+    result.insert("access".into(), json!({
+        "mode":match mode { AccessMode::ReadOnly => "read_only", AccessMode::Control => "control" },
+        "allowed_methods":allowed,
+        "limits":{"connections":MAX_CONNECTIONS,"requests_per_minute":MAX_REQUESTS_PER_MINUTE},
+    }));
+    let response = serde_json::to_string(&value)?;
+    if response.len().saturating_add(1) > crate::terminal::backend::MAX_FRAME_BYTES {
+        return Err(anyhow!("projected capabilities exceed frame limit"));
+    }
+    Ok(response)
 }
 
 fn handle_pairing(mut stream: TcpStream, shared: &Shared, value: &Value) -> Result<()> {
@@ -411,6 +472,7 @@ fn allowed_method(mode: AccessMode, method: &str) -> bool {
                     | "tab.focus"
                     | "pane.focus"
                     | "agent.prompt"
+                    | "agent.keys"
                     | "automation.create"
                     | "automation.update"
                     | "automation.enable"
@@ -925,6 +987,8 @@ mod tests {
         assert!(allowed_method(AccessMode::Control, "tab.focus"));
         assert!(allowed_method(AccessMode::Control, "pane.focus"));
         assert!(allowed_method(AccessMode::Control, "agent.prompt"));
+        assert!(allowed_method(AccessMode::Control, "agent.keys"));
+        assert!(!allowed_method(AccessMode::ReadOnly, "agent.keys"));
         assert!(!allowed_method(AccessMode::ReadOnly, "automation.create"));
         assert!(!allowed_method(AccessMode::ReadOnly, "automation.rebind"));
         assert!(allowed_method(AccessMode::ReadOnly, "automation.health"));
@@ -1220,6 +1284,367 @@ mod tests {
         drop(stream);
         local_server.join().unwrap();
         gateway.stop();
+    }
+
+    #[test]
+    fn control_access_forwards_validated_agent_keys() {
+        // Fail before starting an upstream accept if the RPC is still denied.
+        assert!(allowed_method(AccessMode::Control, "agent.keys"));
+        let _env = crate::persist::test_env("access-agent-keys");
+        let path = crate::persist::ensure_config_dir().join("keys.sock");
+        let listener = crate::ipc::transport::bind(&path).unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "claude".into();
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+        let token = "luv_tok_keys_test";
+        let mut gateway = Gateway::start(
+            path,
+            token.into(),
+            None,
+            "upstream-keys-test".into(),
+            Pairing::new(Duration::from_secs(60)).unwrap(),
+            AccessMode::Control,
+        )
+        .unwrap();
+        let relay = |app: &mut crate::app::App, params: Value| {
+            let request = json!({"id":"keys","method":"agent.keys","params":params,"auth":token});
+            thread::scope(|scope| {
+                let address = gateway.address();
+                let client = scope.spawn(move || exchange(address, &request));
+                let mut local = BufReader::new(listener.accept().unwrap());
+                let forwarded: Value = serde_json::from_str(
+                    &crate::ipc::api::read_response_frame(&mut local).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(forwarded["auth"], "upstream-keys-test");
+                let response = match app.dispatch("agent.keys", &forwarded["params"]) {
+                    Ok(result) => json!({"id":"keys","result":result}),
+                    Err((code, message)) => {
+                        json!({"id":"keys","error":{"code":code,"message":message}})
+                    }
+                };
+                writeln!(local.get_mut(), "{response}").unwrap();
+                local.get_mut().flush().unwrap();
+                client.join().unwrap()
+            })
+        };
+        for (keys, bytes) in [
+            (json!(["ctrl+c"]), b"\x03".as_slice()),
+            (json!(["esc"]), b"\x1b".as_slice()),
+            (json!(["y", "🙂"]), "y🙂".as_bytes()),
+            (
+                json!(["up", "down", "left", "right"]),
+                b"\x1b[A\x1b[B\x1b[D\x1b[C".as_slice(),
+            ),
+            (json!(["esc", "[", "Z"]), b"\x1b[Z".as_slice()),
+            // Unlike the control stream's send_key, this RPC retains the
+            // owner key grammar, including all ctrl+letter chords.
+            (
+                json!(["ctrl+z", "CTRL+X", "c-a"]),
+                b"\x1a\x18\x01".as_slice(),
+            ),
+        ] {
+            let response = relay(&mut app, json!({"target":pane.0.to_string(),"keys":keys}));
+            assert_eq!(
+                response["result"],
+                json!({"type":"ok","pane":pane.0.to_string()})
+            );
+            let crate::terminal::pty::InputAction::Bytes(actual) = input_rx.recv().unwrap() else {
+                panic!("keys must be one byte batch");
+            };
+            assert_eq!(actual, bytes);
+            assert!(input_rx.try_recv().is_err());
+        }
+        for params in [
+            json!({"target":pane.0.to_string(),"keys":[]}),
+            json!({"target":pane.0.to_string(),"keys":"enter"}),
+            json!({"target":pane.0.to_string(),"keys":["enter",7]}),
+            json!({"target":pane.0.to_string(),"keys":["enter","invalid"]}),
+            json!({"target":pane.0.to_string(),"keys":["enter"],"extra":true}),
+            json!({"target":"missing-agent","keys":["enter"]}),
+        ] {
+            assert!(relay(&mut app, params).get("error").is_some());
+            assert!(
+                input_rx.try_recv().is_err(),
+                "rejection must not queue a prefix"
+            );
+        }
+        app.status.get_mut(&pane).unwrap().agent.clear();
+        let params = json!({"target":pane.0.to_string(),"keys":["enter"]});
+        assert_eq!(
+            relay(&mut app, params.clone())["error"]["code"],
+            "agent_not_ready"
+        );
+        assert!(input_rx.try_recv().is_err());
+        app.status.get_mut(&pane).unwrap().agent = "claude".into();
+        drop(input_rx);
+        assert_eq!(relay(&mut app, params)["error"]["code"], "send_failed");
+        gateway.stop();
+    }
+
+    #[test]
+    fn access_keys_rejections_never_admit_input() {
+        let _env = crate::persist::test_env("access-keys-denied");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+        for (mode, expiry, auth, methods) in [
+            (AccessMode::ReadOnly, None, "client", vec!["agent.keys"]),
+            (AccessMode::Control, None, "wrong", vec!["agent.keys"]),
+            (AccessMode::Control, Some(1), "client", vec!["agent.keys"]),
+            (
+                AccessMode::Control,
+                None,
+                "client",
+                vec![
+                    "agent.key",
+                    "Agent.keys",
+                    "agent.keys.",
+                    "agent.keys ",
+                    "agent.send",
+                    "agent.start",
+                    "agent.fork",
+                    "pane.send_input",
+                    "pane.run",
+                    "pane.close",
+                    "terminal.backend.type_literal",
+                    "terminal.backend.submit_text",
+                    "terminal.backend.send_key",
+                    "uhp.token.list",
+                    "uhp.token.create",
+                    "uhp.token.revoke",
+                ],
+            ),
+        ] {
+            // No listener exists: forbidden, rather than unavailable, proves
+            // the gateway rejects before connecting to an upstream writer.
+            let mut gateway = Gateway::start(
+                crate::persist::ensure_config_dir().join("no-upstream.sock"),
+                "client".into(),
+                expiry,
+                "upstream".into(),
+                Pairing::new(Duration::from_secs(60)).unwrap(),
+                mode,
+            )
+            .unwrap();
+            for method in methods {
+                let response = exchange(
+                    gateway.address(),
+                    &json!({
+                        "id":"denied","method":method,"params":{"target":pane.0.to_string(),"keys":["enter"]},"auth":auth
+                    }),
+                );
+                assert_eq!(response["error"]["code"], "forbidden", "{method}");
+                assert!(input_rx.try_recv().is_err());
+            }
+            gateway.stop();
+        }
+    }
+
+    /// Relay one injected owner reply while proving capabilities never enqueue input.
+    fn capabilities_reply(mode: AccessMode, response: impl ToString) -> Value {
+        let response = response.to_string();
+        let _env = crate::persist::test_env("access-capabilities");
+        let path = crate::persist::ensure_config_dir().join("capabilities.sock");
+        let listener = crate::ipc::transport::bind(&path).unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+        let owner = app.dispatch("uhp.capabilities", &json!({})).unwrap();
+        assert!(
+            owner.get("access").is_none(),
+            "owner endpoint must stay unprojected"
+        );
+        let mut gateway = Gateway::start(
+            path,
+            "client".into(),
+            None,
+            "upstream".into(),
+            Pairing::new(Duration::from_secs(60)).unwrap(),
+            mode,
+        )
+        .unwrap();
+        let result =
+            thread::scope(|scope| {
+                let address = gateway.address();
+                let client = scope.spawn(move || exchange(address,
+                &json!({"id":"caps","method":"uhp.capabilities","params":{},"auth":"client"})));
+                let mut local = BufReader::new(listener.accept().unwrap());
+                let request: Value = serde_json::from_str(
+                    &crate::ipc::api::read_response_frame(&mut local).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(request["auth"], "upstream");
+                assert_eq!(
+                    app.dispatch(request["method"].as_str().unwrap(), &request["params"])
+                        .unwrap(),
+                    owner
+                );
+                writeln!(local.get_mut(), "{response}").unwrap();
+                local.get_mut().flush().unwrap();
+                client.join().unwrap()
+            });
+        gateway.stop();
+        assert_eq!(gateway.shared.active.load(Ordering::Acquire), 0);
+        assert!(gateway.shared.connections.lock().unwrap().is_empty());
+        assert!(
+            input_rx.try_recv().is_err(),
+            "capabilities failure/success must leave input queue EMPTY"
+        );
+        assert_eq!(app.layout().focus, pane);
+        assert!(app
+            .dispatch("uhp.capabilities", &json!({}))
+            .unwrap()
+            .get("access")
+            .is_none());
+        result
+    }
+
+    /// Effective methods follow every compiled predicate entry without changing the owner catalog.
+    #[test]
+    fn access_capabilities_expose_only_effective_methods() {
+        for mode in [AccessMode::ReadOnly, AccessMode::Control] {
+            let mut owner = crate::api::capabilities::capabilities(0);
+            owner["future_field"] = json!({"keep":true});
+            owner["methods"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("future.read"));
+            let response = capabilities_reply(mode, json!({"id":"caps","result":owner}));
+            let access = &response["result"]["access"];
+            assert!(
+                access.is_object(),
+                "Access capabilities must expose effective permissions"
+            );
+            let expected: Vec<_> = crate::api::capabilities::METHODS
+                .iter()
+                .copied()
+                .filter(|method| allowed_method(mode, method))
+                .collect();
+            assert_eq!(access["allowed_methods"], json!(expected));
+            assert_eq!(
+                access["mode"],
+                if mode == AccessMode::Control {
+                    "control"
+                } else {
+                    "read_only"
+                }
+            );
+            assert_eq!(
+                access["limits"],
+                json!({"connections":16,"requests_per_minute":120})
+            );
+            assert_eq!(access.as_object().unwrap().len(), 3);
+            assert_eq!(
+                expected.contains(&"agent.keys"),
+                mode == AccessMode::Control
+            );
+            assert_eq!(
+                expected.contains(&"automation.create"),
+                mode == AccessMode::Control
+            );
+            assert!(!expected.contains(&"terminal.backend.type_literal"));
+            assert!(!expected.contains(&"uhp.token.list"));
+            let mut unprojected = response["result"].clone();
+            unprojected.as_object_mut().unwrap().remove("access");
+            assert_eq!(unprojected, owner);
+        }
+        let response = capabilities_reply(
+            AccessMode::Control,
+            json!({"id":"caps","result":{
+            "type":"uhp_capabilities","methods":["uhp.capabilities","future.read"]}}),
+        );
+        assert_eq!(
+            response["result"]["access"]["allowed_methods"],
+            json!(["uhp.capabilities"])
+        );
+    }
+
+    /// Malformed, mismatched and oversized owner replies fail closed with clean connections/input.
+    #[test]
+    fn access_capabilities_reject_invalid_owner_replies() {
+        let mut cases = vec![
+            json!({"id":"other","result":{"type":"uhp_capabilities","methods":["uhp.capabilities"]}}),
+            json!({"id":"caps"}),
+            json!({"id":"caps","result":null}),
+            json!({"id":"caps","result":[]}),
+            json!({"id":"caps","result":{"type":"ok"}}),
+            json!({"id":"caps","result":{"type":"uhp_capabilities"}}),
+            json!({"id":"caps","result":{"type":"uhp_capabilities","methods":"uhp.capabilities"}}),
+            json!({"id":"caps","result":{"type":"uhp_capabilities","methods":["uhp.capabilities",7]}}),
+            json!({"id":"caps","result":{"type":"uhp_capabilities","methods":[]}}),
+            json!({"id":"caps","result":{"type":"uhp_capabilities","methods":[""]}}),
+            json!({"id":"caps","result":{"type":"uhp_capabilities","methods":["future.read"]}}),
+            json!({"id":"caps","error":{}}),
+            json!({"id":"caps","error":{"code":"denied","message":"no"},"result":{}}),
+        ];
+        let mut large = json!({"id":"caps","result":{"type":"uhp_capabilities","methods":["uhp.capabilities"],"padding":""}});
+        let padding = crate::terminal::backend::MAX_FRAME_BYTES - large.to_string().len() - 1;
+        large["result"]["padding"] = json!("x".repeat(padding));
+        assert_eq!(
+            large.to_string().len() + 1,
+            crate::terminal::backend::MAX_FRAME_BYTES
+        );
+        cases.push(large);
+        let malformed = capabilities_reply(AccessMode::Control, "{");
+        assert_eq!(malformed["id"], "caps");
+        assert_eq!(malformed["error"]["code"], "unavailable");
+        for response in cases {
+            let result = capabilities_reply(AccessMode::Control, response);
+            assert_eq!(result["id"], "caps");
+            assert_eq!(result["error"]["code"], "unavailable");
+            assert!(result.get("result").is_none());
+        }
+    }
+
+    /// Projection accepts the exact newline-inclusive frame limit and rejects one extra byte.
+    #[test]
+    fn access_capabilities_respect_projected_frame_boundary() {
+        let mut owner = json!({"id":"caps","result":{"type":"uhp_capabilities",
+            "methods":["uhp.capabilities"],"padding":""}});
+        let projected =
+            project_access_capabilities(&owner.to_string(), &json!("caps"), AccessMode::Control)
+                .unwrap();
+        let padding = crate::terminal::backend::MAX_FRAME_BYTES - projected.len() - 1;
+        owner["result"]["padding"] = json!("x".repeat(padding));
+        let result = capabilities_reply(AccessMode::Control, owner.clone());
+        assert_eq!(
+            result.to_string().len() + 1,
+            crate::terminal::backend::MAX_FRAME_BYTES
+        );
+        assert!(result["result"]["access"].is_object());
+        owner["result"]["padding"] = json!("x".repeat(padding + 1));
+        assert_eq!(
+            capabilities_reply(AccessMode::Control, owner)["error"]["code"],
+            "unavailable"
+        );
+    }
+
+    /// Structured owner errors retain their original identity and payload.
+    #[test]
+    fn access_capabilities_preserve_owner_errors() {
+        let error =
+            json!({"id":"caps","error":{"code":"forbidden","message":"fixture","future":true}});
+        assert_eq!(
+            capabilities_reply(AccessMode::ReadOnly, error.clone()),
+            error
+        );
     }
 
     fn exchange(address: SocketAddr, request: &Value) -> Value {
