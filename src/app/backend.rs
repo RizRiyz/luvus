@@ -307,7 +307,7 @@ impl App {
         let text = required_bounded_string(params, "text", backend::MAX_INPUT_BYTES, true)?;
         self.panes[&pane_id]
             .try_send(text.as_bytes())
-            .map_err(|_| mutation_error("send_failed", "terminal input queue is closed"))?;
+            .map_err(|message| mutation_error("send_failed", message))?;
         Ok(queued_action_json())
     }
 
@@ -326,7 +326,7 @@ impl App {
         let text = required_bounded_string(params, "text", backend::MAX_INPUT_BYTES, true)?;
         self.panes[&pane_id]
             .try_submit_text(text)
-            .map_err(|_| mutation_error("send_failed", "terminal input queue is closed"))?;
+            .map_err(|message| mutation_error("send_failed", message))?;
         Ok(queued_action_json())
     }
 
@@ -352,7 +352,7 @@ impl App {
             )
         })?;
         pane.try_send(&bytes)
-            .map_err(|_| mutation_error("send_failed", "terminal input queue is closed"))?;
+            .map_err(|message| mutation_error("send_failed", message))?;
         Ok(queued_action_json())
     }
 
@@ -1307,7 +1307,7 @@ fn reject_mutation_fields(params: &Value, allowed: &[&str]) -> Result<(), Backen
     })
 }
 
-fn mutation_error(code: &'static str, message: &'static str) -> BackendError {
+fn mutation_error(code: &'static str, message: impl Into<String>) -> BackendError {
     BackendError::mutation(code, message, DispatchEvidence::Rejected)
 }
 

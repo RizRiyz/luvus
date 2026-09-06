@@ -9,9 +9,9 @@ use std::io::Read;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Sender};
-#[cfg(unix)]
-use std::sync::OnceLock;
+#[cfg(all(test, unix))]
+use std::sync::mpsc;
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -24,8 +24,10 @@ use crate::terminal::appearance::PaneAppearance;
 use crate::terminal::backend::TerminalRuntime;
 use crate::terminal::vt::{create_engine, VtEngine, VtEngineKind};
 
+pub(crate) mod input;
 mod io;
 mod reaper;
+pub(crate) use input::InputSender;
 
 /// Keep each pane's read working set small. Unix amortizes synchronization by
 /// draining several of these chunks under one bounded engine lock.
@@ -50,51 +52,6 @@ pub(crate) enum InputAction {
         paste: Vec<u8>,
         settle: std::time::Duration,
     },
-}
-
-/// Ordered PTY input plus an optional Unix actor wakeup. Terminal-generated
-/// replies and user input share this sender, preserving their FIFO order.
-#[derive(Clone)]
-pub(crate) struct InputSender {
-    sender: Sender<InputAction>,
-    #[cfg(unix)]
-    wake: Arc<OnceLock<Arc<io::unix_actor::WakePipe>>>,
-}
-
-impl InputSender {
-    #[cfg(unix)]
-    fn with_wake_slot(
-        sender: Sender<InputAction>,
-        wake: Arc<OnceLock<Arc<io::unix_actor::WakePipe>>>,
-    ) -> Self {
-        Self { sender, wake }
-    }
-
-    pub(crate) fn send(
-        &self,
-        action: InputAction,
-    ) -> std::result::Result<(), mpsc::SendError<InputAction>> {
-        self.sender.send(action)?;
-        self.wake();
-        Ok(())
-    }
-
-    fn wake(&self) {
-        #[cfg(unix)]
-        if let Some(wake) = self.wake.get() {
-            wake.wake();
-        }
-    }
-}
-
-impl From<Sender<InputAction>> for InputSender {
-    fn from(sender: Sender<InputAction>) -> Self {
-        Self {
-            sender,
-            #[cfg(unix)]
-            wake: Arc::new(OnceLock::new()),
-        }
-    }
 }
 
 #[cfg(any(windows, test))]
@@ -467,6 +424,7 @@ impl Pane {
         // User input and terminal-generated responses share one ordered queue.
         // Unix wakes one poll-driven actor; Windows retains the split backend.
         let (input_tx, input_rx) = io::input_channel();
+        input_tx.set_notice(id, app_tx.clone());
         let engine = create_engine(
             VtEngineKind::default(),
             cols,
@@ -546,6 +504,7 @@ impl Pane {
         // Everything a caller can observe before the child exists: the engine
         // (pane.read, detection, rendering) and the input queue.
         let (input_tx, input_rx) = io::input_channel();
+        input_tx.set_notice(id, app_tx.clone());
         let engine = create_engine(
             VtEngineKind::default(),
             cols,
@@ -795,7 +754,11 @@ impl Pane {
         self.rearm_pty_notify();
         self.input_tx
             .send(InputAction::Bytes(bytes.to_vec()))
-            .map_err(|_| "target pane closed before input was delivered".to_string())
+            .map_err(str::to_string)
+    }
+
+    pub(crate) fn acknowledge_input_rejection(&self) {
+        self.input_tx.acknowledge_rejection();
     }
 
     #[cfg(test)]
@@ -831,7 +794,7 @@ impl Pane {
                 },
                 settle,
             })
-            .map_err(|_| "target pane closed before input was queued".to_string())
+            .map_err(str::to_string)
     }
 
     pub fn terminal_runtime(&self) -> Option<TerminalRuntime> {

@@ -30,6 +30,8 @@ pub enum AppEvent {
     PtyData(PaneId),
     /// The given pane's child process exited.
     PtyExit(PaneId),
+    /// Coalesced overload notification for all input sources, including replies.
+    PtyInputRejected(PaneId),
     /// A deferred pane finished opening its PTY and now owns a root process and
     /// stable terminal-backend identity. Pending panes are deliberately absent
     /// from public inventory until this event is applied by the app loop.
