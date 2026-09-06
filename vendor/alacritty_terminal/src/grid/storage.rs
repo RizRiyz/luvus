@@ -466,6 +466,49 @@ impl<T> Storage<T> {
         packed_rows
     }
 
+    /// Incremental consumer boundary. Visits at most 512 rows and encodes at
+    /// most one ordinary block. Reset `cursor` after any grid mutation.
+    pub(crate) fn pack_cold_history_step(&mut self, cursor: &mut usize, full_scan: bool) -> bool
+    where
+        T: Clone + Eq + Hash,
+    {
+        let first_turn = *cursor == 0;
+        let history_rows = self.len.saturating_sub(self.visible_lines);
+        if history_rows < HOT_HISTORY_ROWS + MIN_PACKED_BLOCK_ROWS {
+            *cursor = history_rows;
+            return false;
+        }
+        let mut age = (*cursor).max(HOT_HISTORY_ROWS);
+        let end = history_rows.min(age.saturating_add(PACKED_BLOCK_MAX_ROWS));
+        let mut rows = Vec::new();
+        let mut bytes = 0usize;
+        while age < end {
+            let index = self.compute_index(Line(-((age + 1) as i32)));
+            if self.inner[index].is_packed() {
+                if !full_scan {
+                    age = history_rows;
+                    break;
+                }
+                if !rows.is_empty() { break; }
+                age += 1;
+                continue;
+            }
+            let row_bytes = self.inner[index].physical_len().saturating_mul(mem::size_of::<T>());
+            if !rows.is_empty() && bytes.saturating_add(row_bytes) > PACKED_BLOCK_TARGET_BYTES {
+                break;
+            }
+            bytes = bytes.saturating_add(row_bytes);
+            rows.push(index);
+            age += 1;
+        }
+        // Keep ordinary trickle output from allocating one packed block per line.
+        let small_frontier = first_turn && !full_scan && age == history_rows
+            && rows.len() < MIN_PACKED_BLOCK_ROWS;
+        if !rows.is_empty() && !small_frontier { self.pack_rows(&rows); }
+        *cursor = age;
+        age < history_rows
+    }
+
     /// Repack every dense cold run after operations such as width reflow.
     pub(crate) fn pack_all_cold_history(&mut self) -> usize
     where

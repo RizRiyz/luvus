@@ -113,8 +113,9 @@ cargo test --release --locked history_maintenance_benchmark -- --ignored --nocap
 ```
 
 This uses 80x24 engines with 10,000 retained rows, both printable text and
-per-cell RGB styling, and three trials per corpus. It measures the synchronous
-maintenance boundary, not end-to-end input/scroll latency. Run separate live
+per-cell RGB styling, and three trials per corpus. It reports total maintenance,
+turn count, and per-turn p95/p99/maximum lock-held work, not end-to-end
+input/scroll latency. Run separate live
 latency checks before changing maintenance scheduling, especially on Windows.
 
 ## Adding agent support

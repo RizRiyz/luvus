@@ -323,6 +323,17 @@ pub trait VtEngine: Send {
     /// activity window; Windows uses the app's coalesced output boundary.
     fn finish_output_batch(&mut self);
 
+    /// Incremental maintenance. True requests another bounded turn; false
+    /// means no backlog. Engines without deferred work keep the full boundary.
+    fn finish_output_batch_step(&mut self) -> bool {
+        self.finish_output_batch();
+        false
+    }
+
+    fn history_maintenance_pending(&self) -> bool {
+        false
+    }
+
     /// Monotonic generation of successfully parsed terminal output.
     fn output_generation(&self) -> u64;
 

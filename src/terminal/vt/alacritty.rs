@@ -116,6 +116,9 @@ pub struct AlacrittyEngine {
     // One bounded summary, invalidated at every storage mutation boundary.
     // Output generation alone is insufficient: quiet packing changes storage.
     history_metrics_cache: Cell<Option<HistoryMetrics>>,
+    history_maintenance_cursors: [usize; 2],
+    history_maintenance_pending: bool,
+    history_maintenance_full_scan: bool,
     damage_line_indices: Vec<u16>,
     damage_rows: Vec<DamageRow>,
 }
@@ -168,7 +171,8 @@ impl AlacrittyEngine {
             kitty_keyboard: true,
             ..Config::default()
         };
-        let term = Term::new(config, &dims, proxy);
+        let mut term = Term::new(config, &dims, proxy);
+        term.set_deferred_history_maintenance(true);
         AlacrittyEngine {
             term,
             parser: Processor::new(),
@@ -178,12 +182,18 @@ impl AlacrittyEngine {
             history_budget_bytes,
             output_generation: 0,
             history_metrics_cache: Cell::new(None),
+            history_maintenance_cursors: [0; 2],
+            history_maintenance_pending: false,
+            history_maintenance_full_scan: false,
             damage_line_indices: Vec::new(),
             damage_rows: Vec::new(),
         }
     }
 
     fn apply_history_budget(&mut self) {
+        self.history_maintenance_full_scan = true;
+        self.history_maintenance_cursors = [0; 2];
+        self.history_maintenance_pending = true;
         self.history_metrics_cache.set(None);
         self.term.set_options(Config {
             scrolling_history: history_rows_for_budget(
@@ -364,6 +374,16 @@ fn history_rows_for_budget(bytes: usize, cols: u16) -> usize {
 
 impl VtEngine for AlacrittyEngine {
     fn advance(&mut self, bytes: &[u8]) {
+        // If output interrupts a partial pass, its packed frontier is no longer
+        // proof that all older rows are packed. Otherwise retain the O(1)
+        // already-packed frontier fast path for ordinary quiet output.
+        self.history_maintenance_full_scan |= self.history_maintenance_pending
+            && self
+                .history_maintenance_cursors
+                .iter()
+                .any(|cursor| *cursor > 0);
+        self.history_maintenance_cursors = [0; 2];
+        self.history_maintenance_pending = true;
         self.history_metrics_cache.set(None);
         self.parser.advance(&mut self.term, bytes);
         self.output_generation = self.output_generation.wrapping_add(1);
@@ -371,7 +391,26 @@ impl VtEngine for AlacrittyEngine {
 
     fn finish_output_batch(&mut self) {
         self.history_metrics_cache.set(None);
-        self.term.finish_output_batch();
+        while self.finish_output_batch_step() {}
+    }
+
+    fn finish_output_batch_step(&mut self) -> bool {
+        if !self.history_maintenance_pending {
+            return false;
+        }
+        self.history_metrics_cache.set(None);
+        self.history_maintenance_pending = self.term.finish_output_batch_step(
+            &mut self.history_maintenance_cursors,
+            self.history_maintenance_full_scan,
+        );
+        if !self.history_maintenance_pending {
+            self.history_maintenance_full_scan = false;
+        }
+        self.history_maintenance_pending
+    }
+
+    fn history_maintenance_pending(&self) -> bool {
+        self.history_maintenance_pending
     }
 
     fn output_generation(&self) -> u64 {
@@ -1345,12 +1384,76 @@ mod tests {
                 let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 10_000));
                 engine.advance(&corpus);
                 let start = Instant::now();
-                engine.finish_output_batch();
+                let mut steps = Vec::new();
+                loop {
+                    let step = Instant::now();
+                    let more = engine.finish_output_batch_step();
+                    steps.push(step.elapsed().as_secs_f64() * 1000.0);
+                    if !more {
+                        break;
+                    }
+                }
                 let elapsed = start.elapsed();
+                steps.sort_by(f64::total_cmp);
                 let metrics = black_box(engine.history_metrics());
-                eprintln!("history_maintenance styled={styled} trial={trial} rows={} packed_rows={} milliseconds={:.3}", metrics.retained_rows, metrics.packed_rows.unwrap_or(0), elapsed.as_secs_f64() * 1000.0);
+                eprintln!("history_maintenance styled={styled} trial={trial} rows={} packed_rows={} milliseconds={:.3} turns={} step_p95_ms={:.3} step_p99_ms={:.3} step_max_ms={:.3}", metrics.retained_rows, metrics.packed_rows.unwrap_or(0), elapsed.as_secs_f64() * 1000.0, steps.len(), steps[(steps.len()-1)*95/100], steps[(steps.len()-1)*99/100], steps.last().unwrap());
             }
         }
+    }
+
+    #[test]
+    fn incremental_history_maintenance_is_lossless_and_restarts_after_mutation() {
+        fn rows(engine: &AlacrittyEngine) -> Vec<String> {
+            let mut rows = Vec::new();
+            engine.for_each_retained_row(&mut |_, text| rows.push(text.to_owned()));
+            rows
+        }
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 10_000));
+        for i in 0..1024 {
+            engine.advance(format!("row {i} cafe\u{301} 界\r\n").as_bytes());
+        }
+        let before = rows(&engine);
+        assert!(
+            engine.finish_output_batch_step(),
+            "large backlog takes multiple turns"
+        );
+        let packed = engine.history_metrics().packed_rows.unwrap();
+        assert!(packed > 0 && packed <= 512);
+        assert_eq!(before, rows(&engine));
+        engine.advance(b"new output\r\n");
+        engine.resize(90, 24);
+        let after_mutation = rows(&engine);
+        let mut turns = 0;
+        while engine.finish_output_batch_step() {
+            turns += 1;
+            assert!(turns < 200, "quiet backlog must finish without new output");
+        }
+        assert!(turns > 0);
+        assert!(!engine.history_maintenance_pending());
+        assert_eq!(after_mutation, rows(&engine));
+        let metrics = engine.history_metrics();
+        assert_eq!(
+            metrics.packed_rows.unwrap(),
+            metrics.retained_rows.saturating_sub(128)
+        );
+        assert!(
+            !engine.finish_output_batch_step(),
+            "no idle maintenance work"
+        );
+        engine.advance(b"\x1b]2;title only\x07");
+        assert!(
+            !engine.finish_output_batch_step(),
+            "packed frontier avoids a full quiet-history scan"
+        );
+        let blocks = engine.history_metrics().packed_blocks;
+        engine.advance(b"one more line\r\n");
+        assert!(!engine.finish_output_batch_step());
+        assert_eq!(
+            engine.history_metrics().packed_blocks,
+            blocks,
+            "trickle output retains the minimum batch size"
+        );
     }
 
     #[test]
@@ -1636,6 +1739,7 @@ mod tests {
         // the viewport intentionally consumes the oldest history rows in
         // Alacritty, which is a separate terminal semantic from reflow.
         e.resize(80, 5);
+        e.finish_output_batch(); // reflow packing is deferred to maintenance
         e.scroll_to_top();
         let after = e.history_metrics();
         assert!(after.compacted_rows.unwrap_or(0) > 0);
