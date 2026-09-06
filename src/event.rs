@@ -22,6 +22,7 @@ pub enum ClientInput {
 }
 
 pub enum AppEvent {
+    IoCompleted(crate::app::io_jobs::Completion),
     Key(KeyEvent),
     Mouse(MouseEvent),
     Paste(String),

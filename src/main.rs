@@ -1390,6 +1390,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     }
 
     let detached = app.detach_requested;
+    app.drain_io_jobs();
     persist::save(&app);
     Ok(detached)
 }

@@ -31,9 +31,11 @@ pub use board::{
 };
 pub(crate) mod diff;
 mod dispatch;
+mod file_jobs;
 pub(crate) mod files;
 mod git;
 mod input;
+pub(crate) mod io_jobs;
 mod keys;
 mod mission;
 mod modules;
@@ -2142,6 +2144,9 @@ pub struct App {
     /// This server's last local config snapshot. Persistence diffs against this
     /// snapshot so another named server's newer, unrelated fields survive.
     config_baseline: crate::config::Config,
+    io_jobs: io_jobs::IoJobs,
+    file_metadata_inflight: bool,
+    file_metadata_cursor: usize,
     /// Active `key → Cmd` map for prefix mode (defaults + config overrides).
     pub keymap: std::collections::HashMap<String, Cmd>,
     /// Explicit normal-mode shortcuts. Empty by default so pane input remains
@@ -2828,6 +2833,9 @@ impl App {
             catalog,
             config,
             config_baseline,
+            io_jobs: io_jobs::IoJobs::default(),
+            file_metadata_inflight: false,
+            file_metadata_cursor: 0,
             keymap,
             direct_keymap,
             prefix,
@@ -3472,6 +3480,9 @@ impl App {
             catalog,
             config,
             config_baseline,
+            io_jobs: io_jobs::IoJobs::default(),
+            file_metadata_inflight: false,
+            file_metadata_cursor: 0,
             keymap,
             direct_keymap,
             prefix,
