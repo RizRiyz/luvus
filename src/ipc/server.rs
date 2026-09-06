@@ -426,10 +426,15 @@ pub fn run() -> Result<()> {
         // Otherwise sleep until the next real deadline, or block on the
         // channel when nothing is due (PTY/API/client/signal wake the loop).
         let now = Instant::now();
+        let rearm_interval = if app.has_history_maintenance() {
+            Duration::from_millis(1)
+        } else {
+            REARM_INTERVAL
+        };
         let persist_due = !app.session_save_inflight
             && ((app.persist_session_now && !immediate_save_attempted)
                 || (app.session_dirty && last_save.elapsed() >= SESSION_SAVE_DEBOUNCE));
-        let rearm_due = app.has_pending_pty_output() && last_rearm.elapsed() >= REARM_INTERVAL;
+        let rearm_due = app.has_pending_pty_output() && last_rearm.elapsed() >= rearm_interval;
         let received = if persist_due || rearm_due {
             // Already-due persist/re-arm must not `recv_timeout(0)`: that busy-loops
             // until the 100ms re-arm cadence elapses.
@@ -449,7 +454,7 @@ pub fn run() -> Result<()> {
                 App::sooner_deadline(&mut deadline, last_save + SESSION_SAVE_DEBOUNCE);
             }
             if app.has_pending_pty_output() {
-                App::sooner_deadline(&mut deadline, last_rearm + REARM_INTERVAL);
+                App::sooner_deadline(&mut deadline, last_rearm + rearm_interval);
             }
             match deadline.map(|at| at.saturating_duration_since(now)) {
                 Some(timeout) if !timeout.is_zero() => match rx.recv_timeout(timeout) {
@@ -607,7 +612,7 @@ pub fn run() -> Result<()> {
         }
         // Fallback re-arm (the render path below re-arms at the frame rate): a
         // flag still set here means un-rendered output → schedule a frame.
-        if last_rearm.elapsed() >= REARM_INTERVAL {
+        if last_rearm.elapsed() >= rearm_interval {
             last_rearm = Instant::now();
             let (visible, background, title_changed) = app.rearm_pty_notify_by_visibility();
             if title_changed {

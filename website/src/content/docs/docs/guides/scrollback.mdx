@@ -5,6 +5,18 @@ description: Scroll any pane's history with the wheel, trackpad, or keyboard scr
 
 ## Scrolling
 
+Cold-history packing runs in incremental maintenance turns, rather than encoding
+the entire backlog under one terminal lock. Each turn visits at most 512 rows and
+packs at most one block per grid, with a 128 KiB shallow-cell target (a single
+oversized row may exceed that target). This is a work bound, not a guaranteed
+wall-clock deadline. Visible and recently used history remain directly readable.
+
+On Unix, the existing PTY actor services input and output between continuations.
+Windows uses bounded app-loop maintenance with a short deadline only while work
+remains; maintenance alone does not request a redraw. Reflow queues repacking,
+and new output invalidates an interrupted scan safely. Once the backlog is
+complete, no maintenance timer remains. Retention and copy semantics are unchanged.
+
 **Mouse/trackpad:** just scroll over a pane. Apps that enable terminal mouse
 reporting receive their wheel input; full-screen apps that request alternate
 scrolling do too. Regular transcripts scroll Luvus's retained history.

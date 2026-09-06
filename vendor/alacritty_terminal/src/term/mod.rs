@@ -330,6 +330,7 @@ pub struct Term<T> {
     /// Alternate-screen rebalancing updates logical history for every row but
     /// defers physical cache trimming until the frame leaves the parser path.
     history_cache_dirty: bool,
+    deferred_history_maintenance: bool,
 
     /// Config directly for the terminal.
     config: Config,
@@ -452,6 +453,7 @@ impl<T> Term<T> {
             event_proxy,
             damage,
             history_cache_dirty: false,
+            deferred_history_maintenance: false,
             config,
             grid,
             tabs,
@@ -522,6 +524,20 @@ impl<T> Term<T> {
         self.trim_history_cache_if_dirty();
         self.grid.pack_cold_history();
         self.inactive_grid.pack_cold_history();
+    }
+
+    /// Opt into consumer-scheduled maintenance after reflow instead of packing
+    /// all cold rows while the resize caller holds the terminal lock.
+    pub fn set_deferred_history_maintenance(&mut self, enabled: bool) {
+        self.deferred_history_maintenance = enabled;
+    }
+
+    /// One bounded block per grid. Cursors must reset after input or resize.
+    pub fn finish_output_batch_step(&mut self, cursors: &mut [usize; 2], full_scan: bool) -> bool {
+        self.trim_history_cache_if_dirty();
+        let active = self.grid.pack_cold_history_step(&mut cursors[0], full_scan);
+        let inactive = self.inactive_grid.pack_cold_history_step(&mut cursors[1], full_scan);
+        active || inactive
     }
 
     fn trim_history_cache_if_dirty(&mut self) {
@@ -771,8 +787,10 @@ impl<T> Term<T> {
         if is_alt {
             self.rebalance_alt_history();
         }
-        self.grid.pack_all_cold_history();
-        self.inactive_grid.pack_all_cold_history();
+        if !self.deferred_history_maintenance {
+            self.grid.pack_all_cold_history();
+            self.inactive_grid.pack_all_cold_history();
+        }
 
         // Invalidate selection and tabs only when necessary.
         if old_cols != num_cols {

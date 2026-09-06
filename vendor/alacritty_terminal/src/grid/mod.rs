@@ -530,6 +530,11 @@ where
         self.raw.pack_cold_history()
     }
 
+    /// Pack one bounded block; the caller resets the cursor after mutations.
+    pub fn pack_cold_history_step(&mut self, cursor: &mut usize, full_scan: bool) -> bool {
+        self.raw.pack_cold_history_step(cursor, full_scan)
+    }
+
     /// Repack every dense cold-history run after a structural mutation.
     #[inline]
     pub fn pack_all_cold_history(&mut self) -> usize {

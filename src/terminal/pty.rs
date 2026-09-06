@@ -107,6 +107,8 @@ pub struct Pane {
     /// exactly matches the screen snapshot it serialized.
     content_revision: Arc<AtomicU64>,
     observed_title_generation: AtomicU64,
+    #[cfg(windows)]
+    history_maintenance_pending: AtomicBool,
     /// `PtyData` coalescing: set by the reader when it announces new output,
     /// cleared by the app loop when it consumes the event. While set, further
     /// reads skip the send — a saturated PTY (thousands of 8 KB reads/s) wakes
@@ -471,6 +473,8 @@ impl Pane {
             terminal_runtime: Arc::new(Mutex::new(Some(terminal_runtime))),
             content_revision,
             observed_title_generation: AtomicU64::new(0),
+            #[cfg(windows)]
+            history_maintenance_pending: AtomicBool::new(true),
             master: Arc::new(Mutex::new(Some(pair.master))),
             input_tx,
             cwd,
@@ -679,6 +683,8 @@ impl Pane {
             terminal_runtime,
             content_revision,
             observed_title_generation: AtomicU64::new(0),
+            #[cfg(windows)]
+            history_maintenance_pending: AtomicBool::new(true),
             master,
             input_tx,
             cwd,
@@ -703,9 +709,12 @@ impl Pane {
         // Windows reader has no such event-loop deadline, so retain its
         // coalesced app-boundary maintenance.
         #[cfg(windows)]
-        if pending {
+        if pending || self.history_maintenance_pending.load(Ordering::Acquire) {
             if let Ok(mut engine) = self.engine.lock() {
-                engine.finish_output_batch();
+                let more =
+                    engine.finish_output_batch_step() || engine.history_maintenance_pending();
+                self.history_maintenance_pending
+                    .store(more, Ordering::Release);
             }
         }
         pending
@@ -715,7 +724,22 @@ impl Pane {
     /// consuming it. The server uses this to arm the 100 ms fallback only while
     /// a pane actually has pending bytes, instead of waking forever when idle.
     pub fn has_data_pending(&self) -> bool {
+        #[cfg(windows)]
+        if self.history_maintenance_pending.load(Ordering::Acquire) {
+            return true;
+        }
         self.data_pending.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn has_history_maintenance(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.history_maintenance_pending.load(Ordering::Acquire)
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
     }
 
     /// Coalesce title-only presentation with the existing PTY output wake.
@@ -816,12 +840,19 @@ impl Pane {
         self.child_exited.load(Ordering::SeqCst)
     }
 
-    /// Apply a new per-pane history memory budget (Settings → Layout). Shrinks
-    /// retained history immediately when lowered.
+    fn wake_history_maintenance(&self) {
+        self.input_tx.wake();
+        #[cfg(windows)]
+        self.history_maintenance_pending
+            .store(true, Ordering::Release);
+    }
+
+    /// Apply a new per-pane history memory budget, shrinking retention immediately.
     pub fn set_history_budget(&self, bytes: usize) {
         if let Ok(mut e) = self.engine.lock() {
             e.set_history_budget(bytes);
         }
+        self.wake_history_maintenance();
     }
 
     /// Scroll this pane's scrollback viewport `delta` lines (positive = up into
@@ -1063,6 +1094,7 @@ impl Pane {
         if let Ok(mut e) = self.engine.lock() {
             e.resize(cols, rows);
         }
+        self.wake_history_maintenance();
         crate::logging::event(
             crate::logging::EventKind::PtyResize,
             &[
@@ -1347,6 +1379,40 @@ mod reap_tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         drop(pane);
         assert!(wait_gone(pid), "exit is still reaped without a timer");
+    }
+
+    #[test]
+    fn quiet_pty_history_and_resize_finish_incremental_maintenance() {
+        let _env = crate::persist::test_env("pty-history-maintenance");
+        let (tx, rx) = mpsc::channel();
+        let mut pane = Pane::spawn_command(
+            PaneId::alloc(), 80, 24, std::env::current_dir().unwrap(), tx,
+            &["/bin/sh".into(), "-c".into(), "i=0; while [ $i -lt 2024 ]; do printf 'row %s cafe\n' \"$i\"; i=$((i + 1)); done; sleep 10".into()],
+            &[], 16 * 1024 * 1024, PaneAppearance::default(),
+        ).unwrap();
+        for resize in [false, true] {
+            if resize {
+                assert!(pane.resize(90, 24));
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let complete = {
+                    let engine = pane.engine.lock().unwrap();
+                    let metrics = engine.history_metrics();
+                    metrics.retained_rows >= 1900
+                        && metrics.packed_rows.unwrap_or(0) > 1700
+                        && !engine.history_maintenance_pending()
+                };
+                if complete {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "quiet packing must finish without another output event"
+                );
+                let _ = rx.recv_timeout(std::time::Duration::from_millis(10));
+            }
+        }
     }
 
     /// A deferred pane (docs/82) is fully usable before its shell exists:

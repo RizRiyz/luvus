@@ -179,6 +179,14 @@ fn actor_loop(
         }
 
         let now = Instant::now();
+        if history_compaction_deadline.is_none()
+            && engine
+                .lock()
+                .is_ok_and(|terminal| terminal.history_maintenance_pending())
+        {
+            history_compaction_started = Some(now);
+            history_compaction_deadline = Some(now + HISTORY_COMPACTION_QUIET);
+        }
         arm_or_finish_submit_delay(&mut pending, now);
         let wants_write = matches!(pending.front(), Some(PendingWrite::Bytes { .. }));
         let timeout = poll_timeout(&pending, history_compaction_deadline, now);
@@ -245,18 +253,25 @@ fn actor_loop(
             break;
         }
         if history_compaction_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            if let Ok(mut terminal) = engine.lock() {
-                terminal.finish_output_batch();
+            let more = engine
+                .lock()
+                .is_ok_and(|mut terminal| terminal.finish_output_batch_step());
+            // Yield the lock and service descriptor input/output before each
+            // continuation. No timer remains once the backlog is drained.
+            history_compaction_deadline = more.then(Instant::now);
+            if !more {
+                history_compaction_started = None;
             }
-            history_compaction_deadline = None;
-            history_compaction_started = None;
         }
     }
     // Preserve bounded memory when a pane exits or is cancelled before its
     // quiet-period deadline fires.
     if history_compaction_deadline.is_some() {
-        if let Ok(mut terminal) = engine.lock() {
-            terminal.finish_output_batch();
+        while engine
+            .lock()
+            .is_ok_and(|mut terminal| terminal.finish_output_batch_step())
+        {
+            thread::yield_now();
         }
     }
     let _ = app_tx.send(AppEvent::PtyExit(id));

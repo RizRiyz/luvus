@@ -4446,6 +4446,12 @@ impl App {
         self.panes.values().any(|pane| pane.has_data_pending())
     }
 
+    pub(crate) fn has_history_maintenance(&self) -> bool {
+        self.panes
+            .values()
+            .any(|pane| pane.has_history_maintenance())
+    }
+
     /// Whether a pane is rendered in the active tab.
     pub fn pane_is_visible(&self, id: PaneId) -> bool {
         self.workspaces
