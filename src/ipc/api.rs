@@ -1277,6 +1277,8 @@ fn stream_event_for_target(line: &str, terminal_id: &str) -> Option<(String, u64
 }
 
 fn write_shared_frame(writer: &Mutex<Conn>, frame: &str) -> io::Result<()> {
+    #[cfg(test)]
+    tests::pause_initial_frame_write(frame);
     let mut writer = writer
         .lock()
         .map_err(|_| io::Error::other("terminal stream writer unavailable"))?;
@@ -2700,6 +2702,133 @@ mod tests {
         assert!(reject_duplicate_keys(br#"{"id":"1","id":"2"}"#).is_err());
         assert!(reject_duplicate_keys(br#"{"params":{"x":1,"x":2}}"#).is_err());
         assert!(reject_duplicate_keys(br#"{"id":"1","params":{"x":2}}"#).is_ok());
+    }
+
+    struct FrameWriteBarrier {
+        captured: Sender<()>,
+        resume: mpsc::Receiver<()>,
+    }
+
+    static FRAME_WRITE_BARRIERS: std::sync::LazyLock<
+        Mutex<std::collections::HashMap<String, FrameWriteBarrier>>,
+    > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+    pub(super) fn pause_initial_frame_write(frame: &str) {
+        let value: Value = serde_json::from_str(frame).unwrap();
+        if value["event"] != "terminal.frame" {
+            return;
+        }
+        let barrier = FRAME_WRITE_BARRIERS
+            .lock()
+            .unwrap()
+            .remove(value["data"]["terminal_id"].as_str().unwrap());
+        if let Some(barrier) = barrier {
+            barrier.captured.send(()).unwrap();
+            barrier
+                .resume
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+        }
+    }
+
+    fn assert_final_update_during_initial_write(control: bool) {
+        let _env = crate::persist::test_env("observe-write-race");
+        let root = crate::persist::ensure_config_dir();
+        let path = root.join("race.sock");
+        let lock = transport::acquire_server_startup_lock(&root).unwrap();
+        let listener = bind_server(&path, &lock).unwrap();
+        let (events, event_rx) = mpsc::channel();
+        let bus = new_bus();
+        start_server(listener, events, bus.clone());
+        drop(lock);
+        let mut target = observe_target();
+        target.terminal_id = format!("initial-write-race-{control}");
+        let terminal_id = target.terminal_id.clone();
+        let engine = Arc::clone(&target.engine);
+        let revision = Arc::clone(&target.content_revision);
+        let (captured_tx, captured_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        FRAME_WRITE_BARRIERS.lock().unwrap().insert(
+            terminal_id.clone(),
+            FrameWriteBarrier {
+                captured: captured_tx,
+                resume: resume_rx,
+            },
+        );
+        let client_terminal = terminal_id.clone();
+        let client =
+            thread::spawn(move || {
+                let mut stream = transport::connect(&path).unwrap();
+                stream
+                    .set_timeouts(std::time::Duration::from_secs(5))
+                    .unwrap();
+                writeln!(stream, "{}", json!({"id":"race","method":if control {
+                "terminal.backend.control"
+            } else { "terminal.backend.observe" },"params":{
+                "server_generation":"generation","terminal_id":client_terminal,"pane_id":"7",
+                "mode":"visible","lines":4,"ansi":true
+            }})).unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut frames = Vec::new();
+                loop {
+                    let frame: Value =
+                        serde_json::from_str(&read_response_frame(&mut reader).unwrap()).unwrap();
+                    if frame["event"] == "terminal.closed" {
+                        break;
+                    }
+                    if frame["event"] == "terminal.frame" {
+                        frames.push(frame);
+                    }
+                }
+                frames
+            });
+        let AppEvent::BackendObserve { reply, .. } = event_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+        else {
+            panic!("stream must resolve its target");
+        };
+        reply.send(Ok(target)).unwrap();
+        captured_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        {
+            let mut engine = engine.lock().unwrap();
+            engine.advance(b"\r\nfinal-quiet-marker");
+            revision.fetch_add(1, Ordering::AcqRel);
+        }
+        publish_event(
+            &bus,
+            "terminal.output_ready",
+            json!({"terminal_id":terminal_id,"content_revision":4}),
+        );
+        // Both events fit the bounded queue. Close gives a deterministic end
+        // marker even on the buggy baseline; no timeout is the red proof.
+        publish_event(&bus, "terminal.closed", json!({"terminal_id":terminal_id}));
+        resume_tx.send(()).unwrap();
+        let frames = client.join().unwrap();
+        assert_eq!(
+            frames
+                .iter()
+                .map(|f| f["data"]["content_revision"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![3, 4],
+            "the final quiet revision must follow the emitted initial frame"
+        );
+        assert!(frames[1]["data"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("final-quiet-marker"));
+    }
+
+    #[test]
+    fn observe_does_not_skip_output_during_initial_frame_write() {
+        assert_final_update_during_initial_write(false);
+    }
+
+    #[test]
+    fn control_does_not_skip_output_during_initial_frame_write() {
+        assert_final_update_during_initial_write(true);
     }
 
     fn observe_target() -> crate::terminal::backend::ObserveTarget {
