@@ -696,7 +696,9 @@ impl App {
                     s.last_activity = Instant::now();
                 }
                 self.detection_dirty.insert(id);
-                self.runtime_cwd_dirty = true;
+                if self.panes.contains_key(&id) {
+                    self.runtime_cwd_dirty_panes.insert(id);
+                }
                 self.runtime_proc_dirty = true;
                 // A parked `wait.output` for this pane just got new output to
                 // test against — resolve it on the same wake (docs/81).
@@ -705,6 +707,7 @@ impl App {
                 true // the pane's screen advanced
             }
             AppEvent::PtyExit(id) => {
+                self.runtime_cwd_dirty_panes.remove(&id);
                 crate::logging::event(
                     crate::logging::EventKind::PtyExit,
                     &[

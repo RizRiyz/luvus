@@ -15,6 +15,53 @@ use crate::ids::PaneId;
 const CWD_REHOME_STABLE_SCANS: u8 = 2;
 
 impl App {
+    pub(super) fn invalidate_cwd_topology(&mut self, event: &str) {
+        if matches!(
+            event,
+            "pane.created"
+                | "pane.closed"
+                | "pane.forked"
+                | "pane.moved"
+                | "tab.created"
+                | "tab.closed"
+                | "tab.moved"
+                | "workspace.created"
+                | "workspace.closed"
+        ) {
+            self.runtime_cwd_dirty = true;
+            self.runtime_cwd_dirty_panes.clear();
+        }
+    }
+    /// Expand dirty panes to complete tabs: rehoming requires evidence for all
+    /// split siblings. Quiet unrelated tabs/workspaces need no CWD/Git probes.
+    pub(super) fn cwd_scan_scope(
+        &self,
+        dirty: &HashSet<PaneId>,
+        full: bool,
+    ) -> (HashSet<PaneId>, HashSet<String>) {
+        if full {
+            return (
+                self.panes.keys().copied().collect(),
+                self.workspaces.iter().map(|ws| ws.id.clone()).collect(),
+            );
+        }
+        let mut panes: HashSet<_> = dirty
+            .iter()
+            .copied()
+            .filter(|id| self.panes.contains_key(id))
+            .collect();
+        let mut workspaces = HashSet::new();
+        for ws in &self.workspaces {
+            for tab in &ws.tabs {
+                let leaves = tab.layout.leaves();
+                if leaves.iter().any(|id| dirty.contains(id)) {
+                    panes.extend(leaves.into_iter().filter(|id| self.panes.contains_key(id)));
+                    workspaces.insert(ws.id.clone());
+                }
+            }
+        }
+        (panes, workspaces)
+    }
     /// Track each pane's live process cwd (used for per-pane git / agent-session
     /// keying) and refresh each workspace's git branch from its **fixed** folder.
     /// A workspace is a **static workspace**: `cd`-ing inside a pane does not move the
@@ -61,8 +108,10 @@ impl App {
         workspace_candidates: Vec<crate::git::GitRootInfo>,
     ) -> bool {
         self.cwd_scan_inflight = false;
-        let live: HashSet<PaneId> = panes.iter().map(|(id, _)| *id).collect();
-        self.cwd_git_hits.retain(|id, _| live.contains(id));
+        // A scoped scan says nothing about unrelated live panes. Keep their
+        // consecutive evidence rather than treating absence as evidence loss.
+        self.cwd_git_hits
+            .retain(|id, _| self.panes.contains_key(id));
         let mut changed = false;
         let mut pane_git: HashMap<PaneId, Option<PathBuf>> = HashMap::new();
         for (id, evidence) in panes {
@@ -168,6 +217,9 @@ impl App {
         {
             let homes = self.workspace_homes();
             for (wi, leaves) in candidates {
+                if leaves.iter().any(|id| !pane_git.contains_key(id)) {
+                    continue;
+                }
                 let Some(dest) = tab_rehome_dest(&homes, wi, &leaves, |id| {
                     self.panes.get(&id).map(|pane| {
                         (
@@ -497,6 +549,34 @@ mod tests {
     use std::time::Duration;
     #[cfg(unix)]
     use std::time::Instant;
+
+    #[test]
+    fn scoped_cwd_scan_includes_split_siblings_but_preserves_quiet_workspaces() {
+        let _env = crate::persist::test_env("cwd-scoped-runtime");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let first = app.layout().focus;
+        let root = app.ws().id.clone();
+        app.split(crate::layout::Axis::Col);
+        let sibling = app.layout().focus;
+        let other = crate::persist::config_dir().join("quiet");
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(app.create_workspace_at(other.clone()));
+        let quiet = app.layout().focus;
+        let quiet_ws = app.ws().id.clone();
+        let (panes, workspaces) = app.cwd_scan_scope(&HashSet::from([first]), false);
+        assert_eq!(panes, HashSet::from([first, sibling]));
+        assert_eq!(workspaces, HashSet::from([root.clone()]));
+        let (panes, workspaces) = app.cwd_scan_scope(&HashSet::new(), true);
+        assert_eq!(panes.len(), 3);
+        assert_eq!(workspaces, HashSet::from([root, quiet_ws.clone()]));
+        app.cwd_git_hits.insert(quiet, (other, 1));
+        // An absent pane in a partial result must neither lose its consecutive
+        // evidence nor be rehomed using another tab's incomplete evidence.
+        app.apply_cwd_scan(Vec::new(), Vec::new(), Vec::new());
+        assert_eq!(app.cwd_git_hits[&quiet].1, 1);
+        assert_eq!(app.ws().id, quiet_ws);
+    }
 
     // Live `cd` through Windows PowerShell does not reliably update the PEB
     // directory this reader uses. Windows coverage is process_cwd_matches_this_process

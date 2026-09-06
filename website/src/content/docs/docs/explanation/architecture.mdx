@@ -79,6 +79,12 @@ Scrolling updates the reported offset without traversing retained rows. The
 reported byte fields remain allocation estimates, not process RSS or an exact
 byte-enforced history limit.
 
+Ordinary pane output schedules CWD and workspace-branch inspection for its tab,
+including split siblings needed for safe rehoming. Attach, restore, and topology
+changes retain full invalidation. Process-identity demand remains independent
+and shares the OS process snapshot when deadlines coincide. This reduces
+unrelated Git probes; it does not eliminate platform-wide process enumeration.
+
 ## And the numbers
 
 Pure Rust, a single ~3 MB binary, single-digit-MB resident memory even with

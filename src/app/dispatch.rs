@@ -1546,7 +1546,9 @@ impl App {
         }
 
         if clients_attached {
-            if self.runtime_cwd_dirty && !self.cwd_scan_inflight {
+            if (self.runtime_cwd_dirty || !self.runtime_cwd_dirty_panes.is_empty())
+                && !self.cwd_scan_inflight
+            {
                 consider(self.last_cwd_at + CWD_SCAN_INTERVAL, true);
             }
             if self.runtime_sessions_dirty && !self.sessions_scan_inflight {
@@ -1640,11 +1642,13 @@ impl App {
         }
         // CWD/git follow the user after PTY activity, throttled to 1s. Quiet
         // panes do not spawn a worker or walk process trees.
-        if self.runtime_cwd_dirty
+        if (self.runtime_cwd_dirty || !self.runtime_cwd_dirty_panes.is_empty())
             && !self.cwd_scan_inflight
             && now.duration_since(self.last_cwd_at) >= CWD_SCAN_INTERVAL
         {
-            self.runtime_cwd_dirty = false;
+            let full = std::mem::take(&mut self.runtime_cwd_dirty);
+            let dirty = std::mem::take(&mut self.runtime_cwd_dirty_panes);
+            let (cwd_scope, workspace_scope) = self.cwd_scan_scope(&dirty, full);
             self.last_cwd_at = now;
             self.cwd_scan_inflight = true;
             let include_processes = self.proc_scan_due(now, true);
@@ -1660,6 +1664,7 @@ impl App {
             let panes: Vec<(PaneId, u32)> = self
                 .panes
                 .iter()
+                .filter(|(id, _)| cwd_scope.contains(id))
                 .filter_map(|(id, p)| {
                     let pid = p.child_pid.load(std::sync::atomic::Ordering::SeqCst);
                     (pid != 0).then_some((*id, pid))
@@ -1668,15 +1673,29 @@ impl App {
             let workspaces: Vec<(String, PathBuf)> = self
                 .workspaces
                 .iter()
+                .filter(|ws| workspace_scope.contains(&ws.id))
                 .map(|ws| (ws.id.clone(), ws.cwd.clone()))
                 .collect();
             let homes = self.workspace_homes();
             let tabs = self.renameable_tab_leaves();
+            // Process identity demand remains fleet-wide. It shares this one
+            // OS snapshot without forcing unrelated CWD/Git resolution.
+            let process_roots: Vec<u32> = if include_processes {
+                self.panes
+                    .values()
+                    .map(|pane| pane.child_pid.load(std::sync::atomic::Ordering::SeqCst))
+                    .filter(|pid| *pid != 0)
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let tx = self.app_tx.clone();
             std::thread::spawn(move || {
                 let pids: Vec<u32> = panes.iter().map(|(_, pid)| *pid).collect();
-                let (evidence, processes) =
-                    crate::platform::scan_pane_runtime(&pids, include_processes);
+                let (evidence, processes) = crate::platform::scan_pane_runtime_scoped(
+                    &pids,
+                    include_processes.then_some(process_roots.as_slice()),
+                );
                 let pane_results: Vec<(PaneId, crate::platform::PaneCwdEvidence)> = panes
                     .into_iter()
                     .zip(evidence)

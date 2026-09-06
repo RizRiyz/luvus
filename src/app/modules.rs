@@ -438,6 +438,7 @@ impl App {
     /// any enabled module's matching `[[events]]` hook (MOD-3). The payload is
     /// passed to hooks as `LUVUS_MODULE_EVENT_JSON`.
     pub fn emit_event(&mut self, name: &str, data: serde_json::Value) {
+        self.invalidate_cwd_topology(name);
         let event_json = data.to_string();
         let backend_data = data.clone();
         api::publish_event(&self.events, name, data);

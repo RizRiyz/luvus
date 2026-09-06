@@ -2432,6 +2432,9 @@ pub struct App {
     last_proc_at: Instant,
     /// CWD/git follow-up is scheduled from PTY activity, not a 1s heartbeat.
     runtime_cwd_dirty: bool,
+    /// Ordinary output dirties its tab only. The boolean above remains the
+    /// full-invalidation path for attach, restore, and topology changes.
+    runtime_cwd_dirty_panes: HashSet<PaneId>,
     /// Attached PTY activity dirties process identity without creating a heartbeat.
     runtime_proc_dirty: bool,
     /// Resumable-session disk scans run on attach/demand, not a 4s walk.
@@ -2943,6 +2946,7 @@ impl App {
             usage_scan_inflight: false,
             last_proc_at: Instant::now(),
             runtime_cwd_dirty: false,
+            runtime_cwd_dirty_panes: HashSet::new(),
             runtime_proc_dirty: false,
             runtime_sessions_dirty: false,
             last_detect_at: Instant::now()
@@ -3586,6 +3590,7 @@ impl App {
             usage_scan_inflight: false,
             last_proc_at: Instant::now(),
             runtime_cwd_dirty: false,
+            runtime_cwd_dirty_panes: HashSet::new(),
             runtime_proc_dirty: false,
             runtime_sessions_dirty: false,
             last_detect_at: Instant::now()
