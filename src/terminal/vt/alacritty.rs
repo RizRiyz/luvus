@@ -1062,51 +1062,47 @@ impl VtEngine for AlacrittyEngine {
         if rows == 0 || cols == 0 {
             return String::new();
         }
-        let default = (' ', Color::Reset, Color::Reset, Modifier::empty());
-        let mut cells = vec![vec![default; cols]; rows];
-        for indexed in grid.display_iter() {
-            let r = indexed.point.line.0;
-            let c = indexed.point.column.0;
-            if r < 0 || r as usize >= rows || c >= cols {
-                continue;
-            }
-            let cell = indexed.cell;
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                continue;
-            }
-            let ch = if cell.c == '\0' { ' ' } else { cell.c };
-            cells[r as usize][c] = (
-                ch,
-                map_color(cell.fg),
-                map_color(cell.bg),
-                map_flags(cell.flags),
-            );
-        }
-
-        // Trim trailing blank rows so replaying into any-size engine doesn't
-        // scroll the content off-screen.
-        let last_row = match cells
-            .iter()
-            .rposition(|row| row.iter().any(|c| *c != default))
-        {
-            Some(r) => r,
-            None => return String::from("\x1b[2J\x1b[H"),
-        };
+        // Logical nonnegative rows are the live screen, irrespective of the
+        // user's scroll offset. Do not change that viewport to take a snapshot,
+        // or allocate another grid just to serialize this bounded screen.
         let mut out = String::from("\x1b[2J\x1b[H");
-        for (ri, row) in cells.iter().take(last_row + 1).enumerate() {
-            let last = row.iter().rposition(|c| *c != default).map_or(0, |i| i + 1);
+        for ri in 0..rows {
+            let row = &grid[Line(ri as i32)];
+            let last = (0..cols).rfind(|&ci| {
+                let cell = &row[Column(ci)];
+                !cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+                    && (cell.c != ' ' && cell.c != '\0'
+                        || cell.zerowidth().is_some_and(|chars| !chars.is_empty())
+                        || map_color(cell.fg) != Color::Reset
+                        || map_color(cell.bg) != Color::Reset
+                        || !map_flags(cell.flags).is_empty())
+            });
+            let Some(last) = last else { continue };
+            // Absolute rows avoid a pending autowrap at the right edge causing
+            // the next row to scroll. Empty trailing rows need no replay bytes.
+            out.push_str(&format!("\x1b[{};1H", ri + 1));
             let mut cur = (Color::Reset, Color::Reset, Modifier::empty());
-            for (ch, fg, bg, m) in &row[..last] {
-                if (*fg, *bg, *m) != cur {
-                    out.push_str(&sgr(*fg, *bg, *m));
-                    cur = (*fg, *bg, *m);
+            for ci in 0..=last {
+                let cell = &row[Column(ci)];
+                // The preceding wide character already advances two cells.
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
                 }
-                out.push(*ch);
+                let style = (
+                    map_color(cell.fg),
+                    map_color(cell.bg),
+                    map_flags(cell.flags),
+                );
+                if style != cur {
+                    out.push_str(&sgr(style.0, style.1, style.2));
+                    cur = style;
+                }
+                out.push(if cell.c == '\0' { ' ' } else { cell.c });
+                if let Some(chars) = cell.zerowidth() {
+                    out.extend(chars);
+                }
             }
             out.push_str("\x1b[0m");
-            if ri < last_row {
-                out.push_str("\r\n");
-            }
         }
         out
     }
@@ -1202,6 +1198,56 @@ mod tests {
 
     fn budget_for_rows(cols: usize, rows: usize) -> usize {
         estimated_row_bytes(cols).saturating_mul(rows)
+    }
+
+    #[test]
+    fn snapshot_replays_live_unicode_cells_independent_of_scroll() {
+        for cols in [8, 24] {
+            let (tx, _rx) = channel();
+            let mut source = AlacrittyEngine::new(cols, 4, tx, budget_for_rows(cols as usize, 40));
+            feed_lines(&mut source, 15);
+            source.advance("\x1b[2J\x1b[H界Aé e\u{301}\r\n♥\u{fe0f}X\r\n👩\u{200d}💻Z\r\n\x1b[1;3;4;38;2;2;3;4;48;5;12m界B\x1b[0m".as_bytes());
+            let snapshot = source.snapshot_ansi();
+            source.scroll(8);
+            let offset = source.term.grid().display_offset();
+            let cursor = source.term.grid().cursor.point;
+            assert!(offset > 0);
+            assert_eq!(source.snapshot_ansi(), snapshot);
+            assert_eq!(source.term.grid().display_offset(), offset);
+            assert_eq!(source.term.grid().cursor.point, cursor);
+            assert!(!snapshot.contains("line"), "history must not be serialized");
+
+            let (tx, _rx) = channel();
+            let mut replay = AlacrittyEngine::new(cols, 4, tx, budget_for_rows(cols as usize, 40));
+            replay.advance(snapshot.as_bytes());
+            for line in 0..4 {
+                for col in 0..cols {
+                    let point = Point::new(Line(line), Column(col as usize));
+                    let expected = &source.term.grid()[point];
+                    let actual = &replay.term.grid()[point];
+                    assert_eq!(actual.c, expected.c, "{cols}: {point:?}");
+                    assert_eq!(actual.zerowidth(), expected.zerowidth());
+                    assert_eq!(map_color(actual.fg), map_color(expected.fg));
+                    assert_eq!(map_color(actual.bg), map_color(expected.bg));
+                    assert_eq!(map_flags(actual.flags), map_flags(expected.flags));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_preserves_right_edge_and_blank_rows_after_resize() {
+        let (tx, _rx) = channel();
+        let mut source = AlacrittyEngine::new(8, 4, tx, budget_for_rows(8, 20));
+        source.advance("123456界\r\n\r\nlast".as_bytes());
+        source.resize(12, 4);
+        let snapshot = source.snapshot_ansi();
+        let (tx, _rx) = channel();
+        let mut replay = AlacrittyEngine::new(12, 4, tx, budget_for_rows(12, 20));
+        replay.advance(snapshot.as_bytes());
+        assert_eq!(replay.snapshot_ansi(), snapshot);
+        // ED2 retains the initial blank cursor row; replay adds no scrolling.
+        assert_eq!(replay.term.grid().history_size(), 1);
     }
 
     #[test]
