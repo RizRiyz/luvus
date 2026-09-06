@@ -335,6 +335,24 @@ pub struct Term<T> {
     config: Config,
 }
 
+/// Shallow allocation diagnostics for both terminal grids.
+///
+/// Dynamically allocated cell extras such as hyperlink strings are excluded,
+/// so callers must describe `estimated_bytes` as an estimate rather than an
+/// allocator-exact total.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HistoryStorageMetrics {
+    pub estimated_bytes: usize,
+    pub cache_bytes: usize,
+    pub row_descriptor_bytes: usize,
+    pub dense_cell_bytes: usize,
+    pub packed_block_bytes: usize,
+    pub packed_blocks: usize,
+    pub packed_rows: usize,
+    pub allocated_cells: usize,
+    pub allocations: usize,
+}
+
 /// Configuration options for the [`Term`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -494,14 +512,19 @@ impl<T> Term<T> {
 
     /// Resets the terminal damage information.
     pub fn reset_damage(&mut self) {
-        self.finish_output_batch();
+        self.trim_history_cache_if_dirty();
         self.damage.reset(self.columns());
     }
 
     /// Complete deferred allocation maintenance after a parsed output batch.
-    /// Consumers which do not use damage tracking can call this at their own
-    /// frame boundary.
+    /// Consumers can call this at a bounded activity or frame boundary.
     pub fn finish_output_batch(&mut self) {
+        self.trim_history_cache_if_dirty();
+        self.grid.pack_cold_history();
+        self.inactive_grid.pack_cold_history();
+    }
+
+    fn trim_history_cache_if_dirty(&mut self) {
         if mem::take(&mut self.history_cache_dirty) {
             self.grid.trim_history_cache();
             self.inactive_grid.trim_history_cache();
@@ -679,6 +702,27 @@ impl<T> Term<T> {
         self.inactive_grid.compact_history();
     }
 
+    /// Collect all shallow allocation counters in one traversal per grid.
+    pub fn history_storage_metrics(&self) -> HistoryStorageMetrics {
+        let active = self.grid.storage_metrics();
+        let inactive = self.inactive_grid.storage_metrics();
+        HistoryStorageMetrics {
+            estimated_bytes: active.estimated_bytes.saturating_add(inactive.estimated_bytes),
+            cache_bytes: active.cache_bytes.saturating_add(inactive.cache_bytes),
+            row_descriptor_bytes: active
+                .row_descriptor_bytes
+                .saturating_add(inactive.row_descriptor_bytes),
+            dense_cell_bytes: active.dense_cell_bytes.saturating_add(inactive.dense_cell_bytes),
+            packed_block_bytes: active
+                .packed_block_bytes
+                .saturating_add(inactive.packed_block_bytes),
+            packed_blocks: active.packed_blocks.saturating_add(inactive.packed_blocks),
+            packed_rows: active.packed_rows.saturating_add(inactive.packed_rows),
+            allocated_cells: active.allocated_cells.saturating_add(inactive.allocated_cells),
+            allocations: active.allocations.saturating_add(inactive.allocations),
+        }
+    }
+
     /// Estimated shallow allocation held by cached rows in both grids.
     pub fn history_cache_bytes(&self) -> usize {
         self.grid.history_cache_bytes().saturating_add(self.inactive_grid.history_cache_bytes())
@@ -727,6 +771,8 @@ impl<T> Term<T> {
         if is_alt {
             self.rebalance_alt_history();
         }
+        self.grid.pack_all_cold_history();
+        self.inactive_grid.pack_all_cold_history();
 
         // Invalidate selection and tabs only when necessary.
         if old_cols != num_cols {
@@ -1222,6 +1268,82 @@ impl<T: EventListener> Handler for Term<T> {
             self.grid.cursor.point.column += 1;
         } else {
             self.grid.cursor.input_needs_wrap = true;
+        }
+    }
+
+    #[inline]
+    fn input_ascii(&mut self, bytes: &[u8]) {
+        if self.grid.cursor.charsets[self.active_charset] != StandardCharset::Ascii
+            || self.mode.contains(TermMode::INSERT)
+        {
+            for byte in bytes {
+                self.input(char::from(*byte));
+            }
+            return;
+        }
+
+        let columns = self.columns();
+        let mut offset = 0;
+        while offset < bytes.len() {
+            if self.grid.cursor.input_needs_wrap {
+                self.wrapline();
+            }
+
+            let point = self.grid.cursor.point;
+            let start = point.column.0;
+            let count = (columns - start).min(bytes.len() - offset);
+            let end = start + count;
+            let fresh_template_row = {
+                let row = &self.grid[point.line];
+                row.occ == 0
+                    && row
+                        .last()
+                        .is_some_and(|cell| cell == &self.grid.cursor.template)
+            };
+            let wide = !fresh_template_row
+                && (start..end).any(|column| {
+                    self.grid[point.line][Column(column)]
+                        .flags
+                        .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER)
+                });
+            if wide {
+                for byte in &bytes[offset..] {
+                    self.input(char::from(*byte));
+                }
+                return;
+            }
+
+            let style = (!fresh_template_row).then(|| {
+                (
+                    self.grid.cursor.template.fg,
+                    self.grid.cursor.template.bg,
+                    self.grid.cursor.template.flags,
+                    self.grid.cursor.template.extra.clone(),
+                )
+            });
+            let cells = self.grid[point.line].cells_mut(start..end);
+            if fresh_template_row {
+                for (cell, byte) in cells.iter_mut().zip(&bytes[offset..offset + count]) {
+                    cell.c = char::from(*byte);
+                }
+            } else {
+                let (fg, bg, flags, extra) = style.expect("non-template row style");
+                for (cell, byte) in cells.iter_mut().zip(&bytes[offset..offset + count]) {
+                    cell.c = char::from(*byte);
+                    cell.fg = fg;
+                    cell.bg = bg;
+                    cell.flags = flags;
+                    cell.extra.clone_from(&extra);
+                }
+            }
+
+            offset += count;
+            if end < columns {
+                self.grid.cursor.point.column = Column(end);
+            } else {
+                self.grid.cursor.point.column = Column(columns - 1);
+                self.grid.cursor.input_needs_wrap = true;
+            }
         }
     }
 

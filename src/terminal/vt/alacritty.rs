@@ -468,7 +468,6 @@ impl VtEngine for AlacrittyEngine {
     }
 
     fn damage_snapshot(&mut self) -> DamageSnapshot {
-        self.term.finish_output_batch();
         self.damage_line_indices.clear();
         let kind = match self.term.damage() {
             TermDamage::Full => DamageKind::Full,
@@ -891,15 +890,22 @@ impl VtEngine for AlacrittyEngine {
         let retained_rows = self.history_len();
         let retained_bytes =
             retained_rows.saturating_mul(estimated_row_bytes(self.term.grid().columns()));
+        let storage = self.term.history_storage_metrics();
         HistoryMetrics {
             offset: self.scroll_offset(),
             retained_rows,
             budget_bytes: self.history_budget_bytes,
             retained_bytes,
-            estimated_grid_bytes: self.term.estimated_grid_bytes(),
-            cache_bytes: Some(self.term.history_cache_bytes()),
+            estimated_grid_bytes: storage.estimated_bytes,
+            cache_bytes: Some(storage.cache_bytes),
             compacted_rows: Some(self.term.compacted_history_rows()),
-            allocated_cells: Some(self.term.allocated_cell_capacity()),
+            allocated_cells: Some(storage.allocated_cells),
+            packed_blocks: Some(storage.packed_blocks),
+            packed_bytes: Some(storage.packed_block_bytes),
+            packed_rows: Some(storage.packed_rows),
+            dense_row_bytes: Some(storage.dense_cell_bytes),
+            row_descriptor_bytes: Some(storage.row_descriptor_bytes),
+            allocation_count: Some(storage.allocations),
             exact_bytes: false,
         }
     }
@@ -1372,14 +1378,24 @@ mod tests {
     #[test]
     fn cold_history_compacts_losslessly_and_survives_reflow() {
         let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 500));
+        // Size the budget for the wider post-reflow grid so width-dependent
+        // history accounting does not intentionally evict the oldest rows.
+        let mut e = AlacrittyEngine::new(40, 5, tx, budget_for_rows(80, 500));
         e.advance(b"\x1b[38;2;12;200;155mCOLOR\x1b[0m cafe\xcc\x81 \x1b]8;;https://luvus.dev\x1b\\LINK\x1b]8;;\x1b\\\r\n");
         assert!(e.detection_text(100).contains("cafe\u{301}"));
-        feed_lines(&mut e, 80);
+        feed_lines(&mut e, 300);
+        e.finish_output_batch();
 
         let before = e.history_metrics();
         assert!(before.compacted_rows.unwrap_or(0) > 0);
         assert!(before.allocated_cells.unwrap_or(0) > 0);
+        assert!(before.packed_blocks.unwrap_or(0) > 0);
+        assert!(before.packed_rows.unwrap_or(0) >= 64);
+        assert!(before.packed_bytes.unwrap_or(usize::MAX) < before.estimated_grid_bytes);
+        assert!(
+            before.allocation_count.unwrap_or(usize::MAX) <= before.retained_rows + 16,
+            "bounded reusable row buffers may retain one allocation per row plus block metadata"
+        );
 
         e.scroll_to_top();
         let mut rendered = Vec::new();
@@ -1398,12 +1414,86 @@ mod tests {
             .expect("oldest feature row remains readable");
         assert!(retained.contains("cafe\u{301}"));
 
-        e.resize(80, 8);
+        // Exercise width reflow without changing the viewport height. Growing
+        // the viewport intentionally consumes the oldest history rows in
+        // Alacritty, which is a separate terminal semantic from reflow.
+        e.resize(80, 5);
         e.scroll_to_top();
         let after = e.history_metrics();
         assert!(after.compacted_rows.unwrap_or(0) > 0);
-        assert!(e.visible_rows().join("\n").contains("COLOR"));
-        assert!(e.visible_rows().join("\n").contains("LINK"));
+        assert!(after.packed_blocks.unwrap_or(0) > 0);
+        let mut retained = String::new();
+        e.for_each_retained_row(&mut |_row, text| {
+            retained.push_str(text);
+            retained.push('\n');
+        });
+        assert!(retained.contains("COLOR"));
+        assert!(retained.contains("LINK"));
+    }
+
+    #[test]
+    fn dense_history_width_reflow_preserves_oldest_feature_row() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 500));
+        e.advance(b"OLDEST FEATURE\r\n");
+        // Stay below the cold-packing threshold so this remains the dense
+        // representation control for the packed-history test above.
+        feed_lines(&mut e, 150);
+        e.resize(80, 5);
+
+        let mut retained = String::new();
+        e.for_each_retained_row(&mut |_row, text| {
+            retained.push_str(text);
+            retained.push('\n');
+        });
+        assert!(retained.contains("OLDEST FEATURE"));
+    }
+
+    #[test]
+    fn selection_and_capture_cross_packed_and_hot_history() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 1_000));
+        e.advance(b"PACKED START\r\n");
+        feed_lines(&mut e, 300);
+        e.advance(b"HOT END\r\n");
+        e.finish_output_batch();
+        assert!(e.history_metrics().packed_rows.unwrap_or(0) > 0);
+
+        let mut start = None;
+        let mut end = None;
+        e.for_each_retained_row(&mut |row, text| {
+            if text == "PACKED START" {
+                start = Some(row);
+            }
+            if text == "HOT END" {
+                end = Some(row);
+            }
+        });
+        let (start, end) = (start.expect("packed row"), end.expect("hot row"));
+        let selected = e
+            .retained_selection_text(((start, 0), (end, 6)))
+            .expect("cross-boundary selection");
+        assert!(selected.starts_with("PACKED START\nline0"));
+        assert!(selected.ends_with("HOT END"));
+
+        let capture = e.backend_capture(CaptureMode::RecentUnwrapped, 400, false, 64 * 1024);
+        assert!(capture.text.contains("PACKED START"));
+        assert!(capture.text.contains("HOT END"));
+    }
+
+    #[test]
+    fn shrinking_history_releases_packed_blocks() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 1_000));
+        feed_lines(&mut e, 300);
+        e.finish_output_batch();
+        assert!(e.history_metrics().packed_blocks.unwrap_or(0) > 0);
+
+        e.set_history_budget(budget_for_rows(40, 20));
+        let metrics = e.history_metrics();
+        assert_eq!(e.history_len(), 20);
+        assert_eq!(metrics.packed_blocks, Some(0));
+        assert_eq!(metrics.packed_rows, Some(0));
     }
 
     #[test]
@@ -1823,6 +1913,22 @@ mod tests {
             0,
             "alternate history is reclaimed instead of leaking into the primary screen"
         );
+    }
+
+    #[test]
+    fn packed_alternate_history_is_reclaimed_on_exit() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 500));
+        e.advance(b"\x1b[?1049h");
+        feed_lines(&mut e, 300);
+        e.finish_output_batch();
+        assert!(e.history_metrics().packed_blocks.unwrap_or(0) > 0);
+
+        e.advance(b"\x1b[?1049l");
+        e.finish_output_batch();
+        let metrics = e.history_metrics();
+        assert_eq!(metrics.packed_blocks, Some(0));
+        assert_eq!(metrics.packed_rows, Some(0));
     }
 
     #[test]

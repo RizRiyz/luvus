@@ -2471,6 +2471,12 @@ impl App {
                             "history_cache_bytes": history.and_then(|m| m.cache_bytes),
                             "history_compacted_rows": history.and_then(|m| m.compacted_rows),
                             "history_allocated_cells": history.and_then(|m| m.allocated_cells),
+                            "history_packed_blocks": history.and_then(|m| m.packed_blocks),
+                            "history_packed_bytes": history.and_then(|m| m.packed_bytes),
+                            "history_packed_rows": history.and_then(|m| m.packed_rows),
+                            "history_dense_row_bytes": history.and_then(|m| m.dense_row_bytes),
+                            "history_row_descriptor_bytes": history.and_then(|m| m.row_descriptor_bytes),
+                            "history_allocation_count": history.and_then(|m| m.allocation_count),
                             "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
                             "history_bytes_kind": if history.is_some_and(|m| m.exact_bytes) { "exact" } else { "estimated" },
                         })
@@ -2644,6 +2650,12 @@ impl App {
                     "history_cache_bytes": history.and_then(|m| m.cache_bytes),
                     "history_compacted_rows": history.and_then(|m| m.compacted_rows),
                     "history_allocated_cells": history.and_then(|m| m.allocated_cells),
+                    "history_packed_blocks": history.and_then(|m| m.packed_blocks),
+                    "history_packed_bytes": history.and_then(|m| m.packed_bytes),
+                    "history_packed_rows": history.and_then(|m| m.packed_rows),
+                    "history_dense_row_bytes": history.and_then(|m| m.dense_row_bytes),
+                    "history_row_descriptor_bytes": history.and_then(|m| m.row_descriptor_bytes),
+                    "history_allocation_count": history.and_then(|m| m.allocation_count),
                     "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
                     "history_bytes_kind": if history.is_some_and(|m| m.exact_bytes) { "exact" } else { "estimated" },
                 }))
@@ -10230,9 +10242,10 @@ command = ["true"]
         let pane = app.layout().focus;
         if let Some(p) = app.panes.get(&pane) {
             if let Ok(mut engine) = p.engine.lock() {
-                for i in 0..40 {
+                for i in 0..300 {
                     engine.advance(format!("line {i}\r\n").as_bytes());
                 }
+                engine.finish_output_batch();
             }
         }
         let out = app
@@ -10246,6 +10259,13 @@ command = ["true"]
         assert!(out.get("history_cache_bytes").is_some());
         assert!(out["history_compacted_rows"].as_u64().is_some());
         assert!(out["history_allocated_cells"].as_u64().is_some());
+        assert!(out["history_packed_blocks"].as_u64().is_some());
+        assert!(out["history_packed_bytes"].as_u64().is_some());
+        assert!(out["history_packed_rows"].as_u64().is_some());
+        assert!(out["history_packed_rows"].as_u64().unwrap_or(0) > 0);
+        assert!(out["history_dense_row_bytes"].as_u64().is_some());
+        assert!(out["history_row_descriptor_bytes"].as_u64().is_some());
+        assert!(out["history_allocation_count"].as_u64().is_some());
         assert_eq!(out["history_bytes_kind"], "estimated");
         assert_eq!(out["history_exact"], false, "Alacritty reports an estimate");
 
@@ -10274,6 +10294,12 @@ command = ["true"]
         assert!(row.get("history_cache_bytes").is_some());
         assert!(row.get("history_compacted_rows").is_some());
         assert!(row.get("history_allocated_cells").is_some());
+        assert!(row.get("history_packed_blocks").is_some());
+        assert!(row.get("history_packed_bytes").is_some());
+        assert!(row.get("history_packed_rows").is_some());
+        assert!(row.get("history_dense_row_bytes").is_some());
+        assert!(row.get("history_row_descriptor_bytes").is_some());
+        assert!(row.get("history_allocation_count").is_some());
         assert_eq!(row["history_bytes_kind"], "estimated");
     }
 

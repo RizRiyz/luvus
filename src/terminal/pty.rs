@@ -27,6 +27,10 @@ use crate::terminal::vt::{create_engine, VtEngine, VtEngineKind};
 mod io;
 mod reaper;
 
+/// Keep each pane's read working set small. Unix amortizes synchronization by
+/// draining several of these chunks under one bounded engine lock.
+const PTY_READ_BUFFER_BYTES: usize = 8 * 1024;
+
 #[cfg(test)]
 use reaper::child_poll_finished;
 use reaper::register_child_reaper;
@@ -731,6 +735,12 @@ impl Pane {
         let pending = self
             .data_pending
             .swap(false, std::sync::atomic::Ordering::AcqRel);
+        // Unix compacts on a bounded deadline in its existing descriptor
+        // actor. Doing it here would repeatedly pack and re-inflate rows while
+        // one large output stream is still being consumed. The blocking
+        // Windows reader has no such event-loop deadline, so retain its
+        // coalesced app-boundary maintenance.
+        #[cfg(windows)]
         if pending {
             if let Ok(mut engine) = self.engine.lock() {
                 engine.finish_output_batch();
@@ -962,6 +972,12 @@ impl Pane {
                 cache_bytes: None,
                 compacted_rows: None,
                 allocated_cells: None,
+                packed_blocks: None,
+                packed_bytes: None,
+                packed_rows: None,
+                dense_row_bytes: None,
+                row_descriptor_bytes: None,
+                allocation_count: None,
                 exact_bytes: false,
             },
         )
@@ -1176,7 +1192,7 @@ fn read_loop(
     data_pending: Arc<AtomicBool>,
     content_revision: Arc<AtomicU64>,
 ) {
-    let mut buf = [0u8; 8192];
+    let mut buf = [0u8; PTY_READ_BUFFER_BYTES];
     loop {
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => {

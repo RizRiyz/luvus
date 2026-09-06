@@ -508,6 +508,13 @@ pub trait Handler {
     /// A character to be displayed.
     fn input(&mut self, _c: char) {}
 
+    /// A contiguous run of printable ASCII characters.
+    fn input_ascii(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.input(char::from(*byte));
+        }
+    }
+
     /// Set cursor to position.
     fn goto(&mut self, _line: i32, _col: usize) {}
 
@@ -1302,6 +1309,19 @@ where
     }
 
     #[inline]
+    fn print_ascii(&mut self, bytes: &[u8]) {
+        self.handler.input_ascii(bytes);
+        self.state.preceding_char = bytes.last().copied().map(char::from);
+    }
+
+    #[inline]
+    fn ascii_print_never_terminates(&self) -> bool {
+        // Only escape/control dispatch changes this performer's termination
+        // state; Handler::input_ascii has no access to that state.
+        true
+    }
+
+    #[inline]
     fn execute(&mut self, byte: u8) {
         match byte {
             C0::HT => self.handler.put_tab(1),
@@ -1347,7 +1367,7 @@ where
                 }
                 buf.push_str("],");
             }
-            debug!("[unhandled osc_dispatch]: [{}] at line {}", &buf, line!());
+            debug!("[unhandled osc_dispatch]: [{}] at line {}", buf, line!());
         }
 
         if params.is_empty() || params[0].is_empty() {

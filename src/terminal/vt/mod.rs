@@ -266,6 +266,18 @@ pub struct HistoryMetrics {
     pub compacted_rows: Option<usize>,
     /// Physical cell slots allocated by the engine, excluding logical repeats.
     pub allocated_cells: Option<usize>,
+    /// Cold-history blocks shared by packed rows.
+    pub packed_blocks: Option<usize>,
+    /// Shallow bytes owned by packed cold-history blocks.
+    pub packed_bytes: Option<usize>,
+    /// Rows backed by packed cold-history blocks.
+    pub packed_rows: Option<usize>,
+    /// Shallow bytes owned by ordinary dense row cell vectors.
+    pub dense_row_bytes: Option<usize>,
+    /// Bytes reserved by the outer row descriptor vectors.
+    pub row_descriptor_bytes: Option<usize>,
+    /// Approximate number of outer, row, and block allocations.
+    pub allocation_count: Option<usize>,
     pub exact_bytes: bool,
 }
 
@@ -306,9 +318,9 @@ pub trait VtEngine: Send {
     /// Feed child output. Must never panic on arbitrary bytes.
     fn advance(&mut self, bytes: &[u8]);
 
-    /// Finish allocation maintenance deferred while parsing the latest output
-    /// burst. Called at the app's coalesced frame boundary, outside the PTY
-    /// reader path.
+    /// Finish allocation maintenance deferred while parsing recent output.
+    /// Unix calls this from its existing descriptor actor after a bounded
+    /// activity window; Windows uses the app's coalesced output boundary.
     fn finish_output_batch(&mut self);
 
     /// Monotonic generation of successfully parsed terminal output.
