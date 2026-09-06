@@ -67,6 +67,12 @@ change schedules a presentation through the existing PTY notification path,
 including coalesced output. Unchanged titles and ordinary hidden output do not
 request a redraw just because title display is enabled.
 
+Each attached client retains its own buffer and projected pane rectangles,
+including passive clients at different sizes. All clients consume the same
+owned terminal damage before it is acknowledged. A passive display cannot
+change the active client's focus, PTY dimensions, scroll state, or hit targets.
+A client that falls behind receives a full repair frame.
+
 ## And the numbers
 
 Pure Rust, a single ~3 MB binary, single-digit-MB resident memory even with
