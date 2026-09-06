@@ -88,6 +88,13 @@ PTYs without requiring an interactive terminal. Test visible changes manually,
 measure performance changes before and after, and test platform-specific code on
 the affected platform when available.
 
+Lifecycle tests must isolate the state home and clear inherited socket/session
+selectors before spawning a server. Use an explicit shell when testing process
+behavior rather than shell integration. Bound startup and socket waits, check
+early child exits, retain a bounded excerpt of failure diagnostics, and use a
+child-handle cleanup guard. Tests that change process-global configuration must
+hold `persist::test_env(...)` for their entire lifetime.
+
 ## Adding agent support
 
 Use a detection manifest when an agent only needs identity and live-state
