@@ -925,6 +925,8 @@ mod tests {
         assert!(allowed_method(AccessMode::Control, "tab.focus"));
         assert!(allowed_method(AccessMode::Control, "pane.focus"));
         assert!(allowed_method(AccessMode::Control, "agent.prompt"));
+        assert!(allowed_method(AccessMode::Control, "agent.keys"));
+        assert!(!allowed_method(AccessMode::ReadOnly, "agent.keys"));
         assert!(!allowed_method(AccessMode::ReadOnly, "automation.create"));
         assert!(!allowed_method(AccessMode::ReadOnly, "automation.rebind"));
         assert!(allowed_method(AccessMode::ReadOnly, "automation.health"));
@@ -1220,6 +1222,172 @@ mod tests {
         drop(stream);
         local_server.join().unwrap();
         gateway.stop();
+    }
+
+    #[test]
+    fn control_access_forwards_validated_agent_keys() {
+        // Fail before starting an upstream accept if the RPC is still denied.
+        assert!(allowed_method(AccessMode::Control, "agent.keys"));
+        let _env = crate::persist::test_env("access-agent-keys");
+        let path = crate::persist::ensure_config_dir().join("keys.sock");
+        let listener = crate::ipc::transport::bind(&path).unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "claude".into();
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+        let token = "luv_tok_keys_test";
+        let mut gateway = Gateway::start(
+            path,
+            token.into(),
+            None,
+            "upstream-keys-test".into(),
+            Pairing::new(Duration::from_secs(60)).unwrap(),
+            AccessMode::Control,
+        )
+        .unwrap();
+        let relay = |app: &mut crate::app::App, params: Value| {
+            let request = json!({"id":"keys","method":"agent.keys","params":params,"auth":token});
+            thread::scope(|scope| {
+                let address = gateway.address();
+                let client = scope.spawn(move || exchange(address, &request));
+                let mut local = BufReader::new(listener.accept().unwrap());
+                let forwarded: Value = serde_json::from_str(
+                    &crate::ipc::api::read_response_frame(&mut local).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(forwarded["auth"], "upstream-keys-test");
+                let response = match app.dispatch("agent.keys", &forwarded["params"]) {
+                    Ok(result) => json!({"id":"keys","result":result}),
+                    Err((code, message)) => {
+                        json!({"id":"keys","error":{"code":code,"message":message}})
+                    }
+                };
+                writeln!(local.get_mut(), "{response}").unwrap();
+                local.get_mut().flush().unwrap();
+                client.join().unwrap()
+            })
+        };
+        for (keys, bytes) in [
+            (json!(["ctrl+c"]), b"\x03".as_slice()),
+            (json!(["esc"]), b"\x1b".as_slice()),
+            (json!(["y", "🙂"]), "y🙂".as_bytes()),
+            (
+                json!(["up", "down", "left", "right"]),
+                b"\x1b[A\x1b[B\x1b[D\x1b[C".as_slice(),
+            ),
+            (json!(["esc", "[", "Z"]), b"\x1b[Z".as_slice()),
+            // Unlike the control stream's send_key, this RPC retains the
+            // owner key grammar, including all ctrl+letter chords.
+            (
+                json!(["ctrl+z", "CTRL+X", "c-a"]),
+                b"\x1a\x18\x01".as_slice(),
+            ),
+        ] {
+            let response = relay(&mut app, json!({"target":pane.0.to_string(),"keys":keys}));
+            assert_eq!(
+                response["result"],
+                json!({"type":"ok","pane":pane.0.to_string()})
+            );
+            let crate::terminal::pty::InputAction::Bytes(actual) = input_rx.recv().unwrap() else {
+                panic!("keys must be one byte batch");
+            };
+            assert_eq!(actual, bytes);
+            assert!(input_rx.try_recv().is_err());
+        }
+        for params in [
+            json!({"target":pane.0.to_string(),"keys":[]}),
+            json!({"target":pane.0.to_string(),"keys":"enter"}),
+            json!({"target":pane.0.to_string(),"keys":["enter",7]}),
+            json!({"target":pane.0.to_string(),"keys":["enter","invalid"]}),
+            json!({"target":pane.0.to_string(),"keys":["enter"],"extra":true}),
+            json!({"target":"missing-agent","keys":["enter"]}),
+        ] {
+            assert!(relay(&mut app, params).get("error").is_some());
+            assert!(
+                input_rx.try_recv().is_err(),
+                "rejection must not queue a prefix"
+            );
+        }
+        app.status.get_mut(&pane).unwrap().agent.clear();
+        let params = json!({"target":pane.0.to_string(),"keys":["enter"]});
+        assert_eq!(
+            relay(&mut app, params.clone())["error"]["code"],
+            "agent_not_ready"
+        );
+        assert!(input_rx.try_recv().is_err());
+        app.status.get_mut(&pane).unwrap().agent = "claude".into();
+        drop(input_rx);
+        assert_eq!(relay(&mut app, params)["error"]["code"], "send_failed");
+        gateway.stop();
+    }
+
+    #[test]
+    fn access_keys_rejections_never_admit_input() {
+        let _env = crate::persist::test_env("access-keys-denied");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+        for (mode, expiry, auth, methods) in [
+            (AccessMode::ReadOnly, None, "client", vec!["agent.keys"]),
+            (AccessMode::Control, None, "wrong", vec!["agent.keys"]),
+            (AccessMode::Control, Some(1), "client", vec!["agent.keys"]),
+            (
+                AccessMode::Control,
+                None,
+                "client",
+                vec![
+                    "agent.key",
+                    "Agent.keys",
+                    "agent.keys.",
+                    "agent.keys ",
+                    "agent.send",
+                    "agent.start",
+                    "agent.fork",
+                    "pane.send_input",
+                    "pane.run",
+                    "pane.close",
+                    "terminal.backend.type_literal",
+                    "terminal.backend.submit_text",
+                    "terminal.backend.send_key",
+                    "uhp.token.list",
+                    "uhp.token.create",
+                    "uhp.token.revoke",
+                ],
+            ),
+        ] {
+            // No listener exists: forbidden, rather than unavailable, proves
+            // the gateway rejects before connecting to an upstream writer.
+            let mut gateway = Gateway::start(
+                crate::persist::ensure_config_dir().join("no-upstream.sock"),
+                "client".into(),
+                expiry,
+                "upstream".into(),
+                Pairing::new(Duration::from_secs(60)).unwrap(),
+                mode,
+            )
+            .unwrap();
+            for method in methods {
+                let response = exchange(
+                    gateway.address(),
+                    &json!({
+                        "id":"denied","method":method,"params":{"target":pane.0.to_string(),"keys":["enter"]},"auth":auth
+                    }),
+                );
+                assert_eq!(response["error"]["code"], "forbidden", "{method}");
+                assert!(input_rx.try_recv().is_err());
+            }
+            gateway.stop();
+        }
     }
 
     fn exchange(address: SocketAddr, request: &Value) -> Value {
