@@ -1060,7 +1060,6 @@ fn render_client(
     }
 
     let may_patch = partial_pass
-        && interactive
         && client.retained_ready
         && !client.force_full
         && !client.behind
@@ -1091,8 +1090,8 @@ fn render_client(
                 .clone_from(&app.pane_content_rects);
             client.retained_ready = true;
         } else {
-            ui::render_projection(&mut target, app);
-            client.retained_ready = false;
+            client.retained_pane_content = ui::render_projection(&mut target, app);
+            client.retained_ready = true;
         }
         (target.cursor(), target.cursor_visible())
     };
@@ -1657,6 +1656,96 @@ mod tests {
         assert!(app.rearm_pty_notify_by_visibility().2);
         app.panes[&hidden].mark_data_pending_for_test();
         assert!(!app.rearm_pty_notify_by_visibility().2);
+    }
+
+    #[test]
+    fn passive_retained_frames_match_full_projection_at_each_client_size() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let _env = crate::persist::test_env("passive-retained-frames");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.server_mode = true;
+        let pane = app.layout().focus;
+        let (tx, _rx) = mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            100,
+            30,
+            tx,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        let mut clients = HashMap::new();
+        let mut receivers = Vec::new();
+        for (id, cols, rows) in [(1, 100, 30), (2, 100, 30), (3, 60, 20)] {
+            let (client, rx) = display_client(cols, rows, id);
+            clients.insert(id, client);
+            receivers.push(rx);
+        }
+        let mut foreground = Some(1);
+        let mut size = (100, 30);
+        let mut scratch = RenderScratch::default();
+        render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            false,
+            false,
+            &mut scratch,
+        );
+        for rx in &receivers {
+            rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        }
+        let geometry = app.pane_content_rects.clone();
+        let pty_size = app.panes[&pane].size();
+
+        for bytes in [
+            "界e\u{301} text",
+            "\rshort\x1b[K",
+            "\x1b]2;new title\x07!",
+            "\rnext",
+        ] {
+            for client in clients.values() {
+                client.sender.frame_pending.store(false, Ordering::Release);
+            }
+            engine.lock().unwrap().advance(bytes.as_bytes());
+            let partial_before = super::PARTIAL_TERMINAL_PROJECTIONS.load(Ordering::Relaxed);
+            render_clients(
+                &mut app,
+                &mut clients,
+                &mut foreground,
+                &mut size,
+                false,
+                true,
+                &mut scratch,
+            );
+            for rx in &receivers {
+                rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            }
+            if !bytes.contains("\x1b]2;") {
+                assert!(
+                    super::PARTIAL_TERMINAL_PROJECTIONS.load(Ordering::Relaxed)
+                        >= partial_before + 3,
+                    "all three clients must patch their own retained geometry"
+                );
+            }
+            for client in clients.values() {
+                let area = Rect::new(0, 0, client.size.0, client.size.1);
+                let mut expected = Buffer::empty(area);
+                let mut target = crate::ui::RenderTarget::new(&mut expected, area);
+                crate::ui::render_projection(&mut target, &mut app);
+                let cursor = (target.cursor(), target.cursor_visible());
+                assert_eq!(client.render_buf, expected, "client size {:?}", client.size);
+                let frame = client.last_frame.as_ref().unwrap();
+                assert_eq!((frame.cursor, frame.cursor_visible), cursor);
+                assert!(client.retained_ready);
+            }
+            assert_eq!(app.pane_content_rects, geometry);
+            assert_eq!(app.panes[&pane].size(), pty_size);
+            assert_eq!(app.layout().focus, pane);
+        }
     }
 
     #[test]
