@@ -198,6 +198,7 @@ impl Pane {
         shell: &str,
         history_budget_bytes: usize,
         appearance: PaneAppearance,
+        host_graphics: crate::terminal::graphics::HostGraphics,
     ) -> Result<Pane> {
         let cmd = CommandBuilder::new(shell);
         Self::build(
@@ -212,6 +213,7 @@ impl Pane {
             &[],
             history_budget_bytes,
             appearance,
+            host_graphics,
         )
     }
 
@@ -231,6 +233,7 @@ impl Pane {
         argv: &[String],
         history_budget_bytes: usize,
         appearance: PaneAppearance,
+        host_graphics: crate::terminal::graphics::HostGraphics,
     ) -> Result<Pane> {
         let Some((program, args)) = argv.split_first() else {
             return Err(anyhow::anyhow!("empty shell command"));
@@ -251,6 +254,7 @@ impl Pane {
             &[],
             history_budget_bytes,
             appearance,
+            host_graphics,
         )
     }
 
@@ -267,6 +271,7 @@ impl Pane {
         env: &[(String, String)],
         history_budget_bytes: usize,
         appearance: PaneAppearance,
+        host_graphics: crate::terminal::graphics::HostGraphics,
     ) -> Result<Pane> {
         let Some((program, args)) = argv.split_first() else {
             return Err(anyhow::anyhow!("empty module command"));
@@ -287,6 +292,7 @@ impl Pane {
             env,
             history_budget_bytes,
             appearance,
+            host_graphics,
         )
     }
 
@@ -306,6 +312,7 @@ impl Pane {
         shell: &str,
         history_budget_bytes: usize,
         appearance: PaneAppearance,
+        host_graphics: crate::terminal::graphics::HostGraphics,
     ) -> Pane {
         let cmd = CommandBuilder::new(shell);
         Self::build_deferred(
@@ -321,6 +328,7 @@ impl Pane {
             &[],
             history_budget_bytes,
             appearance,
+            host_graphics,
         )
     }
 
@@ -340,6 +348,7 @@ impl Pane {
         shell: &str,
         history_budget_bytes: usize,
         appearance: PaneAppearance,
+        host_graphics: crate::terminal::graphics::HostGraphics,
     ) -> Pane {
         let cmd = CommandBuilder::new(shell);
         Self::build_deferred(
@@ -355,6 +364,7 @@ impl Pane {
             &[],
             history_budget_bytes,
             appearance,
+            host_graphics,
         )
     }
 
@@ -373,6 +383,7 @@ impl Pane {
         argv: &[String],
         history_budget_bytes: usize,
         appearance: PaneAppearance,
+        host_graphics: crate::terminal::graphics::HostGraphics,
     ) -> Result<Pane> {
         let Some((program, args)) = argv.split_first() else {
             return Err(anyhow::anyhow!("empty shell command"));
@@ -394,6 +405,7 @@ impl Pane {
             &[],
             history_budget_bytes,
             appearance,
+            host_graphics,
         ))
     }
 
@@ -410,6 +422,7 @@ impl Pane {
         extra_env: &[(String, String)],
         history_budget_bytes: usize,
         appearance: PaneAppearance,
+        host_graphics: crate::terminal::graphics::HostGraphics,
     ) -> Result<Pane> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
@@ -444,6 +457,7 @@ impl Pane {
             input_tx.clone(),
             history_budget_bytes,
             appearance,
+            host_graphics,
         );
         // Replay the saved screen so a restored pane shows its prior content.
         if let Some(screen) = initial {
@@ -514,6 +528,7 @@ impl Pane {
         extra_env: &[(String, String)],
         history_budget_bytes: usize,
         appearance: PaneAppearance,
+        host_graphics: crate::terminal::graphics::HostGraphics,
     ) -> Pane {
         // Everything a caller can observe before the child exists: the engine
         // (pane.read, detection, rendering) and the input queue.
@@ -526,6 +541,7 @@ impl Pane {
             input_tx.clone(),
             history_budget_bytes,
             appearance,
+            host_graphics,
         );
         if let Some(screen) = initial {
             if let Ok(mut engine) = engine.lock() {
@@ -1297,6 +1313,7 @@ mod reap_tests {
             "/bin/sh",
             500,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         )
         .expect("spawn")
     }
@@ -1354,6 +1371,7 @@ mod reap_tests {
             "/bin/sh",
             500,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         )
         .expect("spawn shell with inherited blocked SIGCHLD");
         let pid = pane.child_pid.load(Ordering::SeqCst);
@@ -1403,6 +1421,7 @@ mod reap_tests {
             PaneId::alloc(), 80, 24, std::env::current_dir().unwrap(), tx,
             &["/bin/sh".into(), "-c".into(), "i=0; while [ $i -lt 2024 ]; do printf 'row %s cafe\n' \"$i\"; i=$((i + 1)); done; sleep 10".into()],
             &[], 16 * 1024 * 1024, PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         ).unwrap();
         for resize in [false, true] {
             if resize {
@@ -1447,6 +1466,7 @@ mod reap_tests {
             "/bin/sh",
             500,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         );
         assert_eq!(
             pane.child_pid.load(Ordering::SeqCst),
@@ -1493,6 +1513,7 @@ mod reap_tests {
             "/bin/sh",
             500,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         );
         assert!(
             pane.engine
@@ -1521,6 +1542,7 @@ mod reap_tests {
             "/bin/sh",
             500,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1563,6 +1585,7 @@ mod reap_tests {
             "/bin/sh",
             500,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1599,6 +1622,7 @@ mod reap_tests {
             "/bin/sh",
             500,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         );
         // The spawn has not forked yet: this is the racing resize.
         assert!(pane.resize(132, 40));

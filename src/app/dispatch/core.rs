@@ -26,6 +26,15 @@ impl App {
                     "server_generation".into(),
                     json!(self.backend_server_generation),
                 );
+                // Whether an image would actually reach a screen right now.
+                // It depends on the attached clients, so it belongs to the
+                // running server rather than the static contract.
+                if let Some(graphics) = object
+                    .get_mut("graphics")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    graphics.insert("available".into(), json!(self.host_graphics_available()));
+                }
             }
             Ok(capabilities)
         }

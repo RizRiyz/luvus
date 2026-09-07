@@ -77,6 +77,8 @@ pub enum AppEvent {
         cols: u16,
         rows: u16,
         terminal_colors: Option<TerminalColors>,
+        /// Whether this client's terminal can draw images.
+        terminal_graphics: Option<bool>,
     },
     /// A binary client detached.
     ClientDetach {

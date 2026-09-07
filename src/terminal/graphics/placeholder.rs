@@ -25,6 +25,15 @@ use std::borrow::Cow;
 /// coordinate rather than an accent, so they carry no meaning as text either.
 pub(crate) const PLACEHOLDER: char = '\u{10eeee}';
 
+/// Whether one cell's symbol is an image cell rather than text.
+///
+/// The base character decides it, so the cell is recognized whichever
+/// coordinate marks it carries — including none, which the protocol allows for
+/// a cell that inherits its coordinates from its left neighbour.
+pub(crate) fn is_placeholder(symbol: &str) -> bool {
+    symbol.starts_with(PLACEHOLDER)
+}
+
 /// Replace placeholder cells in already-extracted text with blanks.
 ///
 /// Prefer filtering per cell where the grid is still available: a cell knows
@@ -94,6 +103,16 @@ mod tests {
         // letter, or an emoji's variation selector, is text the user selected.
         let accented = "e\u{0301} \u{1f5a5}\u{fe0f}";
         assert_eq!(strip(accented), accented);
+    }
+
+    #[test]
+    fn an_image_cell_is_recognized_by_its_base_character() {
+        assert!(is_placeholder("\u{10eeee}"));
+        assert!(is_placeholder("\u{10eeee}\u{0305}\u{030d}"));
+        assert!(!is_placeholder("x"));
+        assert!(!is_placeholder(""));
+        // A bare combining mark is not an image cell.
+        assert!(!is_placeholder("\u{0305}"));
     }
 
     #[test]

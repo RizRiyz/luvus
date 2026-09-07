@@ -218,6 +218,10 @@ struct ClientState {
     sender: ClientSender,
     size: (u16, u16),
     terminal_colors: Option<crate::terminal::theme_probe::TerminalColors>,
+    /// Whether this client's terminal answered the kitty graphics query.
+    /// Unknown counts as no: painting image bytes at a terminal that cannot
+    /// draw them reaches the user as garbage.
+    graphics: bool,
     render_buf: Buffer,
     last_frame: Option<protocol::FrameData>,
     behind: bool,
@@ -241,6 +245,7 @@ impl ClientState {
         cols: u16,
         rows: u16,
         terminal_colors: Option<crate::terminal::theme_probe::TerminalColors>,
+        graphics: bool,
         last_activity: u64,
     ) -> Self {
         let size = (cols.max(1), rows.max(1));
@@ -248,6 +253,7 @@ impl ClientState {
             sender,
             size,
             terminal_colors,
+            graphics,
             render_buf: Buffer::empty(Rect::new(0, 0, size.0, size.1)),
             last_frame: None,
             behind: false,
@@ -551,7 +557,7 @@ pub fn run() -> Result<()> {
                     let _ = c.send_control(ServerMessage::Detach);
                 }
                 foreground = latest_client(&clients);
-                apply_foreground_theme(&mut app, &clients, foreground);
+                apply_client_state(&mut app, &clients, foreground);
                 render_request.record(RenderCause::UserInterface);
             }
         }
@@ -561,7 +567,7 @@ pub fn run() -> Result<()> {
                     let _ = client.send_control(ServerMessage::SwitchSession { name });
                 }
                 foreground = latest_client(&clients);
-                apply_foreground_theme(&mut app, &clients, foreground);
+                apply_client_state(&mut app, &clients, foreground);
                 render_request.record(RenderCause::UserInterface);
             } else {
                 app.show_toast("no attached client to switch".to_string());
@@ -690,6 +696,7 @@ fn apply(
             cols,
             rows,
             terminal_colors,
+            terminal_graphics,
         } => {
             crate::logging::event(
                 crate::logging::EventKind::ServerClientAttach,
@@ -712,11 +719,12 @@ fn apply(
                     cols,
                     rows,
                     terminal_colors,
+                    terminal_graphics.unwrap_or(false),
                     activity,
                 ),
             );
             *foreground = Some(id);
-            apply_foreground_theme(app, clients, *foreground);
+            apply_client_state(app, clients, *foreground);
             app.mark_runtime_scans_dirty();
             true
         }
@@ -732,7 +740,7 @@ fn apply(
             clients.remove(&id);
             if was_foreground {
                 *foreground = latest_client(clients);
-                apply_foreground_theme(app, clients, *foreground);
+                apply_client_state(app, clients, *foreground);
             }
             was_foreground
         }
@@ -766,7 +774,7 @@ fn apply(
             let promoted = *foreground != Some(id);
             if promoted {
                 *foreground = Some(id);
-                apply_foreground_theme(app, clients, *foreground);
+                apply_client_state(app, clients, *foreground);
             }
             let target_size = clients.get(&id).map(|client| client.size);
             if promoted || target_size.is_some_and(|size| size != *interactive_size) {
@@ -777,7 +785,7 @@ fn apply(
                 if disconnected {
                     clients.remove(&id);
                     *foreground = latest_client(clients);
-                    apply_foreground_theme(app, clients, *foreground);
+                    apply_client_state(app, clients, *foreground);
                     discard_client_input(input);
                     return true;
                 }
@@ -818,7 +826,16 @@ fn latest_client(clients: &Clients) -> Option<u64> {
         .map(|(&id, _)| id)
 }
 
-fn apply_foreground_theme(app: &mut App, clients: &Clients, foreground: Option<u64>) {
+/// Re-derive the state that depends on which clients are attached.
+///
+/// Called at every point the client set changes, so a pane can never be left
+/// believing something about clients that have since come or gone.
+fn apply_client_state(app: &mut App, clients: &Clients, foreground: Option<u64>) {
+    // One drawing client is enough. Images are forwarded only to the clients
+    // that can render them, and the rest paint the placeholder cells as blanks,
+    // so a mixed set of clients stays correct either way.
+    app.set_host_graphics(clients.values().any(|client| client.graphics));
+
     if app.config.theme != "terminal" {
         return;
     }
@@ -898,7 +915,7 @@ fn render_clients(
     }
     if foreground.is_none_or(|id| !clients.contains_key(&id)) {
         *foreground = latest_client(clients);
-        apply_foreground_theme(app, clients, *foreground);
+        apply_client_state(app, clients, *foreground);
     }
 
     let retained_client_ready = foreground
@@ -922,6 +939,20 @@ fn render_clients(
             .damage
             .values()
             .all(|snapshot| snapshot.kind == crate::terminal::vt::DamageKind::Partial);
+
+    // Images the panes' children emitted since the last pass. Drained once and
+    // given to every client that can draw, ahead of the frame whose placeholder
+    // cells refer to them.
+    let graphics = app.take_pane_graphics();
+    if !graphics.is_empty() {
+        for client in clients.values() {
+            if client.graphics {
+                let _ = client
+                    .sender
+                    .send_control(ServerMessage::Graphics(graphics.clone()));
+            }
+        }
+    }
 
     scratch.order.clear();
     scratch.order.extend(clients.keys().copied());
@@ -954,7 +985,7 @@ fn render_clients(
     }
     if foreground.is_some_and(|id| !clients.contains_key(&id)) {
         *foreground = latest_client(clients);
-        apply_foreground_theme(app, clients, *foreground);
+        apply_client_state(app, clients, *foreground);
     }
     if partial_candidate {
         acknowledge_visible_terminal_damage(app, &mut scratch.damage);
@@ -1260,18 +1291,19 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
         return;
     }
 
-    let probe_terminal = terminal_theme.load(Ordering::Relaxed);
-    if protocol::write_message(&mut writer, &ServerMessage::Ready { probe_terminal }).is_err() {
+    // Only the virtual Terminal theme reads the palette, but every client is
+    // asked whether its terminal can draw images: that describes the terminal,
+    // not the theme, and a pane must not be told graphics are unavailable
+    // merely because the user picked a static theme.
+    let probe_colors = terminal_theme.load(Ordering::Relaxed);
+    if protocol::write_message(&mut writer, &ServerMessage::Ready { probe_colors }).is_err() {
         return;
     }
-    let terminal_colors = if probe_terminal {
+    let (terminal_colors, terminal_graphics) =
         match protocol::read_message::<_, ClientMessage>(&mut reader) {
-            Ok(ClientMessage::TerminalColors(colors)) => colors,
+            Ok(ClientMessage::TerminalProbe { colors, graphics }) => (colors, graphics),
             _ => return,
-        }
-    } else {
-        None
-    };
+        };
 
     let (message_tx, message_rx) = mpsc::channel::<ServerMessage>();
     let frame_pending = Arc::new(AtomicBool::new(false));
@@ -1319,6 +1351,7 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
             cols,
             rows,
             terminal_colors,
+            terminal_graphics,
         })
         .is_err()
     {
@@ -1390,7 +1423,7 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
                 let _ = app_tx.send(AppEvent::ClientDetach { id });
                 break;
             }
-            Ok(ClientMessage::Hello { .. } | ClientMessage::TerminalColors(_)) => {}
+            Ok(ClientMessage::Hello { .. } | ClientMessage::TerminalProbe { .. }) => {}
         }
     }
 }
@@ -1623,6 +1656,7 @@ mod tests {
                 cols,
                 rows,
                 None,
+                false,
                 activity,
             ),
             rx,
@@ -1652,6 +1686,7 @@ mod tests {
             tx,
             4 * 1024 * 1024,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         );
         app.panes.get_mut(&hidden).unwrap().engine = engine.clone();
         app.dispatch("tab.new", &serde_json::json!({})).unwrap();
@@ -1700,6 +1735,7 @@ mod tests {
             tx,
             4 * 1024 * 1024,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         );
         app.panes.get_mut(&pane).unwrap().engine = engine.clone();
         let mut clients = HashMap::new();
@@ -1790,6 +1826,7 @@ mod tests {
             response_tx,
             4 * 1024 * 1024,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         );
         app.panes.get_mut(&focus).expect("focused pane").engine = engine.clone();
 
@@ -1924,6 +1961,7 @@ mod tests {
             120,
             32,
             None,
+            false,
             1,
         );
         let frame = || {

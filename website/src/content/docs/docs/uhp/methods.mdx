@@ -79,6 +79,21 @@ method registry, event sequence fence, identity rules, limits, and
 graphics support. Discover capabilities instead of inferring support from the
 Luvus release number.
 
+`graphics` answers two different questions and both matter:
+
+```json
+{"protocol":"kitty","placement":"unicode_placeholder",
+ "supported":true,"available":false}
+```
+
+`supported` says the build speaks the kitty graphics protocol. `available`
+says whether an image would reach a screen *right now*, which depends on the
+attached clients: a pane can only display an image while a client whose own
+terminal can draw one is attached, and that changes as clients attach and
+detach. A program running in a pane does not need to read this — it asks the
+terminal directly with the protocol's own query action, and Luvus answers for
+the clients attached at that instant.
+
 | Family | Methods |
 |---|---|
 | host / sessions | `host.capabilities` · `host.info` · `host.doctor` · `host.update.check` · `host.update.install` · `session.list` · `session.status` · `session.start` · `session.stop` · `session.restart` · `session.delete` · `skill.status` · `skill.enable` · `skill.disable` · `integration.status` · `integration.install` · `integration.uninstall` |

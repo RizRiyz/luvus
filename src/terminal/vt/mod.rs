@@ -165,6 +165,7 @@ pub(crate) fn create_engine(
     resp_tx: impl Into<InputSender>,
     history_budget_bytes: usize,
     appearance: PaneAppearance,
+    host_graphics: crate::terminal::graphics::HostGraphics,
 ) -> Arc<Mutex<dyn VtEngine>> {
     let resp_tx = resp_tx.into();
     match kind {
@@ -175,6 +176,7 @@ pub(crate) fn create_engine(
                 resp_tx,
                 history_budget_bytes,
                 appearance,
+                host_graphics,
             )))
         }
     }
@@ -402,6 +404,24 @@ pub trait VtEngine: Send {
         max_bytes: usize,
     ) -> crate::terminal::backend::CaptureResult;
 
+    /// Take the kitty graphics commands this pane's child emitted since the
+    /// last call, for the clients whose terminals can draw them.
+    ///
+    /// The bytes are opaque and are forwarded verbatim: they teach a terminal
+    /// an image without saying where it goes. Position comes from the
+    /// placeholder cells the child writes into the grid, which travel in the
+    /// ordinary frame. Callers must therefore send these *before* the frame
+    /// they belong to, or a terminal is asked to draw an image it has not been
+    /// given yet.
+    fn take_graphics(&mut self) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
+
+    /// Whether [`Self::take_graphics`] would return anything, without taking it.
+    fn has_graphics(&self) -> bool {
+        false
+    }
+
     /// Latest window title set by the child via OSC 0/2, if any.
     fn title(&self) -> Option<String>;
 
@@ -540,6 +560,7 @@ mod tests {
             tx,
             64 * 1024,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         );
         let mut engine = engine.lock().expect("engine lock");
         engine.advance(b"hi");

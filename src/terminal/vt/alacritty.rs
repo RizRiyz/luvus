@@ -40,7 +40,13 @@ pub struct EventProxy {
     tx: InputSender,
     title: TitleSlot,
     appearance: Arc<Mutex<PaneAppearance>>,
+    host_graphics: graphics::HostGraphics,
+    graphics_queue: GraphicsSlot,
 }
+
+/// Graphics commands waiting to reach the clients that can draw them. Shared
+/// with the engine, which drains it when a frame is about to be sent.
+type GraphicsSlot = Arc<Mutex<graphics::GraphicsQueue>>;
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
@@ -87,8 +93,24 @@ impl EventListener for EventProxy {
             // every other graphics command: with no renderer there is nothing
             // to acknowledge. See `crate::terminal::graphics`.
             Event::KittyGraphics(command) => {
-                if let Some(reply) = graphics::query_reply(&command.payload) {
+                if let Some(reply) =
+                    graphics::query_reply(&command.payload, self.host_graphics.supported())
+                {
                     let _ = self.tx.send(InputAction::Bytes(reply));
+                    return;
+                }
+                // Nothing can draw this, so collecting it would only cost
+                // memory for a command that is never sent anywhere.
+                if !self.host_graphics.supported() {
+                    return;
+                }
+                self.host_graphics.mark_pending();
+                if let Ok(mut queue) = self.graphics_queue.lock() {
+                    let mut forwarded = Vec::with_capacity(command.payload.len() + 5);
+                    forwarded.extend_from_slice(b"\x1b_G");
+                    forwarded.extend_from_slice(&command.payload);
+                    forwarded.extend_from_slice(b"\x1b\\");
+                    queue.push(&command.payload, &forwarded);
                 }
             }
             _ => {}
@@ -119,6 +141,7 @@ pub struct AlacrittyEngine {
     term: Term<EventProxy>,
     parser: Processor,
     title: TitleSlot,
+    graphics_queue: GraphicsSlot,
     response_tx: InputSender,
     appearance: Arc<Mutex<PaneAppearance>>,
     history_budget_bytes: usize,
@@ -150,6 +173,7 @@ impl AlacrittyEngine {
             resp_tx,
             history_budget_bytes,
             PaneAppearance::default(),
+            graphics::HostGraphics::default(),
         )
     }
 
@@ -159,6 +183,7 @@ impl AlacrittyEngine {
         resp_tx: impl Into<InputSender>,
         history_budget_bytes: usize,
         initial_appearance: PaneAppearance,
+        host_graphics: graphics::HostGraphics,
     ) -> Self {
         let resp_tx = resp_tx.into();
         let dims = Dims {
@@ -166,11 +191,14 @@ impl AlacrittyEngine {
             rows: rows.max(1) as usize,
         };
         let title: TitleSlot = Arc::new(Mutex::new(TitleState::default()));
+        let graphics_queue: GraphicsSlot = Arc::new(Mutex::new(graphics::GraphicsQueue::default()));
         let appearance = Arc::new(Mutex::new(initial_appearance));
         let proxy = EventProxy {
             tx: resp_tx.clone(),
             title: title.clone(),
             appearance: appearance.clone(),
+            host_graphics,
+            graphics_queue: graphics_queue.clone(),
         };
         // Alacritty retains history by rows, not bytes. Derive a conservative
         // capacity from Luvus's per-pane byte budget and current width. The
@@ -187,6 +215,7 @@ impl AlacrittyEngine {
             term,
             parser: Processor::new(),
             title,
+            graphics_queue,
             response_tx: resp_tx,
             appearance,
             history_budget_bytes,
@@ -951,6 +980,19 @@ impl VtEngine for AlacrittyEngine {
             lines: returned,
             truncated,
         }
+    }
+
+    fn take_graphics(&mut self) -> Vec<Vec<u8>> {
+        self.graphics_queue
+            .lock()
+            .map(|mut queue| queue.drain())
+            .unwrap_or_default()
+    }
+
+    fn has_graphics(&self) -> bool {
+        self.graphics_queue
+            .lock()
+            .is_ok_and(|queue| !queue.is_empty())
     }
 
     fn title(&self) -> Option<String> {
@@ -2213,6 +2255,128 @@ mod tests {
         assert!(text.contains("cd"), "{text:?}");
     }
 
+    /// The value is shared, not copied, so a pane built before a drawing client
+    /// attached must start answering as soon as one does — and stop when the
+    /// last one leaves. A child asks this question in the middle of parsing its
+    /// own output, so a stale answer is one it acts on immediately.
+    #[test]
+    fn the_support_answer_follows_the_clients_that_are_attached() {
+        let (tx, rx) = channel();
+        let host_graphics = graphics::HostGraphics::default();
+        let mut e = AlacrittyEngine::with_appearance(
+            40,
+            5,
+            tx,
+            budget_for_rows(40, 20),
+            PaneAppearance::default(),
+            host_graphics.clone(),
+        );
+
+        let probe = b"\x1b_Gi=4207,a=q,t=d,f=24,s=1,v=1;AAAA\x1b\\";
+        e.advance(probe);
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b_Gi=4207;ENOTSUPPORTED:no attached client can draw images\x1b\\",
+            "no client is attached yet"
+        );
+
+        host_graphics.set(true);
+        e.advance(probe);
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b_Gi=4207;OK\x1b\\",
+            "a pane built earlier must see the client that attached later"
+        );
+
+        host_graphics.set(false);
+        e.advance(probe);
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b_Gi=4207;ENOTSUPPORTED:no attached client can draw images\x1b\\",
+            "the last drawing client detached"
+        );
+    }
+
+    /// The whole path a real image takes through a pane: the child transmits it
+    /// and creates a virtual placement, then writes the placeholder cells that
+    /// say where it goes. The command must come back out byte for byte — Luvus
+    /// decodes none of it, and a terminal that receives an altered command
+    /// resolves a different image or none.
+    #[test]
+    fn an_image_reaches_the_clients_exactly_as_the_child_wrote_it() {
+        let (tx, _rx) = channel();
+        let host_graphics = graphics::HostGraphics::default();
+        host_graphics.set(true);
+        let mut e = AlacrittyEngine::with_appearance(
+            40,
+            5,
+            tx,
+            budget_for_rows(40, 20),
+            PaneAppearance::default(),
+            host_graphics.clone(),
+        );
+
+        let transmit = "\x1b_Ga=T,U=1,i=42,c=2,r=1,f=100,q=2;iVBORw0KGgo=\x1b\\";
+        e.advance(transmit.as_bytes());
+        e.advance(
+            "\x1b[38;5;42m\u{10eeee}\u{0305}\u{0305}\u{10eeee}\u{0305}\u{030d}\x1b[39m".as_bytes(),
+        );
+
+        assert!(
+            host_graphics.take_pending(),
+            "the pane must flag that a render pass has something to collect"
+        );
+        assert!(e.has_graphics());
+        let forwarded = e.take_graphics();
+        assert_eq!(forwarded.len(), 1);
+        assert_eq!(
+            String::from_utf8(forwarded[0].clone()).unwrap(),
+            transmit,
+            "the command must reach the terminal unchanged"
+        );
+        assert!(
+            !e.has_graphics(),
+            "a command is delivered once, not on every frame"
+        );
+
+        // The placeholder cells stay in the grid: they are what positions the
+        // image, and the frame carries them like any other text.
+        let mut cells = Vec::new();
+        e.for_each_cell(&mut |row, column, symbol, cell| {
+            if row == 0 && column < 2 {
+                cells.push((column, symbol.to_string(), cell.fg));
+            }
+        });
+        assert_eq!(cells.len(), 2, "one cell per image column");
+        assert!(cells[0].1.starts_with('\u{10eeee}'));
+        assert_eq!(
+            cells[1].1, "\u{10eeee}\u{0305}\u{030d}",
+            "the coordinate marks travel with their cell"
+        );
+    }
+
+    /// A pane whose clients cannot draw must not accumulate images for nobody.
+    #[test]
+    fn nothing_is_collected_while_no_client_can_draw() {
+        let (tx, _rx) = channel();
+        let host_graphics = graphics::HostGraphics::default();
+        let mut e = AlacrittyEngine::with_appearance(
+            40,
+            5,
+            tx,
+            budget_for_rows(40, 20),
+            PaneAppearance::default(),
+            host_graphics.clone(),
+        );
+
+        e.advance(b"\x1b_Ga=T,U=1,i=42,c=2,r=1,f=100,q=2;iVBORw0KGgo=\x1b\\");
+        assert!(!e.has_graphics());
+        assert!(
+            !host_graphics.take_pending(),
+            "no render pass should be woken to collect nothing"
+        );
+    }
+
     /// The support probe every kitty-graphics client sends: a query action
     /// followed by DA1. Both must be answered, and the query must be answered
     /// first — a client that sees only the DA1 concludes "no graphics", which
@@ -2225,7 +2389,7 @@ mod tests {
 
         let query = recv_bytes(&rx);
         assert_eq!(
-            query, b"\x1b_Gi=4207;ENOTSUPPORTED:luvus panes render text only\x1b\\",
+            query, b"\x1b_Gi=4207;ENOTSUPPORTED:no attached client can draw images\x1b\\",
             "the query must be declined, keyed to the queried image id"
         );
         let da1 = recv_bytes(&rx);
@@ -2747,8 +2911,14 @@ mod tests {
     ) -> (AlacrittyEngine, std::sync::mpsc::Receiver<InputAction>) {
         let (tx, rx) = channel();
         let appearance = PaneAppearance { background, scheme };
-        let engine =
-            AlacrittyEngine::with_appearance(40, 5, tx, budget_for_rows(40, 20), appearance);
+        let engine = AlacrittyEngine::with_appearance(
+            40,
+            5,
+            tx,
+            budget_for_rows(40, 20),
+            appearance,
+            graphics::HostGraphics::default(),
+        );
         (engine, rx)
     }
 

@@ -95,6 +95,36 @@ fn config_reload_applies_the_agents_filter_live() {
     assert_eq!(app.agents_scroll, 0);
 }
 
+/// Automation is told to discover graphics support rather than infer it
+/// from a release number, so the two halves of the answer have to be there
+/// and have to mean different things: what this build implements, and
+/// whether an image would reach a screen right now.
+#[test]
+fn capabilities_separate_graphics_support_from_present_availability() {
+    let (_env, mut app) = app("socket-graphics-capabilities");
+
+    let reported = app
+        .dispatch("uhp.capabilities", &serde_json::json!({}))
+        .expect("capabilities are reported");
+    let graphics = &reported["graphics"];
+    assert_eq!(graphics["protocol"], "kitty");
+    assert_eq!(graphics["placement"], "unicode_placeholder");
+    assert_eq!(graphics["supported"], true, "the build implements it");
+    assert_eq!(
+        graphics["available"], false,
+        "no client is attached, so nothing could be drawn"
+    );
+
+    app.set_host_graphics(true);
+    let reported = app
+        .dispatch("uhp.capabilities", &serde_json::json!({}))
+        .expect("capabilities are reported");
+    assert_eq!(
+        reported["graphics"]["available"], true,
+        "a client that can draw has attached"
+    );
+}
+
 #[test]
 fn config_patch_updates_child_appearance_and_notifies_mode_2031() {
     let (_env, mut app) = app("socket-theme-appearance");
@@ -106,6 +136,7 @@ fn config_patch_updates_child_appearance_and_notifies_mode_2031() {
         response_tx,
         crate::config::SCROLLBACK_BYTES_DEFAULT,
         crate::terminal::appearance::PaneAppearance::default(),
+        crate::terminal::graphics::HostGraphics::default(),
     );
     crate::terminal::vt::VtEngine::advance(&mut engine, b"\x1b[?2031h");
     app.panes.get_mut(&pane_id).unwrap().engine =
