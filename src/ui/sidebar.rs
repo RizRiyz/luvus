@@ -1027,24 +1027,38 @@ fn draw_module_dock(f: &mut RenderTarget, area: Rect, id: &str, app: &mut App, t
                 .map_or(t.subtext1, |tone| crate::bar::render::tone_color(tone, t))
         };
         let row_color = tone_of(row.tone.as_deref());
-        let mut budget = (cw as usize).saturating_sub(prefix_w);
+        let budget = (cw as usize).saturating_sub(prefix_w);
         if row.spans.is_empty() {
             let text = crate::ui::truncate(&row.text, budget);
             spans.push(Span::styled(text, Style::new().fg(row_color)));
         } else {
+            // Truncate the joined spans as one line, exactly like `truncate`
+            // does for plain text: when they overflow, the last column is the
+            // ellipsis, so a dropped tail (`72%` after a bar that exactly fills
+            // the dock) is never silent.
+            let total: usize = row
+                .spans
+                .iter()
+                .map(|sp| crate::ui::display_width(&sp.text))
+                .sum();
+            let ellipsis = total > budget && budget > 0;
+            let mut left = if ellipsis { budget - 1 } else { budget };
+            let mut last_color = row_color;
             for sp in &row.spans {
-                if budget == 0 {
+                if left == 0 {
                     break;
                 }
-                let text = crate::ui::truncate(&sp.text, budget);
-                budget =
-                    budget.saturating_sub(unicode_width::UnicodeWidthStr::width(text.as_str()));
-                let color = if sp.tone.is_some() {
+                let text = crate::ui::clip_columns(&sp.text, left);
+                left -= crate::ui::display_width(&text);
+                last_color = if sp.tone.is_some() {
                     tone_of(sp.tone.as_deref())
                 } else {
                     row_color
                 };
-                spans.push(Span::styled(text, Style::new().fg(color)));
+                spans.push(Span::styled(text, Style::new().fg(last_color)));
+            }
+            if ellipsis {
+                spans.push(Span::styled("…", Style::new().fg(last_color)));
             }
         }
         line_at(f, y, Line::from(spans));
@@ -1706,5 +1720,227 @@ mod chrome_colour_tests {
             t.border_focus,
             "the hovered resize seam uses the focus border colour"
         );
+    }
+}
+
+/// Module dock rows with a `tone` or `spans` (docs: *Writing a Module*, dock
+/// field table). Rendered through the real sidebar so the colours below are
+/// what a module author sees, not what a helper returns.
+#[cfg(test)]
+mod dock_tone_tests {
+    use crate::app::{App, DockRow, DockSpan, Side};
+    use ratatui::{backend::TestBackend, style::Color, Terminal};
+
+    fn row(text: &str, tone: Option<&str>, spans: &[(&str, Option<&str>)]) -> DockRow {
+        DockRow {
+            text: text.into(),
+            dot: None,
+            tone: tone.map(Into::into),
+            spans: spans
+                .iter()
+                .map(|(text, tone)| DockSpan {
+                    text: (*text).into(),
+                    tone: tone.map(Into::into),
+                })
+                .collect(),
+            action: Some("noop".into()),
+            value: None,
+            menu: Vec::new(),
+        }
+    }
+
+    fn render(app: &mut App) -> Terminal<TestBackend> {
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|frame| crate::ui::render(frame, app)).unwrap();
+        term
+    }
+
+    fn app_with_rows(name: &str, rows: Vec<DockRow>) -> (App, Terminal<TestBackend>) {
+        let _env = crate::persist::test_env(name);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.push_module_dock("mod:quota", Some("QUOTA".into()), Side::Left, rows);
+        assert_eq!(
+            app.sidebars
+                .side_of(&crate::app::DockKind::Module("mod:quota".into())),
+            Some(Side::Left),
+            "the dock mounted, so its rows are on screen"
+        );
+        let term = render(&mut app);
+        (app, term)
+    }
+
+    /// Where `needle` starts in the buffer, compared cell by cell so a
+    /// multi-byte glyph such as `━` counts as one column (a byte offset from
+    /// `str::find` would land on the wrong cell).
+    fn locate(term: &Terminal<TestBackend>, needle: &str) -> Option<(u16, u16)> {
+        let buf = term.backend().buffer();
+        let want: Vec<String> = needle.chars().map(|c| c.to_string()).collect();
+        for r in 0..buf.area.height {
+            let syms: Vec<&str> = (0..buf.area.width)
+                .map(|c| buf.cell((c, r)).map(|x| x.symbol()).unwrap_or(" "))
+                .collect();
+            for start in 0..=syms.len().saturating_sub(want.len()) {
+                if want.iter().enumerate().all(|(i, w)| syms[start + i] == w) {
+                    return Some((start as u16, r));
+                }
+            }
+        }
+        None
+    }
+
+    fn fg_at(term: &Terminal<TestBackend>, needle: &str) -> Color {
+        let (x, y) = locate(term, needle).unwrap_or_else(|| panic!("{needle:?} is on screen"));
+        term.backend().buffer().cell((x, y)).unwrap().fg
+    }
+
+    #[test]
+    fn row_tone_colours_the_text_and_untoned_rows_keep_the_default() {
+        let (app, term) = app_with_rows(
+            "dock-tone-row",
+            vec![
+                row("session 72%", Some("success"), &[]),
+                row("plain row", None, &[]),
+                row("typo row", Some("reddish"), &[]),
+            ],
+        );
+        let t = &app.theme;
+        assert_eq!(
+            fg_at(&term, "session 72%"),
+            t.mint,
+            "success is the theme's mint"
+        );
+        assert_eq!(
+            fg_at(&term, "plain row"),
+            t.subtext1,
+            "no tone: exactly as before"
+        );
+        assert_eq!(
+            fg_at(&term, "typo row"),
+            t.subtext1,
+            "an unknown tone falls back to the default instead of failing"
+        );
+    }
+
+    #[test]
+    fn spans_take_their_own_tone_or_inherit_the_rows() {
+        let (app, term) = app_with_rows(
+            "dock-tone-spans",
+            vec![
+                row(
+                    "week [xx] 41%",
+                    Some("warning"),
+                    &[
+                        ("week ", None),
+                        ("[", Some("muted")),
+                        ("xx", Some("success")),
+                        ("] 41%", None),
+                    ],
+                ),
+                row("day [yy]", None, &[("day ", None), ("[yy]", Some("error"))]),
+            ],
+        );
+        let t = &app.theme;
+        assert_eq!(
+            fg_at(&term, "week"),
+            t.amber,
+            "no span tone: the row's warning"
+        );
+        assert_eq!(fg_at(&term, "[xx"), t.overlay0, "muted span");
+        assert_eq!(fg_at(&term, "xx]"), t.mint, "success span");
+        assert_eq!(
+            fg_at(&term, "] 41%"),
+            t.amber,
+            "tail inherits the row again"
+        );
+        assert_eq!(
+            fg_at(&term, "day"),
+            t.subtext1,
+            "no row tone either: the default"
+        );
+        assert_eq!(fg_at(&term, "[yy]"), t.coral, "error span");
+    }
+
+    #[test]
+    fn spans_truncate_as_one_line_with_a_trailing_ellipsis() {
+        // Learn the dock's text budget from the rect a clickable row records:
+        // the text starts two columns in and the dock keeps a one-column gutter.
+        let (mut app, _term) = app_with_rows("dock-tone-trunc", vec![row("probe", None, &[])]);
+        let rect = app.module_dock_rects[0].2;
+        let budget = rect.width as usize - 3;
+        assert!(budget > 8, "sidebar wide enough for the cases below");
+        let text_x = rect.x + 2;
+        let last_x = text_x + budget as u16 - 1;
+
+        let fill = "a".repeat(budget);
+        app.push_module_dock(
+            "mod:quota",
+            Some("QUOTA".into()),
+            Side::Left,
+            vec![
+                // Bar exactly fills the dock, then a number that cannot fit.
+                row(
+                    "over",
+                    None,
+                    &[(fill.as_str(), Some("success")), ("72%", Some("error"))],
+                ),
+                // Exactly fits: no ellipsis, nothing dropped.
+                row(
+                    "exact",
+                    None,
+                    &[
+                        ("b".repeat(budget - 3).as_str(), None),
+                        ("41%", Some("error")),
+                    ],
+                ),
+                // A single span wider than the dock.
+                row(
+                    "wide",
+                    None,
+                    &[("c".repeat(budget + 5).as_str(), Some("warning"))],
+                ),
+            ],
+        );
+        let term = render(&mut app);
+        let buf = term.backend().buffer();
+        let t = &app.theme;
+
+        assert!(
+            locate(&term, "72%").is_none(),
+            "the tail that cannot fit is dropped"
+        );
+        let (_, y) = locate(&term, "aaaa").expect("the bar row is on screen");
+        assert_eq!(
+            buf.cell((last_x, y)).unwrap().symbol(),
+            "…",
+            "the last column is the ellipsis"
+        );
+        assert_eq!(
+            buf.cell((last_x - 1, y)).unwrap().symbol(),
+            "a",
+            "the bar runs right up to it"
+        );
+        assert_eq!(
+            buf.cell((last_x, y)).unwrap().fg,
+            t.mint,
+            "the ellipsis takes the cut span's colour"
+        );
+        let after = buf.cell((last_x + 1, y)).unwrap().symbol();
+        assert!(
+            !matches!(after, "a" | "7" | "…"),
+            "nothing spills past the dock into the border column, got {after:?}"
+        );
+
+        let (_, y) = locate(&term, "41%").expect("an exact fit keeps its tail");
+        assert_eq!(
+            buf.cell((last_x, y)).unwrap().symbol(),
+            "%",
+            "no ellipsis when it fits"
+        );
+        assert_eq!(buf.cell((last_x - 2, y)).unwrap().fg, t.coral);
+
+        let (_, y) = locate(&term, "cccc").expect("the wide row is on screen");
+        assert_eq!(buf.cell((last_x, y)).unwrap().symbol(), "…");
+        assert_eq!(buf.cell((last_x, y)).unwrap().fg, t.amber);
     }
 }

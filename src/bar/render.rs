@@ -155,6 +155,8 @@ fn parse_state(state: &str) -> State {
     }
 }
 
+/// The theme colour a tone resolves to. Shared by bar segments and module dock
+/// rows so both surfaces read the same under every theme.
 pub fn tone_color(tone: BarTone, t: &Theme) -> Color {
     match tone {
         BarTone::Normal => t.subtext0,

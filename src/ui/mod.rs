@@ -1199,18 +1199,25 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
         return s.to_string();
     }
     // Reserve one column for the ellipsis.
-    let budget = max - 1;
+    let mut out = clip_columns(s, max - 1);
+    out.push('…');
+    out
+}
+
+/// The longest prefix of `s` that fits in `max` display columns, with no
+/// ellipsis. Width-aware like [`truncate`]; a wide glyph that would straddle the
+/// edge is dropped rather than split.
+pub(crate) fn clip_columns(s: &str, max: usize) -> String {
     let mut out = String::new();
     let mut used = 0;
     for ch in s.chars() {
         let cw = display_width(&ch.to_string());
-        if used + cw > budget {
+        if used + cw > max {
             break;
         }
         out.push(ch);
         used += cw;
     }
-    out.push('…');
     out
 }
 

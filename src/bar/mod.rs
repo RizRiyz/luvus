@@ -1041,6 +1041,7 @@ fn total_width(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
     fn tone_from_name_accepts_the_json_spellings_and_rejects_the_rest() {
@@ -1050,7 +1051,6 @@ mod tests {
         assert_eq!(BarTone::from_name("Success"), None);
         assert_eq!(BarTone::from_name("red"), None);
     }
-    use super::*;
 
     fn widget(id: &str, full: &str, compact: &str, priority: u8) -> BarWidget {
         BarWidget::new(

@@ -859,6 +859,8 @@ A `Row` is:
 ```json
 { "text": string,
   "dot":    "idle" | "working" | "blocked" | "done",
+  "tone":   "normal" | "muted" | "accent" | "success" | "warning" | "error",
+  "spans":  [ {"text": string, "tone"?: string} ],
   "action": string,
   "value":  string,
   "menu":   [ {"title": string, "action": string,
@@ -869,6 +871,14 @@ Only `text` is required. The first `push` mounts the dock into `placement`
 (default left); later pushes refresh its rows. A row's `action` is a module
 action id run when the row is **left-clicked**, with `value` handed to it as
 `LUVUS_MODULE_ROW_VALUE` so one action can serve every row.
+
+`tone` colors the row text with a [Luvus Bar tone](#luvus-bar), resolved
+through the active theme. `spans` draws the row from segments instead of
+`text`, left to right, each in its own `tone` or else the row's. A row with
+neither keeps the default row color, which is not the same as `normal`. An
+unknown tone name falls back to the default color rather than failing the
+push. `text` stays the plain string a click hands to the action as
+`LUVUS_MODULE_ROW_TEXT`, so send it even when you send `spans`.
 
 `menu` gives the row a **right-click** menu. Each entry runs an action id, an
 entry with an empty `action` is a divider, and `destructive` tints the label. An

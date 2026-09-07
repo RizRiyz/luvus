@@ -8792,6 +8792,67 @@ command = ["true"]
         // `dock_menu_click_spawns_the_action_with_the_clicked_rows_env`.
     }
 
+    /// `ui.dock.push` carries a row's `tone` and `spans` through to the stored
+    /// `DockRow`, a span without its own tone stays `None` so the renderer can
+    /// fall back to the row's, and a row that sends neither keeps the
+    /// pre-existing shape. The tone name is stored as sent: an unknown name is
+    /// resolved (and ignored) at draw time, never rejected here.
+    #[test]
+    fn dock_push_preserves_row_tone_and_spans() {
+        let _env = crate::persist::test_env("dock-push-tone");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        app.dispatch(
+            "ui.dock.push",
+            &json!({
+                "id": "quota",
+                "rows": [
+                    {"text": "session 72%", "tone": "success"},
+                    {"text": "week [━━━───] 41%", "tone": "warning",
+                     "spans": [
+                         {"text": "week "},
+                         {"text": "[", "tone": "muted"},
+                         {"text": "━━━", "tone": "success"},
+                         {"text": "───] 41%"}
+                     ]},
+                    {"text": "plain"},
+                    {"text": "typo", "tone": "reddish"}
+                ]
+            }),
+        )
+        .expect("dock.push ok");
+
+        let rows = &app.module_docks.get("quota").expect("dock stored").rows;
+        assert_eq!(rows.len(), 4);
+
+        assert_eq!(rows[0].tone.as_deref(), Some("success"));
+        assert!(rows[0].spans.is_empty(), "no spans key stays empty");
+
+        assert_eq!(rows[1].tone.as_deref(), Some("warning"));
+        assert_eq!(
+            rows[1].text, "week [━━━───] 41%",
+            "text is kept beside spans"
+        );
+        let spans = &rows[1].spans;
+        assert_eq!(spans.len(), 4);
+        assert_eq!(spans[0].text, "week ");
+        assert_eq!(
+            spans[0].tone, None,
+            "a span without a tone inherits at draw"
+        );
+        assert_eq!(spans[1].tone.as_deref(), Some("muted"));
+        assert_eq!(spans[2].text, "━━━");
+        assert_eq!(spans[2].tone.as_deref(), Some("success"));
+
+        // Neither key: exactly what every earlier module pushes.
+        assert_eq!(rows[2].tone, None);
+        assert!(rows[2].spans.is_empty());
+
+        // An unknown tone is stored verbatim; the draw path decides the fallback.
+        assert_eq!(rows[3].tone.as_deref(), Some("reddish"));
+    }
+
     /// External clients patch their rows from **both** `agent.list`
     /// and `pane.agent_status_changed`. If the two disagree about what `project`
     /// means, a renamed node visibly alternates between its label and its folder
