@@ -91,8 +91,13 @@ pub enum BarSegmentKind {
     },
     Spacer {
         width: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
     },
-    Separator,
+    Separator {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+    },
 }
 
 fn default_progress_width() -> u16 {
@@ -123,21 +128,23 @@ impl BarSegment {
 
     pub fn separator() -> Self {
         Self {
-            kind: BarSegmentKind::Separator,
+            kind: BarSegmentKind::Separator { value: None },
             tone: BarTone::Muted,
             action: None,
         }
     }
 
+    /// Every segment type may carry a click payload except `progress`, whose
+    /// `value` is the numeric fill and cannot double as a string.
     pub fn click_value(&self) -> Option<&str> {
         match &self.kind {
             BarSegmentKind::Text { value, .. }
             | BarSegmentKind::Symbol { value, .. }
             | BarSegmentKind::State { value, .. }
-            | BarSegmentKind::Badge { value, .. } => value.as_deref(),
-            BarSegmentKind::Progress { .. }
-            | BarSegmentKind::Spacer { .. }
-            | BarSegmentKind::Separator => None,
+            | BarSegmentKind::Badge { value, .. }
+            | BarSegmentKind::Spacer { value, .. }
+            | BarSegmentKind::Separator { value } => value.as_deref(),
+            BarSegmentKind::Progress { .. } => None,
         }
     }
 
@@ -151,8 +158,8 @@ impl BarSegment {
             }
             BarSegmentKind::Badge { text, .. } => text.width() + 2,
             BarSegmentKind::Progress { width, .. } => *width as usize,
-            BarSegmentKind::Spacer { width } => *width as usize,
-            BarSegmentKind::Separator => 5,
+            BarSegmentKind::Spacer { width, .. } => *width as usize,
+            BarSegmentKind::Separator { .. } => 5,
         }
     }
 
@@ -193,10 +200,10 @@ impl BarSegment {
                     return Err("progress width must be between 3 and 24".into());
                 }
             }
-            BarSegmentKind::Spacer { width } if *width > 16 => {
+            BarSegmentKind::Spacer { width, .. } if *width > 16 => {
                 return Err("spacer width must be at most 16".into())
             }
-            BarSegmentKind::Spacer { .. } | BarSegmentKind::Separator => {}
+            BarSegmentKind::Spacer { .. } | BarSegmentKind::Separator { .. } => {}
         }
         if self.action.as_deref().is_some_and(str::is_empty) {
             return Err("action must not be empty".into());
@@ -786,7 +793,10 @@ impl crate::app::App {
             }
             segments.push(state_segment);
             segments.push(BarSegment {
-                kind: BarSegmentKind::Spacer { width: 1 },
+                kind: BarSegmentKind::Spacer {
+                    width: 1,
+                    value: None,
+                },
                 tone: BarTone::Normal,
                 action: None,
             });
@@ -886,8 +896,8 @@ fn mobile_segment_text(segments: &[BarSegment]) -> String {
             BarSegmentKind::Progress { value, total, .. } => {
                 output.push_str(&format!("{value}/{total}"));
             }
-            BarSegmentKind::Spacer { width } => output.push_str(&" ".repeat(*width as usize)),
-            BarSegmentKind::Separator => output.push_str("  ·  "),
+            BarSegmentKind::Spacer { width, .. } => output.push_str(&" ".repeat(*width as usize)),
+            BarSegmentKind::Separator { .. } => output.push_str("  ·  "),
         }
     }
     output
@@ -1107,7 +1117,10 @@ mod tests {
                 action: None,
             },
             BarSegment {
-                kind: BarSegmentKind::Spacer { width: 2 },
+                kind: BarSegmentKind::Spacer {
+                    width: 2,
+                    value: None,
+                },
                 tone: BarTone::Normal,
                 action: None,
             },

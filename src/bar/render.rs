@@ -129,8 +129,8 @@ fn draw_segment(
                 None,
             )
         }
-        BarSegmentKind::Spacer { width } => (Cow::Owned(" ".repeat(*width as usize)), None),
-        BarSegmentKind::Separator => (Cow::Borrowed("  ·  "), None),
+        BarSegmentKind::Spacer { width, .. } => (Cow::Owned(" ".repeat(*width as usize)), None),
+        BarSegmentKind::Separator { .. } => (Cow::Borrowed("  ·  "), None),
     };
     let color = if core_runtime_label {
         t.overlay1
@@ -273,6 +273,63 @@ mod tests {
             .map(|x| buffer.cell((x, 0)).map(|cell| cell.symbol()).unwrap_or(" "))
             .collect::<String>();
         assert!(rendered.starts_with("● agent"));
+    }
+
+    // A spacer or a separator may carry an action, and the Bar contract lets any
+    // segment with an action carry the click payload that action is invoked with.
+    // Dropping it for these two would make their clicks fire with no value, which
+    // is silent: the action still runs, just without the argument the module sent.
+    #[test]
+    fn spacer_and_separator_click_values_reach_the_hit_target() {
+        let segments: Vec<BarSegment> = serde_json::from_str(
+            r#"[
+                {"type":"text","text":"CI","action":"open","value":"run-1842"},
+                {"type":"spacer","width":2,"action":"open","value":"gap"},
+                {"type":"separator","action":"open","value":"rule"}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            segments
+                .iter()
+                .map(BarSegment::click_value)
+                .collect::<Vec<_>>(),
+            vec![Some("run-1842"), Some("gap"), Some("rule")],
+            "every click payload survives parsing"
+        );
+
+        let widget = super::super::BarWidget::new(
+            super::super::BarWidgetKey::new("test", "clickable"),
+            BarRegion::BottomRight,
+            segments,
+            Vec::new(),
+            50,
+        )
+        .unwrap();
+        let candidates = vec![WidgetCandidate {
+            key: "test:clickable",
+            widget: &widget,
+        }];
+        let layout = super::super::compose(&candidates, 40, 40);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+        let (hits, _) = draw_region(
+            &mut target,
+            area,
+            BarRegion::BottomRight,
+            &candidates,
+            &layout,
+            &crate::ui::theme::by_name("quattro-rally"),
+        );
+
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.segment, hit.value.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![(0, Some("run-1842")), (1, Some("gap")), (2, Some("rule")),],
+            "each rendered hit carries its own segment's value"
+        );
     }
 
     #[test]

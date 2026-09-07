@@ -911,7 +911,10 @@ Tones are `normal`, `muted`, `accent`, `success`, `warning`, and `error`.
 States are `blocked`, `working`, `done`, `idle`, and `unknown`. An action must
 belong to the widget's enabled module. Clicks expose
 `LUVUS_MODULE_BAR_ID`, `LUVUS_MODULE_BAR_SEGMENT`, and optional
-`LUVUS_MODULE_BAR_VALUE` to that action.
+`LUVUS_MODULE_BAR_VALUE` to that action. Every segment shape accepts an
+`action` and a string `value` except `progress`, whose `value` is the numeric
+fill: a `progress` segment can be clickable, but its click carries no
+`LUVUS_MODULE_BAR_VALUE`.
 
 Limits are intentionally small: 16 segments and 256 display columns per
 widget, 16 live widgets per module, 64 live widgets globally, and 30 updates per

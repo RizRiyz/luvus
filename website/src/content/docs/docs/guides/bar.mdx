@@ -118,6 +118,11 @@ Supported segments are `text`, `symbol`, `state`, `badge`, `progress`,
 `success`, `warning`, and `error`—adapt to every active theme. Raw ANSI and
 custom rendering are rejected so a widget cannot corrupt the surrounding UI.
 
+Any segment may carry an `action` and the `value` that action is invoked with,
+**except `progress`**: its `value` is the numeric fill, so a `progress` segment
+can be clickable but cannot pass a payload. Put the payload on an adjacent
+`text` or `badge` segment when a bar needs one.
+
 For a full manifest, actions, click values, and validation limits, see
 [Writing a Module](/docs/extend/writing-modules/#bars-compact-chrome-widgets)
 and the [UHP reference](/docs/uhp/methods/#luvus-bar).
