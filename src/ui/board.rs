@@ -1942,9 +1942,11 @@ pub(super) fn draw_form(
                 display_value.push('▏');
             }
             let lines = wrap_display_lines(&display_value, body_rect.width as usize);
-            let scroll = active
-                .then(|| lines.len().saturating_sub(body_rect.height as usize))
-                .unwrap_or(0);
+            let scroll = if active {
+                lines.len().saturating_sub(body_rect.height as usize)
+            } else {
+                0
+            };
             let visible = lines.into_iter().skip(scroll).map(|line| {
                 if let Some(text) = active.then(|| line.strip_suffix('▏')).flatten() {
                     Line::from(vec![

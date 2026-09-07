@@ -3730,9 +3730,13 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
 
         // ── orchestration (docs/22, M0): task ledger + path leases ──────────
         ("task", "add") => {
-            let title = rest.iter().find(|a| !a.starts_with("--")).cloned();
+            let title = rest
+                .first()
+                .filter(|value| !value.starts_with("--"))
+                .cloned()
+                .ok_or_else(|| anyhow!("task add requires a title"))?;
             let mut obj = serde_json::Map::new();
-            obj.insert("title".into(), json!(title.unwrap_or_default()));
+            obj.insert("title".into(), json!(title));
             obj.insert("paths".into(), json!(multi_flag(args, "--paths")));
             obj.insert("deps".into(), json!(multi_flag(args, "--dep")));
             if let Some(prompt) = task_prompt_arg(args)? {
@@ -3816,10 +3820,13 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         ("task", "merge") => ("task.merge".into(), one("id", arg0())),
         ("task", "release") => ("task.release".into(), one("id", arg0())),
         ("task", "update") => {
+            let id = rest
+                .first()
+                .filter(|value| !value.starts_with("--"))
+                .cloned()
+                .ok_or_else(|| anyhow!("task update requires an id"))?;
             let mut obj = serde_json::Map::new();
-            if let Some(id) = arg0() {
-                obj.insert("id".into(), json!(id));
-            }
+            obj.insert("id".into(), json!(id));
             if let Some(s) = flag(args, "--status") {
                 obj.insert("status".into(), json!(s));
             }
@@ -5074,6 +5081,18 @@ mod tests {
             "luvus task add title --prompt inline --prompt-file task.md"
         ))
         .is_err());
+        assert_eq!(
+            parse(&argv("luvus task add --prompt briefing"))
+                .unwrap_err()
+                .to_string(),
+            "task add requires a title"
+        );
+        assert_eq!(
+            parse(&argv("luvus task update --prompt briefing"))
+                .unwrap_err()
+                .to_string(),
+            "task update requires an id"
+        );
 
         let (m, _) = parse(&argv("luvus task list")).unwrap();
         assert_eq!(m, "task.list");
