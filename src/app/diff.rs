@@ -1811,19 +1811,22 @@ impl App {
                     KeyCode::Char('G') | KeyCode::End => view.selected = max,
                     KeyCode::Left => view.selected_side = crate::diff::DiffSide::Old,
                     KeyCode::Right => view.selected_side = crate::diff::DiffSide::New,
-                    KeyCode::Char('h') => view.horizontal = view.horizontal.saturating_sub(8),
-                    KeyCode::Char('l') => view.horizontal = view.horizontal.saturating_add(8),
+                    KeyCode::Char('h') if !is_split && !view.wrap => {
+                        view.horizontal = view.horizontal.saturating_sub(8)
+                    }
+                    KeyCode::Char('l') if !is_split && !view.wrap => {
+                        view.horizontal = view.horizontal.saturating_add(8)
+                    }
+                    KeyCode::Char('h' | 'l') => {}
                     KeyCode::Char('s') => {
-                        // When Auto resolves to Split (wide enough, no wrap),
+                        // When Auto resolves to Split at this viewport width,
                         // skip directly to Stack so the user doesn't need to
                         // press 's' twice to see a visual change.
-                        let was_effectively_split = !view.wrap
-                            && matches!(
-                                view.preference,
-                                crate::diff::DiffLayoutPreference::Split
-                                    | crate::diff::DiffLayoutPreference::Auto
-                            )
-                            && pane_width >= 96;
+                        let was_effectively_split = matches!(
+                            view.preference,
+                            crate::diff::DiffLayoutPreference::Split
+                                | crate::diff::DiffLayoutPreference::Auto
+                        ) && pane_width >= 96;
                         if was_effectively_split
                             && view.preference == crate::diff::DiffLayoutPreference::Auto
                         {
