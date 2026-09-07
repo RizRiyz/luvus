@@ -1117,8 +1117,8 @@ impl App {
     /// Route pasted text into an open text-input modal by replaying it as
     /// keypresses, so a paste fills the field instead of leaking to the pane
     /// underneath. Mirrors `handle_key`'s text-input precedence; returns whether
-    /// a modal consumed it. Control chars (newlines/tabs) are dropped — these are
-    /// all single-line fields.
+    /// a modal consumed it. Control characters are dropped from single-line
+    /// fields; the ORCH prompt preserves normalized line feeds.
     fn paste_into_modal(&mut self, s: &str) -> bool {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         if self.named_session_menu.is_some() {
@@ -1144,6 +1144,25 @@ impl App {
             self.picker_paste(s);
             return true;
         }
+        if self.orch_form.is_some() {
+            let multiline = self
+                .orch_form
+                .as_ref()
+                .is_some_and(|form| form.field == crate::app::OrchFormField::Prompt);
+            for character in s.replace("\r\n", "\n").replace('\r', "\n").chars() {
+                if character == '\n' && multiline {
+                    if let Some(form) = self.orch_form.as_mut() {
+                        form.push_char('\n');
+                    }
+                } else if !character.is_control() {
+                    self.handle_orch_form_key(KeyEvent::new(
+                        KeyCode::Char(character),
+                        KeyModifiers::NONE,
+                    ));
+                }
+            }
+            return true;
+        }
         let handler: fn(&mut Self, KeyEvent) = if self.worktree_prompt.is_some() {
             Self::handle_worktree_prompt_key
         } else if self.tab_rename.is_some() {
@@ -1154,8 +1173,6 @@ impl App {
             Self::handle_ws_rename_key
         } else if self.pane_rename.is_some() {
             Self::handle_pane_rename_key
-        } else if self.orch_form.is_some() {
-            Self::handle_orch_form_key
         } else {
             return false;
         };
@@ -4316,6 +4333,24 @@ fn csi_tilde_key(code: u8, modifiers: KeyModifiers) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_prompt_paste_preserves_normalized_newlines() {
+        let _env = crate::persist::test_env("orch-prompt-paste");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        app.orch_form = Some(crate::app::OrchForm {
+            kind: crate::app::OrchFormKind::Task,
+            field: crate::app::OrchFormField::Prompt,
+            ..crate::app::OrchForm::default()
+        });
+
+        assert!(app.paste_into_modal("first\r\nsecond\rthird\tline"));
+        assert_eq!(
+            app.orch_form.as_ref().unwrap().prompt,
+            "first\nsecond\nthirdline"
+        );
+    }
 
     #[test]
     fn prefix_digits_jump_to_tabs_and_shifted_digits_jump_to_workspaces() {

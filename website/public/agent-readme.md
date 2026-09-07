@@ -134,6 +134,9 @@ Branch-backed dependencies unblock only after they are merged into the shared
 integration history.
 `task release` requeues active work and releases its path leases, but it does
 not stop the worker pane or discard its worktree.
+Use `task add --prompt <text>` or `--prompt-file <path>` for the detailed worker
+briefing. A manual task's prompt can be replaced with `task update` only while
+the task is queued and unassigned; inspect it before starting the worker.
 Use `task update --note` for work progress. `task heartbeat --context-used
 <0..1>` reports only the fraction of the model context window already consumed,
 where `0.6` means 60% consumed, not 60% task progress. Omit the heartbeat when

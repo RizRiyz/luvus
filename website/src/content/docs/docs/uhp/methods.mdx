@@ -104,6 +104,14 @@ pane fails with `not_found`; malformed or out-of-range IDs fail with
 `invalid_request` before any mutation. Pane IDs accept an unsigned 32-bit JSON
 integer or its decimal string form.
 
+`task.add` accepts a short `title` and an optional multiline `prompt` containing
+the detailed worker briefing. `task.get`, `task.list`, and task events return
+that prompt for manual tasks; automation-generated task projections continue to
+hide their private stored briefing. A queued, unassigned manual task can replace
+or clear its prompt through `task.update` with a string or `null`; prompt edits
+fail closed after the task starts. Capability limits publish the exact UTF-8
+byte budgets as `task_title_bytes` and `task_prompt_bytes`.
+
 For `task.heartbeat`, the canonical UHP `context` field is the fraction of the
 model context window already consumed. `0.6` means 60% of that window has been
 used, not 60% task progress. Send work progress through the `note` field of

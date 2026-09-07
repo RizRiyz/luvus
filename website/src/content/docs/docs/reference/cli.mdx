@@ -210,7 +210,7 @@ worktrees:
   worktree remove <path>     remove a worktree (its branch is kept)
 
 orchestration (multiple agents on one project, docs/22):
-  task add "<title>" [--paths <glob>...] [--dep <id>...] [--gate <cmd>]
+  task add "<title>" [--prompt <text>|--prompt-file <path>] [--paths <glob>...] [--dep <id>...] [--gate <cmd>]
   task list                  list all tasks + their status/assignee
   task get <id>              show one task
   task claim <id>            claim a task for this pane (deps must be done)
@@ -221,7 +221,7 @@ orchestration (multiple agents on one project, docs/22):
   task heartbeat <id> --context-used <0..1>
                              report model context-window use, not task progress
                              (>85% blocks done; --context remains accepted)
-  task update <id> [--status <s>] [--output <o>] [--note <n>]
+  task update <id> [--prompt <text>|--prompt-file <path>] [--status <s>] [--output <o>] [--note <n>]
   task done <id>             mark done + release its leases
   task merge <id>            integrate the task's branch into luvus/integration
                              (isolated worktree, conflicts block the task)

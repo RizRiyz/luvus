@@ -1148,6 +1148,7 @@ const TASK_MANUAL_FIELDS: &[OrchFormField] = &[
     OrchFormField::Deps,
     OrchFormField::Gate,
     OrchFormField::Start,
+    OrchFormField::Prompt,
 ];
 const TASK_NOW_FIELDS: &[OrchFormField] = &[
     OrchFormField::Title,
@@ -1474,8 +1475,15 @@ impl OrchForm {
             self.schedule.clear();
             self.schedule_prefilled = false;
         }
+        let limit = match self.field {
+            OrchFormField::Title => Some(crate::orch::MAX_TASK_TITLE_BYTES),
+            OrchFormField::Prompt => Some(crate::orch::MAX_TASK_PROMPT_BYTES),
+            _ => None,
+        };
         if let Some(field) = self.active_mut() {
-            field.push(value);
+            if limit.is_none_or(|limit| field.len() + value.len_utf8() <= limit) {
+                field.push(value);
+            }
         }
     }
 
@@ -11821,10 +11829,24 @@ mod tests {
         let r = call(
             &mut app,
             "task.add",
-            json!({"title":"auth","paths":["src/auth/**"]}),
+            json!({
+                "title":"auth",
+                "prompt":"Review the API.\nInclude rollback coverage.",
+                "paths":["src/auth/**"]
+            }),
         );
         assert_eq!(r["result"]["task"]["id"], "t1");
+        assert_eq!(
+            r["result"]["task"]["prompt"],
+            "Review the API.\nInclude rollback coverage."
+        );
         call(&mut app, "task.add", json!({"title":"api","deps":["t1"]}));
+        let r = call(
+            &mut app,
+            "task.update",
+            json!({"id":"t2", "prompt":"Implement the API client."}),
+        );
+        assert_eq!(r["result"]["task"]["prompt"], "Implement the API client.");
 
         // t2 can't be claimed while its dependency is unfinished.
         let r = call(
@@ -11841,6 +11863,16 @@ mod tests {
             json!({"id":"t1","pane": a.0.to_string()}),
         );
         assert_eq!(r["result"]["task"]["status"], "claimed");
+        let r = call(
+            &mut app,
+            "task.update",
+            json!({"id":"t1", "prompt":"too late"}),
+        );
+        assert_eq!(r["error"]["code"], "task_active");
+        assert_eq!(
+            app.orch.task("t1").unwrap().prompt.as_deref(),
+            Some("Review the API.\nInclude rollback coverage.")
+        );
         let r = call(
             &mut app,
             "lease.acquire",
