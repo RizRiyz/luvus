@@ -2533,6 +2533,13 @@ impl<T: EventListener> Handler for Term<T> {
     }
 
     #[inline]
+    fn cell_size_pixels(&mut self) {
+        self.event_proxy.send_event(Event::CellSizeRequest(Arc::new(move |window_size| {
+            format!("\x1b[6;{};{}t", window_size.cell_height, window_size.cell_width)
+        })));
+    }
+
+    #[inline]
     fn text_area_size_chars(&mut self) {
         let text = format!("\x1b[8;{};{}t", self.screen_lines(), self.columns());
         self.event_proxy.send_event(Event::PtyWrite(text));

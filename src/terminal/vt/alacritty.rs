@@ -1,9 +1,10 @@
 //! `alacritty_terminal` implementation of `VtEngine`. Pure Rust — no Zig, no FFI.
 
 use std::cell::Cell;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use alacritty_terminal::event::{Event, EventListener};
+use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
@@ -43,11 +44,21 @@ pub struct EventProxy {
     appearance: Arc<Mutex<PaneAppearance>>,
     host_graphics: graphics::HostGraphics,
     graphics_queue: GraphicsSlot,
+    grid: GridSlot,
 }
 
 /// Graphics commands waiting to reach the clients that can draw them. Shared
 /// with the engine, which drains it when a frame is about to be sent.
 type GraphicsSlot = Arc<Mutex<graphics::GraphicsQueue>>;
+
+/// The pane's cell grid, packed as columns in the high half and rows in the
+/// low half. Shared because size queries are answered from inside a terminal
+/// callback, which cannot borrow the terminal to ask it how big it is.
+type GridSlot = Arc<AtomicU32>;
+
+fn pack_grid(cols: u16, rows: u16) -> u32 {
+    (u32::from(cols) << 16) | u32::from(rows)
+}
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
@@ -89,10 +100,14 @@ impl EventListener for EventProxy {
                     }
                 }
             }
-            // A pane renders text cells, so it cannot display an image. Decline
-            // the protocol's support query instead of staying silent, and drop
-            // every other graphics command: with no renderer there is nothing
-            // to acknowledge. See `crate::terminal::graphics`.
+            // How big the pane is in pixels, and how big one cell is. A program
+            // that draws an image asks these to choose a resolution.
+            Event::TextAreaSizeRequest(format) | Event::CellSizeRequest(format) => {
+                self.answer_window_size(format.as_ref());
+            }
+            // Answer the protocol's support query, then either forward the
+            // command to the clients that can draw it or drop it. See
+            // `crate::terminal::graphics`.
             Event::KittyGraphics(command) => {
                 if let Some(reply) =
                     graphics::query_reply(&command.payload, self.host_graphics.supported())
@@ -116,6 +131,29 @@ impl EventListener for EventProxy {
             }
             _ => {}
         }
+    }
+}
+
+impl EventProxy {
+    /// Answer a window-size report, but only when the size is really known.
+    ///
+    /// A pane has no pixels of its own: a cell is as big as the terminal in
+    /// front of the user makes it, which Luvus only learns once a client says
+    /// so. Until then there is nothing truthful to answer, and the report has
+    /// no form for "unsupported", so silence is what tells the child to fall
+    /// back — the same thing a terminal that never implemented it does.
+    fn answer_window_size(&self, format: &(dyn Fn(WindowSize) -> String + Sync + Send)) {
+        let Some(cell) = self.host_graphics.cell_size() else {
+            return;
+        };
+        let packed = self.grid.load(Ordering::Relaxed);
+        let reply = format(WindowSize {
+            num_cols: (packed >> 16) as u16,
+            num_lines: packed as u16,
+            cell_width: cell.width,
+            cell_height: cell.height,
+        });
+        let _ = self.tx.send(InputAction::Bytes(reply.into_bytes()));
     }
 }
 
@@ -143,6 +181,7 @@ pub struct AlacrittyEngine {
     parser: Processor,
     title: TitleSlot,
     graphics_queue: GraphicsSlot,
+    grid: GridSlot,
     response_tx: InputSender,
     appearance: Arc<Mutex<PaneAppearance>>,
     history_budget_bytes: usize,
@@ -197,12 +236,17 @@ impl AlacrittyEngine {
         let title: TitleSlot = Arc::new(Mutex::new(TitleState::default()));
         let graphics_queue: GraphicsSlot = Arc::new(Mutex::new(graphics::GraphicsQueue::default()));
         let appearance = Arc::new(Mutex::new(initial_appearance));
+        let grid: GridSlot = Arc::new(AtomicU32::new(pack_grid(
+            dims.cols as u16,
+            dims.rows as u16,
+        )));
         let proxy = EventProxy {
             tx: resp_tx.clone(),
             title: title.clone(),
             appearance: appearance.clone(),
             host_graphics,
             graphics_queue: graphics_queue.clone(),
+            grid: grid.clone(),
         };
         // Alacritty retains history by rows, not bytes. Derive a conservative
         // capacity from Luvus's per-pane byte budget and current width. The
@@ -220,6 +264,7 @@ impl AlacrittyEngine {
             parser: Processor::new(),
             title,
             graphics_queue,
+            grid,
             response_tx: resp_tx,
             appearance,
             history_budget_bytes,
@@ -560,10 +605,12 @@ impl VtEngine for AlacrittyEngine {
     }
 
     fn resize(&mut self, cols: u16, rows: u16) {
+        let (cols, rows) = (cols.max(1), rows.max(1));
         self.term.resize(Dims {
-            cols: cols.max(1) as usize,
-            rows: rows.max(1) as usize,
+            cols: cols as usize,
+            rows: rows as usize,
         });
+        self.grid.store(pack_grid(cols, rows), Ordering::Relaxed);
         self.apply_history_budget();
     }
 
@@ -2377,6 +2424,79 @@ mod tests {
             b"\x1b_Gi=4207;ENOTSUPPORTED:no attached client can draw images\x1b\\",
             "the last drawing client detached"
         );
+    }
+
+    /// A child that draws asks how big the pane is in pixels and how big one
+    /// cell is, and picks the resolution it renders at from the answers. The
+    /// pane is measured in cells, so both answers are only as good as the cell
+    /// size the attached client reported — and must track the pane's own size.
+    #[test]
+    fn a_pane_reports_its_pixel_size_and_its_cell_size() {
+        let (tx, rx) = channel();
+        let host_graphics = graphics::HostGraphics::default();
+        host_graphics.set_cell_size(Some(crate::terminal::theme_probe::CellSize {
+            width: 19,
+            height: 42,
+        }));
+        let mut e = AlacrittyEngine::with_appearance(
+            80,
+            24,
+            tx,
+            budget_for_rows(80, 40),
+            PaneAppearance::default(),
+            host_graphics.clone(),
+        );
+
+        e.advance(b"\x1b[16t");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b[6;42;19t",
+            "the cell is as big as the terminal showing a client makes it"
+        );
+
+        e.advance(b"\x1b[14t");
+        assert_eq!(
+            recv_bytes(&rx),
+            format!("\x1b[4;{};{}t", 24 * 42, 80 * 19).into_bytes(),
+            "the text area is the pane's own cells at that size"
+        );
+
+        // A pane is resized far more often than a terminal window is, and a
+        // child that redraws on SIGWINCH asks again straight away.
+        e.resize(100, 30);
+        e.advance(b"\x1b[14t");
+        assert_eq!(
+            recv_bytes(&rx),
+            format!("\x1b[4;{};{}t", 30 * 42, 100 * 19).into_bytes(),
+            "the answer must follow the pane, not the size it was built at"
+        );
+    }
+
+    /// With no client that draws, Luvus does not know how big a cell is on any
+    /// screen. The report has no way to say "unsupported", so the honest answer
+    /// is none at all: a child that hears nothing falls back to its own
+    /// estimate, while a made-up size is one it would render at.
+    #[test]
+    fn a_pane_that_cannot_know_its_pixel_size_says_nothing() {
+        let (tx, rx) = channel();
+        let mut e = AlacrittyEngine::with_appearance(
+            80,
+            24,
+            tx,
+            budget_for_rows(80, 40),
+            PaneAppearance::default(),
+            graphics::HostGraphics::default(),
+        );
+
+        e.advance(b"\x1b[16t\x1b[14t");
+        assert!(
+            rx.try_recv().is_err(),
+            "neither report can be answered without a cell size"
+        );
+
+        // The size in cells needs no client, so that report is always owed.
+        e.advance(b"\x1b[18t");
+        assert_eq!(recv_bytes(&rx), b"\x1b[8;24;80t");
     }
 
     /// The whole path a real image takes through a pane: the child transmits it
