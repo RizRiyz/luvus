@@ -48,17 +48,19 @@ WORKTREE  1
 Luvus parses one selected file at a time and renders the same normalized data
 as **Auto**, **Split**, or **Stack**. Auto uses Split when both sides remain
 readable and falls back to Stack on a narrow local or remote viewport. Resizing
-one attachment does not change another attachment's effective layout.
+one attachment does not change another attachment's effective layout. Split
+wraps each side within its own column and keeps corresponding before and after
+rows vertically aligned, so long source lines never cross the center divider.
 
 | Key | Action |
 |---|---|
 | `j` / `k`, arrows | next or previous source row |
 | `d` / `u` | half page down or up |
 | `g` / `G` | first or last row |
-| `h` / `l` | scroll long lines horizontally |
+| `h` / `l` | scroll long lines horizontally in Stack when wrapping is off |
 | Left / Right | select the old or new side in Split |
 | `s` | cycle Auto, Split, Stack |
-| `w` | toggle wrapping preference |
+| `w` | toggle wrapping for Stack; Split always wraps within each side |
 | `/` | search the loaded file diff |
 | `{` / `}` | previous or next hunk |
 | `K` / `J` | previous or next file |

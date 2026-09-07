@@ -751,6 +751,10 @@ impl DiffView {
         marker_style: DiffMarkerStyle,
         split: bool,
     ) {
+        if split {
+            self.horizontal = 0;
+            return;
+        }
         let Some(line) = self.stack_rows.get(self.selected) else {
             return;
         };
@@ -759,12 +763,7 @@ impl DiffView {
         let symbol_w = if marker_style.shows_symbols() { 2 } else { 0 };
         let numbers_w = if self.show_line_numbers { 12 } else { 0 };
         let gutter_w = bar_w + symbol_w + numbers_w;
-        let side_width = if split {
-            (pane_width.saturating_sub(1)) / 2
-        } else {
-            pane_width
-        };
-        let text_w = side_width.saturating_sub(gutter_w as u16) as usize;
+        let text_w = pane_width.saturating_sub(gutter_w as u16) as usize;
         if text_w == 0 {
             return;
         }
@@ -778,12 +777,10 @@ impl DiffView {
     }
 
     pub fn effective_split(&self, pane_width: u16) -> bool {
-        !self.wrap
-            && matches!(
-                self.preference,
-                DiffLayoutPreference::Split | DiffLayoutPreference::Auto
-            )
-            && pane_width >= 96
+        matches!(
+            self.preference,
+            DiffLayoutPreference::Split | DiffLayoutPreference::Auto
+        ) && pane_width >= 96
     }
 
     pub fn rebuild_row_indices(&mut self) {
@@ -976,6 +973,26 @@ mod tests {
         assert_eq!(view.stack_row_for_split(1), Some(1));
         assert_eq!(view.stack_row_for_split(2), Some(2));
         assert_eq!(view.split_row_for_stack(3), 1);
+    }
+
+    #[test]
+    fn wrapping_does_not_force_a_wide_split_view_into_stack() {
+        let mut view = DiffView::new(
+            PathBuf::from("/repo"),
+            test_key(),
+            DiffLayoutPreference::Split,
+            3,
+            true,
+            true,
+        );
+
+        assert!(view.effective_split(96));
+        assert!(!view.effective_split(95));
+        view.horizontal = 12;
+        view.ensure_horizontal_visible(120, DiffMarkerStyle::Symbols, true);
+        assert_eq!(view.horizontal, 0);
+        view.preference = DiffLayoutPreference::Stack;
+        assert!(!view.effective_split(120));
     }
 
     #[test]
