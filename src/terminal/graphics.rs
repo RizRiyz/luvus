@@ -121,6 +121,9 @@ const MAX_PENDING_GRAPHICS_COMMANDS: usize = 4_096;
 #[derive(Default)]
 pub(crate) struct GraphicsQueue {
     commands: Vec<Vec<u8>>,
+    /// Cells owed to images whose sender expected the terminal to position
+    /// them. Applied by the engine, which owns the grid.
+    placements: Vec<Placement>,
     bytes: usize,
     /// Set when the budget was reached. A chunked transmission only means
     /// anything whole, so an overflowing queue is abandoned rather than
@@ -135,41 +138,72 @@ pub(crate) struct GraphicsQueue {
 impl GraphicsQueue {
     /// Record a graphics command if it is one Luvus can safely pass on.
     ///
-    /// `payload` is the APC body with the `G` introducer stripped; `command` is
-    /// the sequence to forward verbatim.
-    pub(crate) fn push(&mut self, payload: &[u8], command: &[u8]) {
+    /// `payload` is the APC body with the `G` introducer stripped. `cursor` is
+    /// where the grid cursor stood when the command arrived, which is where a
+    /// terminal placing the image directly would have put its top-left corner.
+    pub(crate) fn push(
+        &mut self,
+        payload: &[u8],
+        cursor: (i32, usize),
+        cell_size: Option<CellSize>,
+    ) {
         let Some(control) = ControlData::parse(payload) else {
             return;
         };
 
-        let forward = if control.is_continuation {
-            // Chunks belong to the transfer that opened them.
-            self.forwarding_transfer
-        } else {
-            let forward = is_forwardable(&control);
-            if control.more {
-                self.forwarding_transfer = forward;
+        if control.is_continuation {
+            // Chunks belong to the transfer that opened them, which already
+            // carried every key the decision was made on.
+            if self.forwarding_transfer {
+                self.queue(payload);
             }
-            forward
-        };
-        // The last chunk closes the transfer.
-        if !control.more {
-            self.forwarding_transfer = false;
-        }
-        if !forward || self.overflowed {
+            if !control.more {
+                self.forwarding_transfer = false;
+            }
             return;
         }
 
+        let handling = classify(&control, payload, cell_size);
+        // A rewritten opening chunk still opens the transfer its later chunks
+        // belong to; those are forwarded as they came.
+        self.forwarding_transfer = control.more && !matches!(handling, Handling::Drop);
+
+        match handling {
+            Handling::Drop => {}
+            Handling::Forward => self.queue(payload),
+            Handling::Virtualize {
+                payload,
+                mut placement,
+            } => {
+                placement.line = cursor.0;
+                placement.column = cursor.1;
+                self.queue(&payload);
+                self.placements.push(placement);
+            }
+        }
+    }
+
+    /// Wrap one command back into an APC sequence and hold it, within budget.
+    fn queue(&mut self, payload: &[u8]) {
+        if self.overflowed {
+            return;
+        }
+        let length = payload.len() + 5;
         if self.commands.len() == MAX_PENDING_GRAPHICS_COMMANDS
-            || self.bytes.saturating_add(command.len()) > MAX_PENDING_GRAPHICS_BYTES
+            || self.bytes.saturating_add(length) > MAX_PENDING_GRAPHICS_BYTES
         {
             self.overflowed = true;
             self.commands = Vec::new();
+            self.placements = Vec::new();
             self.bytes = 0;
             return;
         }
+        let mut command = Vec::with_capacity(length);
+        command.extend_from_slice(b"\x1b_G");
+        command.extend_from_slice(payload);
+        command.extend_from_slice(b"\x1b\\");
         self.bytes += command.len();
-        self.commands.push(command.to_vec());
+        self.commands.push(command);
     }
 
     /// Take everything waiting, leaving the queue ready to collect again.
@@ -179,32 +213,160 @@ impl GraphicsQueue {
         std::mem::take(&mut self.commands)
     }
 
+    /// Take the cells owed to images placed at the cursor.
+    pub(crate) fn drain_placements(&mut self) -> Vec<Placement> {
+        std::mem::take(&mut self.placements)
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.commands.is_empty()
     }
 }
 
-/// Whether a graphics command is one Luvus can safely hand to the terminal
-/// displaying a client.
+/// What Luvus does with one graphics command.
+enum Handling {
+    /// Not something Luvus can pass on, so the child's command stops here.
+    Drop,
+    /// Safe exactly as written.
+    Forward,
+    /// Safe once its placement is made virtual. The rewritten command carries
+    /// the same image, positioned by cells Luvus writes into its own grid.
+    Virtualize {
+        payload: Vec<u8>,
+        placement: Placement,
+    },
+}
+
+/// Cells Luvus must write so a forwarded image appears where its sender meant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Placement {
+    pub(crate) image_id: u32,
+    pub(crate) columns: usize,
+    pub(crate) rows: usize,
+    /// Grid position of the cursor when the command arrived, which is the
+    /// image's top-left corner.
+    pub(crate) line: i32,
+    pub(crate) column: usize,
+    /// Whether the cursor should end up past the image, as it would on a
+    /// terminal that placed it directly. `C=1` asks for it to stay put.
+    pub(crate) move_cursor: bool,
+}
+
+/// Decide what to do with a command that opens a transfer.
 ///
-/// Only commands that do not decide *where* an image appears qualify. A
-/// transmission that creates a virtual placement (`U=1`) is safe: the spec
-/// makes such a placement invisible, a prototype that draws nothing until
-/// placeholder cells in the grid refer to it — and those cells are text, which
-/// Luvus already positions, clips, and scrolls correctly.
+/// A command that does not decide *where* an image appears passes through: a
+/// transmission with a virtual placement (`U=1`) is a prototype that draws
+/// nothing until placeholder cells refer to it, and transmit-only and delete
+/// place nothing at all.
 ///
-/// A real placement is refused. Forwarding one would put the image wherever the
-/// receiving terminal's cursor happens to be, which is the mistake tmux made
-/// first and had to undo: images that ignored pane boundaries, did not scroll,
-/// and left a ghost behind on a split.
-fn is_forwardable(control: &ControlData) -> bool {
+/// A command that asks for the image at the cursor cannot be forwarded as it
+/// stands. The receiving terminal's cursor belongs to Luvus's own rendering,
+/// not to this pane, so the image would land in the wrong place, ignore the
+/// pane's edges, and survive a split as a ghost — the mistake tmux made first
+/// and had to undo. Instead the placement is made virtual and Luvus writes the
+/// placeholder cells itself, which is how tmux eventually fixed it: the cells
+/// are ordinary text, so the machinery that already clips, scrolls and reflows
+/// text carries the image with them.
+fn classify(control: &ControlData, payload: &[u8], cell_size: Option<CellSize>) -> Handling {
     match control.action {
-        // Transmission and placement, only when the placement is virtual.
-        b'T' | b'p' => control.virtual_placement,
+        b'T' | b'p' if control.virtual_placement => Handling::Forward,
+        b'T' | b'p' => virtualize(control, payload, cell_size),
         // Transmit without displaying, and delete, place nothing by themselves.
-        b't' | b'd' => true,
-        _ => false,
+        b't' | b'd' => Handling::Forward,
+        _ => Handling::Drop,
     }
+}
+
+/// Rewrite a placement at the cursor into a virtual one of the same size.
+///
+/// The rectangle comes from the sender when it named one (`c=`/`r=`), and
+/// otherwise from the image's pixel size divided by the terminal's cell size.
+/// Without either the image cannot be turned into cells, so it is dropped
+/// rather than guessed at: a wrong rectangle draws the image at the wrong
+/// scale, which is worse than not drawing it.
+fn virtualize(control: &ControlData, payload: &[u8], cell_size: Option<CellSize>) -> Handling {
+    // The placeholder cells carry the image id in their foreground color, so
+    // an image without one cannot be addressed by them at all.
+    let Some(image_id) = control.image_id else {
+        return Handling::Drop;
+    };
+
+    let cells = |pixels: Option<u32>, per_cell: u16| {
+        // Round up: a part-covered cell still shows part of the image.
+        pixels.map(|pixels| pixels.div_ceil(u32::from(per_cell.max(1))) as usize)
+    };
+    let columns = control
+        .columns
+        .map(|columns| columns as usize)
+        .or_else(|| cells(control.width_px, cell_size?.width));
+    let rows = control
+        .rows
+        .map(|rows| rows as usize)
+        .or_else(|| cells(control.height_px, cell_size?.height));
+    let (Some(columns), Some(rows)) = (columns, rows) else {
+        return Handling::Drop;
+    };
+
+    // A rectangle the protocol cannot address in diacritics is refused rather
+    // than clipped, so a partial image never masquerades as a whole one.
+    if columns == 0
+        || rows == 0
+        || columns > placeholder::MAX_EXTENT
+        || rows > placeholder::MAX_EXTENT
+    {
+        return Handling::Drop;
+    }
+
+    Handling::Virtualize {
+        payload: rewrite_placement(payload, columns, rows),
+        placement: Placement {
+            image_id,
+            columns,
+            rows,
+            // Filled in by the caller, which knows where the cursor was.
+            line: 0,
+            column: 0,
+            move_cursor: !control.cursor_stays,
+        },
+    }
+}
+
+/// The same command with its placement keys replaced by a virtual placement.
+///
+/// Everything else is preserved byte for byte, including keys Luvus does not
+/// understand: the protocol keeps growing, and the terminal receiving this is
+/// the one that has to make sense of the image.
+fn rewrite_placement(payload: &[u8], columns: usize, rows: usize) -> Vec<u8> {
+    let (control, body) = match payload.iter().position(|byte| *byte == b';') {
+        Some(end) => (&payload[..end], Some(&payload[end + 1..])),
+        None => (payload, None),
+    };
+
+    let mut rewritten = Vec::with_capacity(payload.len() + 24);
+    for pair in control.split(|byte| *byte == b',') {
+        if pair.is_empty() {
+            continue;
+        }
+        // Drop the keys that describe the old placement; the rest is the image.
+        if matches!(pair.first(), Some(b'p' | b'C' | b'U' | b'c' | b'r'))
+            && pair.get(1) == Some(&b'=')
+        {
+            continue;
+        }
+        if !rewritten.is_empty() {
+            rewritten.push(b',');
+        }
+        rewritten.extend_from_slice(pair);
+    }
+    if !rewritten.is_empty() {
+        rewritten.push(b',');
+    }
+    rewritten.extend_from_slice(format!("U=1,c={columns},r={rows}").as_bytes());
+    if let Some(body) = body {
+        rewritten.push(b';');
+        rewritten.extend_from_slice(body);
+    }
+    rewritten
 }
 
 /// Reply Luvus owes the child for one kitty graphics command, if any.
@@ -252,6 +414,15 @@ struct ControlData {
     quiet: u8,
     /// `U=1`: the placement is a prototype and draws nothing on its own.
     virtual_placement: bool,
+    /// `s=` and `v=`: the source image's pixel dimensions.
+    width_px: Option<u32>,
+    height_px: Option<u32>,
+    /// `c=` and `r=`: the cell rectangle the sender chose for the image.
+    columns: Option<u32>,
+    rows: Option<u32>,
+    /// `C=1`: the cursor is to stay where it is instead of moving past the
+    /// image. A full-window image sets this so it cannot force a scroll.
+    cursor_stays: bool,
     /// `m=1`: more chunks of this transfer follow.
     more: bool,
     /// A chunk that continues a transfer rather than opening one. The protocol
@@ -280,6 +451,11 @@ impl ControlData {
             image_id: None,
             quiet: 0,
             virtual_placement: false,
+            width_px: None,
+            height_px: None,
+            columns: None,
+            rows: None,
+            cursor_stays: false,
             more: false,
             is_continuation: true,
         };
@@ -305,6 +481,11 @@ impl ControlData {
                 b'i' => parsed.image_id = Some(parse_u32(value)?).filter(|id| *id != 0),
                 b'q' => parsed.quiet = parse_u32(value)?.min(u32::from(u8::MAX)) as u8,
                 b'U' => parsed.virtual_placement = parse_u32(value)? != 0,
+                b's' => parsed.width_px = Some(parse_u32(value)?),
+                b'v' => parsed.height_px = Some(parse_u32(value)?),
+                b'c' => parsed.columns = Some(parse_u32(value)?),
+                b'r' => parsed.rows = Some(parse_u32(value)?),
+                b'C' => parsed.cursor_stays = parse_u32(value)? != 0,
                 b'm' => parsed.more = parse_u32(value)? != 0,
                 _ => {}
             }
@@ -446,18 +627,33 @@ mod tests {
         assert!(reply("a=q,i=9,z=-1,U=1,X=3").is_some());
     }
 
-    /// Queue one command the way the engine does, and report what came out.
-    fn queued(payloads: &[&str]) -> Vec<String> {
+    /// A cell of the size a real terminal reports.
+    const CELL: CellSize = CellSize {
+        width: 14,
+        height: 34,
+    };
+
+    /// Queue commands the way the engine does, and report both what goes to the
+    /// terminal and what Luvus owes its own grid.
+    fn queued_at(
+        payloads: &[&str],
+        cursor: (i32, usize),
+        cell_size: Option<CellSize>,
+    ) -> (Vec<String>, Vec<Placement>) {
         let mut queue = GraphicsQueue::default();
         for payload in payloads {
-            let command = format!("\x1b_G{payload}\x1b\\");
-            queue.push(payload.as_bytes(), command.as_bytes());
+            queue.push(payload.as_bytes(), cursor, cell_size);
         }
-        queue
+        let commands = queue
             .drain()
             .into_iter()
             .map(|command| String::from_utf8(command).unwrap())
-            .collect()
+            .collect();
+        (commands, queue.drain_placements())
+    }
+
+    fn queued(payloads: &[&str]) -> Vec<String> {
+        queued_at(payloads, (0, 0), Some(CELL)).0
     }
 
     #[test]
@@ -472,15 +668,79 @@ mod tests {
     }
 
     #[test]
-    fn a_real_placement_is_refused_because_it_would_land_at_the_wrong_cursor() {
-        // This is the mistake tmux made first and had to undo: forwarding a
-        // placement puts the image wherever the outer terminal's cursor is,
-        // ignoring the pane and leaving a ghost behind on a split.
-        assert!(queued(&["a=T,i=1,f=100;AAAA"]).is_empty());
-        assert!(queued(&["a=p,i=1"]).is_empty());
-        assert!(queued(&["a=T,U=0,i=1,f=100;AAAA"]).is_empty());
-        // The action defaults to transmit-and-display when omitted.
-        assert!(queued(&["f=100,i=1;AAAA"]).is_empty());
+    fn a_placement_at_the_cursor_is_rewritten_instead_of_forwarded_as_it_stands() {
+        // Forwarding this as written is the mistake tmux made first and had to
+        // undo: the image lands wherever the outer terminal's cursor happens to
+        // be, ignores the pane, and survives a split as a ghost. Made virtual,
+        // the placeholder cells decide where it goes.
+        let (commands, placements) = queued_at(
+            &["a=T,f=32,s=28,v=68,t=d,i=7,p=1,C=1,q=2;AAAA"],
+            (3, 5),
+            Some(CELL),
+        );
+        assert_eq!(commands.len(), 1);
+        let command = &commands[0];
+        assert!(
+            command.contains("U=1,c=2,r=2"),
+            "28x68 pixels over a 14x34 cell is 2x2 cells: {command:?}"
+        );
+        assert!(
+            !command.contains("p=1") && !command.contains("C=1"),
+            "the old placement must not survive the rewrite: {command:?}"
+        );
+        assert!(
+            command.contains("i=7")
+                && command.contains("f=32")
+                && command.ends_with(";AAAA\u{1b}\\"),
+            "everything else is preserved byte for byte: {command:?}"
+        );
+
+        assert_eq!(
+            placements,
+            vec![Placement {
+                image_id: 7,
+                columns: 2,
+                rows: 2,
+                line: 3,
+                column: 5,
+                move_cursor: false,
+            }],
+            "the cells go where the cursor was, and C=1 keeps it there"
+        );
+    }
+
+    #[test]
+    fn a_sender_that_names_its_own_rectangle_is_taken_at_its_word() {
+        // `c=`/`r=` say what the sender wants in cells, so no division is
+        // needed and no cell size has to be known.
+        let (commands, placements) = queued_at(&["a=T,i=9,c=4,r=3;AAAA"], (0, 0), None);
+        assert!(commands[0].contains("U=1,c=4,r=3"), "{:?}", commands[0]);
+        assert_eq!(placements[0].columns, 4);
+        assert_eq!(placements[0].rows, 3);
+        assert!(
+            placements[0].move_cursor,
+            "without C=1 the cursor ends past the image, as on a real terminal"
+        );
+    }
+
+    #[test]
+    fn an_image_that_cannot_be_measured_is_dropped_rather_than_guessed_at() {
+        // Drawing at the wrong scale is worse than not drawing: the user sees a
+        // stretched image and no reason for it.
+        assert!(
+            queued_at(&["a=T,f=32,s=28,v=68,i=7;AAAA"], (0, 0), None)
+                .0
+                .is_empty(),
+            "pixel dimensions are useless without the terminal's cell size"
+        );
+        assert!(
+            queued(&["a=T,f=100,i=7;AAAA"]).is_empty(),
+            "a PNG that carries its size only inside itself cannot be measured"
+        );
+        assert!(
+            queued(&["a=T,f=32,s=28,v=68;AAAA"]).is_empty(),
+            "placeholder cells address an image by id, so an image needs one"
+        );
     }
 
     #[test]
@@ -516,7 +776,7 @@ mod tests {
         let command = format!("\x1b_G{payload}\x1b\\");
         // Enough chunks to pass the byte budget several times over.
         for _ in 0..(MAX_PENDING_GRAPHICS_BYTES / command.len() + 8) {
-            queue.push(payload.as_bytes(), command.as_bytes());
+            queue.push(payload.as_bytes(), (0, 0), Some(CELL));
         }
         assert!(
             queue.is_empty(),
@@ -525,14 +785,14 @@ mod tests {
 
         // The queue recovers: the next image is not punished for the last one.
         queue.drain();
-        queue.push(b"a=t,i=2,f=100;AAAA", b"\x1b_Ga=t,i=2,f=100;AAAA\x1b\\");
+        queue.push(b"a=t,i=2,f=100;AAAA", (0, 0), Some(CELL));
         assert_eq!(queue.drain().len(), 1);
     }
 
     #[test]
     fn draining_leaves_the_queue_ready_to_collect_again() {
         let mut queue = GraphicsQueue::default();
-        queue.push(b"a=t,i=1,f=100;AAAA", b"\x1b_Ga=t,i=1,f=100;AAAA\x1b\\");
+        queue.push(b"a=t,i=1,f=100;AAAA", (0, 0), Some(CELL));
         assert_eq!(queue.drain().len(), 1);
         assert!(queue.drain().is_empty(), "a command is delivered once");
     }
