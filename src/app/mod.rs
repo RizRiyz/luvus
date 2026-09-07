@@ -3894,6 +3894,23 @@ impl App {
         self.host_graphics.supported()
     }
 
+    /// Record how big a cell is on the terminal showing the attached clients.
+    ///
+    /// A pane reports its size in pixels as well as in cells, and that pixel
+    /// figure is derived from this. It only changes when the set of attached
+    /// clients does, so the panes are told once rather than on every frame.
+    pub fn set_host_cell_size(
+        &mut self,
+        cell_size: Option<crate::terminal::theme_probe::CellSize>,
+    ) {
+        if !self.host_graphics.set_cell_size(cell_size) {
+            return;
+        }
+        for pane in self.panes.values() {
+            pane.refresh_window_size();
+        }
+    }
+
     /// Take the kitty graphics commands every pane has waiting.
     ///
     /// Returns nothing, without touching a pane, unless one of them signalled

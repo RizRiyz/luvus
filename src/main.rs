@@ -1308,6 +1308,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
         app.apply_terminal_colors(colors);
     }
     app.set_host_graphics(probe.graphics.unwrap_or(false));
+    app.set_host_cell_size(probe.cell_size);
     let pending = probe.pending;
     // Match the client path: query colors before enabling input protocols, so
     // any interleaved bytes are ordinary keys that can be replayed losslessly.

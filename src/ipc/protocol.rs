@@ -11,7 +11,7 @@ use serde::de::{DeserializeOwned, Error as _, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 use crate::sound::SoundSignal;
-use crate::terminal::theme_probe::TerminalColors;
+use crate::terminal::theme_probe::{CellSize, TerminalColors};
 
 /// Bumped to 7 when the terminal probe reply grew the host's graphics
 /// capability alongside its colors.
@@ -44,6 +44,9 @@ pub enum ClientMessage {
     TerminalProbe {
         colors: Option<TerminalColors>,
         graphics: Option<bool>,
+        /// Pixel size of one cell on the client's terminal, when it reported
+        /// one. A pane's window size carries it to programs that draw images.
+        cell_size: Option<CellSize>,
     },
 }
 

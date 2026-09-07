@@ -79,6 +79,7 @@ pub enum AppEvent {
         terminal_colors: Option<TerminalColors>,
         /// Whether this client's terminal can draw images.
         terminal_graphics: Option<bool>,
+        terminal_cell_size: Option<crate::terminal::theme_probe::CellSize>,
     },
     /// A binary client detached.
     ClientDetach {

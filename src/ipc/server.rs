@@ -222,6 +222,7 @@ struct ClientState {
     /// Unknown counts as no: painting image bytes at a terminal that cannot
     /// draw them reaches the user as garbage.
     graphics: bool,
+    cell_size: Option<crate::terminal::theme_probe::CellSize>,
     render_buf: Buffer,
     last_frame: Option<protocol::FrameData>,
     behind: bool,
@@ -246,6 +247,7 @@ impl ClientState {
         rows: u16,
         terminal_colors: Option<crate::terminal::theme_probe::TerminalColors>,
         graphics: bool,
+        cell_size: Option<crate::terminal::theme_probe::CellSize>,
         last_activity: u64,
     ) -> Self {
         let size = (cols.max(1), rows.max(1));
@@ -254,6 +256,7 @@ impl ClientState {
             size,
             terminal_colors,
             graphics,
+            cell_size,
             render_buf: Buffer::empty(Rect::new(0, 0, size.0, size.1)),
             last_frame: None,
             behind: false,
@@ -697,6 +700,7 @@ fn apply(
             rows,
             terminal_colors,
             terminal_graphics,
+            terminal_cell_size,
         } => {
             crate::logging::event(
                 crate::logging::EventKind::ServerClientAttach,
@@ -720,6 +724,7 @@ fn apply(
                     rows,
                     terminal_colors,
                     terminal_graphics.unwrap_or(false),
+                    terminal_cell_size,
                     activity,
                 ),
             );
@@ -835,6 +840,14 @@ fn apply_client_state(app: &mut App, clients: &Clients, foreground: Option<u64>)
     // that can render them, and the rest paint the placeholder cells as blanks,
     // so a mixed set of clients stays correct either way.
     app.set_host_graphics(clients.values().any(|client| client.graphics));
+    // A cell is the size the terminal in front of the user makes it. With more
+    // than one client attached the newest wins, the same rule the palette uses.
+    app.set_host_cell_size(
+        foreground
+            .and_then(|id| clients.get(&id))
+            .or_else(|| clients.values().next())
+            .and_then(|client| client.cell_size),
+    );
 
     if app.config.theme != "terminal" {
         return;
@@ -1299,9 +1312,13 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
     if protocol::write_message(&mut writer, &ServerMessage::Ready { probe_colors }).is_err() {
         return;
     }
-    let (terminal_colors, terminal_graphics) =
+    let (terminal_colors, terminal_graphics, terminal_cell_size) =
         match protocol::read_message::<_, ClientMessage>(&mut reader) {
-            Ok(ClientMessage::TerminalProbe { colors, graphics }) => (colors, graphics),
+            Ok(ClientMessage::TerminalProbe {
+                colors,
+                graphics,
+                cell_size,
+            }) => (colors, graphics, cell_size),
             _ => return,
         };
 
@@ -1352,6 +1369,7 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
             rows,
             terminal_colors,
             terminal_graphics,
+            terminal_cell_size,
         })
         .is_err()
     {
@@ -1657,6 +1675,7 @@ mod tests {
                 rows,
                 None,
                 false,
+                None,
                 activity,
             ),
             rx,
@@ -1962,6 +1981,7 @@ mod tests {
             32,
             None,
             false,
+            None,
             1,
         );
         let frame = || {
