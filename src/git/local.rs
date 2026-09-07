@@ -112,21 +112,35 @@ pub fn common_dir(cwd: &Path) -> Option<PathBuf> {
 }
 
 /// All worktrees of the repo containing `cwd` (`git worktree list --porcelain`).
+///
+/// Asks for `-z` first (git ≥ 2.36): every field is NUL-terminated, so a
+/// worktree path containing a newline still parses as one path. Older gits
+/// reject the flag (Ubuntu 22.04 still ships 2.34), so on failure fall back to
+/// the newline-delimited form — that costs one extra process only on the
+/// error path, and keeps the listing working everywhere.
 pub fn worktrees(cwd: &Path) -> Result<Vec<Worktree>, String> {
-    Ok(parse_worktrees(&run(
-        cwd,
-        &["worktree", "list", "--porcelain"],
-    )?))
+    match run(cwd, &["worktree", "list", "--porcelain", "-z"]) {
+        Ok(raw) => Ok(parse_worktrees(raw.split('\0'))),
+        Err(_) => {
+            let raw = run(cwd, &["worktree", "list", "--porcelain"])?;
+            Ok(parse_worktrees(raw.lines()))
+        }
+    }
 }
 
-fn parse_worktrees(raw: &str) -> Vec<Worktree> {
+/// Parse porcelain records — one `<key> <value>` field per item, an empty
+/// item between worktrees — whichever terminator git used (`\n` or, with
+/// `-z`, NUL).
+fn parse_worktrees<'a>(fields: impl IntoIterator<Item = &'a str>) -> Vec<Worktree> {
     let mut out: Vec<Worktree> = Vec::new();
     let mut path: Option<PathBuf> = None;
     let mut head = String::new();
     let mut branch: Option<String> = None;
+    let mut bare = false;
     let flush = |path: &mut Option<PathBuf>,
                  head: &mut String,
                  branch: &mut Option<String>,
+                 bare: &mut bool,
                  out: &mut Vec<Worktree>| {
         if let Some(p) = path.take() {
             let is_main = out.is_empty(); // the main worktree is listed first
@@ -135,22 +149,25 @@ fn parse_worktrees(raw: &str) -> Vec<Worktree> {
                 branch: branch.take(),
                 head: std::mem::take(head),
                 is_main,
+                bare: std::mem::take(bare),
             });
         }
     };
-    for line in raw.lines() {
+    for line in fields {
         if let Some(p) = line.strip_prefix("worktree ") {
             // A new block; flush the previous one (handles missing blank lines).
-            flush(&mut path, &mut head, &mut branch, &mut out);
+            flush(&mut path, &mut head, &mut branch, &mut bare, &mut out);
             path = Some(PathBuf::from(p));
         } else if let Some(h) = line.strip_prefix("HEAD ") {
             head = h.to_string();
         } else if let Some(b) = line.strip_prefix("branch ") {
             branch = Some(b.strip_prefix("refs/heads/").unwrap_or(b).to_string());
+        } else if line == "bare" {
+            bare = true;
         }
-        // `bare`, `detached`, `locked`, … are ignored (branch stays None).
+        // `detached`, `locked`, … are ignored (branch stays None).
     }
-    flush(&mut path, &mut head, &mut branch, &mut out);
+    flush(&mut path, &mut head, &mut branch, &mut bare, &mut out);
     out
 }
 
@@ -792,14 +809,104 @@ worktree /repo/detached
 HEAD cccc3333
 detached
 ";
-        let wts = parse_worktrees(out);
+        let wts = parse_worktrees(out.lines());
         assert_eq!(wts.len(), 3);
         assert!(wts[0].is_main, "first listed worktree is the main one");
         assert_eq!(wts[0].branch.as_deref(), Some("main"));
+        assert!(!wts[0].bare);
         assert_eq!(wts[1].branch.as_deref(), Some("feature"));
         assert!(!wts[1].is_main);
         assert_eq!(wts[2].branch, None, "detached worktree has no branch");
         assert_eq!(wts[2].head, "cccc3333");
+    }
+
+    #[test]
+    fn parses_bare_worktree_entry() {
+        // A bare clone lists the repo itself first, flagged `bare` — it has no
+        // working files, so callers offering checkouts to open must skip it.
+        let out = "\
+worktree /repo.git
+bare
+
+worktree /repo-wt
+HEAD dddd4444
+branch refs/heads/main
+";
+        let wts = parse_worktrees(out.lines());
+        assert_eq!(wts.len(), 2);
+        assert!(wts[0].bare);
+        assert!(wts[0].is_main);
+        assert!(!wts[1].bare);
+        assert_eq!(wts[1].branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn parses_nul_terminated_porcelain_with_newline_in_path() {
+        // `--porcelain -z` (git ≥ 2.36) NUL-terminates every field and puts an
+        // empty field between worktrees, exactly so a path holding a newline
+        // survives — the newline-delimited form would split it into two junk
+        // lines and the checkout would silently vanish from the list.
+        let out = "worktree /repo/main\0HEAD aaaa1111\0branch refs/heads/main\0\0\
+worktree /repo/odd\nname\0HEAD bbbb2222\0branch refs/heads/odd\0\0";
+        let wts = parse_worktrees(out.split('\0'));
+        assert_eq!(wts.len(), 2);
+        assert!(wts[0].is_main);
+        assert_eq!(wts[0].branch.as_deref(), Some("main"));
+        assert_eq!(wts[1].path, PathBuf::from("/repo/odd\nname"));
+        assert_eq!(wts[1].branch.as_deref(), Some("odd"));
+        assert_eq!(wts[1].head, "bbbb2222");
+    }
+
+    #[test]
+    fn worktrees_lists_a_checkout_whose_path_contains_a_newline() {
+        // End to end against the installed git: a linked worktree at a path
+        // with an embedded newline is listed with its path intact (via `-z`).
+        // Skipped, not failed, where git refuses such a path outright.
+        let base = std::env::temp_dir().join(format!("luvus-wtnl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap()
+        };
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        );
+        let odd = base.join("odd\nname");
+        let added = git(
+            &repo,
+            &["worktree", "add", "-q", &odd.to_string_lossy(), "-b", "odd"],
+        );
+        if !added.status.success() {
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        let wts = worktrees(&repo).unwrap();
+        let listed = wts
+            .iter()
+            .find(|w| w.branch.as_deref() == Some("odd"))
+            .expect("newline-path worktree is listed");
+        assert_eq!(
+            std::fs::canonicalize(&listed.path).unwrap(),
+            std::fs::canonicalize(&odd).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

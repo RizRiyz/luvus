@@ -194,6 +194,10 @@ pub struct Worktree {
     pub branch: Option<String>,
     pub head: String,
     pub is_main: bool,
+    /// A bare entry (`git worktree list` reports the bare repo itself as the
+    /// first "worktree"). It has no working files, so it can't be opened as a
+    /// workspace — kept in the list so `is_main` stays true to git's ordering.
+    pub bare: bool,
 }
 
 /// A workspace's worktree grouping. All checkouts of one repo share a `common_dir`
