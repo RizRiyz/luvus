@@ -89,6 +89,38 @@ mod socket_api_tests {
     }
 
     #[test]
+    fn detect_tick_repairs_a_stale_restored_workspace_index() {
+        let (_env, mut app) = app("restore-active-workspace-repair");
+        let focus = app.layout().focus;
+        app.active_ws = 1;
+        app.session_dirty = false;
+        app.runtime_cwd_dirty = false;
+        app.runtime_proc_dirty = false;
+        app.runtime_sessions_dirty = false;
+        let now = Instant::now();
+        app.last_detect_at = now - DETECTION_INTERVAL;
+
+        assert!(
+            app.detect_tick(now),
+            "repairing persisted focus must request a corrected frame"
+        );
+        assert_eq!(app.active_ws, 0);
+        assert_eq!(app.layout().focus, focus);
+        assert!(
+            app.session_dirty,
+            "the corrected index must replace the stale persisted value"
+        );
+
+        app.workspaces[0].active_tab = 1;
+        app.session_dirty = false;
+        app.persist_session_now = false;
+        assert!(app.detect_tick(now + DETECTION_INTERVAL));
+        assert_eq!(app.workspaces[0].active_tab, 0);
+        assert!(app.session_dirty);
+        assert!(app.persist_session_now);
+    }
+
+    #[test]
     fn quiet_runtime_has_no_loop_deadline() {
         let (_env, mut app) = app("quiet-runtime-deadline");
         let now = Instant::now();
@@ -1405,6 +1437,47 @@ fn blocking_hint(bottom: &str) -> Option<String> {
 }
 
 impl App {
+    /// Recover a stale persisted selection before any periodic work indexes it.
+    ///
+    /// Workspace and tab mutations normally keep these indices valid. A restored
+    /// server must still treat its restored selection as untrusted state. Keep
+    /// this boundary O(1) on the healthy path and persist a repair immediately so
+    /// the same snapshot cannot crash every subsequent launch.
+    fn repair_active_location(&mut self) -> bool {
+        if self.workspaces.is_empty() {
+            return false;
+        }
+
+        let mut repaired = false;
+        if self.active_ws >= self.workspaces.len() {
+            self.active_ws = self.workspaces.len() - 1;
+            repaired = true;
+        }
+
+        if self.workspaces[self.active_ws].tabs.is_empty() {
+            if let Some(workspace) = self
+                .workspaces
+                .iter()
+                .position(|workspace| !workspace.tabs.is_empty())
+            {
+                self.active_ws = workspace;
+                repaired = true;
+            }
+        }
+
+        let workspace = &mut self.workspaces[self.active_ws];
+        if !workspace.tabs.is_empty() && workspace.active_tab >= workspace.tabs.len() {
+            workspace.active_tab = workspace.tabs.len() - 1;
+            repaired = true;
+        }
+
+        if repaired {
+            self.session_dirty = true;
+            self.persist_session_now = true;
+        }
+        repaired
+    }
+
     /// Whether any parked or detection work still has a near-term deadline.
     ///
     /// Idle prompt redraws do not keep the 100 ms cadence. Working panes still
@@ -1763,6 +1836,7 @@ impl App {
     }
 
     pub(crate) fn detect_tick_with(&mut self, now: Instant, clients_attached: bool) -> bool {
+        let repaired_location = self.repair_active_location();
         self.schedule_config_save(now);
         self.schedule_automation_save(now);
         // No node open (docs/43 §3.3 — the session was closed). Closing the last
@@ -1770,8 +1844,8 @@ impl App {
         // `layout()` below would index an empty `workspaces`. The server keeps
         // ticking here with no clients attached, so this is a live path, not a
         // theoretical one.
-        if self.workspaces.is_empty() {
-            return false;
+        if self.workspaces.is_empty() || self.workspaces[self.active_ws].tabs.is_empty() {
+            return repaired_location;
         }
         self.schedule_runtime_scans(now, clients_attached);
         // Mission Control usage is demand-driven. Opening/focusing the dashboard,
@@ -1846,7 +1920,7 @@ impl App {
         // grid; agent state (blocked/working/done) is human-paced, so ~100ms is
         // plenty — running it at the render frame rate (up to 60fps) just burns CPU.
         if now.duration_since(self.last_detect_at) < DETECTION_INTERVAL {
-            return false;
+            return repaired_location;
         }
         self.last_detect_at = now;
         let focus = self.layout().focus;
@@ -2233,7 +2307,7 @@ impl App {
                 json!({"pane":id.0.to_string(), "source":source, "reason":"expired"}),
             );
         }
-        changed
+        repaired_location || changed
     }
 
     // ── api dispatch ──────────────────────────────────────────────────────────
