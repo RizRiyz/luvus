@@ -42,6 +42,9 @@ pub enum Event {
     /// Write some text to the PTY.
     PtyWrite(String),
 
+    /// A kitty graphics protocol command arrived from the child.
+    KittyGraphics(KittyGraphics),
+
     /// Request to write the text area size.
     TextAreaSizeRequest(Arc<dyn Fn(WindowSize) -> String + Sync + Send + 'static>),
 
@@ -70,6 +73,7 @@ impl Debug for Event {
             Event::ColorRequest(index, _) => write!(f, "ColorRequest({index})"),
             Event::ColorSchemeRequest => write!(f, "ColorSchemeRequest"),
             Event::PtyWrite(text) => write!(f, "PtyWrite({text})"),
+            Event::KittyGraphics(graphics) => write!(f, "KittyGraphics({graphics:?})"),
             Event::Title(title) => write!(f, "Title({title})"),
             Event::CursorBlinkingChange => write!(f, "CursorBlinkingChange"),
             Event::MouseCursorDirty => write!(f, "MouseCursorDirty"),
@@ -80,6 +84,25 @@ impl Debug for Event {
             Event::ChildExit(status) => write!(f, "ChildExit({status:?})"),
         }
     }
+}
+
+/// One kitty graphics protocol command, captured from an APC sequence.
+///
+/// The terminal emulation layer does not interpret the payload: a graphics
+/// command addresses pixels, which this layer does not own. It records the
+/// command verbatim together with the grid cursor at the moment the sequence
+/// terminated, because a placement is positioned relative to that cursor and
+/// the grid has moved on by the time a consumer sees the event.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct KittyGraphics {
+    /// Control data and payload, without the `ESC _ G` introducer or the
+    /// terminator.
+    pub payload: Vec<u8>,
+    /// Cursor line when the command terminated, relative to the top of the
+    /// visible region; negative values are in scrollback.
+    pub line: i32,
+    /// Cursor column when the command terminated.
+    pub column: usize,
 }
 
 /// Byte sequences are sent to a `Notify` in response to some events.

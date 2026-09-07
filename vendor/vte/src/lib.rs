@@ -45,6 +45,16 @@ const MAX_INTERMEDIATES: usize = 2;
 const MAX_OSC_PARAMS: usize = 16;
 const MAX_OSC_RAW: usize = 1024;
 
+/// Largest Application Program Command payload retained for [`Perform::apc_dispatch`].
+///
+/// An APC carries an opaque application payload rather than parameters, so the
+/// parser cannot bound it structurally the way it bounds CSI or OSC. The kitty
+/// graphics protocol — the dominant APC user — chunks transfers into at most
+/// 4096 base64 bytes plus a short control prefix, so this leaves generous room
+/// while keeping a malformed or hostile stream from growing the parser without
+/// limit.
+const MAX_APC_RAW: usize = 8192;
+
 /// Parser for raw _VTE_ protocol which delegates actions to a [`Perform`]
 ///
 /// [`Perform`]: trait.Perform.html
@@ -64,6 +74,13 @@ pub struct Parser<const OSC_RAW_BUF_SIZE: usize = MAX_OSC_RAW> {
     osc_raw: Vec<u8>,
     osc_params: [(usize, usize); MAX_OSC_PARAMS],
     osc_num_params: usize,
+    #[cfg(not(feature = "std"))]
+    apc_raw: ArrayVec<u8, OSC_RAW_BUF_SIZE>,
+    #[cfg(feature = "std")]
+    apc_raw: Vec<u8>,
+    /// Set when the current APC outgrew [`MAX_APC_RAW`]. The sequence is then
+    /// dropped whole instead of dispatched truncated.
+    apc_ignoring: bool,
     ignoring: bool,
     partial_utf8: [u8; 4],
     partial_utf8_len: usize,
@@ -189,6 +206,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             State::Escape => self.advance_esc(performer, byte),
             State::EscapeIntermediate => self.advance_esc_intermediate(performer, byte),
             State::OscString => self.advance_osc_string(performer, byte),
+            State::ApcString => self.advance_apc_string(performer, byte),
             State::SosPmApcString => self.anywhere(performer, byte),
             State::Ground => unreachable!(),
         }
@@ -384,7 +402,14 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                 self.osc_num_params = 0;
                 self.state = State::OscString
             },
-            0x5E..=0x5F => self.state = State::SosPmApcString,
+            // PM has no consumer, so it keeps the discarding string state. APC
+            // is collected: it is how the kitty graphics protocol is carried.
+            0x5E => self.state = State::SosPmApcString,
+            0x5F => {
+                self.apc_raw.clear();
+                self.apc_ignoring = false;
+                self.state = State::ApcString
+            },
             0x60..=0x7E => {
                 performer.esc_dispatch(self.intermediates(), self.ignoring, byte);
                 self.state = State::Ground
@@ -441,6 +466,32 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                 self.action_osc_put_param()
             },
             _ => self.action_osc_put(byte),
+        }
+    }
+
+    #[inline(always)]
+    fn advance_apc_string<P: Perform>(&mut self, performer: &mut P, byte: u8) {
+        match byte {
+            0x00..=0x06 | 0x08..=0x17 | 0x19 | 0x1C..=0x1F => (),
+            0x07 => {
+                self.apc_end(performer);
+                self.state = State::Ground
+            },
+            // CAN and SUB cancel the sequence. Unlike OSC, an aborted APC is
+            // not dispatched: its payload is opaque, so half of one is not a
+            // shorter command, it is a corrupt one.
+            0x18 | 0x1A => {
+                self.apc_raw.clear();
+                self.apc_ignoring = false;
+                performer.execute(byte);
+                self.state = State::Ground
+            },
+            0x1B => {
+                self.apc_end(performer);
+                self.reset_params();
+                self.state = State::Escape
+            },
+            _ => self.action_apc_put(byte),
         }
     }
 
@@ -566,6 +617,34 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         self.osc_dispatch(performer, byte);
         self.osc_raw.clear();
         self.osc_num_params = 0;
+    }
+
+    #[inline(always)]
+    fn action_apc_put(&mut self, byte: u8) {
+        #[cfg(feature = "std")]
+        let capacity = MAX_APC_RAW;
+        // Without an allocator the buffer cannot outgrow the size the caller
+        // chose for it, whichever limit is lower.
+        #[cfg(not(feature = "std"))]
+        let capacity = OSC_RAW_BUF_SIZE.min(MAX_APC_RAW);
+
+        if self.apc_ignoring {
+            return;
+        }
+        if self.apc_raw.len() == capacity {
+            self.apc_ignoring = true;
+            self.apc_raw.clear();
+            return;
+        }
+        self.apc_raw.push(byte);
+    }
+
+    fn apc_end<P: Perform>(&mut self, performer: &mut P) {
+        if !self.apc_ignoring && !self.apc_raw.is_empty() {
+            performer.apc_dispatch(&self.apc_raw);
+        }
+        self.apc_raw.clear();
+        self.apc_ignoring = false;
     }
 
     /// Reset escape sequence parameters and intermediates.
@@ -770,6 +849,7 @@ enum State {
     Escape,
     EscapeIntermediate,
     OscString,
+    ApcString,
     SosPmApcString,
     #[default]
     Ground,
@@ -835,6 +915,14 @@ pub trait Perform {
 
     /// Dispatch an operating system command.
     fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {}
+
+    /// Dispatch an application program command (`ESC _ … ST`).
+    ///
+    /// The payload is opaque to the parser and is passed through verbatim,
+    /// without the introducer or the terminator. It is capped at
+    /// [`MAX_APC_RAW`]; a longer sequence is dropped rather than truncated, and
+    /// a sequence cancelled by CAN or SUB is never dispatched.
+    fn apc_dispatch(&mut self, _payload: &[u8]) {}
 
     /// A final character has arrived for a CSI sequence
     ///
@@ -938,6 +1026,7 @@ mod tests {
 
     #[derive(Debug, PartialEq, Eq)]
     enum Sequence {
+        Apc(Vec<u8>),
         Osc(Vec<Vec<u8>>, bool),
         Csi(Vec<Vec<u16>>, Vec<u8>, bool, char),
         Esc(Vec<u8>, bool, u8),
@@ -949,6 +1038,10 @@ mod tests {
     }
 
     impl Perform for Dispatcher {
+        fn apc_dispatch(&mut self, payload: &[u8]) {
+            self.dispatched.push(Sequence::Apc(payload.to_vec()));
+        }
+
         fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
             let params = params.iter().map(|p| p.to_vec()).collect();
             self.dispatched.push(Sequence::Osc(params, bell_terminated));
@@ -986,6 +1079,98 @@ mod tests {
         fn execute(&mut self, byte: u8) {
             self.dispatched.push(Sequence::Execute(byte));
         }
+    }
+
+    #[test]
+    fn parse_apc() {
+        let mut dispatcher = Dispatcher::default();
+        let mut parser = Parser::new();
+
+        // Both terminators the wild uses: ST and, sloppily, BEL.
+        parser.advance(&mut dispatcher, b"\x1b_Gi=1,a=q;AAAA\x1b\\");
+        parser.advance(&mut dispatcher, b"\x1b_marker\x07");
+
+        assert_eq!(
+            dispatcher.dispatched,
+            vec![
+                Sequence::Apc(b"Gi=1,a=q;AAAA".to_vec()),
+                Sequence::Esc(Vec::new(), false, b'\\'),
+                Sequence::Apc(b"marker".to_vec()),
+            ],
+            "the payload arrives verbatim, without introducer or terminator"
+        );
+    }
+
+    #[test]
+    fn parse_apc_split_across_advances() {
+        let mut dispatcher = Dispatcher::default();
+        let mut parser = Parser::new();
+
+        // A chunked graphics transfer arrives in whatever pieces the PTY read
+        // happened to return; the sequence must survive being cut anywhere.
+        for chunk in [&b"\x1b_Gi="[..], b"1,a=", b"q;AA", b"AA\x1b", b"\\"] {
+            parser.advance(&mut dispatcher, chunk);
+        }
+
+        assert_eq!(dispatcher.dispatched.first(), Some(&Sequence::Apc(b"Gi=1,a=q;AAAA".to_vec())));
+    }
+
+    #[test]
+    fn oversized_apc_is_dropped_whole_and_the_parser_recovers() {
+        let mut dispatcher = Dispatcher::default();
+        let mut parser = Parser::new();
+
+        let mut oversized = b"\x1b_G".to_vec();
+        oversized.resize(MAX_APC_RAW * 2, b'A');
+        oversized.extend_from_slice(b"\x1b\\");
+        parser.advance(&mut dispatcher, &oversized);
+
+        assert!(
+            !dispatcher.dispatched.iter().any(|seq| matches!(seq, Sequence::Apc(_))),
+            "a truncated payload is a corrupt command, not a shorter one"
+        );
+
+        parser.advance(&mut dispatcher, b"\x1b_ok\x1b\\");
+        assert!(
+            dispatcher.dispatched.contains(&Sequence::Apc(b"ok".to_vec())),
+            "the next sequence must parse normally"
+        );
+    }
+
+    #[test]
+    fn cancelled_apc_is_not_dispatched() {
+        let mut dispatcher = Dispatcher::default();
+        let mut parser = Parser::new();
+
+        // CAN aborts the sequence; SUB does too.
+        parser.advance(&mut dispatcher, b"\x1b_Gi=1,a=q\x18");
+        parser.advance(&mut dispatcher, b"\x1b_Gi=2,a=q\x1a");
+
+        assert!(
+            !dispatcher.dispatched.iter().any(|seq| matches!(seq, Sequence::Apc(_))),
+            "an aborted APC must not reach a consumer: {:?}",
+            dispatcher.dispatched
+        );
+    }
+
+    #[test]
+    fn sos_and_pm_strings_are_still_discarded() {
+        let mut dispatcher = Dispatcher::default();
+        let mut parser = Parser::new();
+
+        parser.advance(&mut dispatcher, b"\x1bXsos\x1b\\");
+        parser.advance(&mut dispatcher, b"\x1b^pm\x1b\\");
+
+        assert!(
+            !dispatcher.dispatched.iter().any(|seq| matches!(seq, Sequence::Apc(_))),
+            "only APC is collected: {:?}",
+            dispatcher.dispatched
+        );
+        assert!(
+            !dispatcher.dispatched.iter().any(|seq| matches!(seq, Sequence::Print(_))),
+            "and their contents must never print: {:?}",
+            dispatcher.dispatched
+        );
     }
 
     #[test]

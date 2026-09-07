@@ -18,6 +18,7 @@ use super::{
 };
 use crate::terminal::appearance::PaneAppearance;
 use crate::terminal::backend::{CaptureMode, CaptureResult};
+use crate::terminal::graphics;
 use crate::terminal::pty::{InputAction, InputSender};
 
 #[derive(Default)]
@@ -79,6 +80,15 @@ impl EventListener for EventProxy {
                         g.changed = true;
                         g.generation = g.generation.wrapping_add(1);
                     }
+                }
+            }
+            // A pane renders text cells, so it cannot display an image. Decline
+            // the protocol's support query instead of staying silent, and drop
+            // every other graphics command: with no renderer there is nothing
+            // to acknowledge. See `crate::terminal::graphics`.
+            Event::KittyGraphics(command) => {
+                if let Some(reply) = graphics::query_reply(&command.payload) {
+                    let _ = self.tx.send(InputAction::Bytes(reply));
                 }
             }
             _ => {}
@@ -2022,6 +2032,69 @@ mod tests {
         );
     }
 
+    /// The support probe every kitty-graphics client sends: a query action
+    /// followed by DA1. Both must be answered, and the query must be answered
+    /// first — a client that sees only the DA1 concludes "no graphics", which
+    /// is the right conclusion but reached the slow way, after a timeout.
+    #[test]
+    fn kitty_graphics_probe_is_declined_before_device_attributes() {
+        let (tx, rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 20));
+        e.advance(b"\x1b_Gi=4207,a=q,t=d,f=24,s=1,v=1;AAAA\x1b\\\x1b[c");
+
+        let query = recv_bytes(&rx);
+        assert_eq!(
+            query, b"\x1b_Gi=4207;ENOTSUPPORTED:luvus panes render text only\x1b\\",
+            "the query must be declined, keyed to the queried image id"
+        );
+        let da1 = recv_bytes(&rx);
+        assert!(
+            da1.starts_with(b"\x1b[?"),
+            "device attributes still answered: {da1:?}"
+        );
+        assert!(
+            !e.visible_rows().join("").contains("AAAA"),
+            "the payload must never reach the grid"
+        );
+    }
+
+    #[test]
+    fn kitty_graphics_commands_other_than_a_query_are_silent() {
+        let (tx, rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 20));
+        // Transmit-and-display, place, and delete. With no renderer there is
+        // nothing to acknowledge, and an unrequested reply would be read by the
+        // child as input.
+        e.advance(b"\x1b_Ga=T,f=100,s=1,v=1;iVBORw0KGgo=\x1b\\");
+        e.advance(b"\x1b_Ga=p,i=1,c=10,r=5\x1b\\");
+        e.advance(b"\x1b_Ga=d,d=A\x1b\\");
+        assert!(rx.try_recv().is_err(), "no reply is owed");
+        assert_eq!(e.visible_rows().join("").trim(), "");
+    }
+
+    /// An APC that outgrows the parser's buffer is dropped whole. Half a
+    /// graphics command is not a shorter command, and answering one would
+    /// acknowledge an image id the sender may never have written.
+    #[test]
+    fn oversized_kitty_apc_is_dropped_without_a_reply() {
+        let (tx, rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 20));
+        let mut oversized = b"\x1b_Gi=9,a=q;".to_vec();
+        oversized.extend(std::iter::repeat_n(b'A', 16_384));
+        oversized.extend_from_slice(b"\x1b\\");
+        e.advance(&oversized);
+
+        assert!(rx.try_recv().is_err(), "an unbounded APC earns no reply");
+        assert!(
+            !e.visible_rows().join("").contains('A'),
+            "and its payload must not fall through to the grid"
+        );
+
+        // The parser recovers: the next well-formed query is answered.
+        e.advance(b"\x1b_Gi=10,a=q\x1b\\");
+        assert!(recv_bytes(&rx).starts_with(b"\x1b_Gi=10;"));
+    }
+
     #[test]
     fn scrolled_back_still_renders_and_copies_history() {
         let (tx, _rx) = channel();
@@ -2461,13 +2534,20 @@ mod tests {
 
     #[test]
     fn pi_cursor_marker_apc_is_not_a_grid_cell() {
-        let (tx, _rx) = channel();
+        let (tx, rx) = channel();
         let mut e = AlacrittyEngine::new(20, 3, tx, budget_for_rows(20, 20));
         e.advance(b"> \x1b_pi:c\x07\x1b[7m \x1b[27mhi");
         let text = e.visible_rows().join("");
         assert!(
             !text.contains("pi:c"),
             "APC marker must not become cells: {text:?}"
+        );
+        // Agents use APC for private markers on the hot output path. Collecting
+        // APC for the graphics protocol must leave every other one exactly as
+        // inert as it was: no reply, and nothing written back to the child.
+        assert!(
+            rx.try_recv().is_err(),
+            "a non-graphics APC must not be answered"
         );
         let mut reversed = Vec::new();
         e.for_each_cell(&mut |row, col, _, cell| {
