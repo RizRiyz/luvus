@@ -276,6 +276,26 @@ impl App {
                     .map_or(0, |menu| menu.cursor);
                 self.activate_named_session_row(cursor);
             }
+            KeyCode::Char('a') => {
+                let cursor = self
+                    .named_session_menu
+                    .as_ref()
+                    .map_or(0, |menu| menu.cursor);
+                let anchor = self
+                    .named_session_row_rects
+                    .iter()
+                    .find(|(index, _)| *index == cursor)
+                    .map(|(_, rect)| (rect.x.saturating_add(2), rect.y))
+                    .or_else(|| {
+                        self.named_session_menu_rect
+                            .map(|rect| (rect.x.saturating_add(2), rect.y.saturating_add(1)))
+                    })
+                    .unwrap_or((2, 1));
+                self.open_session_menu_for_row(cursor, anchor.0, anchor.1);
+                if let Some(menu) = self.session_menu.as_mut() {
+                    menu.selected = Some(0);
+                }
+            }
             _ => {}
         }
     }
@@ -386,7 +406,7 @@ impl App {
         self.prepare_named_session(name, true);
     }
 
-    fn prepare_named_session(&mut self, name: String, must_be_new: bool) {
+    pub(super) fn prepare_named_session(&mut self, name: String, must_be_new: bool) {
         let Some(menu) = self.named_session_menu.as_mut() else {
             return;
         };
@@ -755,7 +775,7 @@ mod tests {
             error: None,
             preparing: true,
         });
-        // Right-click guard is row.running && !row.current && !menu.preparing.
+        // Actions are blocked while another session is being prepared.
         let menu = app.named_session_menu.as_ref().unwrap();
         let row = &menu.rows[0];
         assert!(row.running && !row.current);
@@ -765,8 +785,9 @@ mod tests {
         app.session_menu = Some(crate::app::SessionMenu {
             name: "old".into(),
             anchor: (0, 0),
-            action: crate::app::SessionMenuItem::Stop,
+            actions: vec![crate::app::SessionMenuItem::Stop],
             items: Vec::new(),
+            selected: None,
         });
         app.open_session_menu("current".into(), 0, 0, true, true);
         assert!(
@@ -776,28 +797,78 @@ mod tests {
         app.session_menu = Some(crate::app::SessionMenu {
             name: "old".into(),
             anchor: (0, 0),
-            action: crate::app::SessionMenuItem::Stop,
+            actions: vec![crate::app::SessionMenuItem::Stop],
             items: Vec::new(),
+            selected: None,
         });
         app.open_session_menu("stopped".into(), 0, 0, false, false);
         assert_eq!(
-            app.session_menu.as_ref().map(|menu| menu.action),
-            Some(crate::app::SessionMenuItem::Delete),
-            "a stopped named session offers deletion"
+            app.session_menu.as_ref().map(|menu| menu.actions.clone()),
+            Some(vec![
+                crate::app::SessionMenuItem::Start,
+                crate::app::SessionMenuItem::Delete,
+            ]),
+            "a stopped named session offers start and deletion"
         );
         app.open_session_menu("other".into(), 5, 6, true, false);
         assert!(app.session_menu.is_some());
         assert_eq!(app.session_menu.as_ref().unwrap().name, "other");
         assert_eq!(
-            app.session_menu.as_ref().unwrap().action,
-            crate::app::SessionMenuItem::Stop
+            app.session_menu.as_ref().unwrap().actions,
+            vec![crate::app::SessionMenuItem::Stop]
         );
 
         app.open_session_menu("default".into(), 0, 0, false, false);
-        assert!(
-            app.session_menu.is_none(),
-            "the default session cannot be deleted"
+        assert_eq!(
+            app.session_menu.as_ref().unwrap().actions,
+            vec![crate::app::SessionMenuItem::Start],
+            "the stopped default session can start but cannot be deleted"
         );
+    }
+
+    #[test]
+    fn action_key_opens_a_keyboard_session_menu() {
+        let _env = crate::persist::test_env("named-session-keyboard-actions");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(100, 30, tx).unwrap();
+        app.named_session_menu = Some(NamedSessionMenu {
+            generation: 1,
+            rows: vec![NamedSessionRow {
+                name: "review".into(),
+                running: false,
+                current: false,
+            }],
+            cursor: 1,
+            scroll: 0,
+            loading: false,
+            prompt: None,
+            error: None,
+            preparing: false,
+        });
+        app.named_session_row_rects
+            .push((1, ratatui::layout::Rect::new(4, 7, 30, 1)));
+
+        app.named_session_key(key(KeyCode::Char('a')));
+
+        let menu = app.session_menu.as_ref().unwrap();
+        assert_eq!(menu.anchor, (6, 7));
+        assert_eq!(menu.selected, Some(0));
+        assert_eq!(
+            menu.actions,
+            vec![
+                crate::app::SessionMenuItem::Start,
+                crate::app::SessionMenuItem::Delete,
+            ]
+        );
+
+        app.handle_session_menu_key(key(KeyCode::Char('j')));
+        assert_eq!(app.session_menu.as_ref().unwrap().selected, Some(1));
+        app.handle_session_menu_key(key(KeyCode::Char('k')));
+        assert_eq!(app.session_menu.as_ref().unwrap().selected, Some(0));
+        app.handle_session_menu_key(key(KeyCode::Char('j')));
+        app.handle_session_menu_key(key(KeyCode::Enter));
+        assert!(app.session_menu.is_none());
+        assert_eq!(app.session_delete_confirm.as_deref(), Some("review"));
     }
 
     #[test]

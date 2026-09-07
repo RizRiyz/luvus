@@ -1067,12 +1067,15 @@ impl AgentMenu {
 pub struct SessionMenu {
     pub name: String,
     pub anchor: (u16, u16),
-    pub action: SessionMenuItem,
+    pub actions: Vec<SessionMenuItem>,
     pub items: Vec<(SessionMenuItem, Rect)>,
+    /// Keyboard-selected rendered item. Mouse-opened menus start without one.
+    pub selected: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SessionMenuItem {
+    Start,
     Stop,
     Delete,
 }
@@ -6413,19 +6416,21 @@ impl App {
             self.session_menu = None;
             return;
         }
-        let action = if running {
-            SessionMenuItem::Stop
-        } else if name != crate::session::DEFAULT_SESSION_NAME {
-            SessionMenuItem::Delete
+        let actions = if running {
+            vec![SessionMenuItem::Stop]
         } else {
-            self.session_menu = None;
-            return;
+            let mut actions = vec![SessionMenuItem::Start];
+            if name != crate::session::DEFAULT_SESSION_NAME {
+                actions.push(SessionMenuItem::Delete);
+            }
+            actions
         };
         self.session_menu = Some(SessionMenu {
             name,
             anchor: (col, row),
-            action,
+            actions,
             items: Vec::new(),
+            selected: None,
         });
     }
 
@@ -6461,14 +6466,41 @@ impl App {
             return;
         };
         match item {
+            SessionMenuItem::Start => self.prepare_named_session(menu.name, false),
             SessionMenuItem::Stop => self.stop_named_session(menu.name),
             SessionMenuItem::Delete => self.session_delete_confirm = Some(menu.name),
         }
     }
 
     pub fn handle_session_menu_key(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Esc {
-            self.session_menu = None;
+        let Some(actions) = self.session_menu.as_ref().map(|menu| menu.actions.clone()) else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.session_menu = None,
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
+                if actions.is_empty() {
+                    return;
+                }
+                let current = self.session_menu.as_ref().and_then(|menu| menu.selected);
+                let next = if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
+                    current
+                        .map(|index| index.checked_sub(1).unwrap_or(actions.len() - 1))
+                        .unwrap_or(actions.len() - 1)
+                } else {
+                    current.map_or(0, |index| (index + 1) % actions.len())
+                };
+                if let Some(menu) = self.session_menu.as_mut() {
+                    menu.selected = Some(next);
+                }
+            }
+            KeyCode::Enter => {
+                let selected = self.session_menu.as_ref().and_then(|menu| menu.selected);
+                if let Some(item) = selected.and_then(|index| actions.get(index)).copied() {
+                    self.session_menu_action(item);
+                }
+            }
+            _ => {}
         }
     }
 
