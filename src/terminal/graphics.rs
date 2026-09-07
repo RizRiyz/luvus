@@ -13,6 +13,8 @@
 //! Answering the query explicitly removes the guess. When Luvus grows a
 //! renderer, the same reply site is where `OK` will come from.
 
+pub(crate) mod placeholder;
+
 /// Reply Luvus owes the child for one kitty graphics command, if any.
 ///
 /// `payload` is the APC body with the `G` introducer already stripped, as
