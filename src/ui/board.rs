@@ -1724,13 +1724,11 @@ fn wrap_display_lines(value: &str, width: usize) -> Vec<String> {
                 .unwrap_or(end);
             rows.push(candidate[..split].to_string());
             let mut consumed = split;
-            if split < end {
-                consumed += remaining[split..]
-                    .chars()
-                    .take_while(|character| character.is_whitespace())
-                    .map(char::len_utf8)
-                    .sum::<usize>();
-            }
+            consumed += remaining[split..]
+                .chars()
+                .take_while(|character| character.is_whitespace())
+                .map(char::len_utf8)
+                .sum::<usize>();
             remaining = &remaining[consumed..];
         }
     }
@@ -1944,7 +1942,9 @@ pub(super) fn draw_form(
                 display_value.push('▏');
             }
             let lines = wrap_display_lines(&display_value, body_rect.width as usize);
-            let scroll = lines.len().saturating_sub(body_rect.height as usize);
+            let scroll = active
+                .then(|| lines.len().saturating_sub(body_rect.height as usize))
+                .unwrap_or(0);
             let visible = lines.into_iter().skip(scroll).map(|line| {
                 if let Some(text) = active.then(|| line.strip_suffix('▏')).flatten() {
                     Line::from(vec![
@@ -3168,6 +3168,42 @@ mod tests {
         assert!(rendered.contains("Binding"));
         assert!(rendered.contains("Survives server restart"));
         assert!(!rendered.contains("private-session"));
+    }
+
+    #[test]
+    fn display_wrapping_consumes_whitespace_at_an_exact_word_boundary() {
+        assert_eq!(wrap_display_lines("hello world", 5), ["hello", "world"]);
+    }
+
+    #[test]
+    fn inactive_task_prompt_starts_at_the_first_wrapped_line() {
+        let area = Rect::new(0, 0, 90, 30);
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+        let mut form = OrchForm::for_kind(crate::app::OrchFormKind::Task);
+        form.field = crate::app::OrchFormField::Title;
+        form.prompt = "first line\nsecond line\nthird line\nfourth line".into();
+
+        draw_form(
+            &mut target,
+            area,
+            &form,
+            &crate::i18n::EN,
+            &Theme::quattro_rally(),
+        );
+
+        let rendered = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("first line"));
+        assert!(rendered.contains("second line"));
+        assert!(rendered.contains("third line"));
+        assert!(!rendered.contains("fourth line"));
     }
 
     #[test]

@@ -3907,6 +3907,7 @@ fn task_prompt_arg(args: &[String]) -> Result<Option<String>> {
     file.take((crate::orch::MAX_TASK_PROMPT_BYTES + 1) as u64)
         .read_to_string(&mut prompt)
         .map_err(|error| anyhow!("cannot read {path} as UTF-8 text: {error}"))?;
+    prompt = prompt.replace("\r\n", "\n").replace('\r', "\n");
     if prompt.len() > crate::orch::MAX_TASK_PROMPT_BYTES {
         return Err(anyhow!(
             "task prompt exceeds the {}-byte limit",
@@ -5059,6 +5060,16 @@ mod tests {
         let (method, params) = parse(&update_args).unwrap();
         assert_eq!(method, "task.update");
         assert_eq!(params["prompt"], "Updated briefing");
+        let (_, params) = parse(&[
+            "luvus".into(),
+            "task".into(),
+            "update".into(),
+            "t1".into(),
+            "--prompt".into(),
+            "inline\r\nprompt\rtext".into(),
+        ])
+        .unwrap();
+        assert_eq!(params["prompt"], "inline\r\nprompt\rtext");
         assert!(parse(&argv(
             "luvus task add title --prompt inline --prompt-file task.md"
         ))
@@ -5144,7 +5155,11 @@ mod tests {
         let root = crate::persist::config_dir();
         fs::create_dir_all(&root).unwrap();
         let prompt_path = root.join("task.md");
-        fs::write(&prompt_path, "Review the API.\nCover rollback behavior.\n").unwrap();
+        fs::write(
+            &prompt_path,
+            "Review the API.\r\nCover rollback behavior.\rCheck recovery.\r\n",
+        )
+        .unwrap();
         let args = vec![
             "luvus".into(),
             "task".into(),
@@ -5157,7 +5172,7 @@ mod tests {
         assert_eq!(method, "task.add");
         assert_eq!(
             params["prompt"],
-            "Review the API.\nCover rollback behavior.\n"
+            "Review the API.\nCover rollback behavior.\nCheck recovery.\n"
         );
 
         fs::write(

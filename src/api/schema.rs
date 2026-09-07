@@ -109,17 +109,39 @@ mod tests {
         let definitions = &bundle["request"]["$defs"];
         assert_eq!(definitions["taskAddParams"]["required"], json!(["title"]));
         assert_eq!(
-            definitions["taskAddParams"]["properties"]["title"]["maxLength"],
-            crate::orch::MAX_TASK_TITLE_BYTES
+            definitions["taskAddParams"]["properties"]["title"]["$comment"],
+            format!(
+                "Consumers must enforce a {}-byte UTF-8 limit.",
+                crate::orch::MAX_TASK_TITLE_BYTES
+            )
         );
         assert_eq!(
-            definitions["taskAddParams"]["properties"]["prompt"]["maxLength"],
-            crate::orch::MAX_TASK_PROMPT_BYTES
+            definitions["taskAddParams"]["properties"]["prompt"]["$comment"],
+            format!(
+                "Consumers must enforce a {}-byte UTF-8 limit.",
+                crate::orch::MAX_TASK_PROMPT_BYTES
+            )
         );
+        assert!(definitions["taskAddParams"]["properties"]["title"]
+            .get("maxLength")
+            .is_none());
+        assert!(definitions["taskAddParams"]["properties"]["prompt"]
+            .get("maxLength")
+            .is_none());
         assert_eq!(
             definitions["taskUpdateParams"]["properties"]["prompt"]["type"],
             json!(["string", "null"])
         );
+        assert_eq!(
+            definitions["taskUpdateParams"]["properties"]["prompt"]["$comment"],
+            format!(
+                "Consumers must enforce a {}-byte UTF-8 limit.",
+                crate::orch::MAX_TASK_PROMPT_BYTES
+            )
+        );
+        assert!(definitions["taskUpdateParams"]["properties"]["prompt"]
+            .get("maxLength")
+            .is_none());
     }
 
     #[test]
