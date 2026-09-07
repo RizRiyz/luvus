@@ -37,6 +37,13 @@ validates every entry before it queues one ordered byte sequence, so a
 mixed-type or unknown-key batch sends no prefix. A closed PTY input queue
 returns `send_failed` instead of reporting delivery.
 
+Prompt text and its final Enter are queued as one ordered submission, including
+direct `agent.send` requests and DIFF note handoffs. Other queued input cannot
+interleave between that paste and Enter. A successful send means the queue
+accepted the submission, not that the agent completed it. A closed queue fails
+without recording a successful handoff. Submission uses the existing PTY writer
+and does not create a delayed-send thread.
+
 For line-specific feedback, the native [DIFF review](/docs/guides/diff/) uses
 the same target validation. It groups selected local notes into one bounded
 message, quotes source context as untrusted review data, and records delivery

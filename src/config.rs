@@ -579,10 +579,6 @@ fn config_path() -> PathBuf {
     crate::persist::config_dir().join("config.json")
 }
 
-fn config_lock_path() -> PathBuf {
-    crate::persist::config_dir().join("config.lock")
-}
-
 /// Load the config, or defaults if missing / unparsable.
 pub fn load() -> Config {
     fs::read_to_string(config_path())
@@ -639,7 +635,8 @@ static CONFIG_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// server may hold an older copy of fields changed by another server.
 #[cfg(test)]
 pub fn save(cfg: &Config) {
-    let _ = with_config_lock(|| write_config_atomic(cfg));
+    let path = config_path();
+    let _ = with_config_lock(&path, || write_config_atomic(cfg, &path));
 }
 
 /// Persist only fields changed between one server's last local config and its
@@ -650,6 +647,7 @@ pub fn save(cfg: &Config) {
 /// Returns `true` after either a successful write or a no-op. Callers retain
 /// their old baseline on `false`, allowing the next change to retry everything
 /// that has not reached disk yet.
+#[cfg(test)]
 pub fn save_changes(base: &Config, desired: &Config) -> bool {
     save_changes_with_patch(base, desired, None)
 }
@@ -659,6 +657,43 @@ pub fn save_changes(base: &Config, desired: &Config) -> bool {
 /// already has in memory: there may be no local delta, but the shared file must
 /// still record the user's choice.
 pub fn save_changes_with_patch(base: &Config, desired: &Config, explicit: Option<&Value>) -> bool {
+    SaveRequest::new(base.clone(), desired.clone(), explicit.cloned()).write()
+}
+
+/// Owned save inputs with a pinned path; workers never resolve session globals.
+pub(crate) struct SaveRequest {
+    base: Config,
+    desired: Config,
+    explicit: Option<Value>,
+    path: PathBuf,
+}
+
+impl SaveRequest {
+    pub(crate) fn new(base: Config, desired: Config, explicit: Option<Value>) -> Self {
+        Self {
+            base,
+            desired,
+            explicit,
+            path: config_path(),
+        }
+    }
+
+    pub(crate) fn write(self) -> bool {
+        save_changes_at(
+            &self.path,
+            &self.base,
+            &self.desired,
+            self.explicit.as_ref(),
+        )
+    }
+}
+
+fn save_changes_at(
+    path: &std::path::Path,
+    base: &Config,
+    desired: &Config,
+    explicit: Option<&Value>,
+) -> bool {
     let Ok(base) = serde_json::to_value(base) else {
         return false;
     };
@@ -670,8 +705,13 @@ pub fn save_changes_with_patch(base: &Config, desired: &Config, explicit: Option
         return true;
     }
 
-    with_config_lock(|| {
-        let mut latest = serde_json::to_value(load()).map_err(io::Error::other)?;
+    with_config_lock(path, || {
+        let latest: Config = fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .map(normalize_config)
+            .unwrap_or_default();
+        let mut latest = serde_json::to_value(latest).map_err(io::Error::other)?;
         if let Some(delta) = &delta {
             apply_delta(&mut latest, delta);
         }
@@ -679,13 +719,26 @@ pub fn save_changes_with_patch(base: &Config, desired: &Config, explicit: Option
             apply_delta(&mut latest, explicit);
         }
         let merged: Config = serde_json::from_value(latest).map_err(io::Error::other)?;
-        write_config_atomic(&normalize_config(merged))
+        write_config_atomic(&normalize_config(merged), path)
     })
     .is_ok()
 }
 
-fn with_config_lock<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
-    let dir = crate::persist::ensure_config_dir();
+fn with_config_lock<T>(
+    path: &std::path::Path,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::other("missing configuration directory"))?;
+    fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if Some(dir) != crate::platform::home_dir().as_deref() {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        }
+    }
     if !dir.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -697,14 +750,25 @@ fn with_config_lock<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<
         .read(true)
         .write(true)
         .truncate(false)
-        .open(config_lock_path())?;
-    lock.lock_exclusive()?;
+        .open(dir.join("config.lock"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => return Err(error),
+        }
+    }
     operation()
 }
 
-fn write_config_atomic(cfg: &Config) -> io::Result<()> {
+fn write_config_atomic(cfg: &Config, path: &std::path::Path) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(cfg).map_err(io::Error::other)?;
-    let path = config_path();
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -733,7 +797,7 @@ fn write_config_atomic(cfg: &Config) -> io::Result<()> {
         file.write_all(&json)?;
         file.flush()?;
         drop(file);
-        crate::platform::atomic_replace_file(&temporary, &path)
+        crate::platform::atomic_replace_file(&temporary, path)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);

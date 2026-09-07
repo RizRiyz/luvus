@@ -124,7 +124,9 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
 /// clamps a handful of scroll offsets as part of an ordinary interactive draw;
 /// preserve those values here so a passive projection cannot move the active
 /// client's cursor, scroll position, compact mode, or click targets.
-pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
+/// Return the passive client's content geometry before restoring all active
+/// hit-test state. Each client owns this baseline, never the shared App.
+pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> Vec<(PaneId, Rect)> {
     let compact = app.compact;
     let last_main_area = app.last_main_area;
     let last_pane_area = app.last_pane_area;
@@ -296,7 +298,7 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     app.file_tree.scroll = file_tree_scroll;
     app.menu_scroll = menu_scroll;
     app.pane_rects = pane_rects;
-    app.pane_content_rects = pane_content_rects;
+    let projected_content = std::mem::replace(&mut app.pane_content_rects, pane_content_rects);
     app.pane_title_rects = pane_title_rects;
     app.tab_rects = tab_rects;
     app.tab_close_rects = tab_close_rects;
@@ -402,18 +404,17 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
             git.contributors_more_rect = contributors_more_rect;
         }
     }
+    projected_content
 }
 
-/// Whether a PTY-only frame may reuse the active client's complete UI buffer.
+/// Whether a PTY-only frame may reuse a client's complete UI buffer.
 /// Every state that draws over pane content or changes terminal styling forces
 /// the ordinary full renderer. Conservative false negatives cost one full
 /// frame; a false positive could corrupt visible output.
 pub(crate) fn retained_pty_eligible(app: &App) -> bool {
     app.mode == Mode::Normal
-        // OSC title changes arrive with PTY output and can alter an agent row
-        // outside the pane. Until retained chrome has its own invalidation,
-        // keep that optional projection on the full path.
-        && !app.config.layout.agent_title
+        // The VT damage contract forces a full projection when title chrome
+        // changes. Enabling titles alone need not disable retained rendering.
         && app.selection.is_none()
         && app.copy_mode.is_none()
         && app.hover_link.is_none()

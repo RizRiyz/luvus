@@ -3,6 +3,49 @@ title: Architecture
 description: Why luvus is fast and why sessions survive, thanks to the server/client split, one event loop, and frame diffs.
 ---
 
+## Shared filesystem work
+
+Native file and document-preview refresh checks use one lazily started `luvus-io`
+worker per server. It sleeps on a channel when idle. Admission is nonblocking and
+limited to eight outstanding jobs, including completed results not yet applied.
+Metadata refresh admits only one batch at a time, covering at most 128 views.
+Results return to the app loop and must match the view path and read generation.
+A closed or replaced view cannot receive a stale refresh.
+
+Shutdown allows two seconds for admitted work to finish and reports a timeout.
+An operating-system filesystem call cannot be forcibly cancelled safely, so a
+timeout is not a successful completion guarantee. This worker adds no per-pane
+thread and does not change PTY ownership or public API acknowledgement semantics.
+
+Session persistence captures immutable layout and identity evidence on the app
+loop, then discovers native sessions, serializes, and atomically replaces the
+selected session file on this worker. Only one ordinary capture is outstanding.
+An acknowledgement cannot clear changes made after admission; failed writes
+retain retry intent at the normal debounce cadence. Explicitly closed workspace
+paths remain persisted even when no workspace is open.
+
+Shutdown queues one final capture after previously admitted writes, with the same
+two-second deadline. It never falls back to a competing synchronous write after
+timeout. Terminal screen capture still runs under the existing short engine lock;
+this does not introduce a second persistent screen cache or promise constant-time
+capture for an arbitrary number of panes. Automation dispatch-intent persistence
+is a separate contract and is not made asynchronous by session saving.
+
+Settings changes apply to the running UI immediately and are persisted through
+the same shared worker. Rapid changes coalesce behind one in-flight write.
+Acknowledged baselines preserve newer local edits and unrelated changes from
+other named sessions. Explicit API patches remain authoritative even when the
+requested value matches this server's old in-memory value. Cross-process lock
+acquisition is bounded to one second, and failures retain intent for a later
+retry and display an error. The worker pins the config path before admission.
+
+Socket config reloads that arrive during a save wait for its outcome and read
+the shared file again. A failed save or a concurrent edit during that fresh read
+returns a structured error instead of silently replacing newer settings.
+Shutdown uses the in-flight write receipt to avoid replaying already-saved fields
+over changes another session made afterward. This is not a multi-file transaction
+between configuration and the session snapshot.
+
 Three design decisions explain most of luvus's behavior.
 
 ## A headless server, a thin client
@@ -55,6 +98,35 @@ coalesced into same-style runs. A keystroke costs ~22 bytes on the wire, a
 full 40-character line ~100 bytes. This is what makes
 [remote attach](/docs/guides/remote/) over plain SSH feel local, and keeps the
 local render path around a millisecond per frame.
+
+For ordinary terminal-only updates, the server can also reuse its rendered
+buffer and repaint only damaged rows. Agent titles do not disable this path:
+a changed title invalidates the full projection until that output generation
+is acknowledged. Repeated identical titles keep the row-only path available.
+Overlays, resize, and backpressure recovery retain conservative full rendering.
+
+A hidden agent's changed title can still update a visible sidebar label. That
+change schedules a presentation through the existing PTY notification path,
+including coalesced output. Unchanged titles and ordinary hidden output do not
+request a redraw just because title display is enabled.
+
+Each attached client retains its own buffer and projected pane rectangles,
+including passive clients at different sizes. All clients consume the same
+owned terminal damage before it is acknowledged. A passive display cannot
+change the active client's focus, PTY dimensions, scroll state, or hit targets.
+A client that falls behind receives a full repair frame.
+
+Detailed history accounting is cached once per terminal storage state. Output,
+resize, budget changes, and quiet history packing invalidate the summary.
+Scrolling updates the reported offset without traversing retained rows. The
+reported byte fields remain allocation estimates, not process RSS or an exact
+byte-enforced history limit.
+
+Ordinary pane output schedules CWD and workspace-branch inspection for its tab,
+including split siblings needed for safe rehoming. Attach, restore, and topology
+changes retain full invalidation. Process-identity demand remains independent
+and shares the OS process snapshot when deadlines coincide. This reduces
+unrelated Git probes; it does not eliminate platform-wide process enumeration.
 
 ## And the numbers
 

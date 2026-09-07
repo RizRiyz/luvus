@@ -7,6 +7,28 @@ Agent Automation turns a prompt into a durable one-time or recurring schedule.
 A definition can start a fresh ORCH worker, or deliver its prompt to one exact
 agent that is already running in Luvus.
 
+## Saving and responsiveness
+
+The server serializes and flushes the automation ledger on its shared, bounded
+filesystem worker. It keeps one ledger snapshot in flight and coalesces later
+changes. This adds no separate scheduler persistence thread. Input, rendering,
+and unrelated CLI/UHP requests continue while that worker waits for storage.
+
+An occurrence cannot launch until its checkpoint is acknowledged. Active-agent
+delivery additionally saves dispatch intent and then rechecks the terminal,
+agent identity, readiness, and cancellation before submitting the prompt. A
+restart with uncertain dispatch intent fails that occurrence instead of replaying
+it. Existing ORCH provenance writes remain ordered before worker launch.
+
+CLI/UHP mutation success waits for the required ledger checkpoint. On a storage
+failure, Luvus reports `persistence_failed`, fails unlaunched occurrences, and
+retries pending bookkeeping with backoff. A failed run is not automatically
+relaunched when storage recovers. A failed or lost response does not prove that
+the definition is absent: inspect it or retry with the same idempotency key.
+Reads may show the current in-memory state while a checkpoint is pending.
+Shutdown drains accepted writes and makes a final ledger checkpoint within the
+shared bounded shutdown deadline; it never races a synchronous fallback write.
+
 :::tip[Quick path]
 Open ORCH with `Ctrl+Space o`, press `Tab` for **Automations BETA**, then press
 `a`. Choose **Run with → New agent** or **Active agent**, then set its

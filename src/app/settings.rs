@@ -1596,6 +1596,7 @@ mod tests {
             app.config.layout.diff_marker_style,
             crate::diff::DiffMarkerStyle::Bars
         );
+        app.flush_config_for_test(&_rx);
         assert_eq!(
             crate::config::load().layout.diff_marker_style,
             crate::diff::DiffMarkerStyle::Bars,
@@ -1638,6 +1639,7 @@ mod tests {
             app.config.layout.diff_color_mode,
             crate::diff::DiffColorMode::Standard
         );
+        app.flush_config_for_test(&_rx);
         assert_eq!(
             crate::config::load().layout.diff_color_mode,
             crate::diff::DiffColorMode::Standard,
@@ -1676,6 +1678,7 @@ mod tests {
 
         app.adjust_general(row, 1);
         assert!(app.config.resume_launch_flags, "the toggle flipped");
+        app.flush_config_for_test(&_rx);
         assert!(
             crate::config::load().resume_launch_flags,
             "and it was saved"
@@ -1720,6 +1723,7 @@ mod tests {
             app.config.layout.new_pane_to_workspace_root,
             "the toggle flipped"
         );
+        app.flush_config_for_test(&_rx);
         assert!(
             crate::config::load().layout.new_pane_to_workspace_root,
             "and it was saved"
@@ -2059,6 +2063,7 @@ mod tests {
         app.settings_adjust(click, 1);
         assert_eq!(app.config.layout.file_click, config::FILE_CLICK_TAB);
         assert_eq!(app.file_click_label(), "Open in tab");
+        app.flush_config_for_test(&_rx);
         assert_eq!(
             crate::config::load().layout.file_click,
             config::FILE_CLICK_TAB,

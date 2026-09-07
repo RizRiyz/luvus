@@ -382,6 +382,9 @@ surface:
   retrying. Leases coordinate declared paths but do not sandbox a shared
   checkout. `task release` requeues an
   active task and releases its path leases; it does not stop the worker pane.
+  `task add --prompt <text>` or `--prompt-file <path>` stores a detailed worker
+  briefing; `task update` may replace it only while a manual task is still
+  queued and unassigned. Inspect the stored prompt before starting the worker.
   Report work progress only with `task update --note`. `task heartbeat
   --context-used <0..1>` means the fraction of the model context window already
   consumed, never task-completion progress; `0.6` means 60% consumed. Omit the
@@ -393,6 +396,10 @@ surface:
   idempotency key for retryable create/run requests, and never turn an
   automation into an arbitrary scheduled shell command. Disabling prevents
   future occurrences; it does not stop a live ORCH task or pane.
+  Mutation success waits for the ledger checkpoint. After `persistence_failed`
+  or a lost response, inspect state and retry the same idempotency key; do not
+  assume the definition is absent or create a duplicate schedule. A failed
+  prelaunch occurrence is not automatically relaunched on storage recovery.
   `target=new_worker` is the durable default. Use `active_agent` only with
   the exact discovered pane, terminal lifetime, agent, and workspace identities;
   treat `delivered` as input-queue evidence rather than completed work, and do

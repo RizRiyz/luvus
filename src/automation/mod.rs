@@ -205,11 +205,12 @@ impl AutomationState {
         automation.next_run_at = next_run_at;
         let automation = automation.clone();
         if !enabled {
-            for run in self
-                .runs
-                .iter_mut()
-                .filter(|run| run.automation_id == id && run.status == RunStatus::Pending)
-            {
+            for run in self.runs.iter_mut().filter(|run| {
+                run.automation_id == id
+                    && (run.status == RunStatus::Pending
+                        || (run.status == RunStatus::Starting
+                            && matches!(run.target, AutomationTarget::ActiveAgent { .. })))
+            }) {
                 run.status = RunStatus::Cancelled;
                 run.error = Some("automation disabled before launch".into());
                 run.finished_at = Some(now);

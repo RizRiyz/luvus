@@ -266,6 +266,18 @@ pub struct HistoryMetrics {
     pub compacted_rows: Option<usize>,
     /// Physical cell slots allocated by the engine, excluding logical repeats.
     pub allocated_cells: Option<usize>,
+    /// Cold-history blocks shared by packed rows.
+    pub packed_blocks: Option<usize>,
+    /// Shallow bytes owned by packed cold-history blocks.
+    pub packed_bytes: Option<usize>,
+    /// Rows backed by packed cold-history blocks.
+    pub packed_rows: Option<usize>,
+    /// Shallow bytes owned by ordinary dense row cell vectors.
+    pub dense_row_bytes: Option<usize>,
+    /// Bytes reserved by the outer row descriptor vectors.
+    pub row_descriptor_bytes: Option<usize>,
+    /// Approximate number of outer, row, and block allocations.
+    pub allocation_count: Option<usize>,
     pub exact_bytes: bool,
 }
 
@@ -306,10 +318,21 @@ pub trait VtEngine: Send {
     /// Feed child output. Must never panic on arbitrary bytes.
     fn advance(&mut self, bytes: &[u8]);
 
-    /// Finish allocation maintenance deferred while parsing the latest output
-    /// burst. Called at the app's coalesced frame boundary, outside the PTY
-    /// reader path.
+    /// Finish allocation maintenance deferred while parsing recent output.
+    /// Unix calls this from its existing descriptor actor after a bounded
+    /// activity window; Windows uses the app's coalesced output boundary.
     fn finish_output_batch(&mut self);
+
+    /// Incremental maintenance. True requests another bounded turn; false
+    /// means no backlog. Engines without deferred work keep the full boundary.
+    fn finish_output_batch_step(&mut self) -> bool {
+        self.finish_output_batch();
+        false
+    }
+
+    fn history_maintenance_pending(&self) -> bool {
+        false
+    }
 
     /// Monotonic generation of successfully parsed terminal output.
     fn output_generation(&self) -> u64;
@@ -332,6 +355,8 @@ pub trait VtEngine: Send {
 
     /// Capture owned visible rows affected since the last acknowledged render.
     /// Implementations may conservatively return [`DamageKind::Full`].
+    /// Title changes must return Full until acknowledged: titles can also
+    /// affect chrome outside terminal rows, including agent sidebar labels.
     fn damage_snapshot(&mut self) -> DamageSnapshot;
 
     /// Forget damage through `generation` only when no newer output exists.
@@ -379,6 +404,12 @@ pub trait VtEngine: Send {
 
     /// Latest window title set by the child via OSC 0/2, if any.
     fn title(&self) -> Option<String>;
+
+    /// Changes only when title chrome changes, including reset. Engines with
+    /// mutable titles must override this for hidden-pane presentation.
+    fn title_generation(&self) -> u64 {
+        0
+    }
 
     /// Scroll the viewport `delta` lines through scrollback: **positive scrolls
     /// up into history**, negative back toward the live bottom. Clamped to the

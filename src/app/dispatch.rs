@@ -89,6 +89,38 @@ mod socket_api_tests {
     }
 
     #[test]
+    fn detect_tick_repairs_a_stale_restored_workspace_index() {
+        let (_env, mut app) = app("restore-active-workspace-repair");
+        let focus = app.layout().focus;
+        app.active_ws = 1;
+        app.session_dirty = false;
+        app.runtime_cwd_dirty = false;
+        app.runtime_proc_dirty = false;
+        app.runtime_sessions_dirty = false;
+        let now = Instant::now();
+        app.last_detect_at = now - DETECTION_INTERVAL;
+
+        assert!(
+            app.detect_tick(now),
+            "repairing persisted focus must request a corrected frame"
+        );
+        assert_eq!(app.active_ws, 0);
+        assert_eq!(app.layout().focus, focus);
+        assert!(
+            app.session_dirty,
+            "the corrected index must replace the stale persisted value"
+        );
+
+        app.workspaces[0].active_tab = 1;
+        app.session_dirty = false;
+        app.persist_session_now = false;
+        assert!(app.detect_tick(now + DETECTION_INTERVAL));
+        assert_eq!(app.workspaces[0].active_tab, 0);
+        assert!(app.session_dirty);
+        assert!(app.persist_session_now);
+    }
+
+    #[test]
     fn quiet_runtime_has_no_loop_deadline() {
         let (_env, mut app) = app("quiet-runtime-deadline");
         let now = Instant::now();
@@ -1405,6 +1437,47 @@ fn blocking_hint(bottom: &str) -> Option<String> {
 }
 
 impl App {
+    /// Recover a stale persisted selection before any periodic work indexes it.
+    ///
+    /// Workspace and tab mutations normally keep these indices valid. A restored
+    /// server must still treat its restored selection as untrusted state. Keep
+    /// this boundary O(1) on the healthy path and persist a repair immediately so
+    /// the same snapshot cannot crash every subsequent launch.
+    fn repair_active_location(&mut self) -> bool {
+        if self.workspaces.is_empty() {
+            return false;
+        }
+
+        let mut repaired = false;
+        if self.active_ws >= self.workspaces.len() {
+            self.active_ws = self.workspaces.len() - 1;
+            repaired = true;
+        }
+
+        if self.workspaces[self.active_ws].tabs.is_empty() {
+            if let Some(workspace) = self
+                .workspaces
+                .iter()
+                .position(|workspace| !workspace.tabs.is_empty())
+            {
+                self.active_ws = workspace;
+                repaired = true;
+            }
+        }
+
+        let workspace = &mut self.workspaces[self.active_ws];
+        if !workspace.tabs.is_empty() && workspace.active_tab >= workspace.tabs.len() {
+            workspace.active_tab = workspace.tabs.len() - 1;
+            repaired = true;
+        }
+
+        if repaired {
+            self.session_dirty = true;
+            self.persist_session_now = true;
+        }
+        repaired
+    }
+
     /// Whether any parked or detection work still has a near-term deadline.
     ///
     /// Idle prompt redraws do not keep the 100 ms cadence. Working panes still
@@ -1468,6 +1541,12 @@ impl App {
         clients_attached: bool,
     ) -> Option<Instant> {
         let mut deadline = None;
+        if self.config_persistence.dirty && !self.config_persistence.inflight {
+            Self::sooner_deadline(
+                &mut deadline,
+                self.config_persistence.retry_at.unwrap_or(now),
+            );
+        }
         let mut consider = |candidate: Instant, due: bool| {
             if candidate > now {
                 Self::sooner_deadline(&mut deadline, candidate);
@@ -1546,7 +1625,9 @@ impl App {
         }
 
         if clients_attached {
-            if self.runtime_cwd_dirty && !self.cwd_scan_inflight {
+            if (self.runtime_cwd_dirty || !self.runtime_cwd_dirty_panes.is_empty())
+                && !self.cwd_scan_inflight
+            {
                 consider(self.last_cwd_at + CWD_SCAN_INTERVAL, true);
             }
             if self.runtime_sessions_dirty && !self.sessions_scan_inflight {
@@ -1563,7 +1644,14 @@ impl App {
             );
         }
 
-        if let Some(at_utc) = self.automation.next_deadline() {
+        if let Some(retry) = self.automation_save_deadline() {
+            consider(retry, true);
+        }
+        if let Some(at_utc) = self
+            .automation
+            .next_deadline()
+            .filter(|_| !self.automation_save_pending())
+        {
             let now_unix = crate::automation::unix_now();
             let instant = if at_utc <= now_unix {
                 now
@@ -1640,11 +1728,13 @@ impl App {
         }
         // CWD/git follow the user after PTY activity, throttled to 1s. Quiet
         // panes do not spawn a worker or walk process trees.
-        if self.runtime_cwd_dirty
+        if (self.runtime_cwd_dirty || !self.runtime_cwd_dirty_panes.is_empty())
             && !self.cwd_scan_inflight
             && now.duration_since(self.last_cwd_at) >= CWD_SCAN_INTERVAL
         {
-            self.runtime_cwd_dirty = false;
+            let full = std::mem::take(&mut self.runtime_cwd_dirty);
+            let dirty = std::mem::take(&mut self.runtime_cwd_dirty_panes);
+            let (cwd_scope, workspace_scope) = self.cwd_scan_scope(&dirty, full);
             self.last_cwd_at = now;
             self.cwd_scan_inflight = true;
             let include_processes = self.proc_scan_due(now, true);
@@ -1660,6 +1750,7 @@ impl App {
             let panes: Vec<(PaneId, u32)> = self
                 .panes
                 .iter()
+                .filter(|(id, _)| cwd_scope.contains(id))
                 .filter_map(|(id, p)| {
                     let pid = p.child_pid.load(std::sync::atomic::Ordering::SeqCst);
                     (pid != 0).then_some((*id, pid))
@@ -1668,15 +1759,29 @@ impl App {
             let workspaces: Vec<(String, PathBuf)> = self
                 .workspaces
                 .iter()
+                .filter(|ws| workspace_scope.contains(&ws.id))
                 .map(|ws| (ws.id.clone(), ws.cwd.clone()))
                 .collect();
             let homes = self.workspace_homes();
             let tabs = self.renameable_tab_leaves();
+            // Process identity demand remains fleet-wide. It shares this one
+            // OS snapshot without forcing unrelated CWD/Git resolution.
+            let process_roots: Vec<u32> = if include_processes {
+                self.panes
+                    .values()
+                    .map(|pane| pane.child_pid.load(std::sync::atomic::Ordering::SeqCst))
+                    .filter(|pid| *pid != 0)
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let tx = self.app_tx.clone();
             std::thread::spawn(move || {
                 let pids: Vec<u32> = panes.iter().map(|(_, pid)| *pid).collect();
-                let (evidence, processes) =
-                    crate::platform::scan_pane_runtime(&pids, include_processes);
+                let (evidence, processes) = crate::platform::scan_pane_runtime_scoped(
+                    &pids,
+                    include_processes.then_some(process_roots.as_slice()),
+                );
                 let pane_results: Vec<(PaneId, crate::platform::PaneCwdEvidence)> = panes
                     .into_iter()
                     .zip(evidence)
@@ -1731,13 +1836,16 @@ impl App {
     }
 
     pub(crate) fn detect_tick_with(&mut self, now: Instant, clients_attached: bool) -> bool {
+        let repaired_location = self.repair_active_location();
+        self.schedule_config_save(now);
+        self.schedule_automation_save(now);
         // No node open (docs/43 §3.3 — the session was closed). Closing the last
         // node also closed every pane, so there is nothing to classify, and
         // `layout()` below would index an empty `workspaces`. The server keeps
         // ticking here with no clients attached, so this is a live path, not a
         // theoretical one.
-        if self.workspaces.is_empty() {
-            return false;
+        if self.workspaces.is_empty() || self.workspaces[self.active_ws].tabs.is_empty() {
+            return repaired_location;
         }
         self.schedule_runtime_scans(now, clients_attached);
         // Mission Control usage is demand-driven. Opening/focusing the dashboard,
@@ -1812,7 +1920,7 @@ impl App {
         // grid; agent state (blocked/working/done) is human-paced, so ~100ms is
         // plenty — running it at the render frame rate (up to 60fps) just burns CPU.
         if now.duration_since(self.last_detect_at) < DETECTION_INTERVAL {
-            return false;
+            return repaired_location;
         }
         self.last_detect_at = now;
         let focus = self.layout().focus;
@@ -2199,7 +2307,7 @@ impl App {
                 json!({"pane":id.0.to_string(), "source":source, "reason":"expired"}),
             );
         }
-        changed
+        repaired_location || changed
     }
 
     // ── api dispatch ──────────────────────────────────────────────────────────
@@ -2302,6 +2410,12 @@ impl App {
 
     /// Validate and execute one bounded local API method against server-owned state.
     pub(crate) fn dispatch(&mut self, method: &str, p: &Value) -> Result<Value, (String, String)> {
+        if Self::is_automation_mutation(method) && self.automation_admission_full() {
+            return Err((
+                "busy".into(),
+                "automation checkpoint queue is full; retry later".into(),
+            ));
+        }
         match method {
             "ping" => Ok(json!({
                 "type":"pong",
@@ -2471,6 +2585,12 @@ impl App {
                             "history_cache_bytes": history.and_then(|m| m.cache_bytes),
                             "history_compacted_rows": history.and_then(|m| m.compacted_rows),
                             "history_allocated_cells": history.and_then(|m| m.allocated_cells),
+                            "history_packed_blocks": history.and_then(|m| m.packed_blocks),
+                            "history_packed_bytes": history.and_then(|m| m.packed_bytes),
+                            "history_packed_rows": history.and_then(|m| m.packed_rows),
+                            "history_dense_row_bytes": history.and_then(|m| m.dense_row_bytes),
+                            "history_row_descriptor_bytes": history.and_then(|m| m.row_descriptor_bytes),
+                            "history_allocation_count": history.and_then(|m| m.allocation_count),
                             "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
                             "history_bytes_kind": if history.is_some_and(|m| m.exact_bytes) { "exact" } else { "estimated" },
                         })
@@ -2556,18 +2676,20 @@ impl App {
             "pane.run" => {
                 let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 let cmd = p.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                if let Some(pane) = self.panes.get(&id) {
-                    pane.send(cmd.as_bytes());
-                    pane.send(b"\r");
-                }
+                let pane = self.panes.get(&id).ok_or_else(not_found)?;
+                let mut bytes = Vec::with_capacity(cmd.len() + 1);
+                bytes.extend_from_slice(cmd.as_bytes());
+                bytes.push(b'\r');
+                pane.try_send(&bytes)
+                    .map_err(|message| ("send_failed".to_string(), message))?;
                 Ok(json!({"type":"ok"}))
             }
             "pane.send_input" => {
                 let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                if let Some(pane) = self.panes.get(&id) {
-                    pane.send(text.as_bytes());
-                }
+                let pane = self.panes.get(&id).ok_or_else(not_found)?;
+                pane.try_send(text.as_bytes())
+                    .map_err(|message| ("send_failed".to_string(), message))?;
                 Ok(json!({"type":"ok"}))
             }
             "pane.read" => {
@@ -2644,6 +2766,12 @@ impl App {
                     "history_cache_bytes": history.and_then(|m| m.cache_bytes),
                     "history_compacted_rows": history.and_then(|m| m.compacted_rows),
                     "history_allocated_cells": history.and_then(|m| m.allocated_cells),
+                    "history_packed_blocks": history.and_then(|m| m.packed_blocks),
+                    "history_packed_bytes": history.and_then(|m| m.packed_bytes),
+                    "history_packed_rows": history.and_then(|m| m.packed_rows),
+                    "history_dense_row_bytes": history.and_then(|m| m.dense_row_bytes),
+                    "history_row_descriptor_bytes": history.and_then(|m| m.row_descriptor_bytes),
+                    "history_allocation_count": history.and_then(|m| m.allocation_count),
                     "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
                     "history_bytes_kind": if history.is_some_and(|m| m.exact_bytes) { "exact" } else { "estimated" },
                 }))
@@ -3591,10 +3719,14 @@ impl App {
                         "agent send text must not be empty".to_string(),
                     ));
                 }
-                if let Some(pane) = self.panes.get(&id) {
-                    pane.send_paste(text);
-                    pane.send_after(b"\r".to_vec(), std::time::Duration::from_millis(45));
-                }
+                let pane = self.panes.get(&id).ok_or_else(|| {
+                    (
+                        "send_failed".to_string(),
+                        "target pane closed before input was queued".to_string(),
+                    )
+                })?;
+                pane.try_submit_text_with_settle(text, AGENT_MESSAGE_SETTLE)
+                    .map_err(|message| ("send_failed".to_string(), message))?;
                 let (agent, status) = self
                     .status
                     .get(&id)
@@ -5107,7 +5239,6 @@ impl App {
                     }
                 }
                 validate_automation_target(self, &mut input)?;
-                let before = self.automation.clone();
                 let automation = if method == "automation.create" {
                     self.automation
                         .create(input, opt_borrowed_str(p, "idempotency_key"), now)
@@ -5118,13 +5249,7 @@ impl App {
                         .update(id, input, now)
                         .map_err(automation_err)?
                 };
-                if let Err(error) = self.automation.save() {
-                    self.automation = before;
-                    return Err((
-                        "persistence_failed".into(),
-                        format!("could not persist automation: {error}"),
-                    ));
-                }
+                self.persist_automation();
                 if automation.target.is_durable_active_agent() {
                     self.initialize_durable_active_target_state(&automation);
                 } else {
@@ -5189,15 +5314,11 @@ impl App {
                         self.validate_active_agent_target(&automation.target, &automation.task)?;
                     }
                 }
-                let before = self.automation.clone();
                 let automation = self
                     .automation
                     .set_enabled(id, enable, crate::automation::unix_now())
                     .map_err(automation_err)?;
-                if let Err(error) = self.automation.save() {
-                    self.automation = before;
-                    return Err(("persistence_failed".into(), error.to_string()));
-                }
+                self.persist_automation();
                 self.emit_event(
                     if automation.enabled {
                         "automation.enabled"
@@ -5246,12 +5367,8 @@ impl App {
             "automation.delete" => {
                 reject_api_fields(p, &["id"])?;
                 let id = req_str(p, "id")?;
-                let before = self.automation.clone();
                 let automation = self.automation.delete(id).map_err(automation_err)?;
-                if let Err(error) = self.automation.save() {
-                    self.automation = before;
-                    return Err(("persistence_failed".into(), error.to_string()));
-                }
+                self.persist_automation();
                 self.emit_event("automation.deleted", json!({"id":id}));
                 Ok(
                     json!({"type":"automation", "automation":crate::automation::public_automation(&automation, None)}),
@@ -5273,15 +5390,11 @@ impl App {
                         json!({"type":"automation_run", "run":crate::automation::public_run(&run)}),
                     );
                 }
-                let before = self.automation.clone();
                 let run = self
                     .automation
                     .request_run(&id, opt_borrowed_str(p, "idempotency_key"), now)
                     .map_err(automation_err)?;
-                if let Err(error) = self.automation.save() {
-                    self.automation = before;
-                    return Err(("persistence_failed".into(), error.to_string()));
-                }
+                self.persist_automation();
                 self.emit_event(
                     "automation.run_queued",
                     json!({"automation_id":run.automation_id, "run_id":run.id, "scheduled_at":run.scheduled_at}),
@@ -5330,11 +5443,14 @@ impl App {
             }
             // ── ORCH-1/2: task ledger + path leases (docs/22, M0) ──────────
             "task.add" => {
+                reject_api_fields(p, &["title", "prompt", "paths", "deps", "gate"])?;
                 let title = req_str(p, "title")?.to_string();
+                let prompt = optional_task_prompt(p)?;
                 let task = self
                     .orch
-                    .add_task(
+                    .add_task_with_prompt(
                         title,
+                        prompt,
                         str_array(p, "paths"),
                         str_array(p, "deps"),
                         opt_str(p, "gate"),
@@ -5388,6 +5504,7 @@ impl App {
                 }))
             }
             "task.update" => {
+                reject_api_fields(p, &["id", "status", "output", "note", "prompt"])?;
                 let id = req_str(p, "id")?.to_string();
                 let status = if let Some(s) = p.get("status").and_then(|v| v.as_str()) {
                     let st = crate::orch::TaskStatus::parse(s).ok_or_else(|| {
@@ -5416,6 +5533,11 @@ impl App {
                             format!("{id} is already {}", current.as_str()),
                         ));
                     }
+                }
+                if p.get("prompt").is_some() {
+                    self.orch
+                        .set_prompt(&id, optional_task_prompt(p)?)
+                        .map_err(orch_err)?;
                 }
                 if let Some(st) = status {
                     self.orch.set_status(&id, st).map_err(orch_err)?;
@@ -7543,6 +7665,12 @@ pub(crate) fn task_json(t: &crate::orch::Task) -> Value {
         "created": t.created,
         "updated": t.updated,
     });
+    // Manual task briefings are part of the ORCH task contract. Automation
+    // prompts remain private to their definition/run projection and must not
+    // leak through the general task list or event stream.
+    if t.automation.is_none() {
+        value["prompt"] = json!(t.prompt);
+    }
     if let Some(mode) = t.worker_mode {
         value["mode"] = json!(mode);
     }
@@ -7550,6 +7678,17 @@ pub(crate) fn task_json(t: &crate::orch::Task) -> Value {
         value["workspace_worker"] = json!(workspace);
     }
     value
+}
+
+fn optional_task_prompt(p: &Value) -> Result<Option<String>, (String, String)> {
+    match p.get("prompt") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(prompt)) => Ok(Some(prompt.clone())),
+        Some(_) => Err((
+            "invalid_request".to_string(),
+            "prompt must be a string or null".to_string(),
+        )),
+    }
 }
 
 /// A trimmed JSON view of an installed module for `module.list`.
@@ -9040,6 +9179,84 @@ command = ["true"]
     }
 
     #[test]
+    fn pane_input_methods_report_rejection_and_run_is_one_action() {
+        let _env = crate::persist::test_env("pane-input-admission");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(tx);
+        app.dispatch(
+            "pane.run",
+            &json!({"pane": pane.0.to_string(), "command": "echo hi"}),
+        )
+        .unwrap();
+        let crate::terminal::pty::InputAction::Bytes(bytes) = rx.try_recv().unwrap() else {
+            panic!("expected raw command")
+        };
+        assert_eq!(bytes, b"echo hi\r");
+        assert!(rx.try_recv().is_err());
+        drop(rx);
+        for (method, params) in [
+            (
+                "pane.run",
+                json!({"pane": pane.0.to_string(), "command": "echo hi"}),
+            ),
+            (
+                "pane.send_input",
+                json!({"pane": pane.0.to_string(), "text": "hi"}),
+            ),
+        ] {
+            assert_eq!(app.dispatch(method, &params).unwrap_err().0, "send_failed");
+        }
+    }
+
+    #[test]
+    fn agent_send_admits_one_ordered_submission_and_reports_closed_queue() {
+        let _env = crate::persist::test_env("agent-send-atomic");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "claude".into();
+        app.panes[&pane]
+            .engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b[?2004h");
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+        for text in ["first\nsecond", "next"] {
+            app.dispatch(
+                "agent.send",
+                &json!({"target": pane.0.to_string(), "text": text}),
+            )
+            .unwrap();
+            let crate::terminal::pty::InputAction::Submit { paste, settle } =
+                input_rx.try_recv().unwrap()
+            else {
+                panic!("paste and Enter must be a single action")
+            };
+            assert_eq!(paste, format!("\x1b[200~{text}\x1b[201~").as_bytes());
+            assert_eq!(settle, std::time::Duration::from_millis(45));
+            assert!(input_rx.try_recv().is_err());
+        }
+        drop(input_rx);
+        let error = app
+            .dispatch(
+                "agent.send",
+                &json!({"target": pane.0.to_string(), "text": "closed"}),
+            )
+            .unwrap_err();
+        assert_eq!(error.0, "send_failed");
+    }
+
+    #[test]
     fn atomic_agent_prompt_uses_output_evidence_for_a_fast_settled_turn() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
@@ -10230,9 +10447,10 @@ command = ["true"]
         let pane = app.layout().focus;
         if let Some(p) = app.panes.get(&pane) {
             if let Ok(mut engine) = p.engine.lock() {
-                for i in 0..40 {
+                for i in 0..300 {
                     engine.advance(format!("line {i}\r\n").as_bytes());
                 }
+                engine.finish_output_batch();
             }
         }
         let out = app
@@ -10246,6 +10464,13 @@ command = ["true"]
         assert!(out.get("history_cache_bytes").is_some());
         assert!(out["history_compacted_rows"].as_u64().is_some());
         assert!(out["history_allocated_cells"].as_u64().is_some());
+        assert!(out["history_packed_blocks"].as_u64().is_some());
+        assert!(out["history_packed_bytes"].as_u64().is_some());
+        assert!(out["history_packed_rows"].as_u64().is_some());
+        assert!(out["history_packed_rows"].as_u64().unwrap_or(0) > 0);
+        assert!(out["history_dense_row_bytes"].as_u64().is_some());
+        assert!(out["history_row_descriptor_bytes"].as_u64().is_some());
+        assert!(out["history_allocation_count"].as_u64().is_some());
         assert_eq!(out["history_bytes_kind"], "estimated");
         assert_eq!(out["history_exact"], false, "Alacritty reports an estimate");
 
@@ -10274,6 +10499,12 @@ command = ["true"]
         assert!(row.get("history_cache_bytes").is_some());
         assert!(row.get("history_compacted_rows").is_some());
         assert!(row.get("history_allocated_cells").is_some());
+        assert!(row.get("history_packed_blocks").is_some());
+        assert!(row.get("history_packed_bytes").is_some());
+        assert!(row.get("history_packed_rows").is_some());
+        assert!(row.get("history_dense_row_bytes").is_some());
+        assert!(row.get("history_row_descriptor_bytes").is_some());
+        assert!(row.get("history_allocation_count").is_some());
         assert_eq!(row["history_bytes_kind"], "estimated");
     }
 

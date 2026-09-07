@@ -470,6 +470,7 @@ pub enum EventKind {
     PaneOpen,
     PaneClose,
     PtySpawnFailed,
+    PtyInputRejected,
     PtyExit,
     PtyResize,
     AgentIdentity,
@@ -522,6 +523,7 @@ impl EventKind {
             Self::PaneOpen => "pane.open",
             Self::PaneClose => "pane.close",
             Self::PtySpawnFailed => "pty.spawn_failed",
+            Self::PtyInputRejected => "pty.input_rejected",
             Self::PtyExit => "pty.exit",
             Self::PtyResize => "pty.resize",
             Self::AgentIdentity => "agent.identity",
@@ -560,6 +562,7 @@ impl EventKind {
             | Self::ClientHandshakeRejected
             | Self::ClientRenderFailed => Level::Error,
             Self::PersistSaveFailed
+            | Self::PtyInputRejected
             | Self::WorkerFailed
             | Self::ClientDisconnect
             | Self::ClientFrameError
@@ -631,6 +634,7 @@ impl EventKind {
             E::TabOpen | E::TabClose => matches!(key, F::WorkspaceIndex | F::TabIndex),
             E::PaneOpen => matches!(key, F::PaneId | F::SpawnKind),
             E::PaneClose => matches!(key, F::PaneId),
+            E::PtyInputRejected => matches!(key, F::PaneId),
             E::PtySpawnFailed => matches!(key, F::PaneId | F::SpawnKind | F::ErrorCode),
             E::PtyExit => matches!(key, F::PaneId | F::ExitClass),
             E::PtyResize => matches!(key, F::PaneId | F::Cols | F::Rows),

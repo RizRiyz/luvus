@@ -72,6 +72,12 @@ tabs, and layouts. It also **resumes each agent's own conversation** via its
 native session store. A Claude Code pane comes back *as the same Claude Code
 conversation*, no `--resume` flags to remember.
 
+The saved terminal image is a bounded copy of the live screen, not the portion
+of history you happen to be viewing. Scrolling before a save does not change
+that image. Wide characters, combining marks, and text styling are preserved
+when replayed at the same terminal size. This cosmetic image is separate from
+the agent's native conversation store and is not a backup of all scrollback.
+
 ## Where next
 
 - [Core Concepts](/docs/getting-started/concepts/): the 2-minute mental model

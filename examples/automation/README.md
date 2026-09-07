@@ -1,5 +1,17 @@
 # Agent Automation example
 
+For an isolated Unix checkpoint regression test (no agent is launched):
+
+```sh
+cargo build --locked
+python3 examples/uhp/terminal/automation_checkpoints.py
+```
+
+This holds the shared storage worker, verifies that automation success waits
+for persistence while other requests remain responsive, checks the CLI, and
+restarts only its scratch server to verify idempotency. Pass `--luvus` to select
+an exact debug or release binary. It does not operate an existing user session.
+
 `weekday-readonly-review.sh` creates a weekday read-only review for an existing
 Luvus workspace. It previews the next occurrences before storing anything and
 uses an idempotency key so retrying the same command cannot create a duplicate.

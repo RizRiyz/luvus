@@ -426,9 +426,15 @@ pub fn run() -> Result<()> {
         // Otherwise sleep until the next real deadline, or block on the
         // channel when nothing is due (PTY/API/client/signal wake the loop).
         let now = Instant::now();
-        let persist_due = (app.persist_session_now && !immediate_save_attempted)
-            || (app.session_dirty && last_save.elapsed() >= SESSION_SAVE_DEBOUNCE);
-        let rearm_due = app.has_pending_pty_output() && last_rearm.elapsed() >= REARM_INTERVAL;
+        let rearm_interval = if app.has_history_maintenance() {
+            Duration::from_millis(1)
+        } else {
+            REARM_INTERVAL
+        };
+        let persist_due = !app.session_save_inflight
+            && ((app.persist_session_now && !immediate_save_attempted)
+                || (app.session_dirty && last_save.elapsed() >= SESSION_SAVE_DEBOUNCE));
+        let rearm_due = app.has_pending_pty_output() && last_rearm.elapsed() >= rearm_interval;
         let received = if persist_due || rearm_due {
             // Already-due persist/re-arm must not `recv_timeout(0)`: that busy-loops
             // until the 100ms re-arm cadence elapses.
@@ -444,11 +450,11 @@ pub fn run() -> Result<()> {
             }
         } else {
             let mut deadline = app.next_runtime_deadline(now, !clients.is_empty());
-            if app.session_dirty {
+            if app.session_dirty && !app.session_save_inflight {
                 App::sooner_deadline(&mut deadline, last_save + SESSION_SAVE_DEBOUNCE);
             }
             if app.has_pending_pty_output() {
-                App::sooner_deadline(&mut deadline, last_rearm + REARM_INTERVAL);
+                App::sooner_deadline(&mut deadline, last_rearm + rearm_interval);
             }
             match deadline.map(|at| at.saturating_duration_since(now)) {
                 Some(timeout) if !timeout.is_zero() => match rx.recv_timeout(timeout) {
@@ -533,13 +539,9 @@ pub fn run() -> Result<()> {
         // retain both flags and retry at the normal cadence instead of hot-looping.
         let immediate_save_due = app.persist_session_now && !immediate_save_attempted;
         let debounced_save_due = app.session_dirty && last_save.elapsed() >= SESSION_SAVE_DEBOUNCE;
-        if immediate_save_due || debounced_save_due {
+        if !app.session_save_inflight && (immediate_save_due || debounced_save_due) {
             immediate_save_attempted = app.persist_session_now;
-            if persist::save(&app) {
-                app.persist_session_now = false;
-                app.session_dirty = false;
-                immediate_save_attempted = false;
-            }
+            app.schedule_session_save();
             last_save = Instant::now();
         }
         if app.detach_requested {
@@ -610,9 +612,12 @@ pub fn run() -> Result<()> {
         }
         // Fallback re-arm (the render path below re-arms at the frame rate): a
         // flag still set here means un-rendered output → schedule a frame.
-        if last_rearm.elapsed() >= REARM_INTERVAL {
+        if last_rearm.elapsed() >= rearm_interval {
             last_rearm = Instant::now();
-            let (visible, background) = app.rearm_pty_notify_by_visibility();
+            let (visible, background, title_changed) = app.rearm_pty_notify_by_visibility();
+            if title_changed {
+                render_request.record(RenderCause::Metadata);
+            }
             if visible {
                 render_request.record_visible_pty();
             }
@@ -651,7 +656,10 @@ pub fn run() -> Result<()> {
             // Re-arm the PTY readers now that their output is on screen. A flag
             // set during this frame = more output already waiting → stay dirty
             // so the burst keeps rendering at the frame cap, tail included.
-            let (visible, background) = app.rearm_pty_notify_by_visibility();
+            let (visible, background, title_changed) = app.rearm_pty_notify_by_visibility();
+            if title_changed {
+                render_request.record(RenderCause::Metadata);
+            }
             if visible {
                 render_request.record_visible_pty();
             }
@@ -661,7 +669,7 @@ pub fn run() -> Result<()> {
         }
     }
 
-    persist::save(&app);
+    app.finish_session_persistence();
     Ok(())
 }
 
@@ -823,6 +831,9 @@ enum EventRenderSource {
 fn event_render_source(app: &App, event: &AppEvent) -> EventRenderSource {
     match event {
         AppEvent::PtyData(id) if app.pane_is_visible(*id) => EventRenderSource::VisiblePty,
+        AppEvent::PtyData(id) if app.hidden_title_changed(*id) => {
+            EventRenderSource::Cause(RenderCause::Metadata)
+        }
         AppEvent::PtyData(_) => EventRenderSource::HiddenPty,
         AppEvent::ClientConnected { .. }
         | AppEvent::ClientInput {
@@ -1051,7 +1062,6 @@ fn render_client(
     }
 
     let may_patch = partial_pass
-        && interactive
         && client.retained_ready
         && !client.force_full
         && !client.behind
@@ -1082,8 +1092,8 @@ fn render_client(
                 .clone_from(&app.pane_content_rects);
             client.retained_ready = true;
         } else {
-            ui::render_projection(&mut target, app);
-            client.retained_ready = false;
+            client.retained_pane_content = ui::render_projection(&mut target, app);
+            client.retained_ready = true;
         }
         (target.cursor(), target.cursor_visible())
     };
@@ -1604,11 +1614,149 @@ mod tests {
     }
 
     #[test]
+    fn hidden_agent_titles_present_once_including_coalesced_output() {
+        let _env = crate::persist::test_env("hidden-agent-title");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let hidden = app.layout().focus;
+        app.status.get_mut(&hidden).unwrap().agent = "claude".into();
+        let (tx, _rx) = mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            100,
+            30,
+            tx,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes.get_mut(&hidden).unwrap().engine = engine.clone();
+        app.dispatch("tab.new", &serde_json::json!({})).unwrap();
+        assert!(!app.pane_is_visible(hidden));
+        app.config.layout.agent_title = true;
+
+        engine.lock().unwrap().advance(b"\x1b]2;reviewing\x07");
+        let source = super::event_render_source(&app, &AppEvent::PtyData(hidden));
+        let mut request = RenderRequest::default();
+        record_event_render_request(source, true, &mut request);
+        assert!(request.needs_render());
+        assert!(matches!(
+            source,
+            EventRenderSource::Cause(RenderCause::Metadata)
+        ));
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"ordinary output\x1b]2;reviewing\x07");
+        assert!(matches!(
+            super::event_render_source(&app, &AppEvent::PtyData(hidden)),
+            EventRenderSource::HiddenPty
+        ));
+
+        // Output may arrive while the reader's notification is already set.
+        engine.lock().unwrap().advance(b"\x1b]2;finished\x07");
+        app.panes[&hidden].mark_data_pending_for_test();
+        assert!(app.rearm_pty_notify_by_visibility().2);
+        app.panes[&hidden].mark_data_pending_for_test();
+        assert!(!app.rearm_pty_notify_by_visibility().2);
+    }
+
+    #[test]
+    fn passive_retained_frames_match_full_projection_at_each_client_size() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let _env = crate::persist::test_env("passive-retained-frames");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.server_mode = true;
+        let pane = app.layout().focus;
+        let (tx, _rx) = mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            100,
+            30,
+            tx,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        let mut clients = HashMap::new();
+        let mut receivers = Vec::new();
+        for (id, cols, rows) in [(1, 100, 30), (2, 100, 30), (3, 60, 20)] {
+            let (client, rx) = display_client(cols, rows, id);
+            clients.insert(id, client);
+            receivers.push(rx);
+        }
+        let mut foreground = Some(1);
+        let mut size = (100, 30);
+        let mut scratch = RenderScratch::default();
+        render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            false,
+            false,
+            &mut scratch,
+        );
+        for rx in &receivers {
+            rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        }
+        let geometry = app.pane_content_rects.clone();
+        let pty_size = app.panes[&pane].size();
+
+        for bytes in [
+            "界e\u{301} text",
+            "\rshort\x1b[K",
+            "\x1b]2;new title\x07!",
+            "\rnext",
+        ] {
+            for client in clients.values() {
+                client.sender.frame_pending.store(false, Ordering::Release);
+            }
+            engine.lock().unwrap().advance(bytes.as_bytes());
+            let partial_before = super::PARTIAL_TERMINAL_PROJECTIONS.load(Ordering::Relaxed);
+            render_clients(
+                &mut app,
+                &mut clients,
+                &mut foreground,
+                &mut size,
+                false,
+                true,
+                &mut scratch,
+            );
+            for rx in &receivers {
+                rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            }
+            if !bytes.contains("\x1b]2;") {
+                assert!(
+                    super::PARTIAL_TERMINAL_PROJECTIONS.load(Ordering::Relaxed)
+                        >= partial_before + 3,
+                    "all three clients must patch their own retained geometry"
+                );
+            }
+            for client in clients.values() {
+                let area = Rect::new(0, 0, client.size.0, client.size.1);
+                let mut expected = Buffer::empty(area);
+                let mut target = crate::ui::RenderTarget::new(&mut expected, area);
+                crate::ui::render_projection(&mut target, &mut app);
+                let cursor = (target.cursor(), target.cursor_visible());
+                assert_eq!(client.render_buf, expected, "client size {:?}", client.size);
+                let frame = client.last_frame.as_ref().unwrap();
+                assert_eq!((frame.cursor, frame.cursor_visible), cursor);
+                assert!(client.retained_ready);
+            }
+            assert_eq!(app.pane_content_rects, geometry);
+            assert_eq!(app.panes[&pane].size(), pty_size);
+            assert_eq!(app.layout().focus, pane);
+        }
+    }
+
+    #[test]
     fn visible_pty_only_frame_uses_retained_rows_after_full_baseline() {
         let _env = crate::persist::test_env("server-retained-terminal-rows");
         let (app_tx, _app_rx) = mpsc::channel();
         let mut app = App::new(100, 30, app_tx).expect("app starts");
         app.server_mode = true;
+        app.config.layout.agent_title = true;
         let focus = app.layout().focus;
         let (response_tx, _response_rx) = mpsc::channel();
         let engine = create_engine(

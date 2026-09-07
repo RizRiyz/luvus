@@ -104,6 +104,14 @@ pane fails with `not_found`; malformed or out-of-range IDs fail with
 `invalid_request` before any mutation. Pane IDs accept an unsigned 32-bit JSON
 integer or its decimal string form.
 
+`task.add` accepts a short `title` and an optional multiline `prompt` containing
+the detailed worker briefing. `task.get`, `task.list`, and task events return
+that prompt for manual tasks; automation-generated task projections continue to
+hide their private stored briefing. A queued, unassigned manual task can replace
+or clear its prompt through `task.update` with a string or `null`; prompt edits
+fail closed after the task starts. Capability limits publish the exact UTF-8
+byte budgets as `task_title_bytes` and `task_prompt_bytes`.
+
 For `task.heartbeat`, the canonical UHP `context` field is the fraction of the
 model context window already consumed. `0.6` means 60% of that window has been
 used, not 60% task progress. Send work progress through the `note` field of
@@ -145,6 +153,13 @@ repository, while workspace mode creates a dedicated branchless task tab there.
 ```
 
 ## Agent automation
+
+Mutating automation responses wait for a durable ledger checkpoint, including
+idempotent retries of records whose save is still pending. Unrelated requests do
+not wait for automation storage. Admission is bounded and can return `busy`;
+storage failure returns `persistence_failed`. After an error or lost response,
+inspect state or retry the same idempotency key rather than creating a second
+schedule. Read-only projections can include changes awaiting persistence.
 
 Automations are durable agent-task templates owned by one named Luvus server.
 Each due occurrence is persisted before Luvus creates a fresh ORCH task, takes
@@ -598,6 +613,17 @@ read-only history fields to their existing result rows:
   "history_rows": 1830,
   "history_budget_bytes": 10485760,
   "history_bytes": 7340032,
+  "history_estimated_grid_bytes": 524288,
+  "history_cache_bytes": 65536,
+  "history_compacted_rows": 1700,
+  "history_allocated_cells": 4200,
+  "history_packed_blocks": 4,
+  "history_packed_bytes": 98304,
+  "history_packed_rows": 1536,
+  "history_dense_row_bytes": 204800,
+  "history_row_descriptor_bytes": 65536,
+  "history_allocation_count": 310,
+  "history_bytes_kind": "estimated",
   "history_exact": false
 }
 ```
@@ -609,6 +635,15 @@ reading; `history_exact` tells consumers whether that number is exact. With the
 current Alacritty adapter it is a conservative estimate (`false`), because the
 underlying terminal engine limits rows rather than allocation bytes. These
 fields observe state only; they do not grant remote control of a pane viewport.
+
+The additive `history_estimated_grid_bytes`, `history_cache_bytes`,
+`history_dense_row_bytes`, `history_row_descriptor_bytes`, and
+`history_packed_bytes` fields attribute shallow terminal storage. Packed block
+and row counts, allocated cell capacity, and the approximate allocation count
+support repeatable diagnostics without exposing pane content. Dynamic cell
+extras and allocator metadata are not fully measurable, so
+`history_bytes_kind` remains `estimated` and consumers must not present these
+fields as exact process memory.
 
 ### Runtime performance counters
 

@@ -1066,10 +1066,10 @@ impl App {
             && key
                 .modifiers
                 .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
-            && self.orch_form.as_ref().is_some_and(|form| {
-                form.kind == crate::app::OrchFormKind::Automation
-                    && form.field == crate::app::OrchFormField::Prompt
-            })
+            && self
+                .orch_form
+                .as_ref()
+                .is_some_and(|form| form.field == crate::app::OrchFormField::Prompt)
         {
             if let Some(form) = self.orch_form.as_mut() {
                 form.push_char('\n');
@@ -1234,11 +1234,13 @@ impl App {
         let before = self.orch.clone();
         let task = self
             .orch
-            .add_task(title, paths, deps, gate)
-            .map_err(|error| error.message)?;
-        let task = self
-            .orch
-            .set_prompt(&task.id, (!prompt.is_empty()).then_some(prompt))
+            .add_task_with_prompt(
+                title,
+                (!prompt.is_empty()).then_some(prompt),
+                paths,
+                deps,
+                gate,
+            )
             .map_err(|error| error.message)?;
         if let Err(error) = self.orch.try_save() {
             self.orch = before;
@@ -1360,15 +1362,11 @@ impl App {
                 )
                 .map_err(|error| error.message)?;
         }
-        let before = self.automation.clone();
         let item = self
             .automation
             .create(input, None, now)
             .map_err(|error| error.message)?;
-        if let Err(error) = self.automation.save() {
-            self.automation = before;
-            return Err(format!("could not save automation: {error}"));
-        }
+        self.persist_automation();
         if item.target.is_durable_active_agent() {
             self.initialize_durable_active_target_state(&item);
         }
@@ -1500,7 +1498,6 @@ impl App {
             .automation
             .automation(&id)
             .is_some_and(|item| item.enabled);
-        let before = self.automation.clone();
         let now = crate::automation::unix_now();
         if enabled {
             let Some(automation) = self.automation.automation(&id).cloned() else {
@@ -1519,26 +1516,21 @@ impl App {
             }
         }
         match self.automation.set_enabled(&id, enabled, now) {
-            Ok(item) => match self.automation.save() {
-                Ok(()) => {
-                    self.emit_event(
-                        if enabled {
-                            "automation.enabled"
-                        } else {
-                            "automation.disabled"
-                        },
-                        crate::automation::definition_event(&item),
-                    );
-                    self.show_toast(format!(
-                        "{id}: {}",
-                        if enabled { "scheduled" } else { "paused" }
-                    ));
-                }
-                Err(error) => {
-                    self.automation = before;
-                    self.show_toast(format!("could not save automation: {error}"));
-                }
-            },
+            Ok(item) => {
+                self.persist_automation();
+                self.emit_event(
+                    if enabled {
+                        "automation.enabled"
+                    } else {
+                        "automation.disabled"
+                    },
+                    crate::automation::definition_event(&item),
+                );
+                self.show_toast(format!(
+                    "{id}: {}",
+                    if enabled { "scheduled" } else { "paused" }
+                ));
+            }
             Err(error) => self.show_toast(error.message),
         }
     }
@@ -1554,23 +1546,17 @@ impl App {
         let Some(id) = self.selected_automation_id() else {
             return;
         };
-        let before = self.automation.clone();
         let now = crate::automation::unix_now();
         match self.automation.request_run(&id, None, now) {
-            Ok(run) => match self.automation.save() {
-                Ok(()) => {
-                    let run_id = run.id.clone();
-                    self.emit_event(
-                        "automation.run_queued",
-                        serde_json::json!({"automation_id": id, "run_id": run_id, "scheduled_at": now}),
-                    );
-                    self.start_pending_automation_runs(now);
-                }
-                Err(error) => {
-                    self.automation = before;
-                    self.show_toast(format!("could not save automation: {error}"));
-                }
-            },
+            Ok(run) => {
+                self.persist_automation();
+                let run_id = run.id.clone();
+                self.emit_event(
+                    "automation.run_queued",
+                    serde_json::json!({"automation_id": id, "run_id": run_id, "scheduled_at": now}),
+                );
+                self.start_pending_automation_runs(now);
+            }
             Err(error) => self.show_toast(error.message),
         }
     }
@@ -1606,21 +1592,15 @@ impl App {
         let Some(id) = self.selected_automation_id() else {
             return;
         };
-        let before = self.automation.clone();
         match self.automation.delete(&id) {
-            Ok(item) => match self.automation.save() {
-                Ok(()) => {
-                    self.orch_automation_cursor = self
-                        .orch_automation_cursor
-                        .min(self.automation.automations.len().saturating_sub(1));
-                    self.emit_event("automation.deleted", serde_json::json!({"id": item.id}));
-                    self.show_toast(format!("{id} deleted"));
-                }
-                Err(error) => {
-                    self.automation = before;
-                    self.show_toast(format!("could not save automation: {error}"));
-                }
-            },
+            Ok(item) => {
+                self.persist_automation();
+                self.orch_automation_cursor = self
+                    .orch_automation_cursor
+                    .min(self.automation.automations.len().saturating_sub(1));
+                self.emit_event("automation.deleted", serde_json::json!({"id": item.id}));
+                self.show_toast(format!("{id} deleted"));
+            }
             Err(error) => self.show_toast(error.message),
         }
     }
@@ -2113,7 +2093,16 @@ fn task_briefing(task: &crate::orch::Task, mode: TaskWorkerMode) -> String {
         .filter(|prompt| !prompt.trim().is_empty())
     {
         b.push(' ');
-        b.push_str(prompt.trim());
+        // Manual workers are launched by typing one command into a PTY. Keep
+        // the stored prompt multiline for editing and APIs, but fold its line
+        // boundaries at this final terminal boundary so a newline can never
+        // submit a partial shell command.
+        for (index, line) in prompt.lines().map(str::trim).enumerate() {
+            if index > 0 {
+                b.push(' ');
+            }
+            b.push_str(line);
+        }
     }
     if !task.paths.is_empty() {
         b.push_str(&format!(
@@ -3252,7 +3241,7 @@ mod tests {
     #[test]
     fn agent_launch_line_is_one_quoted_line_with_the_contract() {
         let mut s = crate::orch::OrchState::default();
-        let t = s
+        let mut t = s
             .add_task(
                 "fix the auth's bug".into(),
                 vec!["src/auth/**".into()],
@@ -3260,8 +3249,10 @@ mod tests {
                 Some("cargo test auth".into()),
             )
             .unwrap();
+        t.prompt = Some("Review the contract.\nInclude rollback risks.".into());
         let line = agent_launch_line("claude", &t, TaskWorkerMode::Worktree).unwrap();
         assert!(!line.contains('\n'), "typed into a shell — one line");
+        assert!(line.contains("Review the contract. Include rollback risks."));
         assert!(line.contains("claude"));
         assert!(line.contains("luvus task done t1"));
         assert!(line.contains("LUVUS_BIN_PATH"));
@@ -3284,9 +3275,9 @@ mod tests {
         app.orch
             .add_task("safe title".into(), vec![], vec![], None)
             .unwrap();
-        app.orch
-            .set_prompt("t1", Some("review this\rwhoami".into()))
-            .unwrap();
+        // Simulate a ledger written by an older version before task text was
+        // validated on mutation. Launch still fails closed at the PTY boundary.
+        app.orch.tasks[0].prompt = Some("review this\rwhoami".into());
         let panes_before = app.panes.len();
 
         let error = app
@@ -3511,6 +3502,20 @@ mod tests {
         for c in "src/auth/**".chars() {
             app.handle_orch_form_key(k(c));
         }
+        for _ in 0..4 {
+            app.handle_orch_form_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(
+            app.orch_form.as_ref().unwrap().field,
+            crate::app::OrchFormField::Prompt
+        );
+        for c in "Implement token validation".chars() {
+            app.handle_orch_form_key(k(c));
+        }
+        app.handle_orch_form_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        for c in "Cover rollback behavior".chars() {
+            app.handle_orch_form_key(k(c));
+        }
         app.handle_orch_form_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert!(
@@ -3520,6 +3525,10 @@ mod tests {
         let t = app.orch.task("t1").expect("task was created from the UI");
         assert_eq!(t.title, "auth");
         assert_eq!(t.paths, vec!["src/auth/**".to_string()]);
+        assert_eq!(
+            t.prompt.as_deref(),
+            Some("Implement token validation\nCover rollback behavior")
+        );
     }
 
     #[test]
@@ -3751,12 +3760,12 @@ mod tests {
     }
 
     #[test]
-    fn automation_prompt_shift_enter_inserts_a_newline_without_submitting() {
+    fn task_and_automation_prompt_shift_enter_insert_a_newline_without_submitting() {
         let _env = crate::persist::test_env("orch-form-multiline-prompt");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         app.orch_form = Some(crate::app::OrchForm {
-            kind: crate::app::OrchFormKind::Automation,
+            kind: crate::app::OrchFormKind::Task,
             field: crate::app::OrchFormField::Prompt,
             prompt: "Review the changes".into(),
             ..crate::app::OrchForm::default()
@@ -3770,7 +3779,7 @@ mod tests {
         let form = app
             .orch_form
             .as_ref()
-            .expect("Shift+Enter keeps the automation form open");
+            .expect("Shift+Enter keeps the task form open");
         assert_eq!(form.prompt, "Review the changes\nand report risks");
         assert!(app.automation.automations.is_empty());
         assert!(app.orch.tasks.is_empty());
@@ -3781,6 +3790,10 @@ mod tests {
             "Review the changes\nand report risks\n",
             "Alt+Enter is the ESC-CR fallback used when a terminal cannot report Shift+Enter"
         );
+
+        app.orch_form.as_mut().unwrap().kind = crate::app::OrchFormKind::Automation;
+        app.handle_orch_form_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert!(app.orch_form.as_ref().unwrap().prompt.ends_with("\n\n"));
     }
 
     #[test]

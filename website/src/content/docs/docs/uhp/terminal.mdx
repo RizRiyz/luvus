@@ -106,6 +106,21 @@ Actions reuse ordinary strict UHP validation and replies. Only one
 API control stream can lease a terminal at a time. Observe streams remain
 read-only, and local owner/TUI authority is unchanged.
 
+Each pane admits at most 4,096 pending input actions and 8 MiB of owned input
+buffer capacity across the channel and writer queues together. Capabilities
+advertise these as `terminal.limits.queued_input_actions` and
+`terminal.limits.queued_input_bytes`. These cumulative limits are separate from
+the per-request `input_bytes` limit. A submit reserves its final Enter too.
+Reservations remain held until the whole action is written or cancelled.
+
+Admission never waits for a blocked child. At capacity, control calls return
+`send_failed` with no input queued. TUI input and terminal-generated replies
+share the same bound and produce a coalesced warning rather than silently
+discarding overflow. The server logs `pty.input_rejected` without input content.
+No automatic retry is performed: inspect the pane and retry only a rejected
+action after it becomes responsive. Already accepted actions retain FIFO order;
+queue acceptance is not proof of child consumption or task completion.
+
 While a full-screen agent owns the alternate screen, Luvus passively retains
 rows that scroll above that screen and includes them in `recent_unwrapped`.
 Capture never sends mouse-wheel or navigation input into the child and never

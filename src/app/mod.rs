@@ -23,20 +23,25 @@ use crate::terminal::pty::Pane;
 use crate::ui::theme::{State, Theme};
 
 mod automation;
+mod automation_persistence;
 mod backend;
 mod board;
+mod config_persistence;
 mod cwd;
 pub use board::{
     agent_choices, automation_agent_choices, automation_agent_choices_for, task_agent_choices,
 };
 pub(crate) mod diff;
 mod dispatch;
+mod file_jobs;
 pub(crate) mod files;
 mod git;
 mod input;
+pub(crate) mod io_jobs;
 mod keys;
 mod mission;
 mod modules;
+mod persistence;
 mod picker;
 mod preview;
 mod search;
@@ -56,6 +61,9 @@ pub use settings::{
 
 /// How recently a pane must have produced PTY output to read as *raw* Working.
 const ACTIVITY_WINDOW: Duration = Duration::from_millis(700);
+
+/// Shared paste-to-Enter settling policy for direct and DIFF agent messages.
+const AGENT_MESSAGE_SETTLE: Duration = Duration::from_millis(45);
 
 /// Anti-jitter dwell: how long a pane must stay *quiet* before its published
 /// status is allowed to fall back to Idle/Done. Agents stream in bursts — a
@@ -1172,6 +1180,7 @@ const TASK_MANUAL_FIELDS: &[OrchFormField] = &[
     OrchFormField::Deps,
     OrchFormField::Gate,
     OrchFormField::Start,
+    OrchFormField::Prompt,
 ];
 const TASK_NOW_FIELDS: &[OrchFormField] = &[
     OrchFormField::Title,
@@ -1498,8 +1507,15 @@ impl OrchForm {
             self.schedule.clear();
             self.schedule_prefilled = false;
         }
+        let limit = match self.field {
+            OrchFormField::Title => Some(crate::orch::MAX_TASK_TITLE_BYTES),
+            OrchFormField::Prompt => Some(crate::orch::MAX_TASK_PROMPT_BYTES),
+            _ => None,
+        };
         if let Some(field) = self.active_mut() {
-            field.push(value);
+            if limit.is_none_or(|limit| field.len() + value.len_utf8() <= limit) {
+                field.push(value);
+            }
         }
     }
 
@@ -2171,6 +2187,13 @@ pub struct App {
     /// This server's last local config snapshot. Persistence diffs against this
     /// snapshot so another named server's newer, unrelated fields survive.
     config_baseline: crate::config::Config,
+    config_persistence: config_persistence::ConfigPersistence,
+    io_jobs: io_jobs::IoJobs,
+    automation_persistence: automation_persistence::AutomationPersistence,
+    file_metadata_inflight: bool,
+    file_metadata_cursor: usize,
+    file_mutation_inflight: bool,
+    pub(crate) session_save_inflight: bool,
     /// Active `key → Cmd` map for prefix mode (defaults + config overrides).
     pub keymap: std::collections::HashMap<String, Cmd>,
     /// Explicit normal-mode shortcuts. Empty by default so pane input remains
@@ -2475,6 +2498,9 @@ pub struct App {
     last_proc_at: Instant,
     /// CWD/git follow-up is scheduled from PTY activity, not a 1s heartbeat.
     runtime_cwd_dirty: bool,
+    /// Ordinary output dirties its tab only. The boolean above remains the
+    /// full-invalidation path for attach, restore, and topology changes.
+    runtime_cwd_dirty_panes: HashSet<PaneId>,
     /// Attached PTY activity dirties process identity without creating a heartbeat.
     runtime_proc_dirty: bool,
     /// Resumable-session disk scans run on attach/demand, not a 4s walk.
@@ -2868,6 +2894,13 @@ impl App {
             catalog,
             config,
             config_baseline,
+            config_persistence: config_persistence::ConfigPersistence::default(),
+            io_jobs: io_jobs::IoJobs::default(),
+            automation_persistence: automation_persistence::AutomationPersistence::default(),
+            file_metadata_inflight: false,
+            file_metadata_cursor: 0,
+            file_mutation_inflight: false,
+            session_save_inflight: false,
             keymap,
             direct_keymap,
             prefix,
@@ -2990,6 +3023,7 @@ impl App {
             usage_scan_inflight: false,
             last_proc_at: Instant::now(),
             runtime_cwd_dirty: false,
+            runtime_cwd_dirty_panes: HashSet::new(),
             runtime_proc_dirty: false,
             runtime_sessions_dirty: false,
             last_detect_at: Instant::now()
@@ -3515,6 +3549,13 @@ impl App {
             catalog,
             config,
             config_baseline,
+            config_persistence: config_persistence::ConfigPersistence::default(),
+            io_jobs: io_jobs::IoJobs::default(),
+            automation_persistence: automation_persistence::AutomationPersistence::default(),
+            file_metadata_inflight: false,
+            file_metadata_cursor: 0,
+            file_mutation_inflight: false,
+            session_save_inflight: false,
             keymap,
             direct_keymap,
             prefix,
@@ -3637,6 +3678,7 @@ impl App {
             usage_scan_inflight: false,
             last_proc_at: Instant::now(),
             runtime_cwd_dirty: false,
+            runtime_cwd_dirty_panes: HashSet::new(),
             runtime_proc_dirty: false,
             runtime_sessions_dirty: false,
             last_detect_at: Instant::now()
@@ -3849,29 +3891,6 @@ impl App {
         self.config.sidebars = Some(self.sidebars.to_config());
         self.config.sidebar_width = self.sidebars.left.width;
         self.persist_config();
-    }
-
-    /// Merge only this server's local changes into the shared home-level config.
-    /// A failed best-effort write keeps the old baseline so the next mutation
-    /// retries every unsaved field.
-    pub(crate) fn persist_config(&mut self) {
-        if crate::config::save_changes(&self.config_baseline, &self.config) {
-            self.config_baseline = self.config.clone();
-        }
-    }
-
-    /// Persist local changes while forcing an explicit user/API patch even when
-    /// this server already held the requested value in memory.
-    pub(crate) fn persist_config_patch(&mut self, patch: &serde_json::Value) {
-        if crate::config::save_changes_with_patch(&self.config_baseline, &self.config, Some(patch))
-        {
-            self.config_baseline = self.config.clone();
-        }
-    }
-
-    /// Adopt an externally reloaded config without writing it back to disk.
-    pub(crate) fn reset_config_baseline(&mut self) {
-        self.config_baseline = self.config.clone();
     }
 
     /// Apply the AGENTS All / Active projection without performing I/O. This is
@@ -4436,7 +4455,7 @@ impl App {
     /// active tab from output owned by another tab or workspace. The server
     /// uses this to keep focused rendering responsive without repeatedly
     /// diffing an unchanged UI for background-only bursts.
-    pub fn rearm_pty_notify_by_visibility(&self) -> (bool, bool) {
+    pub fn rearm_pty_notify_by_visibility(&self) -> (bool, bool, bool) {
         let layout = self.workspaces.get(self.active_ws).and_then(|workspace| {
             workspace
                 .tabs
@@ -4445,6 +4464,7 @@ impl App {
         });
         let mut visible = false;
         let mut background = false;
+        let mut title_changed = false;
         for (id, pane) in &self.panes {
             if !pane.take_data_pending() {
                 continue;
@@ -4453,14 +4473,30 @@ impl App {
                 visible = true;
             } else {
                 background = true;
+                title_changed |= self.hidden_title_changed(*id);
             }
         }
-        (visible, background)
+        (visible, background, title_changed)
+    }
+
+    pub(crate) fn hidden_title_changed(&self, id: PaneId) -> bool {
+        self.config.layout.agent_title
+            && self.is_agent_pane(id)
+            && self
+                .panes
+                .get(&id)
+                .is_some_and(|pane| pane.take_title_change())
     }
 
     /// Whether any PTY reader is currently coalescing an output notification.
     pub fn has_pending_pty_output(&self) -> bool {
         self.panes.values().any(|pane| pane.has_data_pending())
+    }
+
+    pub(crate) fn has_history_maintenance(&self) -> bool {
+        self.panes
+            .values()
+            .any(|pane| pane.has_history_maintenance())
     }
 
     /// Whether a pane is rendered in the active tab.
@@ -8142,6 +8178,8 @@ mod tests {
 
         alpha.apply_theme("quattro-rally");
         assert!(beta.set_agents_filter(true));
+        alpha.flush_config_for_test(&_alpha_rx);
+        beta.flush_config_for_test(&_beta_rx);
 
         let merged = crate::config::load();
         assert_eq!(merged.theme, "quattro-rally");
@@ -9786,12 +9824,14 @@ mod tests {
 
         app.open_ws_menu(0, 0, 0);
         app.ws_menu_action(WsMenuItem::TogglePath);
+        app.flush_config_for_test(&_rx);
         let stored = crate::config::load();
         assert!(!stored.layout.workspace_paths);
         assert!(stored.layout.agent_paths);
 
         app.open_agent_menu(AgentTarget::Live(pane), 0, 0);
         app.agent_menu_action(AgentMenuItem::TogglePath);
+        app.flush_config_for_test(&_rx);
         let stored = crate::config::load();
         assert!(!stored.layout.workspace_paths);
         assert!(!stored.layout.agent_paths);
@@ -10787,6 +10827,7 @@ mod tests {
             "the left sidebar widened by the drag distance"
         );
         // Released width is persisted for the next launch.
+        app.flush_config_for_test(&_rx);
         assert_eq!(
             crate::config::load().sidebars.unwrap().left.width,
             before + 6,
@@ -12625,10 +12666,24 @@ mod tests {
         let r = call(
             &mut app,
             "task.add",
-            json!({"title":"auth","paths":["src/auth/**"]}),
+            json!({
+                "title":"auth",
+                "prompt":"Review the API.\nInclude rollback coverage.",
+                "paths":["src/auth/**"]
+            }),
         );
         assert_eq!(r["result"]["task"]["id"], "t1");
+        assert_eq!(
+            r["result"]["task"]["prompt"],
+            "Review the API.\nInclude rollback coverage."
+        );
         call(&mut app, "task.add", json!({"title":"api","deps":["t1"]}));
+        let r = call(
+            &mut app,
+            "task.update",
+            json!({"id":"t2", "prompt":"Implement the API client."}),
+        );
+        assert_eq!(r["result"]["task"]["prompt"], "Implement the API client.");
 
         // t2 can't be claimed while its dependency is unfinished.
         let r = call(
@@ -12645,6 +12700,16 @@ mod tests {
             json!({"id":"t1","pane": a.0.to_string()}),
         );
         assert_eq!(r["result"]["task"]["status"], "claimed");
+        let r = call(
+            &mut app,
+            "task.update",
+            json!({"id":"t1", "prompt":"too late"}),
+        );
+        assert_eq!(r["error"]["code"], "task_active");
+        assert_eq!(
+            app.orch.task("t1").unwrap().prompt.as_deref(),
+            Some("Review the API.\nInclude rollback coverage.")
+        );
         let r = call(
             &mut app,
             "lease.acquire",
@@ -13160,6 +13225,7 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         }));
         assert!(app.agents_this_workspace);
+        app.flush_config_for_test(&_rx);
         assert!(crate::config::load().agents_this_workspace);
         app.open_agent_menu(AgentTarget::Session(1), row.x + 1, row.y);
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
@@ -13457,6 +13523,7 @@ mod tests {
             crate::i18n::by_code(&app.config.language).workspaces,
             "catalog swapped live"
         );
+        app.flush_config_for_test(&_rx);
         assert_eq!(
             crate::config::load().language,
             app.config.language,

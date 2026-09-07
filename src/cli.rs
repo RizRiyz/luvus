@@ -1,7 +1,7 @@
 //! CLI client (M4): `luvus pane …` / `luvus ping` / `luvus events` connect to
 //! the session socket, send one JSON request, and print the reply. See docs/08.
 
-use std::io::{BufReader, Write};
+use std::io::{BufReader, Read, Write};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -270,7 +270,7 @@ worktrees:
   worktree remove <path>     remove a worktree (its branch is kept)
 
 orchestration (multiple agents on one project, docs/22):
-  task add \"<title>\" [--paths <glob>...] [--dep <id>...] [--gate <cmd>]
+  task add \"<title>\" [--prompt <text>|--prompt-file <path>] [--paths <glob>...] [--dep <id>...] [--gate <cmd>]
   task list                  list all tasks + their status/assignee
   task get <id>              show one task
   task claim <id>            claim a task for this pane (deps must be done)
@@ -281,7 +281,7 @@ orchestration (multiple agents on one project, docs/22):
   task heartbeat <id> --context-used <0..1>
                              report model context-window use, not task progress
                              (>85% blocks done; --context remains accepted)
-  task update <id> [--status <s>] [--output <o>] [--note <n>]
+  task update <id> [--prompt <text>|--prompt-file <path>] [--status <s>] [--output <o>] [--note <n>]
   task done <id>             mark done + release its leases
   task merge <id>            integrate the task's branch into luvus/integration
                              (isolated worktree, conflicts block the task)
@@ -3730,11 +3730,18 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
 
         // ── orchestration (docs/22, M0): task ledger + path leases ──────────
         ("task", "add") => {
-            let title = rest.iter().find(|a| !a.starts_with("--")).cloned();
+            let title = rest
+                .first()
+                .filter(|value| !value.starts_with("--"))
+                .cloned()
+                .ok_or_else(|| anyhow!("task add requires a title"))?;
             let mut obj = serde_json::Map::new();
-            obj.insert("title".into(), json!(title.unwrap_or_default()));
+            obj.insert("title".into(), json!(title));
             obj.insert("paths".into(), json!(multi_flag(args, "--paths")));
             obj.insert("deps".into(), json!(multi_flag(args, "--dep")));
+            if let Some(prompt) = task_prompt_arg(args)? {
+                obj.insert("prompt".into(), json!(prompt));
+            }
             if let Some(g) = flag(args, "--gate") {
                 obj.insert("gate".into(), json!(g));
             }
@@ -3813,10 +3820,13 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         ("task", "merge") => ("task.merge".into(), one("id", arg0())),
         ("task", "release") => ("task.release".into(), one("id", arg0())),
         ("task", "update") => {
+            let id = rest
+                .first()
+                .filter(|value| !value.starts_with("--"))
+                .cloned()
+                .ok_or_else(|| anyhow!("task update requires an id"))?;
             let mut obj = serde_json::Map::new();
-            if let Some(id) = arg0() {
-                obj.insert("id".into(), json!(id));
-            }
+            obj.insert("id".into(), json!(id));
             if let Some(s) = flag(args, "--status") {
                 obj.insert("status".into(), json!(s));
             }
@@ -3825,6 +3835,9 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             }
             if let Some(n) = flag(args, "--note") {
                 obj.insert("note".into(), json!(n));
+            }
+            if let Some(prompt) = task_prompt_arg(args)? {
+                obj.insert("prompt".into(), json!(prompt));
             }
             ("task.update".into(), Value::Object(obj))
         }
@@ -3873,6 +3886,54 @@ fn multi_flag(args: &[String], name: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Read an optional task prompt from argv without allowing a prompt file to
+/// allocate past the same limit enforced by the server and UHP schema.
+fn task_prompt_arg(args: &[String]) -> Result<Option<String>> {
+    let inline = flag(args, "--prompt").filter(|value| !value.starts_with("--"));
+    let file = flag(args, "--prompt-file").filter(|value| !value.starts_with("--"));
+    if inline.is_some() && file.is_some() {
+        return Err(anyhow!("use only one of --prompt and --prompt-file"));
+    }
+    if args.iter().any(|arg| arg == "--prompt") && inline.is_none() {
+        return Err(anyhow!("--prompt requires text"));
+    }
+    if args.iter().any(|arg| arg == "--prompt-file") && file.is_none() {
+        return Err(anyhow!("--prompt-file requires a path"));
+    }
+    if let Some(prompt) = inline {
+        return Ok(Some(prompt));
+    }
+    let Some(path) = file else {
+        return Ok(None);
+    };
+    let file =
+        std::fs::File::open(&path).map_err(|error| anyhow!("cannot read {path}: {error}"))?;
+    // Every normalized LF can occupy at most two source bytes as CRLF. Read
+    // one byte beyond that largest valid representation so an oversized file
+    // is rejected instead of silently accepted after a truncated read.
+    let max_source_bytes = crate::orch::MAX_TASK_PROMPT_BYTES * 2;
+    let mut bytes = Vec::with_capacity(max_source_bytes + 1);
+    file.take((max_source_bytes + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| anyhow!("cannot read {path}: {error}"))?;
+    if bytes.len() > max_source_bytes {
+        return Err(anyhow!(
+            "task prompt exceeds the {}-byte limit",
+            crate::orch::MAX_TASK_PROMPT_BYTES
+        ));
+    }
+    let mut prompt = String::from_utf8(bytes)
+        .map_err(|error| anyhow!("cannot read {path} as UTF-8 text: {error}"))?;
+    prompt = prompt.replace("\r\n", "\n").replace('\r', "\n");
+    if prompt.len() > crate::orch::MAX_TASK_PROMPT_BYTES {
+        return Err(anyhow!(
+            "task prompt exceeds the {}-byte limit",
+            crate::orch::MAX_TASK_PROMPT_BYTES
+        ));
+    }
+    Ok(Some(prompt))
 }
 
 fn automation_definition_params(
@@ -4986,6 +5047,65 @@ mod tests {
         );
         assert_eq!(p.get("gate").and_then(|v| v.as_str()), Some("cargo"));
 
+        let prompt_args = [
+            "luvus",
+            "task",
+            "add",
+            "Detailed review task that remains one title argument",
+            "--prompt",
+            "Inspect the API.\nCover rollback behavior.",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let (method, params) = parse(&prompt_args).unwrap();
+        assert_eq!(method, "task.add");
+        assert_eq!(
+            params["prompt"],
+            "Inspect the API.\nCover rollback behavior."
+        );
+
+        let update_args = [
+            "luvus",
+            "task",
+            "update",
+            "t1",
+            "--prompt",
+            "Updated briefing",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let (method, params) = parse(&update_args).unwrap();
+        assert_eq!(method, "task.update");
+        assert_eq!(params["prompt"], "Updated briefing");
+        let (_, params) = parse(&[
+            "luvus".into(),
+            "task".into(),
+            "update".into(),
+            "t1".into(),
+            "--prompt".into(),
+            "inline\r\nprompt\rtext".into(),
+        ])
+        .unwrap();
+        assert_eq!(params["prompt"], "inline\r\nprompt\rtext");
+        assert!(parse(&argv(
+            "luvus task add title --prompt inline --prompt-file task.md"
+        ))
+        .is_err());
+        assert_eq!(
+            parse(&argv("luvus task add --prompt briefing"))
+                .unwrap_err()
+                .to_string(),
+            "task add requires a title"
+        );
+        assert_eq!(
+            parse(&argv("luvus task update --prompt briefing"))
+                .unwrap_err()
+                .to_string(),
+            "task update requires an id"
+        );
+
         let (m, _) = parse(&argv("luvus task list")).unwrap();
         assert_eq!(m, "task.list");
         let (m, p) = parse(&argv("luvus task claim t3")).unwrap();
@@ -5058,6 +5178,57 @@ mod tests {
         let (m, p) = parse(&argv("luvus task merge t1")).unwrap();
         assert_eq!(m, "task.merge");
         assert_eq!(p.get("id").and_then(|v| v.as_str()), Some("t1"));
+    }
+
+    #[test]
+    fn task_prompt_file_is_bounded_and_maps_to_the_prompt_field() {
+        let _env = crate::persist::test_env("task-prompt-file");
+        let root = crate::persist::config_dir();
+        fs::create_dir_all(&root).unwrap();
+        let prompt_path = root.join("task.md");
+        fs::write(
+            &prompt_path,
+            "Review the API.\r\nCover rollback behavior.\rCheck recovery.\r\n",
+        )
+        .unwrap();
+        let args = vec![
+            "luvus".into(),
+            "task".into(),
+            "add".into(),
+            "Review API".into(),
+            "--prompt-file".into(),
+            prompt_path.display().to_string(),
+        ];
+        let (method, params) = parse(&args).unwrap();
+        assert_eq!(method, "task.add");
+        assert_eq!(
+            params["prompt"],
+            "Review the API.\nCover rollback behavior.\nCheck recovery.\n"
+        );
+
+        fs::write(
+            &prompt_path,
+            "\r\n".repeat(crate::orch::MAX_TASK_PROMPT_BYTES),
+        )
+        .unwrap();
+        let (_, params) = parse(&args).unwrap();
+        let prompt = params["prompt"].as_str().unwrap();
+        assert_eq!(prompt.len(), crate::orch::MAX_TASK_PROMPT_BYTES);
+        assert!(prompt.bytes().all(|byte| byte == b'\n'));
+
+        fs::write(
+            &prompt_path,
+            "\r\n".repeat(crate::orch::MAX_TASK_PROMPT_BYTES + 1),
+        )
+        .unwrap();
+        assert!(parse(&args).unwrap_err().to_string().contains("byte limit"));
+
+        fs::write(
+            &prompt_path,
+            "x".repeat(crate::orch::MAX_TASK_PROMPT_BYTES + 1),
+        )
+        .unwrap();
+        assert!(parse(&args).unwrap_err().to_string().contains("byte limit"));
     }
 
     #[test]

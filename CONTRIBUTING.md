@@ -88,6 +88,48 @@ PTYs without requiring an interactive terminal. Test visible changes manually,
 measure performance changes before and after, and test platform-specific code on
 the affected platform when available.
 
+Lifecycle tests must isolate the state home and clear inherited socket/session
+selectors before spawning a server. Use an explicit shell when testing process
+behavior rather than shell integration. Bound startup and socket waits, check
+early child exits, retain a bounded excerpt of failure diagnostics, and use a
+child-handle cleanup guard. Tests that change process-global configuration must
+hold `persist::test_env(...)` for their entire lifetime.
+
+Detailed terminal-history inspection has an opt-in, in-process benchmark:
+
+```bash
+cargo test --locked history_inspection_benchmark -- --ignored --nocapture
+```
+
+It reports three warmed trials for 1, 20, and 50 engines with 10,000 retained
+rows each. These are engine-accounting timings, not end-to-end API latency or
+process memory measurements. Record the commit and build profile when comparing
+runs. Ordinary test runs do not execute this workload.
+
+To isolate cold-history maintenance from ingestion, run:
+
+```bash
+cargo test --release --locked history_maintenance_benchmark -- --ignored --nocapture
+```
+
+This uses 80x24 engines with 10,000 retained rows, both printable text and
+per-cell RGB styling, and three trials per corpus. It reports total maintenance,
+turn count, and per-turn p95/p99/maximum lock-held work, not end-to-end
+input/scroll latency. Run separate live
+latency checks before changing maintenance scheduling, especially on Windows.
+
+To check CLI/UHP responsiveness while configuration storage is locked (Unix):
+
+```bash
+cargo build --locked
+python3 examples/uhp/terminal/io_responsiveness.py --luvus target/debug/luvus
+```
+
+This starts its own isolated development server, reports baseline and contended
+request timings, deliberately exercises the lock timeout, and verifies that retry
+persists the setting. It never attaches to an existing session. Timings are host
+measurements, not hard CI thresholds or proof of Windows/TUI rendering latency.
+
 ## Adding agent support
 
 Use a detection manifest when an agent only needs identity and live-state

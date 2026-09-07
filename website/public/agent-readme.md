@@ -134,6 +134,9 @@ Branch-backed dependencies unblock only after they are merged into the shared
 integration history.
 `task release` requeues active work and releases its path leases, but it does
 not stop the worker pane or discard its worktree.
+Use `task add --prompt <text>` or `--prompt-file <path>` for the detailed worker
+briefing. A manual task's prompt can be replaced with `task update` only while
+the task is queued and unassigned; inspect it before starting the worker.
 Use `task update --note` for work progress. `task heartbeat --context-used
 <0..1>` reports only the fraction of the model context window already consumed,
 where `0.6` means 60% consumed, not 60% task progress. Omit the heartbeat when
@@ -329,6 +332,10 @@ the worktree/workspace Git mode, and unsupported agent/access pairs are rejected
 before a worker is created. Read definitions with `automation.list`,
 runs with `automation.history`, and fleet health with `automation.health`.
 Create and manual-run requests accept idempotency keys for safe retries.
+Mutation success waits for its ledger checkpoint. After `persistence_failed`
+or a lost response, inspect state and retry the same idempotency key instead of
+creating a duplicate schedule. Failed prelaunch runs do not automatically
+relaunch when storage recovers.
 Use `automation.rebind` only to reconnect a durable active-agent definition to
 a pane that proves the same native conversation; it requires orchestration
 authority and is safe to repeat with the same pane.

@@ -221,44 +221,10 @@ impl App {
         }
     }
 
-    /// Live refresh (docs/38 FILE-5): re-read any open file view whose file
-    /// changed on disk since we last read it. One `stat` per open view, ~1s —
-    /// cheap (there are rarely more than a couple). Called from `detect_tick`.
+    /// Live refresh uses one bounded metadata job, never filesystem calls on
+    /// the app loop. Results are fenced by path and read token.
     pub fn ensure_file_views(&mut self) {
-        if self.views.is_empty() {
-            return;
-        }
-        let mut stale_files = Vec::new();
-        let mut stale_previews = Vec::new();
-        for (id, view) in self.views.iter() {
-            match view {
-                ViewKind::File(v) => {
-                    let disk = std::fs::metadata(&v.path).and_then(|m| m.modified()).ok();
-                    if disk.is_some() && disk != v.mtime {
-                        stale_files.push((*id, v.path.clone(), disk));
-                    }
-                }
-                ViewKind::Preview(v) => {
-                    let disk = std::fs::metadata(&v.path).and_then(|m| m.modified()).ok();
-                    if disk.is_some() && disk != v.mtime {
-                        stale_previews.push((*id, v.path.clone(), disk));
-                    }
-                }
-                ViewKind::Diff(_) => {}
-            }
-        }
-        for (id, path, mtime) in stale_files {
-            if let Some(ViewKind::File(v)) = self.views.get_mut(&id) {
-                v.mtime = mtime; // record now so we don't reschedule until it changes again
-            }
-            self.schedule_file_read(id, path);
-        }
-        for (id, path, mtime) in stale_previews {
-            if let Some(ViewKind::Preview(v)) = self.views.get_mut(&id) {
-                v.mtime = mtime;
-            }
-            self.schedule_preview_read(id, path);
-        }
+        self.schedule_file_metadata();
     }
 
     /// Give normal-mode keyboard input to the FILES tree. The dock is mounted
@@ -949,28 +915,21 @@ impl App {
         }
         let dest = p.dir.join(&name);
         let (kind, target) = (p.kind, p.target.clone());
-        let result = match kind {
-            FilePromptKind::NewFile => {
-                if dest.exists() {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::AlreadyExists,
-                        "already exists",
-                    ))
-                } else {
-                    std::fs::write(&dest, b"")
+        use super::file_jobs::FileMutation;
+        let operation = match kind {
+            FilePromptKind::NewFile => FileMutation::CreateFile(dest),
+            FilePromptKind::NewFolder => FileMutation::CreateFolder(dest),
+            FilePromptKind::Rename => {
+                let Some(source) = target else { return };
+                FileMutation::Rename {
+                    source,
+                    destination: dest,
                 }
             }
-            FilePromptKind::NewFolder => std::fs::create_dir(&dest),
-            FilePromptKind::Rename => std::fs::rename(target.as_ref().unwrap(), &dest),
         };
-        match result {
+        match self.schedule_file_mutation(operation) {
             Ok(()) => {
                 self.file_prompt = None;
-                self.after_fs_change(&dest);
-                self.show_toast(match kind {
-                    FilePromptKind::Rename => "renamed",
-                    _ => "created",
-                });
             }
             Err(e) => {
                 if let Some(pr) = self.file_prompt.as_mut() {
@@ -992,22 +951,16 @@ impl App {
         let Some(path) = self.file_delete.take() else {
             return;
         };
-        let result = if path.is_dir() {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_file(&path)
-        };
-        match result {
-            Ok(()) => {
-                self.after_fs_change(&path);
-                self.show_toast("deleted");
-            }
-            Err(e) => self.show_toast(format!("delete failed: {e}")),
+        if let Err(error) =
+            self.schedule_file_mutation(super::file_jobs::FileMutation::Delete(path.clone()))
+        {
+            self.file_delete = Some(path);
+            self.show_toast(error);
         }
     }
 
     /// After a create/rename/delete: re-read the tree, reveal the path, re-tint.
-    fn after_fs_change(&mut self, path: &Path) {
+    pub(super) fn after_fs_change(&mut self, path: &Path) {
         self.file_tree.invalidate();
         self.load_pending_dirs();
         self.file_tree.reveal(path);
@@ -1198,7 +1151,7 @@ impl App {
         self.recent_files.truncate(RECENT_FILE_CAP);
     }
 
-    fn schedule_file_read(&mut self, id: PaneId, path: PathBuf) {
+    pub(super) fn schedule_file_read(&mut self, id: PaneId, path: PathBuf) {
         // Claim the next token for this view and record the mtime now, so live
         // refresh (FILE-5) only re-reads on a real change rather than
         // immediately after this read. No view means nothing could apply the
@@ -1345,6 +1298,7 @@ mod tests {
         assert!(app.move_dock(&DockKind::Files, Side::Right));
         assert_eq!(app.sidebars.side_of(&DockKind::Files), Some(Side::Right));
         app.unmount_dock(&DockKind::Files);
+        app.flush_config_for_test(&_rx);
         assert_eq!(app.sidebars.side_of(&DockKind::Files), None);
         assert_eq!(
             app.config
@@ -3526,6 +3480,7 @@ mod tests {
         app.file_menu_action_pub(crate::app::FileMenuItem::NewFile);
         typ(&mut app, "created.rs");
         app.file_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        pump_file_mutation(&rx, &mut app);
         assert!(
             root.join("src/created.rs").exists(),
             "new file created on disk"
@@ -3549,6 +3504,7 @@ mod tests {
         }
         typ(&mut app, "new.rs");
         app.file_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        pump_file_mutation(&rx, &mut app);
         assert!(
             root.join("src/new.rs").exists() && !root.join("src/old.rs").exists(),
             "renamed"
@@ -3567,6 +3523,7 @@ mod tests {
         app.open_file_menu(c_idx, 5, 7);
         app.file_menu_action_pub(crate::app::FileMenuItem::Delete);
         app.file_delete_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        pump_file_mutation(&rx, &mut app);
         assert!(!root.join("src/created.rs").exists(), "deleted");
 
         let _ = std::fs::remove_dir_all(&root);
@@ -3618,9 +3575,21 @@ mod tests {
         app.open_file_menu(idx, 5, 5);
         app.file_menu_action_pub(crate::app::FileMenuItem::Delete);
         app.file_delete_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        pump_file_mutation(&rx, &mut app);
         assert!(!file.exists(), "confirmed delete removes it");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn pump_file_mutation(rx: &std::sync::mpsc::Receiver<AppEvent>, app: &mut App) {
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while app.file_mutation_inflight {
+            let event = rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("file mutation completion");
+            app.handle_event(event);
+        }
     }
 
     // ── Insert Path (docs/38 FILE-6) ─────────────────────────────────────────
