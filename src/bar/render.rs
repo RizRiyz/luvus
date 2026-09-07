@@ -55,7 +55,7 @@ pub fn draw_region(
                     segment: segment_index,
                     rect,
                     action: action.clone(),
-                    value: segment.value.clone(),
+                    value: segment.click_value().map(str::to_string),
                 });
             }
             x = x.saturating_add(width);
@@ -100,10 +100,10 @@ fn draw_segment(
     t: &Theme,
 ) {
     let (text, state_color): (Cow<'_, str>, Option<Color>) = match &segment.kind {
-        BarSegmentKind::Text { text } | BarSegmentKind::Symbol { symbol: text } => {
+        BarSegmentKind::Text { text, .. } | BarSegmentKind::Symbol { symbol: text, .. } => {
             (Cow::Borrowed(text), None)
         }
-        BarSegmentKind::State { state, label } => {
+        BarSegmentKind::State { state, label, .. } => {
             let state = parse_state(state);
             let glyph = state.dot();
             let text = label
@@ -112,7 +112,7 @@ fn draw_segment(
                 .unwrap_or_else(|| glyph.to_string());
             (Cow::Owned(text), Some(state.color(t)))
         }
-        BarSegmentKind::Badge { text } => (Cow::Owned(format!("[{text}]")), None),
+        BarSegmentKind::Badge { text, .. } => (Cow::Owned(format!("[{text}]")), None),
         BarSegmentKind::Progress {
             value,
             total,
@@ -256,10 +256,10 @@ mod tests {
             kind: BarSegmentKind::State {
                 state: "working".into(),
                 label: Some("agent".into()),
+                value: None,
             },
             tone: BarTone::Normal,
             action: None,
-            value: None,
         };
         draw_segment(
             &mut target,

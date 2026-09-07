@@ -63,17 +63,25 @@ pub enum BarTone {
 pub enum BarSegmentKind {
     Text {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
     },
     Symbol {
         symbol: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
     },
     State {
         state: String,
         #[serde(default)]
         label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
     },
     Badge {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
     },
     Progress {
         value: u64,
@@ -99,17 +107,17 @@ pub struct BarSegment {
     pub tone: BarTone,
     #[serde(default)]
     pub action: Option<String>,
-    #[serde(default)]
-    pub value: Option<String>,
 }
 
 impl BarSegment {
     pub fn text(text: impl Into<String>, tone: BarTone) -> Self {
         Self {
-            kind: BarSegmentKind::Text { text: text.into() },
+            kind: BarSegmentKind::Text {
+                text: text.into(),
+                value: None,
+            },
             tone,
             action: None,
-            value: None,
         }
     }
 
@@ -118,17 +126,30 @@ impl BarSegment {
             kind: BarSegmentKind::Separator,
             tone: BarTone::Muted,
             action: None,
-            value: None,
+        }
+    }
+
+    pub fn click_value(&self) -> Option<&str> {
+        match &self.kind {
+            BarSegmentKind::Text { value, .. }
+            | BarSegmentKind::Symbol { value, .. }
+            | BarSegmentKind::State { value, .. }
+            | BarSegmentKind::Badge { value, .. } => value.as_deref(),
+            BarSegmentKind::Progress { .. }
+            | BarSegmentKind::Spacer { .. }
+            | BarSegmentKind::Separator => None,
         }
     }
 
     pub fn display_width(&self) -> usize {
         match &self.kind {
-            BarSegmentKind::Text { text } | BarSegmentKind::Symbol { symbol: text } => text.width(),
+            BarSegmentKind::Text { text, .. } | BarSegmentKind::Symbol { symbol: text, .. } => {
+                text.width()
+            }
             BarSegmentKind::State { label, .. } => {
                 1 + label.as_deref().map_or(0, |label| 1 + label.width())
             }
-            BarSegmentKind::Badge { text } => text.width() + 2,
+            BarSegmentKind::Badge { text, .. } => text.width() + 2,
             BarSegmentKind::Progress { width, .. } => *width as usize,
             BarSegmentKind::Spacer { width } => *width as usize,
             BarSegmentKind::Separator => 5,
@@ -149,9 +170,9 @@ impl BarSegment {
             Ok(())
         };
         match &self.kind {
-            BarSegmentKind::Text { text } => check_text("text", text)?,
-            BarSegmentKind::Symbol { symbol } => check_text("symbol", symbol)?,
-            BarSegmentKind::State { state, label } => {
+            BarSegmentKind::Text { text, .. } => check_text("text", text)?,
+            BarSegmentKind::Symbol { symbol, .. } => check_text("symbol", symbol)?,
+            BarSegmentKind::State { state, label, .. } => {
                 if !["blocked", "working", "done", "idle", "unknown"].contains(&state.as_str()) {
                     return Err(format!("unknown state {state:?}"));
                 }
@@ -159,7 +180,7 @@ impl BarSegment {
                     check_text("state label", label)?;
                 }
             }
-            BarSegmentKind::Badge { text } => check_text("badge", text)?,
+            BarSegmentKind::Badge { text, .. } => check_text("badge", text)?,
             BarSegmentKind::Progress {
                 value,
                 total,
@@ -180,7 +201,7 @@ impl BarSegment {
         if self.action.as_deref().is_some_and(str::is_empty) {
             return Err("action must not be empty".into());
         }
-        if let Some(value) = &self.value {
+        if let Some(value) = self.click_value() {
             if value.len() > MAX_TEXT_BYTES || value.chars().any(char::is_control) {
                 return Err("action value is too long or contains controls".into());
             }
@@ -335,9 +356,14 @@ impl NotificationPush {
                 return Err("dedupe_key is empty, too long, or contains controls".into());
             }
         }
-        let mut segment = BarSegment::text(self.text.clone(), self.level.tone());
-        segment.action = self.action.clone();
-        segment.value = self.value.clone();
+        let segment = BarSegment {
+            kind: BarSegmentKind::Text {
+                text: self.text.clone(),
+                value: self.value.clone(),
+            },
+            tone: self.level.tone(),
+            action: self.action.clone(),
+        };
         BarWidget::new(
             BarWidgetKey::new(
                 self.owner.as_deref().unwrap_or(UNOWNED_NOTIFICATION_OWNER),
@@ -517,9 +543,11 @@ impl BarState {
             value,
             dedupe_key,
         } = request;
-        let mut segment = BarSegment::text(text, level.tone());
-        segment.action = action;
-        segment.value = value;
+        let segment = BarSegment {
+            kind: BarSegmentKind::Text { text, value },
+            tone: level.tone(),
+            action,
+        };
         let id = self.next_notification;
         self.next_notification = self.next_notification.wrapping_add(1);
         let widget = BarWidget::new(
@@ -671,7 +699,7 @@ impl crate::app::App {
     pub fn mobile_agent_summary(&self) -> Option<(String, crate::ui::theme::State)> {
         let widget = self.bar.widgets.get(CORE_AGENTS)?;
         widget.content.iter().find_map(|segment| {
-            let BarSegmentKind::State { state, label } = &segment.kind else {
+            let BarSegmentKind::State { state, label, .. } = &segment.kind else {
                 return None;
             };
             let parsed = match state.as_str() {
@@ -748,10 +776,10 @@ impl crate::app::App {
                 kind: BarSegmentKind::State {
                     state: state.to_string(),
                     label: Some(count.to_string()),
+                    value: None,
                 },
                 tone: BarTone::Normal,
                 action: None,
-                value: None,
             };
             if compact_segments.is_empty() {
                 compact_segments.push(state_segment.clone());
@@ -761,7 +789,6 @@ impl crate::app::App {
                 kind: BarSegmentKind::Spacer { width: 1 },
                 tone: BarTone::Normal,
                 action: None,
-                value: None,
             });
         }
         if segments.is_empty() {
@@ -838,10 +865,10 @@ fn mobile_segment_text(segments: &[BarSegment]) -> String {
     let mut output = String::new();
     for segment in segments {
         match &segment.kind {
-            BarSegmentKind::Text { text } | BarSegmentKind::Symbol { symbol: text } => {
+            BarSegmentKind::Text { text, .. } | BarSegmentKind::Symbol { symbol: text, .. } => {
                 output.push_str(text)
             }
-            BarSegmentKind::State { state, label } => {
+            BarSegmentKind::State { state, label, .. } => {
                 output.push_str(match state.as_str() {
                     "blocked" | "working" | "done" => "●",
                     _ => "○",
@@ -851,7 +878,7 @@ fn mobile_segment_text(segments: &[BarSegment]) -> String {
                     output.push_str(label);
                 }
             }
-            BarSegmentKind::Badge { text } => {
+            BarSegmentKind::Badge { text, .. } => {
                 output.push('[');
                 output.push_str(text);
                 output.push(']');
@@ -1047,26 +1074,28 @@ mod tests {
             BarSegment::text("界", BarTone::Normal),
             BarSegment {
                 kind: BarSegmentKind::Symbol {
-                    symbol: "✓".into()
+                    symbol: "✓".into(),
+                    value: None,
                 },
                 tone: BarTone::Success,
                 action: None,
-                value: None,
             },
             BarSegment {
                 kind: BarSegmentKind::State {
                     state: "done".into(),
                     label: Some("ok".into()),
+                    value: None,
                 },
                 tone: BarTone::Normal,
                 action: None,
-                value: None,
             },
             BarSegment {
-                kind: BarSegmentKind::Badge { text: "2".into() },
+                kind: BarSegmentKind::Badge {
+                    text: "2".into(),
+                    value: None,
+                },
                 tone: BarTone::Error,
                 action: None,
-                value: None,
             },
             BarSegment {
                 kind: BarSegmentKind::Progress {
@@ -1076,13 +1105,11 @@ mod tests {
                 },
                 tone: BarTone::Accent,
                 action: None,
-                value: None,
             },
             BarSegment {
                 kind: BarSegmentKind::Spacer { width: 2 },
                 tone: BarTone::Normal,
                 action: None,
-                value: None,
             },
             BarSegment::separator(),
         ];
@@ -1228,6 +1255,153 @@ mod tests {
         assert_eq!(state.notifications.len(), 1);
         assert!(state.tick(now + Duration::from_millis(501)));
         assert!(state.notifications.is_empty());
+    }
+
+    const DOCUMENTED_CONTENT: &str = r#"[
+        {"type":"text", "text":"CI", "tone":"muted"},
+        {"type":"symbol", "symbol":"✓", "tone":"success"},
+        {"type":"state", "state":"done", "label":"passing"},
+        {"type":"badge", "text":"2", "tone":"error",
+         "action":"details", "value":"run-1842"},
+        {"type":"progress", "value":3, "total":7, "width":8},
+        {"type":"spacer", "width":1},
+        {"type":"separator"}
+    ]"#;
+
+    #[test]
+    fn documented_progress_segment_keeps_its_numeric_value() {
+        let segment: BarSegment =
+            serde_json::from_str(r#"{"type":"progress","value":3,"total":7,"width":8}"#).unwrap();
+        assert_eq!(
+            segment.kind,
+            BarSegmentKind::Progress {
+                value: 3,
+                total: 7,
+                width: 8,
+            }
+        );
+        assert_eq!(segment.click_value(), None);
+        segment.validate().unwrap();
+    }
+
+    #[test]
+    fn progress_width_defaults_to_eight_and_stays_bounded() {
+        let segment: BarSegment =
+            serde_json::from_str(r#"{"type":"progress","value":0,"total":100}"#).unwrap();
+        let BarSegmentKind::Progress { width, .. } = segment.kind else {
+            panic!("expected a progress segment");
+        };
+        assert_eq!(width, default_progress_width());
+        assert_eq!(width, 8);
+
+        let over: BarSegment =
+            serde_json::from_str(r#"{"type":"progress","value":5,"total":4}"#).unwrap();
+        assert_eq!(
+            over.validate().unwrap_err(),
+            "progress requires 0 <= value <= total and total > 0"
+        );
+        let wide: BarSegment =
+            serde_json::from_str(r#"{"type":"progress","value":1,"total":4,"width":25}"#).unwrap();
+        assert_eq!(
+            wide.validate().unwrap_err(),
+            "progress width must be between 3 and 24"
+        );
+    }
+
+    #[test]
+    fn click_capable_segments_keep_their_string_value() {
+        let segment: BarSegment = serde_json::from_str(
+            r#"{"type":"badge","text":"2","tone":"error","action":"details","value":"run-1842"}"#,
+        )
+        .unwrap();
+        assert_eq!(segment.tone, BarTone::Error);
+        assert_eq!(segment.action.as_deref(), Some("details"));
+        assert_eq!(segment.click_value(), Some("run-1842"));
+        segment.validate().unwrap();
+
+        let mut oversized = segment.clone();
+        oversized.kind = BarSegmentKind::Badge {
+            text: "2".into(),
+            value: Some("x".repeat(MAX_TEXT_BYTES + 1)),
+        };
+        assert_eq!(
+            oversized.validate().unwrap_err(),
+            "action value is too long or contains controls"
+        );
+        let control = BarSegment {
+            kind: BarSegmentKind::Text {
+                text: "ok".into(),
+                value: Some("run\u{1b}[31m".into()),
+            },
+            tone: BarTone::Normal,
+            action: Some("details".into()),
+        };
+        assert_eq!(
+            control.validate().unwrap_err(),
+            "action value is too long or contains controls"
+        );
+    }
+
+    #[test]
+    fn segments_round_trip_through_json_without_a_duplicate_value_key() {
+        let progress = BarSegment {
+            kind: BarSegmentKind::Progress {
+                value: 23,
+                total: 100,
+                width: 6,
+            },
+            tone: BarTone::Accent,
+            action: None,
+        };
+        let encoded = serde_json::to_string(&progress).unwrap();
+        assert_eq!(
+            encoded.matches("\"value\"").count(),
+            1,
+            "progress emits exactly one value key: {encoded}"
+        );
+        assert!(encoded.contains("\"value\":23"), "{encoded}");
+        assert_eq!(
+            serde_json::from_str::<BarSegment>(&encoded).unwrap(),
+            progress
+        );
+
+        let badge = BarSegment {
+            kind: BarSegmentKind::Badge {
+                text: "2".into(),
+                value: Some("run-1842".into()),
+            },
+            tone: BarTone::Error,
+            action: Some("details".into()),
+        };
+        let encoded = serde_json::to_string(&badge).unwrap();
+        assert!(encoded.contains("\"value\":\"run-1842\""), "{encoded}");
+        assert_eq!(serde_json::from_str::<BarSegment>(&encoded).unwrap(), badge);
+    }
+
+    #[test]
+    fn the_documented_content_example_parses_and_validates() {
+        let segments: Vec<BarSegment> = serde_json::from_str(DOCUMENTED_CONTENT).unwrap();
+        assert_eq!(segments.len(), 7);
+        assert_eq!(segments[3].click_value(), Some("run-1842"));
+        assert_eq!(
+            segments[4].kind,
+            BarSegmentKind::Progress {
+                value: 3,
+                total: 7,
+                width: 8,
+            }
+        );
+        BarWidget::new(
+            BarWidgetKey::new("test", "documented"),
+            BarRegion::TopRight,
+            segments.clone(),
+            Vec::new(),
+            50,
+        )
+        .unwrap();
+        let round_tripped: Vec<BarSegment> =
+            serde_json::from_str(&serde_json::to_string(&segments).unwrap()).unwrap();
+        assert_eq!(round_tripped, segments);
     }
 
     #[test]
