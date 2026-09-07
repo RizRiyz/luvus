@@ -1052,6 +1052,37 @@ mod tests {
         assert_eq!(BarTone::from_name("red"), None);
     }
 
+    /// `from_name` is a hand-written twin of the serde `rename_all`
+    /// spelling. Pin them together so a new variant cannot work in the bar
+    /// while silently falling back to the default colour in dock rows.
+    #[test]
+    fn tone_from_name_matches_the_serde_spelling_of_every_variant() {
+        let all = [
+            BarTone::Normal,
+            BarTone::Muted,
+            BarTone::Accent,
+            BarTone::Success,
+            BarTone::Warning,
+            BarTone::Error,
+        ];
+        // Exhaustive on purpose: a new variant fails to compile here until it
+        // is added to `all` above.
+        let index = |tone: BarTone| match tone {
+            BarTone::Normal => 0,
+            BarTone::Muted => 1,
+            BarTone::Accent => 2,
+            BarTone::Success => 3,
+            BarTone::Warning => 4,
+            BarTone::Error => 5,
+        };
+        for (i, tone) in all.into_iter().enumerate() {
+            assert_eq!(index(tone), i);
+            let name = serde_json::to_value(tone).unwrap();
+            let name = name.as_str().expect("tones serialise as plain strings");
+            assert_eq!(BarTone::from_name(name), Some(tone), "{name}");
+        }
+    }
+
     fn widget(id: &str, full: &str, compact: &str, priority: u8) -> BarWidget {
         BarWidget::new(
             BarWidgetKey::new("test", id),

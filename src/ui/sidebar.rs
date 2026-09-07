@@ -1049,13 +1049,24 @@ fn draw_module_dock(f: &mut RenderTarget, area: Rect, id: &str, app: &mut App, t
                     break;
                 }
                 let text = crate::ui::clip_columns(&sp.text, left);
-                left -= crate::ui::display_width(&text);
-                last_color = if sp.tone.is_some() {
-                    tone_of(sp.tone.as_deref())
-                } else {
-                    row_color
-                };
-                spans.push(Span::styled(text, Style::new().fg(last_color)));
+                let shown = crate::ui::display_width(&text);
+                // A span that did not fit whole ends the line, even when it
+                // put nothing on screen (a wide glyph at the edge). Otherwise
+                // the spans after it would slide left into its place and the
+                // row would read as a different value than the module sent.
+                let cut = shown < crate::ui::display_width(&sp.text);
+                left -= shown;
+                if shown > 0 {
+                    last_color = if sp.tone.is_some() {
+                        tone_of(sp.tone.as_deref())
+                    } else {
+                        row_color
+                    };
+                    spans.push(Span::styled(text, Style::new().fg(last_color)));
+                }
+                if cut {
+                    break;
+                }
             }
             if ellipsis {
                 spans.push(Span::styled("…", Style::new().fg(last_color)));
@@ -1755,8 +1766,13 @@ mod dock_tone_tests {
         term
     }
 
-    fn app_with_rows(name: &str, rows: Vec<DockRow>) -> (App, Terminal<TestBackend>) {
-        let _env = crate::persist::test_env(name);
+    /// The `TestEnv` comes back with the app so `$LUVUS_HOME` stays isolated
+    /// for the whole test body, not just this call.
+    fn app_with_rows(
+        name: &str,
+        rows: Vec<DockRow>,
+    ) -> (crate::persist::TestEnv, App, Terminal<TestBackend>) {
+        let env = crate::persist::test_env(name);
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
         app.push_module_dock("mod:quota", Some("QUOTA".into()), Side::Left, rows);
@@ -1767,7 +1783,7 @@ mod dock_tone_tests {
             "the dock mounted, so its rows are on screen"
         );
         let term = render(&mut app);
-        (app, term)
+        (env, app, term)
     }
 
     /// Where `needle` starts in the buffer, compared cell by cell so a
@@ -1796,7 +1812,7 @@ mod dock_tone_tests {
 
     #[test]
     fn row_tone_colours_the_text_and_untoned_rows_keep_the_default() {
-        let (app, term) = app_with_rows(
+        let (_env, app, term) = app_with_rows(
             "dock-tone-row",
             vec![
                 row("session 72%", Some("success"), &[]),
@@ -1824,7 +1840,7 @@ mod dock_tone_tests {
 
     #[test]
     fn spans_take_their_own_tone_or_inherit_the_rows() {
-        let (app, term) = app_with_rows(
+        let (_env, app, term) = app_with_rows(
             "dock-tone-spans",
             vec![
                 row(
@@ -1865,7 +1881,8 @@ mod dock_tone_tests {
     fn spans_truncate_as_one_line_with_a_trailing_ellipsis() {
         // Learn the dock's text budget from the rect a clickable row records:
         // the text starts two columns in and the dock keeps a one-column gutter.
-        let (mut app, _term) = app_with_rows("dock-tone-trunc", vec![row("probe", None, &[])]);
+        let (_env, mut app, _term) =
+            app_with_rows("dock-tone-trunc", vec![row("probe", None, &[])]);
         let rect = app.module_dock_rects[0].2;
         let budget = rect.width as usize - 3;
         assert!(budget > 8, "sidebar wide enough for the cases below");
@@ -1942,5 +1959,54 @@ mod dock_tone_tests {
         let (_, y) = locate(&term, "cccc").expect("the wide row is on screen");
         assert_eq!(buf.cell((last_x, y)).unwrap().symbol(), "…");
         assert_eq!(buf.cell((last_x, y)).unwrap().fg, t.amber);
+    }
+
+    /// A two-column glyph that does not fit at the edge ends the line. The
+    /// spans after it must not slide left into its place, or the row would
+    /// read as a different value than the module pushed.
+    #[test]
+    fn a_wide_glyph_at_the_edge_ends_the_line_instead_of_being_skipped() {
+        let (_env, mut app, _term) = app_with_rows("dock-tone-wide", vec![row("probe", None, &[])]);
+        let rect = app.module_dock_rects[0].2;
+        let budget = rect.width as usize - 3;
+        let text_x = rect.x + 2;
+
+        // Two narrow columns are left for the ellipsis and the glyph: the
+        // glyph needs two on its own, so it is dropped, and so is "Q9".
+        let lead = "d".repeat(budget - 2);
+        app.push_module_dock(
+            "mod:quota",
+            Some("QUOTA".into()),
+            Side::Left,
+            vec![row(
+                "wide",
+                None,
+                &[(lead.as_str(), None), ("日", Some("error")), ("Q9", None)],
+            )],
+        );
+        let term = render(&mut app);
+        let buf = term.backend().buffer();
+        let t = &app.theme;
+
+        let (_, y) = locate(&term, "dddd").expect("the row is on screen");
+        assert!(
+            locate(&term, "日").is_none(),
+            "the glyph that did not fit is not drawn"
+        );
+        assert!(
+            locate(&term, "Q9").is_none(),
+            "nothing after it slides into its place"
+        );
+        let ell_x = text_x + (budget - 2) as u16;
+        assert_eq!(
+            buf.cell((ell_x, y)).unwrap().symbol(),
+            "…",
+            "the ellipsis follows the last drawn span"
+        );
+        assert_eq!(
+            buf.cell((ell_x, y)).unwrap().fg,
+            t.subtext1,
+            "the ellipsis takes the colour of a span that was drawn, not the dropped one"
+        );
     }
 }
