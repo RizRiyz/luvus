@@ -387,7 +387,7 @@ Each **row** is an object:
 
 | Field | Required | Meaning |
 |---|:---:|---|
-| `text` | ✓ | The row label. |
+| `text` | ✓ | The row label. May be omitted only when `spans` is given, then it defaults to the segments joined. |
 | `dot` |  | A status dot: `idle` / `working` / `blocked` / `done` (colored like the Agents list). |
 | `tone` |  | Colors the row text with a Luvus Bar tone: `normal` / `muted` / `accent` / `success` / `warning` / `error`. Omit for the default row color (`normal` is the bar's own text color, one step dimmer than the default). An unknown name falls back to the default. |
 | `spans` |  | Draw the row from segments instead of `text`: `[{"text": "[", "tone": "muted"}, {"text": "━━━", "tone": "success"}]`. Each segment takes its own tone, else the row's. `text` stays the plain version handed to the action, and defaults to the segments joined when omitted. |
