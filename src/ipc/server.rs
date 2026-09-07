@@ -730,6 +730,15 @@ fn apply(
             );
             *foreground = Some(id);
             apply_client_state(app, clients, *foreground);
+            // The panes this client is about to be shown may already hold
+            // images, and their first frame carries the cells naming them.
+            // Teach this terminal those images before that frame goes out.
+            if let Some(client) = clients.get(&id).filter(|client| client.graphics) {
+                let history = app.pane_graphics_history();
+                if !history.is_empty() {
+                    let _ = client.sender.send_control(ServerMessage::Graphics(history));
+                }
+            }
             app.mark_runtime_scans_dirty();
             true
         }

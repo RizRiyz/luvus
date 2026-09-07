@@ -1124,6 +1124,13 @@ impl VtEngine for AlacrittyEngine {
             .is_ok_and(|queue| !queue.is_empty())
     }
 
+    fn retained_graphics(&self) -> Vec<Vec<u8>> {
+        self.graphics_queue
+            .lock()
+            .map(|queue| queue.retained())
+            .unwrap_or_default()
+    }
+
     fn title(&self) -> Option<String> {
         self.title.lock().ok().and_then(|g| g.value.clone())
     }
@@ -2554,6 +2561,43 @@ mod tests {
         assert_eq!(
             cells[1].1, "\u{10eeee}\u{0305}\u{030d}",
             "the coordinate marks travel with their cell"
+        );
+    }
+
+    /// A pane outlives the client that was watching it. Its grid still holds
+    /// the cells naming an image, so the pane has to be able to teach that
+    /// image again to whoever attaches next — long after it was handed to the
+    /// clients that were there when it arrived.
+    #[test]
+    fn a_pane_can_still_teach_its_images_after_todays_clients_have_them() {
+        let (tx, _rx) = channel();
+        let host_graphics = graphics::HostGraphics::default();
+        host_graphics.set(true);
+        let mut e = AlacrittyEngine::with_appearance(
+            40,
+            5,
+            tx,
+            budget_for_rows(40, 20),
+            PaneAppearance::default(),
+            host_graphics.clone(),
+        );
+
+        let transmit = "\x1b_Ga=T,U=1,i=42,c=2,r=1,f=100,q=2;iVBORw0KGgo=\x1b\\";
+        e.advance(transmit.as_bytes());
+
+        assert_eq!(e.take_graphics().len(), 1, "the clients attached now");
+        assert!(!e.has_graphics(), "and they are not sent it twice");
+        assert_eq!(
+            e.retained_graphics(),
+            vec![transmit.as_bytes().to_vec()],
+            "but a client attaching later must be taught the same image"
+        );
+
+        // Deleting it is the child saying the pane no longer shows it.
+        e.advance(b"\x1b_Ga=d,d=I,i=42\x1b\\");
+        assert!(
+            e.retained_graphics().is_empty(),
+            "a deleted image is not owed to anyone"
         );
     }
 

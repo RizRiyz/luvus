@@ -111,6 +111,18 @@ impl HostGraphics {
 const MAX_PENDING_GRAPHICS_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PENDING_GRAPHICS_COMMANDS: usize = 4_096;
 
+/// Most bytes of images a pane keeps so a client attaching later can be taught
+/// them, and the most images across them.
+///
+/// A pane's grid outlives the client that was watching it, and the placeholder
+/// cells in it name images by id. A client that attaches afterwards is sent
+/// those cells, so it has to be sent the images they name or it would be asked
+/// to draw something it was never given. Only the newest version of each image
+/// is worth keeping — an id names one image, and a child that redraws replaces
+/// it — so this holds a working set, not a history.
+const MAX_RETAINED_GRAPHICS_BYTES: usize = 8 * 1024 * 1024;
+const MAX_RETAINED_IMAGES: usize = 64;
+
 /// Graphics commands a pane's child emitted, waiting to reach the terminals
 /// that can draw them.
 ///
@@ -133,6 +145,33 @@ pub(crate) struct GraphicsQueue {
     /// A continuation chunk carries only `m`, repeating none of the keys that
     /// made the decision, so the decision has to be remembered.
     forwarding_transfer: bool,
+    /// The images this pane has taught, newest last, for clients yet to attach.
+    retained: Vec<RetainedImage>,
+    retained_bytes: usize,
+    /// Which retained image the transfer in progress is being collected into.
+    retaining: Option<u32>,
+}
+
+/// Everything a terminal needs in order to draw one image the pane holds.
+struct RetainedImage {
+    id: u32,
+    /// The commands that carried the image, in the order they arrived. A large
+    /// transmission arrives in chunks, and means nothing until all of them do.
+    commands: Vec<Vec<u8>>,
+    bytes: usize,
+}
+
+/// What a command adds to the images a pane keeps.
+enum Retain {
+    /// Carries an image, replacing whatever that id held before.
+    Open(u32),
+    /// Adds a placement to an image already held, which is only worth keeping
+    /// alongside the transmission it refers to.
+    Place(u32),
+    /// Continues the transfer already being collected.
+    Chunk,
+    /// Teaches no image, so there is nothing to keep.
+    No,
 }
 
 impl GraphicsQueue {
@@ -155,10 +194,11 @@ impl GraphicsQueue {
             // Chunks belong to the transfer that opened them, which already
             // carried every key the decision was made on.
             if self.forwarding_transfer {
-                self.queue(payload);
+                self.queue(payload, Retain::Chunk);
             }
             if !control.more {
                 self.forwarding_transfer = false;
+                self.retaining = None;
             }
             return;
         }
@@ -170,21 +210,56 @@ impl GraphicsQueue {
 
         match handling {
             Handling::Drop => {}
-            Handling::Forward => self.queue(payload),
+            Handling::Forward => {
+                let retain = self.plan_retention(&control);
+                self.queue(payload, retain);
+            }
             Handling::Virtualize {
                 payload,
                 mut placement,
             } => {
                 placement.line = cursor.0;
                 placement.column = cursor.1;
-                self.queue(&payload);
+                let retain = self.plan_retention(&control);
+                self.queue(&payload, retain);
                 self.placements.push(placement);
             }
         }
     }
 
+    /// Decide what one command leaves behind for a client yet to attach, and
+    /// apply the deletions that take images away again.
+    ///
+    /// A delete aimed at an id by name is honoured; other scopes select by
+    /// position or z-order, which only the terminal holding the image can
+    /// resolve. Those are left alone, so an image may outlive its placements
+    /// in this working set. That costs a little of the budget and shows
+    /// nothing: what a client draws is decided by the placeholder cells in the
+    /// grid, and those are gone once the child stops writing them.
+    fn plan_retention(&mut self, control: &ControlData) -> Retain {
+        match control.action {
+            b'd' => {
+                match (control.delete_scope, control.image_id) {
+                    (b'A' | b'a', _) => self.forget_all(),
+                    (b'I' | b'i', Some(id)) => self.forget(id),
+                    _ => {}
+                }
+                Retain::No
+            }
+            b't' | b'T' => match control.image_id {
+                Some(id) => Retain::Open(id),
+                // Without an id the terminal assigns one and reports it back to
+                // the child. Luvus does not read that reply, so it cannot name
+                // the image later either.
+                None => Retain::No,
+            },
+            b'p' => control.image_id.map_or(Retain::No, Retain::Place),
+            _ => Retain::No,
+        }
+    }
+
     /// Wrap one command back into an APC sequence and hold it, within budget.
-    fn queue(&mut self, payload: &[u8]) {
+    fn queue(&mut self, payload: &[u8], retain: Retain) {
         if self.overflowed {
             return;
         }
@@ -203,7 +278,81 @@ impl GraphicsQueue {
         command.extend_from_slice(payload);
         command.extend_from_slice(b"\x1b\\");
         self.bytes += command.len();
+        self.retain(&command, retain);
         self.commands.push(command);
+    }
+
+    /// Keep a command so it can be replayed to a client that attaches later.
+    fn retain(&mut self, command: &[u8], retain: Retain) {
+        let id = match retain {
+            Retain::No => return,
+            Retain::Chunk => match self.retaining {
+                Some(id) => id,
+                None => return,
+            },
+            Retain::Open(id) => {
+                self.forget(id);
+                self.retained.push(RetainedImage {
+                    id,
+                    commands: Vec::new(),
+                    bytes: 0,
+                });
+                self.retaining = Some(id);
+                id
+            }
+            Retain::Place(id) => id,
+        };
+
+        let Some(image) = self.retained.iter_mut().find(|image| image.id == id) else {
+            return;
+        };
+        image.commands.push(command.to_vec());
+        image.bytes += command.len();
+        self.retained_bytes += command.len();
+        self.enforce_retention_budget();
+    }
+
+    /// Drop the oldest images until the working set is back within budget.
+    fn enforce_retention_budget(&mut self) {
+        while self.retained_bytes > MAX_RETAINED_GRAPHICS_BYTES
+            || self.retained.len() > MAX_RETAINED_IMAGES
+        {
+            // The image being collected is the one the pane is about to show,
+            // so evicting it would trade a stale image for no image at all.
+            let Some(index) = self
+                .retained
+                .iter()
+                .position(|image| Some(image.id) != self.retaining)
+            else {
+                return;
+            };
+            let dropped = self.retained.remove(index);
+            self.retained_bytes -= dropped.bytes;
+        }
+    }
+
+    fn forget(&mut self, id: u32) {
+        if let Some(index) = self.retained.iter().position(|image| image.id == id) {
+            let dropped = self.retained.remove(index);
+            self.retained_bytes -= dropped.bytes;
+        }
+        if self.retaining == Some(id) {
+            self.retaining = None;
+        }
+    }
+
+    fn forget_all(&mut self) {
+        self.retained.clear();
+        self.retained_bytes = 0;
+        self.retaining = None;
+    }
+
+    /// Every image this pane holds, in the order a terminal must learn them.
+    pub(crate) fn retained(&self) -> Vec<Vec<u8>> {
+        self.retained
+            .iter()
+            .flat_map(|image| image.commands.iter().cloned())
+            .collect()
     }
 
     /// Take everything waiting, leaving the queue ready to collect again.
@@ -425,6 +574,9 @@ struct ControlData {
     cursor_stays: bool,
     /// `m=1`: more chunks of this transfer follow.
     more: bool,
+    /// `d=`: what a delete is aimed at. Uppercase frees the image's data as
+    /// well as its placements; lowercase leaves the image behind.
+    delete_scope: u8,
     /// A chunk that continues a transfer rather than opening one. The protocol
     /// requires such a chunk to carry only `m` and optionally `q`, so anything
     /// else present means this command stands on its own.
@@ -457,6 +609,8 @@ impl ControlData {
             rows: None,
             cursor_stays: false,
             more: false,
+            // `d=a` is the protocol default for a delete.
+            delete_scope: b'a',
             is_continuation: true,
         };
 
@@ -487,6 +641,7 @@ impl ControlData {
                 b'r' => parsed.rows = Some(parse_u32(value)?),
                 b'C' => parsed.cursor_stays = parse_u32(value)? != 0,
                 b'm' => parsed.more = parse_u32(value)? != 0,
+                b'd' => parsed.delete_scope = *value.first()?,
                 _ => {}
             }
         }
@@ -795,6 +950,128 @@ mod tests {
         queue.push(b"a=t,i=1,f=100;AAAA", (0, 0), Some(CELL));
         assert_eq!(queue.drain().len(), 1);
         assert!(queue.drain().is_empty(), "a command is delivered once");
+    }
+
+    /// Draining hands an image to the clients watching now. A client that
+    /// attaches afterwards is sent the same grid, so it must be able to learn
+    /// the same images — otherwise its cells name nothing.
+    #[test]
+    fn an_image_outlives_the_delivery_that_took_it_to_todays_clients() {
+        let mut queue = GraphicsQueue::default();
+        queue.push(
+            b"a=T,i=7,f=32,s=38,v=84,U=1,c=2,r=2;DATA",
+            (0, 0),
+            Some(CELL),
+        );
+
+        assert_eq!(queue.drain().len(), 1, "delivered to the clients attached");
+        assert!(queue.drain().is_empty(), "and delivered only once");
+        assert_eq!(
+            queue.retained(),
+            vec![b"\x1b_Ga=T,i=7,f=32,s=38,v=84,U=1,c=2,r=2;DATA\x1b\\".to_vec()],
+            "but still available to a client that has yet to attach"
+        );
+        assert_eq!(
+            queue.retained().len(),
+            1,
+            "and available to every later client, not just the first"
+        );
+    }
+
+    /// The child positioned this one itself, so what a later client is taught
+    /// has to be the rewritten command — the original would put the image
+    /// wherever Luvus's own cursor happens to be.
+    #[test]
+    fn a_rewritten_placement_is_what_a_later_client_learns() {
+        let mut queue = GraphicsQueue::default();
+        // Two cells wide and two tall at `CELL`.
+        queue.push(b"a=T,i=7,f=32,s=28,v=68,C=1;DATA", (3, 5), Some(CELL));
+        queue.drain();
+
+        let retained = String::from_utf8(queue.retained().concat()).unwrap();
+        assert!(retained.contains("U=1,c=2,r=2"), "{retained}");
+        assert!(!retained.contains("C=1"), "{retained}");
+    }
+
+    /// A transfer split into chunks means nothing until every chunk arrives,
+    /// so a later client has to be given all of them, in order.
+    #[test]
+    fn a_chunked_image_is_kept_whole() {
+        let mut queue = GraphicsQueue::default();
+        queue.push(b"a=t,i=7,f=100,m=1;AAAA", (0, 0), Some(CELL));
+        queue.push(b"m=1;BBBB", (0, 0), Some(CELL));
+        queue.push(b"m=0;CCCC", (0, 0), Some(CELL));
+        queue.drain();
+
+        assert_eq!(
+            queue.retained(),
+            vec![
+                b"\x1b_Ga=t,i=7,f=100,m=1;AAAA\x1b\\".to_vec(),
+                b"\x1b_Gm=1;BBBB\x1b\\".to_vec(),
+                b"\x1b_Gm=0;CCCC\x1b\\".to_vec(),
+            ]
+        );
+    }
+
+    /// An id names one image. A child that redraws replaces what that id means,
+    /// and a client attaching later wants what the grid shows now, not a
+    /// stale frame that happened to come first.
+    #[test]
+    fn redrawing_an_image_replaces_the_one_a_later_client_learns() {
+        let mut queue = GraphicsQueue::default();
+        queue.push(b"a=t,i=7,f=100;OLD", (0, 0), Some(CELL));
+        queue.push(b"a=t,i=7,f=100;NEW", (0, 0), Some(CELL));
+        queue.drain();
+
+        assert_eq!(
+            queue.retained(),
+            vec![b"\x1b_Ga=t,i=7,f=100;NEW\x1b\\".to_vec()],
+            "one image per id, and it is the current one"
+        );
+    }
+
+    /// A child that deletes an image is saying the pane no longer shows it.
+    /// Handing it to the next client would be handing over something the child
+    /// has already taken back.
+    #[test]
+    fn a_deleted_image_is_not_handed_to_a_later_client() {
+        let mut queue = GraphicsQueue::default();
+        queue.push(b"a=t,i=7,f=100;AAAA", (0, 0), Some(CELL));
+        queue.push(b"a=t,i=8,f=100;BBBB", (0, 0), Some(CELL));
+
+        queue.push(b"a=d,d=I,i=7", (0, 0), Some(CELL));
+        let left = String::from_utf8(queue.retained().concat()).unwrap();
+        assert!(!left.contains("AAAA"), "{left}");
+        assert!(left.contains("BBBB"), "{left}");
+
+        queue.push(b"a=d,d=A", (0, 0), Some(CELL));
+        assert!(queue.retained().is_empty(), "delete-all clears the set");
+    }
+
+    /// A child that draws continuously must not grow a pane without limit. The
+    /// working set is bounded, and the newest images are the ones the grid is
+    /// most likely to still be naming.
+    #[test]
+    fn the_images_kept_for_later_clients_stay_within_budget() {
+        let mut queue = GraphicsQueue::default();
+        let body = "A".repeat(4096);
+        for id in 1..=(MAX_RETAINED_IMAGES + 20) {
+            queue.push(
+                format!("a=t,i={id},f=100;{body}").as_bytes(),
+                (0, 0),
+                Some(CELL),
+            );
+            queue.drain();
+        }
+
+        let retained = queue.retained();
+        assert!(retained.len() <= MAX_RETAINED_IMAGES, "{}", retained.len());
+        assert!(queue.retained_bytes <= MAX_RETAINED_GRAPHICS_BYTES);
+        let newest = String::from_utf8(retained.concat()).unwrap();
+        assert!(
+            newest.contains(&format!("i={}", MAX_RETAINED_IMAGES + 20)),
+            "the image drawn last is the one to keep"
+        );
     }
 
     #[test]

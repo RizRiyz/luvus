@@ -3931,6 +3931,18 @@ impl App {
         commands
     }
 
+    /// The images every pane's grid still refers to, for a client that has just
+    /// attached and is about to be sent cells naming them.
+    pub fn pane_graphics_history(&self) -> Vec<Vec<u8>> {
+        let mut commands = Vec::new();
+        for pane in self.panes.values() {
+            if let Ok(engine) = pane.engine.lock() {
+                commands.append(&mut engine.retained_graphics());
+            }
+        }
+        commands
+    }
+
     /// Apply colors reported by the terminal displaying the foreground client.
     pub fn apply_terminal_colors(&mut self, colors: &crate::terminal::theme_probe::TerminalColors) {
         self.probed_appearance =
