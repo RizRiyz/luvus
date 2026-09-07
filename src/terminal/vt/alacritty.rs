@@ -19,6 +19,7 @@ use super::{
 use crate::terminal::appearance::PaneAppearance;
 use crate::terminal::backend::{CaptureMode, CaptureResult};
 use crate::terminal::graphics;
+use crate::terminal::graphics::placeholder;
 use crate::terminal::pty::{InputAction, InputSender};
 
 #[derive(Default)]
@@ -106,11 +107,11 @@ impl EventListener for EventProxy {
                 }
                 self.host_graphics.mark_pending();
                 if let Ok(mut queue) = self.graphics_queue.lock() {
-                    let mut forwarded = Vec::with_capacity(command.payload.len() + 5);
-                    forwarded.extend_from_slice(b"\x1b_G");
-                    forwarded.extend_from_slice(&command.payload);
-                    forwarded.extend_from_slice(b"\x1b\\");
-                    queue.push(&command.payload, &forwarded);
+                    queue.push(
+                        &command.payload,
+                        (command.line, command.column),
+                        self.host_graphics.cell_size(),
+                    );
                 }
             }
             _ => {}
@@ -152,6 +153,9 @@ pub struct AlacrittyEngine {
     history_maintenance_cursors: [usize; 2],
     history_maintenance_pending: bool,
     history_maintenance_full_scan: bool,
+    /// Set when placeholder cells were written straight into the grid, which
+    /// the emulator's own damage tracking cannot have seen.
+    placement_damage: bool,
     damage_line_indices: Vec<u16>,
     damage_rows: Vec<DamageRow>,
 }
@@ -224,9 +228,83 @@ impl AlacrittyEngine {
             history_maintenance_cursors: [0; 2],
             history_maintenance_pending: false,
             history_maintenance_full_scan: false,
+            placement_damage: false,
             damage_line_indices: Vec::new(),
             damage_rows: Vec::new(),
         }
+    }
+
+    fn apply_pending_placements(&mut self) {
+        let placements = match self.graphics_queue.lock() {
+            Ok(mut queue) => queue.drain_placements(),
+            Err(_) => return,
+        };
+        for placement in placements {
+            self.write_placeholder_cells(&placement);
+            if placement.move_cursor {
+                // A terminal that placed the image itself would leave the
+                // cursor past it. Feeding real line breaks lets the existing
+                // scroll-region logic handle an image that reaches the bottom.
+                let feed = "\r\n".repeat(placement.rows);
+                self.parser.advance(&mut self.term, feed.as_bytes());
+            }
+        }
+    }
+
+    /// Write the placeholder cells that make one forwarded image appear.
+    ///
+    /// Each cell holds the private-use character, the image id in its
+    /// foreground color, and its own coordinate within the image in combining
+    /// marks. Writing them straight into the grid — rather than printing them
+    /// through the parser — keeps the child's cursor, colors and scroll region
+    /// exactly as they were: none of that belongs to the image.
+    ///
+    /// Cells outside the screen are skipped, so an image larger than its pane
+    /// is clipped by the pane instead of overflowing it.
+    fn write_placeholder_cells(&mut self, placement: &graphics::Placement) {
+        let id = placement.image_id;
+        let color = VtColor::Spec(Rgb {
+            r: (id >> 16) as u8,
+            g: (id >> 8) as u8,
+            b: id as u8,
+        });
+        // Ids need a fourth byte only above three, and it rides a third mark.
+        let high_byte = placeholder::diacritic((id >> 24) as usize).filter(|_| id >> 24 != 0);
+
+        let grid = self.term.grid_mut();
+        let columns = grid.columns();
+        let screen_lines = grid.screen_lines() as i32;
+        for row in 0..placement.rows {
+            let line = placement.line.saturating_add(row as i32);
+            if line < 0 || line >= screen_lines {
+                continue;
+            }
+            let Some(row_mark) = placeholder::diacritic(row) else {
+                continue;
+            };
+            for column in 0..placement.columns {
+                let column = placement.column.saturating_add(column);
+                if column >= columns {
+                    break;
+                }
+                let Some(column_mark) = placeholder::diacritic(column - placement.column) else {
+                    continue;
+                };
+                let cell = &mut grid[Line(line)][Column(column)];
+                *cell = alacritty_terminal::term::cell::Cell::default();
+                cell.c = placeholder::PLACEHOLDER;
+                cell.fg = color;
+                cell.push_zerowidth(row_mark);
+                cell.push_zerowidth(column_mark);
+                if let Some(high_byte) = high_byte {
+                    cell.push_zerowidth(high_byte);
+                }
+            }
+        }
+        // These cells were written behind the emulator's back, so nothing has
+        // recorded them as changed. One full frame is cheap here: a placement
+        // only repeats when its geometry does, not on every image frame.
+        self.placement_damage = true;
     }
 
     fn apply_history_budget(&mut self) {
@@ -449,6 +527,7 @@ impl VtEngine for AlacrittyEngine {
         self.history_maintenance_pending = true;
         self.history_metrics_cache.set(None);
         self.parser.advance(&mut self.term, bytes);
+        self.apply_pending_placements();
         self.output_generation = self.output_generation.wrapping_add(1);
     }
 
@@ -604,6 +683,9 @@ impl VtEngine for AlacrittyEngine {
             }
         };
         if self.title.lock().map_or(true, |title| title.changed) {
+            kind = DamageKind::Full;
+        }
+        if std::mem::take(&mut self.placement_damage) {
             kind = DamageKind::Full;
         }
 
@@ -2352,6 +2434,88 @@ mod tests {
         assert_eq!(
             cells[1].1, "\u{10eeee}\u{0305}\u{030d}",
             "the coordinate marks travel with their cell"
+        );
+    }
+
+    /// A child that believes it has the terminal to itself asks for the image
+    /// at the cursor and writes no cells of its own. Luvus makes the placement
+    /// virtual and builds the cells, so the image lands inside the pane instead
+    /// of wherever the client's own cursor happens to be.
+    #[test]
+    fn an_image_placed_at_the_cursor_is_given_cells_of_its_own() {
+        let (tx, _rx) = channel();
+        let host_graphics = graphics::HostGraphics::default();
+        host_graphics.set(true);
+        host_graphics.set_cell_size(Some(crate::terminal::theme_probe::CellSize {
+            width: 10,
+            height: 20,
+        }));
+        let mut e = AlacrittyEngine::with_appearance(
+            40,
+            5,
+            tx,
+            budget_for_rows(40, 20),
+            PaneAppearance::default(),
+            host_graphics.clone(),
+        );
+
+        // Move the cursor first: a placement at the cursor starts there, and
+        // the image must not be pinned to the top-left of the pane.
+        e.advance(b"\x1b[2;3H");
+        // 30x40 pixels over a 10x20 cell is 3x2 cells. `C=1` keeps the cursor.
+        e.advance(b"\x1b_Ga=T,f=32,s=30,v=40,t=d,i=5,p=1,C=1,q=2;AAAA\x1b\\");
+
+        let forwarded = e.take_graphics();
+        assert_eq!(forwarded.len(), 1);
+        let command = String::from_utf8(forwarded[0].clone()).unwrap();
+        assert!(
+            command.contains("U=1,c=3,r=2"),
+            "the placement must become virtual, sized in cells: {command:?}"
+        );
+        assert!(
+            !command.contains("p=1") && !command.contains("C=1"),
+            "the placement at the cursor must not survive: {command:?}"
+        );
+
+        let mut cells = Vec::new();
+        e.for_each_cell(&mut |row, column, symbol, cell| {
+            if symbol.starts_with('\u{10eeee}') {
+                cells.push((row, column, symbol.to_string(), cell.fg));
+            }
+        });
+        assert_eq!(cells.len(), 6, "a 3x2 image is six cells: {cells:?}");
+        assert_eq!(
+            (cells[0].0, cells[0].1),
+            (1, 2),
+            "the image starts where the cursor stood, not at the pane's corner"
+        );
+        assert_eq!(
+            cells[0].3,
+            Color::Rgb(0, 0, 5),
+            "the image id rides in the foreground color"
+        );
+        assert_eq!(
+            cells[0].2, "\u{10eeee}\u{0305}\u{0305}",
+            "row 0, column 0 of the image"
+        );
+        assert_eq!(
+            cells[5].2, "\u{10eeee}\u{030d}\u{030e}",
+            "row 1, column 2 of the image"
+        );
+
+        assert_eq!(
+            (e.cursor().x, e.cursor().y),
+            (2, 1),
+            "C=1 asked for the cursor to stay where it was"
+        );
+        assert_eq!(
+            e.damage_snapshot().kind,
+            DamageKind::Full,
+            "cells written behind the emulator's back must still reach a client"
+        );
+        assert!(
+            !e.visible_rows().join("").contains('\u{10eeee}'),
+            "the cells are an image, so they must not read back as text"
         );
     }
 
