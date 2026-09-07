@@ -234,9 +234,12 @@ impl AlacrittyEngine {
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                 continue;
             }
-            output.push(if cell.c == '\0' { ' ' } else { cell.c });
-            if let Some(zerowidth) = cell.zerowidth() {
-                output.extend(zerowidth);
+            let (character, marks_are_text) = cell_as_text(cell);
+            output.push(character);
+            if marks_are_text {
+                if let Some(zerowidth) = cell.zerowidth() {
+                    output.extend(zerowidth);
+                }
             }
         }
         let trimmed = output.trim_end().len();
@@ -280,13 +283,13 @@ impl AlacrittyEngine {
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                 continue;
             }
-            let character = if cell.c == '\0' { ' ' } else { cell.c };
+            let (character, marks_are_text) = cell_as_text(cell);
             if (!character.is_control() || character == '\t')
                 && !append_utf8_bounded(output, character.encode_utf8(&mut encoded), max_bytes)
             {
                 return false;
             }
-            if let Some(zerowidth) = cell.zerowidth() {
+            if let Some(zerowidth) = cell.zerowidth().filter(|_| marks_are_text) {
                 for character in zerowidth.iter().copied().filter(|c| !c.is_control()) {
                     if !append_utf8_bounded(output, character.encode_utf8(&mut encoded), max_bytes)
                     {
@@ -315,7 +318,7 @@ impl AlacrittyEngine {
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                 continue;
             }
-            let character = if cell.c == '\0' { ' ' } else { cell.c };
+            let (character, marks_are_text) = cell_as_text(cell);
             if character.is_control() && character != '\t' {
                 continue;
             }
@@ -327,7 +330,7 @@ impl AlacrittyEngine {
             let style_code =
                 (next_style != style).then(|| sgr(next_style.0, next_style.1, next_style.2));
             let mut symbol = character.to_string();
-            if let Some(zerowidth) = cell.zerowidth() {
+            if let Some(zerowidth) = cell.zerowidth().filter(|_| marks_are_text) {
                 symbol.extend(zerowidth.iter().copied().filter(|c| !c.is_control()));
             }
             let needed = style_code.as_ref().map_or(0, String::len) + symbol.len();
@@ -347,6 +350,27 @@ impl AlacrittyEngine {
             output.push_str("\x1b[0m");
         }
         true
+    }
+}
+
+/// What a grid cell contributes when the grid is read as *text* rather than
+/// rendered: the character to emit, and whether the cell's zero-width marks
+/// belong with it.
+///
+/// Two cells are not the text they hold. `\0` is an untouched cell, which reads
+/// as a blank. A kitty graphics placeholder is an image cell: the private-use
+/// character is not something anyone typed, and its combining marks encode a
+/// coordinate inside the image rather than an accent. Letting either reach
+/// extracted text puts unusable characters in the user's clipboard and noise in
+/// the screen text that agent detection matches against.
+///
+/// Rendering must not use this — a placeholder cell is drawn, so the render
+/// path keeps the character and its marks exactly as the child wrote them.
+fn cell_as_text(cell: &alacritty_terminal::term::cell::Cell) -> (char, bool) {
+    match cell.c {
+        graphics::placeholder::PLACEHOLDER => (' ', false),
+        '\0' => (' ', true),
+        character => (character, true),
     }
 }
 
@@ -687,9 +711,12 @@ impl VtEngine for AlacrittyEngine {
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     continue;
                 }
-                line.push(if cell.c == '\0' { ' ' } else { cell.c });
-                if let Some(zerowidth) = cell.zerowidth() {
-                    line.extend(zerowidth);
+                let (character, marks_are_text) = cell_as_text(cell);
+                line.push(character);
+                if marks_are_text {
+                    if let Some(zerowidth) = cell.zerowidth() {
+                        line.extend(zerowidth);
+                    }
                 }
             }
             if !out.is_empty() {
@@ -713,9 +740,12 @@ impl VtEngine for AlacrittyEngine {
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     continue;
                 }
-                line.push(if cell.c == '\0' { ' ' } else { cell.c });
-                if let Some(zerowidth) = cell.zerowidth() {
-                    line.extend(zerowidth);
+                let (character, marks_are_text) = cell_as_text(cell);
+                line.push(character);
+                if marks_are_text {
+                    if let Some(zerowidth) = cell.zerowidth() {
+                        line.extend(zerowidth);
+                    }
                 }
             }
             let line = line.trim_end();
@@ -747,8 +777,7 @@ impl VtEngine for AlacrittyEngine {
             if indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                 continue;
             }
-            let c = indexed.cell.c;
-            lines[r as usize].push(if c == '\0' { ' ' } else { c });
+            lines[r as usize].push(cell_as_text(indexed.cell).0);
         }
         lines
     }
@@ -767,14 +796,16 @@ impl VtEngine for AlacrittyEngine {
             if r < 0 || r as usize >= rows {
                 continue;
             }
-            let c = if indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            let wide_spacer = indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER);
+            let (character, marks_are_text) = cell_as_text(indexed.cell);
+            // One char per terminal column is this method's whole contract, so a
+            // filtered image cell becomes a blank rather than disappearing.
+            let c = if wide_spacer {
                 ALIGNED_WIDE_CELL
-            } else if indexed.cell.c == '\0' {
-                ' '
             } else {
-                indexed.cell.c
+                character
             };
-            let zero_width = if indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            let zero_width = if wide_spacer || !marks_are_text {
                 None
             } else {
                 indexed.cell.zerowidth()
@@ -1043,7 +1074,14 @@ impl VtEngine for AlacrittyEngine {
 
         // Alacritty owns the VT line-wrap metadata. Extract the complete range
         // once so soft wraps are rejoined while real line breaks are retained.
-        Some(self.term.bounds_to_string(start, end))
+        // The engine returns a finished string, so image cells are removed from
+        // the text rather than skipped per cell as everywhere else. A selection
+        // holding no image keeps the engine's own allocation.
+        let text = self.term.bounds_to_string(start, end);
+        Some(match graphics::placeholder::strip(&text) {
+            std::borrow::Cow::Borrowed(_) => text,
+            std::borrow::Cow::Owned(stripped) => stripped,
+        })
     }
 
     fn retained_row_layout(&self, index: usize) -> Option<RetainedRowLayout> {
@@ -1192,8 +1230,13 @@ impl VtEngine for AlacrittyEngine {
                     out.push_str(&sgr(style.0, style.1, style.2));
                     cur = style;
                 }
-                out.push(if cell.c == '\0' { ' ' } else { cell.c });
-                if let Some(chars) = cell.zerowidth() {
+                // A restored pane replays this text, but no client still holds
+                // the image a placeholder pointed at, so replaying one would
+                // paint an unresolvable character. Revisit if image data ever
+                // becomes part of the snapshot.
+                let (character, marks_are_text) = cell_as_text(cell);
+                out.push(character);
+                if let Some(chars) = cell.zerowidth().filter(|_| marks_are_text) {
                     out.extend(chars);
                 }
             }
@@ -2030,6 +2073,144 @@ mod tests {
                 .as_deref(),
             Some("abcdefghij\nnext")
         );
+    }
+
+    /// A kitty graphics Unicode placeholder is ordinary text: the private-use
+    /// character `U+10EEEE` with its coordinates in combining marks and the
+    /// image id in a truecolor foreground. Nothing about it is special to the
+    /// grid, and that is exactly the property the whole approach rests on — the
+    /// cells scroll, clip, and reflow because they are text like any other.
+    #[test]
+    fn a_unicode_placeholder_survives_the_grid_as_one_cell_per_image_cell() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 3, tx, budget_for_rows(20, 20));
+        // Image id 42 as a 2x1 block, exactly as a client writes it.
+        e.advance(
+            "\x1b[38;2;0;0;42m\u{10eeee}\u{0305}\u{0305}\u{10eeee}\u{0305}\u{030d}\x1b[39m"
+                .as_bytes(),
+        );
+
+        let mut cells = Vec::new();
+        e.for_each_cell(&mut |row, col, symbol, cell| {
+            if symbol.starts_with('\u{10eeee}') {
+                cells.push((row, col, symbol.to_string(), cell.fg));
+            }
+        });
+
+        assert_eq!(cells.len(), 2, "one grid cell per image cell: {cells:?}");
+        assert_eq!(
+            (cells[0].0, cells[0].1, cells[1].0, cells[1].1),
+            (0, 0, 0, 1),
+            "the block occupies adjacent columns on one row"
+        );
+        assert_eq!(
+            cells[0].2, "\u{10eeee}\u{0305}\u{0305}",
+            "the coordinate diacritics must survive with the base character"
+        );
+        assert_eq!(cells[1].2, "\u{10eeee}\u{0305}\u{030d}");
+        assert_eq!(
+            cells[0].3,
+            Color::Rgb(0, 0, 42),
+            "the image id rides in the foreground color and must stay exact"
+        );
+    }
+
+    /// Feed a pane the two image cells of a 2x1 placement, surrounded by text.
+    fn engine_with_a_placeholder() -> AlacrittyEngine {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(20, 3, tx, budget_for_rows(20, 200));
+        engine.advance(
+            "ab\x1b[38;2;0;0;42m\u{10eeee}\u{0305}\u{0305}\u{10eeee}\u{0305}\u{030d}\x1b[39mcd"
+                .as_bytes(),
+        );
+        engine
+    }
+
+    /// An image cell is not text. Reading it as text puts a private-use
+    /// character nobody can use into the clipboard, and noise into the screen
+    /// text that agent detection matches against.
+    #[test]
+    fn an_image_cell_never_reaches_extracted_text() {
+        let engine = engine_with_a_placeholder();
+
+        let mut sources = vec![
+            ("detection_text", engine.detection_text(3)),
+            (
+                "detection_text_non_empty",
+                engine.detection_text_non_empty(3),
+            ),
+            ("visible_rows", engine.visible_rows().join("\n")),
+            (
+                "visible_rows_aligned",
+                engine.visible_rows_aligned().rows().join("\n"),
+            ),
+            ("snapshot_ansi", engine.snapshot_ansi()),
+        ];
+        let mut retained = String::new();
+        engine.for_each_retained_row(&mut |_index, line| {
+            retained.push_str(line);
+        });
+        sources.push(("for_each_retained_row", retained));
+        sources.push((
+            "backend_capture",
+            engine
+                .backend_capture(CaptureMode::Visible, 3, false, 4_096)
+                .text,
+        ));
+        sources.push((
+            "backend_capture (ansi)",
+            engine
+                .backend_capture(CaptureMode::Visible, 3, true, 4_096)
+                .text,
+        ));
+
+        for (source, text) in sources {
+            assert!(
+                !text.contains('\u{10eeee}'),
+                "{source} leaked a placeholder: {text:?}"
+            );
+            assert!(
+                !text.contains('\u{030d}'),
+                "{source} leaked a coordinate diacritic: {text:?}"
+            );
+            assert!(
+                text.contains("ab") && text.contains("cd"),
+                "{source} must keep the surrounding text: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_filtered_image_cell_still_occupies_its_column() {
+        // `visible_rows_aligned` promises one char per terminal column: it is
+        // how a double-click finds the token under the pointer. Dropping an
+        // image cell would shift every column after it.
+        let engine = engine_with_a_placeholder();
+        let aligned = engine.visible_rows_aligned();
+        assert_eq!(
+            &aligned.rows()[0][..6],
+            "ab  cd",
+            "each image cell leaves exactly one blank behind"
+        );
+    }
+
+    #[test]
+    fn copying_a_selection_across_an_image_keeps_the_text_around_it() {
+        let engine = engine_with_a_placeholder();
+        let row = engine
+            .visible_rows()
+            .iter()
+            .position(|line| line.contains("ab"))
+            .expect("the line is on screen");
+        let text = engine
+            .retained_selection_text(((row, 0), (row, 5)))
+            .expect("the range is selectable");
+        assert!(
+            !text.contains('\u{10eeee}') && !text.contains('\u{030d}'),
+            "the clipboard must not receive image cells: {text:?}"
+        );
+        assert!(text.contains("ab"), "{text:?}");
+        assert!(text.contains("cd"), "{text:?}");
     }
 
     /// The support probe every kitty-graphics client sends: a query action
