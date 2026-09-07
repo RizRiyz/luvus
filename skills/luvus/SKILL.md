@@ -317,7 +317,7 @@ luvus agent get <target>
 luvus agent fork <target> [--name <alias>] [--no-focus]
 ```
 
-Native forks currently support Claude, Grok, Codex, Pi, and OMP. Report
+Native forks currently support Claude, Grok, Codex, Kilo Code, Pi, and OMP. Report
 `unsupported_agent`, `session_unknown`, or `spawn_failed` exactly when returned.
 Do not approximate a failed fork with `pane split`, `agent start`, or `resume`,
 because those paths do not guarantee an independent copy of the conversation.

@@ -18,6 +18,7 @@ description: What luvus supports per agent, covering live status, session resume
 | Muse Code | ✓ | ✓ | no | no |
 | fx | ✓ | ✓ | no | no |
 | Cursor | ✓ | resume command | no | no |
+| Kilo Code | ✓ | with exact session ID | with exact session ID | no |
 | Gemini | ✓ | no | no | no |
 | Aider | ✓ | no | no | no |
 | Amp | ✓ | no | no | no |
@@ -36,7 +37,8 @@ description: What luvus supports per agent, covering live status, session resume
   original keeps running. It needs an agent with a native fork command, so today
   that is **Claude** (`claude --resume <id> --fork-session`), **Grok**
   (`grok --resume <id> --fork-session`), **Codex** (`codex fork <id>`),
-  **Pi** (`pi --fork <id>`), and **Oh My Pi (omp)** (`omp --fork <id>`).
+  **Kilo Code** (`kilo --session <id> --fork`), **Pi** (`pi --fork <id>`),
+  and **Oh My Pi (omp)** (`omp --fork <id>`).
   Right-click the pane and choose **Fork to New Pane**, or press `Ctrl+Space f`.
   The action only appears when Luvus can resolve the source session safely.
 - **Hook**, via `luvus integration install <agent>`, makes the agent report its
@@ -70,6 +72,13 @@ description: What luvus supports per agent, covering live status, session resume
   OpenCode detection and legacy JSON session discovery still work while usage
   remains unavailable.
 
+  Kilo Code is detected through either official executable (`kilo` or
+  `kilocode`) and the exact `@kilocode/cli` package identity. Luvus can resume
+  and fork a Kilo session when it already has the exact session ID, but does not
+  scan or guess IDs from Kilo's current database. Scheduled Kilo workers are
+  available only with explicit **Full access**, which maps to Kilo's documented
+  `kilo run --auto` contract; read-only and workspace automation are rejected.
+
   Hermes installs `~/.hermes/plugins/luvus-agent-state`, or the equivalent
   directory under `HERMES_HOME`, and enables only that plugin in
   `config.yaml`. Its callbacks report each exact CLI session once. Native
@@ -96,7 +105,7 @@ Print the release-matched instructions for one conversation with
 `luvus skill show`, or install them persistently with `luvus skill enable`.
 
 The shared `~/.agents/skills/luvus/` destination is understood by Codex,
-GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, and fx. Luvus uses
+GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, fx, and Kilo Code. Luvus uses
 dedicated native destinations for Claude Code, OpenCode, Kimi Code CLI, Grok
 Build, Hermes CLI, Qwen Code, Oh My Pi (omp), and Kiro. Aider does not expose a
 native Agent Skills installation directory, so use `luvus skill show` when an

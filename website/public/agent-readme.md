@@ -84,7 +84,7 @@ for an agent to receive it:
 `luvus skill enable` makes no network request. It installs the same bundled
 skill into detected native skill locations without overwriting external or
 modified content. The shared `~/.agents/skills/luvus/` copy serves Codex,
-GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, and fx. Dedicated
+GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, fx, and Kilo Code. Dedicated
 adapters serve Claude Code, OpenCode, Kimi Code CLI, Grok Build, Hermes CLI,
 Qwen Code, and Kiro. Aider has no native Agent Skills installation surface, so
 use `luvus skill show` when an Aider conversation needs the instructions.
@@ -305,6 +305,11 @@ discovery rather than inferring support from an agent name.
   `luvus integration install opencode` adds a TUI-local plugin that reports
   only the root session selected in that pane plus structured usage. Without
   it, Mission Control leaves OpenCode usage unavailable instead of guessing.
+- Kilo Code is detected through the official `kilo` and `kilocode` commands.
+  Resume and fork use Kilo's native commands only when Luvus already has the
+  exact session ID; Luvus does not scan or guess sessions from Kilo's database.
+  A scheduled Kilo worker requires the user's explicit `full_access` selection
+  because its reviewed unattended command is `kilo run --auto`.
 - `luvus integration install hermes` adds exact per-pane session ownership for
   restart resume. Hermes detection still works without it, but Luvus does not
   scan Hermes's private history database or guess a session.

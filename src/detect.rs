@@ -1968,6 +1968,75 @@ Would you like to proceed?
             m.launch_args_for(&[antigravity_windows.into()], "antigravity"),
             Some(vec!["-p".into(), "fix the tests".into()])
         );
+
+        let kilo_unix = "/opt/homebrew/bin/kilo --session ses_123 --model anthropic/claude";
+        assert_eq!(
+            m.agent_in_processes(&[kilo_unix.into()]),
+            Some("kilo".into())
+        );
+        assert_eq!(
+            m.launch_args_for(&[kilo_unix.into()], "kilo"),
+            Some(vec![
+                "--session".into(),
+                "ses_123".into(),
+                "--model".into(),
+                "anthropic/claude".into(),
+            ])
+        );
+        assert_eq!(
+            m.agent_in_processes(&[r#"C:\Users\me\bin\kilocode.exe --continue"#.into()]),
+            Some("kilo".into())
+        );
+        assert_eq!(
+            m.agent_in_processes(&[
+                r#"node C:\Users\me\AppData\Roaming\npm\node_modules\@kilocode\cli\bin\kilo --prompt "review""#.into()
+            ]),
+            Some("kilo".into()),
+            "the exact scoped npm package identifies Kilo on Windows"
+        );
+    }
+
+    #[test]
+    fn kilo_uses_process_identity_and_generic_state_rules() {
+        let manifests = Manifests::builtin();
+        let running = ["/usr/local/bin/kilo".to_string()];
+        let detect = |screen: &str| {
+            classify(
+                Some("zsh"),
+                screen,
+                false,
+                false,
+                "zsh",
+                "",
+                &running,
+                &manifests,
+            )
+        };
+
+        let blocked = detect("Run this command? [y/n]");
+        assert_eq!(blocked.agent, "kilo");
+        assert_eq!(blocked.identity_source, "process_tree");
+        assert_eq!(blocked.state, State::Blocked);
+        assert_eq!(
+            detect("⠹ Thinking… (esc to interrupt)").state,
+            State::Working
+        );
+        assert_eq!(detect("Ready").state, State::Idle);
+
+        let incidental = classify(
+            Some("zsh"),
+            "this archive weighs one kilo",
+            false,
+            false,
+            "zsh",
+            "",
+            &[],
+            &manifests,
+        );
+        assert_eq!(
+            incidental.agent, "zsh",
+            "the ordinary word kilo is never trusted from terminal prose"
+        );
     }
 
     #[test]

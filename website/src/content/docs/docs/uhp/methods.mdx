@@ -678,8 +678,10 @@ when false, the current workspace, tab, pane focus, and zoom state are preserved
 Unsupported agents return `unsupported_agent`; a supported agent whose session
 ID cannot be resolved returns `session_unknown`; and PTY launch failure returns
 `spawn_failed`. Codex requires a hook-reported or Luvus-resumed exact session
-identity and never falls back to the newest rollout in the workspace. Validation
-completes before a new pane is spawned.
+identity and never falls back to the newest rollout in the workspace. Kilo Code
+also requires an exact session identity because Luvus does not scan or guess
+sessions from Kilo's current database. Validation completes before a new pane
+is spawned.
 
 ## Files
 

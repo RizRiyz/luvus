@@ -1,0 +1,9 @@
+# Official Luvus detection manifest for Kilo Code CLI.
+# This provides detection-only compatibility to older identity-enabled Luvus
+# versions. Native launch, automation, resume, and fork support ships in the
+# Luvus binary.
+agent = "kilo"
+
+[identity]
+distinct = ["kilocode"]
+ambiguous = ["kilo"]

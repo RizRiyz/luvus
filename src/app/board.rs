@@ -3314,6 +3314,7 @@ mod tests {
             ("grok", "grok"),
             ("hermes", "hermes --oneshot"),
             ("kimi", "kimi --prompt"),
+            ("kilo", "kilo --prompt"),
             ("kiro", "kiro-cli"),
             ("muse", "muse"),
             ("omp", "omp"),
@@ -3339,6 +3340,12 @@ mod tests {
             agent_automation_command("fx", AutomationAccess::Workspace).unwrap(),
             "fx ask --auto"
         );
+        assert_eq!(
+            agent_automation_command("kilo", AutomationAccess::FullAccess).unwrap(),
+            "kilo run --auto"
+        );
+        assert!(agent_automation_command("kilo", AutomationAccess::ReadOnly).is_err());
+        assert!(agent_automation_command("kilo", AutomationAccess::Workspace).is_err());
         assert!(agent_automation_command("aider", AutomationAccess::Workspace).is_err());
         assert!(agent_automation_command("antigravity", AutomationAccess::Workspace).is_err());
 
