@@ -1,8 +1,9 @@
-//! Query the real terminal's foreground, background, and ANSI palette.
+//! Query the real terminal's foreground, background, ANSI palette, and whether
+//! it can draw images.
 //!
 //! Probing is deliberately outside `ui::theme`: this module owns terminal I/O,
 //! while the theme module only turns a palette into UI colors. A probe can read
-//! keyboard bytes interleaved with OSC replies, so those bytes are decoded and
+//! keyboard bytes interleaved with the replies, so those bytes are decoded and
 //! returned to the caller instead of being injected back through `TIOCSTI`
 //! (which modern Linux kernels commonly reject).
 
@@ -23,19 +24,39 @@ pub struct TerminalColors {
 #[derive(Default)]
 pub struct ProbeResult {
     pub colors: Option<TerminalColors>,
+    /// Whether the host terminal answered the kitty graphics support query.
+    ///
+    /// `None` means it stayed silent, which is not the same as a refusal: a
+    /// multiplexer in between may have swallowed the sequence. Both are
+    /// treated as "cannot draw", because painting graphics bytes at a terminal
+    /// that does not render them reaches the user as garbage — but only a
+    /// `Some(true)` is ever permission to emit.
+    pub graphics: Option<bool>,
     pub pending: Vec<Event>,
 }
 
 /// Query only the palette entries used by `Theme::from_terminal`.
 #[cfg(unix)]
 const PALETTE_QUERIES: [u8; 6] = [1, 2, 3, 4, 6, 8];
+
+/// Image id used only to correlate the graphics support query with its reply.
+/// Nothing is transmitted under it: `a=q` asks the terminal to validate the
+/// command and answer, without creating an image.
+#[cfg(any(unix, test))]
+const GRAPHICS_PROBE_ID: u16 = 1917;
+
 /// Unsupported terminals must not add a visible pause to attachment.
 #[cfg(unix)]
 const PROBE_TIMEOUT_MS: u64 = 50;
 
 /// Query the terminal. The caller must already have enabled raw mode.
+///
+/// `colors` asks for the palette as well, which only the virtual Terminal
+/// theme reads. Graphics support is asked for either way: it describes what
+/// this terminal can draw, which has nothing to do with which theme the user
+/// picked, and it rides the same round trip.
 #[cfg(unix)]
-pub fn probe() -> ProbeResult {
+pub fn probe(colors: bool) -> ProbeResult {
     use std::io::{Read, Write};
     use std::os::fd::AsRawFd;
     use std::time::{Duration, Instant};
@@ -53,13 +74,40 @@ pub fn probe() -> ProbeResult {
     }
 
     let mut stdout = std::io::stdout();
-    if write!(stdout, "\x1b]10;?\x07\x1b]11;?\x07").is_err() {
+    // The kitty graphics protocol's own support test: a one-pixel direct
+    // transmission in query mode, which asks the terminal to validate the
+    // command and answer without creating an image. A terminal that implements
+    // the protocol must answer immediately; one that does not says nothing.
+    //
+    // It goes first on purpose. Replies arrive in order and the read loop stops
+    // as soon as the colors are complete, so asking last would either lose the
+    // answer or cost the full timeout on every attach.
+    if write!(
+        stdout,
+        "\x1b_Gi={GRAPHICS_PROBE_ID},a=q,t=d,f=24,s=1,v=1;AAAA\x1b\\"
+    )
+    .is_err()
+    {
         return ProbeResult::default();
     }
-    for index in PALETTE_QUERIES {
-        if write!(stdout, "\x1b]4;{index};?\x07").is_err() {
+    if colors {
+        if write!(stdout, "\x1b]10;?\x07\x1b]11;?\x07").is_err() {
             return ProbeResult::default();
         }
+        for index in PALETTE_QUERIES {
+            if write!(stdout, "\x1b]4;{index};?\x07").is_err() {
+                return ProbeResult::default();
+            }
+        }
+    }
+    // The fence, sent last. Every terminal answers a primary device attributes
+    // request, and replies come back in the order they were asked for, so its
+    // arrival proves every answer this probe is going to get has already
+    // arrived. That is what lets a terminal decline the graphics query by
+    // saying nothing without costing the full timeout — the protocol's own
+    // recommended way to ask the question.
+    if write!(stdout, "\x1b[c").is_err() {
+        return ProbeResult::default();
     }
     if stdout.flush().is_err() {
         return ProbeResult::default();
@@ -81,7 +129,7 @@ pub fn probe() -> ProbeResult {
             Ok(0) | Err(_) => break,
             Ok(n) => {
                 bytes.extend_from_slice(&chunk[..n]);
-                if complete_color_responses(&bytes) >= 2 + PALETTE_QUERIES.len() {
+                if contains_device_attributes(&bytes) {
                     break;
                 }
             }
@@ -91,6 +139,7 @@ pub fn probe() -> ProbeResult {
     let (responses, input) = split_responses_and_input(&bytes);
     ProbeResult {
         colors: parse_osc_responses(&responses),
+        graphics: parse_graphics_support(&responses),
         pending: decode_pending_input(&input),
     }
 }
@@ -133,7 +182,7 @@ fn fd_readable(fd: std::os::fd::RawFd, timeout_ms: i32) -> bool {
 }
 
 #[cfg(not(unix))]
-pub fn probe() -> ProbeResult {
+pub fn probe(_colors: bool) -> ProbeResult {
     ProbeResult::default()
 }
 
@@ -142,6 +191,66 @@ fn is_color_response_start(data: &[u8]) -> bool {
     data.starts_with(b"\x1b]10;") || data.starts_with(b"\x1b]11;") || data.starts_with(b"\x1b]4;")
 }
 
+#[cfg(any(unix, test))]
+fn is_graphics_response_start(data: &[u8]) -> bool {
+    data.starts_with(b"\x1b_G")
+}
+
+/// Length of a primary device attributes reply at the front of `data`.
+///
+/// The reply is `ESC [ ? <numbers and semicolons> c`. It is recognized so it
+/// can be taken out of the input: left there, the fence Luvus itself asked for
+/// would reach the focused pane as text the user never typed.
+///
+/// A reply cut short by the deadline is still terminal traffic, not a key, so
+/// it is reported separately rather than lumped in with unrelated bytes.
+#[cfg(any(unix, test))]
+enum DeviceAttributes {
+    /// Not this reply. `ESC` alone is the Escape key, and `ESC [ ?` also opens
+    /// unrelated CSI sequences.
+    No,
+    /// The fence, complete, and this long.
+    Complete(usize),
+    /// A valid beginning with the rest still in flight.
+    Partial,
+}
+
+#[cfg(any(unix, test))]
+fn device_attributes_reply(data: &[u8]) -> DeviceAttributes {
+    // The whole three-byte head is required before this is treated as a reply,
+    // exactly as the color replies require theirs. A shorter prefix is
+    // ambiguous with keys the user may actually have pressed — `ESC` alone is
+    // Escape, and `ESC [` opens ordinary key sequences — and swallowing those
+    // would be a worse failure than the vanishingly rare split mid-head.
+    const HEAD: &[u8] = b"\x1b[?";
+    if !data.starts_with(HEAD) {
+        return DeviceAttributes::No;
+    }
+    for (offset, byte) in data.iter().enumerate().skip(HEAD.len()) {
+        match byte {
+            b'c' => return DeviceAttributes::Complete(offset + 1),
+            b'0'..=b'9' | b';' => {}
+            // Some other CSI sequence that merely starts the same way.
+            _ => return DeviceAttributes::No,
+        }
+    }
+    DeviceAttributes::Partial
+}
+
+/// Whether the fence has come back, meaning every reply this probe will get
+/// has already arrived.
+#[cfg(any(unix, test))]
+fn contains_device_attributes(data: &[u8]) -> bool {
+    (0..data.len()).any(|start| {
+        matches!(
+            device_attributes_reply(&data[start..]),
+            DeviceAttributes::Complete(_)
+        )
+    })
+}
+
+/// End of an OSC or APC reply: both are introduced by two bytes and run until
+/// `BEL` or `ST`, so one scan serves the color and graphics replies alike.
 #[cfg(any(unix, test))]
 fn osc_end(data: &[u8]) -> Option<usize> {
     let mut i = 2;
@@ -157,7 +266,7 @@ fn osc_end(data: &[u8]) -> Option<usize> {
     None
 }
 
-/// Separate only the OSC replies luvus requested. Other bytes remain input.
+/// Separate only the replies luvus requested. Other bytes remain input.
 #[cfg(any(unix, test))]
 fn split_responses_and_input(data: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let mut responses = Vec::with_capacity(data.len());
@@ -165,7 +274,17 @@ fn split_responses_and_input(data: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let mut i = 0;
     while i < data.len() {
         let rest = &data[i..];
-        if is_color_response_start(rest) {
+        match device_attributes_reply(rest) {
+            // The fence answered its own question by arriving; it carries
+            // nothing else luvus reads, but it must not reach the pane.
+            DeviceAttributes::Complete(len) => {
+                i += len;
+                continue;
+            }
+            DeviceAttributes::Partial => break,
+            DeviceAttributes::No => {}
+        }
+        if is_color_response_start(rest) || is_graphics_response_start(rest) {
             if let Some(len) = osc_end(rest) {
                 responses.extend_from_slice(&rest[..len]);
                 i += len;
@@ -181,7 +300,13 @@ fn split_responses_and_input(data: &[u8]) -> (Vec<u8>, Vec<u8>) {
     (responses, input)
 }
 
-#[cfg(any(unix, test))]
+/// How many complete color replies `data` holds.
+///
+/// The read loop used to stop on this count; it stops on the device-attributes
+/// fence now, which is correct for a terminal that answers fewer replies than
+/// were asked for. This remains as the tests' way of asserting that a reply
+/// was separated out intact rather than merely dropped.
+#[cfg(test)]
 fn complete_color_responses(data: &[u8]) -> usize {
     let mut count = 0;
     let mut i = 0;
@@ -196,6 +321,26 @@ fn complete_color_responses(data: &[u8]) -> usize {
         i += 1;
     }
     count
+}
+
+/// Read the verdict out of a kitty graphics reply, if one arrived.
+///
+/// The reply is keyed to the id the query carried, so an unrelated graphics
+/// response — from an image some other program on the same terminal is
+/// drawing — cannot be mistaken for an answer to this question.
+#[cfg(any(unix, test))]
+fn parse_graphics_support(data: &[u8]) -> Option<bool> {
+    let mut needle = Vec::from(b"\x1b_Gi=");
+    needle.extend_from_slice(GRAPHICS_PROBE_ID.to_string().as_bytes());
+    needle.push(b';');
+
+    let at = data
+        .windows(needle.len())
+        .position(|window| window == needle)?;
+    let body = &data[at + needle.len()..];
+    // `OK` is the only affirmative; everything else is an error code such as
+    // `ENOTSUPPORTED`, which is a definite no rather than an absent answer.
+    Some(body.starts_with(b"OK"))
 }
 
 #[cfg(any(unix, test))]
@@ -472,6 +617,82 @@ mod tests {
         assert_eq!(colors.fg, [0xe7, 0xe7, 0xed]);
         assert_eq!(colors.bg, [0x1e, 0x20, 0x30]);
         assert_eq!(colors.palette[4], [0x8a, 0xad, 0xf4]);
+    }
+
+    #[test]
+    fn a_terminal_that_draws_images_is_recognized_and_one_that_does_not_is_too() {
+        // kitty, ghostty, and WezTerm answer the query keyed to the id it
+        // carried; a terminal without graphics answers only the DA1 that
+        // follows, which is how the absence is detected rather than guessed.
+        let ok = format!("\x1b_Gi={GRAPHICS_PROBE_ID};OK\x1b\\\x1b[?62;4c");
+        assert_eq!(parse_graphics_support(ok.as_bytes()), Some(true));
+
+        let refused = format!("\x1b_Gi={GRAPHICS_PROBE_ID};ENOSYS:no graphics\x1b\\");
+        assert_eq!(parse_graphics_support(refused.as_bytes()), Some(false));
+
+        assert_eq!(
+            parse_graphics_support(b"\x1b[?62;4c"),
+            None,
+            "silence is unknown here; the caller decides it means no"
+        );
+    }
+
+    #[test]
+    fn the_fence_ends_the_wait_and_never_reaches_the_pane() {
+        // Sent last and answered by every terminal, the device-attributes
+        // reply proves the answers are all in. Without it a terminal that
+        // declines the graphics query by saying nothing would cost the whole
+        // timeout on every attach.
+        assert!(contains_device_attributes(b"\x1b[?62;4c"));
+        assert!(contains_device_attributes(b"\x1b[?6c"));
+        assert!(!contains_device_attributes(b"\x1b[?62;4"), "still arriving");
+
+        let (_, input) = split_responses_and_input(b"x\x1b[?62;1;4;6c y");
+        assert_eq!(
+            input, b"x y",
+            "the fence luvus asked for is not a keystroke"
+        );
+    }
+
+    #[test]
+    fn a_keypress_that_looks_like_the_fence_is_still_a_keypress() {
+        // Escape and the CSI sequences real keys produce open the same way.
+        // Swallowing them would lose input the user actually typed.
+        let (_, input) = split_responses_and_input(b"\x1b");
+        assert_eq!(input, b"\x1b", "Escape is a key");
+
+        let (_, input) = split_responses_and_input(b"\x1b[A\x1b[?1;2R");
+        assert_eq!(
+            input, b"\x1b[A\x1b[?1;2R",
+            "an arrow key, and a CSI reply that ends in something else"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_graphics_reply_is_not_mistaken_for_the_answer() {
+        // A child's own image traffic can be in flight when the probe runs.
+        // Only the reply keyed to the probe's id answers the probe.
+        let other = format!("\x1b_Gi={};OK\x1b\\", GRAPHICS_PROBE_ID.wrapping_add(1));
+        assert_eq!(parse_graphics_support(other.as_bytes()), None);
+    }
+
+    #[test]
+    fn a_graphics_reply_is_never_delivered_as_keystrokes() {
+        // Left in the input stream, the reply would reach the focused pane as
+        // text the user never typed.
+        let data = format!("a\x1b_Gi={GRAPHICS_PROBE_ID};OK\x1b\\\x1b]11;rgb:00/00/00\x1b\\b");
+        let (responses, input) = split_responses_and_input(data.as_bytes());
+        assert_eq!(input, b"ab", "only real keystrokes stay in the input");
+        assert_eq!(
+            parse_graphics_support(&responses),
+            Some(true),
+            "the reply is separated out intact, not merely discarded"
+        );
+        assert_eq!(
+            complete_color_responses(&responses),
+            1,
+            "the color reply beside it is still recognized"
+        );
     }
 
     #[test]
