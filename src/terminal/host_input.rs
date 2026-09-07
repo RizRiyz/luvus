@@ -10,10 +10,18 @@ use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind};
 
+#[cfg(any(windows, test))]
+mod console;
+#[cfg(windows)]
+mod windows;
+
+#[cfg(windows)]
+pub use windows::run_input_loop;
+
 const START_MARKER: &[char] = &['\u{1b}', '[', '2', '0', '0', '~'];
 const END_MARKER: &[char] = &['\u{1b}', '[', '2', '0', '1', '~'];
 const PREFIX_TIMEOUT: Duration = Duration::from_millis(40);
-const PASTE_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+const NATIVE_PREFIX_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_PASTE_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 
 /// Zero, one, or a rare batch of decoded terminal events.
@@ -67,7 +75,6 @@ enum DecodeState {
     Paste {
         text: String,
         ending: String,
-        deadline: Instant,
     },
 }
 
@@ -91,9 +98,38 @@ impl HostInputDecoder {
     }
 
     fn push_at(&mut self, event: Event, now: Instant) -> DecodedEvents {
+        self.push_at_with_policy(event, now, true, PREFIX_TIMEOUT)
+    }
+
+    /// Decode one event produced from a native Windows console record.
+    ///
+    /// A physical Escape key has a scan code and can bypass marker detection,
+    /// so it is delivered immediately. Synthetic scan-code-zero Escape records
+    /// may begin a terminal control sequence and receive a wider continuation
+    /// window than Crossterm's fallback path.
+    pub(super) fn push_native(
+        &mut self,
+        event: Event,
+        can_start_marker: bool,
+        now: Instant,
+    ) -> DecodedEvents {
+        self.push_at_with_policy(event, now, can_start_marker, NATIVE_PREFIX_TIMEOUT)
+    }
+
+    pub(super) fn is_pasting(&self) -> bool {
+        matches!(self.state, DecodeState::Paste { .. })
+    }
+
+    fn push_at_with_policy(
+        &mut self,
+        event: Event,
+        now: Instant,
+        can_start_marker: bool,
+        prefix_timeout: Duration,
+    ) -> DecodedEvents {
         let state = std::mem::replace(&mut self.state, DecodeState::Idle);
         match state {
-            DecodeState::Idle => self.push_idle(event, now),
+            DecodeState::Idle => self.push_idle(event, now, can_start_marker, prefix_timeout),
             DecodeState::Prefix {
                 mut events,
                 matched,
@@ -103,7 +139,7 @@ impl HostInputDecoder {
                     self.state = DecodeState::Prefix {
                         events,
                         matched,
-                        deadline: now + PREFIX_TIMEOUT,
+                        deadline: now + prefix_timeout,
                     };
                     return DecodedEvents::None;
                 }
@@ -125,35 +161,39 @@ impl HostInputDecoder {
                         self.state = DecodeState::Paste {
                             text: String::new(),
                             ending: String::new(),
-                            deadline: now + PASTE_IDLE_TIMEOUT,
                         };
                     } else {
                         self.state = DecodeState::Prefix {
                             events,
                             matched,
-                            deadline: now + PREFIX_TIMEOUT,
+                            deadline: now + prefix_timeout,
                         };
                     }
                     DecodedEvents::None
                 } else {
                     let replay = DecodedEvents::Many(events);
-                    replay.combine(self.push_idle(event, now))
+                    replay.combine(self.push_idle(event, now, can_start_marker, prefix_timeout))
                 }
             }
             DecodeState::Paste {
                 mut text,
                 mut ending,
-                deadline: _,
-            } => self.push_paste(event, now, &mut text, &mut ending),
+            } => self.push_paste(event, &mut text, &mut ending),
         }
     }
 
-    fn push_idle(&mut self, event: Event, now: Instant) -> DecodedEvents {
-        if marker_char(&event) == Some(START_MARKER[0]) {
+    fn push_idle(
+        &mut self,
+        event: Event,
+        now: Instant,
+        can_start_marker: bool,
+        prefix_timeout: Duration,
+    ) -> DecodedEvents {
+        if can_start_marker && marker_char(&event) == Some(START_MARKER[0]) {
             self.state = DecodeState::Prefix {
                 events: vec![event],
                 matched: 1,
-                deadline: now + PREFIX_TIMEOUT,
+                deadline: now + prefix_timeout,
             };
             DecodedEvents::None
         } else {
@@ -164,7 +204,6 @@ impl HostInputDecoder {
     fn push_paste(
         &mut self,
         event: Event,
-        now: Instant,
         text: &mut String,
         ending: &mut String,
     ) -> DecodedEvents {
@@ -172,14 +211,13 @@ impl HostInputDecoder {
             text.push_str(ending);
             ending.clear();
             text.push_str(&pasted);
-            return self.keep_or_chunk(text, ending, now);
+            return self.keep_or_chunk(text, ending);
         }
 
         let Event::Key(key) = &event else {
             self.state = DecodeState::Paste {
                 text: std::mem::take(text),
                 ending: std::mem::take(ending),
-                deadline: now + PASTE_IDLE_TIMEOUT,
             };
             return DecodedEvents::One(event);
         };
@@ -187,7 +225,6 @@ impl HostInputDecoder {
             self.state = DecodeState::Paste {
                 text: std::mem::take(text),
                 ending: std::mem::take(ending),
-                deadline: now + PASTE_IDLE_TIMEOUT,
             };
             return DecodedEvents::None;
         }
@@ -206,7 +243,6 @@ impl HostInputDecoder {
                 self.state = DecodeState::Paste {
                     text: std::mem::take(text),
                     ending: std::mem::take(ending),
-                    deadline: now + PASTE_IDLE_TIMEOUT,
                 };
                 return DecodedEvents::None;
             }
@@ -219,15 +255,10 @@ impl HostInputDecoder {
         } else {
             text.push(character);
         }
-        self.keep_or_chunk(text, ending, now)
+        self.keep_or_chunk(text, ending)
     }
 
-    fn keep_or_chunk(
-        &mut self,
-        text: &mut String,
-        ending: &mut String,
-        now: Instant,
-    ) -> DecodedEvents {
+    fn keep_or_chunk(&mut self, text: &mut String, ending: &mut String) -> DecodedEvents {
         let output = if text.len() >= MAX_PASTE_CHUNK_BYTES {
             DecodedEvents::One(Event::Paste(std::mem::take(text)))
         } else {
@@ -236,18 +267,16 @@ impl HostInputDecoder {
         self.state = DecodeState::Paste {
             text: std::mem::take(text),
             ending: std::mem::take(ending),
-            deadline: now + PASTE_IDLE_TIMEOUT,
         };
         output
     }
 
-    /// Time until held input must be released. Detection always uses explicit
-    /// markers; this deadline only prevents a lone Escape or damaged paste from
-    /// leaving the decoder stuck indefinitely.
+    /// Time until a possible start-marker prefix must be released. Once a full
+    /// start marker arrives, only its matching end marker closes the paste.
     pub fn wait_timeout(&self) -> Option<Duration> {
         let deadline = match &self.state {
-            DecodeState::Idle => return None,
-            DecodeState::Prefix { deadline, .. } | DecodeState::Paste { deadline, .. } => *deadline,
+            DecodeState::Idle | DecodeState::Paste { .. } => return None,
+            DecodeState::Prefix { deadline, .. } => *deadline,
         };
         Some(deadline.saturating_duration_since(Instant::now()))
     }
@@ -258,10 +287,8 @@ impl HostInputDecoder {
 
     fn flush_expired_at(&mut self, now: Instant) -> DecodedEvents {
         let expired = match &self.state {
-            DecodeState::Idle => false,
-            DecodeState::Prefix { deadline, .. } | DecodeState::Paste { deadline, .. } => {
-                now >= *deadline
-            }
+            DecodeState::Idle | DecodeState::Paste { .. } => false,
+            DecodeState::Prefix { deadline, .. } => now >= *deadline,
         };
         if !expired {
             return DecodedEvents::None;
@@ -269,11 +296,7 @@ impl HostInputDecoder {
         match std::mem::replace(&mut self.state, DecodeState::Idle) {
             DecodeState::Idle => DecodedEvents::None,
             DecodeState::Prefix { events, .. } => DecodedEvents::Many(events),
-            DecodeState::Paste {
-                mut text,
-                mut ending,
-                ..
-            } => finish_paste(&mut text, &mut ending),
+            DecodeState::Paste { .. } => unreachable!("paste states do not expire"),
         }
     }
 }
@@ -534,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn unterminated_paste_flushes_content_without_markers() {
+    fn unterminated_paste_waits_for_its_real_end_marker() {
         let now = Instant::now();
         let mut decoder = HostInputDecoder::default();
         for event in marker(START_MARKER) {
@@ -544,9 +567,22 @@ mod tests {
         decoder.push_at(key(KeyCode::Enter), now);
         decoder.push_at(key(KeyCode::Char('b')), now);
 
+        assert!(decoder.wait_timeout().is_none());
         assert!(matches!(
-            decoder.flush_expired_at(now + PASTE_IDLE_TIMEOUT),
-            DecodedEvents::One(Event::Paste(text)) if text == "a\rb"
+            decoder.flush_expired_at(now + Duration::from_secs(60)),
+            DecodedEvents::None
+        ));
+
+        let mut output = Vec::new();
+        for event in marker(END_MARKER) {
+            collect(
+                decoder.push_at(event, now + Duration::from_secs(60)),
+                &mut output,
+            );
+        }
+        assert!(matches!(
+            output.as_slice(),
+            [Event::Paste(text)] if text == "a\rb"
         ));
     }
 
