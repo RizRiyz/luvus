@@ -94,6 +94,9 @@ read current state and reconcile instead of blindly retrying.
     `full_access`; omitted access defaults to `workspace`. This is independent
     of `task.mode`. Never retry an unsupported agent/access pair with broader
     access unless the user explicitly selected it.
+  - Kilo Code new-worker schedules support only an explicitly selected
+    `full_access` profile because its reviewed unattended command is
+    `kilo run --auto`. Never broaden a Kilo schedule automatically.
   - `target` defaults to `new_worker`. Use `active_agent` only with the exact
     live `pane_id`, `terminal_id`, `task.agent_id`, and `task.workspace_id`
     returned by discovery. Its `if_busy` policy is `wait` or `skip`; it creates

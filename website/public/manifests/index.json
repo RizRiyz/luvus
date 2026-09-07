@@ -2,6 +2,7 @@
   "files": [
     "antigravity.toml",
     "claude.toml",
-    "gemini.toml"
+    "gemini.toml",
+    "kilo.toml"
   ]
 }
