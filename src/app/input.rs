@@ -536,10 +536,6 @@ impl App {
                 self.apply_named_sessions_loaded(generation, result);
                 return true;
             }
-            AppEvent::WorktreeListLoaded { generation, result } => {
-                self.apply_worktree_list(generation, result);
-                return true;
-            }
             AppEvent::NamedSessionPrepared {
                 generation,
                 name,
@@ -1087,7 +1083,6 @@ impl App {
             | AppEvent::SearchHandoffReady { .. } => unreachable!(),
             AppEvent::NamedSessionsLoaded { .. }
             | AppEvent::NamedSessionPrepared { .. }
-            | AppEvent::WorktreeListLoaded { .. }
             | AppEvent::NamedSessionStopped { .. } => {
                 unreachable!()
             }

@@ -6507,12 +6507,34 @@ impl App {
 
     /// The workspace menu's "Open Worktree": list every checkout of the repo at
     /// `cwd` (`git worktree list`) in a picker modal. The modal opens at once in
-    /// its loading state; the scan runs on a worker thread and lands through
-    /// [`AppEvent::WorktreeListLoaded`] → [`App::apply_worktree_list`]. It
-    /// must not run on the loop: git stats every checkout to flag prunable
+    /// its loading state; the scan runs on the bounded filesystem executor and
+    /// lands through [`AppEvent::IoCompleted`] → [`App::apply_worktree_list`].
+    /// It must not run on the loop: git stats every checkout to flag prunable
     /// ones, and a sibling checkout can sit on a stale network mount, which
-    /// would freeze every attached client for as long as that stat hangs.
+    /// would freeze every attached client for as long as that stat hangs. The
+    /// bound also prevents repeated close/reopen gestures from accumulating one
+    /// blocked OS thread and git process per attempt.
     pub fn open_worktree_list(&mut self, cwd: &std::path::Path) {
+        let generation = self.begin_worktree_list();
+        let cwd = cwd.to_path_buf();
+        // Snapshot the open workspace roots: the "already open" badge needs a
+        // canonicalize per checkout, which is exactly the kind of stat the
+        // worker exists to keep off the loop. A workspace opened mid-scan is
+        // only missed on the badge — ⏎ re-resolves against live workspaces.
+        let open_cwds: Vec<PathBuf> = self.workspaces.iter().map(|w| w.cwd.clone()).collect();
+        let accepted = self.io_jobs.submit(self.app_tx.clone(), move || {
+            let result = openable_worktrees(&cwd, &open_cwds);
+            Box::new(move |app| app.apply_worktree_list(generation, result))
+        });
+        if let Err(error) = accepted {
+            self.apply_worktree_list(generation, Err(error.to_string()));
+        }
+    }
+
+    /// Establish one loading generation separately from worker admission so
+    /// focused tests can apply a deterministic scan without scheduling a
+    /// duplicate filesystem job.
+    fn begin_worktree_list(&mut self) -> u64 {
         self.worktree_open_generation = self.worktree_open_generation.wrapping_add(1);
         let generation = self.worktree_open_generation;
         self.worktree_open = Some(WorktreeOpenList {
@@ -6522,17 +6544,7 @@ impl App {
             entries: Vec::new(),
             cursor: 0,
         });
-        let cwd = cwd.to_path_buf();
-        // Snapshot the open workspace roots: the "already open" badge needs a
-        // canonicalize per checkout, which is exactly the kind of stat the
-        // worker exists to keep off the loop. A workspace opened mid-scan is
-        // only missed on the badge — ⏎ re-resolves against live workspaces.
-        let open_cwds: Vec<PathBuf> = self.workspaces.iter().map(|w| w.cwd.clone()).collect();
-        let tx = self.app_tx.clone();
-        std::thread::spawn(move || {
-            let result = openable_worktrees(&cwd, &open_cwds);
-            let _ = tx.send(AppEvent::WorktreeListLoaded { generation, result });
-        });
+        generation
     }
 
     /// Close the open-worktree list. Bumps the generation so a scan still in
@@ -6552,13 +6564,13 @@ impl App {
         &mut self,
         generation: u64,
         result: Result<Vec<WorktreeOpenEntry>, String>,
-    ) {
+    ) -> bool {
         if self
             .worktree_open
             .as_ref()
             .is_none_or(|list| list.generation != generation)
         {
-            return;
+            return false;
         }
         let entries = match result {
             Ok(entries) => entries,
@@ -6567,19 +6579,20 @@ impl App {
                     list.loading = false;
                     list.error = Some(e);
                 }
-                return;
+                return true;
             }
         };
         if entries.is_empty() {
             self.close_worktree_list();
             self.show_toast(self.catalog.no_worktrees_found);
-            return;
+            return true;
         }
         if let Some(list) = self.worktree_open.as_mut() {
             list.loading = false;
             list.entries = entries;
             list.cursor = 0;
         }
+        true
     }
 
     /// The workspace already showing `path`, if any (see [`checkout_idx_in`]).
@@ -8459,17 +8472,17 @@ mod tests {
         (base, repo, wt)
     }
 
-    /// Open the worktree list and apply its scan inline — the worker thread's
-    /// job, done synchronously so a test can assert on the rows at once.
+    /// Open the worktree list and apply its scan inline — the bounded worker's
+    /// job, done synchronously so a test can assert on the rows at once without
+    /// scheduling duplicate filesystem work.
     fn open_worktree_list_now(app: &mut App, repo: &std::path::Path) {
-        app.open_worktree_list(repo);
-        let generation = app.worktree_open.as_ref().unwrap().generation;
+        let generation = app.begin_worktree_list();
         let cwds: Vec<PathBuf> = app.workspaces.iter().map(|w| w.cwd.clone()).collect();
         app.apply_worktree_list(generation, openable_worktrees(repo, &cwds));
     }
 
     #[test]
-    fn open_worktree_list_scans_off_loop_and_lands_through_the_event() {
+    fn open_worktree_list_scans_off_loop_on_the_bounded_executor() {
         let _env = crate::persist::test_env("worktree-open-event");
         let (base, repo, _wt) = repo_with_sibling_worktree("wtevent");
 
@@ -8485,14 +8498,15 @@ mod tests {
         app.handle_worktree_open_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.worktree_open.is_some());
 
-        // The worker's result comes back as an event (other events may be
-        // interleaved; wait for ours) and fills the rows.
+        // The bounded worker's completion comes back through the app event
+        // channel (other events may be interleaved; wait for ours) and fills
+        // the rows on the single-writer loop.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             let ev = rx
                 .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
                 .expect("worktree scan result arrives");
-            let ours = matches!(ev, AppEvent::WorktreeListLoaded { .. });
+            let ours = matches!(&ev, AppEvent::IoCompleted(_));
             app.handle_event(ev);
             if ours {
                 break;
@@ -8508,6 +8522,31 @@ mod tests {
     }
 
     #[test]
+    fn open_worktree_list_reports_a_full_filesystem_queue() {
+        let _env = crate::persist::test_env("worktree-open-queue-full");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        // Completed-but-unapplied jobs retain their permits, so this reaches
+        // the executor's real admission bound without timing assumptions.
+        loop {
+            if app
+                .io_jobs
+                .submit(app.app_tx.clone(), || Box::new(|_| false))
+                .is_err()
+            {
+                break;
+            }
+        }
+
+        app.open_worktree_list(std::path::Path::new("/not/read/when-full"));
+        let list = app.worktree_open.as_ref().expect("modal remains visible");
+        assert!(!list.loading, "rejected work must not load forever");
+        assert_eq!(list.error.as_deref(), Some("filesystem work queue is full"));
+        app.drain_io_jobs();
+    }
+
+    #[test]
     fn stale_worktree_list_result_is_dropped() {
         let _env = crate::persist::test_env("worktree-open-stale");
         let (base, repo, _wt) = repo_with_sibling_worktree("wtstale");
@@ -8516,22 +8555,21 @@ mod tests {
         let mut app = App::new(80, 24, tx).unwrap();
 
         // Closed before the scan landed: the result must not reopen the modal.
-        app.open_worktree_list(&repo);
-        let first = app.worktree_open.as_ref().unwrap().generation;
+        let first = app.begin_worktree_list();
         app.handle_worktree_open_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.worktree_open.is_none());
-        app.apply_worktree_list(first, openable_worktrees(&repo, &[]));
+        assert!(!app.apply_worktree_list(first, openable_worktrees(&repo, &[])));
         assert!(app.worktree_open.is_none(), "a closed modal stays closed");
 
         // Reopened before the first scan landed: the old result is ignored and
         // the modal keeps waiting for its own.
-        app.open_worktree_list(&repo);
-        app.open_worktree_list(&repo);
-        let second = app.worktree_open.as_ref().unwrap().generation;
+        let stale = app.begin_worktree_list();
+        let second = app.begin_worktree_list();
         assert_ne!(first, second);
-        app.apply_worktree_list(first, openable_worktrees(&repo, &[]));
+        assert_ne!(stale, second);
+        assert!(!app.apply_worktree_list(stale, openable_worktrees(&repo, &[])));
         assert!(app.worktree_open.as_ref().unwrap().loading, "still waiting");
-        app.apply_worktree_list(second, openable_worktrees(&repo, &[]));
+        assert!(app.apply_worktree_list(second, openable_worktrees(&repo, &[])));
         let list = app.worktree_open.as_ref().unwrap();
         assert!(!list.loading);
         assert_eq!(list.entries.len(), 2);
@@ -8545,9 +8583,7 @@ mod tests {
         let _env = crate::persist::test_env("worktree-open-error");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
-        let not_repo = std::env::temp_dir();
-        app.open_worktree_list(&not_repo);
-        let generation = app.worktree_open.as_ref().unwrap().generation;
+        let generation = app.begin_worktree_list();
         app.apply_worktree_list(generation, Err("fatal: not a git repository".into()));
         let list = app
             .worktree_open
