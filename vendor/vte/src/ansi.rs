@@ -710,6 +710,9 @@ pub trait Handler {
     /// Report text area size in characters.
     fn text_area_size_chars(&mut self) {}
 
+    /// Application program command payload, without introducer or terminator.
+    fn apc(&mut self, _payload: &[u8]) {}
+
     /// Set hyperlink.
     fn set_hyperlink(&mut self, _: Option<Hyperlink>) {}
 
@@ -1352,6 +1355,11 @@ where
     #[inline]
     fn unhook(&mut self) {
         debug!("[unhandled unhook]");
+    }
+
+    #[inline]
+    fn apc_dispatch(&mut self, payload: &[u8]) {
+        self.handler.apc(payload);
     }
 
     #[inline]
