@@ -1019,6 +1019,18 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         if app.session_menu.is_some() {
             menu::draw_session_menu(f, area, app, cat, &t);
         }
+        if let Some(name) = app.session_delete_confirm.as_deref() {
+            let (commit, cancel) = files::draw_named_delete_confirm(
+                f,
+                area,
+                name,
+                cat.session_delete_confirm,
+                app.hover,
+                &t,
+            );
+            app.modal_commit_rect = commit;
+            app.modal_cancel_rect = cancel;
+        }
     } else {
         app.named_session_menu_rect = None;
         app.named_session_close_rect = None;
@@ -1040,6 +1052,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         || app.bar.overflow.is_some()
         || app.help_open
         || app.named_session_menu.is_some()
+        || app.session_delete_confirm.is_some()
         || app.worktree_prompt.is_some()
         || app.worktree_open.is_some()
         || app.tab_rename.is_some()

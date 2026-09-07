@@ -1067,12 +1067,14 @@ impl AgentMenu {
 pub struct SessionMenu {
     pub name: String,
     pub anchor: (u16, u16),
+    pub action: SessionMenuItem,
     pub items: Vec<(SessionMenuItem, Rect)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SessionMenuItem {
     Stop,
+    Delete,
 }
 
 /// The workspace-rename modal: like [`TabRename`] but for a node's **label** (the
@@ -2261,8 +2263,10 @@ pub struct App {
     pub pane_menu: Option<PaneMenu>,
     /// Active AGENTS-list context menu (right-click a row); `None` when closed.
     pub agent_menu: Option<AgentMenu>,
-    /// Context menu on a session row (right-click → Stop session).
+    /// Context menu on a named-session row.
     pub session_menu: Option<SessionMenu>,
+    /// A stopped named session awaiting explicit delete confirmation.
+    pub session_delete_confirm: Option<String>,
     /// Live agents pinned to the top of the AGENTS list (right-click → Pin).
     /// Per-session: pane ids are reallocated each run, so this is not persisted;
     /// pruned when a pane closes.
@@ -2392,6 +2396,11 @@ pub struct App {
     /// On-demand named-session menu. Its filesystem/process discovery runs only
     /// while opening or activating this surface, never on an idle timer.
     pub named_session_menu: Option<session_menu::NamedSessionMenu>,
+    /// Last validated projection retained between selector opens. Refresh stays
+    /// user-triggered, but warm opens do not wait for filesystem/socket probes.
+    pub(crate) named_session_cache: Vec<session_menu::NamedSessionRow>,
+    /// Lifecycle work already running off-loop, keyed by validated session name.
+    pub(crate) pending_named_session_actions: HashMap<String, session_menu::NamedSessionAction>,
     pub named_session_button_rect: Option<Rect>,
     pub named_session_menu_rect: Option<Rect>,
     pub named_session_close_rect: Option<Rect>,
@@ -2928,6 +2937,7 @@ impl App {
             pane_menu: None,
             agent_menu: None,
             session_menu: None,
+            session_delete_confirm: None,
             pinned_agents: std::collections::HashSet::new(),
             ws_rename: None,
             pane_rename: None,
@@ -2982,6 +2992,8 @@ impl App {
             detach_requested: false,
             pending_session_switch: None,
             named_session_menu: None,
+            named_session_cache: Vec::new(),
+            pending_named_session_actions: HashMap::new(),
             named_session_button_rect: None,
             named_session_menu_rect: None,
             named_session_close_rect: None,
@@ -3581,6 +3593,7 @@ impl App {
             pane_menu: None,
             agent_menu: None,
             session_menu: None,
+            session_delete_confirm: None,
             pinned_agents: std::collections::HashSet::new(),
             ws_rename: None,
             pane_rename: None,
@@ -3635,6 +3648,8 @@ impl App {
             detach_requested: false,
             pending_session_switch: None,
             named_session_menu: None,
+            named_session_cache: Vec::new(),
+            pending_named_session_actions: HashMap::new(),
             named_session_button_rect: None,
             named_session_menu_rect: None,
             named_session_close_rect: None,
@@ -6394,17 +6409,38 @@ impl App {
         running: bool,
         current: bool,
     ) {
-        // Guard: only running non-current sessions are stoppable; opening on a
-        // stopped/current row would show an empty menu, so treat as no-op.
-        if !running || current {
+        if current || self.pending_named_session_actions.contains_key(&name) {
             self.session_menu = None;
             return;
         }
+        let action = if running {
+            SessionMenuItem::Stop
+        } else if name != crate::session::DEFAULT_SESSION_NAME {
+            SessionMenuItem::Delete
+        } else {
+            self.session_menu = None;
+            return;
+        };
         self.session_menu = Some(SessionMenu {
             name,
             anchor: (col, row),
+            action,
             items: Vec::new(),
         });
+    }
+
+    pub fn open_session_menu_for_row(&mut self, index: usize, col: u16, row: u16) {
+        let candidate = self
+            .named_session_menu
+            .as_ref()
+            .filter(|menu| !menu.preparing && index > 0)
+            .and_then(|menu| menu.rows.get(index - 1))
+            .map(|row| (row.name.clone(), row.running, row.current));
+        if let Some((name, running, current)) = candidate {
+            self.open_session_menu(name, col, row, running, current);
+        } else {
+            self.session_menu = None;
+        }
     }
 
     pub fn session_menu_click(&mut self, col: u16, row: u16) {
@@ -6426,6 +6462,7 @@ impl App {
         };
         match item {
             SessionMenuItem::Stop => self.stop_named_session(menu.name),
+            SessionMenuItem::Delete => self.session_delete_confirm = Some(menu.name),
         }
     }
 
@@ -6444,8 +6481,13 @@ impl App {
             self.show_toast(self.catalog.session_open_failed);
             return;
         }
-        let generation = self.named_session_generation;
+        let Some(generation) =
+            self.begin_named_session_action(&name, session_menu::NamedSessionAction::Stop)
+        else {
+            return;
+        };
         let tx = self.app_tx.clone();
+        self.show_toast(format!("{} {name}…", self.catalog.menu_stop_session));
         // Keep the sessions list visible while stopping; close the context menu
         // but not the sessions popup itself.
         std::thread::spawn(move || {
@@ -6458,6 +6500,66 @@ impl App {
                 result,
             });
         });
+    }
+
+    pub fn session_delete_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                self.confirm_named_session_delete()
+            }
+            _ => self.session_delete_confirm = None,
+        }
+    }
+
+    fn confirm_named_session_delete(&mut self) {
+        let Some(name) = self.session_delete_confirm.take() else {
+            return;
+        };
+        let current = crate::session::display_name();
+        if name == current || name == crate::session::DEFAULT_SESSION_NAME {
+            self.show_toast(self.catalog.session_open_failed);
+            return;
+        }
+        let Some(generation) =
+            self.begin_named_session_action(&name, session_menu::NamedSessionAction::Delete)
+        else {
+            return;
+        };
+        let tx = self.app_tx.clone();
+        self.show_toast(format!("{} {name}…", self.catalog.act_delete));
+        std::thread::spawn(move || {
+            let result = crate::session::delete_session(&name)
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            let _ = tx.send(crate::event::AppEvent::NamedSessionDeleted {
+                generation,
+                name,
+                result,
+            });
+        });
+    }
+
+    /// Register one lifecycle mutation and invalidate an older list refresh.
+    /// The action result becomes authoritative for its row without a second
+    /// filesystem or socket scan.
+    fn begin_named_session_action(
+        &mut self,
+        name: &str,
+        action: session_menu::NamedSessionAction,
+    ) -> Option<u64> {
+        if self
+            .pending_named_session_actions
+            .insert(name.to_string(), action)
+            .is_some()
+        {
+            return None;
+        }
+        self.named_session_generation = self.named_session_generation.wrapping_add(1);
+        if let Some(menu) = self.named_session_menu.as_mut() {
+            menu.generation = self.named_session_generation;
+            menu.loading = false;
+        }
+        Some(self.named_session_generation)
     }
 
     /// Key handling while the new-worktree prompt is open.

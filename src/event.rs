@@ -143,6 +143,12 @@ pub enum AppEvent {
         name: String,
         result: Result<(), String>,
     },
+    /// A delete request for a stopped named session finished off the app loop.
+    NamedSessionDeleted {
+        generation: u64,
+        name: String,
+        result: Result<(), String>,
+    },
     /// A selected named session is ready for this client to attach.
     NamedSessionPrepared {
         generation: u64,

@@ -530,8 +530,13 @@ pub(super) fn draw_session_menu(
         return;
     };
     let anchor = menu.anchor;
+    let action = menu.action;
+    let text = match action {
+        crate::app::SessionMenuItem::Stop => cat.menu_stop_session.to_string(),
+        crate::app::SessionMenuItem::Delete => cap_first(cat.act_delete),
+    };
     let rows: Vec<MenuRow> = vec![MenuRow {
-        text: cat.menu_stop_session.to_string(),
+        text,
         divider: false,
         destructive: true,
     }];
@@ -550,7 +555,7 @@ pub(super) fn draw_session_menu(
         },
     );
     if let Some(menu) = app.session_menu.as_mut() {
-        menu.items = vec![(crate::app::SessionMenuItem::Stop, rects[0])];
+        menu.items = vec![(action, rects[0])];
     }
 }
 

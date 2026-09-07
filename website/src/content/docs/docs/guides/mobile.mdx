@@ -51,8 +51,11 @@ may be up to 64 bytes. `Ctrl+Space t` opens the sheet directly. Arrow keys,
 the same sheet.
 
 With a mouse, right-click a running session that is not current and select
-**Stop** to end its server and live panes. The current session and sessions that
-are already stopped do not offer this action.
+**Stop** to end its server and live panes. Right-click that stopped named session
+again and select **Delete** to remove its saved state after confirmation. The
+current session cannot be stopped or deleted, and the default session cannot be
+deleted. Reopening the sheet shows its last known rows immediately while one
+background refresh checks for external changes.
 
 Exit appears after Changelog and behaves like `Ctrl+Space q`. In a server-backed
 session it detaches the current client while the server and panes keep running.

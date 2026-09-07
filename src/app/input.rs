@@ -552,6 +552,14 @@ impl App {
                 self.apply_named_session_stopped(generation, name, result);
                 return true;
             }
+            AppEvent::NamedSessionDeleted {
+                generation,
+                name,
+                result,
+            } => {
+                self.apply_named_session_deleted(generation, name, result);
+                return true;
+            }
             other => other,
         };
         // Control-API requests and parked `wait.output` replies must be answered
@@ -1083,7 +1091,8 @@ impl App {
             | AppEvent::SearchHandoffReady { .. } => unreachable!(),
             AppEvent::NamedSessionsLoaded { .. }
             | AppEvent::NamedSessionPrepared { .. }
-            | AppEvent::NamedSessionStopped { .. } => {
+            | AppEvent::NamedSessionStopped { .. }
+            | AppEvent::NamedSessionDeleted { .. } => {
                 unreachable!()
             }
         }
@@ -1238,6 +1247,12 @@ impl App {
         let hit = |rect: Rect| c >= rect.x && c < rect.right() && r >= rect.y && r < rect.bottom();
         let first = |rects: &[Rect]| rects.iter().copied().find(|rect| hit(*rect));
 
+        if self.session_delete_confirm.is_some() {
+            return [self.modal_commit_rect, self.modal_cancel_rect]
+                .into_iter()
+                .flatten()
+                .find(|rect| hit(*rect));
+        }
         if self.named_session_menu.is_some() {
             if self.session_menu.is_some() {
                 if let Some(menu) = &self.session_menu {
@@ -1458,6 +1473,12 @@ impl App {
             }
             return;
         }
+        if self.session_delete_confirm.is_some() {
+            if let Some(key) = self.modal_button_key(&m) {
+                self.session_delete_key(key);
+            }
+            return;
+        }
         if self.named_session_menu.is_some() {
             // Context menu on a session row owns the click first.
             if self.session_menu.is_some() {
@@ -1483,33 +1504,7 @@ impl App {
                             })
                             .map(|(i, _)| *i)
                         {
-                            if idx != 0 {
-                                // Keep `menu` bound here so `menu.preparing` is in scope.
-                                // The previous `.and_then(|menu| menu.rows.get(..))` moves
-                                // `menu` into the closure, so a naive `&& !menu.preparing`
-                                // at the row check would not compile.
-                                if let Some(menu) = self.named_session_menu.as_ref() {
-                                    if let Some(row) = menu.rows.get(idx - 1) {
-                                        if row.running && !row.current && !menu.preparing {
-                                            self.open_session_menu(
-                                                row.name.clone(),
-                                                m.column,
-                                                m.row,
-                                                row.running,
-                                                row.current,
-                                            );
-                                        } else {
-                                            self.session_menu = None;
-                                        }
-                                    } else {
-                                        self.session_menu = None;
-                                    }
-                                } else {
-                                    self.session_menu = None;
-                                }
-                            } else {
-                                self.session_menu = None;
-                            }
+                            self.open_session_menu_for_row(idx, m.column, m.row);
                         } else if !self.session_menu.as_ref().is_some_and(|menu| {
                             menu.items.iter().any(|(_, r)| {
                                 m.column >= r.x
@@ -1533,7 +1528,7 @@ impl App {
                     self.named_session_click(m.column, m.row)
                 }
                 MouseEventKind::Down(MouseButton::Right) => {
-                    // Right-click on a row → open Stop menu for running sessions only.
+                    // Right-click exposes the action valid for this row's state.
                     if let Some(idx) = self
                         .named_session_row_rects
                         .iter()
@@ -1545,23 +1540,7 @@ impl App {
                         })
                         .map(|(i, _)| *i)
                     {
-                        if idx != 0 {
-                            // Same reason as the guard above: bind `menu` first so
-                            // `!menu.preparing` is available (`.and_then` would hide it).
-                            if let Some(menu) = self.named_session_menu.as_ref() {
-                                if let Some(row) = menu.rows.get(idx - 1) {
-                                    if row.running && !row.current && !menu.preparing {
-                                        self.open_session_menu(
-                                            row.name.clone(),
-                                            m.column,
-                                            m.row,
-                                            row.running,
-                                            row.current,
-                                        );
-                                    }
-                                }
-                            }
-                        }
+                        self.open_session_menu_for_row(idx, m.column, m.row);
                     }
                 }
                 MouseEventKind::ScrollUp => self.move_named_session_cursor(-1),
@@ -3794,6 +3773,10 @@ impl App {
         // take keys first (docs/13 §3.6).
         if self.module_setting_edit.is_some() {
             self.handle_module_setting_key(key);
+            return true;
+        }
+        if self.session_delete_confirm.is_some() {
+            self.session_delete_key(key);
             return true;
         }
         if self.named_session_menu.is_some() {

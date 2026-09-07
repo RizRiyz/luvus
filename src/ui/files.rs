@@ -620,6 +620,32 @@ pub(super) fn draw_delete_confirm(
     hover: Option<(u16, u16)>,
     t: &Theme,
 ) -> (Option<Rect>, Option<Rect>) {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let is_dir = path.is_dir();
+    let what = if is_dir {
+        "folder (and its contents)"
+    } else {
+        "file"
+    };
+    let head = heading
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("Delete {what}?"));
+    draw_named_delete_confirm(f, area, &name, &head, hover, t)
+}
+
+/// Generic delete confirmation for resources that are not filesystem paths.
+/// Keeping the renderer string-based avoids filesystem probes on the app loop.
+pub(super) fn draw_named_delete_confirm(
+    f: &mut RenderTarget,
+    area: Rect,
+    name: &str,
+    heading: &str,
+    hover: Option<(u16, u16)>,
+    t: &Theme,
+) -> (Option<Rect>, Option<Rect>) {
     use ratatui::layout::Alignment;
     use ratatui::widgets::{Block, Borders, Clear};
     // Dim backdrop.
@@ -631,11 +657,6 @@ pub(super) fn draw_delete_confirm(
             }
         }
     }
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let is_dir = path.is_dir();
     let w = area.width.saturating_sub(6).clamp(30, 60).min(area.width);
     let h = 6u16;
     let mx = area.x + (area.width.saturating_sub(w)) / 2;
@@ -648,22 +669,17 @@ pub(super) fn draw_delete_confirm(
         .style(Style::new().bg(t.surface0));
     let inner = block.inner(modal);
     f.render_widget(block, modal);
-    let what = if is_dir {
-        "folder (and its contents)"
-    } else {
-        "file"
-    };
-    let head = heading
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("Delete {what}?"));
     f.render_widget(
-        Paragraph::new(Span::styled(head, Style::new().fg(t.text).bold()))
+        Paragraph::new(Span::styled(heading, Style::new().fg(t.text).bold()))
             .alignment(Alignment::Center),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
     f.render_widget(
-        Paragraph::new(Span::styled(name, Style::new().fg(t.coral).bold()))
-            .alignment(Alignment::Center),
+        Paragraph::new(Span::styled(
+            name.to_string(),
+            Style::new().fg(t.coral).bold(),
+        ))
+        .alignment(Alignment::Center),
         Rect::new(inner.x, inner.y + 2, inner.width, 1),
     );
     // Footer: y delete · esc cancel (clickable rects).

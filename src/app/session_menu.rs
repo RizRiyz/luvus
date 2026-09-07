@@ -14,6 +14,12 @@ pub struct NamedSessionRow {
     pub current: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NamedSessionAction {
+    Stop,
+    Delete,
+}
+
 #[derive(Debug)]
 pub struct NamedSessionMenu {
     pub generation: u64,
@@ -43,55 +49,57 @@ impl App {
 
     pub fn apply_named_session_stopped(
         &mut self,
-        generation: u64,
+        _generation: u64,
         name: String,
         result: Result<(), String>,
     ) {
-        let Some(current_generation) = self.named_session_menu.as_ref().map(|menu| menu.generation)
-        else {
-            match result {
-                Ok(()) => self.show_toast(format!("stopped {name}")),
-                Err(err) => self.show_toast(format!("could not stop {name}: {err}")),
-            }
-            return;
-        };
-        if current_generation != generation {
-            match result {
-                Ok(()) => {
-                    self.show_toast(format!("stopped {name}"));
-                    self.refresh_named_sessions(current_generation);
+        self.pending_named_session_actions.remove(&name);
+        match result {
+            Ok(()) => {
+                set_session_running(&mut self.named_session_cache, &name, false);
+                if let Some(menu) = self.named_session_menu.as_mut() {
+                    set_session_running(&mut menu.rows, &name, false);
+                    keep_named_session_cursor(menu, &name);
                 }
-                Err(err) => self.show_toast(format!("could not stop {name}: {err}")),
+                self.show_toast(format!("{name}: {}", self.catalog.session_stopped));
             }
-            return;
+            Err(error) => {
+                if let Some(menu) = self.named_session_menu.as_mut() {
+                    menu.error = Some(error.clone());
+                }
+                self.show_toast(format!(
+                    "{name}: {}: {error}",
+                    self.catalog.session_stop_failed
+                ));
+            }
         }
-        // Capture values before mutable borrow for toast.
-        let toast = match &result {
-            Ok(()) => format!("stopped {name}"),
-            Err(_) => String::new(),
-        };
-        let (gen, had_error) = {
-            let menu = self.named_session_menu.as_mut().unwrap();
-            match result {
-                Ok(()) => {
-                    if let Some(pos) = menu.rows.iter().position(|r| r.name == name) {
-                        menu.rows.remove(pos);
-                        let count = menu.rows.len() + 1;
-                        if menu.cursor >= count {
-                            menu.cursor = count.saturating_sub(1);
-                        }
-                    }
-                    (menu.generation, false)
+    }
+
+    pub fn apply_named_session_deleted(
+        &mut self,
+        _generation: u64,
+        name: String,
+        result: Result<(), String>,
+    ) {
+        self.pending_named_session_actions.remove(&name);
+        match result {
+            Ok(()) => {
+                self.named_session_cache.retain(|row| row.name != name);
+                if let Some(menu) = self.named_session_menu.as_mut() {
+                    menu.rows.retain(|row| row.name != name);
+                    menu.cursor = menu.cursor.min(menu.rows.len());
                 }
-                Err(err) => {
-                    menu.error = Some(err);
-                    (0, true)
-                }
+                self.show_toast(format!("{name}: {}", self.catalog.session_deleted));
             }
-        };
-        if !had_error {
-            self.show_toast(toast);
-            self.refresh_named_sessions(gen);
+            Err(error) => {
+                if let Some(menu) = self.named_session_menu.as_mut() {
+                    menu.error = Some(error.clone());
+                }
+                self.show_toast(format!(
+                    "{name}: {}: {error}",
+                    self.catalog.session_delete_failed
+                ));
+            }
         }
     }
 
@@ -103,10 +111,16 @@ impl App {
         self.switcher = false;
         self.named_session_generation = self.named_session_generation.wrapping_add(1);
         let generation = self.named_session_generation;
+        let current = crate::session::display_name();
+        let rows = cached_session_rows(&self.named_session_cache, &current);
+        let cursor = rows
+            .iter()
+            .position(|row| row.current)
+            .map_or(0, |index| index + 1);
         self.named_session_menu = Some(NamedSessionMenu {
             generation,
-            rows: Vec::new(),
-            cursor: 0,
+            rows,
+            cursor,
             scroll: 0,
             loading: true,
             prompt: None,
@@ -120,6 +134,7 @@ impl App {
         self.named_session_generation = self.named_session_generation.wrapping_add(1);
         self.named_session_menu = None;
         self.session_menu = None;
+        self.session_delete_confirm = None;
     }
 
     pub fn apply_named_sessions_loaded(
@@ -128,24 +143,28 @@ impl App {
         result: Result<Vec<crate::session::SessionInfo>, String>,
     ) {
         let current = crate::session::display_name();
-        let Some(menu) = self.named_session_menu.as_mut() else {
-            return;
-        };
-        if menu.generation != generation {
+        if self.named_session_generation != generation {
             return;
         }
-        menu.loading = false;
         match result {
             Ok(sessions) => {
-                menu.rows = session_rows(sessions, &current);
-                menu.cursor = menu
-                    .rows
-                    .iter()
-                    .position(|row| row.current)
-                    .map_or(0, |index| index + 1);
+                let rows = session_rows(sessions, &current);
+                self.named_session_cache.clone_from(&rows);
+                if let Some(menu) = self.named_session_menu.as_mut() {
+                    menu.loading = false;
+                    menu.rows = rows;
+                    menu.cursor = menu
+                        .rows
+                        .iter()
+                        .position(|row| row.current)
+                        .map_or(0, |index| index + 1);
+                }
             }
             Err(error) => {
-                menu.error = Some(format!("{}: {error}", self.catalog.session_open_failed))
+                if let Some(menu) = self.named_session_menu.as_mut() {
+                    menu.loading = false;
+                    menu.error = Some(format!("{}: {error}", self.catalog.session_open_failed));
+                }
             }
         }
     }
@@ -322,7 +341,7 @@ impl App {
         let Some(menu) = self.named_session_menu.as_mut() else {
             return;
         };
-        if menu.loading || menu.preparing {
+        if menu.preparing {
             return;
         }
         if index == 0 {
@@ -337,6 +356,9 @@ impl App {
         else {
             return;
         };
+        if self.pending_named_session_actions.contains_key(&name) {
+            return;
+        }
         if current {
             self.close_named_session_menu();
             return;
@@ -410,6 +432,27 @@ fn session_rows(sessions: Vec<crate::session::SessionInfo>, current: &str) -> Ve
             current: true,
         });
     }
+    sort_session_rows(&mut rows);
+    rows
+}
+
+fn cached_session_rows(cache: &[NamedSessionRow], current: &str) -> Vec<NamedSessionRow> {
+    let mut rows = cache.to_vec();
+    for row in &mut rows {
+        row.current = row.name == current;
+    }
+    if !rows.iter().any(|row| row.current) {
+        rows.push(NamedSessionRow {
+            name: current.to_string(),
+            running: true,
+            current: true,
+        });
+    }
+    sort_session_rows(&mut rows);
+    rows
+}
+
+fn sort_session_rows(rows: &mut [NamedSessionRow]) {
     rows.sort_by(|left, right| {
         (!left.current, !left.running, left.name.to_ascii_lowercase()).cmp(&(
             !right.current,
@@ -417,7 +460,21 @@ fn session_rows(sessions: Vec<crate::session::SessionInfo>, current: &str) -> Ve
             right.name.to_ascii_lowercase(),
         ))
     });
-    rows
+}
+
+fn set_session_running(rows: &mut [NamedSessionRow], name: &str, running: bool) {
+    if let Some(row) = rows.iter_mut().find(|row| row.name == name) {
+        row.running = running;
+    }
+    sort_session_rows(rows);
+}
+
+fn keep_named_session_cursor(menu: &mut NamedSessionMenu, name: &str) {
+    menu.cursor = menu
+        .rows
+        .iter()
+        .position(|row| row.name == name)
+        .map_or_else(|| menu.cursor.min(menu.rows.len()), |index| index + 1);
 }
 
 fn is_session_name_character(character: char) -> bool {
@@ -426,10 +483,10 @@ fn is_session_name_character(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{session_rows, NamedSessionMenu, NamedSessionRow};
+    use super::{
+        cached_session_rows, session_rows, NamedSessionAction, NamedSessionMenu, NamedSessionRow,
+    };
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use std::sync::mpsc::Receiver;
-    use std::time::Duration;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -440,16 +497,6 @@ mod tests {
         info.name = name.to_string();
         info.running = running;
         info
-    }
-
-    fn loaded_generation(rx: &Receiver<crate::event::AppEvent>) -> u64 {
-        match rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("session refresh should complete")
-        {
-            crate::event::AppEvent::NamedSessionsLoaded { generation, .. } => generation,
-            _ => panic!("expected a named-session refresh"),
-        }
     }
 
     #[test]
@@ -480,6 +527,7 @@ mod tests {
         let _env = crate::persist::test_env("named-session-menu-current");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = crate::app::App::new(100, 30, tx).unwrap();
+        app.named_session_generation = 7;
         app.named_session_menu = Some(NamedSessionMenu {
             generation: 7,
             rows: Vec::new(),
@@ -590,10 +638,15 @@ mod tests {
     }
 
     #[test]
-    fn stopped_session_refreshes_a_reopened_menu_with_its_current_generation() {
-        let _env = crate::persist::test_env("named-session-stop-reopened-refresh");
-        let (tx, rx) = std::sync::mpsc::channel();
+    fn stop_updates_the_cache_and_a_reopened_menu() {
+        let _env = crate::persist::test_env("named-session-stop-reopened-cache");
+        let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = crate::app::App::new(100, 30, tx).unwrap();
+        app.named_session_cache = vec![NamedSessionRow {
+            name: "review".into(),
+            running: true,
+            current: false,
+        }];
         app.named_session_menu = Some(NamedSessionMenu {
             generation: 8,
             rows: vec![NamedSessionRow {
@@ -611,19 +664,25 @@ mod tests {
 
         app.apply_named_session_stopped(7, "review".into(), Ok(()));
 
-        assert_eq!(
-            app.named_session_menu.as_ref().unwrap().rows.len(),
-            1,
-            "a stale result must not edit the replacement menu directly"
+        assert!(
+            !app.named_session_menu.as_ref().unwrap().rows[0].running,
+            "a completed exact-name action remains authoritative after reopen"
         );
-        assert_eq!(loaded_generation(&rx), 8);
+        assert!(!app.named_session_cache[0].running);
     }
 
     #[test]
-    fn stopped_session_is_removed_and_refreshed_for_the_matching_menu() {
-        let _env = crate::persist::test_env("named-session-stop-current-refresh");
+    fn stopped_session_becomes_a_stopped_row_without_an_extra_scan() {
+        let _env = crate::persist::test_env("named-session-stop-direct-update");
         let (tx, rx) = std::sync::mpsc::channel();
         let mut app = crate::app::App::new(100, 30, tx).unwrap();
+        app.named_session_cache = vec![NamedSessionRow {
+            name: "review".into(),
+            running: true,
+            current: false,
+        }];
+        app.pending_named_session_actions
+            .insert("review".into(), NamedSessionAction::Stop);
         app.named_session_menu = Some(NamedSessionMenu {
             generation: 5,
             rows: vec![NamedSessionRow {
@@ -641,8 +700,13 @@ mod tests {
 
         app.apply_named_session_stopped(5, "review".into(), Ok(()));
 
-        assert!(app.named_session_menu.as_ref().unwrap().rows.is_empty());
-        assert_eq!(loaded_generation(&rx), 5);
+        assert!(!app.named_session_menu.as_ref().unwrap().rows[0].running);
+        assert!(!app.named_session_cache[0].running);
+        assert!(!app.pending_named_session_actions.contains_key("review"));
+        assert!(
+            rx.try_recv().is_err(),
+            "stop completion must not rescan sessions"
+        );
     }
 
     #[test]
@@ -701,6 +765,7 @@ mod tests {
         app.session_menu = Some(crate::app::SessionMenu {
             name: "old".into(),
             anchor: (0, 0),
+            action: crate::app::SessionMenuItem::Stop,
             items: Vec::new(),
         });
         app.open_session_menu("current".into(), 0, 0, true, true);
@@ -711,15 +776,124 @@ mod tests {
         app.session_menu = Some(crate::app::SessionMenu {
             name: "old".into(),
             anchor: (0, 0),
+            action: crate::app::SessionMenuItem::Stop,
             items: Vec::new(),
         });
         app.open_session_menu("stopped".into(), 0, 0, false, false);
-        assert!(
-            app.session_menu.is_none(),
-            "stopped row must clear stale Stop menu"
+        assert_eq!(
+            app.session_menu.as_ref().map(|menu| menu.action),
+            Some(crate::app::SessionMenuItem::Delete),
+            "a stopped named session offers deletion"
         );
         app.open_session_menu("other".into(), 5, 6, true, false);
         assert!(app.session_menu.is_some());
         assert_eq!(app.session_menu.as_ref().unwrap().name, "other");
+        assert_eq!(
+            app.session_menu.as_ref().unwrap().action,
+            crate::app::SessionMenuItem::Stop
+        );
+
+        app.open_session_menu("default".into(), 0, 0, false, false);
+        assert!(
+            app.session_menu.is_none(),
+            "the default session cannot be deleted"
+        );
+    }
+
+    #[test]
+    fn stopped_session_delete_action_opens_confirmation() {
+        let _env = crate::persist::test_env("named-session-delete-confirm");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(100, 30, tx).unwrap();
+        app.open_session_menu("review".into(), 4, 5, false, false);
+
+        app.session_menu_action(crate::app::SessionMenuItem::Delete);
+
+        assert_eq!(app.session_delete_confirm.as_deref(), Some("review"));
+        assert!(app.session_menu.is_none());
+        app.session_delete_key(key(KeyCode::Esc));
+        assert!(app.session_delete_confirm.is_none());
+    }
+
+    #[test]
+    fn cached_rows_are_available_before_discovery_finishes() {
+        let rows = cached_session_rows(
+            &[NamedSessionRow {
+                name: "review".into(),
+                running: false,
+                current: false,
+            }],
+            "default",
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "default");
+        assert!(rows[0].current);
+        assert_eq!(rows[1].name, "review");
+    }
+
+    #[test]
+    fn delete_completion_removes_the_row_and_cache_entry() {
+        let _env = crate::persist::test_env("named-session-delete-direct-update");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(100, 30, tx).unwrap();
+        let row = NamedSessionRow {
+            name: "review".into(),
+            running: false,
+            current: false,
+        };
+        app.named_session_cache = vec![row.clone()];
+        app.named_session_menu = Some(NamedSessionMenu {
+            generation: 9,
+            rows: vec![row],
+            cursor: 1,
+            scroll: 0,
+            loading: false,
+            prompt: None,
+            error: None,
+            preparing: false,
+        });
+        app.pending_named_session_actions
+            .insert("review".into(), NamedSessionAction::Delete);
+
+        app.apply_named_session_deleted(9, "review".into(), Ok(()));
+
+        assert!(app.named_session_cache.is_empty());
+        assert!(app.named_session_menu.as_ref().unwrap().rows.is_empty());
+        assert!(!app.pending_named_session_actions.contains_key("review"));
+    }
+
+    #[test]
+    fn failed_delete_clears_pending_and_keeps_the_row() {
+        let _env = crate::persist::test_env("named-session-delete-error");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(100, 30, tx).unwrap();
+        let row = NamedSessionRow {
+            name: "review".into(),
+            running: false,
+            current: false,
+        };
+        app.named_session_cache = vec![row.clone()];
+        app.named_session_menu = Some(NamedSessionMenu {
+            generation: 4,
+            rows: vec![row],
+            cursor: 1,
+            scroll: 0,
+            loading: false,
+            prompt: None,
+            error: None,
+            preparing: false,
+        });
+        app.pending_named_session_actions
+            .insert("review".into(), NamedSessionAction::Delete);
+
+        app.apply_named_session_deleted(4, "review".into(), Err("still running".into()));
+
+        assert_eq!(app.named_session_cache.len(), 1);
+        assert_eq!(app.named_session_menu.as_ref().unwrap().rows.len(), 1);
+        assert_eq!(
+            app.named_session_menu.as_ref().unwrap().error.as_deref(),
+            Some("still running")
+        );
+        assert!(!app.pending_named_session_actions.contains_key("review"));
     }
 }
