@@ -71,6 +71,13 @@ stream may lease a terminal at a time. There are at most eight combined
 observe/control streams per server. Overflow requires a fresh capture and
 reconnect.
 
+Each `terminal.frame` replaces the previous capture. Its `content_revision`
+belongs to the text captured under the terminal-engine lock. Both initial and
+subsequent sends advance the stream cursor only to that emitted revision,
+after a successful write; output arriving during a write remains eligible for
+the next frame. The acknowledgment's revision is an earlier observation, not
+proof that a frame has been emitted. The wire shape and event catalog are unchanged.
+
 An installed binary exposes the same contract with `luvus uhp schema`,
 live negotiation with `luvus uhp capabilities`, the fenced inventory
 with `luvus uhp snapshot`, and terminal events with
