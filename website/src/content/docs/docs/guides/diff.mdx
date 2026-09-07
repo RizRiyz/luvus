@@ -50,7 +50,8 @@ as **Auto**, **Split**, or **Stack**. Auto uses Split when both sides remain
 readable and falls back to Stack on a narrow local or remote viewport. Resizing
 one attachment does not change another attachment's effective layout. Split
 wraps each side within its own column and keeps corresponding before and after
-rows vertically aligned, so long source lines never cross the center divider.
+rows vertically aligned. Its narrow Stack fallback keeps wrapping too, so long
+source lines remain inside the pane at every responsive width.
 
 | Key | Action |
 |---|---|
@@ -60,7 +61,7 @@ rows vertically aligned, so long source lines never cross the center divider.
 | `h` / `l` | scroll long lines horizontally in Stack when wrapping is off |
 | Left / Right | select the old or new side in Split |
 | `s` | cycle Auto, Split, Stack |
-| `w` | toggle wrapping for Stack; Split always wraps within each side |
+| `w` | toggle wrapping for an explicitly selected Stack layout; Split and Auto wrap at every responsive width |
 | `/` | search the loaded file diff |
 | `{` / `}` | previous or next hunk |
 | `K` / `J` | previous or next file |

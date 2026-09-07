@@ -1069,12 +1069,7 @@ impl App {
             .find(|(pane, _)| *pane == id)
             .map(|(_, rect)| rect.width)
             .unwrap_or(120);
-        let split = !view.wrap
-            && match view.preference {
-                crate::diff::DiffLayoutPreference::Stack => false,
-                crate::diff::DiffLayoutPreference::Split => width >= 96,
-                crate::diff::DiffLayoutPreference::Auto => width >= 96,
-            };
+        let split = view.effective_split(width);
         if split {
             let anchor = view.stack_rows.get(view.selected).and_then(source_anchor)?;
             let row = view.split_rows.iter().find(|row| {
@@ -1659,11 +1654,14 @@ impl App {
             .map(|(_, rect)| rect.width)
             .unwrap_or(80);
         let marker_style = self.config.layout.diff_marker_style;
-        let is_split = {
+        let (is_split, wraps_lines) = {
             let Some(ViewKind::Diff(view)) = self.views.get(&id) else {
                 return false;
             };
-            view.effective_split(pane_width)
+            (
+                view.effective_split(pane_width),
+                view.effective_wrap(pane_width),
+            )
         };
 
         enum Deferred {
@@ -1811,10 +1809,10 @@ impl App {
                     KeyCode::Char('G') | KeyCode::End => view.selected = max,
                     KeyCode::Left => view.selected_side = crate::diff::DiffSide::Old,
                     KeyCode::Right => view.selected_side = crate::diff::DiffSide::New,
-                    KeyCode::Char('h') if !is_split && !view.wrap => {
+                    KeyCode::Char('h') if !is_split && !wraps_lines => {
                         view.horizontal = view.horizontal.saturating_sub(8)
                     }
-                    KeyCode::Char('l') if !is_split && !view.wrap => {
+                    KeyCode::Char('l') if !is_split && !wraps_lines => {
                         view.horizontal = view.horizontal.saturating_add(8)
                     }
                     KeyCode::Char('h' | 'l') => {}

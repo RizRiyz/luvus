@@ -751,7 +751,7 @@ impl DiffView {
         marker_style: DiffMarkerStyle,
         split: bool,
     ) {
-        if split {
+        if split || self.effective_wrap(pane_width) {
             self.horizontal = 0;
             return;
         }
@@ -781,6 +781,18 @@ impl DiffView {
             self.preference,
             DiffLayoutPreference::Split | DiffLayoutPreference::Auto
         ) && pane_width >= 96
+    }
+
+    /// Whether source text wraps in the current viewport.
+    ///
+    /// Split and Auto are responsive layouts. Their two-column form wraps each
+    /// side independently, and their narrow Stack fallback must keep wrapping
+    /// too. Only an explicitly selected Stack layout may opt into horizontal
+    /// scrolling by disabling the Wrap preference.
+    pub fn effective_wrap(&self, pane_width: u16) -> bool {
+        self.wrap
+            || self.effective_split(pane_width)
+            || !matches!(self.preference, DiffLayoutPreference::Stack)
     }
 
     pub fn rebuild_row_indices(&mut self) {
@@ -993,6 +1005,31 @@ mod tests {
         assert_eq!(view.horizontal, 0);
         view.preference = DiffLayoutPreference::Stack;
         assert!(!view.effective_split(120));
+    }
+
+    #[test]
+    fn responsive_layouts_keep_wrapping_when_the_viewport_falls_back_to_stack() {
+        let mut view = DiffView::new(
+            PathBuf::from("/repo"),
+            test_key(),
+            DiffLayoutPreference::Split,
+            3,
+            true,
+            false,
+        );
+
+        assert!(view.effective_wrap(120));
+        assert!(view.effective_wrap(80));
+        view.horizontal = 12;
+        view.ensure_horizontal_visible(80, DiffMarkerStyle::Symbols, false);
+        assert_eq!(view.horizontal, 0);
+
+        view.preference = DiffLayoutPreference::Auto;
+        assert!(view.effective_wrap(80));
+        view.preference = DiffLayoutPreference::Stack;
+        assert!(!view.effective_wrap(80));
+        view.wrap = true;
+        assert!(view.effective_wrap(80));
     }
 
     #[test]

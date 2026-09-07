@@ -2336,7 +2336,7 @@ impl App {
                     }
                     Some(crate::app::ViewKind::Diff(v)) => {
                         let is_split = v.effective_split(rect.width);
-                        if hscroll != 0 {
+                        if hscroll != 0 && !v.effective_wrap(rect.width) {
                             if hscroll < 0 {
                                 v.horizontal = v.horizontal.saturating_sub(8);
                             } else {

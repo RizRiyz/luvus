@@ -256,7 +256,7 @@ fn draw_stack(
         let style = line_style(line.kind, selected, options.color_mode, t);
         let gutter_width = bar.chars().count() + numbers.chars().count() + symbol.chars().count();
         let text_w = area.width.saturating_sub(gutter_width as u16);
-        if view.wrap {
+        if view.effective_wrap(area.width) {
             let fragments = wrapped_text(&line.text, text_w.max(1));
             for (fragment_index, text) in fragments.into_iter().enumerate() {
                 if y >= area.bottom() {
@@ -1005,6 +1005,7 @@ mod tests {
     use ratatui::buffer::Buffer;
 
     use super::*;
+    use crate::diff::model::{DiffHunk, FileDiff};
     use crate::diff::{DiffKey, DiffLayer, RepoPath};
 
     fn test_view(rows: Vec<DiffLine>) -> DiffView {
@@ -1461,6 +1462,66 @@ mod tests {
             (0..area.height).all(|y| buffer[(10, y)].symbol() == "│"),
             "the center divider remains intact across wrapped rows"
         );
+    }
+
+    #[test]
+    fn narrow_split_fallback_wraps_stack_rows_without_the_wrap_setting() {
+        let theme = Theme::quattro_rally();
+        let line = DiffLine {
+            kind: DiffLineKind::Addition,
+            old_line: None,
+            new_line: Some(8),
+            text: "abcdefghijklmnopqrst".into(),
+        };
+        let mut view = test_view(vec![line]);
+        view.preference = DiffLayoutPreference::Split;
+        view.wrap = false;
+        view.load = DiffLoad::Ready(Box::new(FileDiff {
+            key: view.key.clone(),
+            status: crate::diff::DiffFileStatus::Modified,
+            additions: 1,
+            deletions: 0,
+            binary: false,
+            truncated: false,
+            omitted_lines: 0,
+            hunks: vec![DiffHunk {
+                id: "hunk".into(),
+                old_start: 1,
+                new_start: 1,
+                header: "@@ -1 +1 @@".into(),
+                lines: Vec::new(),
+            }],
+        }));
+        let area = Rect::new(0, 0, 10, 5);
+        let pane = crate::ids::PaneId(12);
+        let mut buffer = Buffer::empty(area);
+        let mut source_rects = Vec::new();
+        let mut note_rects = Vec::new();
+        {
+            let mut target = RenderTarget::new(&mut buffer, area);
+            draw_diff_view(
+                &mut target,
+                area,
+                pane,
+                &view,
+                DiffRenderContext {
+                    state: &DiffState::default(),
+                    picker: None,
+                    marker_style: DiffMarkerStyle::Symbols,
+                    color_mode: DiffColorMode::Theme,
+                    mobile: false,
+                    source_hits: &mut source_rects,
+                    note_hits: &mut note_rects,
+                },
+                &theme,
+            );
+        }
+        let row_text = |y| -> String { (0..area.width).map(|x| buffer[(x, y)].symbol()).collect() };
+
+        assert_eq!(row_text(1), "+ abcdefgh");
+        assert_eq!(row_text(2), "  ijklmnop");
+        assert_eq!(row_text(3), "  qrst    ");
+        assert_eq!(source_rects.len(), 3);
     }
 
     #[test]
