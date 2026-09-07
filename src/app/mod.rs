@@ -3286,10 +3286,8 @@ impl App {
                         std::thread::spawn(move || {
                             let result =
                                 crate::diff::git::load_diff(&root, &file, context).map(|diff| {
-                                    crate::diff::LoadedDiff {
-                                        diff,
-                                        reconciled_notes: Vec::new(),
-                                    }
+                                    let diff = std::sync::Arc::new(diff);
+                                    crate::diff::LoadedDiff::prepare(diff, Vec::new())
                                 });
                             let _ = tx.send(crate::event::AppEvent::DiffLoaded {
                                 id,

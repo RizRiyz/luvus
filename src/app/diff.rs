@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
@@ -595,7 +596,7 @@ impl App {
     pub(crate) fn load_diff_file_sync(
         &mut self,
         file: &crate::diff::DiffFile,
-    ) -> Result<crate::diff::model::FileDiff, String> {
+    ) -> Result<Arc<crate::diff::model::FileDiff>, String> {
         let root = self
             .diff
             .snapshot
@@ -607,9 +608,9 @@ impl App {
         if let Some(cached) = self.diff.cache_get(&file.key, context, &file.fingerprint) {
             return Ok(cached);
         }
-        let loaded = crate::diff::git::load_diff(&root, file, context)?;
+        let loaded = Arc::new(crate::diff::git::load_diff(&root, file, context)?);
         self.diff
-            .cache_insert(context, file.fingerprint.clone(), loaded.clone());
+            .cache_insert(context, file.fingerprint.clone(), Arc::clone(&loaded));
         Ok(loaded)
     }
 
@@ -739,14 +740,14 @@ impl App {
             let result = file
                 .ok_or_else(|| "change disappeared before the diff loaded".to_string())
                 .and_then(|file| {
-                    cached.map_or_else(|| crate::diff::git::load_diff(&root, &file, context), Ok)
+                    cached.map_or_else(
+                        || crate::diff::git::load_diff(&root, &file, context).map(Arc::new),
+                        Ok,
+                    )
                 })
                 .map(|diff| {
                     crate::diff::notes::reconcile(&mut notes, &diff);
-                    crate::diff::LoadedDiff {
-                        diff,
-                        reconciled_notes: notes,
-                    }
+                    crate::diff::LoadedDiff::prepare(diff, notes)
                 });
             let _ = tx.send(AppEvent::DiffLoaded { id, token, result });
         });
@@ -777,11 +778,12 @@ impl App {
             Ok(loaded) => {
                 let diff = loaded.diff;
                 reconciled = loaded.reconciled_notes;
-                view.stack_rows = crate::diff::rows::stack_rows(&diff);
-                view.split_rows = crate::diff::rows::split_rows(&diff);
-                view.rebuild_row_indices();
-                cache = Some(diff.clone());
-                DiffLoad::Ready(Box::new(diff))
+                view.stack_rows = loaded.stack_rows;
+                view.split_rows = loaded.split_rows;
+                view.stack_indices = loaded.stack_indices;
+                view.split_indices = loaded.split_indices;
+                cache = Some(Arc::clone(&diff));
+                DiffLoad::Ready(diff)
             }
             Err(error) if view.key.layer == crate::diff::DiffLayer::Conflict => {
                 DiffLoad::Conflict(error)
@@ -1079,11 +1081,11 @@ impl App {
             let preferred = match view.selected_side {
                 crate::diff::DiffSide::Old => row.old.as_ref().and_then(|line| {
                     line.old_line
-                        .map(|number| (crate::diff::DiffSide::Old, number, line.text.clone()))
+                        .map(|number| (crate::diff::DiffSide::Old, number, line.text.to_string()))
                 }),
                 crate::diff::DiffSide::New => row.new.as_ref().and_then(|line| {
                     line.new_line
-                        .map(|number| (crate::diff::DiffSide::New, number, line.text.clone()))
+                        .map(|number| (crate::diff::DiffSide::New, number, line.text.to_string()))
                 }),
             };
             if preferred.is_some() {
@@ -1093,12 +1095,13 @@ impl App {
                 .as_ref()
                 .and_then(|line| {
                     line.new_line
-                        .map(|number| (crate::diff::DiffSide::New, number, line.text.clone()))
+                        .map(|number| (crate::diff::DiffSide::New, number, line.text.to_string()))
                 })
                 .or_else(|| {
                     row.old.as_ref().and_then(|line| {
-                        line.old_line
-                            .map(|number| (crate::diff::DiffSide::Old, number, line.text.clone()))
+                        line.old_line.map(|number| {
+                            (crate::diff::DiffSide::Old, number, line.text.to_string())
+                        })
                     })
                 })
         } else {
@@ -1106,18 +1109,18 @@ impl App {
             match view.selected_side {
                 crate::diff::DiffSide::Old => line
                     .old_line
-                    .map(|number| (crate::diff::DiffSide::Old, number, line.text.clone())),
+                    .map(|number| (crate::diff::DiffSide::Old, number, line.text.to_string())),
                 crate::diff::DiffSide::New => line
                     .new_line
-                    .map(|number| (crate::diff::DiffSide::New, number, line.text.clone())),
+                    .map(|number| (crate::diff::DiffSide::New, number, line.text.to_string())),
             }
             .or_else(|| {
                 line.new_line
-                    .map(|number| (crate::diff::DiffSide::New, number, line.text.clone()))
+                    .map(|number| (crate::diff::DiffSide::New, number, line.text.to_string()))
             })
             .or_else(|| {
                 line.old_line
-                    .map(|number| (crate::diff::DiffSide::Old, number, line.text.clone()))
+                    .map(|number| (crate::diff::DiffSide::Old, number, line.text.to_string()))
             })
         }
     }
@@ -2606,7 +2609,7 @@ mod tests {
         view.split_rows = split_rows;
         view.rebuild_row_indices();
         view.horizontal = usize::MAX;
-        view.load = DiffLoad::Ready(Box::new(file_diff));
+        view.load = DiffLoad::Ready(Arc::new(file_diff));
 
         let mut terminal = Terminal::new(TestBackend::new(180, 40)).unwrap();
         terminal
@@ -2784,7 +2787,7 @@ mod tests {
         view.split_rows = crate::diff::rows::split_rows(&file_diff);
         view.selected_side = crate::diff::DiffSide::New;
         view.rebuild_row_indices();
-        view.load = DiffLoad::Ready(Box::new(file_diff));
+        view.load = DiffLoad::Ready(Arc::new(file_diff));
         app.pane_content_rects = vec![(id, Rect::new(0, 0, 120, 4))];
 
         assert!(app.handle_event(AppEvent::Mouse(MouseEvent {
@@ -2841,7 +2844,7 @@ mod tests {
         view.preference = crate::diff::DiffLayoutPreference::Stack;
         view.stack_rows = stack_rows;
         view.split_rows = split_rows;
-        view.load = DiffLoad::Ready(Box::new(file_diff));
+        view.load = DiffLoad::Ready(Arc::new(file_diff));
         app.diff.notes.push(crate::diff::ReviewNote {
             id: "clicked-note".into(),
             review_id: "review".into(),

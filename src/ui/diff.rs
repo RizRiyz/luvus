@@ -257,8 +257,7 @@ fn draw_stack(
         let gutter_width = bar.chars().count() + numbers.chars().count() + symbol.chars().count();
         let text_w = area.width.saturating_sub(gutter_width as u16);
         if view.effective_wrap(area.width) {
-            let fragments = wrapped_text(&line.text, text_w.max(1));
-            for (fragment_index, text) in fragments.into_iter().enumerate() {
+            for (fragment_index, text) in wrapped_text(&line.text, text_w.max(1)).enumerate() {
                 if y >= area.bottom() {
                     break;
                 }
@@ -378,11 +377,16 @@ fn draw_split(
         };
         let old_width = half;
         let new_width = area.width.saturating_sub(half + 1);
-        let old_fragments = split_side_fragments(row.old.as_ref(), view, options, old_width);
-        let new_fragments = split_side_fragments(row.new.as_ref(), view, options, new_width);
-        let row_height = old_fragments.len().max(new_fragments.len()).max(1);
-        for fragment_index in 0..row_height {
+        let mut old_fragments = split_side_fragments(row.old.as_ref(), view, options, old_width);
+        let mut new_fragments = split_side_fragments(row.new.as_ref(), view, options, new_width);
+        let mut fragment_index = 0;
+        loop {
             if y >= area.bottom() {
+                break;
+            }
+            let old_fragment = old_fragments.as_mut().and_then(Iterator::next);
+            let new_fragment = new_fragments.as_mut().and_then(Iterator::next);
+            if fragment_index > 0 && old_fragment.is_none() && new_fragment.is_none() {
                 break;
             }
             let old_rect = Rect::new(area.x, y, old_width, 1);
@@ -391,7 +395,7 @@ fn draw_split(
                 f,
                 old_rect,
                 row.old.as_ref(),
-                old_fragments.get(fragment_index).map(String::as_str),
+                old_fragment,
                 true,
                 fragment_index == 0,
                 old_selected,
@@ -406,7 +410,7 @@ fn draw_split(
                 f,
                 new_rect,
                 row.new.as_ref(),
-                new_fragments.get(fragment_index).map(String::as_str),
+                new_fragment,
                 false,
                 fragment_index == 0,
                 new_selected,
@@ -429,6 +433,7 @@ fn draw_split(
                 }
             }
             y = y.saturating_add(1);
+            fragment_index += 1;
         }
         if let Some(line) = row.old.as_ref() {
             y = draw_notes_for_anchor(
@@ -726,7 +731,7 @@ fn note_range_label(side: DiffSide, start: u32, end: u32) -> String {
 
 fn note_editor_lines(text: &str, width: u16) -> Vec<String> {
     text.split('\n')
-        .flat_map(|line| wrapped_text(line, width))
+        .flat_map(|line| wrapped_text(line, width).map(str::to_owned))
         .collect()
 }
 
@@ -838,20 +843,19 @@ fn draw_split_side(
     );
 }
 
-fn split_side_fragments(
-    line: Option<&DiffLine>,
+fn split_side_fragments<'a>(
+    line: Option<&'a DiffLine>,
     view: &DiffView,
     options: DiffRenderOptions,
     width: u16,
-) -> Vec<String> {
-    let Some(line) = line else {
-        return Vec::new();
-    };
+) -> Option<WrappedText<'a>> {
+    let line = line?;
     let number_width = if view.show_line_numbers { 6 } else { 0 };
-    let (bar, symbol) = gutter_markers(line.kind, options.marker_style);
-    let gutter_width = number_width + bar.chars().count() + symbol.chars().count();
+    let bar_width = usize::from(options.marker_style.shows_bars());
+    let symbol_width = usize::from(options.marker_style.shows_symbols()) * 2;
+    let gutter_width = number_width + bar_width + symbol_width;
     let text_width = width.saturating_sub(gutter_width as u16).max(1);
-    wrapped_text(&line.text, text_width)
+    Some(wrapped_text(&line.text, text_width))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -959,26 +963,53 @@ fn horizontal_text(text: &str, offset: usize, width: u16) -> String {
     text.chars().skip(offset).take(width as usize).collect()
 }
 
-fn wrapped_text(text: &str, width: u16) -> Vec<String> {
-    let width = width.max(1) as usize;
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-    let mut rows = Vec::new();
-    let mut row = String::new();
-    let mut used = 0;
-    for character in text.chars() {
-        let mut encoded = [0; 4];
-        let character_width = super::display_width(character.encode_utf8(&mut encoded));
-        if !row.is_empty() && used + character_width > width {
-            rows.push(std::mem::take(&mut row));
-            used = 0;
+struct WrappedText<'a> {
+    text: &'a str,
+    width: usize,
+    offset: usize,
+    emitted_empty: bool,
+}
+
+impl<'a> Iterator for WrappedText<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.text.is_empty() {
+            if self.emitted_empty {
+                return None;
+            }
+            self.emitted_empty = true;
+            return Some("");
         }
-        row.push(character);
-        used += character_width;
+        if self.offset >= self.text.len() {
+            return None;
+        }
+
+        let start = self.offset;
+        let mut end = start;
+        let mut used = 0;
+        for (relative, character) in self.text[start..].char_indices() {
+            let mut encoded = [0; 4];
+            let character_width = super::display_width(character.encode_utf8(&mut encoded));
+            if end > start && used + character_width > self.width {
+                break;
+            }
+            end = start + relative + character.len_utf8();
+            used += character_width;
+        }
+
+        self.offset = end;
+        Some(&self.text[start..end])
     }
-    rows.push(row);
-    rows
+}
+
+fn wrapped_text(text: &str, width: u16) -> WrappedText<'_> {
+    WrappedText {
+        text,
+        width: width.max(1) as usize,
+        offset: 0,
+        emitted_empty: false,
+    }
 }
 
 fn center(f: &mut RenderTarget, area: Rect, text: &str, color: Color) {
@@ -1075,9 +1106,20 @@ mod tests {
 
     #[test]
     fn wrapping_is_unicode_safe_and_never_returns_zero_rows() {
-        assert_eq!(wrapped_text("", 0), vec![""]);
-        assert_eq!(wrapped_text("abçd", 2), vec!["ab", "çd"]);
-        assert_eq!(wrapped_text("a界b", 3), vec!["a界", "b"]);
+        assert_eq!(wrapped_text("", 0).collect::<Vec<_>>(), vec![""]);
+        assert_eq!(
+            wrapped_text("abçd", 2).collect::<Vec<_>>(),
+            vec!["ab", "çd"]
+        );
+        assert_eq!(
+            wrapped_text("a界b", 3).collect::<Vec<_>>(),
+            vec!["a界", "b"]
+        );
+
+        let long = "x".repeat(crate::diff::PATCH_LINE_BYTE_CAP);
+        let mut fragments = wrapped_text(&long, 8);
+        assert_eq!(fragments.next(), Some("xxxxxxxx"));
+        assert_eq!(fragments.offset, 8, "the unseen tail remains unscanned");
     }
 
     #[test]
@@ -1476,7 +1518,7 @@ mod tests {
         let mut view = test_view(vec![line]);
         view.preference = DiffLayoutPreference::Split;
         view.wrap = false;
-        view.load = DiffLoad::Ready(Box::new(FileDiff {
+        view.load = DiffLoad::Ready(std::sync::Arc::new(FileDiff {
             key: view.key.clone(),
             status: crate::diff::DiffFileStatus::Modified,
             additions: 1,
