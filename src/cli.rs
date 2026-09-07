@@ -3910,9 +3910,21 @@ fn task_prompt_arg(args: &[String]) -> Result<Option<String>> {
     };
     let file =
         std::fs::File::open(&path).map_err(|error| anyhow!("cannot read {path}: {error}"))?;
-    let mut prompt = String::new();
-    file.take((crate::orch::MAX_TASK_PROMPT_BYTES + 1) as u64)
-        .read_to_string(&mut prompt)
+    // Every normalized LF can occupy at most two source bytes as CRLF. Read
+    // one byte beyond that largest valid representation so an oversized file
+    // is rejected instead of silently accepted after a truncated read.
+    let max_source_bytes = crate::orch::MAX_TASK_PROMPT_BYTES * 2;
+    let mut bytes = Vec::with_capacity(max_source_bytes + 1);
+    file.take((max_source_bytes + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| anyhow!("cannot read {path}: {error}"))?;
+    if bytes.len() > max_source_bytes {
+        return Err(anyhow!(
+            "task prompt exceeds the {}-byte limit",
+            crate::orch::MAX_TASK_PROMPT_BYTES
+        ));
+    }
+    let mut prompt = String::from_utf8(bytes)
         .map_err(|error| anyhow!("cannot read {path} as UTF-8 text: {error}"))?;
     prompt = prompt.replace("\r\n", "\n").replace('\r', "\n");
     if prompt.len() > crate::orch::MAX_TASK_PROMPT_BYTES {
@@ -5193,6 +5205,23 @@ mod tests {
             params["prompt"],
             "Review the API.\nCover rollback behavior.\nCheck recovery.\n"
         );
+
+        fs::write(
+            &prompt_path,
+            "\r\n".repeat(crate::orch::MAX_TASK_PROMPT_BYTES),
+        )
+        .unwrap();
+        let (_, params) = parse(&args).unwrap();
+        let prompt = params["prompt"].as_str().unwrap();
+        assert_eq!(prompt.len(), crate::orch::MAX_TASK_PROMPT_BYTES);
+        assert!(prompt.bytes().all(|byte| byte == b'\n'));
+
+        fs::write(
+            &prompt_path,
+            "\r\n".repeat(crate::orch::MAX_TASK_PROMPT_BYTES + 1),
+        )
+        .unwrap();
+        assert!(parse(&args).unwrap_err().to_string().contains("byte limit"));
 
         fs::write(
             &prompt_path,
