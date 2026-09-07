@@ -394,6 +394,7 @@
       "properties": {
         "id": { "type": "string" },
         "title": { "type": "string" },
+        "prompt": { "type": ["string", "null"] },
         "status": { "enum": ["queued", "claimed", "running", "blocked", "review", "done", "merging", "merged", "failed"] },
         "assignee": { "type": ["integer", "null"], "minimum": 1 },
         "deps": { "type": "array", "items": { "type": "string" } },

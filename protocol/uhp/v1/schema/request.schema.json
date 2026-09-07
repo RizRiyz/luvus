@@ -147,6 +147,26 @@
         }
       }
     },
+    "taskAddParams": {
+      "type": "object", "additionalProperties": false, "required": ["title"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "prompt": { "type": "string", "maxLength": 32768 },
+        "paths": { "type": "array", "items": { "type": "string" } },
+        "deps": { "type": "array", "items": { "type": "string" } },
+        "gate": { "type": "string" }
+      }
+    },
+    "taskUpdateParams": {
+      "type": "object", "additionalProperties": false, "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "prompt": { "type": ["string", "null"], "maxLength": 32768 },
+        "status": { "enum": ["queued", "claimed", "running", "blocked", "review", "done", "failed"] },
+        "output": { "type": "string" },
+        "note": { "type": "string" }
+      }
+    },
     "taskStartParams": {
       "type": "object", "additionalProperties": false, "required": ["id"],
       "properties": {
@@ -308,6 +328,10 @@
       "then": { "properties": { "params": { "$ref": "#/$defs/integrationChangeParams" } } } },
     { "if": { "properties": { "method": { "const": "pane.report_session" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/paneReportSessionParams" } } } },
+    { "if": { "properties": { "method": { "const": "task.add" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/taskAddParams" } } } },
+    { "if": { "properties": { "method": { "const": "task.update" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/taskUpdateParams" } } } },
     { "if": { "properties": { "method": { "const": "task.start" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/taskStartParams" } } } },
     { "if": { "properties": { "method": { "const": "task.next" } } },

@@ -104,6 +104,25 @@ mod tests {
     }
 
     #[test]
+    fn task_prompt_request_contract_is_bounded_and_editable() {
+        let bundle = schema_bundle();
+        let definitions = &bundle["request"]["$defs"];
+        assert_eq!(definitions["taskAddParams"]["required"], json!(["title"]));
+        assert_eq!(
+            definitions["taskAddParams"]["properties"]["title"]["maxLength"],
+            crate::orch::MAX_TASK_TITLE_BYTES
+        );
+        assert_eq!(
+            definitions["taskAddParams"]["properties"]["prompt"]["maxLength"],
+            crate::orch::MAX_TASK_PROMPT_BYTES
+        );
+        assert_eq!(
+            definitions["taskUpdateParams"]["properties"]["prompt"]["type"],
+            json!(["string", "null"])
+        );
+    }
+
+    #[test]
     fn schema_bundle_publishes_the_general_event_catalog() {
         let bundle = schema_bundle();
         let catalog = bundle["event_catalog"]["properties"].as_object().unwrap();
@@ -293,6 +312,7 @@ mod tests {
             .iter()
             .map(|value| value.as_str().unwrap())
             .collect();
+        assert!(!task_required.contains("prompt"));
         assert!(!task_required.contains("mode"));
         assert!(!task_required.contains("workspace_worker"));
         assert_eq!(
@@ -302,6 +322,10 @@ mod tests {
         assert_eq!(
             task["properties"]["workspace_worker"]["$ref"],
             "#/$defs/workspace_worker"
+        );
+        assert_eq!(
+            task["properties"]["prompt"]["type"],
+            json!(["string", "null"])
         );
 
         let workspace_worker = &definitions["workspace_worker"];

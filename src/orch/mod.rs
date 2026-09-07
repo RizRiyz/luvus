@@ -162,6 +162,10 @@ pub const COMPACTION_THRESHOLD: f64 = 0.85;
 /// `orch.json` on disk, and the UHP can drive it programmatically — so
 /// nothing may grow without bound. Limits far above real use, well below harm.
 pub const MAX_TASKS: usize = 1000;
+/// Task titles remain compact board labels while still allowing descriptive names.
+pub const MAX_TASK_TITLE_BYTES: usize = 256;
+/// Detailed worker briefings share the reviewed automation prompt budget.
+pub const MAX_TASK_PROMPT_BYTES: usize = 32 * 1024;
 /// Per-task `outputs` / `notes` keep only the most recent entries…
 pub const MAX_TASK_LOG: usize = 100;
 /// …and each entry is truncated to this many bytes (a runaway agent piping a
@@ -174,11 +178,35 @@ pub const MAX_LEASE_PATHS: usize = 64;
 /// Maximum UTF-8 byte length of one path pattern.
 pub const MAX_LEASE_PATH_BYTES: usize = 1024;
 
-/// Task briefings are sent to a live shell as terminal input. Reject control
-/// characters before launch so restored or remotely supplied task text cannot
-/// synthesize Enter, Escape, or another terminal action.
+/// Task briefings are sent to a live shell as terminal input. Reject every
+/// control character before launch so restored task text cannot synthesize an
+/// Enter, Escape, or another terminal action.
 pub(crate) fn contains_terminal_control(value: &str) -> bool {
     value.chars().any(char::is_control)
+}
+
+fn validate_task_text(
+    field: &'static str,
+    value: &str,
+    max_bytes: usize,
+    multiline: bool,
+) -> OrchResult<()> {
+    if value.len() > max_bytes {
+        return Err(Reject::new(
+            "bad_request",
+            format!("{field} exceeds the {max_bytes}-byte limit"),
+        ));
+    }
+    if value
+        .chars()
+        .any(|character| character.is_control() && !(multiline && character == '\n'))
+    {
+        return Err(Reject::new(
+            "bad_request",
+            format!("{field} contains an unsupported control character"),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -238,8 +266,24 @@ impl OrchState {
         deps: Vec<TaskId>,
         gate: Option<String>,
     ) -> OrchResult<Task> {
+        self.add_task_with_prompt(title, None, paths, deps, gate)
+    }
+
+    /// Add a task and its optional detailed worker briefing atomically.
+    pub fn add_task_with_prompt(
+        &mut self,
+        title: String,
+        prompt: Option<String>,
+        paths: Vec<String>,
+        deps: Vec<TaskId>,
+        gate: Option<String>,
+    ) -> OrchResult<Task> {
         if title.trim().is_empty() {
             return Err(Reject::new("bad_request", "task title is required"));
+        }
+        validate_task_text("task title", &title, MAX_TASK_TITLE_BYTES, false)?;
+        if let Some(prompt) = &prompt {
+            validate_task_text("task prompt", prompt, MAX_TASK_PROMPT_BYTES, true)?;
         }
         if self.tasks.len() >= MAX_TASKS {
             return Err(Reject::new(
@@ -258,7 +302,7 @@ impl OrchState {
         let task = Task {
             id: format!("t{}", self.next_task),
             title,
-            prompt: None,
+            prompt: prompt.filter(|value| !value.trim().is_empty()),
             status: TaskStatus::Queued,
             assignee: None,
             deps,
@@ -288,6 +332,7 @@ impl OrchState {
         prompt: String,
         provenance: AutomationProvenance,
     ) -> OrchResult<Task> {
+        validate_task_text("task prompt", &prompt, MAX_TASK_PROMPT_BYTES, true)?;
         if self.tasks.iter().any(|task| {
             task.id != id
                 && task
@@ -329,6 +374,16 @@ impl OrchState {
             .iter_mut()
             .find(|task| task.id == id)
             .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        if task.status != TaskStatus::Queued || task.assignee.is_some() || task.automation.is_some()
+        {
+            return Err(Reject::new(
+                "task_active",
+                "task prompt can only be edited before a manual task starts",
+            ));
+        }
+        if let Some(prompt) = &prompt {
+            validate_task_text("task prompt", prompt, MAX_TASK_PROMPT_BYTES, true)?;
+        }
         task.prompt = prompt.filter(|value| !value.trim().is_empty());
         task.updated = unix_now();
         Ok(task.clone())
@@ -1059,6 +1114,72 @@ mod tests {
         let stored = s.task("t2").unwrap().outputs.last().unwrap().clone();
         assert!(stored.len() <= MAX_LOG_ENTRY + '…'.len_utf8());
         assert!(stored.ends_with('…'));
+    }
+
+    #[test]
+    fn task_title_and_prompt_are_bounded_and_created_atomically() {
+        let mut state = OrchState::default();
+        let task = state
+            .add_task_with_prompt(
+                "Review the authentication migration".into(),
+                Some("Check the API contract.\nCover rollback behavior.".into()),
+                vec!["src/auth/**".into()],
+                vec![],
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            task.prompt.as_deref(),
+            Some("Check the API contract.\nCover rollback behavior.")
+        );
+
+        let too_long_title = "x".repeat(MAX_TASK_TITLE_BYTES + 1);
+        let error = state
+            .add_task(too_long_title, vec![], vec![], None)
+            .unwrap_err();
+        assert_eq!(error.code, "bad_request");
+
+        let too_long_prompt = "x".repeat(MAX_TASK_PROMPT_BYTES + 1);
+        let error = state
+            .add_task_with_prompt(
+                "not inserted".into(),
+                Some(too_long_prompt),
+                vec![],
+                vec![],
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "bad_request");
+        assert_eq!(state.tasks.len(), 1, "a rejected prompt creates no task");
+    }
+
+    #[test]
+    fn manual_prompt_is_editable_only_before_start() {
+        let mut state = OrchState::default();
+        state
+            .add_task_with_prompt(
+                "Review".into(),
+                Some("First briefing".into()),
+                vec![],
+                vec![],
+                None,
+            )
+            .unwrap();
+        state
+            .set_prompt("t1", Some("Updated\nbriefing".into()))
+            .unwrap();
+        assert_eq!(
+            state.task("t1").unwrap().prompt.as_deref(),
+            Some("Updated\nbriefing")
+        );
+
+        state.claim("t1", 7).unwrap();
+        let error = state.set_prompt("t1", Some("too late".into())).unwrap_err();
+        assert_eq!(error.code, "task_active");
+        assert_eq!(
+            state.task("t1").unwrap().prompt.as_deref(),
+            Some("Updated\nbriefing")
+        );
     }
 
     #[test]
