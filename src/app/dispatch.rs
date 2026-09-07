@@ -5369,11 +5369,14 @@ impl App {
             }
             // ── ORCH-1/2: task ledger + path leases (docs/22, M0) ──────────
             "task.add" => {
+                reject_api_fields(p, &["title", "prompt", "paths", "deps", "gate"])?;
                 let title = req_str(p, "title")?.to_string();
+                let prompt = optional_task_prompt(p)?;
                 let task = self
                     .orch
-                    .add_task(
+                    .add_task_with_prompt(
                         title,
+                        prompt,
                         str_array(p, "paths"),
                         str_array(p, "deps"),
                         opt_str(p, "gate"),
@@ -5427,6 +5430,7 @@ impl App {
                 }))
             }
             "task.update" => {
+                reject_api_fields(p, &["id", "status", "output", "note", "prompt"])?;
                 let id = req_str(p, "id")?.to_string();
                 let status = if let Some(s) = p.get("status").and_then(|v| v.as_str()) {
                     let st = crate::orch::TaskStatus::parse(s).ok_or_else(|| {
@@ -5455,6 +5459,11 @@ impl App {
                             format!("{id} is already {}", current.as_str()),
                         ));
                     }
+                }
+                if p.get("prompt").is_some() {
+                    self.orch
+                        .set_prompt(&id, optional_task_prompt(p)?)
+                        .map_err(orch_err)?;
                 }
                 if let Some(st) = status {
                     self.orch.set_status(&id, st).map_err(orch_err)?;
@@ -7582,6 +7591,12 @@ pub(crate) fn task_json(t: &crate::orch::Task) -> Value {
         "created": t.created,
         "updated": t.updated,
     });
+    // Manual task briefings are part of the ORCH task contract. Automation
+    // prompts remain private to their definition/run projection and must not
+    // leak through the general task list or event stream.
+    if t.automation.is_none() {
+        value["prompt"] = json!(t.prompt);
+    }
     if let Some(mode) = t.worker_mode {
         value["mode"] = json!(mode);
     }
@@ -7589,6 +7604,17 @@ pub(crate) fn task_json(t: &crate::orch::Task) -> Value {
         value["workspace_worker"] = json!(workspace);
     }
     value
+}
+
+fn optional_task_prompt(p: &Value) -> Result<Option<String>, (String, String)> {
+    match p.get("prompt") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(prompt)) => Ok(Some(prompt.clone())),
+        Some(_) => Err((
+            "invalid_request".to_string(),
+            "prompt must be a string or null".to_string(),
+        )),
+    }
 }
 
 /// A trimmed JSON view of an installed module for `module.list`.

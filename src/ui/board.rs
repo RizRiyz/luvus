@@ -1608,6 +1608,23 @@ fn draw_summary(f: &mut RenderTarget, area: Rect, task: &Task, cat: &Catalog, t:
     add(cat.board_f_paths, task.paths.join(" "));
     add(cat.board_f_deps, task.deps.join(" "));
     add(cat.board_f_gate, task.gate.clone().unwrap_or_default());
+    if let Some(prompt) = task
+        .prompt
+        .as_deref()
+        .filter(|prompt| !prompt.trim().is_empty())
+    {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" {}", cat.board_f_prompt),
+            Style::new().fg(t.subtext1).bold(),
+        )));
+        lines.extend(prompt.lines().take(3).map(|line| {
+            Line::from(Span::styled(
+                format!("  {line}"),
+                Style::new().fg(t.subtext0),
+            ))
+        }));
+    }
     if let Some(output) = task.outputs.last() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -1644,6 +1661,83 @@ fn fill_bg(f: &mut RenderTarget, rect: Rect, color: Color) {
             buf[(x, y)].set_bg(color);
         }
     }
+}
+
+/// Keep the insertion cursor visible for a long single-line form value. This
+/// crops from the left by terminal display cells and never splits a wide glyph.
+fn input_tail(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if super::display_width(value) <= width {
+        return value.to_string();
+    }
+    let budget = width.saturating_sub(1);
+    let mut tail = Vec::new();
+    let mut used = 0;
+    for character in value.chars().rev() {
+        let mut encoded = [0; 4];
+        let character_width = super::display_width(character.encode_utf8(&mut encoded));
+        if used + character_width > budget {
+            break;
+        }
+        tail.push(character);
+        used += character_width;
+    }
+    tail.reverse();
+    format!("…{}", tail.into_iter().collect::<String>())
+}
+
+/// Split text into explicit display-width rows so scrolling and the visible
+/// insertion cursor agree without relying on unstable widget measurements.
+fn wrap_display_lines(value: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    for logical in value.split('\n') {
+        if logical.is_empty() {
+            rows.push(String::new());
+            continue;
+        }
+        let mut remaining = logical;
+        while !remaining.is_empty() {
+            let mut used = 0;
+            let mut end = 0;
+            for (index, character) in remaining.char_indices() {
+                let mut encoded = [0; 4];
+                let character_width = super::display_width(character.encode_utf8(&mut encoded));
+                if end > 0 && used + character_width > width.max(1) {
+                    break;
+                }
+                used += character_width;
+                end = index + character.len_utf8();
+            }
+            if end >= remaining.len() {
+                rows.push(remaining.to_string());
+                break;
+            }
+            let candidate = &remaining[..end];
+            let split = candidate
+                .char_indices()
+                .rev()
+                .find_map(|(index, character)| {
+                    (index > 0 && character.is_whitespace()).then_some(index)
+                })
+                .unwrap_or(end);
+            rows.push(candidate[..split].to_string());
+            let mut consumed = split;
+            if split < end {
+                consumed += remaining[split..]
+                    .chars()
+                    .take_while(|character| character.is_whitespace())
+                    .map(char::len_utf8)
+                    .sum::<usize>();
+            }
+            remaining = &remaining[consumed..];
+        }
+    }
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    rows
 }
 
 /// The in-TUI creation form. Task and automation tabs share the common fields,
@@ -1841,37 +1935,62 @@ pub(super) fn draw_form(
                 field_rect.width.saturating_sub(LABEL_WIDTH),
                 field_rect.height,
             );
-            let mut lines = if value.is_empty() && !active {
-                vec![Line::from(Span::styled(hint, Style::new().fg(t.overlay0)))]
+            let (mut display_value, value_style) = if value.is_empty() && !active {
+                (hint.to_string(), Style::new().fg(t.overlay0))
             } else {
-                value
-                    .split('\n')
-                    .map(|line| Line::from(Span::styled(line.to_string(), Style::new().fg(t.text))))
-                    .collect::<Vec<_>>()
+                (value, Style::new().fg(t.text))
             };
             if active {
-                lines
-                    .last_mut()
-                    .expect("a prompt always renders at least one line")
-                    .spans
-                    .push(Span::styled("▏", Style::new().fg(t.accent)));
+                display_value.push('▏');
             }
-            let scroll = lines.len().saturating_sub(body_rect.height as usize) as u16;
-            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-            f.render_widget(paragraph.scroll((scroll, 0)), body_rect);
+            let lines = wrap_display_lines(&display_value, body_rect.width as usize);
+            let scroll = lines.len().saturating_sub(body_rect.height as usize);
+            let visible = lines.into_iter().skip(scroll).map(|line| {
+                if let Some(text) = active.then(|| line.strip_suffix('▏')).flatten() {
+                    Line::from(vec![
+                        Span::styled(text.to_string(), value_style),
+                        Span::styled("▏", Style::new().fg(t.accent)),
+                    ])
+                } else {
+                    Line::from(Span::styled(line, value_style))
+                }
+            });
+            f.render_widget(Paragraph::new(visible.collect::<Vec<_>>()), body_rect);
         } else {
+            const LABEL_WIDTH: u16 = 11;
+            f.render_widget(
+                Paragraph::new(Span::styled(format!(" {label:<8}: "), label_style)),
+                Rect::new(
+                    field_rect.x,
+                    field_rect.y,
+                    LABEL_WIDTH.min(field_rect.width),
+                    1,
+                ),
+            );
+            let body_rect = Rect::new(
+                field_rect.x.saturating_add(LABEL_WIDTH),
+                field_rect.y,
+                field_rect.width.saturating_sub(LABEL_WIDTH),
+                1,
+            );
+            let cursor_width = usize::from(active && body_rect.width > 0);
+            let available = body_rect.width as usize - cursor_width;
             let body = if value.is_empty() && !active {
-                Span::styled(hint, Style::new().fg(t.overlay0))
+                Span::styled(
+                    super::truncate(hint, available),
+                    Style::new().fg(t.overlay0),
+                )
+            } else if active {
+                Span::styled(input_tail(&value, available), Style::new().fg(t.text))
             } else {
-                Span::styled(value, Style::new().fg(t.text))
+                Span::styled(super::truncate(&value, available), Style::new().fg(t.text))
             };
             f.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(format!(" {label:<8}: "), label_style),
                     body,
                     Span::styled(if active { "▏" } else { "" }, Style::new().fg(t.accent)),
                 ])),
-                field_rect,
+                body_rect,
             );
         }
         hits.push((crate::app::OrchHit::FormField(field), field_rect));
@@ -1886,9 +2005,7 @@ pub(super) fn draw_form(
         );
     } else {
         let mut shortcuts = vec![("⏎", cat.act_create)];
-        if form.kind == crate::app::OrchFormKind::Automation
-            && form.field == crate::app::OrchFormField::Prompt
-        {
+        if form.field == crate::app::OrchFormField::Prompt {
             shortcuts.push(("⇧⏎", cat.settings.shift_newline));
         }
         shortcuts.extend([
@@ -2291,20 +2408,21 @@ pub(super) fn draw_detail(
     );
 
     let sc = status_color(task.status, t);
-    let mut lines: Vec<Line> = vec![
-        Line::from(vec![
-            Span::styled(format!(" {} ", task.id), Style::new().fg(t.subtext1).bold()),
-            Span::styled(status_label(task.status, cat), Style::new().fg(sc)),
-            Span::styled(
-                format!(
-                    "  {}",
-                    pad(&task.title, (inner.width as usize).saturating_sub(14))
-                ),
-                Style::new().fg(t.text).bold(),
-            ),
-        ]),
-        Line::from(""),
-    ];
+    let mut lines: Vec<Line> = vec![Line::from(vec![
+        Span::styled(format!(" {} ", task.id), Style::new().fg(t.subtext1).bold()),
+        Span::styled(status_label(task.status, cat), Style::new().fg(sc)),
+    ])];
+    lines.extend(
+        wrap_display_lines(&task.title, inner.width.saturating_sub(1) as usize)
+            .into_iter()
+            .map(|title| {
+                Line::from(Span::styled(
+                    format!(" {title}"),
+                    Style::new().fg(t.text).bold(),
+                ))
+            }),
+    );
+    lines.push(Line::from(""));
     let kv = |k: &'static str, v: String, lines: &mut Vec<Line>| {
         if !v.is_empty() {
             lines.push(Line::from(vec![
@@ -2353,6 +2471,26 @@ pub(super) fn draw_detail(
         task.gate.clone().unwrap_or_default(),
         &mut lines,
     );
+    if let Some(prompt) = task
+        .prompt
+        .as_deref()
+        .filter(|prompt| !prompt.trim().is_empty())
+    {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" {}", cat.board_f_prompt),
+            Style::new().fg(t.subtext1).bold(),
+        )));
+        for logical in prompt.split('\n') {
+            lines.extend(
+                wrap_display_lines(logical, inner.width.saturating_sub(2) as usize)
+                    .into_iter()
+                    .map(|line| {
+                        Line::from(Span::styled(format!("  {line}"), Style::new().fg(t.text)))
+                    }),
+            );
+        }
+    }
     if !task.outputs.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -3033,11 +3171,11 @@ mod tests {
     }
 
     #[test]
-    fn automation_form_keeps_the_multiline_prompt_tail_visible() {
+    fn task_form_keeps_the_multiline_prompt_tail_visible() {
         let area = Rect::new(0, 0, 90, 30);
         let mut buffer = Buffer::empty(area);
         let mut target = RenderTarget::new(&mut buffer, area);
-        let mut form = OrchForm::for_kind(crate::app::OrchFormKind::Automation);
+        let mut form = OrchForm::for_kind(crate::app::OrchFormKind::Task);
         form.field = crate::app::OrchFormField::Prompt;
         form.prompt = "first line\nsecond line\nthird line\nfourth line".into();
 
@@ -3062,6 +3200,71 @@ mod tests {
         assert!(rendered.contains("third line"));
         assert!(rendered.contains("fourth line▏"));
         assert!(rendered.contains("newline"));
+    }
+
+    #[test]
+    fn long_task_title_keeps_its_tail_and_cursor_visible() {
+        let area = Rect::new(0, 0, 52, 22);
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+        let mut form = OrchForm::for_kind(crate::app::OrchFormKind::Task);
+        form.field = crate::app::OrchFormField::Title;
+        form.title = "A long descriptive task title whose ending stays visible".into();
+
+        draw_form(
+            &mut target,
+            area,
+            &form,
+            &crate::i18n::EN,
+            &Theme::quattro_rally(),
+        );
+
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("…"));
+        assert!(rendered.contains("ending stays visible▏"));
+        assert!(!rendered.contains("A long descriptive task title"));
+    }
+
+    #[test]
+    fn task_detail_shows_the_full_wrapped_title_and_prompt() {
+        let area = Rect::new(0, 0, 52, 24);
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+        let mut state = OrchState::default();
+        let task = state
+            .add_task_with_prompt(
+                "Review the complete authentication migration and rollback path".into(),
+                Some("Inspect the API contract.\nCover data rollback and recovery.".into()),
+                vec![],
+                vec![],
+                None,
+            )
+            .unwrap();
+
+        draw_detail(
+            &mut target,
+            area,
+            &task,
+            0,
+            &crate::i18n::EN,
+            &Theme::quattro_rally(),
+        );
+        let rendered = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Review the complete authentication"));
+        assert!(rendered.contains("migration and rollback path"));
+        assert!(rendered.contains("Inspect the API contract."));
+        assert!(rendered.contains("Cover data rollback and recovery."));
     }
 
     #[test]

@@ -113,16 +113,18 @@ before an action is chosen.
 | `q` | close the board without stopping tasks or workers |
 
 The form starts on a compact **Task · Automation** choice. The active board view
-selects its matching type by default. Task shows Title, Paths, Deps, Gate, and a
-`Manual`/`Now` Start choice; Prompt and Agent appear only for `Now`. Automation
+selects its matching type by default. Task shows Title, Paths, Deps, Gate, a
+`Manual`/`Now` Start choice, and a three-row Prompt editor; Agent appears only
+for `Now`. Automation
 hides concrete dependencies and owns a registry-backed Agent, an explicit
 `Run in` choice for an isolated Worktree or the existing Workspace, an `Access`
 choice (`Read only`, `Workspace`, or `Full access`), `Once later`,
 `Hourly`, `Daily`, or `Weekly`, and Schedule, followed by a three-row Prompt editor. Use
 `Tab` to switch between Task and Automation, Down or Up to move between fields,
 Left/Right to change the selected Agent, Run in, Access, or Start value, and
-`Shift+Enter` to add a new line to the Automation prompt. Plain `Enter` creates
-the automation. Agent
+`Shift+Enter` to add a new line to either prompt. Plain `Enter` creates the task
+or automation. Pasted task prompts preserve line breaks, and long titles scroll
+horizontally with the active cursor instead of hiding the end. Agent
 choices come from the built-in adapters that declare at least one reviewed
 unattended launch profile. A selected agent/access combination that is not supported
 is rejected before Luvus creates a task, worktree, lease, or pane. Task and Automation
@@ -154,7 +156,8 @@ Automation definition.
 Say you want an auth module and an API layer that depends on it:
 
 1. `a` → Title `OAuth token module`, Paths `src/auth/**`, Gate
-   `cargo test auth`, `⏎`.
+   `cargo test auth`, Prompt `Implement the token parser and cover rollback
+   behavior`, `⏎`.
 2. `a` → Title `API layer`, Paths `src/api/**`, Deps `t1`, `⏎`.
 3. Select `t1` and press `s`. luvus creates a worktree on branch `luvus/t1`,
    opens a pane in it, and takes you there. Run your agent in that pane (or
@@ -178,8 +181,12 @@ can run the whole loop itself:
 
 ```sh
 # create + inspect
-luvus task add "OAuth module" --paths "src/auth/**" --gate "cargo test auth"
-luvus task list · get t1 · update t1 --status running --note "learning: …"
+luvus task add "OAuth module" \
+  --prompt "Implement the token parser and cover rollback behavior." \
+  --paths "src/auth/**" --gate "cargo test auth"
+luvus task list · get t1
+luvus task update t1 --prompt-file ./task-brief.md # editable until the task starts
+luvus task update t1 --status running --note "learning: …"
 
 # start workers (worktree remains the default)
 luvus task start t1 --agent "claude"
