@@ -7,6 +7,12 @@ These examples use UHP 1.0 through the selected Luvus session. Start with
 read-only discovery, use stable IDs returned by the server, and reconcile state
 before retrying any mutation whose response was lost.
 
+For a paired Access connection, inspect `result.access.allowed_methods` in the
+`uhp.capabilities` response before enabling a supported UI action. Keep
+`result.methods` as the server capability catalog; `access.mode` and
+`access.limits` describe this endpoint. Missing `access` on an older gateway
+must not be treated as unrestricted authority.
+
 ## Choose a connection path
 
 | Need | Use |

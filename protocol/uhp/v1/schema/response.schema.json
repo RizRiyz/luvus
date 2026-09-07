@@ -20,6 +20,19 @@
     {
       "if": {
         "required": ["result"],
+        "properties": { "result": { "required": ["type", "access"], "properties": { "type": { "const": "uhp_capabilities" } } } }
+      },
+      "then": { "properties": { "result": {
+        "required": ["methods"],
+        "properties": {
+          "methods": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+          "access": { "$ref": "#/$defs/effectiveAccess" }
+        }
+      } } }
+    },
+    {
+      "if": {
+        "required": ["result"],
         "properties": {
           "result": {
             "type": "object",
@@ -32,6 +45,23 @@
     }
   ],
   "$defs": {
+    "effectiveAccess": {
+      "description": "Access-only endpoint authority. The owner endpoint omits this field; unknown additive fields remain valid. allowed_methods is a subset of methods enforced by the gateway.",
+      "type": "object",
+      "required": ["mode", "allowed_methods", "limits"],
+      "properties": {
+        "mode": { "enum": ["read_only", "control"] },
+        "allowed_methods": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "limits": {
+          "type": "object",
+          "required": ["connections", "requests_per_minute"],
+          "properties": {
+            "connections": { "type": "integer", "minimum": 1 },
+            "requests_per_minute": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
     "agentWaitResult": {
       "type": "object",
       "additionalProperties": false,
