@@ -399,6 +399,8 @@ pub fn capabilities(event_sequence: u64) -> Value {
             "event_wait_timeout_s":super::topology::MAX_EVENT_WAIT_S,
             "layout_depth":super::topology::MAX_LAYOUT_DEPTH,
             "workspace_move_block":super::topology::MAX_WORKSPACE_MOVE_BLOCK,
+            "task_title_bytes":crate::orch::MAX_TASK_TITLE_BYTES,
+            "task_prompt_bytes":crate::orch::MAX_TASK_PROMPT_BYTES,
             "automations":crate::automation::MAX_AUTOMATIONS,
             "automation_runs":crate::automation::MAX_RUNS,
             "automation_prompt_bytes":crate::automation::MAX_PROMPT_BYTES,
@@ -459,6 +461,14 @@ mod tests {
         let capabilities = capabilities(0);
         assert_eq!(capabilities["limits"]["terminal_stream_capacity"], 8);
         assert_eq!(capabilities["limits"]["terminal_stream_queue"], 2);
+        assert_eq!(
+            capabilities["limits"]["task_title_bytes"],
+            crate::orch::MAX_TASK_TITLE_BYTES
+        );
+        assert_eq!(
+            capabilities["limits"]["task_prompt_bytes"],
+            crate::orch::MAX_TASK_PROMPT_BYTES
+        );
         assert!(is_idempotent("pane.list"));
         assert!(!is_read_only("mission.open"));
         assert_eq!(required_scope("mission.open"), "workspace");

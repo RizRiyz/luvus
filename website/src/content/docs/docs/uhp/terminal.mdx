@@ -94,6 +94,12 @@ combined observe/control streams. Slow clients receive best-effort
 `terminal.resync_required` and disconnect. Treat EOF the same way and reconnect
 for a fresh initial frame.
 
+Frames are complete replacements. Their `content_revision` identifies the
+captured text, and the sender advances its cursor to that revision only after
+writing the frame successfully. Output arriving during the initial or a later
+write remains eligible for delivery, even when the child then becomes quiet.
+The acknowledgment revision does not mean that output has already been emitted.
+
 `terminal.backend.control` has the same output stream and accepts correlated
 action frames after its acknowledgment:
 
