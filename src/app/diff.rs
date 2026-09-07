@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
@@ -595,7 +596,7 @@ impl App {
     pub(crate) fn load_diff_file_sync(
         &mut self,
         file: &crate::diff::DiffFile,
-    ) -> Result<crate::diff::model::FileDiff, String> {
+    ) -> Result<Arc<crate::diff::model::FileDiff>, String> {
         let root = self
             .diff
             .snapshot
@@ -607,9 +608,9 @@ impl App {
         if let Some(cached) = self.diff.cache_get(&file.key, context, &file.fingerprint) {
             return Ok(cached);
         }
-        let loaded = crate::diff::git::load_diff(&root, file, context)?;
+        let loaded = Arc::new(crate::diff::git::load_diff(&root, file, context)?);
         self.diff
-            .cache_insert(context, file.fingerprint.clone(), loaded.clone());
+            .cache_insert(context, file.fingerprint.clone(), Arc::clone(&loaded));
         Ok(loaded)
     }
 
@@ -739,14 +740,14 @@ impl App {
             let result = file
                 .ok_or_else(|| "change disappeared before the diff loaded".to_string())
                 .and_then(|file| {
-                    cached.map_or_else(|| crate::diff::git::load_diff(&root, &file, context), Ok)
+                    cached.map_or_else(
+                        || crate::diff::git::load_diff(&root, &file, context).map(Arc::new),
+                        Ok,
+                    )
                 })
                 .map(|diff| {
                     crate::diff::notes::reconcile(&mut notes, &diff);
-                    crate::diff::LoadedDiff {
-                        diff,
-                        reconciled_notes: notes,
-                    }
+                    crate::diff::LoadedDiff::prepare(diff, notes)
                 });
             let _ = tx.send(AppEvent::DiffLoaded { id, token, result });
         });
@@ -777,11 +778,12 @@ impl App {
             Ok(loaded) => {
                 let diff = loaded.diff;
                 reconciled = loaded.reconciled_notes;
-                view.stack_rows = crate::diff::rows::stack_rows(&diff);
-                view.split_rows = crate::diff::rows::split_rows(&diff);
-                view.rebuild_row_indices();
-                cache = Some(diff.clone());
-                DiffLoad::Ready(Box::new(diff))
+                view.stack_rows = loaded.stack_rows;
+                view.split_rows = loaded.split_rows;
+                view.stack_indices = loaded.stack_indices;
+                view.split_indices = loaded.split_indices;
+                cache = Some(Arc::clone(&diff));
+                DiffLoad::Ready(diff)
             }
             Err(error) if view.key.layer == crate::diff::DiffLayer::Conflict => {
                 DiffLoad::Conflict(error)
@@ -1069,12 +1071,7 @@ impl App {
             .find(|(pane, _)| *pane == id)
             .map(|(_, rect)| rect.width)
             .unwrap_or(120);
-        let split = !view.wrap
-            && match view.preference {
-                crate::diff::DiffLayoutPreference::Stack => false,
-                crate::diff::DiffLayoutPreference::Split => width >= 96,
-                crate::diff::DiffLayoutPreference::Auto => width >= 96,
-            };
+        let split = view.effective_split(width);
         if split {
             let anchor = view.stack_rows.get(view.selected).and_then(source_anchor)?;
             let row = view.split_rows.iter().find(|row| {
@@ -1084,11 +1081,11 @@ impl App {
             let preferred = match view.selected_side {
                 crate::diff::DiffSide::Old => row.old.as_ref().and_then(|line| {
                     line.old_line
-                        .map(|number| (crate::diff::DiffSide::Old, number, line.text.clone()))
+                        .map(|number| (crate::diff::DiffSide::Old, number, line.text.to_string()))
                 }),
                 crate::diff::DiffSide::New => row.new.as_ref().and_then(|line| {
                     line.new_line
-                        .map(|number| (crate::diff::DiffSide::New, number, line.text.clone()))
+                        .map(|number| (crate::diff::DiffSide::New, number, line.text.to_string()))
                 }),
             };
             if preferred.is_some() {
@@ -1098,12 +1095,13 @@ impl App {
                 .as_ref()
                 .and_then(|line| {
                     line.new_line
-                        .map(|number| (crate::diff::DiffSide::New, number, line.text.clone()))
+                        .map(|number| (crate::diff::DiffSide::New, number, line.text.to_string()))
                 })
                 .or_else(|| {
                     row.old.as_ref().and_then(|line| {
-                        line.old_line
-                            .map(|number| (crate::diff::DiffSide::Old, number, line.text.clone()))
+                        line.old_line.map(|number| {
+                            (crate::diff::DiffSide::Old, number, line.text.to_string())
+                        })
                     })
                 })
         } else {
@@ -1111,18 +1109,18 @@ impl App {
             match view.selected_side {
                 crate::diff::DiffSide::Old => line
                     .old_line
-                    .map(|number| (crate::diff::DiffSide::Old, number, line.text.clone())),
+                    .map(|number| (crate::diff::DiffSide::Old, number, line.text.to_string())),
                 crate::diff::DiffSide::New => line
                     .new_line
-                    .map(|number| (crate::diff::DiffSide::New, number, line.text.clone())),
+                    .map(|number| (crate::diff::DiffSide::New, number, line.text.to_string())),
             }
             .or_else(|| {
                 line.new_line
-                    .map(|number| (crate::diff::DiffSide::New, number, line.text.clone()))
+                    .map(|number| (crate::diff::DiffSide::New, number, line.text.to_string()))
             })
             .or_else(|| {
                 line.old_line
-                    .map(|number| (crate::diff::DiffSide::Old, number, line.text.clone()))
+                    .map(|number| (crate::diff::DiffSide::Old, number, line.text.to_string()))
             })
         }
     }
@@ -1659,11 +1657,14 @@ impl App {
             .map(|(_, rect)| rect.width)
             .unwrap_or(80);
         let marker_style = self.config.layout.diff_marker_style;
-        let is_split = {
+        let (is_split, wraps_lines) = {
             let Some(ViewKind::Diff(view)) = self.views.get(&id) else {
                 return false;
             };
-            view.effective_split(pane_width)
+            (
+                view.effective_split(pane_width),
+                view.effective_wrap(pane_width),
+            )
         };
 
         enum Deferred {
@@ -1811,19 +1812,22 @@ impl App {
                     KeyCode::Char('G') | KeyCode::End => view.selected = max,
                     KeyCode::Left => view.selected_side = crate::diff::DiffSide::Old,
                     KeyCode::Right => view.selected_side = crate::diff::DiffSide::New,
-                    KeyCode::Char('h') => view.horizontal = view.horizontal.saturating_sub(8),
-                    KeyCode::Char('l') => view.horizontal = view.horizontal.saturating_add(8),
+                    KeyCode::Char('h') if !is_split && !wraps_lines => {
+                        view.horizontal = view.horizontal.saturating_sub(8)
+                    }
+                    KeyCode::Char('l') if !is_split && !wraps_lines => {
+                        view.horizontal = view.horizontal.saturating_add(8)
+                    }
+                    KeyCode::Char('h' | 'l') => {}
                     KeyCode::Char('s') => {
-                        // When Auto resolves to Split (wide enough, no wrap),
+                        // When Auto resolves to Split at this viewport width,
                         // skip directly to Stack so the user doesn't need to
                         // press 's' twice to see a visual change.
-                        let was_effectively_split = !view.wrap
-                            && matches!(
-                                view.preference,
-                                crate::diff::DiffLayoutPreference::Split
-                                    | crate::diff::DiffLayoutPreference::Auto
-                            )
-                            && pane_width >= 96;
+                        let was_effectively_split = matches!(
+                            view.preference,
+                            crate::diff::DiffLayoutPreference::Split
+                                | crate::diff::DiffLayoutPreference::Auto
+                        ) && pane_width >= 96;
                         if was_effectively_split
                             && view.preference == crate::diff::DiffLayoutPreference::Auto
                         {
@@ -2605,7 +2609,7 @@ mod tests {
         view.split_rows = split_rows;
         view.rebuild_row_indices();
         view.horizontal = usize::MAX;
-        view.load = DiffLoad::Ready(Box::new(file_diff));
+        view.load = DiffLoad::Ready(Arc::new(file_diff));
 
         let mut terminal = Terminal::new(TestBackend::new(180, 40)).unwrap();
         terminal
@@ -2783,7 +2787,7 @@ mod tests {
         view.split_rows = crate::diff::rows::split_rows(&file_diff);
         view.selected_side = crate::diff::DiffSide::New;
         view.rebuild_row_indices();
-        view.load = DiffLoad::Ready(Box::new(file_diff));
+        view.load = DiffLoad::Ready(Arc::new(file_diff));
         app.pane_content_rects = vec![(id, Rect::new(0, 0, 120, 4))];
 
         assert!(app.handle_event(AppEvent::Mouse(MouseEvent {
@@ -2840,7 +2844,7 @@ mod tests {
         view.preference = crate::diff::DiffLayoutPreference::Stack;
         view.stack_rows = stack_rows;
         view.split_rows = split_rows;
-        view.load = DiffLoad::Ready(Box::new(file_diff));
+        view.load = DiffLoad::Ready(Arc::new(file_diff));
         app.diff.notes.push(crate::diff::ReviewNote {
             id: "clicked-note".into(),
             review_id: "review".into(),
