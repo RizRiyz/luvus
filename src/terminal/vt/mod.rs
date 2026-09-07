@@ -422,6 +422,18 @@ pub trait VtEngine: Send {
         false
     }
 
+    /// The images this pane's grid still refers to, for a terminal that has
+    /// never been told about them.
+    ///
+    /// A pane outlives the clients watching it, and the placeholder cells left
+    /// in its grid name images by id. A client attaching later is sent those
+    /// cells in its first frame, so it has to be sent these first or it is
+    /// asked to draw an image it never received. Unlike [`Self::take_graphics`]
+    /// this takes nothing away: the next client to attach needs them too.
+    fn retained_graphics(&self) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
+
     /// Latest window title set by the child via OSC 0/2, if any.
     fn title(&self) -> Option<String>;
 
