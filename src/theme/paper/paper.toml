@@ -1,0 +1,34 @@
+# Luvus semantic adaptation of Paper Theme's Alacritty palette by s6muel.
+# Source: https://github.com/s6muel/paper-theme
+# The palette builds on the original Paper theme by Yorick Peterse.
+# Upstream is licensed under the Mozilla Public License 2.0.
+
+schema = 1
+id = "paper"
+display_name = "Paper"
+description = "Warm notebook paper with black ink and restrained color."
+author = "s6muel and Yorick Peterse"
+license = "MPL-2.0"
+version = "1.0.0"
+requires_luvus = ">=0.13.4"
+appearance = "light"
+
+[colors]
+crust = "#fffdf5"
+mantle = "#f2eede"
+base = "#e9e5d7"
+surface0 = "#e0dccf"
+surface1 = "#d8d5c7"
+overlay0 = "#c8c4b7"
+overlay1 = "#aaaaaa"
+subtext0 = "#77746c"
+subtext1 = "#555555"
+text = "#000000"
+accent = "#1e6fcc"
+sel_bg = "#d8d5c7"
+border = "#c8c4b7"
+border_focus = "#1e6fcc"
+green = "#216609"
+mint = "#158c86"
+amber = "#b58900"
+coral = "#cc3e28"

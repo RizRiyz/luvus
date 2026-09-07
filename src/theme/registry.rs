@@ -251,27 +251,40 @@ impl ThemeRegistry {
         let mut entries = Vec::new();
         for id in theme::THEMES {
             let virtual_theme = *id == "terminal";
+            let bundled = super::builtin_file(id);
             entries.push(ThemeEntry {
                 id: (*id).to_string(),
-                display_name: display_name(id),
-                description: theme::describe(id).to_string(),
-                author: "Luvus".to_string(),
-                license: String::new(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                appearance: if virtual_theme {
-                    Appearance::Terminal
-                } else if matches!(*id, "sky" | "catppuccin-latte" | "gruvbox-light") {
-                    Appearance::Light
-                } else {
-                    Appearance::Dark
-                },
+                display_name: bundled
+                    .map(|file| file.display_name.clone())
+                    .unwrap_or_else(|| display_name(id)),
+                description: bundled
+                    .map(|file| file.description.clone())
+                    .unwrap_or_else(|| theme::describe(id).to_string()),
+                author: bundled
+                    .map(|file| file.author.clone())
+                    .unwrap_or_else(|| "Luvus".to_string()),
+                license: bundled.map(|file| file.license.clone()).unwrap_or_default(),
+                version: bundled
+                    .map(|file| file.version.clone())
+                    .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
+                appearance: bundled.map(|file| file.appearance).unwrap_or_else(|| {
+                    if virtual_theme {
+                        Appearance::Terminal
+                    } else if matches!(*id, "sky" | "catppuccin-latte" | "gruvbox-light") {
+                        Appearance::Light
+                    } else {
+                        Appearance::Dark
+                    }
+                }),
                 source: if virtual_theme {
                     ThemeSource::Virtual
                 } else {
                     ThemeSource::BuiltIn
                 },
                 extends: None,
-                theme: theme::by_name(id),
+                theme: bundled
+                    .and_then(|_| super::builtin_theme(id))
+                    .unwrap_or_else(|| theme::by_name(id)),
                 warnings: Vec::new(),
             });
         }
@@ -560,6 +573,68 @@ accent = "#222222"
             registry.index_of("mocha"),
             registry.index_of("catppuccin-mocha")
         );
+    }
+
+    #[test]
+    fn rose_pine_builtins_retain_upstream_attribution() {
+        let registry = ThemeRegistry::load_from(Path::new("/path/that/does/not/exist"));
+        for id in ["rose-pine", "rose-pine-moon", "rose-pine-dawn"] {
+            let entry = registry.get(id).expect("Rosé Pine theme is registered");
+            assert_eq!(entry.author, "Rosé Pine");
+            assert_eq!(entry.license, "MIT");
+        }
+        assert_eq!(registry.get("rose-pine").unwrap().display_name, "Rosé Pine");
+        assert_eq!(
+            registry.get("rose-pine-moon").unwrap().display_name,
+            "Rosé Pine Moon"
+        );
+        assert_eq!(
+            registry.get("rose-pine-dawn").unwrap().appearance,
+            Appearance::Light
+        );
+    }
+
+    #[test]
+    fn tokyo_night_builtin_retains_upstream_attribution() {
+        let registry = ThemeRegistry::load_from(Path::new("/path/that/does/not/exist"));
+        let entry = registry
+            .get("tokyo-night")
+            .expect("Tokyo Night theme is registered");
+        assert_eq!(entry.display_name, "Tokyo Night");
+        assert_eq!(entry.author, "Zak Hammerman and Enkia");
+        assert_eq!(entry.license, "MIT");
+        assert_eq!(entry.appearance, Appearance::Dark);
+    }
+
+    #[test]
+    fn baitong_builtin_retains_upstream_credit() {
+        let registry = ThemeRegistry::load_from(Path::new("/path/that/does/not/exist"));
+        let entry = registry
+            .get("baitong")
+            .expect("Baitong theme is registered");
+        assert_eq!(entry.display_name, "Baitong");
+        assert_eq!(entry.author, "cyphbt");
+        assert!(entry.license.is_empty());
+        assert_eq!(entry.appearance, Appearance::Dark);
+    }
+
+    #[test]
+    fn paper_builtins_retain_credit_and_light_contrast() {
+        let registry = ThemeRegistry::load_from(Path::new("/path/that/does/not/exist"));
+        for (id, author, license) in [
+            ("papercolor", "Nikyle Nguyen", "MIT"),
+            ("paper", "s6muel and Yorick Peterse", "MPL-2.0"),
+        ] {
+            let entry = registry.get(id).expect("paper theme is registered");
+            assert_eq!(entry.author, author);
+            assert_eq!(entry.license, license);
+            assert_eq!(entry.appearance, Appearance::Light);
+            let file = super::super::builtin_file(id).expect("paper theme file is embedded");
+            assert!(
+                file.warnings(&entry.theme).is_empty(),
+                "{id} must preserve readable text and distinct semantic colors"
+            );
+        }
     }
 
     #[test]

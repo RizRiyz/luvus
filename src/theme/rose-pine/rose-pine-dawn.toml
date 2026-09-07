@@ -1,0 +1,33 @@
+# Adapted from the official Rosé Pine Dawn palette.
+# https://github.com/rose-pine/rose-pine-theme
+# Copyright (c) 2023 Rosé Pine. Licensed under the MIT License.
+
+schema = 1
+id = "rose-pine-dawn"
+display_name = "Rosé Pine Dawn"
+description = "Light Rosé Pine with a rose accent."
+author = "Rosé Pine"
+license = "MIT"
+version = "1.0.0"
+requires_luvus = ">=0.13.4"
+appearance = "light"
+
+[colors]
+crust = "#fffaf3"
+mantle = "#faf4ed"
+base = "#f8f0e7"
+surface0 = "#f4ede8"
+surface1 = "#f2e9e1"
+overlay0 = "#dfdad9"
+overlay1 = "#cecacd"
+subtext0 = "#9893a5"
+subtext1 = "#797593"
+text = "#464261"
+accent = "#d7827e"
+sel_bg = "#dfdad9"
+border = "#cecacd"
+border_focus = "#797593"
+green = "#6d8f89"
+mint = "#56949f"
+amber = "#ea9d34"
+coral = "#b4637a"

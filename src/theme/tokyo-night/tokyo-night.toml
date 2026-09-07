@@ -1,0 +1,36 @@
+# Adapted from the standard Tokyo Night Alacritty palette, not Storm.
+# https://github.com/zatchheems/tokyo-night-alacritty-theme
+# Based on the original Tokyo Night palette by Enkia.
+# https://github.com/tokyo-night/tokyo-night-vscode-theme
+# Copyright (c) 2020 Zak Hammerman and (c) 2018-present Enkia.
+# Both upstream projects are licensed under the MIT License.
+
+schema = 1
+id = "tokyo-night"
+display_name = "Tokyo Night"
+description = "Deep Tokyo night surfaces with a clear blue accent."
+author = "Zak Hammerman and Enkia"
+license = "MIT"
+version = "1.0.0"
+requires_luvus = ">=0.13.4"
+appearance = "dark"
+
+[colors]
+crust = "#16161e"
+mantle = "#1a1b26"
+base = "#1f2335"
+surface0 = "#24283b"
+surface1 = "#292e42"
+overlay0 = "#32344a"
+overlay1 = "#444b6a"
+subtext0 = "#787c99"
+subtext1 = "#acb0d0"
+text = "#a9b1d6"
+accent = "#7aa2f7"
+sel_bg = "#292e42"
+border = "#32344a"
+border_focus = "#7da6ff"
+green = "#9ece6a"
+mint = "#0db9d7"
+amber = "#e0af68"
+coral = "#f7768e"

@@ -1,0 +1,32 @@
+# Luvus semantic adaptation of the Baitong color palette by cyphbt.
+# Source: https://github.com/cyphbt/baitong-theme
+# The original palette values are credited here without assigning a license.
+
+schema = 1
+id = "baitong"
+display_name = "Baitong"
+description = "Deep teal surfaces with neon green and magenta accents."
+author = "cyphbt"
+version = "1.0.0"
+requires_luvus = ">=0.13.4"
+appearance = "dark"
+
+[colors]
+crust = "#081b1b"
+mantle = "#112a2a"
+base = "#173838"
+surface0 = "#1d4646"
+surface1 = "#255454"
+overlay0 = "#326b6b"
+overlay1 = "#4b8585"
+subtext0 = "#6fa5a5"
+subtext1 = "#87cefa"
+text = "#33ff33"
+accent = "#ff00ff"
+sel_bg = "#254d32"
+border = "#326b6b"
+border_focus = "#ff66ff"
+green = "#33ff33"
+mint = "#68fdfe"
+amber = "#1ae642"
+coral = "#f77272"
