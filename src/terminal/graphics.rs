@@ -26,10 +26,12 @@
 
 pub(crate) mod placeholder;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
-/// Whether the terminal displaying any attached client can draw images.
+use crate::terminal::theme_probe::CellSize;
+
+/// What the terminals displaying the attached clients can do with an image.
 ///
 /// One value is shared by every pane rather than copied into each, because it
 /// describes the clients, not the pane. A child asks whether graphics work
@@ -37,8 +39,8 @@ use std::sync::Arc;
 /// to be correct at that instant — a pane created between two clients
 /// attaching must not be left believing something the others do not.
 ///
-/// Panes stay honest when this is false: a query is declined, as it is when
-/// Luvus is built without a client that can draw at all.
+/// Panes stay honest when nothing here is known: a support query is declined,
+/// and a pane reports no pixel size rather than a made-up one.
 #[derive(Clone, Debug, Default)]
 pub struct HostGraphics(Arc<HostGraphicsState>);
 
@@ -49,6 +51,10 @@ struct HostGraphicsState {
     /// one atomic load whether it is worth walking the panes at all, instead
     /// of locking every engine on every frame to find nothing.
     pending: AtomicBool,
+    /// Cell width and height in pixels, packed into one word so a pane reads a
+    /// consistent pair rather than a width from one client and a height from
+    /// another. Zero means no client has reported one.
+    cell_size: AtomicU32,
 }
 
 impl HostGraphics {
@@ -58,6 +64,26 @@ impl HostGraphics {
 
     pub(crate) fn set(&self, supported: bool) {
         self.0.supported.store(supported, Ordering::Relaxed);
+    }
+
+    /// Pixel size of one cell, as reported by the terminal showing a client.
+    ///
+    /// A program that draws an image asks its pane how many pixels it has, and
+    /// the pane can only answer if it knows this. `None` means no attached
+    /// client's terminal reported one, and the pane says so rather than
+    /// guessing — a made-up size renders an image at the wrong scale.
+    pub(crate) fn cell_size(&self) -> Option<CellSize> {
+        let packed = self.0.cell_size.load(Ordering::Relaxed);
+        CellSize::unpack(packed)
+    }
+
+    /// Record a cell size, returning whether it changed.
+    ///
+    /// Panes carry this in their window size, which only changes when they are
+    /// told to, so the caller has to know when to tell them.
+    pub(crate) fn set_cell_size(&self, cell_size: Option<CellSize>) -> bool {
+        let packed = cell_size.map_or(0, CellSize::pack);
+        self.0.cell_size.swap(packed, Ordering::Relaxed) != packed
     }
 
     pub(crate) fn mark_pending(&self) {

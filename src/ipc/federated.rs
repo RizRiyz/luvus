@@ -516,6 +516,7 @@ fn negotiate_local(
         &ClientMessage::TerminalProbe {
             colors: probe.colors.clone(),
             graphics: Some(false),
+            cell_size: None,
         },
     )?;
     protocol::write_message(writer, &super::client::cell_pixels_message())?;
@@ -1546,6 +1547,7 @@ fn handle_surface_message(
                     control.send(&ClientMessage::TerminalProbe {
                         colors: None,
                         graphics: Some(false),
+                        cell_size: None,
                     })?;
                     control.send(&super::client::cell_pixels_message())?;
                     control.send(&ClientMessage::ShellDockLayout(layout))?;

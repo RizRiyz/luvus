@@ -383,6 +383,7 @@ fn verify_endpoint_with_mode(
                         task.control.send(&ClientMessage::TerminalProbe {
                             colors: None,
                             graphics: Some(false),
+                            cell_size: None,
                         })?;
                         task.control.send(&ClientMessage::CellPixels {
                             cell_width_px: 0,
