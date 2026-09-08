@@ -784,7 +784,7 @@ fn handle_link_event(
             }) {
                 *warm = None;
             }
-            if matches!(active, Endpoint::Remote { machine_id: id, .. } if id == &machine_id) {
+            if invalidate_remote_surface(active, &machine_id) {
                 replace_candidate_with_local(candidate, |endpoint| {
                     close_remote(endpoint, machines)
                 });
@@ -1579,14 +1579,19 @@ fn send_surface(
             machine_id,
             channel_id,
             ..
-        } => machines
-            .get(machine_id)
-            .and_then(|machine| machine.control.as_ref())
-            .ok_or_else(|| anyhow!("active machine link is unavailable"))?
-            .send(&fleet::ClientMessage::Surface {
-                channel_id: *channel_id,
-                message: message.clone(),
-            }),
+        } => {
+            if *channel_id == 0 {
+                return Err(anyhow!("remote surface is no longer available"));
+            }
+            machines
+                .get(machine_id)
+                .and_then(|machine| machine.control.as_ref())
+                .ok_or_else(|| anyhow!("active machine link is unavailable"))?
+                .send(&fleet::ClientMessage::Surface {
+                    channel_id: *channel_id,
+                    message: message.clone(),
+                })
+        }
     }
 }
 
@@ -1620,6 +1625,9 @@ fn close_remote(endpoint: &Endpoint, machines: &HashMap<String, MachineRuntime>)
         ..
     } = endpoint
     {
+        if *channel_id == 0 {
+            return;
+        }
         if let Some(control) = machines
             .get(machine_id)
             .and_then(|machine| machine.control.as_ref())
@@ -1628,6 +1636,23 @@ fn close_remote(endpoint: &Endpoint, machines: &HashMap<String, MachineRuntime>)
                 channel_id: *channel_id,
             });
         }
+    }
+}
+
+/// Keep the last remote frame displayed during local failover, but retire its
+/// transport route immediately. Channel zero is reserved for an unopened
+/// selection and can never be reused or sent through a replacement link.
+fn invalidate_remote_surface(endpoint: &mut Endpoint, disconnected_machine: &str) -> bool {
+    match endpoint {
+        Endpoint::Remote {
+            machine_id,
+            channel_id,
+            ..
+        } if machine_id == disconnected_machine => {
+            *channel_id = 0;
+            true
+        }
+        _ => false,
     }
 }
 
@@ -2157,5 +2182,43 @@ mod tests {
 
         assert!(!warm_surface_matches(&stale, &endpoint, &machines));
         assert!(warm_surface_matches(&current, &endpoint, &machines));
+    }
+
+    #[test]
+    fn disconnected_active_surface_cannot_gain_the_replacement_generation() {
+        let profile = MachineProfile::new("box".into(), "box".into());
+        let machines = HashMap::from([(
+            profile.id.clone(),
+            MachineRuntime {
+                profile,
+                state: MachineState::Online,
+                generation: 2,
+                control: None,
+                reader: None,
+                backoff: Duration::from_secs(1),
+                sessions: Vec::new(),
+            },
+        )]);
+        let requested = Endpoint::Remote {
+            machine_id: "box".into(),
+            channel_id: 0,
+            session: "default".into(),
+        };
+        let mut stale_active = Endpoint::Remote {
+            machine_id: "box".into(),
+            channel_id: 41,
+            session: "default".into(),
+        };
+
+        assert!(invalidate_remote_surface(&mut stale_active, "box"));
+        let stamped_after_reconnect = WarmSurface {
+            endpoint: stale_active,
+            generation: 2,
+        };
+        assert!(!warm_surface_matches(
+            &stamped_after_reconnect,
+            &requested,
+            &machines
+        ));
     }
 }
