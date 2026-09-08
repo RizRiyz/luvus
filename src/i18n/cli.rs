@@ -431,6 +431,127 @@ static HELP: &[Translation] = &[
         "세션:"
     ),
     tr!(
+        "machines:",
+        "máquinas:",
+        "máquinas:",
+        "machines :",
+        "Maschinen:",
+        "mesin:",
+        "机器：",
+        "マシン：",
+        "머신:"
+    ),
+    tr!(
+        "Save, inspect, and open Luvus machines over SSH",
+        "Guardar, inspeccionar y abrir máquinas Luvus mediante SSH",
+        "Salvar, inspecionar e abrir máquinas Luvus por SSH",
+        "Enregistrer, inspecter et ouvrir des machines Luvus via SSH",
+        "Luvus-Maschinen über SSH speichern, prüfen und öffnen",
+        "Simpan, periksa, dan buka mesin Luvus melalui SSH",
+        "通过 SSH 保存、检查并打开 Luvus 机器",
+        "SSH 経由で Luvus マシンを保存、検査、接続",
+        "SSH로 Luvus 머신을 저장하고 검사하고 열기"
+    ),
+    tr!(
+        "validate and save one SSH machine",
+        "validar y guardar una máquina SSH",
+        "validar e salvar uma máquina SSH",
+        "valider et enregistrer une machine SSH",
+        "eine SSH-Maschine prüfen und speichern",
+        "validasi dan simpan satu mesin SSH",
+        "验证并保存一台 SSH 机器",
+        "SSH マシンを検証して保存",
+        "SSH 머신 하나를 검증하고 저장"
+    ),
+    tr!(
+        "list saved machine profiles and catalog revision",
+        "listar perfiles de máquina guardados y la revisión del catálogo",
+        "listar perfis de máquina salvos e a revisão do catálogo",
+        "lister les profils de machine enregistrés et la révision du catalogue",
+        "gespeicherte Maschinenprofile und Katalogrevision auflisten",
+        "tampilkan profil mesin tersimpan dan revisi katalog",
+        "列出已保存的机器配置和目录修订版本",
+        "保存済みマシンプロファイルとカタログのリビジョンを一覧表示",
+        "저장된 머신 프로필과 카탈로그 리비전 나열"
+    ),
+    tr!(
+        "show one saved profile",
+        "mostrar un perfil guardado",
+        "mostrar um perfil salvo",
+        "afficher un profil enregistré",
+        "ein gespeichertes Profil anzeigen",
+        "tampilkan satu profil tersimpan",
+        "显示一个已保存的配置",
+        "保存済みプロファイルを表示",
+        "저장된 프로필 하나 표시"
+    ),
+    tr!(
+        "rename a profile with optional revision protection",
+        "renombrar un perfil con protección de revisión opcional",
+        "renomear um perfil com proteção de revisão opcional",
+        "renommer un profil avec une protection de révision facultative",
+        "ein Profil mit optionalem Revisionsschutz umbenennen",
+        "ganti nama profil dengan perlindungan revisi opsional",
+        "重命名配置，可选择启用修订版本保护",
+        "オプションのリビジョン保護付きでプロファイル名を変更",
+        "선택적 리비전 보호로 프로필 이름 변경"
+    ),
+    tr!(
+        "enable after a bounded SSH probe, or disable locally",
+        "habilitar tras una prueba SSH acotada o deshabilitar localmente",
+        "habilitar após uma sondagem SSH limitada ou desabilitar localmente",
+        "activer après une vérification SSH bornée ou désactiver localement",
+        "nach einer begrenzten SSH-Prüfung aktivieren oder lokal deaktivieren",
+        "aktifkan setelah pemeriksaan SSH terbatas atau nonaktifkan secara lokal",
+        "在有限 SSH 探测后启用，或在本地禁用",
+        "制限付き SSH プローブ後に有効化、またはローカルで無効化",
+        "제한된 SSH 검사 후 활성화하거나 로컬에서 비활성화"
+    ),
+    tr!(
+        "remove only the local profile; remote panes stay alive",
+        "eliminar solo el perfil local; los paneles remotos siguen activos",
+        "remover apenas o perfil local; os painéis remotos continuam ativos",
+        "supprimer uniquement le profil local ; les volets distants restent actifs",
+        "nur das lokale Profil entfernen; entfernte Panes bleiben aktiv",
+        "hapus hanya profil lokal; pane jarak jauh tetap aktif",
+        "仅删除本地配置；远程窗格保持运行",
+        "ローカルプロファイルのみ削除し、リモートペインは稼働を継続",
+        "로컬 프로필만 제거하며 원격 창은 계속 실행"
+    ),
+    tr!(
+        "run one bounded non-interactive capability probe",
+        "ejecutar una prueba de capacidades no interactiva y acotada",
+        "executar uma sondagem de recursos não interativa e limitada",
+        "exécuter une vérification de capacité non interactive et bornée",
+        "eine begrenzte nicht interaktive Funktionsprüfung ausführen",
+        "jalankan satu pemeriksaan kemampuan noninteraktif terbatas",
+        "运行一次有限的非交互式能力探测",
+        "制限付きの非対話型機能プローブを実行",
+        "제한된 비대화형 기능 검사 실행"
+    ),
+    tr!(
+        "list named sessions through bounded SSH",
+        "listar sesiones con nombre mediante SSH acotado",
+        "listar sessões nomeadas por SSH limitado",
+        "lister les sessions nommées via une connexion SSH bornée",
+        "benannte Sitzungen über begrenztes SSH auflisten",
+        "tampilkan sesi bernama melalui SSH terbatas",
+        "通过有限 SSH 列出命名会话",
+        "制限付き SSH 経由で名前付きセッションを一覧表示",
+        "제한된 SSH를 통해 이름 있는 세션 나열"
+    ),
+    tr!(
+        "attach using the verified absolute remote binary",
+        "conectar usando el binario remoto absoluto verificado",
+        "conectar usando o binário remoto absoluto verificado",
+        "se connecter avec le binaire distant absolu vérifié",
+        "mit der geprüften absoluten Remote-Binärdatei verbinden",
+        "sambungkan menggunakan biner jarak jauh absolut yang terverifikasi",
+        "使用已验证的远程二进制绝对路径连接",
+        "検証済みの絶対パスのリモートバイナリで接続",
+        "검증된 절대 경로의 원격 바이너리로 연결"
+    ),
+    tr!(
         "remote:",
         "remoto:",
         "remoto:",

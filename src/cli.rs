@@ -4268,6 +4268,8 @@ mod tests {
                             | "task"
                             | "automation"
                             | "integration"
+                            | "machine"
+                            | "uhp"
                     )
                 ) && !trimmed.contains("  ");
                 if trimmed.is_empty()
