@@ -7,6 +7,7 @@ pub(crate) static BUILTINS: &[&AgentDescriptor] = &[
     &super::antigravity::DESCRIPTOR,
     &super::aider::DESCRIPTOR,
     &super::opencode::DESCRIPTOR,
+    &super::opencode2::DESCRIPTOR,
     &super::copilot::DESCRIPTOR,
     &super::kimi::DESCRIPTOR,
     &super::qwen::DESCRIPTOR,
@@ -150,6 +151,11 @@ mod tests {
         assert!(!kilo.supports(AutomationAccess::ReadOnly));
         assert!(!kilo.supports(AutomationAccess::Workspace));
         assert!(kilo.supports(AutomationAccess::FullAccess));
+
+        let opencode2 = find("opencode2").unwrap().automation.unwrap();
+        assert!(!opencode2.supports(AutomationAccess::ReadOnly));
+        assert!(!opencode2.supports(AutomationAccess::Workspace));
+        assert!(opencode2.supports(AutomationAccess::FullAccess));
     }
 
     #[test]
@@ -215,6 +221,7 @@ mod tests {
             ("antigravity", &["antigravity-cli"][..], &["agy"][..]),
             ("aider", &["aider"][..], &[][..]),
             ("opencode", &["opencode"][..], &[][..]),
+            ("opencode2", &["opencode2"][..], &[][..]),
             ("copilot", &["copilot"][..], &[][..]),
             ("kimi", &["kimi"][..], &[][..]),
             ("qwen", &["qwen"][..], &[][..]),
@@ -261,6 +268,7 @@ mod tests {
                 "gemini",
                 "antigravity",
                 "opencode",
+                "opencode2",
                 "copilot",
                 "kimi",
                 "qwen",

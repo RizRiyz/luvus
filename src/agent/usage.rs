@@ -186,7 +186,8 @@ pub fn session_usage(agent: &str, cwd: &Path, session_id: &str) -> Option<AgentU
         "fx" => fx_usage(&fx_dir(&fx::sessions::base(), session_id)),
         // These agents currently expose identity/state but no stable,
         // structured, per-session usage store Luvus can read safely.
-        "aider" | "antigravity" | "kilo" | "kiro" | "cursor" | "amp" | "droid" | "opencode" => None,
+        "aider" | "antigravity" | "kilo" | "kiro" | "cursor" | "amp" | "droid" | "opencode"
+        | "opencode2" => None,
         _ => None, // manifest-defined agents degrade honestly too.
     }
 }
@@ -885,6 +886,7 @@ mod tests {
             "cursor-agent",
             "amp",
             "droid",
+            "opencode2",
             "custom",
         ] {
             assert!(session_usage(agent, Path::new("/work"), "session").is_none());

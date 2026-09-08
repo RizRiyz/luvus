@@ -93,6 +93,7 @@ Keyboard → Keyboard Shortcuts → Input Sources** to free `Ctrl+Space`.
 | Codex | ✓ | ✓ | ✓ |
 | Antigravity CLI | ✓ | ✓ | session only |
 | opencode | ✓ | ✓ | ✓ |
+| OpenCode 2 Preview | ✓ | exact-ID resume | No |
 | Kimi | ✓ | ✓ | ✓ |
 | Grok | ✓ | ✓ | ✓ |
 | Hermes CLI | ✓ | ✓ with integration | session only |

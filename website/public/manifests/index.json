@@ -3,6 +3,7 @@
     "antigravity.toml",
     "claude.toml",
     "gemini.toml",
-    "kilo.toml"
+    "kilo.toml",
+    "opencode2.toml"
   ]
 }

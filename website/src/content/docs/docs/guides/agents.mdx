@@ -10,8 +10,9 @@ back after a restart, all without wrapping or modifying the agents themselves.
 ## The AGENTS sidebar
 
 Every pane running a recognized agent (Claude Code, Copilot, Codex, opencode,
-Kimi, Grok, Hermes CLI, Muse Code, Pi, Oh My Pi (OMP), Cursor, Gemini, Qwen,
-Kilo Code, Kiro, Aider, Amp, Droid, or fx) appears in the sidebar with a live state:
+OpenCode 2 Preview, Kimi, Grok, Hermes CLI, Muse Code, Pi, Oh My Pi (OMP),
+Cursor, Gemini, Qwen, Kilo Code, Kiro, Aider, Amp, Droid, or fx) appears in the
+sidebar with a live state:
 
 | State | Meaning | How it's detected |
 |---|---|---|
@@ -70,6 +71,7 @@ Click a session row to select it and update the Selected Agent panel. Use
 | Codex | rollout token counters |
 | GitHub Copilot CLI | session shutdown metrics |
 | opencode | selected-session integration events |
+| OpenCode 2 Preview | unavailable until an exact structured counter is exposed |
 | Kimi | session status records |
 | Grok | completed-turn usage records |
 | Pi | assistant message usage |
@@ -77,10 +79,10 @@ Click a session row to select it and update the Selected Agent panel. Use
 | Gemini and Qwen | project chat records |
 | fx | session usage snapshot |
 
-Aider, Kilo Code, Kiro, Cursor, Amp, Droid, Muse, and manifest-defined agents still receive live
-identity and state detection, but show `—` for usage until they expose a stable
-per-session counter or report one through an integration. Luvus never estimates
-tokens from transcript text.
+Aider, OpenCode 2 Preview, Kilo Code, Kiro, Cursor, Amp, Droid, Muse, and
+manifest-defined agents still receive live identity and state detection, but
+show `—` for usage until they expose a stable per-session counter or report one
+through an integration. Luvus never estimates tokens from transcript text.
 
 Usage parsing runs off the render path only when Mission Control becomes active,
 its scope changes, or you choose **Refresh**. A hidden dashboard schedules no
@@ -133,6 +135,7 @@ not sufficient, and Luvus runs the agent's own resume command:
 | Codex | its rollout files |
 | Antigravity CLI | its workspace conversation cache (`~/.gemini/antigravity-cli/cache/last_conversations.json`) |
 | opencode | its session storage, plus exact live ownership from the optional integration |
+| OpenCode 2 Preview | `opencode2 --session <id>` when the exact ID is already known |
 | Kimi | its session index (`~/.kimi-code/session_index.jsonl`) |
 | Grok | its session directory (`~/.grok/sessions`) |
 | Hermes CLI | its exact session report from the optional integration |
@@ -144,6 +147,11 @@ not sufficient, and Luvus runs the agent's own resume command:
 | fx | its session store (`~/.fx/sessions`) |
 | Cursor | resume command (when the session id is known) |
 | Kilo Code | `kilo --session <id>` (when the exact session id is known) |
+
+OpenCode 2 Preview runs beside OpenCode V1 under the distinct `opencode2`
+executable. Luvus does not scan the V2 service's live SQLite database or reuse
+the V1 TUI plugin. Exact-ID resume remains available, and scheduled V2 work is
+offered only for explicit **Full access** through `opencode2 run --auto`.
 
 You'll also see **recent sessions** listed at the bottom of the AGENTS sidebar
 (toggle *All*): click one to reopen it into a new pane, even sessions from

@@ -447,6 +447,8 @@ surface:
   detection remains authoritative for agent state.
 - For OpenCode, `luvus integration install opencode` adds exact TUI-local root
   session ownership and structured usage. Without it, usage stays unavailable.
+- OpenCode 2 Preview is a separate `opencode2` agent. Do not install the
+  OpenCode V1 integration for it or infer session IDs from its live database.
 - For Hermes, `luvus integration install hermes` adds exact per-pane session
   ownership for restart resume. Detection remains native, but Luvus does not
   scan Hermes's private history store.

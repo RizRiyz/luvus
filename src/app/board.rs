@@ -3319,6 +3319,7 @@ mod tests {
             ("muse", "muse"),
             ("omp", "omp"),
             ("opencode", "opencode --prompt"),
+            ("opencode2", "opencode2 --prompt"),
             ("pi", "pi"),
             ("qwen", "qwen --prompt-interactive"),
         ];
@@ -3346,6 +3347,12 @@ mod tests {
         );
         assert!(agent_automation_command("kilo", AutomationAccess::ReadOnly).is_err());
         assert!(agent_automation_command("kilo", AutomationAccess::Workspace).is_err());
+        assert_eq!(
+            agent_automation_command("opencode2", AutomationAccess::FullAccess).unwrap(),
+            "opencode2 run --auto"
+        );
+        assert!(agent_automation_command("opencode2", AutomationAccess::ReadOnly).is_err());
+        assert!(agent_automation_command("opencode2", AutomationAccess::Workspace).is_err());
         assert!(agent_automation_command("aider", AutomationAccess::Workspace).is_err());
         assert!(agent_automation_command("antigravity", AutomationAccess::Workspace).is_err());
 

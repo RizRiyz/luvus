@@ -544,7 +544,7 @@ fn host_commands(host: SkillHost) -> &'static [&'static str] {
             "kilo",
             "kilocode",
         ],
-        SkillHost::Opencode => &["opencode"],
+        SkillHost::Opencode => &["opencode", "opencode2"],
         SkillHost::Kimi => &["kimi"],
         SkillHost::Grok => &["grok"],
         SkillHost::Qwen => &["qwen"],
@@ -1125,6 +1125,10 @@ mod tests {
         assert_eq!(
             target_dir_at(SkillHost::Opencode, home, Some(Path::new("/xdg/config"))),
             PathBuf::from("/xdg/config/opencode/skills/luvus")
+        );
+        assert_eq!(
+            host_commands(SkillHost::Opencode),
+            ["opencode", "opencode2"]
         );
         assert_eq!(
             target_dir_at(SkillHost::Kimi, home, None),

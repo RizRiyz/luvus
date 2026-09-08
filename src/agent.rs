@@ -33,6 +33,7 @@ pub(crate) mod kiro;
 pub(crate) mod muse;
 pub(crate) mod omp;
 pub(crate) mod opencode;
+pub(crate) mod opencode2;
 pub(crate) mod pi;
 pub(crate) mod qwen;
 pub(crate) mod registry;
@@ -369,6 +370,10 @@ mod tests {
         assert!(resume_command("opencode", "ses_1")
             .unwrap()
             .contains("opencode --session"));
+        assert_eq!(
+            resume_command("opencode2", "ses_2").as_deref(),
+            Some("opencode2 --session 'ses_2'\r")
+        );
         // Aliases + resume-only agents resolve through the registry.
         assert!(resume_command("codex", "c1")
             .unwrap()
@@ -397,7 +402,12 @@ mod tests {
             resume_command("kilocode", "ses_123").as_deref(),
             Some("kilo --session 'ses_123'\r")
         );
-        assert!(is_resumable("opencode") && is_resumable("cursor-agent") && is_resumable("kilo"));
+        assert!(
+            is_resumable("opencode")
+                && is_resumable("opencode2")
+                && is_resumable("cursor-agent")
+                && is_resumable("kilo")
+        );
         assert_eq!(
             resume_command("gemini", "g1").as_deref(),
             Some("gemini --resume 'g1'\r")
@@ -695,6 +705,10 @@ mod tests {
             f("grok", &["--resume", "old-id", "--fork-session", "--yolo"]),
             vec!["--yolo"]
         );
+        assert_eq!(
+            f("opencode2", &["--session", "old-id", "--standalone"]),
+            vec!["--standalone"]
+        );
         // Codex selects a session with positional resume/fork subcommands.
         assert_eq!(
             f("codex", &["resume", "sess_9", "--model", "o3"]),
@@ -747,6 +761,15 @@ mod tests {
         assert!(cmd.ends_with('\r'));
         // The stale captured --resume was filtered: exactly one resume id remains.
         assert_eq!(cmd.matches("--resume").count(), 1);
+
+        let opencode2_launch = ["--session", "old", "--standalone"]
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            resume_command_with_flags("opencode2", "ses_2", &opencode2_launch).as_deref(),
+            Some("opencode2 --session 'ses_2' '--standalone'\r")
+        );
 
         // All-filtered input and empty input both fall back to the plain command.
         let base = resume_command("claude", "abc").unwrap();
