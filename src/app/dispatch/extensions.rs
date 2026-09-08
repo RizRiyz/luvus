@@ -3,6 +3,13 @@
 use super::*;
 use super::{params::*, projection::*};
 
+#[derive(Clone)]
+struct AgentRowTitleUpdate {
+    pane: Option<PaneId>,
+    session: Option<(String, String)>,
+    title: Option<String>,
+}
+
 impl App {
     pub(super) fn api_theme_list(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = (method, p);
@@ -74,31 +81,48 @@ impl App {
 
     pub(super) fn api_ui_agent_title_push(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = method;
+        reject_api_fields(p, &["owner", "titles"])?;
+        let owner = self.agent_row_title_owner(p)?;
         let titles = p.get("titles").and_then(Value::as_array).ok_or_else(|| {
             (
                 "invalid_request".to_string(),
                 "titles must be a JSON array".to_string(),
             )
         })?;
-        if titles.len() > MAX_AGENT_ROW_TITLES {
+        if titles.len() > crate::app::MAX_AGENT_ROW_TITLES {
             return Err(("invalid_request".to_string(), "too many titles".to_string()));
         }
-        let mut changed = false;
-        for item in titles {
-            changed |= self.apply_agent_row_title_item(item)?;
-        }
+        let updates = titles
+            .iter()
+            .map(|item| self.parse_agent_row_title_item(item))
+            .collect::<Result<Vec<_>, _>>()?;
+        let changed = self.apply_agent_row_title_items_atomically(&updates, owner.as_deref())?;
         Ok(json!({"type":"ok", "changed": changed}))
     }
 
     pub(super) fn api_ui_agent_title_clear(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = method;
+        reject_api_fields(p, &["owner", "pane", "agent", "session_id"])?;
+        let owner = self.agent_row_title_owner(p)?;
         let pane = match p.get("pane") {
             Some(value) => Some(self.parse_agent_row_title_pane(value)?),
             None => None,
         };
         let session = agent_row_title_session(p.get("agent"), p.get("session_id"))?;
-        let changed = self.clear_agent_row_titles(pane, session);
+        let changed = self.clear_agent_row_titles_owned(pane, session, owner.as_deref())?;
         Ok(json!({"type":"ok", "changed": changed}))
+    }
+
+    fn agent_row_title_owner(&self, p: &Value) -> Result<Option<String>, (String, String)> {
+        let Some(owner) = p.get("owner") else {
+            return Ok(None);
+        };
+        let owner = owner
+            .as_str()
+            .filter(|owner| !owner.is_empty() && owner.len() <= 120)
+            .ok_or_else(|| ("invalid_request".into(), "invalid module owner".into()))?;
+        validate_bar_action(self, owner, None)?;
+        Ok(Some(owner.to_string()))
     }
 
     fn parse_agent_row_title_pane(&self, value: &Value) -> Result<PaneId, (String, String)> {
@@ -114,15 +138,16 @@ impl App {
         Ok(id)
     }
 
-    fn apply_agent_row_title_item(&mut self, item: &Value) -> Result<bool, (String, String)> {
-        if !item.is_object() {
-            return Err((
-                "invalid_request".into(),
-                "each title must be an object".into(),
-            ));
-        }
-        let title =
-            sanitize_agent_row_title(item.get("title").and_then(Value::as_str).unwrap_or(""))?;
+    fn parse_agent_row_title_item(
+        &self,
+        item: &Value,
+    ) -> Result<AgentRowTitleUpdate, (String, String)> {
+        reject_api_fields(item, &["pane", "agent", "session_id", "title"])?;
+        let raw_title = item
+            .get("title")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ("invalid_request".into(), "title must be a string".into()))?;
+        let title = sanitize_agent_row_title(raw_title)?;
         let pane = match item.get("pane") {
             Some(value) => Some(self.parse_agent_row_title_pane(value)?),
             None => None,
@@ -134,14 +159,74 @@ impl App {
                 "each title needs pane or agent+session_id".into(),
             ));
         }
-        let mut changed = false;
-        if let Some(pane) = pane {
-            changed |= self.set_agent_row_title_for_pane(pane, title.clone());
+        Ok(AgentRowTitleUpdate {
+            pane,
+            session,
+            title,
+        })
+    }
+
+    fn apply_agent_row_title_items_atomically(
+        &mut self,
+        updates: &[AgentRowTitleUpdate],
+        owner: Option<&str>,
+    ) -> Result<bool, (String, String)> {
+        let mut panes = self.agent_title_panes.clone();
+        let mut sessions = self.agent_title_sessions.clone();
+        for update in updates {
+            if let Some(pane) = update.pane {
+                set_owned_agent_row_title(&mut panes, pane, update.title.clone(), owner)
+                    .map_err(module_err)?;
+            }
+            if let Some((agent, session_id)) = &update.session {
+                set_owned_agent_session_title(
+                    &mut sessions,
+                    agent.clone(),
+                    session_id.clone(),
+                    update.title.clone(),
+                    owner,
+                )
+                .map_err(module_err)?;
+            }
         }
-        if let Some((agent, session_id)) = session {
-            changed |= self.set_agent_row_title_for_session(agent, session_id, title);
+        if panes.len() + agent_session_title_count(&sessions) > crate::app::MAX_AGENT_ROW_TITLES {
+            return Err((
+                "resource_exhausted".into(),
+                "too many agent row titles".into(),
+            ));
+        }
+        let changed = panes != self.agent_title_panes || sessions != self.agent_title_sessions;
+        if changed {
+            self.agent_title_panes = panes;
+            self.agent_title_sessions = sessions;
         }
         Ok(changed)
+    }
+
+    fn clear_agent_row_titles_owned(
+        &mut self,
+        pane: Option<PaneId>,
+        session: Option<(String, String)>,
+        owner: Option<&str>,
+    ) -> Result<bool, (String, String)> {
+        if pane.is_none() && session.is_none() {
+            return Ok(match owner {
+                Some(owner) => self.clear_agent_row_titles_for_owner(owner),
+                None => {
+                    let changed =
+                        !self.agent_title_panes.is_empty() || !self.agent_title_sessions.is_empty();
+                    self.agent_title_panes.clear();
+                    self.agent_title_sessions.clear();
+                    changed
+                }
+            });
+        }
+        let update = AgentRowTitleUpdate {
+            pane,
+            session,
+            title: None,
+        };
+        self.apply_agent_row_title_items_atomically(&[update], owner)
     }
 
     pub(super) fn api_ui_dock_push(&mut self, method: &str, p: &Value) -> DispatchResult {

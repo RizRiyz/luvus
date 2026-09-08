@@ -713,7 +713,7 @@ impl App {
         if let Some(title) = self
             .agent_title_panes
             .get(&pane)
-            .map(|title| strip_title_icon(title))
+            .map(|title| strip_title_icon(&title.text))
             .filter(|title| !title.is_empty())
         {
             return Some(title);

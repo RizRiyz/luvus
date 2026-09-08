@@ -80,6 +80,8 @@ impl App {
             "ui.bar.push",
             "ui.bar.move",
             "ui.bar.remove",
+            "ui.agent_title.push",
+            "ui.agent_title.clear",
             "ui.notification.push",
             "ui.notification.clear",
             "theme.list",

@@ -666,9 +666,10 @@ resumable rows:
 OSC titles still win. If there is no OSC title, the pane title is used, then
 the `agent`+`session_id` title. If neither exists, live rows keep
 `workspace · =pane` and resumable rows keep the project folder. Never send a
-Luvus pane alias (`=name`) as `title`. Empty `title` clears that key. Clear
-everything with `ui agent-title clear`, or one row with `--pane` /
-`--agent` + `--session-id`.
+Luvus pane alias (`=name`) as `title`. Empty `title` clears that key. Clear all
+titles owned by your module with `ui agent-title clear`, or one row with
+`--pane` / `--agent` + `--session-id`. Luvus removes a module's titles when the
+module is disabled, unlinked, or uninstalled.
 
 Repaint from `[[startup]]` and `[[events]]` such as `pane.agent_status_changed`.
 Pi's `session_info.name` belongs in that module, not in Luvus core.

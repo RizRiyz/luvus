@@ -927,8 +927,8 @@ rendering.
 | Method | Params | Result |
 |---|---|---|
 | `ui.sidebar` | `{side?: "left"\|"right", width?: int, visible?: bool}` | `{width, visible}` for that side |
-| `ui.agent_title.push` | `{titles: Title[]}` | `{type:"ok", changed}` |
-| `ui.agent_title.clear` | `{pane?, agent?, session_id?}` | `{type:"ok", changed}` |
+| `ui.agent_title.push` | `{owner?, titles: Title[]}` | `{type:"ok", changed}` |
+| `ui.agent_title.clear` | `{owner?, pane?, agent?, session_id?}` | `{type:"ok", changed}` |
 | `ui.dock.push` | `{id, title?, placement?: "left"\|"right", rows: Row[]}` | `{type:"ok"}` |
 | `ui.dock.list` | `{}` | `{docks: [{id, side}]}` |
 | `ui.dock.move` | `{id, side: "left"\|"right"}` | `{type:"ok"}` |
@@ -943,9 +943,12 @@ Luvus parsing any agent's native store. Each `Title` is:
 A row needs `pane` and/or `agent`+`session_id`. Empty `title` clears that key.
 Live rows still prefer an OSC title; otherwise they use a pane title, then a
 session title. Resumable All/history rows use the session title. Luvus pane
-aliases (`=name`) are never used as titles. `clear` with no filters drops every
-module-provided title. The CLI wrappers are `luvus ui agent-title push|clear`
-(`push` also reads `--titles` from stdin).
+aliases (`=name`) are never used as titles. Module commands include their owner
+automatically, cannot replace another module's title, and `clear` with no filters
+drops every title owned by that module. A direct local-owner API call with no
+owner may clear all titles. Luvus also clears an owner's titles when that module
+is disabled, unlinked, or uninstalled. The CLI wrappers are
+`luvus ui agent-title push|clear` (`push` also reads `--titles` from stdin).
 
 A `Row` is:
 

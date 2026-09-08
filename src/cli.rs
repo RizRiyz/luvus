@@ -2851,6 +2851,10 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         }
         ("ui", "agent-title") => {
             let sub = rest.first().map(String::as_str).unwrap_or("");
+            let mut obj = serde_json::Map::new();
+            if let Ok(owner) = std::env::var("LUVUS_MODULE_ID") {
+                obj.insert("owner".into(), json!(owner));
+            }
             match sub {
                 "push" => {
                     let titles_str = match flag(args, "--titles") {
@@ -2871,10 +2875,10 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
                     if !titles.is_array() {
                         return Err(anyhow!("--titles must be a JSON array"));
                     }
-                    ("ui.agent_title.push".into(), json!({ "titles": titles }))
+                    obj.insert("titles".into(), titles);
+                    ("ui.agent_title.push".into(), Value::Object(obj))
                 }
                 "clear" => {
-                    let mut obj = serde_json::Map::new();
                     if let Some(pane) = flag(args, "--pane") {
                         obj.insert("pane".into(), json!(pane));
                     }
@@ -5092,6 +5096,16 @@ mod tests {
         assert_eq!(method, "ui.bar.push");
         assert_eq!(params["owner"], "you.ci");
         assert_eq!(params["content"].as_array().unwrap().len(), 2);
+
+        let (method, params) = parse(&argv(
+            r#"luvus ui agent-title push --titles [{"agent":"pi","session_id":"s1","title":"Title"}]"#,
+        ))
+        .unwrap();
+        assert_eq!(method, "ui.agent_title.push");
+        assert_eq!(params["owner"], "you.ci");
+        let (method, params) = parse(&argv("luvus ui agent-title clear")).unwrap();
+        assert_eq!(method, "ui.agent_title.clear");
+        assert_eq!(params["owner"], "you.ci");
 
         let (method, params) =
             parse(&argv("luvus bar move --id status --region bottom-right")).unwrap();

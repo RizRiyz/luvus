@@ -258,6 +258,92 @@ pub struct ModuleDock {
     pub rows: Vec<DockRow>,
 }
 
+/// One volatile AGENTS-row title and the module that owns it. `None` is reserved
+/// for direct local-owner API calls; module commands always include their id.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct AgentRowTitle {
+    pub(crate) owner: Option<String>,
+    pub(crate) text: String,
+}
+
+pub(crate) const MAX_AGENT_ROW_TITLE_BYTES: usize = 256;
+pub(crate) const MAX_AGENT_ROW_TITLES: usize = 256;
+pub(crate) const MAX_AGENT_ROW_TITLE_AGENT_BYTES: usize = 64;
+
+pub(crate) fn agent_session_title_count(
+    titles: &HashMap<String, HashMap<String, AgentRowTitle>>,
+) -> usize {
+    titles.values().map(HashMap::len).sum()
+}
+
+pub(crate) fn set_owned_agent_row_title(
+    titles: &mut HashMap<PaneId, AgentRowTitle>,
+    pane: PaneId,
+    text: Option<String>,
+    owner: Option<&str>,
+) -> Result<bool, String> {
+    if let Some(existing) = titles.get(&pane) {
+        if owner.is_some() && existing.owner.as_deref() != owner {
+            return Err("agent row title belongs to another module".into());
+        }
+    }
+    match text {
+        Some(text) => {
+            let title = AgentRowTitle {
+                owner: owner.map(String::from),
+                text,
+            };
+            if titles.get(&pane) == Some(&title) {
+                Ok(false)
+            } else {
+                titles.insert(pane, title);
+                Ok(true)
+            }
+        }
+        None => Ok(titles.remove(&pane).is_some()),
+    }
+}
+
+pub(crate) fn set_owned_agent_session_title(
+    titles: &mut HashMap<String, HashMap<String, AgentRowTitle>>,
+    agent: String,
+    session_id: String,
+    text: Option<String>,
+    owner: Option<&str>,
+) -> Result<bool, String> {
+    let existing = titles
+        .get(&agent)
+        .and_then(|sessions| sessions.get(&session_id));
+    if let Some(existing) = existing {
+        if owner.is_some() && existing.owner.as_deref() != owner {
+            return Err("agent row title belongs to another module".into());
+        }
+    }
+    match text {
+        Some(text) => {
+            let title = AgentRowTitle {
+                owner: owner.map(String::from),
+                text,
+            };
+            if existing == Some(&title) {
+                return Ok(false);
+            }
+            titles.entry(agent).or_default().insert(session_id, title);
+            Ok(true)
+        }
+        None => {
+            let Some(sessions) = titles.get_mut(&agent) else {
+                return Ok(false);
+            };
+            let changed = sessions.remove(&session_id).is_some();
+            if sessions.is_empty() {
+                titles.remove(&agent);
+            }
+            Ok(changed)
+        }
+    }
+}
+
 /// One sidebar's live state: shown/hidden, width, and its ordered docks.
 #[derive(Clone)]
 pub struct SideState {
@@ -2497,9 +2583,10 @@ pub struct App {
     /// Resumable agent sessions discovered on disk (for the AGENTS sidebar).
     pub resumable: Vec<crate::agent::SessionInfo>,
     /// Module-provided AGENTS sidebar titles for live panes. OSC still wins.
-    pub(crate) agent_title_panes: HashMap<PaneId, String>,
+    pub(crate) agent_title_panes: HashMap<PaneId, AgentRowTitle>,
     /// Module-provided titles for native sessions (live idle fallback and All/history).
-    pub(crate) agent_title_sessions: HashMap<(String, String), String>,
+    /// The nested shape permits borrowed, allocation-free lookups while rendering.
+    pub(crate) agent_title_sessions: HashMap<String, HashMap<String, AgentRowTitle>>,
     /// A resumable-session disk scan is running on a worker thread; don't start
     /// another until its `SessionsScanned` result arrives.
     sessions_scan_inflight: bool,
@@ -7030,59 +7117,34 @@ impl App {
         changed
     }
 
-    pub(crate) fn set_agent_row_title_for_pane(
-        &mut self,
-        pane: PaneId,
-        title: Option<String>,
-    ) -> bool {
-        match title {
-            Some(title) if self.agent_title_panes.get(&pane) == Some(&title) => false,
-            Some(title) => {
-                self.agent_title_panes.insert(pane, title);
-                true
-            }
-            None => self.agent_title_panes.remove(&pane).is_some(),
-        }
-    }
-
+    #[cfg(test)]
     pub(crate) fn set_agent_row_title_for_session(
         &mut self,
         agent: String,
         session_id: String,
         title: Option<String>,
     ) -> bool {
-        let key = (agent, session_id);
-        match title {
-            Some(title) if self.agent_title_sessions.get(&key) == Some(&title) => false,
-            Some(title) => {
-                self.agent_title_sessions.insert(key, title);
-                true
-            }
-            None => self.agent_title_sessions.remove(&key).is_some(),
-        }
+        set_owned_agent_session_title(
+            &mut self.agent_title_sessions,
+            agent,
+            session_id,
+            title,
+            None,
+        )
+        .expect("the direct local owner may replace any title")
     }
 
-    pub(crate) fn clear_agent_row_titles(
-        &mut self,
-        pane: Option<PaneId>,
-        session: Option<(String, String)>,
-    ) -> bool {
-        match (pane, session) {
-            (None, None) => {
-                let changed =
-                    !self.agent_title_panes.is_empty() || !self.agent_title_sessions.is_empty();
-                self.agent_title_panes.clear();
-                self.agent_title_sessions.clear();
-                changed
-            }
-            (Some(pane), None) => self.agent_title_panes.remove(&pane).is_some(),
-            (None, Some(session)) => self.agent_title_sessions.remove(&session).is_some(),
-            (Some(pane), Some(session)) => {
-                let pane_changed = self.agent_title_panes.remove(&pane).is_some();
-                let session_changed = self.agent_title_sessions.remove(&session).is_some();
-                pane_changed || session_changed
-            }
-        }
+    pub(crate) fn clear_agent_row_titles_for_owner(&mut self, owner: &str) -> bool {
+        let pane_count = self.agent_title_panes.len();
+        self.agent_title_panes
+            .retain(|_, title| title.owner.as_deref() != Some(owner));
+        let session_count = agent_session_title_count(&self.agent_title_sessions);
+        self.agent_title_sessions.retain(|_, sessions| {
+            sessions.retain(|_, title| title.owner.as_deref() != Some(owner));
+            !sessions.is_empty()
+        });
+        pane_count != self.agent_title_panes.len()
+            || session_count != agent_session_title_count(&self.agent_title_sessions)
     }
 
     pub(crate) fn agent_row_title_for_session(
@@ -7091,8 +7153,9 @@ impl App {
         session_id: &str,
     ) -> Option<&str> {
         self.agent_title_sessions
-            .get(&(agent.to_string(), session_id.to_string()))
-            .map(String::as_str)
+            .get(agent)?
+            .get(session_id)
+            .map(|title| title.text.as_str())
             .filter(|title| !title.is_empty())
     }
 
@@ -13239,6 +13302,43 @@ mod tests {
     }
 
     #[test]
+    fn module_agent_title_owners_cannot_overwrite_or_clear_each_other() {
+        let _env = crate::persist::test_env("module-agent-title-owners");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        set_owned_agent_session_title(
+            &mut app.agent_title_sessions,
+            "pi".into(),
+            "shared".into(),
+            Some("Alpha".into()),
+            Some("module.alpha"),
+        )
+        .unwrap();
+        assert!(set_owned_agent_session_title(
+            &mut app.agent_title_sessions,
+            "pi".into(),
+            "shared".into(),
+            Some("Beta".into()),
+            Some("module.beta"),
+        )
+        .is_err());
+        set_owned_agent_session_title(
+            &mut app.agent_title_sessions,
+            "pi".into(),
+            "beta-only".into(),
+            Some("Beta".into()),
+            Some("module.beta"),
+        )
+        .unwrap();
+        assert!(app.clear_agent_row_titles_for_owner("module.alpha"));
+        assert!(app.agent_row_title_for_session("pi", "shared").is_none());
+        assert_eq!(
+            app.agent_row_title_for_session("pi", "beta-only"),
+            Some("Beta")
+        );
+    }
+
+    #[test]
     fn module_agent_titles_apply_to_live_and_resumable_without_using_alias() {
         let _env = crate::persist::test_env("module-agent-titles");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -13269,7 +13369,7 @@ mod tests {
             app.agent_row_title_for_session("pi", "old-1"),
             Some("History title")
         );
-        assert!(app.clear_agent_row_titles(None, Some(("pi".into(), "live-1".into()))));
+        assert!(app.set_agent_row_title_for_session("pi".into(), "live-1".into(), None));
         assert!(app.pane_title(pane).is_none());
     }
 

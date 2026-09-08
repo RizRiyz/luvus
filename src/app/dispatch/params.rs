@@ -88,16 +88,25 @@ pub(in crate::app::dispatch) fn agent_fork_error(err: AgentForkError) -> (String
     (code.to_string(), message.to_string())
 }
 
-pub(in crate::app::dispatch) const MAX_AGENT_ROW_TITLE_BYTES: usize = 256;
-pub(in crate::app::dispatch) const MAX_AGENT_ROW_TITLES: usize = 256;
-
 pub(in crate::app::dispatch) fn sanitize_agent_row_title(
     raw: &str,
 ) -> Result<Option<String>, (String, String)> {
+    if raw.len() > crate::app::MAX_AGENT_ROW_TITLE_BYTES {
+        return Err(("invalid_request".into(), "title is too long".into()));
+    }
+    if raw
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err((
+            "invalid_request".into(),
+            "title contains unsupported control characters".into(),
+        ));
+    }
     let cleaned: String = raw
         .chars()
         .map(|character| {
-            if matches!(character, '\n' | '\r') {
+            if matches!(character, '\n' | '\r' | '\t') {
                 ' '
             } else {
                 character
@@ -107,9 +116,6 @@ pub(in crate::app::dispatch) fn sanitize_agent_row_title(
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {
         return Ok(None);
-    }
-    if trimmed.len() > MAX_AGENT_ROW_TITLE_BYTES {
-        return Err(("invalid_request".into(), "title is too long".into()));
     }
     Ok(Some(trimmed.to_string()))
 }
@@ -121,11 +127,20 @@ pub(in crate::app::dispatch) fn agent_row_title_session(
     match (agent, session_id) {
         (None, None) => Ok(None),
         (Some(agent), Some(session_id)) => {
-            let agent = agent
+            let raw_agent = agent
                 .as_str()
                 .map(str::trim)
                 .filter(|agent| !agent.is_empty())
                 .ok_or_else(|| ("invalid_request".into(), "agent is required".into()))?;
+            if raw_agent.len() > crate::app::MAX_AGENT_ROW_TITLE_AGENT_BYTES {
+                return Err(("invalid_request".into(), "agent is too long".into()));
+            }
+            let agent = crate::agent::canonical_builtin(raw_agent).ok_or_else(|| {
+                (
+                    "invalid_request".into(),
+                    "agent must name a built-in Luvus adapter".into(),
+                )
+            })?;
             let session_id = session_id.as_str().unwrap_or("");
             if !crate::agent::safe_session_id(session_id) {
                 return Err(("invalid_request".into(), "invalid session_id".into()));

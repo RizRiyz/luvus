@@ -89,6 +89,7 @@ impl App {
         let _ = std::fs::remove_dir_all(&root);
         self.remove_module_docks(&dock_ids);
         self.bar.clear_owner(id);
+        self.clear_agent_row_titles_for_owner(id);
         self.bar.sync_modules(&self.modules);
         Ok(())
     }
@@ -105,6 +106,7 @@ impl App {
         registry::save(&self.modules);
         self.remove_module_docks(&dock_ids);
         self.bar.clear_owner(id);
+        self.clear_agent_row_titles_for_owner(id);
         self.bar.sync_modules(&self.modules);
         Ok(())
     }
@@ -123,6 +125,7 @@ impl App {
             let dock_ids = self.module_dock_ids(id);
             self.remove_module_docks(&dock_ids);
             self.bar.clear_owner(id);
+            self.clear_agent_row_titles_for_owner(id);
             self.module_startup_done.remove(id);
             self.bar.sync_modules(&self.modules);
         } else {
@@ -945,9 +948,26 @@ command = ["sh", "-c", "echo hello-from-module; echo oops 1>&2"]
         );
         assert!(log.err.contains("oops"), "captured stderr: {:?}", log.err);
 
+        // Volatile UI contributions are owned and retire with the module.
+        set_owned_agent_session_title(
+            &mut app.agent_title_sessions,
+            "pi".into(),
+            "owned-session".into(),
+            Some("Owned title".into()),
+            Some(&id),
+        )
+        .unwrap();
+        assert_eq!(
+            app.agent_row_title_for_session("pi", "owned-session"),
+            Some("Owned title")
+        );
+
         // Disabling makes it non-runnable; unlink removes it.
         app.module_set_enabled(&id, false).unwrap();
         assert!(!app.modules.find(&id).unwrap().is_runnable());
+        assert!(app
+            .agent_row_title_for_session("pi", "owned-session")
+            .is_none());
         assert!(app.module_invoke_action("refresh", None, "test").is_err());
         // Naming the module explicitly gives a clear "disabled" error.
         let err = app

@@ -166,6 +166,27 @@ command = ["true"]
     assert_eq!(result["changed"], true);
     let before = app.bar.widgets["you.ci:status"].clone();
 
+    app.dispatch(
+        "ui.agent_title.push",
+        &json!({"owner":"you.ci","titles":[{
+            "agent":"pi","session_id":"owned-session","title":"Owned title"
+        }]}),
+    )
+    .unwrap();
+    assert_eq!(
+        app.agent_row_title_for_session("pi", "owned-session"),
+        Some("Owned title")
+    );
+    assert_eq!(
+        app.dispatch(
+            "ui.agent_title.push",
+            &json!({"owner":"missing.module","titles":[]}),
+        )
+        .unwrap_err()
+        .0,
+        "module_error"
+    );
+
     let mut invalid = valid;
     invalid["content"] = json!([{"type":"text","text":"\u{1b}[31mraw"}]);
     assert!(app.dispatch("ui.bar.push", &invalid).is_err());
@@ -200,6 +221,126 @@ command = ["true"]
     );
     app.module_set_enabled("you.ci", false).unwrap();
     assert!(!app.bar.widgets.contains_key("you.ci:status"));
+    assert!(app
+        .agent_row_title_for_session("pi", "owned-session")
+        .is_none());
+}
+
+#[test]
+fn agent_row_titles_are_module_provided_and_never_use_alias() {
+    let _env = crate::persist::test_env("agent-row-titles");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    app.status.get_mut(&pane).unwrap().agent_session = Some(crate::app::AgentSession {
+        agent: "pi".into(),
+        session_id: "sess-1".into(),
+    });
+    app.agent_names.insert("chezmoi".into(), pane);
+    let pushed = app
+        .dispatch(
+            "ui.agent_title.push",
+            &json!({"titles": [
+                {"pane": pane.0.to_string(), "title": "Ship desktop"},
+                {"agent": "pi", "session_id": "old-1", "title": "History title"}
+            ]}),
+        )
+        .unwrap();
+    assert_eq!(pushed["changed"], true);
+    assert_eq!(app.pane_title(pane).as_deref(), Some("Ship desktop"));
+    assert_eq!(app.agent_name_for(pane), Some("chezmoi"));
+    assert_eq!(
+        app.agent_row_title_for_session("pi", "old-1"),
+        Some("History title")
+    );
+    app.dispatch(
+        "ui.agent_title.push",
+        &json!({"titles": [
+            {"pane": pane.0.to_string(), "title": ""}
+        ]}),
+    )
+    .unwrap();
+    assert_eq!(app.pane_title(pane), None, "must not fall back to =alias");
+    app.dispatch(
+        "ui.agent_title.clear",
+        &json!({
+            "agent":"pi", "session_id":"old-1"
+        }),
+    )
+    .unwrap();
+    assert!(app.agent_row_title_for_session("pi", "old-1").is_none());
+    for invalid in [
+        json!({"titles": [{"title": "no target"}]}),
+        json!({"titles": [{"agent":"pi","session_id":"old-1"}]}),
+        json!({"titles": [{"agent":"pi","session_id":"old-1","title":42}]}),
+        json!({"titles": [{"agent":"pi","session_id":"old-1","title":"bad\u{7}title"}]}),
+        json!({"titles": [{"agent":"not-built-in","session_id":"old-1","title":"bad"}]}),
+    ] {
+        assert_eq!(
+            app.dispatch("ui.agent_title.push", &invalid).unwrap_err().0,
+            "invalid_request"
+        );
+    }
+}
+
+#[test]
+fn agent_row_title_push_is_atomic_and_globally_bounded() {
+    let _env = crate::persist::test_env("agent-row-title-bounds");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let invalid = json!({"titles":[
+        {"agent":"pi","session_id":"first","title":"must not stick"},
+        {"title":"missing target"}
+    ]});
+    assert!(app.dispatch("ui.agent_title.push", &invalid).is_err());
+    assert!(app.agent_row_title_for_session("pi", "first").is_none());
+
+    let titles = (0..crate::app::MAX_AGENT_ROW_TITLES)
+        .map(|index| {
+            json!({
+                "agent":"pi", "session_id":format!("session-{index}"),
+                "title":format!("Title {index}")
+            })
+        })
+        .collect::<Vec<_>>();
+    app.dispatch("ui.agent_title.push", &json!({"titles":titles}))
+        .unwrap();
+    let before = agent_session_title_count(&app.agent_title_sessions);
+    let error = app
+        .dispatch(
+            "ui.agent_title.push",
+            &json!({"titles":[{
+                "agent":"pi", "session_id":"overflow", "title":"No"
+            }]}),
+        )
+        .unwrap_err();
+    assert_eq!(error.0, "resource_exhausted");
+    assert_eq!(agent_session_title_count(&app.agent_title_sessions), before);
+    assert!(app.agent_row_title_for_session("pi", "overflow").is_none());
+}
+
+#[test]
+fn agent_row_session_titles_work_without_a_workspace() {
+    let _env = crate::persist::test_env("agent-row-title-no-workspace");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    for pane in app.panes.keys().copied().collect::<Vec<_>>() {
+        app.drop_leaf_runtime(pane);
+    }
+    app.workspaces.clear();
+    let (reply, _response) = std::sync::mpsc::channel();
+    let request = ApiRequest {
+        id: "title".into(),
+        method: "ui.agent_title.push".into(),
+        params: json!({"titles":[{"agent":"pi","session_id":"offline","title":"Offline"}]}),
+        reply,
+    };
+    let response: Value = serde_json::from_str(&app.handle_api(&request)).unwrap();
+    assert_eq!(response["result"]["changed"], true);
+    assert_eq!(
+        app.agent_row_title_for_session("pi", "offline"),
+        Some("Offline")
+    );
 }
 
 #[test]
