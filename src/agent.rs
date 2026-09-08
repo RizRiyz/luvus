@@ -27,6 +27,7 @@ pub(crate) mod fx;
 pub(crate) mod gemini;
 pub(crate) mod grok;
 pub(crate) mod hermes;
+pub(crate) mod kilo;
 pub(crate) mod kimi;
 pub(crate) mod kiro;
 pub(crate) mod muse;
@@ -392,7 +393,11 @@ mod tests {
         assert!(resume_command("cursor-agent", "z")
             .unwrap()
             .contains("cursor-agent --resume"));
-        assert!(is_resumable("opencode") && is_resumable("cursor-agent"));
+        assert_eq!(
+            resume_command("kilocode", "ses_123").as_deref(),
+            Some("kilo --session 'ses_123'\r")
+        );
+        assert!(is_resumable("opencode") && is_resumable("cursor-agent") && is_resumable("kilo"));
         assert_eq!(
             resume_command("gemini", "g1").as_deref(),
             Some("gemini --resume 'g1'\r")
@@ -817,7 +822,17 @@ mod tests {
             .contains("pi --fork"));
         let grok = fork_command("grok", "g1").unwrap();
         assert!(grok.contains("grok --resume") && grok.contains("--fork-session"));
-        assert!(can_fork("claude") && can_fork("codex") && can_fork("pi") && can_fork("grok"));
+        assert_eq!(
+            fork_command("kilocode", "ses_123").as_deref(),
+            Some("kilo --session 'ses_123' --fork\r")
+        );
+        assert!(
+            can_fork("claude")
+                && can_fork("codex")
+                && can_fork("kilo")
+                && can_fork("pi")
+                && can_fork("grok")
+        );
         assert!(
             !can_fork("muse"),
             "Muse has no external native fork entrypoint"

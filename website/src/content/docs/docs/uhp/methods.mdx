@@ -678,8 +678,10 @@ when false, the current workspace, tab, pane focus, and zoom state are preserved
 Unsupported agents return `unsupported_agent`; a supported agent whose session
 ID cannot be resolved returns `session_unknown`; and PTY launch failure returns
 `spawn_failed`. Codex requires a hook-reported or Luvus-resumed exact session
-identity and never falls back to the newest rollout in the workspace. Validation
-completes before a new pane is spawned.
+identity and never falls back to the newest rollout in the workspace. Kilo Code
+also requires an exact session identity because Luvus does not scan or guess
+sessions from Kilo's current database. Validation completes before a new pane
+is spawned.
 
 ## Files
 
@@ -940,7 +942,10 @@ Tones are `normal`, `muted`, `accent`, `success`, `warning`, and `error`.
 States are `blocked`, `working`, `done`, `idle`, and `unknown`. An action must
 belong to the widget's enabled module. Clicks expose
 `LUVUS_MODULE_BAR_ID`, `LUVUS_MODULE_BAR_SEGMENT`, and optional
-`LUVUS_MODULE_BAR_VALUE` to that action.
+`LUVUS_MODULE_BAR_VALUE` to that action. Every segment shape accepts an
+`action` and a string `value` except `progress`, whose `value` is the numeric
+fill: a `progress` segment can be clickable, but its click carries no
+`LUVUS_MODULE_BAR_VALUE`.
 
 Limits are intentionally small: 16 segments and 256 display columns per
 widget, 16 live widgets per module, 64 live widgets globally, and 30 updates per

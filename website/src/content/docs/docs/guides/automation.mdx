@@ -204,6 +204,11 @@ agent/access combinations fail before Luvus creates a task, lease, worktree, or
 pane. Luvus never edits the agent's permanent configuration or types approval
 answers into an unknown prompt.
 
+Kilo Code currently exposes one reviewed unattended profile: **Full access**,
+launched as `kilo run --auto`. Kilo documents that `--auto` may approve actions
+not explicitly denied, so Luvus does not present it as read-only or workspace
+access and rejects those combinations before creating worker resources.
+
 ## Schedule types
 
 Pass exactly one trigger to `automation create`, `automation update`, or

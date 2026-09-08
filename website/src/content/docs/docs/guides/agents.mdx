@@ -11,7 +11,7 @@ back after a restart, all without wrapping or modifying the agents themselves.
 
 Every pane running a recognized agent (Claude Code, Copilot, Codex, opencode,
 Kimi, Grok, Hermes CLI, Muse Code, Pi, Oh My Pi (OMP), Cursor, Gemini, Qwen,
-Kiro, Aider, Amp, Droid, or fx) appears in the sidebar with a live state:
+Kilo Code, Kiro, Aider, Amp, Droid, or fx) appears in the sidebar with a live state:
 
 | State | Meaning | How it's detected |
 |---|---|---|
@@ -77,7 +77,7 @@ Click a session row to select it and update the Selected Agent panel. Use
 | Gemini and Qwen | project chat records |
 | fx | session usage snapshot |
 
-Aider, Kiro, Cursor, Amp, Droid, Muse, and manifest-defined agents still receive live
+Aider, Kilo Code, Kiro, Cursor, Amp, Droid, Muse, and manifest-defined agents still receive live
 identity and state detection, but show `—` for usage until they expose a stable
 per-session counter or report one through an integration. Luvus never estimates
 tokens from transcript text.
@@ -143,6 +143,7 @@ not sufficient, and Luvus runs the agent's own resume command:
 | Qwen | its project chat store (`~/.qwen/tmp`) |
 | fx | its session store (`~/.fx/sessions`) |
 | Cursor | resume command (when the session id is known) |
+| Kilo Code | `kilo --session <id>` (when the exact session id is known) |
 
 You'll also see **recent sessions** listed at the bottom of the AGENTS sidebar
 (toggle *All*): click one to reopen it into a new pane, even sessions from
@@ -177,6 +178,7 @@ support it natively:
 | Claude Code | `claude --resume <id> --fork-session` |
 | Grok Build | `grok --resume <id> --fork-session` |
 | Codex | `codex fork <id>` |
+| Kilo Code | `kilo --session <id> --fork` |
 | Pi | `pi --fork <id>` |
 | Oh My Pi (OMP) | `omp --fork <id>` |
 
@@ -190,6 +192,10 @@ rollout in a shared folder, because that could fork another pane's active
 conversation. Install or refresh the Codex hook with
 `luvus integration install codex`; its SessionStart and prompt hooks bind new
 and resumed Codex panes to their exact rollout.
+
+Kilo Code also requires an exact session ID for resume or fork. Luvus detects
+the `kilo` and `kilocode` executables natively, but it does not scan Kilo's
+current database or guess which session belongs to a pane.
 
 Muse Code supports native detection and resume, but not **Fork to New Pane**.
 Its `/fork` command exists only inside the active TUI, and its CLI refuses to

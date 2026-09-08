@@ -41,7 +41,7 @@ luvus skill enable
 The command makes no network request. It detects supported coding-agent
 environments and installs the one bundled Luvus skill through their native
 skill directories. The shared `~/.agents/skills/luvus/` destination serves
-Codex, GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, and fx.
+Codex, GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, fx, and Kilo Code.
 Claude Code, OpenCode, Kimi Code CLI, Grok Build, Hermes CLI, Qwen Code, and
 Kiro use their native dedicated destinations. It does not add an always-on
 pointer to `~/.codex/AGENTS.md`, and it never overwrites an installation it
@@ -176,7 +176,7 @@ luvus agent fork reviewer --name experiment --no-focus
 ```
 
 The fork inherits the source conversation and receives its own new session.
-Native forks currently support Claude, Grok, Codex, Pi, and OMP. If the target is
+Native forks currently support Claude, Grok, Codex, Kilo Code, Pi, and OMP. If the target is
 unsupported, its session cannot be resolved, or its pane cannot start, the
 skill reports Luvus's structured error instead of substituting a split, new
 agent, or resume operation that could lose or reuse the wrong context.

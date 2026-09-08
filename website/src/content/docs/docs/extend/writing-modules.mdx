@@ -288,7 +288,9 @@ custom colors, and module-controlled rendering are rejected.
 
 An actionable segment names an action from the same manifest. Its command gets
 `LUVUS_MODULE_BAR_ID`, `LUVUS_MODULE_BAR_SEGMENT`, and
-`LUVUS_MODULE_BAR_VALUE`. Live content is in-memory, so restore it from a
+`LUVUS_MODULE_BAR_VALUE` — except on a `progress` segment, whose `value` is the
+numeric fill, so its click passes no payload; carry it on a neighboring `text`
+or `badge` segment instead. Live content is in-memory, so restore it from a
 one-shot startup hook. A repeated push is an atomic replacement, not an append.
 
 For transient status, use the bounded notification lane instead of repeatedly
