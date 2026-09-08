@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{Read, Write};
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
@@ -65,11 +65,31 @@ pub(crate) fn prepare(profile: &MachineProfile) -> Result<ProbeResult> {
     })
 }
 
+/// Prepare an enabled machine, provisioning the matching published release
+/// when automatic discovery cannot find a compatible fleet binary. An
+/// explicitly configured binary remains authoritative and is never replaced.
+pub(crate) fn prepare_or_provision(profile: &MachineProfile) -> Result<ProbeResult> {
+    match prepare(profile) {
+        Ok(probe) => Ok(probe),
+        Err(initial) if !profile.automatic_provisioning => Err(initial),
+        Err(initial) => {
+            let binary = super::provision::install(&profile.destination).map_err(|provision| {
+                anyhow!(
+                    "remote preparation failed: {initial}; automatic provisioning failed: {provision}"
+                )
+            })?;
+            let mut provisioned = profile.clone();
+            provisioned.remote_binary = Some(binary);
+            prepare(&provisioned)
+        }
+    }
+}
+
 fn discover_binary(destination: &str) -> Result<String> {
     // This fixed script contains no user input. It prints exactly one path and
     // never installs, modifies, or starts anything on the remote host.
     const DISCOVER: &str = "for p in \"$HOME/.local/bin/luvus\" \"$HOME/.cargo/bin/luvus\" \"$HOME/.nix-profile/bin/luvus\" /usr/local/bin/luvus /opt/homebrew/bin/luvus /home/linuxbrew/.linuxbrew/bin/luvus; do if [ -x \"$p\" ]; then printf '%s\\n' \"$p\"; exit 0; fi; done; command -v luvus 2>/dev/null || exit 127";
-    let mut command = ssh_command(destination, false);
+    let mut command = ssh_command(destination, true);
     // OpenSSH already invokes the remote login shell. Passing this fixed
     // script as the only command argument preserves it as one command string;
     // no profile or user data is interpolated into it.
@@ -128,7 +148,7 @@ pub(super) fn open(profile: &MachineProfile, session: Option<&str>) -> Result<()
     crate::remote_attach_profile(&profile.destination, binary, session)
 }
 
-fn ssh_command(destination: &str, batch: bool) -> Command {
+pub(super) fn ssh_command(destination: &str, batch: bool) -> Command {
     let mut command = Command::new("ssh");
     command
         .arg("-T")
@@ -145,23 +165,43 @@ fn ssh_command(destination: &str, batch: bool) -> Command {
     command
 }
 
-fn run_bounded(mut command: Command, timeout: Duration) -> Result<Output> {
+fn run_bounded(command: Command, timeout: Duration) -> Result<Output> {
+    run_bounded_with_input(command, timeout, None)
+}
+
+pub(super) fn run_bounded_with_input(
+    mut command: Command,
+    timeout: Duration,
+    input: Option<&[u8]>,
+) -> Result<Output> {
     const MAX_OUTPUT_BYTES: u64 = 64 * 1024;
     command
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::platform::no_window(&mut command);
     let mut child = command.spawn().context("failed to launch ssh")?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow!("ssh stdout was not captured"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow!("ssh stderr was not captured"))?;
-    let stdout_reader = std::thread::Builder::new()
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow!("ssh stdout was not captured"));
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow!("ssh stderr was not captured"));
+        }
+    };
+    let stdout_reader = match std::thread::Builder::new()
         .name("machine-probe-out".into())
         .stack_size(128 * 1024)
         .spawn(move || {
@@ -170,8 +210,15 @@ fn run_bounded(mut command: Command, timeout: Duration) -> Result<Output> {
                 .take(MAX_OUTPUT_BYTES + 1)
                 .read_to_end(&mut bytes)
                 .map(|_| bytes)
-        })?;
-    let stderr_reader = std::thread::Builder::new()
+        }) {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error.into());
+        }
+    };
+    let stderr_reader = match std::thread::Builder::new()
         .name("machine-probe-err".into())
         .stack_size(128 * 1024)
         .spawn(move || {
@@ -180,11 +227,45 @@ fn run_bounded(mut command: Command, timeout: Duration) -> Result<Output> {
                 .take(MAX_OUTPUT_BYTES + 1)
                 .read_to_end(&mut bytes)
                 .map(|_| bytes)
-        })?;
+        }) {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            return Err(error.into());
+        }
+    };
+    if let Some(input) = input {
+        let written = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("ssh stdin was not captured"))
+            .and_then(|mut stdin| {
+                stdin
+                    .write_all(input)
+                    .context("could not send the provisioning script")
+            });
+        if let Err(error) = written {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(error);
+        }
+    }
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(error.into());
+            }
         }
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
@@ -225,5 +306,21 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["-o", "BatchMode=yes"]));
         assert_eq!(args.last().map(String::as_str), Some("dev@buildbox"));
         assert!(!args.iter().any(|arg| arg.contains("ProxyCommand")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_runner_delivers_foreground_script_on_stdin() {
+        let mut command = Command::new("sh");
+        command.arg("-s").arg("--").arg("fleet-test");
+        let output = run_bounded_with_input(
+            command,
+            Duration::from_secs(2),
+            Some(b"printf '%s' \"$1\"\n"),
+        )
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"fleet-test");
+        assert!(output.stderr.is_empty());
     }
 }

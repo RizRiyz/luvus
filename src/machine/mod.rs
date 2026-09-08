@@ -10,6 +10,7 @@ pub(crate) mod catalog;
 mod cli;
 pub(crate) mod link;
 pub(crate) mod protocol;
+mod provision;
 mod ssh;
 
 pub(crate) use bridge::run as run_bridge;

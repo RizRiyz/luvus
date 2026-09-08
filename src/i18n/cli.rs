@@ -453,15 +453,15 @@ static HELP: &[Translation] = &[
         "SSH로 Luvus 머신을 저장하고 검사하고 열기"
     ),
     tr!(
-        "validate and save one SSH machine",
-        "validar y guardar una máquina SSH",
-        "validar e salvar uma máquina SSH",
-        "valider et enregistrer une machine SSH",
-        "eine SSH-Maschine prüfen und speichern",
-        "validasi dan simpan satu mesin SSH",
-        "验证并保存一台 SSH 机器",
-        "SSH マシンを検証して保存",
-        "SSH 머신 하나를 검증하고 저장"
+        "provision and validate one SSH machine",
+        "aprovisionar y validar una máquina SSH",
+        "provisionar e validar uma máquina SSH",
+        "provisionner et valider une machine SSH",
+        "eine SSH-Maschine bereitstellen und prüfen",
+        "sediakan dan validasi satu mesin SSH",
+        "自动配置并验证一台 SSH 机器",
+        "SSH マシンをプロビジョニングして検証",
+        "SSH 머신 하나를 프로비저닝하고 검증"
     ),
     tr!(
         "list saved machine profiles and catalog revision",
@@ -497,15 +497,15 @@ static HELP: &[Translation] = &[
         "선택적 리비전 보호로 프로필 이름 변경"
     ),
     tr!(
-        "enable after a bounded SSH probe, or disable locally",
-        "habilitar tras una prueba SSH acotada o deshabilitar localmente",
-        "habilitar após uma sondagem SSH limitada ou desabilitar localmente",
-        "activer après une vérification SSH bornée ou désactiver localement",
-        "nach einer begrenzten SSH-Prüfung aktivieren oder lokal deaktivieren",
-        "aktifkan setelah pemeriksaan SSH terbatas atau nonaktifkan secara lokal",
-        "在有限 SSH 探测后启用，或在本地禁用",
-        "制限付き SSH プローブ後に有効化、またはローカルで無効化",
-        "제한된 SSH 검사 후 활성화하거나 로컬에서 비활성화"
+        "provision and enable after a bounded SSH probe, or disable locally",
+        "aprovisionar y habilitar tras una prueba SSH acotada o deshabilitar localmente",
+        "provisionar e habilitar após uma sondagem SSH limitada ou desabilitar localmente",
+        "provisionner et activer après une vérification SSH bornée ou désactiver localement",
+        "nach einer begrenzten SSH-Prüfung bereitstellen und aktivieren oder lokal deaktivieren",
+        "sediakan dan aktifkan setelah pemeriksaan SSH terbatas atau nonaktifkan secara lokal",
+        "在有限 SSH 探测后自动配置并启用，或在本地禁用",
+        "制限付き SSH プローブ後にプロビジョニングして有効化、またはローカルで無効化",
+        "제한된 SSH 검사 후 프로비저닝하고 활성화하거나 로컬에서 비활성화"
     ),
     tr!(
         "remove only the local profile; remote panes stay alive",

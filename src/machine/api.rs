@@ -98,6 +98,7 @@ fn add(params: &Value) -> Result<Value> {
     }
     if let Some(binary) = optional_string(params, "remote_binary")? {
         profile.remote_binary = Some(binary.to_string());
+        profile.automatic_provisioning = false;
     }
     profile.enabled = optional_bool(params, "enabled")?.unwrap_or(true);
     profile.connection_policy = if profile.enabled {
@@ -106,14 +107,19 @@ fn add(params: &Value) -> Result<Value> {
         ConnectionPolicy::Manual
     };
     profile.validate()?;
+    let expected = required_revision(params)?;
+    let current = catalog::preflight_mutation(Some(expected))?;
+    if current.machines.iter().any(|machine| machine.id == id) {
+        return Err(anyhow!("machine `{id}` already exists"));
+    }
     let probe = if profile.enabled {
-        let probe = super::ssh::prepare(&profile)?;
+        let probe = super::ssh::prepare_or_provision(&profile)?;
         profile.remote_binary = Some(probe.remote_binary.clone());
         Some(probe)
     } else {
         None
     };
-    let (_, saved) = catalog::mutate(Some(required_revision(params)?), |catalog| {
+    let (_, saved) = catalog::mutate(Some(expected), |catalog| {
         if catalog.machines.iter().any(|machine| machine.id == id) {
             return Err(anyhow!("machine `{id}` already exists"));
         }
@@ -141,13 +147,14 @@ fn set_enabled(params: &Value, enabled: bool) -> Result<Value> {
     reject_unknown(params, &["id", "if_revision"])?;
     let id = string(params, "id")?;
     catalog::validate_id(id)?;
+    let expected = required_revision(params)?;
     let prepared = if enabled {
-        let loaded = catalog::load()?;
-        Some(super::ssh::prepare(find(&loaded.catalog, id)?)?.remote_binary)
+        let current = catalog::preflight_mutation(Some(expected))?;
+        Some(super::ssh::prepare_or_provision(find(&current, id)?)?.remote_binary)
     } else {
         None
     };
-    let (_, saved) = catalog::mutate(Some(required_revision(params)?), |catalog| {
+    let (_, saved) = catalog::mutate(Some(expected), |catalog| {
         let profile = find_mut(catalog, id)?;
         profile.enabled = enabled;
         profile.connection_policy = if enabled {
@@ -191,6 +198,7 @@ fn project(profile: &MachineProfile) -> Value {
         "transport":profile.transport,
         "enabled":profile.enabled,
         "prepared":profile.remote_binary.is_some(),
+        "automatic_provisioning":profile.automatic_provisioning,
         "preferred_session":profile.preferred_session,
         "connection_policy":profile.connection_policy,
     })
@@ -283,6 +291,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(added["revision"], 1);
+        assert_eq!(added["machine"]["automatic_provisioning"], true);
         assert_eq!(
             dispatch("machine.list", &json!({})).unwrap()["machines"][0]["id"],
             "build"
@@ -307,5 +316,12 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("if_revision"));
+        assert!(dispatch(
+            "machine.add",
+            &json!({"id":"network-must-not-run","host":"invalid","enabled":true})
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("if_revision"));
     }
 }

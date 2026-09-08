@@ -273,13 +273,13 @@ sessions:
 
 machines:
   machine add <id> --host <ssh-alias> [--label <label>] [--remote-binary <path>] [--disabled]
-                             validate and save one SSH machine
+                             provision and validate one SSH machine
   machine list               list saved machine profiles and catalog revision
   machine show <id>          show one saved profile
   machine rename <id> <label> [--revision <n>]
                              rename a profile with optional revision protection
   machine enable|disable <id> [--revision <n>]
-                             enable after a bounded SSH probe, or disable locally
+                             provision and enable after a bounded SSH probe, or disable locally
   machine remove <id> [--revision <n>]
                              remove only the local profile; remote panes stay alive
   machine status <id>        run one bounded non-interactive capability probe

@@ -118,8 +118,16 @@ selected session server. `machine.list` takes `{}`. `machine.get`,
 `{id, host, if_revision, label?, remote_binary?, enabled?}`. Rename takes
 `{id, label, if_revision}`; enable, disable, and remove take
 `{id, if_revision}`. Read projections omit SSH destinations and executable
-paths. Control methods are advertised only by `luvus uhp access --machines
---control`.
+paths, but include `automatic_provisioning` so a client can distinguish a
+managed binary from an explicit path. Control methods are advertised only by
+`luvus uhp access --machines --control`.
+
+An enabled `machine.add` or `machine.enable` request may provision the exact
+published Luvus release on the remote account before saving or enabling the
+profile. This foreground operation uses key-based OpenSSH, verifies the release
+checksum and fleet capability, installs only under `~/.local/bin`, and never
+restarts a running remote server. `machine.status` and all background reconnects
+remain read-only. Use `enabled:false` to save without provisioning.
 
 `task.add` accepts a short `title` and an optional multiline `prompt` containing
 the detailed worker briefing. `task.get`, `task.list`, and task events return

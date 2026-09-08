@@ -70,21 +70,26 @@ fn add(args: &[String]) -> Result<i32> {
     }
     if let Some(binary) = option(args, "--remote-binary") {
         profile.remote_binary = Some(binary.to_string());
+        profile.automatic_provisioning = false;
     }
     profile.enabled = !flag(args, "--disabled");
     if !profile.enabled {
         profile.connection_policy = ConnectionPolicy::Manual;
     }
     profile.validate()?;
+    let expected = revision(args)?;
+    let current = catalog::preflight_mutation(expected)?;
+    if current.machines.iter().any(|machine| machine.id == id) {
+        return Err(anyhow!("machine `{id}` already exists"));
+    }
 
     let probe = if profile.enabled {
-        let result = super::ssh::prepare(&profile)?;
+        let result = super::ssh::prepare_or_provision(&profile)?;
         profile.remote_binary = Some(result.remote_binary.clone());
         Some(result)
     } else {
         None
     };
-    let expected = revision(args)?;
     let (_, catalog) = catalog::mutate(expected, |catalog| {
         if catalog.machines.iter().any(|machine| machine.id == id) {
             return Err(anyhow!("machine `{id}` already exists"));
@@ -128,9 +133,9 @@ fn set_enabled(args: &[String], enabled: bool) -> Result<i32> {
     let expected = revision(args)?;
     let mut prepared = None;
     if enabled {
-        let loaded = catalog::load()?;
-        let profile = find(&loaded.catalog, id)?;
-        let result = super::ssh::prepare(profile)?;
+        let current = catalog::preflight_mutation(expected)?;
+        let profile = find(&current, id)?;
+        let result = super::ssh::prepare_or_provision(profile)?;
         prepared = Some(result.remote_binary);
     }
     let (_, catalog) = catalog::mutate(expected, |catalog| {
@@ -290,7 +295,7 @@ fn machine_help() -> &'static str {
 
 Saved SSH machines:
   machine add <id> --host <ssh-alias> [--label <label>] [--remote-binary <path>] [--disabled]
-      Validate and save one machine. Enabled profiles require key-based SSH.
+      provision and validate one SSH machine
   machine list
       List saved profiles and the current catalog revision.
   machine show <id>
@@ -298,7 +303,7 @@ Saved SSH machines:
   machine rename <id> <label> [--revision <n>]
       Change the display label with optional optimistic concurrency.
   machine enable|disable <id> [--revision <n>]
-      Enable after a non-interactive capability probe, or disconnect on use.
+      provision and enable after a bounded SSH probe, or disable locally
   machine remove <id> [--revision <n>]
       Remove only the local profile. Remote sessions and panes stay alive.
   machine status <id>
@@ -339,6 +344,7 @@ mod tests {
         assert_eq!(loaded.catalog.machines[0].id, "buildbox");
         assert!(!loaded.catalog.machines[0].enabled);
         assert!(loaded.catalog.machines[0].remote_binary.is_none());
+        assert!(loaded.catalog.machines[0].automatic_provisioning);
     }
 
     #[test]
@@ -358,5 +364,30 @@ mod tests {
             "no".into(),
         ];
         assert!(revision(&invalid).is_err());
+    }
+
+    #[test]
+    fn explicit_remote_binary_disables_managed_provisioning() {
+        let _env = crate::persist::test_env("machine-cli-explicit-binary");
+        let args = vec![
+            "add".into(),
+            "buildbox".into(),
+            "--host".into(),
+            "dev@buildbox".into(),
+            "--remote-binary".into(),
+            "/opt/luvus/bin/luvus".into(),
+            "--disabled".into(),
+        ];
+        run(
+            &args,
+            crate::i18n::cli::Context::for_language(crate::i18n::cli::Language::En),
+        )
+        .unwrap();
+        let profile = &catalog::load().unwrap().catalog.machines[0];
+        assert_eq!(
+            profile.remote_binary.as_deref(),
+            Some("/opt/luvus/bin/luvus")
+        );
+        assert!(!profile.automatic_provisioning);
     }
 }

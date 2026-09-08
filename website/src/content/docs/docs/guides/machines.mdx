@@ -11,13 +11,10 @@ that produces no frames and does not own input, cursor, effects, or PTY size.
 
 ## Prepare a machine
 
-First confirm normal OpenSSH access and install the same Luvus version on both
-machines:
+First confirm normal key-based OpenSSH access:
 
 ```sh
 ssh buildbox
-ssh buildbox luvus --version
-luvus --version
 ```
 
 Then save the machine:
@@ -26,11 +23,35 @@ Then save the machine:
 luvus machine add build --host buildbox --label "Build box"
 ```
 
-An enabled profile is saved only after Luvus locates the remote executable,
-verifies the fleet protocol, and proves that a fresh `BatchMode=yes` connection
-works. Luvus never stores a password, private key, host-key answer, or SSH
-command. OpenSSH configuration remains authoritative for aliases, keys, jump
-hosts, and authentication agents.
+For an enabled profile, Luvus first looks for an exact compatible remote
+binary. If none is available, the foreground `machine add` command
+automatically downloads the matching published release on the remote host,
+verifies its published SHA-256 digest and fleet capability, and atomically
+installs it at `~/.local/bin/luvus`. It never requests administrator access and
+never executes a downloaded installer script. The profile is saved only after
+a fresh `BatchMode=yes` capability probe succeeds.
+
+Automatic provisioning requires `curl` or `wget`, `tar`, and one of
+`sha256sum`, `shasum`, or `openssl` on a supported macOS or Linux remote. An
+explicit `--remote-binary <absolute-path>` remains authoritative and is only
+validated; Luvus records `automatic_provisioning:false` and does not replace
+it. Automatically discovered or installed paths retain
+`automatic_provisioning:true`, so a later foreground enable can repair a
+missing or incompatible managed binary. `machine status` is always read-only.
+Provisioning runs only for the explicit foreground `machine add` and `machine
+enable` operations. Background connect and reconnect paths never install,
+update, restart, or answer prompts.
+
+A source or prerelease build needs a published release asset with the same
+version before automatic provisioning can succeed. Until then, install that
+build on the remote host yourself and pass its absolute path with
+`--remote-binary`.
+
+Luvus never stores a password, private key, host-key answer, or SSH command.
+OpenSSH configuration remains authoritative for aliases, keys, jump hosts, and
+authentication agents. A remote server that is already running is never
+restarted automatically; restart it deliberately if it still serves an older
+binary after provisioning.
 
 Use `--disabled` to record a profile without connecting or probing it:
 
@@ -101,6 +122,11 @@ Read-only mode adds `machine.list`, `machine.get`, `machine.status`, and
 scope. Capability discovery advertises these methods only when `--machines` is
 present. Profile projections omit the SSH destination and absolute remote
 binary path.
+
+An enabled `machine.add` or `machine.enable` control request is an explicit
+foreground provisioning request and may install the matching verified release
+for that remote account. Add with `enabled:false` when the caller should only
+record the profile.
 
 Mutations require `if_revision` to reject stale writers and duplicate retries:
 

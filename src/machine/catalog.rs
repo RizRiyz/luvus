@@ -33,6 +33,9 @@ pub(crate) struct MachineProfile {
     pub transport: String,
     pub destination: String,
     pub remote_binary: Option<String>,
+    /// Whether foreground add/enable may install the matching user-local
+    /// release when the saved binary is absent or incompatible.
+    pub automatic_provisioning: bool,
     pub enabled: bool,
     pub preferred_session: Option<String>,
     pub connection_policy: ConnectionPolicy,
@@ -46,6 +49,7 @@ impl Default for MachineProfile {
             transport: "ssh".to_string(),
             destination: String::new(),
             remote_binary: None,
+            automatic_provisioning: false,
             enabled: true,
             preferred_session: None,
             connection_policy: ConnectionPolicy::PersistentWhileOpen,
@@ -59,6 +63,7 @@ impl MachineProfile {
             label: id.clone(),
             id,
             destination,
+            automatic_provisioning: true,
             ..Self::default()
         }
     }
@@ -222,22 +227,7 @@ pub(crate) fn mutate<T>(
     operation: impl FnOnce(&mut Catalog) -> Result<T>,
 ) -> Result<(T, Catalog)> {
     let _lock = acquire_lock()?;
-    let loaded = load()?;
-    if !loaded.warnings.is_empty() {
-        return Err(anyhow!(
-            "machine catalog contains invalid entries; repair {} before changing it: {}",
-            path().display(),
-            loaded.warnings.join("; ")
-        ));
-    }
-    let mut catalog = loaded.catalog;
-    if let Some(expected) = expected_revision.filter(|expected| *expected != catalog.revision) {
-        return Err(anyhow!(
-            "machine catalog revision conflict: expected {}, current {}",
-            expected,
-            catalog.revision
-        ));
-    }
+    let mut catalog = checked_for_mutation(load()?, expected_revision)?;
     let result = operation(&mut catalog)?;
     validate_catalog(&catalog)?;
     catalog.revision = catalog
@@ -246,6 +236,31 @@ pub(crate) fn mutate<T>(
         .ok_or_else(|| anyhow!("machine catalog revision is exhausted"))?;
     save(&catalog)?;
     Ok((result, catalog))
+}
+
+/// Reject invalid or stale catalog writes before a foreground operation starts
+/// network or provisioning work. `mutate` repeats this check under the lock.
+pub(crate) fn preflight_mutation(expected_revision: Option<u64>) -> Result<Catalog> {
+    checked_for_mutation(load()?, expected_revision)
+}
+
+fn checked_for_mutation(loaded: LoadedCatalog, expected_revision: Option<u64>) -> Result<Catalog> {
+    if !loaded.warnings.is_empty() {
+        return Err(anyhow!(
+            "machine catalog contains invalid entries; repair {} before changing it: {}",
+            path().display(),
+            loaded.warnings.join("; ")
+        ));
+    }
+    let catalog = loaded.catalog;
+    if let Some(expected) = expected_revision.filter(|expected| *expected != catalog.revision) {
+        return Err(anyhow!(
+            "machine catalog revision conflict: expected {}, current {}",
+            expected,
+            catalog.revision
+        ));
+    }
+    Ok(catalog)
 }
 
 fn validate_catalog(catalog: &Catalog) -> Result<()> {
@@ -417,6 +432,7 @@ mod tests {
         .unwrap();
         let loaded = load().unwrap();
         assert_eq!(loaded.catalog.machines.len(), 1);
+        assert!(!loaded.catalog.machines[0].automatic_provisioning);
         assert_eq!(loaded.warnings.len(), 1);
         assert!(mutate(None, |_| Ok(())).is_err());
         assert_eq!(
