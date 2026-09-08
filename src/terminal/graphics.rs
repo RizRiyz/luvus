@@ -90,6 +90,13 @@ impl HostGraphics {
         self.0.pending.store(true, Ordering::Release);
     }
 
+    /// Non-consuming fence for a projection made after the last collection.
+    /// Only the app thread consumes the flag; producers set it before their
+    /// changed graphics/grid can be observed outside the engine lock.
+    pub(crate) fn pending(&self) -> bool {
+        self.0.pending.load(Ordering::Acquire)
+    }
+
     /// Whether any pane may be holding commands, clearing the flag so a
     /// command queued during the collection that follows is not missed.
     ///
@@ -1506,9 +1513,16 @@ mod tests {
     #[test]
     fn pending_is_cleared_before_collection_so_a_racing_command_is_not_lost() {
         let graphics = HostGraphics::default();
+        assert!(!graphics.pending());
         assert!(!graphics.take_pending(), "nothing queued yet");
         graphics.mark_pending();
+        assert!(graphics.pending());
+        assert!(
+            graphics.pending(),
+            "checking a projection must not consume the flag"
+        );
         assert!(graphics.take_pending());
+        assert!(!graphics.pending());
         assert!(!graphics.take_pending(), "the flag is consumed");
     }
 
