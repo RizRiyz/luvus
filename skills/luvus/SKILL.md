@@ -148,6 +148,11 @@ luvus uhp snapshot
 
 These discovery calls are an exception to the no-preflight rule because they
 define the live protocol contract. Do not run them before routine CLI actions.
+In UHP 1.0, `graphics` is a build-support boolean. When present,
+`graphics_details.available` describes the foreground display's current ability
+to draw kitty images; a passive graphics client does not make it true. Older
+servers may omit the additive details. Pane programs should use kitty's own
+support query rather than infer display support from the build flag.
 `luvus uhp proxy` forwards one newline-delimited JSON request from stdin to the
 selected local server. Validate the method and parameters against the installed
 schema before sending it.

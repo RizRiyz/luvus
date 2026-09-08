@@ -105,7 +105,7 @@ pub(crate) fn is_placeholder(symbol: &str) -> bool {
 /// exactly which marks are its own. This exists for text that came back from
 /// the terminal engine as a finished string, where the only way to tell a
 /// coordinate mark from the surrounding text is that it follows a placeholder
-/// and occupies no column of its own.
+/// and belongs to the protocol's coordinate table.
 ///
 /// Each image cell becomes one space, so a selection that spanned an image
 /// keeps the alignment of the text around it.
@@ -125,7 +125,7 @@ pub(crate) fn strip(text: &str) -> Cow<'_, str> {
         // The coordinate diacritics trail the placeholder and take no column.
         while characters
             .peek()
-            .is_some_and(|next| unicode_width::UnicodeWidthChar::width(*next) == Some(0))
+            .is_some_and(|next| DIACRITICS.contains(next))
         {
             characters.next();
         }
@@ -202,6 +202,16 @@ mod tests {
         // letter, or an emoji's variation selector, is text the user selected.
         let accented = "e\u{0301} \u{1f5a5}\u{fe0f}";
         assert_eq!(strip(accented), accented);
+    }
+
+    /// Zero width alone does not make a character a kitty coordinate.
+    #[test]
+    fn review_stripping_preserves_non_coordinate_zero_width_text() {
+        for character in ['\u{200b}', '\u{200d}', '\u{0301}', '\u{fe0f}'] {
+            assert!(!DIACRITICS.contains(&character));
+            let selected = format!("a{PLACEHOLDER}\u{0305}\u{030d}{character}b");
+            assert_eq!(strip(&selected), format!("a {character}b"));
+        }
     }
 
     #[test]

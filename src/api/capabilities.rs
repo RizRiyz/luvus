@@ -420,11 +420,10 @@ pub fn capabilities(event_sequence: u64) -> Value {
         "concurrency":{"mutation_guard":"if_revision"},
         "atomic_methods":["agent.start","agent.prompt","automation.create","automation.rebind","automation.run","workspace.move_block","layout.apply","diff.note.apply"],
         "idempotency_keys":{"methods":["automation.create","automation.run"],"max_bytes":128},
-        // What this build can do, not what it can do right now. A pane's child
-        // only draws when a client whose terminal answered the kitty graphics
-        // support query is attached, which changes as clients come and go —
-        // `uhp.capabilities` reports that live state as `graphics.available`.
-        "graphics":{
+        // Preserve the UHP 1.0 boolean wire type. Optional details are additive;
+        // the running server adds foreground availability separately.
+        "graphics":true,
+        "graphics_details":{
             "protocol":"kitty",
             "placement":"unicode_placeholder",
             "supported":true,

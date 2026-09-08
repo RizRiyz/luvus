@@ -3880,18 +3880,19 @@ impl App {
         }
     }
 
-    /// Record whether any attached client's terminal can draw images.
-    ///
-    /// Every pane's engine shares this one value, so a child that asks the
-    /// kitty graphics support question mid-parse is answered against the
-    /// clients attached at that instant.
+    /// Record support for the single display in monolithic local mode.
     pub fn set_host_graphics(&mut self, supported: bool) {
         self.host_graphics.set(supported);
     }
 
-    /// Whether an image a pane's child emits would reach a screen right now.
+    /// Share foreground negotiation and any-renderer delivery with every pane.
+    pub(crate) fn set_host_graphics_clients(&mut self, foreground: bool, any_renderer: bool) {
+        self.host_graphics.set_clients(foreground, any_renderer);
+    }
+
+    /// Whether the foreground display can acknowledge a new image query.
     pub fn host_graphics_available(&self) -> bool {
-        self.host_graphics.supported()
+        self.host_graphics.query_supported()
     }
 
     /// Record how big a cell is on the terminal showing the attached clients.

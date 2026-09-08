@@ -1,0 +1,4 @@
+{"id":"graphics-legacy","result":{"type":"uhp_capabilities","graphics":false}}
+{"id":"graphics-static","result":{"type":"uhp_capabilities","graphics":true,"graphics_details":{"protocol":"kitty","placement":"unicode_placeholder","supported":true}}}
+{"id":"graphics-unavailable","result":{"type":"uhp_capabilities","graphics":true,"graphics_details":{"protocol":"kitty","placement":"unicode_placeholder","supported":true,"available":false}}}
+{"id":"graphics-available","result":{"type":"uhp_capabilities","graphics":true,"graphics_details":{"protocol":"kitty","placement":"unicode_placeholder","supported":true,"available":true,"future":1},"future":true}}

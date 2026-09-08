@@ -118,7 +118,7 @@ impl EventListener for EventProxy {
             // `crate::terminal::graphics`.
             Event::KittyGraphics(command) => {
                 if let Some(reply) =
-                    graphics::query_reply(&command.payload, self.host_graphics.supported())
+                    graphics::query_reply(&command.payload, self.host_graphics.query_supported())
                 {
                     let _ = self.tx.send(InputAction::Bytes(reply));
                     return;
@@ -733,6 +733,8 @@ impl VtEngine for AlacrittyEngine {
                 && applied.column == 0
                 && applied.columns == old_cols
                 && applied.rows == old_rows
+                && usize::from(cols) <= placeholder::MAX_EXTENT
+                && usize::from(rows) <= placeholder::MAX_EXTENT
             {
                 // During a divider drag the child has not repainted yet. Stretch
                 // the full-pane image it already sent, as a GUI would, rather
@@ -758,6 +760,8 @@ impl VtEngine for AlacrittyEngine {
             } else {
                 // A shrink may truncate non-anchor cells, so the anchor alone
                 // cannot prove that this rectangle survived the resize whole.
+                // Beyond the coordinate table, retain the last valid rectangle
+                // rather than advertising cells we cannot encode.
                 self.applied[index].dirty = true;
             }
         }
@@ -2563,7 +2567,7 @@ mod tests {
         e.advance(probe);
         assert_eq!(
             recv_bytes(&rx),
-            b"\x1b_Gi=4207;ENOTSUPPORTED:no attached client can draw images\x1b\\",
+            b"\x1b_Gi=4207;ENOTSUPPORTED:foreground client cannot draw images\x1b\\",
             "no client is attached yet"
         );
 
@@ -2579,7 +2583,7 @@ mod tests {
         e.advance(probe);
         assert_eq!(
             recv_bytes(&rx),
-            b"\x1b_Gi=4207;ENOTSUPPORTED:no attached client can draw images\x1b\\",
+            b"\x1b_Gi=4207;ENOTSUPPORTED:foreground client cannot draw images\x1b\\",
             "the last drawing client detached"
         );
     }
@@ -3068,6 +3072,42 @@ mod tests {
         );
     }
 
+    /// Resizing must not advertise coordinates the placeholder table cannot encode.
+    #[test]
+    fn review_oversized_resize_keeps_the_last_valid_image_rectangle() {
+        let max = placeholder::MAX_EXTENT as u16;
+        for (cols, rows) in [(max + 1, 4), (10, max + 1)] {
+            let mut engine = graphics_engine(10, 4);
+            let command = b"\x1b_Ga=T,f=32,s=100,v=80,t=d,i=9,p=1,C=1,c=10,r=4,q=2;AAAA\x1b\\";
+            engine.advance(command);
+            engine.take_graphics();
+            let retained = engine.retained_graphics();
+            let before = placeholder_cells(&engine);
+            engine.host_graphics.take_pending();
+
+            engine.resize(cols, rows);
+            assert!(
+                engine.take_graphics().is_empty(),
+                "no oversized placement is forwarded"
+            );
+            assert_eq!(engine.retained_graphics(), retained);
+            assert_eq!(placeholder_cells(&engine), before);
+            assert_eq!((engine.applied[0].columns, engine.applied[0].rows), (10, 4));
+            assert!(!engine.host_graphics.pending());
+
+            // Returning to a supported size and receiving a child repaint works.
+            engine.resize(10, 4);
+            engine.advance(command);
+            assert_eq!(placeholder_cells(&engine).len(), 40);
+            engine.resize(max, 4);
+            assert_eq!(placeholder_cells(&engine).len(), usize::from(max) * 4);
+            assert!(engine
+                .take_graphics()
+                .iter()
+                .any(|command| { String::from_utf8_lossy(command).contains("U=1,c=297,r=4") }));
+        }
+    }
+
     /// A pane whose clients cannot draw must not accumulate images for nobody.
     #[test]
     fn nothing_is_collected_while_no_client_can_draw() {
@@ -3102,7 +3142,7 @@ mod tests {
 
         let query = recv_bytes(&rx);
         assert_eq!(
-            query, b"\x1b_Gi=4207;ENOTSUPPORTED:no attached client can draw images\x1b\\",
+            query, b"\x1b_Gi=4207;ENOTSUPPORTED:foreground client cannot draw images\x1b\\",
             "the query must be declined, keyed to the queried image id"
         );
         let da1 = recv_bytes(&rx);

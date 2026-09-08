@@ -695,18 +695,23 @@ pub fn run() -> Result<()> {
         if app.tick_automations(crate::automation::unix_now()) {
             render_request.record(RenderCause::Detection);
         }
+        let mut clients_removed = false;
         for msg in app.pending_notify.drain(..) {
-            broadcast(&mut clients, ServerMessage::Notify(msg));
+            clients_removed |= broadcast(&mut clients, ServerMessage::Notify(msg));
         }
         if let Some(signal) = app.pending_sound.take() {
-            broadcast(&mut clients, ServerMessage::Sound(signal));
+            clients_removed |= broadcast(&mut clients, ServerMessage::Sound(signal));
         }
         // A finished mouse selection copies to the client's clipboard (OSC 52).
         if let Some(url) = app.pending_open_url.take() {
-            broadcast(&mut clients, ServerMessage::OpenUrl(url));
+            clients_removed |= broadcast(&mut clients, ServerMessage::OpenUrl(url));
         }
         if let Some(text) = app.pending_clipboard.take() {
-            broadcast(&mut clients, ServerMessage::Clipboard(text));
+            clients_removed |= broadcast(&mut clients, ServerMessage::Clipboard(text));
+        }
+        if clients_removed {
+            reconcile_client_state(&mut app, &mut clients, &mut foreground);
+            render_request.record(RenderCause::UserInterface);
         }
         // An expired toast forces one render so it disappears (idle frames don't).
         if app.tick_toast(Instant::now()) {
@@ -874,10 +879,8 @@ fn apply(
                 ],
             );
             let was_foreground = *foreground == Some(id);
-            clients.remove(&id);
-            if was_foreground {
-                *foreground = latest_client(clients);
-                apply_client_state(app, clients, *foreground);
+            if clients.remove(&id).is_some() {
+                reconcile_client_state(app, clients, foreground);
             }
             was_foreground
         }
@@ -960,8 +963,12 @@ fn discard_client_input(input: ClientInput) {
     }
 }
 
-fn broadcast(clients: &mut Clients, msg: ServerMessage) {
+/// Return whether failed control sends changed the client set. The caller
+/// reconciles shared state once after draining the app's pending effects.
+fn broadcast(clients: &mut Clients, msg: ServerMessage) -> bool {
+    let before = clients.len();
     clients.retain(|_, client| client.send_control(msg.clone()).is_ok());
+    clients.len() != before
 }
 
 fn latest_client(clients: &Clients) -> Option<u64> {
@@ -971,23 +978,36 @@ fn latest_client(clients: &Clients) -> Option<u64> {
         .map(|(&id, _)| id)
 }
 
+/// Repair ownership after an actual client-set change, never on every frame.
+/// A newly foreground view needs a frame-capped repair even if it already
+/// received a passive frame and no subsequent PTY or input event arrives.
+fn reconcile_client_state(app: &mut App, clients: &mut Clients, foreground: &mut Option<u64>) {
+    if foreground.is_none_or(|id| !clients.contains_key(&id)) {
+        *foreground = latest_client(clients);
+        if let Some(client) = foreground.and_then(|id| clients.get_mut(&id)) {
+            client.behind = true;
+        }
+    }
+    apply_client_state(app, clients, *foreground);
+}
+
 /// Re-derive the state that depends on which clients are attached.
 ///
 /// Called at every point the client set changes, so a pane can never be left
 /// believing something about clients that have since come or gone.
 fn apply_client_state(app: &mut App, clients: &Clients, foreground: Option<u64>) {
-    // One drawing client is enough. Images are forwarded only to the clients
-    // that can render them, and the rest paint the placeholder cells as blanks,
-    // so a mixed set of clients stays correct either way.
-    app.set_host_graphics(clients.values().any(|client| client.graphics));
-    // A cell is the size the terminal in front of the user makes it. With more
-    // than one client attached the newest wins, the same rule the palette uses.
-    app.set_host_cell_size(
-        foreground
-            .and_then(|id| clients.get(&id))
-            .or_else(|| clients.values().next())
-            .and_then(|client| client.cell_size),
+    let display = foreground
+        .and_then(|id| clients.get(&id))
+        .or_else(|| latest_client(clients).and_then(|id| clients.get(&id)));
+    // New queries promise support only on the foreground display. Existing
+    // streams still reach passive renderers; plain clients keep blanking cells.
+    app.set_host_graphics_clients(
+        display.is_some_and(|client| client.graphics),
+        clients.values().any(|client| client.graphics),
     );
+    // Prefer foreground, otherwise the most recently active client. An existing
+    // foreground with unknown pixel size must not borrow another display's size.
+    app.set_host_cell_size(display.and_then(|client| client.cell_size));
 
     if app.config.theme != "terminal" {
         return;
@@ -1149,12 +1169,11 @@ fn render_clients(
             }
         }
     }
-    for id in scratch.dead.drain(..) {
-        clients.remove(&id);
-    }
-    if foreground.is_some_and(|id| !clients.contains_key(&id)) {
-        *foreground = latest_client(clients);
-        apply_client_state(app, clients, *foreground);
+    if !scratch.dead.is_empty() {
+        for id in scratch.dead.drain(..) {
+            clients.remove(&id);
+        }
+        reconcile_client_state(app, clients, foreground);
     }
     if partial_candidate {
         acknowledge_visible_terminal_damage(app, &mut scratch.damage);
@@ -2010,12 +2029,58 @@ mod tests {
         engine: Arc<std::sync::Mutex<dyn crate::terminal::vt::VtEngine>>,
         clients: HashMap<u64, ClientState>,
         rx: mpsc::Receiver<ServerMessage>,
+        responses: mpsc::Receiver<crate::terminal::pty::InputAction>,
         foreground: Option<u64>,
         interactive_size: (u16, u16),
         scratch: RenderScratch,
     }
 
     impl Drawing {
+        /// Exercise real attach/detach/input ownership without a host terminal.
+        fn event(&mut self, event: AppEvent) -> bool {
+            let mut activity = self
+                .clients
+                .values()
+                .map(|client| client.last_activity)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            apply(
+                event,
+                &mut self.app,
+                &mut self.clients,
+                &mut self.foreground,
+                &mut self.interactive_size,
+                &mut activity,
+            )
+        }
+
+        fn connect(&mut self, id: u64, graphics: bool) -> mpsc::Receiver<ServerMessage> {
+            let (messages, rx) = mpsc::channel();
+            assert!(self.event(AppEvent::ClientConnected {
+                id,
+                messages,
+                frame_pending: Arc::new(AtomicBool::new(false)),
+                graphics_pending: Arc::new(AtomicBool::new(false)),
+                cols: 100,
+                rows: 30,
+                terminal_colors: None,
+                terminal_graphics: Some(graphics),
+                terminal_cell_size: None,
+            }));
+            rx
+        }
+
+        fn probe(&mut self) -> String {
+            self.engine.lock().unwrap().advance(b"\x1b_Ga=q,i=71\x1b\\");
+            match self.responses.recv_timeout(Duration::from_secs(1)).unwrap() {
+                crate::terminal::pty::InputAction::Bytes(bytes) => {
+                    String::from_utf8(bytes).unwrap()
+                }
+                _ => panic!("expected kitty query response"),
+            }
+        }
+
         fn render(&mut self) -> bool {
             render_clients(
                 &mut self.app,
@@ -2041,7 +2106,7 @@ mod tests {
         let mut app = App::new(100, 30, app_tx).expect("app starts");
         app.server_mode = true;
         let focus = app.layout().focus;
-        let (response_tx, _response_rx) = mpsc::channel();
+        let (response_tx, response_rx) = mpsc::channel();
         // Support is what makes the engine keep a command at all: a pane must
         // not hold images for a terminal that cannot draw them.
         let host_graphics = app.host_graphics_for_test();
@@ -2074,6 +2139,7 @@ mod tests {
             engine,
             clients: HashMap::from([(1, client)]),
             rx,
+            responses: response_rx,
             foreground: Some(1),
             interactive_size: (100, 30),
             scratch: RenderScratch::default(),
@@ -2086,6 +2152,150 @@ mod tests {
             ServerMessage::FrameDiff(frame) => (frame.width, frame.height),
             _ => panic!("expected rendered frame"),
         }
+    }
+
+    /// New probes follow the active display, not a passive renderer.
+    #[test]
+    fn review_graphics_queries_follow_foreground_but_passive_delivery_continues() {
+        let mut drawing = app_with_an_image("graphics-query-owner");
+        assert!(drawing.probe().contains(";OK"));
+        let _plain_rx = drawing.connect(2, false);
+        assert_eq!(drawing.foreground, Some(2));
+        assert!(drawing.probe().contains(";ENOTSUPPORTED"));
+        assert!(!drawing.app.host_graphics_available());
+
+        drawing
+            .engine
+            .lock()
+            .unwrap()
+            .advance(&image("a=T,U=1,i=8,c=1,r=1,f=100;BBBB"));
+        assert!(
+            !drawing.app.take_pane_graphics().is_empty(),
+            "existing streams can still reach the passive renderer"
+        );
+        drawing.event(AppEvent::ClientInput {
+            id: 1,
+            input: ClientInput::Resize(100, 30),
+        });
+        assert_eq!(drawing.foreground, Some(2));
+        assert!(
+            drawing.probe().contains(";ENOTSUPPORTED"),
+            "background resize cannot change query ownership"
+        );
+
+        drawing.event(AppEvent::ClientInput {
+            id: 1,
+            input: ClientInput::Key(KeyEvent::new(KeyCode::Null, KeyModifiers::NONE)),
+        });
+        assert_eq!(drawing.foreground, Some(1));
+        assert!(drawing.probe().contains(";OK"));
+        drawing.event(AppEvent::ClientDetach { id: 1 });
+        assert!(drawing.probe().contains(";ENOTSUPPORTED"));
+    }
+
+    /// Losing a passive renderer must disable collection even if focus survives.
+    #[test]
+    fn review_passive_detach_refreshes_shared_graphics_state() {
+        let mut drawing = app_with_an_image("graphics-passive-detach");
+        let _plain_rx = drawing.connect(2, false);
+        drawing.event(AppEvent::ClientDetach { id: 1 });
+        assert_eq!(drawing.foreground, Some(2));
+        assert!(!drawing.app.host_graphics_for_test().supported());
+        drawing
+            .engine
+            .lock()
+            .unwrap()
+            .advance(&image("a=T,U=1,i=8,c=1,r=1,f=100;BBBB"));
+        assert!(drawing.app.take_pane_graphics().is_empty());
+    }
+
+    /// Failed frame sends must update graphics state, not just remove a map entry.
+    #[test]
+    fn review_render_removal_refreshes_shared_graphics_state() {
+        let mut drawing = app_with_an_image("graphics-render-removal");
+        let _plain_rx = drawing.connect(2, false);
+        drop(std::mem::replace(&mut drawing.rx, mpsc::channel().1));
+        drawing.render();
+        assert!(!drawing.clients.contains_key(&1));
+        assert_eq!(drawing.foreground, Some(2));
+        assert!(!drawing.app.host_graphics_for_test().supported());
+    }
+
+    /// Control messages share the same lifecycle rule as failed frame sends.
+    #[test]
+    fn review_broadcast_removal_refreshes_shared_graphics_state() {
+        let mut drawing = app_with_an_image("graphics-broadcast-removal");
+        let _plain_rx = drawing.connect(2, false);
+        drop(std::mem::replace(&mut drawing.rx, mpsc::channel().1));
+        assert!(broadcast(
+            &mut drawing.clients,
+            ServerMessage::Clipboard("copy".into())
+        ));
+        super::reconcile_client_state(
+            &mut drawing.app,
+            &mut drawing.clients,
+            &mut drawing.foreground,
+        );
+        assert_eq!(drawing.foreground, Some(2));
+        assert!(!drawing.app.host_graphics_for_test().supported());
+        assert!(!broadcast(
+            &mut drawing.clients,
+            ServerMessage::Clipboard("copy again".into())
+        ));
+    }
+
+    /// A passive frame is not enough when a failed foreground send transfers ownership.
+    #[test]
+    fn review_foreground_frame_failure_schedules_the_surviving_view() {
+        let mut drawing = app_with_an_image("graphics-foreground-removal");
+        let _plain_rx = drawing.connect(2, false);
+        drawing.foreground = Some(1);
+        super::apply_client_state(&mut drawing.app, &drawing.clients, drawing.foreground);
+        drop(std::mem::replace(&mut drawing.rx, mpsc::channel().1));
+        drawing.render();
+        assert_eq!(drawing.foreground, Some(2));
+        assert!(
+            drawing.clients[&2].behind,
+            "repair must not wait for unrelated output"
+        );
+        assert!(!drawing.app.host_graphics_available());
+    }
+
+    /// Detaching the plain foreground restores queries on the remaining renderer.
+    #[test]
+    fn review_plain_foreground_detach_restores_graphics_queries() {
+        let mut drawing = app_with_an_image("graphics-foreground-detach");
+        let _plain_rx = drawing.connect(2, false);
+        assert!(drawing.probe().contains(";ENOTSUPPORTED"));
+        drawing.event(AppEvent::ClientDetach { id: 2 });
+        assert_eq!(drawing.foreground, Some(1));
+        assert!(drawing.probe().contains(";OK"));
+        drawing.event(AppEvent::ClientDetach { id: 1 });
+        assert_eq!(drawing.foreground, None);
+        assert!(drawing.probe().contains(";ENOTSUPPORTED"));
+        assert!(!drawing.app.host_graphics_for_test().supported());
+    }
+
+    /// Missing foreground uses recency; missing foreground pixel data stays unknown.
+    #[test]
+    fn review_cell_size_fallback_uses_latest_client_not_hash_iteration() {
+        let mut drawing = app_with_an_image("graphics-cell-fallback");
+        let _second_rx = drawing.connect(2, true);
+        let first = *drawing.clients.keys().next().unwrap();
+        let latest = if first == 1 { 2 } else { 1 };
+        let cell_size = crate::terminal::theme_probe::CellSize {
+            width: 13,
+            height: 27,
+        };
+        drawing.clients.get_mut(&latest).unwrap().last_activity = 100;
+        drawing.clients.get_mut(&latest).unwrap().cell_size = Some(cell_size);
+        super::apply_client_state(&mut drawing.app, &drawing.clients, None);
+        assert_eq!(
+            drawing.app.host_graphics_for_test().cell_size(),
+            Some(cell_size)
+        );
+        super::apply_client_state(&mut drawing.app, &drawing.clients, Some(first));
+        assert_eq!(drawing.app.host_graphics_for_test().cell_size(), None);
     }
 
     #[test]
