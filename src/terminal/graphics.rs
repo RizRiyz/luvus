@@ -9,7 +9,7 @@
 //! **The support question has a real answer.** The protocol's test is a query
 //! action (`a=q`) followed by a primary device attributes request: answering
 //! only the DA1 declares no graphics support. Luvus answers `OK` exactly when
-//! an attached client's terminal answered the same question, and declines
+//! the foreground client's terminal answered the same question, and declines
 //! otherwise. Staying silent instead would be a valid answer but a poor one —
 //! the child cannot tell it apart from a slow terminal or a multiplexer that
 //! swallowed the sequence, so it waits out a timeout and then guesses. A child
@@ -26,7 +26,7 @@
 
 pub(crate) mod placeholder;
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use crate::terminal::theme_probe::CellSize;
@@ -46,7 +46,9 @@ pub struct HostGraphics(Arc<HostGraphicsState>);
 
 #[derive(Debug, Default)]
 struct HostGraphicsState {
-    supported: AtomicBool,
+    /// Bit 0: a renderer can receive commands. Bit 1: the foreground can
+    /// acknowledge new queries. Publish both together when ownership changes.
+    clients: AtomicU8,
     /// Set by any pane that queued a command. Lets a render pass decide with
     /// one atomic load whether it is worth walking the panes at all, instead
     /// of locking every engine on every frame to find nothing.
@@ -59,11 +61,23 @@ struct HostGraphicsState {
 
 impl HostGraphics {
     pub(crate) fn supported(&self) -> bool {
-        self.0.supported.load(Ordering::Relaxed)
+        self.0.clients.load(Ordering::Relaxed) & 1 != 0
     }
 
+    /// A single local display owns both negotiation and command delivery.
     pub(crate) fn set(&self, supported: bool) {
-        self.0.supported.store(supported, Ordering::Relaxed);
+        self.set_clients(supported, supported);
+    }
+
+    /// New queries follow foreground ownership; existing streams may still
+    /// reach a passive renderer. Updating one must not briefly enable the other.
+    pub(crate) fn set_clients(&self, foreground: bool, any_renderer: bool) {
+        let clients = u8::from(any_renderer) | (u8::from(foreground && any_renderer) << 1);
+        self.0.clients.store(clients, Ordering::Relaxed);
+    }
+
+    pub(crate) fn query_supported(&self) -> bool {
+        self.0.clients.load(Ordering::Relaxed) & 2 != 0
     }
 
     /// Pixel size of one cell, as reported by the terminal showing a client.
@@ -888,7 +902,7 @@ pub(crate) fn query_reply(payload: &[u8], supported: bool) -> Option<Vec<u8>> {
     reply.extend_from_slice(if supported {
         b";OK\x1b\\".as_slice()
     } else {
-        b";ENOTSUPPORTED:no attached client can draw images\x1b\\".as_slice()
+        b";ENOTSUPPORTED:foreground client cannot draw images\x1b\\".as_slice()
     });
     Some(reply)
 }

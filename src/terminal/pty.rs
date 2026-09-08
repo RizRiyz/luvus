@@ -1091,10 +1091,6 @@ impl Pane {
         self.try_send(&wrap_paste(text, bracketed))
     }
 
-    /// Resize the PTY + engine. Returns whether the size actually changed (so the
-    /// caller can note the resize for detection's post-resize grace, docs/07).
-    /// A deferred pane that has not spawned yet records the size; the spawn
-    /// worker applies it (docs/82).
     /// Re-send the window size without changing the cell grid.
     ///
     /// The pixel dimensions in it come from the terminal displaying a client,
@@ -1110,6 +1106,10 @@ impl Pane {
         }
     }
 
+    /// Resize the PTY + engine. Returns whether the size actually changed (so the
+    /// caller can note the resize for detection's post-resize grace, docs/07).
+    /// A deferred pane that has not spawned yet records the size; the spawn
+    /// worker applies it (docs/82).
     pub fn resize(&mut self, cols: u16, rows: u16) -> bool {
         if cols == 0 || rows == 0 {
             return false;
