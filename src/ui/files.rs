@@ -490,7 +490,8 @@ fn draw_text(f: &mut RenderTarget, body: Rect, v: &FileView, lines: &[String], t
         let mut i = v.scroll;
         while y < bottom && i < lines.len() {
             let line = &lines[i];
-            let tokens = highlight::tokenize(line, lang);
+            let open = v.string_states.get(i).copied().flatten();
+            let tokens = highlight::tokenize_continued(line, lang, open);
             let (hits, qlen) = search_hits_for_line(v, i);
             for (si, range) in crate::files::wrap_ranges(line, text_w as usize)
                 .into_iter()
@@ -516,7 +517,8 @@ fn draw_text(f: &mut RenderTarget, body: Rect, v: &FileView, lines: &[String], t
     for (i, line) in lines.iter().enumerate().skip(v.scroll).take(rows) {
         let y = body.y + (i - v.scroll) as u16;
         gutter_cell(f, y, Some(i + 1), i + 1);
-        let tokens = highlight::tokenize(line, lang);
+        let open = v.string_states.get(i).copied().flatten();
+        let tokens = highlight::tokenize_continued(line, lang, open);
         let (hits, qlen) = search_hits_for_line(v, i);
         let width = line.chars().count();
         let spans = spans_in_range(line, &tokens, (0, width), &hits, qlen, t);
@@ -842,7 +844,7 @@ mod tests {
 
         let theme = Theme::quattro_rally();
         let line = "fn load(path: &Path) -> usize { // open";
-        let tokens = highlight::tokenize(line, highlight::Language::Rust);
+        let tokens = highlight::tokenize_continued(line, highlight::Language::Rust, None);
         let width = line.chars().count();
         let spans = super::spans_in_range(line, &tokens, (0, width), &[], 0, &theme);
         let text: String = spans.iter().map(|span| span.content.as_ref()).collect();
@@ -887,7 +889,7 @@ mod tests {
 
         let theme = Theme::quattro_rally();
         let line = "let loaded = load(path); // load";
-        let tokens = highlight::tokenize(line, highlight::Language::Rust);
+        let tokens = highlight::tokenize_continued(line, highlight::Language::Rust, None);
         let width = line.chars().count();
         // `load` occurs at columns 4 ("loaded" prefix) and 13; highlight the
         // standalone call as the current match.

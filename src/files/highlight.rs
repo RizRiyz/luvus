@@ -96,25 +96,89 @@ pub struct Token {
     pub kind: Kind,
 }
 
-/// Tokenize a single line. Offsets are char indices, matching the file
-/// viewer's search-match columns. Always returns at least one token covering
-/// the whole line (possibly a single `Normal`), so renderers can rely on full
-/// coverage without a fallback path.
-pub fn tokenize(line: &str, lang: Language) -> Vec<Token> {
+/// A multiline string opener still active when a line begins. Only constructs
+/// that genuinely span lines produce one: Python triple-quoted strings and
+/// backtick literals (JavaScript template literals, Go raw strings). Rust raw
+/// strings can also span lines but stay single-line here — a documented
+/// approximation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MultilineKind {
+    TripleDouble,
+    TripleSingle,
+    Backtick,
+}
+
+/// Tokenize a single line. Pass `None` for `open` when no multiline string
+/// carries in; offsets are char indices, matching the file viewer's
+/// search-match columns. Always returns at least one token covering the whole
+/// line (possibly a single `Normal`), so renderers can rely on full coverage
+/// without a fallback path.
+///
+/// When the line may continue a multiline string opened on an earlier line,
+/// pass the opener active at its first character (taken from
+/// [`continuation_states`]) instead of `None`.
+pub fn tokenize_continued(line: &str, lang: Language, open: Option<MultilineKind>) -> Vec<Token> {
+    scan(line, lang, open).0
+}
+
+/// The multiline-string opener active at the start of each line, in order.
+/// The viewer rebuilds this once per file load and threads one entry per
+/// visible line into [`tokenize_continued`], so rendering stays O(visible
+/// rows) while continuation lines keep their string color.
+pub fn continuation_states(lines: &[String], lang: Language) -> Vec<Option<MultilineKind>> {
+    let mut states = Vec::with_capacity(lines.len());
+    let mut open = None;
+    for line in lines {
+        states.push(open);
+        open = scan(line, lang, open).1;
+    }
+    states
+}
+
+fn scan(
+    line: &str,
+    lang: Language,
+    open: Option<MultilineKind>,
+) -> (Vec<Token>, Option<MultilineKind>) {
     let chars: Vec<char> = line.chars().collect();
     let len = chars.len();
     if len == 0 {
-        return Vec::new();
+        // An empty line never opens or closes a multiline string.
+        return (Vec::new(), open);
     }
     if lang == Language::Plain {
-        return vec![Token {
-            start: 0,
-            end: len,
-            kind: Kind::Normal,
-        }];
+        return (
+            vec![Token {
+                start: 0,
+                end: len,
+                kind: Kind::Normal,
+            }],
+            None,
+        );
     }
     let mut tokens = Vec::new();
     let mut i = 0;
+    let mut open = open;
+    // A line that begins inside a multiline string: emit string content up to
+    // the closer (if any), then tokenize the remainder as fresh code.
+    if let Some(kind) = open {
+        if let Some(end) = find_multiline_close(&chars, 0, lang, kind) {
+            tokens.push(Token {
+                start: 0,
+                end,
+                kind: Kind::String,
+            });
+            i = end;
+            open = None;
+        } else {
+            tokens.push(Token {
+                start: 0,
+                end: len,
+                kind: Kind::String,
+            });
+            return (tokens, open);
+        }
+    }
     while i < len {
         // Line comments (checked before anything else at this position).
         if starts_line_comment(&chars, i, lang) {
@@ -136,6 +200,28 @@ pub fn tokenize(line: &str, lang: Language) -> Vec<Token> {
             continue;
         }
         let ch = chars[i];
+        // Multiline openers: Python triple-quoted strings and backtick
+        // literals. A same-line pair is one string token; an unclosed opener
+        // strings the rest of the line and carries into the next one. Checked
+        // before single-line strings so `"""` never splits into pieces.
+        if let Some(kind) = multiline_opener_at(&chars, i, lang) {
+            let body = i + opener_len(kind);
+            if let Some(end) = find_multiline_close(&chars, body, lang, kind) {
+                tokens.push(Token {
+                    start: i,
+                    end,
+                    kind: Kind::String,
+                });
+                i = end;
+                continue;
+            }
+            tokens.push(Token {
+                start: i,
+                end: len,
+                kind: Kind::String,
+            });
+            return (tokens, Some(kind));
+        }
         // Strings.
         if ch == '"'
             || ch == '`' && backtick_is_string(lang)
@@ -257,7 +343,91 @@ pub fn tokenize(line: &str, lang: Language) -> Vec<Token> {
         });
         i += 1;
     }
-    tokens
+    (tokens, open)
+}
+
+/// The opener width in chars: three for triple quotes, one for backticks.
+fn opener_len(kind: MultilineKind) -> usize {
+    match kind {
+        MultilineKind::TripleDouble | MultilineKind::TripleSingle => 3,
+        MultilineKind::Backtick => 1,
+    }
+}
+
+/// The multiline opener starting at char offset `i`, if any.
+fn multiline_opener_at(chars: &[char], i: usize, lang: Language) -> Option<MultilineKind> {
+    let ch = chars[i];
+    if lang == Language::Python
+        && ch == '"'
+        && chars.get(i + 1) == Some(&'"')
+        && chars.get(i + 2) == Some(&'"')
+    {
+        return Some(MultilineKind::TripleDouble);
+    }
+    if lang == Language::Python
+        && ch == '\''
+        && chars.get(i + 1) == Some(&'\'')
+        && chars.get(i + 2) == Some(&'\'')
+    {
+        return Some(MultilineKind::TripleSingle);
+    }
+    if ch == '`' && backtick_is_string(lang) {
+        return Some(MultilineKind::Backtick);
+    }
+    None
+}
+
+/// Offset just past the closer for `kind`, searching from char offset `from`.
+/// Returns `None` when the line ends inside the string. Backslash escapes
+/// apply everywhere except Go raw strings, which end at the next backtick.
+fn find_multiline_close(
+    chars: &[char],
+    from: usize,
+    lang: Language,
+    kind: MultilineKind,
+) -> Option<usize> {
+    let mut j = from;
+    while j < chars.len() {
+        match kind {
+            MultilineKind::TripleDouble => {
+                if chars[j] == '\\' && j + 1 < chars.len() {
+                    j += 2;
+                    continue;
+                }
+                if chars[j] == '"'
+                    && chars.get(j + 1) == Some(&'"')
+                    && chars.get(j + 2) == Some(&'"')
+                {
+                    return Some(j + 3);
+                }
+                j += 1;
+            }
+            MultilineKind::TripleSingle => {
+                if chars[j] == '\\' && j + 1 < chars.len() {
+                    j += 2;
+                    continue;
+                }
+                if chars[j] == '\''
+                    && chars.get(j + 1) == Some(&'\'')
+                    && chars.get(j + 2) == Some(&'\'')
+                {
+                    return Some(j + 3);
+                }
+                j += 1;
+            }
+            MultilineKind::Backtick => {
+                if lang != Language::Go && chars[j] == '\\' && j + 1 < chars.len() {
+                    j += 2;
+                    continue;
+                }
+                if chars[j] == '`' {
+                    return Some(j + 1);
+                }
+                j += 1;
+            }
+        }
+    }
+    None
 }
 
 /// Does a line comment start at char offset `i`?
@@ -643,7 +813,7 @@ mod tests {
 
     fn kinds(line: &str, lang: Language) -> Vec<(String, Kind)> {
         let chars: Vec<char> = line.chars().collect();
-        tokenize(line, lang)
+        tokenize_continued(line, lang, None)
             .iter()
             .map(|token| (chars[token.start..token.end].iter().collect(), token.kind))
             .collect()
@@ -750,7 +920,7 @@ mod tests {
             ("SELECT 1;", Language::Sql),
         ] {
             let len = line.chars().count();
-            let tokens = tokenize(line, lang);
+            let tokens = tokenize_continued(line, lang, None);
             if len == 0 {
                 assert!(tokens.is_empty());
                 continue;
@@ -769,5 +939,84 @@ mod tests {
         assert_eq!(language_for_path(&dir.join("Dockerfile")), Language::Shell);
         let tokens = kinds("RUN echo hi # done", Language::Shell);
         assert!(tokens.iter().any(|(_, kind)| *kind == Kind::Comment));
+    }
+
+    fn continued(lines: &[&str], lang: Language) -> Vec<Vec<(String, Kind)>> {
+        let owned: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+        let states = continuation_states(&owned, lang);
+        assert_eq!(states.len(), lines.len());
+        lines
+            .iter()
+            .zip(states)
+            .map(|(line, open)| {
+                let chars: Vec<char> = line.chars().collect();
+                tokenize_continued(line, lang, open)
+                    .iter()
+                    .map(|token| (chars[token.start..token.end].iter().collect(), token.kind))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The review repro: keywords on continuation lines of a triple-quoted
+    /// string must not classify as keywords.
+    #[test]
+    fn python_triple_quoted_continuations_stay_strings() {
+        let rows = continued(
+            &[r#"doc = """start"#, "return of the thing", r#"end""""#],
+            Language::Python,
+        );
+        assert!(rows[1].iter().all(|(_, kind)| *kind == Kind::String));
+        assert!(
+            !rows[1].iter().any(|(_, kind)| *kind == Kind::Keyword),
+            "`return` inside a docstring is string content"
+        );
+        // The closer ends the string; code after it tokenizes normally.
+        assert!(rows[2].iter().any(|(_, kind)| *kind == Kind::String));
+    }
+
+    #[test]
+    fn same_line_triple_pair_does_not_carry() {
+        let owned = vec![r#"x = """done""" + 1"#.to_string()];
+        let states = continuation_states(&owned, Language::Python);
+        assert_eq!(states, vec![None]);
+        let rows = continued(&[r#"x = """done""" + 1"#], Language::Python);
+        assert!(rows[0].iter().any(|(_, kind)| *kind == Kind::Number));
+    }
+
+    #[test]
+    fn js_template_literals_span_lines_with_escapes() {
+        let rows = continued(
+            &["const t = `a\\`b", "return ${x} done", "end` + 1;"],
+            Language::Js,
+        );
+        // The escaped backtick must not close the literal early.
+        assert!(rows[1].iter().all(|(_, kind)| *kind == Kind::String));
+        assert!(rows[2].iter().any(|(_, kind)| *kind == Kind::String));
+        assert!(rows[2].iter().any(|(_, kind)| *kind == Kind::Number));
+    }
+
+    #[test]
+    fn go_raw_strings_span_lines() {
+        let rows = continued(
+            &[r#"s := `first"#, "return second", "third`;"],
+            Language::Go,
+        );
+        assert!(rows[1].iter().all(|(_, kind)| *kind == Kind::String));
+        assert!(rows[2].iter().any(|(_, kind)| *kind == Kind::String));
+    }
+
+    #[test]
+    fn backtick_in_a_comment_opens_nothing() {
+        let owned = vec!["// use `ticks` here".to_string(), "return 1;".to_string()];
+        let states = continuation_states(&owned, Language::Js);
+        assert_eq!(states, vec![None, None]);
+    }
+
+    #[test]
+    fn single_quoted_strings_do_not_carry() {
+        let owned = vec!["'open".to_string(), "return".to_string()];
+        let states = continuation_states(&owned, Language::Python);
+        assert_eq!(states, vec![None, None]);
     }
 }

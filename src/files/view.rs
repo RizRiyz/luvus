@@ -59,6 +59,11 @@ pub struct FileView {
     /// Empty for a clean file, an untracked file, or outside a repo — markers are
     /// an enhancement, never a requirement.
     pub changes: Vec<crate::git::local::ChangeSpan>,
+    /// The multiline-string opener active at the start of each line, parallel
+    /// to the `Text` lines. Rebuilt in [`FileView::apply`] so continuation
+    /// lines of triple-quoted or backtick strings keep their string color;
+    /// empty for non-text loads.
+    pub string_states: Vec<Option<super::highlight::MultilineKind>>,
     /// Which scheduled read this view is waiting for (the `request_token` idea
     /// `DiffView` already uses). Every read carries the token it was issued
     /// with, and only a match may be applied, so a slow read cannot land after
@@ -96,6 +101,7 @@ impl FileView {
             changes: Vec::new(),
             search: None,
             read_token: 0,
+            string_states: Vec::new(),
         }
     }
 
@@ -105,6 +111,16 @@ impl FileView {
     /// re-evaluated against the new text.
     pub fn apply(&mut self, load: FileLoad) {
         self.load = load;
+        // One forward pass over the text records the multiline-string opener
+        // at each line start, so the renderer colors continuation lines
+        // without scanning from the top of the file every frame.
+        self.string_states = match &self.load {
+            FileLoad::Text(lines) => {
+                let lang = super::highlight::language_for_path(&self.path);
+                super::highlight::continuation_states(lines, lang)
+            }
+            _ => Vec::new(),
+        };
         let max = self.line_count().saturating_sub(1);
         self.scroll = self.scroll.min(max);
         self.hscroll = 0;
@@ -608,6 +624,28 @@ mod tests {
         }
     }
     use super::*;
+
+    /// `apply` rebuilds the per-line multiline-string states so the renderer
+    /// colors docstring continuations without scanning from the file top.
+    #[test]
+    fn apply_records_multiline_string_states() {
+        let mut v = FileView::new(PathBuf::from("doc.py"));
+        v.apply(FileLoad::Text(vec![
+            "doc = \"\"\"start".into(),
+            "return of the thing".into(),
+            "end\"\"\"".into(),
+        ]));
+        assert_eq!(
+            v.string_states,
+            vec![
+                None,
+                Some(crate::files::highlight::MultilineKind::TripleDouble),
+                Some(crate::files::highlight::MultilineKind::TripleDouble),
+            ]
+        );
+        v.apply(FileLoad::Error("gone".into()));
+        assert!(v.string_states.is_empty());
+    }
 
     #[test]
     fn reads_text_binary_and_oversize() {
