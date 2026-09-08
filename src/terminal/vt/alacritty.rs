@@ -60,6 +60,14 @@ fn pack_grid(cols: u16, rows: u16) -> u32 {
     (u32::from(cols) << 16) | u32::from(rows)
 }
 
+fn placeholder_color(image_id: u32) -> VtColor {
+    VtColor::Spec(Rgb {
+        r: (image_id >> 16) as u8,
+        g: (image_id >> 8) as u8,
+        b: image_id as u8,
+    })
+}
+
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         match event {
@@ -176,6 +184,36 @@ impl Dimensions for Dims {
     }
 }
 
+#[derive(Clone, Copy)]
+struct AppliedPlacement {
+    image_id: u32,
+    columns: usize,
+    rows: usize,
+    line: i32,
+    column: usize,
+    dirty: bool,
+}
+
+impl AppliedPlacement {
+    fn from_placement(placement: &graphics::Placement) -> Self {
+        Self {
+            image_id: placement.image_id,
+            columns: placement.columns,
+            rows: placement.rows,
+            line: placement.line,
+            column: placement.column,
+            dirty: false,
+        }
+    }
+
+    fn has_same_geometry(&self, placement: &graphics::Placement) -> bool {
+        self.columns == placement.columns
+            && self.rows == placement.rows
+            && self.line == placement.line
+            && self.column == placement.column
+    }
+}
+
 pub struct AlacrittyEngine {
     term: Term<EventProxy>,
     parser: Processor,
@@ -195,6 +233,9 @@ pub struct AlacrittyEngine {
     /// Set when placeholder cells were written straight into the grid, which
     /// the emulator's own damage tracking cannot have seen.
     placement_damage: bool,
+    // Placement geometry shares the retained-image working-set bound, so an
+    // image-id stream cannot grow per-pane state without limit.
+    applied: Vec<AppliedPlacement>,
     damage_line_indices: Vec<u16>,
     damage_rows: Vec<DamageRow>,
 }
@@ -274,6 +315,7 @@ impl AlacrittyEngine {
             history_maintenance_pending: false,
             history_maintenance_full_scan: false,
             placement_damage: false,
+            applied: Vec::with_capacity(graphics::MAX_RETAINED_IMAGES),
             damage_line_indices: Vec::new(),
             damage_rows: Vec::new(),
         }
@@ -285,13 +327,83 @@ impl AlacrittyEngine {
             Err(_) => return,
         };
         for placement in placements {
-            self.write_placeholder_cells(&placement);
+            let applied_index = self
+                .applied
+                .iter()
+                .position(|applied| applied.image_id == placement.image_id);
+            let applied = applied_index.map(|index| self.applied[index]);
+            let geometry_matches =
+                applied.is_some_and(|applied| applied.has_same_geometry(&placement));
+            let can_skip = applied.is_some_and(|applied| !applied.dirty)
+                && geometry_matches
+                && self.placement_anchor_matches(&placement);
+
+            if !can_skip {
+                if let Some(applied) = applied.filter(|_| !geometry_matches) {
+                    self.clear_stale_placeholder_cells(&applied, &placement);
+                }
+                self.write_placeholder_cells(&placement);
+                let updated = AppliedPlacement::from_placement(&placement);
+                if let Some(index) = applied_index {
+                    self.applied[index] = updated;
+                } else {
+                    if self.applied.len() == graphics::MAX_RETAINED_IMAGES {
+                        self.applied.remove(0);
+                    }
+                    self.applied.push(updated);
+                }
+            }
             if placement.move_cursor {
                 // A terminal that placed the image itself would leave the
                 // cursor past it. Feeding real line breaks lets the existing
                 // scroll-region logic handle an image that reaches the bottom.
                 let feed = "\r\n".repeat(placement.rows);
                 self.parser.advance(&mut self.term, feed.as_bytes());
+            }
+        }
+    }
+
+    fn placement_anchor_matches(&self, placement: &graphics::Placement) -> bool {
+        let grid = self.term.grid();
+        if placement.line < 0
+            || placement.line >= grid.screen_lines() as i32
+            || placement.column >= grid.columns()
+        {
+            return false;
+        }
+        let cell = &grid[Line(placement.line)][Column(placement.column)];
+        cell.c == placeholder::PLACEHOLDER && cell.fg == placeholder_color(placement.image_id)
+    }
+
+    fn clear_stale_placeholder_cells(&mut self, old: &AppliedPlacement, new: &graphics::Placement) {
+        let color = placeholder_color(old.image_id);
+        let grid = self.term.grid_mut();
+        let columns = grid.columns();
+        let screen_lines = grid.screen_lines() as i32;
+        for row in 0..old.rows {
+            let line = old.line.saturating_add(row as i32);
+            if line < 0 || line >= screen_lines {
+                continue;
+            }
+            for column in 0..old.columns {
+                let column = old.column.saturating_add(column);
+                if column >= columns {
+                    break;
+                }
+                let covered_by_new = line
+                    .checked_sub(new.line)
+                    .and_then(|row| usize::try_from(row).ok())
+                    .is_some_and(|row| row < new.rows)
+                    && column
+                        .checked_sub(new.column)
+                        .is_some_and(|column| column < new.columns);
+                if covered_by_new {
+                    continue;
+                }
+                let cell = &mut grid[Line(line)][Column(column)];
+                if cell.c == placeholder::PLACEHOLDER && cell.fg == color {
+                    *cell = alacritty_terminal::term::cell::Cell::default();
+                }
             }
         }
     }
@@ -308,11 +420,7 @@ impl AlacrittyEngine {
     /// is clipped by the pane instead of overflowing it.
     fn write_placeholder_cells(&mut self, placement: &graphics::Placement) {
         let id = placement.image_id;
-        let color = VtColor::Spec(Rgb {
-            r: (id >> 16) as u8,
-            g: (id >> 8) as u8,
-            b: id as u8,
-        });
+        let color = placeholder_color(id);
         // Ids need a fourth byte only above three, and it rides a third mark.
         let high_byte = placeholder::diacritic((id >> 24) as usize).filter(|_| id >> 24 != 0);
 
@@ -346,9 +454,9 @@ impl AlacrittyEngine {
                 }
             }
         }
-        // These cells were written behind the emulator's back, so nothing has
-        // recorded them as changed. One full frame is cheap here: a placement
-        // only repeats when its geometry does, not on every image frame.
+        // Streaming children re-send the same placement on every image frame,
+        // and `apply_pending_placements` skips those. Full damage is paid only
+        // when the placement's cells actually need to be rewritten.
         self.placement_damage = true;
     }
 
@@ -606,10 +714,38 @@ impl VtEngine for AlacrittyEngine {
 
     fn resize(&mut self, cols: u16, rows: u16) {
         let (cols, rows) = (cols.max(1), rows.max(1));
+        let old_cols = self.term.grid().columns();
+        let old_rows = self.term.grid().screen_lines();
         self.term.resize(Dims {
             cols: cols as usize,
             rows: rows as usize,
         });
+        for index in 0..self.applied.len() {
+            let applied = self.applied[index];
+            if applied.line == 0
+                && applied.column == 0
+                && applied.columns == old_cols
+                && applied.rows == old_rows
+            {
+                // During a divider drag the child has not repainted yet. Stretch
+                // the full-pane image it already sent, as a GUI would, rather
+                // than exposing a gap until the next image frame arrives.
+                let placement = graphics::Placement {
+                    image_id: applied.image_id,
+                    columns: cols as usize,
+                    rows: rows as usize,
+                    line: 0,
+                    column: 0,
+                    move_cursor: false,
+                };
+                self.write_placeholder_cells(&placement);
+                self.applied[index] = AppliedPlacement::from_placement(&placement);
+            } else {
+                // A shrink may truncate non-anchor cells, so the anchor alone
+                // cannot prove that this rectangle survived the resize whole.
+                self.applied[index].dirty = true;
+            }
+        }
         self.grid.store(pack_grid(cols, rows), Ordering::Relaxed);
         self.apply_history_budget();
     }
@@ -2680,6 +2816,208 @@ mod tests {
         assert!(
             !e.visible_rows().join("").contains('\u{10eeee}'),
             "the cells are an image, so they must not read back as text"
+        );
+    }
+
+    fn graphics_engine(cols: u16, rows: u16) -> AlacrittyEngine {
+        let (tx, _rx) = channel();
+        let host_graphics = graphics::HostGraphics::default();
+        host_graphics.set(true);
+        host_graphics.set_cell_size(Some(crate::terminal::theme_probe::CellSize {
+            width: 10,
+            height: 20,
+        }));
+        AlacrittyEngine::with_appearance(
+            cols,
+            rows,
+            tx,
+            budget_for_rows(cols as usize, 20),
+            PaneAppearance::default(),
+            host_graphics,
+        )
+    }
+
+    fn rendered_cell_snapshot(engine: &AlacrittyEngine) -> Vec<(u16, u16, String, RenderCell)> {
+        let mut cells = Vec::new();
+        engine.for_each_cell(&mut |row, column, symbol, cell| {
+            cells.push((row, column, symbol.to_owned(), cell));
+        });
+        cells
+    }
+
+    fn placeholder_cells(engine: &AlacrittyEngine) -> Vec<(u16, u16, String, Color)> {
+        let mut cells = Vec::new();
+        engine.for_each_cell(&mut |row, column, symbol, cell| {
+            if symbol.starts_with(placeholder::PLACEHOLDER) {
+                cells.push((row, column, symbol.to_owned(), cell.fg));
+            }
+        });
+        cells
+    }
+
+    #[test]
+    fn the_same_streamed_placement_is_not_rewritten() {
+        let mut engine = graphics_engine(10, 4);
+        let placement = b"\x1b_Ga=T,f=32,s=30,v=40,t=d,i=5,p=1,C=1,c=3,r=2,q=2;AAAA\x1b\\";
+
+        engine.advance(placement);
+        let first_damage = engine.damage_snapshot();
+        assert_eq!(first_damage.kind, DamageKind::Full);
+        assert!(engine.acknowledge_damage(first_damage.generation));
+        let before = rendered_cell_snapshot(&engine);
+
+        engine.advance(placement);
+        let after = rendered_cell_snapshot(&engine);
+        assert_eq!(
+            after, before,
+            "an unchanged frame must leave every rendered cell byte-identical"
+        );
+        assert_ne!(
+            engine.damage_snapshot().kind,
+            DamageKind::Full,
+            "an unchanged placement must not force a full projection"
+        );
+    }
+
+    #[test]
+    fn clearing_the_screen_forces_an_identical_placement_to_be_rewritten() {
+        let mut engine = graphics_engine(10, 4);
+        let placement = b"\x1b_Ga=T,f=32,s=30,v=40,t=d,i=5,p=1,C=1,c=3,r=2,q=2;AAAA\x1b\\";
+
+        engine.advance(placement);
+        let first_damage = engine.damage_snapshot();
+        assert!(engine.acknowledge_damage(first_damage.generation));
+        engine.advance(b"\x1b[2J");
+        let clear_damage = engine.damage_snapshot();
+        assert!(engine.acknowledge_damage(clear_damage.generation));
+        assert!(
+            placeholder_cells(&engine).is_empty(),
+            "ED2 must remove the old image cells before the child places it again"
+        );
+
+        engine.advance(placement);
+        assert_eq!(
+            placeholder_cells(&engine).len(),
+            6,
+            "a missing anchor must force all six image cells to be restored"
+        );
+        assert_eq!(
+            engine.damage_snapshot().kind,
+            DamageKind::Full,
+            "restoring cells behind the emulator's back needs full damage"
+        );
+    }
+
+    #[test]
+    fn a_resize_forces_a_non_full_pane_placement_to_be_rewritten() {
+        let mut engine = graphics_engine(10, 4);
+        let placement = b"\x1b_Ga=T,f=32,s=30,v=40,t=d,i=5,p=1,C=1,c=3,r=2,q=2;AAAA\x1b\\";
+        engine.advance(b"\x1b[2;3H");
+        engine.advance(placement);
+        let first_damage = engine.damage_snapshot();
+        assert!(engine.acknowledge_damage(first_damage.generation));
+
+        engine.resize(12, 5);
+        let resize_damage = engine.damage_snapshot();
+        assert!(engine.acknowledge_damage(resize_damage.generation));
+        engine.advance(placement);
+
+        assert_eq!(
+            placeholder_cells(&engine).len(),
+            6,
+            "the non-full-pane rectangle must still be present after resize"
+        );
+        assert_eq!(
+            engine.damage_snapshot().kind,
+            DamageKind::Full,
+            "resize dirties the placement even when its anchor survived"
+        );
+    }
+
+    #[test]
+    fn shrinking_a_placement_clears_only_its_stale_cells() {
+        let mut engine = graphics_engine(8, 4);
+        engine.advance(b"safe\x1b[2;3H");
+        engine.advance(b"\x1b_Ga=T,f=32,s=30,v=40,t=d,i=7,p=1,C=1,c=3,r=2,q=2;AAAA\x1b\\");
+        engine.advance(b"\x1b_Ga=T,f=32,s=20,v=20,t=d,i=7,p=1,C=1,c=2,r=1,q=2;BBBB\x1b\\");
+
+        let grid = engine.term.grid();
+        let expected_color = placeholder_color(7);
+        for column in 2..4 {
+            let cell = &grid[Line(1)][Column(column)];
+            assert_eq!(cell.c, placeholder::PLACEHOLDER, "new image cell missing");
+            assert_eq!(cell.fg, expected_color, "new image id must be retained");
+        }
+        for (line, column) in [(1, 4), (2, 2), (2, 3), (2, 4)] {
+            assert_eq!(
+                grid[Line(line)][Column(column)],
+                alacritty_terminal::term::cell::Cell::default(),
+                "old image cell at ({line}, {column}) must become blank"
+            );
+        }
+        let text: String = (0..4)
+            .map(|column| grid[Line(0)][Column(column)].c)
+            .collect();
+        assert_eq!(
+            text, "safe",
+            "clearing the old rectangle must not erase unrelated child text"
+        );
+    }
+
+    #[test]
+    fn a_full_pane_placement_follows_the_pane_when_it_resizes() {
+        let mut engine = graphics_engine(10, 4);
+        engine.advance(b"\x1b_Ga=T,f=32,s=100,v=80,t=d,i=9,p=1,C=1,c=10,r=4,q=2;AAAA\x1b\\");
+        let first_damage = engine.damage_snapshot();
+        assert!(engine.acknowledge_damage(first_damage.generation));
+
+        engine.resize(14, 6);
+        let cells = placeholder_cells(&engine);
+        assert_eq!(
+            cells.len(),
+            14 * 6,
+            "the previous full-pane image must stretch across the grown pane"
+        );
+        assert!(
+            cells.iter().all(|cell| cell.3 == Color::Rgb(0, 0, 9)),
+            "resizing must preserve the image id"
+        );
+        let resize_damage = engine.damage_snapshot();
+        assert_eq!(resize_damage.kind, DamageKind::Full);
+        assert!(engine.acknowledge_damage(resize_damage.generation));
+        let before = rendered_cell_snapshot(&engine);
+
+        engine.advance(b"\x1b_Ga=T,f=32,s=140,v=120,t=d,i=9,p=1,C=1,c=14,r=6,q=2;BBBB\x1b\\");
+        assert_eq!(
+            rendered_cell_snapshot(&engine),
+            before,
+            "the child's matching repaint must reuse the stretched placement"
+        );
+        assert_ne!(
+            engine.damage_snapshot().kind,
+            DamageKind::Full,
+            "the first matching child frame after resize must be skipped"
+        );
+    }
+
+    #[test]
+    fn a_different_image_at_the_same_place_is_written() {
+        let mut engine = graphics_engine(10, 4);
+        engine.advance(b"\x1b_Ga=T,f=32,s=20,v=20,t=d,i=5,p=1,C=1,c=2,r=1,q=2;AAAA\x1b\\");
+        let first_damage = engine.damage_snapshot();
+        assert!(engine.acknowledge_damage(first_damage.generation));
+
+        engine.advance(b"\x1b_Ga=T,f=32,s=20,v=20,t=d,i=6,p=1,C=1,c=2,r=1,q=2;BBBB\x1b\\");
+        let cells = placeholder_cells(&engine);
+        assert_eq!(cells.len(), 2);
+        assert!(
+            cells.iter().all(|cell| cell.3 == Color::Rgb(0, 0, 6)),
+            "a new id at identical geometry must replace the visible image cells"
+        );
+        assert_eq!(
+            engine.damage_snapshot().kind,
+            DamageKind::Full,
+            "a different image id must never take the geometry-only fast path"
         );
     }
 
