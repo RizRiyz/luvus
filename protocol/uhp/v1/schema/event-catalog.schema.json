@@ -333,7 +333,7 @@
       }
     },
     "agent_status": {
-      "description": "This event can represent identity or metadata changes with unchanged status. Such events cannot complete agent.prompt wait=true. Its observed_state records a new working or blocked transition; this is not confirmation that prompt text was consumed.",
+      "description": "This event can represent identity or metadata changes with unchanged status. Such events cannot complete agent.prompt wait=true. The agent_prompt response and prompt-failure data, not this event payload, carry observed_state for a new working or blocked transition; this is not confirmation that prompt text was consumed.",
       "type": "object",
       "additionalProperties": false,
       "required": ["pane", "status", "agent", "cwd", "project", "branch", "authority"],

@@ -28,3 +28,6 @@
 {"id":"prompt-queue-not-observation","result":{"type":"agent_prompt","pane":"7","submitted":true,"matched":true,"status":"idle","baseline_revision":10,"content_revision":11,"evidence":"queued","observed_state":"working"}}
 {"id":"prompt-contradictory","result":{"type":"agent_prompt","pane":"7","submitted":false,"matched":true,"status":"idle","baseline_revision":10,"content_revision":11,"evidence":"state_transition","observed_state":"working"}}
 {"id":"prompt-exit-missing-pane","error":{"code":"agent_not_running","message":"pane closed","data":{"queued":true,"submitted":true,"observed_state":null,"reason":"pane_closed","baseline_revision":10,"content_revision":11}}}
+{"id":"prompt-exit-missing-message","error":{"code":"agent_not_running","data":{"pane":"7","queued":true,"submitted":true,"observed_state":null,"reason":"pane_closed","baseline_revision":10,"content_revision":11}}}
+{"id":"prompt-exit-numeric-message","error":{"code":"agent_not_running","message":7,"data":{"pane":"7","queued":true,"submitted":true,"observed_state":null,"reason":"pane_closed","baseline_revision":10,"content_revision":11}}}
+{"id":"prompt-exit-null-message","error":{"code":"agent_not_running","message":null,"data":{"pane":"7","queued":true,"submitted":true,"observed_state":null,"reason":"pane_closed","baseline_revision":10,"content_revision":11}}}

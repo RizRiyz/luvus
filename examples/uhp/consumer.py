@@ -696,7 +696,8 @@ def valid_global_response(value):
         data = error.get("data")
         if isinstance(data, dict) and "observed_state" in data:
             return (
-                {"pane", "queued", "submitted", "observed_state", "reason",
+                isinstance(error.get("message"), str)
+                and {"pane", "queued", "submitted", "observed_state", "reason",
                  "baseline_revision", "content_revision"} <= set(data)
                 and pane(data["pane"])
                 and data["queued"] is True and data["submitted"] is True
