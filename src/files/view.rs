@@ -273,9 +273,12 @@ impl FileView {
                 let hay = line.to_lowercase();
                 let mut from = 0;
                 while let Some(rel) = hay[from..].find(&needle) {
-                    let col = from + rel;
+                    let byte_col = from + rel;
+                    // The renderer consumes matches as character columns
+                    // (tokens, wrap ranges), so translate the byte offset.
+                    let col = hay[..byte_col].chars().count();
                     matches.push((li, col));
-                    from = col + needle.len().max(1);
+                    from = byte_col + needle.len().max(1);
                 }
             }
         }
@@ -817,6 +820,21 @@ mod tests {
         assert_eq!(v.last_top(20, 80), 80);
         v.goto_bottom(20, 80);
         assert_eq!(v.scroll, 80);
+    }
+
+    #[test]
+    fn search_stores_character_columns_for_non_ascii_lines() {
+        let mut v = FileView::new(PathBuf::from("/x"));
+        v.apply(FileLoad::Text(vec!["ééfoo".into(), "fooé".into()]));
+        v.search_begin();
+        for c in "foo".chars() {
+            v.search_push(c);
+        }
+        v.search_commit();
+        let s = v.search.as_ref().unwrap();
+        // `é` is two bytes but one column: byte offsets 4 and 0 would
+        // misplace the overlay, character columns 2 and 0 do not.
+        assert_eq!(s.matches, vec![(0, 2), (1, 0)]);
     }
 
     #[test]
