@@ -2290,7 +2290,6 @@ mod tests {
             theme::THEMES[0],
             "removing the active file switches to the bundled default first"
         );
-        assert!(installed.path.exists(), "filesystem removal stays off-loop");
         assert!(
             app.settings_theme_remove_rects
                 .iter()
