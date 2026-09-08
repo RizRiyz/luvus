@@ -801,7 +801,7 @@ impl Pane {
     }
 
     #[cfg(test)]
-    pub(crate) fn fill_input_queue_for_test(&mut self) -> impl Drop {
+    pub(crate) fn fill_input_queue_for_test(&mut self) -> impl Sized {
         let (tx, rx) = input::InputSender::channel();
         tx.send(InputAction::Bytes(Vec::with_capacity(
             input::MAX_QUEUED_BYTES,
