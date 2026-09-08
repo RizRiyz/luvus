@@ -242,9 +242,16 @@ With `luvus --remote`, the local attached client owns effects that should happen
 where you are sitting:
 
 - copied text goes to the local clipboard
+- on Windows, an explicit image paste reads the local clipboard and stages the
+  private PNG on the remote Luvus server before pasting that remote path into
+  the focused pane
 - notifications and sounds play locally
 - detected links open in the local browser
 - each attached client uses its own terminal size and mobile or desktop layout
+
+Image bytes travel inside the existing encrypted SSH connection. Luvus does not
+open another port or write the image to the local machine's Luvus server. If no
+supported image is present, the original paste key continues unchanged.
 
 The global finder searches the selected remote Luvus home. It does not mix
 local workspaces or sessions into remote results.

@@ -27,6 +27,12 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_VM_READ, RTL_USER_PROCESS_PARAMETERS,
 };
 
+mod clipboard;
+
+pub(super) fn clipboard_image() -> Option<Vec<u8>> {
+    clipboard::clipboard_image()
+}
+
 const MAX_PROCESS_ENTRIES: usize = 16_384;
 const MAX_DESCENDANTS_PER_ROOT: usize = 64;
 const MAX_COMMAND_LINE_BYTES: usize = 64 * 1024;

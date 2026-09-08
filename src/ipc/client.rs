@@ -376,7 +376,17 @@ fn write_input_event(writer: &mut impl Write, event: Event) -> bool {
 }
 
 fn event_message(event: Event) -> Option<ClientMessage> {
+    event_message_with_image(event, crate::platform::clipboard_image)
+}
+
+fn event_message_with_image(
+    event: Event,
+    image: impl FnOnce() -> Option<Vec<u8>>,
+) -> Option<ClientMessage> {
     match crate::terminal::host_key::normalize_platform_modifiers(event) {
+        Event::Key(k) if crate::clipboard_image::is_image_paste_key(&k) => image()
+            .map(ClientMessage::ClipboardImage)
+            .or(Some(ClientMessage::Key(k))),
         Event::Key(k) => Some(ClientMessage::Key(k)),
         Event::Mouse(m) => Some(ClientMessage::Mouse(m)),
         Event::Resize(cols, rows) => {
@@ -968,6 +978,22 @@ mod render_tests {
         assert!(matches!(
             message,
             Some(ClientMessage::Paste(text)) if text == command
+        ));
+    }
+
+    #[test]
+    fn image_paste_chord_uses_binary_data_and_falls_back_to_the_key() {
+        let key = ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('v'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        );
+        assert!(matches!(
+            event_message_with_image(Event::Key(key), || Some(vec![1, 2, 3])),
+            Some(ClientMessage::ClipboardImage(bytes)) if bytes == [1, 2, 3]
+        ));
+        assert!(matches!(
+            event_message_with_image(Event::Key(key), || None),
+            Some(ClientMessage::Key(fallback)) if fallback == key
         ));
     }
 

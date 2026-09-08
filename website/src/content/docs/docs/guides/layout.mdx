@@ -231,6 +231,21 @@ Unicode character counts; wide glyphs such as CJK and many emoji consume two.
 Drag across any pane to select, and releasing **auto-copies** to your clipboard. Full
 details, plus scrollback, are in [Scrollback & Copy](/docs/guides/scrollback/).
 
+## Pasting images on Windows
+
+Copy a screenshot or image, focus an agent pane, then press `Ctrl+V` or
+`Ctrl+Shift+V` if that is the paste chord your terminal sends. Luvus reads the
+clipboard only for that explicit gesture. A supported PNG or bitmap is staged
+as a private PNG and its path is pasted into the focused pane without submitting
+the prompt. Agents that accept image paths can then attach or inspect it.
+
+If the clipboard has text, is unavailable, or contains an unsupported image,
+Luvus forwards the original key unchanged. Image paste is ignored while a Luvus
+modal, native file view, dashboard, copy mode, or navigation mode owns input, so
+the private path cannot leak into a pane behind it. This dedicated reader is
+currently available in Windows display clients. Text paste and the existing
+terminal-native behavior on macOS and Linux are unchanged.
+
 ## Opening links and files
 
 Agents print references all day: the PR they opened, the doc they read, the file

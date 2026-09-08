@@ -738,6 +738,7 @@ fn apply(
         }
         AppEvent::ClientInput { id, input } => {
             let Some(client) = clients.get_mut(&id) else {
+                discard_client_input(input);
                 return false;
             };
             client.last_activity = *next_activity;
@@ -777,6 +778,7 @@ fn apply(
                     clients.remove(&id);
                     *foreground = latest_client(clients);
                     apply_foreground_theme(app, clients, *foreground);
+                    discard_client_input(input);
                     return true;
                 }
                 if let Some(size) = target_size {
@@ -788,6 +790,7 @@ fn apply(
                 ClientInput::Key(key) => AppEvent::Key(key),
                 ClientInput::Mouse(mouse) => AppEvent::Mouse(mouse),
                 ClientInput::Paste(text) => AppEvent::Paste(text),
+                ClientInput::PasteImage(path) => AppEvent::PasteImage(path),
                 ClientInput::Resize(..) => unreachable!("handled above"),
             };
             app.handle_event(event)
@@ -795,6 +798,12 @@ fn apply(
         // Redraw only if the event actually changed the UI — a plain keystroke
         // forwarded to a pane does not (its echo arrives as a separate `PtyData`).
         other => app.handle_event(other),
+    }
+}
+
+fn discard_client_input(input: ClientInput) {
+    if let ClientInput::PasteImage(path) = input {
+        crate::clipboard_image::discard_staged_png(&path);
     }
 }
 
@@ -1348,6 +1357,21 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
                     })
                     .is_err()
                 {
+                    break;
+                }
+            }
+            Ok(ClientMessage::ClipboardImage(png)) => {
+                let Ok(path) = crate::clipboard_image::stage_png(&png) else {
+                    continue;
+                };
+                if app_tx
+                    .send(AppEvent::ClientInput {
+                        id,
+                        input: ClientInput::PasteImage(path.clone()),
+                    })
+                    .is_err()
+                {
+                    crate::clipboard_image::discard_staged_png(&path);
                     break;
                 }
             }
@@ -1940,6 +1964,33 @@ mod tests {
             ),
             "clipboard control data cannot be dropped behind a frame"
         );
+    }
+
+    #[test]
+    fn image_staged_for_a_removed_client_is_discarded() {
+        let _env = crate::persist::test_env("removed-client-image");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(80, 24, app_tx).expect("app starts");
+        let png = crate::clipboard_image::encode_rgba_png(1, 1, |_, _| [1, 2, 3, 255])
+            .expect("fixture PNG");
+        let staged = crate::clipboard_image::stage_png(&png).expect("staged image");
+        let mut clients = HashMap::new();
+        let mut foreground = None;
+        let mut interactive_size = (80, 24);
+        let mut next_activity = 1;
+
+        assert!(!apply(
+            AppEvent::ClientInput {
+                id: 7,
+                input: ClientInput::PasteImage(staged.clone()),
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        ));
+        assert!(!staged.exists());
     }
 
     /// Explicit client detach is carried by the same reliable control path and
