@@ -2129,9 +2129,13 @@ fn skill_cmd(rest: &[String], context: crate::i18n::cli::Context) -> Result<i32>
 /// submits and waits as one server-owned operation. `agent send` remains a
 /// compatibility alias.
 fn agent_send_cmd(args: &[String]) -> Result<i32> {
-    let target = args.get(3).cloned().ok_or_else(|| {
-        anyhow!("usage: luvus agent prompt <target> <text> [--no-confirm] [--wait] [--until STATE] [--timeout S]")
-    })?;
+    let target = args
+        .get(3)
+        .filter(|target| !target.starts_with("--"))
+        .cloned()
+        .ok_or_else(|| {
+            anyhow!("usage: luvus agent prompt <target> <text> [--no-confirm] [--wait] [--until STATE] [--timeout S]")
+        })?;
     let mut text_parts = Vec::new();
     let mut wait = false;
     let mut until = Vec::new();

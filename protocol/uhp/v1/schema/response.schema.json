@@ -51,6 +51,7 @@
     "agentPromptResult": {
       "description": "Submission is text identity evidence, distinct from until-wait completion. Legacy results without submission remain valid and are unconfirmed.",
       "type": "object",
+      "required": ["type", "pane", "submitted", "matched", "evidence", "status", "baseline_revision", "content_revision"],
       "properties": {
         "type": {
           "const": "agent_prompt"
@@ -104,16 +105,8 @@
           },
           "then": {
             "required": [
-              "type",
-              "pane",
-              "submitted",
-              "matched",
-              "status",
-              "baseline_revision",
-              "content_revision",
               "submission",
-              "reason",
-              "evidence"
+              "reason"
             ]
           }
         },

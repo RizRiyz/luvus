@@ -682,6 +682,8 @@ def valid_global_request(value, methods):
 def valid_prompt_result(result):
     boolean_fields = ("submitted", "matched")
     revision_fields = ("baseline_revision", "content_revision")
+    if not set(boolean_fields + revision_fields) | {"type", "pane", "status", "evidence"} <= set(result):
+        return False
     for field in boolean_fields:
         if field in result and not isinstance(result[field], bool):
             return False
@@ -690,7 +692,7 @@ def valid_prompt_result(result):
             return False
     if "submission" not in result:
         return True  # Old servers did not expose confirmation coordinates.
-    if not set(boolean_fields + revision_fields) | {"type", "pane", "status", "submission", "reason", "evidence"} <= set(result):
+    if "reason" not in result:
         return False
     return (
         isinstance(result["pane"], str)
