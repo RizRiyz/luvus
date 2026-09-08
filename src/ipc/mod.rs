@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod client;
+mod federated;
 pub mod protocol;
 pub mod server;
 pub mod transport;

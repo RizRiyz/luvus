@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const FLEET_PROTOCOL_VERSION: u32 = 1;
 pub(crate) const MAX_SURFACES: usize = 16;
+pub(crate) const MAX_SESSIONS: usize = 64;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum ClientMessage {

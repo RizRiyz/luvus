@@ -73,6 +73,13 @@ pub fn run(sock: &Path) -> Result<()> {
     };
     crate::logging::event(crate::logging::EventKind::ClientConnect, &[]);
     // `Conn` is a cloneable duplex handle: one clone reads, the other writes.
+    if crate::machine::catalog::path().exists() {
+        if let Ok(loaded) = crate::machine::catalog::load() {
+            if !loaded.catalog.machines.is_empty() {
+                return super::federated::run(stream.clone(), stream, loaded.catalog.machines);
+            }
+        }
+    }
     attach_inner(stream.clone(), stream)
 }
 
@@ -129,7 +136,7 @@ where
     }
 }
 
-enum ClientExit {
+pub(super) enum ClientExit {
     Done,
     Detached,
     ServerStopped,
@@ -309,7 +316,7 @@ where
 /// and immediately lets this process exit, so the old terminal-input thread is
 /// never left reading alongside the new client. Local launches and `--remote`
 /// retain their existing arguments and SSH options.
-fn switch_session_process(name: &str) -> Result<()> {
+pub(super) fn switch_session_process(name: &str) -> Result<()> {
     crate::session::validate_name(name).map_err(anyhow::Error::msg)?;
     let raw: Vec<String> = std::env::args().collect();
     let args = switched_args(&raw, name);
@@ -375,7 +382,7 @@ fn write_input_event(writer: &mut impl Write, event: Event) -> bool {
     event_message(event).is_none_or(|message| protocol::write_message(writer, &message).is_ok())
 }
 
-fn event_message(event: Event) -> Option<ClientMessage> {
+pub(super) fn event_message(event: Event) -> Option<ClientMessage> {
     event_message_with_image(event, crate::platform::clipboard_image)
 }
 
@@ -469,12 +476,12 @@ fn copy_and_flush<R: Read, W: Write>(reader: &mut R, writer: &mut W) -> std::io:
 
 /// Begin/end a DEC 2026 synchronized update so a frame paints atomically (no
 /// tearing). Terminals without it ignore the sequence.
-fn sync_begin() {
+pub(super) fn sync_begin() {
     let mut out = std::io::stdout().lock();
     let _ = out.write_all(b"\x1b[?2026h");
     let _ = out.flush();
 }
-fn sync_end() {
+pub(super) fn sync_end() {
     let mut out = std::io::stdout().lock();
     let _ = out.write_all(b"\x1b[?2026l");
     let _ = out.flush();
@@ -482,7 +489,7 @@ fn sync_end() {
 
 /// Build one ratatui `Cell` from wire fields (control chars → space; 256-color
 /// downsampling on non-truecolor terminals).
-fn make_cell(sym: &str, fg: u32, bg: u32, mods: u16, truecolor: bool) -> Cell {
+pub(super) fn make_cell(sym: &str, fg: u32, bg: u32, mods: u16, truecolor: bool) -> Cell {
     let adjust = |c| if truecolor { c } else { protocol::to_256(c) };
     // ratatui panics on control chars in a symbol; the server filters, but never
     // trust the wire. (Empty symbols are wide-char continuations and are already
@@ -501,7 +508,7 @@ fn make_cell(sym: &str, fg: u32, bg: u32, mods: u16, truecolor: bool) -> Cell {
 }
 
 /// Every cell of a full frame as `(x, y, Cell)`.
-fn frame_cells(frame: &FrameData, truecolor: bool) -> Vec<(u16, u16, Cell)> {
+pub(super) fn frame_cells(frame: &FrameData, truecolor: bool) -> Vec<(u16, u16, Cell)> {
     frame
         .cells
         .iter()
@@ -525,7 +532,7 @@ fn frame_cells(frame: &FrameData, truecolor: bool) -> Vec<(u16, u16, Cell)> {
 }
 
 /// Only the changed cells of a diff as `(x, y, Cell)` — the whole point: O(changed).
-fn diff_cells(diff: &FrameDiff, truecolor: bool) -> Vec<(u16, u16, Cell)> {
+pub(super) fn diff_cells(diff: &FrameDiff, truecolor: bool) -> Vec<(u16, u16, Cell)> {
     let w = diff.width as u32;
     let mut cells = Vec::new();
     for run in &diff.runs {
@@ -557,7 +564,7 @@ fn ime_position(cursor: Option<(u16, u16)>, tw: u16, th: u16) -> Option<(u16, u1
 /// Hide, write cells, CUP to the pane PTY (hidden still parks), then show/hide.
 /// `backend.draw` walks the hardware cursor onto the last cell (e.g. a
 /// `working` spinner); IME must not observe that cell.
-fn paint<B>(
+pub(super) fn paint<B>(
     terminal: &mut Terminal<B>,
     cells: &[(u16, u16, Cell)],
     cursor: Option<(u16, u16)>,

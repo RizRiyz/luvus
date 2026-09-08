@@ -27,7 +27,7 @@ pub(super) struct ProbeResult {
     pub remote_binary: String,
 }
 
-pub(super) fn prepare(profile: &MachineProfile) -> Result<ProbeResult> {
+pub(crate) fn prepare(profile: &MachineProfile) -> Result<ProbeResult> {
     validate_destination(&profile.destination)?;
     let binary = match profile.remote_binary.as_deref() {
         Some(binary) => {
@@ -39,6 +39,13 @@ pub(super) fn prepare(profile: &MachineProfile) -> Result<ProbeResult> {
     let response = probe(&profile.destination, &binary, true)?;
     if response.protocol != "luvus-fleet-v1" {
         return Err(anyhow!("remote Luvus does not advertise fleet protocol 1"));
+    }
+    if response.version != env!("CARGO_PKG_VERSION") {
+        return Err(anyhow!(
+            "remote Luvus {} does not match local {}",
+            response.version,
+            env!("CARGO_PKG_VERSION")
+        ));
     }
     if !matches!(response.os.as_str(), "linux" | "macos") {
         return Err(anyhow!(
@@ -63,7 +70,10 @@ fn discover_binary(destination: &str) -> Result<String> {
     // never installs, modifies, or starts anything on the remote host.
     const DISCOVER: &str = "for p in \"$HOME/.local/bin/luvus\" \"$HOME/.cargo/bin/luvus\" \"$HOME/.nix-profile/bin/luvus\" /usr/local/bin/luvus /opt/homebrew/bin/luvus /home/linuxbrew/.linuxbrew/bin/luvus; do if [ -x \"$p\" ]; then printf '%s\\n' \"$p\"; exit 0; fi; done; command -v luvus 2>/dev/null || exit 127";
     let mut command = ssh_command(destination, false);
-    command.arg("sh").arg("-c").arg(DISCOVER);
+    // OpenSSH already invokes the remote login shell. Passing this fixed
+    // script as the only command argument preserves it as one command string;
+    // no profile or user data is interpolated into it.
+    command.arg(DISCOVER);
     let output = run_bounded(command, PROBE_TIMEOUT)?;
     if !output.status.success() {
         return Err(anyhow!(
@@ -94,7 +104,7 @@ fn probe(destination: &str, binary: &str, batch: bool) -> Result<ProbeResponse> 
     Ok(response)
 }
 
-pub(super) fn sessions(profile: &MachineProfile) -> Result<serde_json::Value> {
+pub(crate) fn sessions(profile: &MachineProfile) -> Result<serde_json::Value> {
     let binary = profile
         .remote_binary
         .as_deref()

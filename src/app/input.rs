@@ -1088,6 +1088,7 @@ impl App {
             AppEvent::ClientConnected { .. }
             | AppEvent::ClientDetach { .. }
             | AppEvent::ClientSurfaceInterest { .. }
+            | AppEvent::ClientShellDockRows { .. }
             | AppEvent::ClientInput { .. }
             | AppEvent::Shutdown => false,
             // Consumed by the pre-dispatch worker-result branch above.

@@ -19,7 +19,7 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum ConnectionPolicy {
+pub(crate) enum ConnectionPolicy {
     Manual,
     #[default]
     PersistentWhileOpen,
@@ -27,7 +27,7 @@ pub(super) enum ConnectionPolicy {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
-pub(super) struct MachineProfile {
+pub(crate) struct MachineProfile {
     pub id: String,
     pub label: String,
     pub transport: String,
@@ -54,7 +54,7 @@ impl Default for MachineProfile {
 }
 
 impl MachineProfile {
-    pub(super) fn new(id: String, destination: String) -> Self {
+    pub(crate) fn new(id: String, destination: String) -> Self {
         Self {
             label: id.clone(),
             id,
@@ -85,7 +85,7 @@ impl MachineProfile {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
-pub(super) struct Catalog {
+pub(crate) struct Catalog {
     pub format_version: u32,
     pub revision: u64,
     pub machines: Vec<MachineProfile>,
@@ -102,7 +102,7 @@ impl Default for Catalog {
 }
 
 #[derive(Debug)]
-pub(super) struct LoadedCatalog {
+pub(crate) struct LoadedCatalog {
     pub catalog: Catalog,
     pub warnings: Vec<String>,
 }
@@ -111,7 +111,7 @@ struct CatalogLock {
     _file: File,
 }
 
-pub(super) fn path() -> PathBuf {
+pub(crate) fn path() -> PathBuf {
     crate::persist::config_dir().join("machines.json")
 }
 
@@ -135,7 +135,7 @@ fn acquire_lock() -> Result<CatalogLock> {
     Ok(CatalogLock { _file: file })
 }
 
-pub(super) fn load() -> Result<LoadedCatalog> {
+pub(crate) fn load() -> Result<LoadedCatalog> {
     load_from(&path())
 }
 
@@ -217,7 +217,7 @@ fn load_from(path: &Path) -> Result<LoadedCatalog> {
     })
 }
 
-pub(super) fn mutate<T>(
+pub(crate) fn mutate<T>(
     expected_revision: Option<u64>,
     operation: impl FnOnce(&mut Catalog) -> Result<T>,
 ) -> Result<(T, Catalog)> {
@@ -318,7 +318,7 @@ fn save(catalog: &Catalog) -> Result<()> {
     result
 }
 
-pub(super) fn validate_id(id: &str) -> Result<()> {
+pub(crate) fn validate_id(id: &str) -> Result<()> {
     if id.is_empty() || id.len() > MAX_ID_BYTES {
         return Err(anyhow!("machine id must contain 1 to {MAX_ID_BYTES} bytes"));
     }
@@ -337,7 +337,7 @@ pub(super) fn validate_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn validate_label(label: &str) -> Result<()> {
+pub(crate) fn validate_label(label: &str) -> Result<()> {
     let count = label.chars().count();
     if count == 0 || count > MAX_LABEL_CHARS || label.chars().any(char::is_control) {
         return Err(anyhow!(

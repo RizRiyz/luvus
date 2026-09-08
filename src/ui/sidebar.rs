@@ -224,6 +224,28 @@ pub(super) fn draw_sidebar(
         body_w,
         area.bottom().saturating_sub(body_top),
     );
+    let primary = match side {
+        Side::Left => app.sidebars.left.shown(),
+        Side::Right => !app.sidebars.left.shown() && app.sidebars.right.shown(),
+    };
+    let reserved = if primary {
+        app.client_shell_dock_rows
+            .min(body.height.saturating_sub(3))
+    } else {
+        0
+    };
+    let body = if reserved > 0 {
+        let slot = Rect::new(body.x, body.y, body.width, reserved);
+        app.client_shell_dock_rect = Some(slot);
+        Rect::new(
+            body.x,
+            body.y + reserved,
+            body.width,
+            body.height - reserved,
+        )
+    } else {
+        body
+    };
     let docks = app.sidebars.get(side).docks.clone();
     let (slots, dividers) = dock_slots(body, &app.sidebars.get(side).dock_weights());
     // Publish the rules so a press can grab one. Recomputed every frame, so a

@@ -651,6 +651,7 @@ pub enum SwitcherTarget {
     Settings,
     MissionControl,
     Version,
+    Machines,
     Sessions,
     Exit,
 }
@@ -2311,6 +2312,10 @@ pub struct App {
     /// Left + right sidebars, their widths, and their docks (docs/29). Resolved
     /// from `config.sidebars()` at startup; runtime edits persist via `save_sidebars`.
     pub sidebars: Sidebars,
+    /// Viewport-local rows reserved for the thin client's machine selector.
+    /// This is transient projection state, never configuration or persistence.
+    pub client_shell_dock_rows: u16,
+    pub client_shell_dock_rect: Option<Rect>,
     /// Module-contributed dock content, keyed by dock id (docs/29, DOCK-4).
     /// Populated by `ui.dock.push`; rendered by the sidebar.
     pub module_docks: std::collections::HashMap<String, ModuleDock>,
@@ -2415,6 +2420,9 @@ pub struct App {
     /// finder. The server consumes this once and sends a logical handoff only
     /// to that client.
     pub pending_session_switch: Option<String>,
+    /// One-shot request for the attached thin client to open its owner-local
+    /// machine selector. The server never receives the machine catalog.
+    pub pending_machine_selector: bool,
     /// On-demand named-session menu. Its filesystem/process discovery runs only
     /// while opening or activating this surface, never on an idle timer.
     pub named_session_menu: Option<session_menu::NamedSessionMenu>,
@@ -2969,6 +2977,8 @@ impl App {
             worktree_error: None,
             mode: Mode::Normal,
             sidebars,
+            client_shell_dock_rows: 0,
+            client_shell_dock_rect: None,
             module_docks: std::collections::HashMap::new(),
             module_dock_rects: Vec::new(),
             bar,
@@ -3013,6 +3023,7 @@ impl App {
             last_cursor: None,
             detach_requested: false,
             pending_session_switch: None,
+            pending_machine_selector: false,
             named_session_menu: None,
             named_session_cache: Vec::new(),
             pending_named_session_actions: HashMap::new(),
@@ -3625,6 +3636,8 @@ impl App {
             worktree_error: None,
             mode: Mode::Normal,
             sidebars,
+            client_shell_dock_rows: 0,
+            client_shell_dock_rect: None,
             module_docks: std::collections::HashMap::new(),
             module_dock_rects: Vec::new(),
             bar,
@@ -3669,6 +3682,7 @@ impl App {
             last_cursor: None,
             detach_requested: false,
             pending_session_switch: None,
+            pending_machine_selector: false,
             named_session_menu: None,
             named_session_cache: Vec::new(),
             pending_named_session_actions: HashMap::new(),

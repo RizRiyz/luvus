@@ -14,7 +14,8 @@ use std::thread::{self, JoinHandle};
 use anyhow::{anyhow, Result};
 
 use super::protocol::{
-    ClientMessage, ServerMessage, SessionSummary, FLEET_PROTOCOL_VERSION, MAX_SURFACES,
+    ClientMessage, ServerMessage, SessionSummary, FLEET_PROTOCOL_VERSION, MAX_SESSIONS,
+    MAX_SURFACES,
 };
 
 const CONTROL_QUEUE: usize = 32;
@@ -136,17 +137,20 @@ pub(crate) fn run() -> Result<()> {
             }
             Ok(ClientMessage::Sessions { request_id }) => {
                 let message = match crate::session::list_sessions() {
-                    Ok(sessions) => ServerMessage::Sessions {
-                        request_id,
-                        sessions: sessions
-                            .into_iter()
-                            .map(|session| SessionSummary {
-                                name: session.name,
-                                default: session.default,
-                                running: session.running,
-                            })
-                            .collect(),
-                    },
+                    Ok(mut sessions) => {
+                        sessions.truncate(MAX_SESSIONS);
+                        ServerMessage::Sessions {
+                            request_id,
+                            sessions: sessions
+                                .into_iter()
+                                .map(|session| SessionSummary {
+                                    name: session.name,
+                                    default: session.default,
+                                    running: session.running,
+                                })
+                                .collect(),
+                        }
+                    }
                     Err(_) => error(
                         Some(request_id),
                         None,

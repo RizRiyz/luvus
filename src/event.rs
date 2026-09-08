@@ -88,6 +88,10 @@ pub enum AppEvent {
         id: u64,
         interest: SurfaceInterest,
     },
+    ClientShellDockRows {
+        id: u64,
+        rows: u16,
+    },
     /// Input from a binary display client. The server unwraps this only after
     /// activating the correct per-client viewport; it never reaches `App`.
     ClientInput {

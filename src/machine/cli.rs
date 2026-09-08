@@ -294,7 +294,7 @@ Saved SSH machines:
   machine list
       List saved profiles and the current catalog revision.
   machine show <id>
-      Show one redacted profile.
+      Show one saved owner-local profile.
   machine rename <id> <label> [--revision <n>]
       Change the display label with optional optimistic concurrency.
   machine enable|disable <id> [--revision <n>]

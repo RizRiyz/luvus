@@ -126,7 +126,12 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
 /// client's cursor, scroll position, compact mode, or click targets.
 /// Return the passive client's content geometry before restoring all active
 /// hit-test state. Each client owns this baseline, never the shared App.
-pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> Vec<(PaneId, Rect)> {
+pub(crate) struct ClientProjection {
+    pub pane_content: Vec<(PaneId, Rect)>,
+    pub shell_dock: Option<Rect>,
+}
+
+pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientProjection {
     let compact = app.compact;
     let last_main_area = app.last_main_area;
     let last_pane_area = app.last_pane_area;
@@ -238,6 +243,7 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> Vec<(Pan
     let settings_icon_rect = app.settings_icon_rect;
     let sidebar_toggle_rect = app.sidebar_toggle_rect;
     let right_sidebar_toggle_rect = app.right_sidebar_toggle_rect;
+    let client_shell_dock_rect = app.client_shell_dock_rect;
     let version_rect = app.version_rect;
     let files_area = app.files_area;
     let workspaces_area = app.workspaces_area;
@@ -273,6 +279,8 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> Vec<(Pan
     });
 
     render_into_mode(f, app, false);
+
+    let projected_shell_dock = app.client_shell_dock_rect;
 
     app.compact = compact;
     app.last_main_area = last_main_area;
@@ -377,6 +385,7 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> Vec<(Pan
     app.settings_icon_rect = settings_icon_rect;
     app.sidebar_toggle_rect = sidebar_toggle_rect;
     app.right_sidebar_toggle_rect = right_sidebar_toggle_rect;
+    app.client_shell_dock_rect = client_shell_dock_rect;
     app.version_rect = version_rect;
     app.files_area = files_area;
     app.workspaces_area = workspaces_area;
@@ -404,7 +413,10 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> Vec<(Pan
             git.contributors_more_rect = contributors_more_rect;
         }
     }
-    projected_content
+    ClientProjection {
+        pane_content: projected_content,
+        shell_dock: projected_shell_dock,
+    }
 }
 
 /// Whether a PTY-only frame may reuse a client's complete UI buffer.
@@ -483,6 +495,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // leave a dock divider behind as a live drag target.
     app.dock_dividers.clear();
     app.agents_elsewhere_rect = None;
+    app.client_shell_dock_rect = None;
     app.mobile_pane_prev_rect = None;
     app.mobile_pane_next_rect = None;
 
@@ -1621,5 +1634,30 @@ mod dock_projection_tests {
             app.begin_dock_resize(col, dy),
             "the recorded divider row is still a hit target after projection"
         );
+    }
+
+    #[test]
+    fn machine_slot_follows_the_only_visible_sidebar_without_mutating_active_geometry() {
+        let _env = crate::persist::test_env("machine-slot-projection");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.sidebars.left.visible = false;
+        app.sidebars.right.visible = true;
+        app.sidebars.right.docks = vec![DockKind::Agents];
+        app.client_shell_dock_rows = 3;
+        let pane = app.layout().focus;
+        let pty_size = app.panes[&pane].size();
+
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+        let projection = render_projection(&mut target, &mut app);
+        let slot = projection
+            .shell_dock
+            .expect("right sidebar reserves a slot");
+        assert_eq!(slot.height, 3);
+        assert!(slot.x > area.width / 2);
+        assert_eq!(app.panes[&pane].size(), pty_size);
+        assert!(app.client_shell_dock_rect.is_none());
     }
 }

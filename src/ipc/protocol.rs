@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::sound::SoundSignal;
 use crate::terminal::theme_probe::TerminalColors;
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -37,6 +37,10 @@ pub enum ClientMessage {
     /// suspended fleet channel remains connected but receives no frames,
     /// cursor, resize ownership, input, or interactive host effects.
     SurfaceInterest(SurfaceInterest),
+    /// Reserve a small client-owned slot at the top of the server's primary
+    /// sidebar. The server shifts its docks and reports the exact rectangle;
+    /// machine data itself never crosses into the selected server.
+    ShellDockRows(u16),
     Detach,
     /// Response to [`ServerMessage::Ready`] when terminal colors were requested.
     TerminalColors(Option<TerminalColors>),
@@ -130,6 +134,21 @@ pub enum ServerMessage {
     Ready {
         probe_terminal: bool,
     },
+    /// Exact client-owned sidebar slot for the current viewport. `None` means
+    /// the client must use its modal/mobile fallback instead of painting over
+    /// server content.
+    ShellDock(Option<ShellDockRect>),
+    /// Ask a machine-aware thin client to open its owner-local selector. Plain
+    /// clients ignore this optional shell action.
+    OpenMachineSelector,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShellDockRect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]

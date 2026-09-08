@@ -226,6 +226,9 @@ struct ClientState {
     retained_ready: bool,
     last_activity: u64,
     interest: SurfaceInterest,
+    shell_dock_rows: u16,
+    last_shell_dock: Option<protocol::ShellDockRect>,
+    shell_dock_dirty: bool,
 }
 
 #[derive(Default)]
@@ -257,6 +260,9 @@ impl ClientState {
             retained_ready: false,
             last_activity,
             interest: SurfaceInterest::Active,
+            shell_dock_rows: 0,
+            last_shell_dock: None,
+            shell_dock_dirty: false,
         }
     }
 
@@ -569,6 +575,11 @@ pub fn run() -> Result<()> {
                 app.show_toast("no attached client to switch".to_string());
             }
         }
+        if std::mem::take(&mut app.pending_machine_selector) {
+            if let Some(client) = foreground.and_then(|id| clients.get(&id)) {
+                let _ = client.send_control(ServerMessage::OpenMachineSelector);
+            }
+        }
 
         // A state transition here (e.g. a silent agent reaching Done) has no PtyData
         // to ride on, so repaint when detection reports a visible change.
@@ -758,6 +769,9 @@ fn apply(
             client.behind = false;
             client.retained_ready = false;
             client.retained_pane_content.clear();
+            if interest == SurfaceInterest::Prepared && client.shell_dock_rows > 0 {
+                client.shell_dock_dirty = true;
+            }
             if interest == SurfaceInterest::Suspended {
                 client.last_frame = None;
                 client.render_buf = Buffer::empty(Rect::new(0, 0, 1, 1));
@@ -771,6 +785,20 @@ fn apply(
                 *foreground = latest_client(clients);
                 apply_foreground_theme(app, clients, *foreground);
             }
+            true
+        }
+        AppEvent::ClientShellDockRows { id, rows } => {
+            let Some(client) = clients.get_mut(&id) else {
+                return false;
+            };
+            let rows = rows.min(12);
+            if client.shell_dock_rows == rows {
+                return false;
+            }
+            client.shell_dock_rows = rows;
+            client.force_full = true;
+            client.retained_ready = false;
+            client.shell_dock_dirty = rows > 0 || client.last_shell_dock.is_some();
             true
         }
         AppEvent::ClientInput { id, input } => {
@@ -1161,9 +1189,13 @@ fn render_client(
         None
     };
 
-    let (cursor, cursor_visible) = if let Some(cursor) = patched {
+    let previous_shell_rows = app.client_shell_dock_rows;
+    let previous_shell_rect = app.client_shell_dock_rect;
+    app.client_shell_dock_rows = client.shell_dock_rows;
+    app.client_shell_dock_rect = None;
+    let (cursor, cursor_visible, shell_dock) = if let Some(cursor) = patched {
         PARTIAL_TERMINAL_PROJECTIONS.fetch_add(1, Ordering::Relaxed);
-        cursor
+        (cursor.0, cursor.1, client.last_shell_dock)
     } else {
         if partial_pass {
             RETAINED_RENDER_FALLBACKS.fetch_add(1, Ordering::Relaxed);
@@ -1178,11 +1210,40 @@ fn render_client(
                 .clone_from(&app.pane_content_rects);
             client.retained_ready = true;
         } else {
-            client.retained_pane_content = ui::render_projection(&mut target, app);
+            let projection = ui::render_projection(&mut target, app);
+            client.retained_pane_content = projection.pane_content;
             client.retained_ready = true;
+            app.client_shell_dock_rect = projection.shell_dock;
         }
-        (target.cursor(), target.cursor_visible())
+        (
+            target.cursor(),
+            target.cursor_visible(),
+            app.client_shell_dock_rect
+                .map(|rect| protocol::ShellDockRect {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.width,
+                    height: rect.height,
+                }),
+        )
     };
+    if !interactive {
+        app.client_shell_dock_rows = previous_shell_rows;
+        app.client_shell_dock_rect = previous_shell_rect;
+    }
+    if client.shell_dock_dirty || shell_dock != client.last_shell_dock {
+        if client
+            .send_control(ServerMessage::ShellDock(shell_dock))
+            .is_err()
+        {
+            return RenderClientOutcome {
+                enqueued: false,
+                disconnected: true,
+            };
+        }
+        client.last_shell_dock = shell_dock;
+        client.shell_dock_dirty = false;
+    }
 
     let full = force_all
         || client.force_full
@@ -1370,6 +1431,7 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
                 ServerMessage::Detach
                     | ServerMessage::ServerShutdown { .. }
                     | ServerMessage::SwitchSession { .. }
+                    | ServerMessage::OpenMachineSelector
             );
             match protocol::write_message_counted(&mut writer, &msg) {
                 Ok(bytes) => {
@@ -1466,6 +1528,14 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
             Ok(ClientMessage::SurfaceInterest(interest)) => {
                 if app_tx
                     .send(AppEvent::ClientSurfaceInterest { id, interest })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMessage::ShellDockRows(rows)) => {
+                if app_tx
+                    .send(AppEvent::ClientShellDockRows { id, rows })
                     .is_err()
                 {
                     break;
@@ -1799,6 +1869,64 @@ mod tests {
             &mut scratch,
         ));
         assert!(matches!(rx.recv().unwrap(), ServerMessage::Frame(_)));
+    }
+
+    #[test]
+    fn machine_dock_slot_is_client_local_and_does_not_resize_the_pty() {
+        let _env = crate::persist::test_env("machine-dock-slot");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(100, 30, app_tx).unwrap();
+        let pane = app.layout().focus;
+        let (client, rx) = display_client(100, 30, 1);
+        let mut clients = HashMap::from([(7, client)]);
+        let mut foreground = Some(7);
+        let mut interactive_size = (100, 30);
+        let mut next_activity = 2;
+        let mut scratch = RenderScratch::default();
+
+        assert!(render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            true,
+            false,
+            &mut scratch,
+        ));
+        assert!(matches!(rx.recv().unwrap(), ServerMessage::Frame(_)));
+        clients[&7]
+            .sender
+            .frame_pending
+            .store(false, Ordering::Release);
+        let pty_size = app.panes[&pane].size();
+
+        assert!(apply(
+            AppEvent::ClientShellDockRows { id: 7, rows: 4 },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        ));
+        assert!(render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            true,
+            false,
+            &mut scratch,
+        ));
+        let slot = match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            ServerMessage::ShellDock(Some(slot)) => slot,
+            _ => panic!("machine-aware clients receive dock geometry before their frame"),
+        };
+        assert_eq!(slot.height, 4);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            ServerMessage::Frame(_)
+        ));
+        assert_eq!(app.panes[&pane].size(), pty_size);
     }
 
     #[test]
