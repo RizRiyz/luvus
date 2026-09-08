@@ -1304,6 +1304,11 @@ fn refresh_catalog(
         });
     }
     if active_removed {
+        // Catalog replacement retires the old link synchronously. Its eventual
+        // disconnect event is generation-fenced after the replacement starts,
+        // so invalidate the channel before Local can commit the handoff and
+        // accidentally stamp that retired channel with the new generation.
+        invalidate_remote_surface_for_replaced_machine(active, &replaced);
         request_switch(
             Endpoint::Local,
             warm,
@@ -1651,6 +1656,19 @@ fn invalidate_remote_surface(endpoint: &mut Endpoint, disconnected_machine: &str
         } if machine_id == disconnected_machine => {
             *channel_id = 0;
             true
+        }
+        _ => false,
+    }
+}
+
+fn invalidate_remote_surface_for_replaced_machine(
+    endpoint: &mut Endpoint,
+    replaced: &[String],
+) -> bool {
+    match endpoint {
+        Endpoint::Remote { machine_id, .. } if replaced.contains(machine_id) => {
+            let machine_id = machine_id.clone();
+            invalidate_remote_surface(endpoint, &machine_id)
         }
         _ => false,
     }
@@ -2217,6 +2235,47 @@ mod tests {
         };
         assert!(!warm_surface_matches(
             &stamped_after_reconnect,
+            &requested,
+            &machines
+        ));
+    }
+
+    #[test]
+    fn catalog_replaced_active_surface_cannot_gain_the_replacement_generation() {
+        let profile = MachineProfile::new("box".into(), "box".into());
+        let machines = HashMap::from([(
+            profile.id.clone(),
+            MachineRuntime {
+                profile,
+                state: MachineState::Online,
+                generation: 2,
+                control: None,
+                reader: None,
+                backoff: Duration::from_secs(1),
+                sessions: Vec::new(),
+            },
+        )]);
+        let requested = Endpoint::Remote {
+            machine_id: "box".into(),
+            channel_id: 0,
+            session: "default".into(),
+        };
+        let mut stale_active = Endpoint::Remote {
+            machine_id: "box".into(),
+            channel_id: 41,
+            session: "default".into(),
+        };
+
+        assert!(invalidate_remote_surface_for_replaced_machine(
+            &mut stale_active,
+            &["box".into()]
+        ));
+        let stamped_after_replacement = WarmSurface {
+            endpoint: stale_active,
+            generation: 2,
+        };
+        assert!(!warm_surface_matches(
+            &stamped_after_replacement,
             &requested,
             &machines
         ));

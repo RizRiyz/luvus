@@ -101,8 +101,8 @@ try {
     $Temp = Join-Path $env:TEMP ("luvus-machine-" + [Guid]::NewGuid().ToString('N'))
     $InstallDir = Join-Path $env:LOCALAPPDATA "luvus\fleet\$Tag"
     $Destination = Join-Path $InstallDir 'luvus.exe'
-    if ($Destination -match '\s') {
-        throw 'automatic install path contains whitespace; pass --remote-binary with a shell-safe absolute path'
+    if ($Destination -notmatch '^[A-Za-z]:[\\/][0-9A-Za-z\\/_.+-]*$') {
+        throw 'automatic install path is not shell-safe; pass --remote-binary with a shell-safe absolute path'
     }
 
     function Download-Bounded([string]$Uri, [string]$Path, [long]$Limit) {
@@ -310,6 +310,11 @@ mod tests {
         assert!(INSTALL_WINDOWS.contains("Expand-Archive"));
         assert!(INSTALL_WINDOWS.contains("fleet-bridge --probe"));
         assert!(INSTALL_WINDOWS.contains("luvus\\fleet\\$Tag"));
+        assert!(INSTALL_WINDOWS
+            .contains("$Destination -notmatch '^[A-Za-z]:[\\\\/][0-9A-Za-z\\\\/_.+-]*$'"));
+        assert!(INSTALL_WINDOWS.contains(
+            "automatic install path is not shell-safe; pass --remote-binary with a shell-safe absolute path"
+        ));
         assert!(INSTALL_WINDOWS.contains("67108864"));
         assert!(INSTALL_WINDOWS.contains("4096"));
         assert!(!INSTALL_WINDOWS.contains("Invoke-Expression"));
