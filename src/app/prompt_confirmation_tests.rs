@@ -154,7 +154,15 @@ fn confirmed_prompt_multiline_and_truncation_require_exact_capacity() {
     ] {
         let (mut app, pane, input) = fixture();
         app.panes[&pane].engine.lock().unwrap().resize(80, 24);
-        screen(&app, pane, "\x1b[2J\x1b[H");
+        screen(
+            &app,
+            pane,
+            if text == "alpha\nbeta" {
+                "\x1b[2J\x1b[H\r\n› "
+            } else {
+                "\x1b[2J\x1b[H"
+            },
+        );
         let (rx, _) = start(&mut app, pane, json!({"text":text}));
         bytes(&input, text.as_bytes());
         screen(&app, pane, &visible);
@@ -320,7 +328,7 @@ fn confirmed_prompt_wait_starts_after_echo_and_preserves_until_and_timeout() {
         let (rx, _) = start(
             &mut app,
             pane,
-            json!({"text":"unique","wait":true,"until":"working","timeout_s":10}),
+            json!({"text":"unique","wait":true,"until":["working"],"timeout_s":10}),
         );
         bytes(&input, b"unique");
         app.status.get_mut(&pane).unwrap().state = State::Working;
@@ -366,5 +374,42 @@ fn confirmed_prompt_full_input_queue_never_sends_enter() {
     assert_eq!(value["error"]["code"], "send_failed");
     assert_eq!(value["error"]["data"]["queued"], false);
     assert_eq!(value["error"]["data"]["submitted"], false);
+    assert!(app.agent_prompts.is_empty());
+}
+
+#[test]
+fn confirmed_prompt_capacity_failure_queues_nothing() {
+    let _env = crate::persist::test_env("echo-capacity-limit");
+    let (mut app, pane, input) = fixture();
+    for offset in 0..MAX_AGENT_WAITS_TOTAL {
+        let (_rx, _) = start(&mut app, pane, json!({"text":"unique"}));
+        bytes(&input, b"unique");
+        let owner = app.agent_prompts.remove(&pane).unwrap();
+        app.agent_prompts
+            .insert(PaneId(u32::try_from(offset + 1000).unwrap()), owner);
+    }
+    let (rx, _) = start(&mut app, pane, json!({"text":"unique"}));
+    assert_eq!(response(&rx)["error"]["code"], "unavailable");
+    assert!(input.try_recv().is_err());
+    assert_eq!(
+        app.agent_prompts.values().map(Vec::len).sum::<usize>(),
+        MAX_AGENT_WAITS_TOTAL
+    );
+}
+
+#[test]
+fn confirmed_prompt_wait_timeout_before_echo_never_sends_enter() {
+    let _env = crate::persist::test_env("echo-short-deadline");
+    let (mut app, pane, input) = fixture();
+    let (rx, _) = start(
+        &mut app,
+        pane,
+        json!({"text":"unique","wait":true,"timeout_s":0}),
+    );
+    bytes(&input, b"unique");
+    screen(&app, pane, "unique");
+    app.tick_agent_workflows(Instant::now());
+    assert_eq!(response(&rx)["error"]["code"], "input_not_echoed");
+    assert!(input.try_recv().is_err());
     assert!(app.agent_prompts.is_empty());
 }
