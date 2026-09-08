@@ -1,11 +1,7 @@
-//! Native Windows console input reader.
-//!
-//! Crossterm intentionally presents one semantic event at a time. Windows
-//! Terminal, however, injects a bracketed paste as a burst of console records.
-//! Reading those records directly preserves scan codes, UTF-16, modifiers,
-//! repeats, mouse state, and paste boundaries before they cross Luvus IPC.
+//! Windows console input setup and record reader.
 
-use std::io;
+use std::io::{self, Write};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{poll, read, Event};
@@ -13,22 +9,94 @@ use windows_sys::Win32::Foundation::{
     HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::System::Console::{
-    GetConsoleMode, GetConsoleScreenBufferInfo, GetStdHandle, ReadConsoleInputW,
-    CONSOLE_SCREEN_BUFFER_INFO, FOCUS_EVENT, INPUT_RECORD, KEY_EVENT, MOUSE_EVENT,
-    STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, WINDOW_BUFFER_SIZE_EVENT,
+    GetConsoleMode, GetConsoleScreenBufferInfo, GetStdHandle, ReadConsoleInputW, SetConsoleMode,
+    CONSOLE_SCREEN_BUFFER_INFO, ENABLE_VIRTUAL_TERMINAL_INPUT, FOCUS_EVENT, INPUT_RECORD,
+    KEY_EVENT, MOUSE_EVENT, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, WINDOW_BUFFER_SIZE_EVENT,
 };
 use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
 
-use super::console::{ConsoleInputDecoder, ConsoleKeyRecord, ConsoleMouseRecord};
+use super::console::{ConsoleKeyRecord, ConsoleMouseRecord, ConsoleStreamDecoder};
 use super::{DecodedEvents, HostInputDecoder};
 
 const READ_BATCH: usize = 128;
+const WIN32_INPUT_ENABLE: &[u8] = b"\x1b[?9001h";
+const WIN32_INPUT_DISABLE: &[u8] = b"\x1b[?9001l";
+
+/// Restore the console and host-terminal input modes when a client detaches.
+pub struct WindowsInputModeGuard {
+    input: Option<HANDLE>,
+    restore_mode: Option<u32>,
+    win32_mode: bool,
+}
+
+impl WindowsInputModeGuard {
+    fn inactive() -> Self {
+        Self {
+            input: None,
+            restore_mode: None,
+            win32_mode: false,
+        }
+    }
+}
+
+impl Drop for WindowsInputModeGuard {
+    fn drop(&mut self) {
+        if self.win32_mode {
+            let _ = std::io::stdout().write_all(WIN32_INPUT_DISABLE);
+            let _ = std::io::stdout().flush();
+        }
+        if let (Some(input), Some(mode)) = (self.input, self.restore_mode) {
+            let _ = unsafe { SetConsoleMode(input, mode) };
+        }
+    }
+}
+
+/// Enable lossless VT input and the documented Win32 key-record protocol.
+///
+/// Crossterm raw mode does not set `ENABLE_VIRTUAL_TERMINAL_INPUT`. Without it,
+/// ConPTY translates a terminal paste back into legacy records and destroys
+/// the byte boundaries before Luvus can identify one bracketed paste.
+pub fn enable_input_mode() -> WindowsInputModeGuard {
+    if !native_backend_enabled() {
+        return WindowsInputModeGuard::inactive();
+    }
+    let Ok(input) = std_handle(STD_INPUT_HANDLE) else {
+        return WindowsInputModeGuard::inactive();
+    };
+    let mut original = 0;
+    if unsafe { GetConsoleMode(input, &mut original) } == 0 {
+        return WindowsInputModeGuard::inactive();
+    }
+    let desired = original | ENABLE_VIRTUAL_TERMINAL_INPUT;
+    if desired != original && unsafe { SetConsoleMode(input, desired) } == 0 {
+        return WindowsInputModeGuard::inactive();
+    }
+    let mut applied = 0;
+    if unsafe { GetConsoleMode(input, &mut applied) } == 0
+        || applied & ENABLE_VIRTUAL_TERMINAL_INPUT == 0
+    {
+        if desired != original {
+            let _ = unsafe { SetConsoleMode(input, original) };
+        }
+        return WindowsInputModeGuard::inactive();
+    }
+    if std::io::stdout().write_all(WIN32_INPUT_ENABLE).is_err()
+        || std::io::stdout().flush().is_err()
+    {
+        if desired != original {
+            let _ = unsafe { SetConsoleMode(input, original) };
+        }
+        return WindowsInputModeGuard::inactive();
+    }
+    WindowsInputModeGuard {
+        input: Some(input),
+        restore_mode: (desired != original).then_some(original),
+        win32_mode: true,
+    }
+}
 
 pub fn run_input_loop(mut pending: Vec<Event>, mut emit: impl FnMut(Event) -> bool) {
     for event in pending.drain(..) {
-        // Theme probing runs before bracketed paste is enabled, so these are
-        // ordinary user events rather than paste markers. Forward them exactly
-        // once before the native reader begins consuming console records.
         if !emit(event) {
             return;
         }
@@ -36,11 +104,12 @@ pub fn run_input_loop(mut pending: Vec<Event>, mut emit: impl FnMut(Event) -> bo
 
     if native_backend_enabled() {
         if let Ok(mut input) = NativeConsoleInput::open() {
-            input.run(&mut emit);
-            return;
+            if input.virtual_terminal_input {
+                input.run(&mut emit);
+                return;
+            }
         }
     }
-
     run_crossterm_fallback(&mut emit);
 }
 
@@ -78,6 +147,7 @@ fn emit_decoded(decoded: DecodedEvents, emit: &mut impl FnMut(Event) -> bool) ->
     let mut connected = true;
     decoded.for_each(|event| {
         if connected {
+            trace_decoded_event(&event);
             connected = emit(event);
         }
     });
@@ -87,7 +157,8 @@ fn emit_decoded(decoded: DecodedEvents, emit: &mut impl FnMut(Event) -> bool) ->
 struct NativeConsoleInput {
     input: HANDLE,
     output: Option<HANDLE>,
-    decoder: ConsoleInputDecoder,
+    virtual_terminal_input: bool,
+    decoder: ConsoleStreamDecoder,
     records: [INPUT_RECORD; READ_BATCH],
 }
 
@@ -101,27 +172,28 @@ impl NativeConsoleInput {
         Ok(Self {
             input,
             output: std_handle(STD_OUTPUT_HANDLE).ok(),
-            decoder: ConsoleInputDecoder::default(),
+            virtual_terminal_input: mode & ENABLE_VIRTUAL_TERMINAL_INPUT != 0,
+            decoder: ConsoleStreamDecoder::default(),
             records: [INPUT_RECORD::default(); READ_BATCH],
         })
     }
 
     fn run(&mut self, emit: &mut impl FnMut(Event) -> bool) {
         loop {
-            let timeout = self.decoder.wait_timeout();
+            let now = Instant::now();
+            let timeout = self.decoder.wait_timeout(now);
             match self.read_batch(timeout) {
                 Ok(Some(read_count)) => {
                     let now = Instant::now();
                     for index in 0..read_count {
-                        let record = self.records[index];
-                        let decoded = self.decode_record(record, now);
+                        let decoded = self.decode_record(self.records[index], now);
                         if !emit_decoded(decoded, emit) {
                             return;
                         }
                     }
                 }
                 Ok(None) => {
-                    if !emit_decoded(self.decoder.flush_expired(), emit) {
+                    if !emit_decoded(self.decoder.flush_expired(Instant::now()), emit) {
                         return;
                     }
                 }
@@ -159,24 +231,24 @@ impl NativeConsoleInput {
         match u32::from(record.EventType) {
             KEY_EVENT => {
                 let key = unsafe { record.Event.KeyEvent };
-                self.decoder.push_key(
-                    ConsoleKeyRecord {
-                        key_down: key.bKeyDown != 0,
-                        repeat_count: key.wRepeatCount,
-                        virtual_key: key.wVirtualKeyCode,
-                        scan_code: key.wVirtualScanCode,
-                        utf16: unsafe { key.uChar.UnicodeChar },
-                        control_state: key.dwControlKeyState,
-                    },
-                    now,
-                )
+                let key = ConsoleKeyRecord {
+                    key_down: key.bKeyDown != 0,
+                    repeat_count: key.wRepeatCount,
+                    virtual_key: key.wVirtualKeyCode,
+                    scan_code: key.wVirtualScanCode,
+                    utf16: unsafe { key.uChar.UnicodeChar },
+                    control_state: key.dwControlKeyState,
+                };
+                trace_key_record(key);
+                self.decoder.push_key(key, now)
             }
             MOUSE_EVENT => {
                 let mouse = unsafe { record.Event.MouseEvent };
-                let row = self.relative_mouse_row(mouse.dwMousePosition.Y);
+                let (column, row) =
+                    self.relative_mouse_position(mouse.dwMousePosition.X, mouse.dwMousePosition.Y);
                 self.decoder.push_mouse(
                     ConsoleMouseRecord {
-                        column: mouse.dwMousePosition.X.max(0) as u16,
+                        column,
                         row,
                         button_state: mouse.dwButtonState,
                         control_state: mouse.dwControlKeyState,
@@ -190,27 +262,89 @@ impl NativeConsoleInput {
                 .unwrap_or(DecodedEvents::None),
             FOCUS_EVENT => {
                 let focus = unsafe { record.Event.FocusEvent };
-                let event = if focus.bSetFocus != 0 {
-                    Event::FocusGained
-                } else {
-                    Event::FocusLost
-                };
-                self.decoder.push_event(event, now)
+                self.decoder.push_event(
+                    if focus.bSetFocus != 0 {
+                        Event::FocusGained
+                    } else {
+                        Event::FocusLost
+                    },
+                    now,
+                )
             }
             _ => DecodedEvents::None,
         }
     }
 
-    fn relative_mouse_row(&self, absolute: i16) -> u16 {
+    fn relative_mouse_position(&self, column: i16, row: i16) -> (u16, u16) {
+        let fallback = (column.max(0) as u16, row.max(0) as u16);
         let Some(output) = self.output else {
-            return absolute.max(0) as u16;
+            return fallback;
         };
         let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
         if unsafe { GetConsoleScreenBufferInfo(output, &mut info) } == 0 {
-            return absolute.max(0) as u16;
+            return fallback;
         }
-        absolute.saturating_sub(info.srWindow.Top).max(0) as u16
+        (
+            column.saturating_sub(info.srWindow.Left).max(0) as u16,
+            row.saturating_sub(info.srWindow.Top).max(0) as u16,
+        )
     }
+}
+
+fn input_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("LUVUS_WINDOWS_INPUT_TRACE")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
+// This diagnostic is deliberately opt-in because UTF-16 key units can reveal
+// typed or pasted text. It is never emitted during normal logging.
+fn trace_key_record(record: ConsoleKeyRecord) {
+    if !input_trace_enabled() {
+        return;
+    }
+    crate::logging::event(
+        crate::logging::EventKind::ClientInputRecord,
+        &[
+            crate::logging::Field::KeyDown(record.key_down),
+            crate::logging::Field::RepeatCount(u64::from(record.repeat_count)),
+            crate::logging::Field::VirtualKey(u64::from(record.virtual_key)),
+            crate::logging::Field::ScanCode(u64::from(record.scan_code)),
+            crate::logging::Field::Utf16(u64::from(record.utf16)),
+            crate::logging::Field::ControlState(u64::from(record.control_state)),
+        ],
+    );
+}
+
+fn trace_decoded_event(event: &Event) {
+    if !input_trace_enabled() {
+        return;
+    }
+    let (kind, bytes) = match event {
+        Event::Paste(text) => ("paste", text.len() as u64),
+        Event::Key(_) => ("key", 0),
+        Event::Mouse(_) => ("mouse", 0),
+        Event::Resize(_, _) => ("resize", 0),
+        Event::FocusGained => ("focus_gained", 0),
+        Event::FocusLost => ("focus_lost", 0),
+    };
+    crate::logging::event(
+        crate::logging::EventKind::ClientInputDecoded,
+        &[
+            crate::logging::Field::InputKind(
+                crate::logging::SafeId::new(kind).expect("static input kind is safe"),
+            ),
+            crate::logging::Field::Bytes(bytes),
+        ],
+    );
 }
 
 fn std_handle(kind: u32) -> io::Result<HANDLE> {
@@ -222,5 +356,19 @@ fn std_handle(kind: u32) -> io::Result<HANDLE> {
         ))
     } else {
         Ok(handle)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn virtual_terminal_input_preserves_existing_console_flags() {
+        let original = 0x0010 | 0x0080;
+        assert_eq!(
+            original | ENABLE_VIRTUAL_TERMINAL_INPUT,
+            0x0010 | 0x0080 | 0x0200
+        );
     }
 }

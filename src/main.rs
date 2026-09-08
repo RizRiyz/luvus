@@ -1297,6 +1297,8 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
         EnableFocusChange,
         crossterm::terminal::SetTitle(window_title())
     );
+    #[cfg(windows)]
+    let _windows_input_mode = terminal::host_input::enable_input_mode();
     push_key_protocol();
     {
         let tx = tx.clone();

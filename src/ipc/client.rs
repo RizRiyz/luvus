@@ -214,6 +214,8 @@ where
         EnableFocusChange,
         crossterm::terminal::SetTitle(crate::window_title())
     );
+    #[cfg(windows)]
+    let _windows_input_mode = crate::terminal::host_input::enable_input_mode();
     // Let the terminal report Shift+Enter et al. as distinct keys, so agents get
     // a real "new line" key instead of a bare CR (see `push_key_protocol`).
     crate::push_key_protocol();

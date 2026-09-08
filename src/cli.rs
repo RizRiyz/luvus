@@ -146,7 +146,7 @@ panes / agents:
   pane focus <id>            focus a pane (jumps to its workspace/tab)
   pane move [<id>] (--tab <n> | --new-tab)  move a pane within its workspace
   pane run [<id>] <cmd...>   run a command in a pane
-  pane send [<id>] <text>    send raw text to a pane
+  pane send [<id>] <text>    paste text into a pane
   pane read [<id>]           print a pane's recent output
   pane status [<id>]         print a pane's agent status and history metrics (any workspace)
   pane processes [<id>]      list cached executable identities without exposing arguments
@@ -3236,6 +3236,7 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             let text = tail().join(" ");
             let mut obj = serde_json::Map::new();
             obj.insert("text".to_string(), json!(text));
+            obj.insert("paste".to_string(), json!(true));
             ("pane.send_input".into(), with_pane(obj))
         }
         ("pane", "read") => ("pane.read".into(), with_pane(serde_json::Map::new())),
@@ -4463,6 +4464,28 @@ mod tests {
             let args = argv(raw);
             assert_eq!(command_help_request(&args), None, "{raw}");
         }
+    }
+
+    #[test]
+    fn pane_send_requests_atomic_paste_semantics() {
+        let (method, params) = parse(&argv("luvus pane send 9 first second")).unwrap();
+        assert_eq!(method, "pane.send_input");
+        assert_eq!(params.get("pane").and_then(Value::as_str), Some("9"));
+        assert_eq!(
+            params.get("text").and_then(Value::as_str),
+            Some("first second")
+        );
+        assert_eq!(params.get("paste").and_then(Value::as_bool), Some(true));
+
+        let args = ["luvus", "pane", "send", "9", "first\nsecond"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
+        let (_, params) = parse(&args).unwrap();
+        assert_eq!(
+            params.get("text").and_then(Value::as_str),
+            Some("first\nsecond")
+        );
     }
 
     #[test]

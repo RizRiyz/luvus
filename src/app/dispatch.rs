@@ -2688,8 +2688,12 @@ impl App {
                 let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
                 let pane = self.panes.get(&id).ok_or_else(not_found)?;
-                pane.try_send(text.as_bytes())
-                    .map_err(|message| ("send_failed".to_string(), message))?;
+                let result = if p.get("paste").and_then(|value| value.as_bool()) == Some(true) {
+                    pane.try_send_paste(text)
+                } else {
+                    pane.try_send(text.as_bytes())
+                };
+                result.map_err(|message| ("send_failed".to_string(), message))?;
                 Ok(json!({"type":"ok"}))
             }
             "pane.read" => {
@@ -9199,6 +9203,24 @@ command = ["true"]
         };
         assert_eq!(bytes, b"echo hi\r");
         assert!(rx.try_recv().is_err());
+        app.panes[&pane]
+            .engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b[?2004h");
+        app.dispatch(
+            "pane.send_input",
+            &json!({
+                "pane": pane.0.to_string(),
+                "text": "first\nsecond",
+                "paste": true,
+            }),
+        )
+        .unwrap();
+        let crate::terminal::pty::InputAction::Bytes(bytes) = rx.try_recv().unwrap() else {
+            panic!("expected bracketed paste")
+        };
+        assert_eq!(bytes, b"\x1b[200~first\nsecond\x1b[201~");
         drop(rx);
         for (method, params) in [
             (
