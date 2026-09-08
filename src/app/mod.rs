@@ -29,7 +29,8 @@ mod board;
 mod config_persistence;
 mod cwd;
 pub use board::{
-    agent_choices, automation_agent_choices, automation_agent_choices_for, task_agent_choices,
+    agent_choices, automation_agent_choices, automation_agent_choices_for,
+    automation_agent_supports, task_agent_choices,
 };
 pub(crate) mod diff;
 mod dispatch;
@@ -1460,7 +1461,7 @@ impl OrchForm {
             }
             OrchFormField::Agent => {
                 let choices = if self.kind == OrchFormKind::Automation {
-                    crate::app::automation_agent_choices_for(self.access)
+                    crate::app::automation_agent_choices()
                 } else {
                     crate::app::task_agent_choices()
                 };
@@ -1493,13 +1494,6 @@ impl OrchForm {
                     .unwrap_or(0);
                 self.access = choices
                     [(index + if backwards { choices.len() - 1 } else { 1 }) % choices.len()];
-                let agents = crate::app::automation_agent_choices_for(self.access);
-                if !agents
-                    .iter()
-                    .any(|agent| agent.eq_ignore_ascii_case(&self.agent))
-                {
-                    self.agent = agents.first().copied().unwrap_or_default().to_string();
-                }
             }
             _ => {}
         }

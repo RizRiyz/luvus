@@ -204,6 +204,39 @@ agent/access combinations fail before Luvus creates a task, lease, worktree, or
 pane. Luvus never edits the agent's permanent configuration or types approval
 answers into an unknown prompt.
 
+The TUI keeps every launch-capable built-in agent visible in the Agent field.
+The access profiles beside its name show what that adapter supports. An
+incompatible selection is highlighted and cannot be submitted until you choose
+one of those profiles. Luvus never changes a selection to Full access on your
+behalf.
+
+| Agent | Read-only | Workspace | Full access |
+|---|:---:|:---:|:---:|
+| Claude Code | yes | yes | yes |
+| Codex | yes | yes | yes |
+| Gemini | no | yes | yes |
+| Aider | yes | no | yes |
+| opencode | no | yes | no |
+| OpenCode 2 Preview | no | no | yes |
+| GitHub Copilot CLI | yes | yes | yes |
+| Kimi Code CLI | no | yes | yes |
+| Qwen Code | yes | yes | yes |
+| Kilo Code | no | no | yes |
+| Kiro | yes | no | yes |
+| Cursor | yes | yes | yes |
+| Droid | yes | yes | yes |
+| Grok Build | yes | yes | yes |
+| Hermes CLI | no | no | yes |
+| Muse Code | yes | yes | yes |
+| Oh My Pi | yes | yes | yes |
+| Pi | yes | no | no |
+| fx | no | yes | yes |
+
+Luvus also detects Antigravity and Amp, but their current CLIs do not expose a
+reviewed unattended permission profile, so they are not available as new
+automation workers. They can still appear when an automation targets a live
+agent that is already running in a pane.
+
 Kilo Code currently exposes one reviewed unattended profile: **Full access**,
 launched as `kilo run --auto`. Kilo documents that `--auto` may approve actions
 not explicitly denied, so Luvus does not present it as read-only or workspace

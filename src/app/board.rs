@@ -2067,6 +2067,15 @@ pub fn automation_agent_choices_for(
     })
 }
 
+/// Whether one built-in automation agent has a reviewed launch profile for the
+/// requested access level. The creation form uses this for presentation only;
+/// submission repeats the same descriptor-owned validation before mutation.
+pub fn automation_agent_supports(agent: &str, access: crate::automation::AutomationAccess) -> bool {
+    crate::agent::registry::find(agent)
+        .and_then(|descriptor| descriptor.automation)
+        .is_some_and(|operations| operations.supports(access))
+}
+
 fn task_tab_name(task: &crate::orch::Task) -> String {
     let value = format!("{} · {}", task.id, task.title.trim());
     value.chars().take(crate::app::TAB_NAME_MAX).collect()
@@ -3762,7 +3771,8 @@ mod tests {
         app.handle_orch_form_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         let form = app.orch_form.as_ref().unwrap();
         assert_eq!(form.access, crate::automation::AutomationAccess::ReadOnly);
-        assert!(automation_agent_choices_for(form.access).contains(&form.agent.as_str()));
+        assert_eq!(form.agent, "fx");
+        assert!(!automation_agent_supports(&form.agent, form.access));
 
         app.orch_activate_hit(crate::app::OrchHit::FormField(
             crate::app::OrchFormField::Access,
@@ -3771,6 +3781,64 @@ mod tests {
             app.orch_form.as_ref().unwrap().access,
             crate::automation::AutomationAccess::Workspace
         );
+    }
+
+    #[test]
+    fn automation_agent_picker_keeps_all_launch_capable_agents_visible() {
+        use crate::automation::AutomationAccess;
+
+        assert_eq!(automation_agent_choices().len(), 19);
+        assert!(automation_agent_choices().contains(&"kilo"));
+        assert!(automation_agent_choices().contains(&"pi"));
+        assert!(!automation_agent_choices().contains(&"antigravity"));
+        assert!(!automation_agent_choices().contains(&"amp"));
+
+        let mut form = crate::app::OrchForm::for_kind(crate::app::OrchFormKind::Automation);
+        form.access = AutomationAccess::ReadOnly;
+        form.agent = "opencode".into();
+        form.field = crate::app::OrchFormField::Agent;
+        form.cycle_choice(false);
+
+        assert_eq!(form.agent, "opencode2");
+        assert_eq!(form.access, AutomationAccess::ReadOnly);
+        assert!(!automation_agent_supports(&form.agent, form.access));
+        assert!(automation_agent_supports(
+            &form.agent,
+            AutomationAccess::FullAccess
+        ));
+    }
+
+    #[test]
+    fn automation_form_rejects_an_incompatible_visible_agent() {
+        let _env = crate::persist::test_env("orch-automation-access-mismatch");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.open_orch_board();
+        app.orch_form = Some(crate::app::OrchForm {
+            kind: crate::app::OrchFormKind::Automation,
+            title: "OpenCode 2 review".into(),
+            prompt: "Review the workspace.".into(),
+            agent: "opencode2".into(),
+            access: crate::automation::AutomationAccess::ReadOnly,
+            start: crate::app::OrchFormStart::Daily,
+            schedule: "08:00".into(),
+            timezone: "Asia/Makassar".into(),
+            mode: TaskWorkerMode::Workspace,
+            ..crate::app::OrchForm::default()
+        });
+
+        app.submit_orch_form();
+
+        let form = app
+            .orch_form
+            .as_ref()
+            .expect("an invalid access choice keeps the form open");
+        assert!(form
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("does not support read only")));
+        assert!(app.automation.automations.is_empty());
+        assert!(app.orch.tasks.is_empty());
     }
 
     #[test]
