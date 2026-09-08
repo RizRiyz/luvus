@@ -56,6 +56,7 @@ impl App {
         self.pending_named_session_actions.remove(&name);
         match result {
             Ok(()) => {
+                self.invalidate_named_session_discovery();
                 set_session_running(&mut self.named_session_cache, &name, false);
                 if let Some(menu) = self.named_session_menu.as_mut() {
                     set_session_running(&mut menu.rows, &name, false);
@@ -84,6 +85,7 @@ impl App {
         self.pending_named_session_actions.remove(&name);
         match result {
             Ok(()) => {
+                self.invalidate_named_session_discovery();
                 self.named_session_cache.retain(|row| row.name != name);
                 if let Some(menu) = self.named_session_menu.as_mut() {
                     menu.rows.retain(|row| row.name != name);
@@ -100,6 +102,15 @@ impl App {
                     self.catalog.session_delete_failed
                 ));
             }
+        }
+    }
+
+    /// Fence any in-flight discovery before applying an authoritative action result.
+    pub(super) fn invalidate_named_session_discovery(&mut self) {
+        self.named_session_generation = self.named_session_generation.wrapping_add(1);
+        if let Some(menu) = self.named_session_menu.as_mut() {
+            menu.generation = self.named_session_generation;
+            menu.loading = false;
         }
     }
 
@@ -658,37 +669,46 @@ mod tests {
     }
 
     #[test]
-    fn stop_updates_the_cache_and_a_reopened_menu() {
-        let _env = crate::persist::test_env("named-session-stop-reopened-cache");
+    fn stale_reopened_discovery_cannot_restore_a_running_session_after_stop() {
+        let _env = crate::persist::test_env("named-session-stop-reopened-discovery");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = crate::app::App::new(100, 30, tx).unwrap();
+        app.server_mode = true;
         app.named_session_cache = vec![NamedSessionRow {
             name: "review".into(),
             running: true,
             current: false,
         }];
-        app.named_session_menu = Some(NamedSessionMenu {
-            generation: 8,
-            rows: vec![NamedSessionRow {
-                name: "review".into(),
-                running: true,
-                current: false,
-            }],
-            cursor: 1,
-            scroll: 0,
-            loading: false,
-            prompt: None,
-            error: None,
-            preparing: false,
-        });
+        let action_generation = app
+            .begin_named_session_action("review", NamedSessionAction::Stop)
+            .unwrap();
+        app.open_named_session_menu();
+        let discovery_generation = app.named_session_generation;
 
-        app.apply_named_session_stopped(7, "review".into(), Ok(()));
-
-        assert!(
-            !app.named_session_menu.as_ref().unwrap().rows[0].running,
-            "a completed exact-name action remains authoritative after reopen"
+        app.apply_named_session_stopped(action_generation, "review".into(), Ok(()));
+        app.apply_named_sessions_loaded(
+            discovery_generation,
+            Ok(vec![info("default", true), info("review", true)]),
         );
-        assert!(!app.named_session_cache[0].running);
+
+        let menu = app.named_session_menu.as_ref().unwrap();
+        assert_eq!(menu.generation, app.named_session_generation);
+        assert!(!menu.loading);
+        assert!(
+            !menu
+                .rows
+                .iter()
+                .find(|row| row.name == "review")
+                .unwrap()
+                .running
+        );
+        assert!(
+            !app.named_session_cache
+                .iter()
+                .find(|row| row.name == "review")
+                .unwrap()
+                .running
+        );
     }
 
     #[test]
@@ -723,10 +743,12 @@ mod tests {
         assert!(!app.named_session_menu.as_ref().unwrap().rows[0].running);
         assert!(!app.named_session_cache[0].running);
         assert!(!app.pending_named_session_actions.contains_key("review"));
-        assert!(
-            rx.try_recv().is_err(),
-            "stop completion must not rescan sessions"
-        );
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(event, crate::event::AppEvent::NamedSessionsLoaded { .. }),
+                "stop completion must not rescan sessions"
+            );
+        }
     }
 
     #[test]
@@ -903,33 +925,36 @@ mod tests {
     }
 
     #[test]
-    fn delete_completion_removes_the_row_and_cache_entry() {
-        let _env = crate::persist::test_env("named-session-delete-direct-update");
+    fn stale_reopened_discovery_cannot_restore_a_deleted_session() {
+        let _env = crate::persist::test_env("named-session-delete-reopened-discovery");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = crate::app::App::new(100, 30, tx).unwrap();
-        let row = NamedSessionRow {
+        app.server_mode = true;
+        app.named_session_cache = vec![NamedSessionRow {
             name: "review".into(),
             running: false,
             current: false,
-        };
-        app.named_session_cache = vec![row.clone()];
-        app.named_session_menu = Some(NamedSessionMenu {
-            generation: 9,
-            rows: vec![row],
-            cursor: 1,
-            scroll: 0,
-            loading: false,
-            prompt: None,
-            error: None,
-            preparing: false,
-        });
-        app.pending_named_session_actions
-            .insert("review".into(), NamedSessionAction::Delete);
+        }];
+        let action_generation = app
+            .begin_named_session_action("review", NamedSessionAction::Delete)
+            .unwrap();
+        app.open_named_session_menu();
+        let discovery_generation = app.named_session_generation;
 
-        app.apply_named_session_deleted(9, "review".into(), Ok(()));
+        app.apply_named_session_deleted(action_generation, "review".into(), Ok(()));
+        app.apply_named_sessions_loaded(
+            discovery_generation,
+            Ok(vec![info("default", true), info("review", false)]),
+        );
 
-        assert!(app.named_session_cache.is_empty());
-        assert!(app.named_session_menu.as_ref().unwrap().rows.is_empty());
+        let menu = app.named_session_menu.as_ref().unwrap();
+        assert_eq!(menu.generation, app.named_session_generation);
+        assert!(!menu.loading);
+        assert!(menu.rows.iter().all(|row| row.name != "review"));
+        assert!(app
+            .named_session_cache
+            .iter()
+            .all(|row| row.name != "review"));
         assert!(!app.pending_named_session_actions.contains_key("review"));
     }
 

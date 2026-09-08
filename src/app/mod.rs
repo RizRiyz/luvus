@@ -6586,11 +6586,7 @@ impl App {
         {
             return None;
         }
-        self.named_session_generation = self.named_session_generation.wrapping_add(1);
-        if let Some(menu) = self.named_session_menu.as_mut() {
-            menu.generation = self.named_session_generation;
-            menu.loading = false;
-        }
+        self.invalidate_named_session_discovery();
         Some(self.named_session_generation)
     }
 
