@@ -2836,4 +2836,43 @@ Would you like to proceed?
         // which must keep working rather than reporting "no agents at all".
         assert_eq!(named("claude\n", &[]), "claude");
     }
+
+    #[test]
+    fn opencode_versions_have_distinct_process_identity() {
+        let manifests = Manifests::builtin();
+
+        assert_eq!(
+            manifests.agent_in_processes(&["/Users/me/.opencode/bin/opencode2 --auto".into()]),
+            Some("opencode2".into())
+        );
+        assert_eq!(
+            manifests.agent_in_processes(&[
+                r#"C:\Users\me\.opencode\bin\opencode2.exe --session ses_123"#.into()
+            ]),
+            Some("opencode2".into())
+        );
+        assert_eq!(
+            manifests.agent_in_processes(&["/usr/local/bin/opencode --session ses_v1".into()]),
+            Some("opencode".into())
+        );
+        assert_eq!(
+            manifests.launch_args_for(
+                &["/Users/me/.opencode/bin/opencode2 --session ses_2".into()],
+                "opencode2"
+            ),
+            Some(vec!["--session".into(), "ses_2".into()])
+        );
+
+        let prose = classify(
+            Some("zsh"),
+            "OpenCode 2 is available in beta\n",
+            true,
+            false,
+            "zsh",
+            "",
+            &["-zsh".into()],
+            &manifests,
+        );
+        assert_eq!(prose.agent, "zsh");
+    }
 }
