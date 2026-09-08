@@ -1862,6 +1862,15 @@ pub(super) fn draw_form(
             crate::app::OrchFormStart::Daily => cat.automation_daily,
             crate::app::OrchFormStart::Weekly => cat.automation_weekly,
         };
+        let access_label = |access| match access {
+            crate::automation::AutomationAccess::ReadOnly => cat.automation_access_read_only,
+            crate::automation::AutomationAccess::Workspace => cat.automation_access_workspace,
+            crate::automation::AutomationAccess::FullAccess => cat.automation_access_full,
+        };
+        let agent_access_mismatch = field == crate::app::OrchFormField::Agent
+            && form.kind == crate::app::OrchFormKind::Automation
+            && form.automation_target == crate::app::OrchAutomationTarget::NewWorker
+            && !crate::app::automation_agent_supports(&form.agent, form.access);
         let value = if field == crate::app::OrchFormField::Target {
             match form.automation_target {
                 crate::app::OrchAutomationTarget::NewWorker => {
@@ -1883,17 +1892,25 @@ pub(super) fn draw_form(
                 crate::orch::TaskWorkerMode::Workspace => cat.board_workspace.to_string(),
             }
         } else if field == crate::app::OrchFormField::Access {
-            match form.access {
-                crate::automation::AutomationAccess::ReadOnly => {
-                    cat.automation_access_read_only.to_string()
-                }
-                crate::automation::AutomationAccess::Workspace => {
-                    cat.automation_access_workspace.to_string()
-                }
-                crate::automation::AutomationAccess::FullAccess => {
-                    cat.automation_access_full.to_string()
+            access_label(form.access).to_string()
+        } else if field == crate::app::OrchFormField::Agent
+            && form.kind == crate::app::OrchFormKind::Automation
+            && form.automation_target == crate::app::OrchAutomationTarget::NewWorker
+        {
+            let mut value = form.agent.clone();
+            let mut separator = "  ·  ";
+            for access in [
+                crate::automation::AutomationAccess::ReadOnly,
+                crate::automation::AutomationAccess::Workspace,
+                crate::automation::AutomationAccess::FullAccess,
+            ] {
+                if crate::app::automation_agent_supports(&form.agent, access) {
+                    value.push_str(separator);
+                    value.push_str(access_label(access));
+                    separator = "/";
                 }
             }
+            value
         } else {
             form.value(field).to_string()
         };
@@ -1977,15 +1994,20 @@ pub(super) fn draw_form(
             );
             let cursor_width = usize::from(active && body_rect.width > 0);
             let available = body_rect.width as usize - cursor_width;
+            let value_style = if agent_access_mismatch {
+                Style::new().fg(t.coral)
+            } else {
+                Style::new().fg(t.text)
+            };
             let body = if value.is_empty() && !active {
                 Span::styled(
                     super::truncate(hint, available),
                     Style::new().fg(t.overlay0),
                 )
             } else if active {
-                Span::styled(input_tail(&value, available), Style::new().fg(t.text))
+                Span::styled(input_tail(&value, available), value_style)
             } else {
-                Span::styled(super::truncate(&value, available), Style::new().fg(t.text))
+                Span::styled(super::truncate(&value, available), value_style)
             };
             f.render_widget(
                 Paragraph::new(Line::from(vec![
@@ -3265,6 +3287,32 @@ mod tests {
         assert!(rendered.contains("…"));
         assert!(rendered.contains("ending stays visible▏"));
         assert!(!rendered.contains("A long descriptive task title"));
+    }
+
+    #[test]
+    fn automation_form_shows_each_agents_supported_access_profiles() {
+        let area = Rect::new(0, 0, 90, 30);
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+        let mut form = OrchForm::for_kind(crate::app::OrchFormKind::Automation);
+        form.agent = "opencode2".into();
+        form.access = crate::automation::AutomationAccess::ReadOnly;
+        form.field = crate::app::OrchFormField::Agent;
+
+        draw_form(
+            &mut target,
+            area,
+            &form,
+            &crate::i18n::EN,
+            &Theme::quattro_rally(),
+        );
+
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("opencode2  ·  Full access▏"));
     }
 
     #[test]
