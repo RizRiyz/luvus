@@ -1787,6 +1787,13 @@ pub struct PaneStatus {
     /// one-key answer. Captured **once** when the pane enters Blocked (not every
     /// tick), cleared when it leaves; `None` when the pane isn't blocked.
     pub blocked_hint: Option<String>,
+    /// Raw, non-debounced prompt-surface evidence. Prompt APIs consult this
+    /// separately from the presentation state's quiet-dwell hysteresis.
+    prompt_evidence: detect::PromptEvidence,
+    /// A server-owned launch whose CLI needs a proven composer before prompt
+    /// input. Existing panes retain the legacy permissive fallback when the
+    /// detector has neither ready nor blocked evidence.
+    prompt_evidence_required: bool,
     /// Explainable evidence from the last heuristic classification.
     pub identity_source: &'static str,
     pub state_source: &'static str,
@@ -1821,6 +1828,8 @@ impl PaneStatus {
             detected_bottom: Arc::from(""),
             force_detect: true,
             blocked_hint: None,
+            prompt_evidence: detect::PromptEvidence::Unknown,
+            prompt_evidence_required: false,
             identity_source: "command_fallback",
             state_source: "no_positive_state_evidence",
             rule_priority: None,

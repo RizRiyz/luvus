@@ -336,8 +336,10 @@ pub(crate) fn screen_rows(known_agent: &str, running: &[String], manifests: &Man
     }
 }
 
-/// Claude and Hermes can place a live approval panel above a tall blank footer.
-/// Keep their most recent non-empty live rows without pulling in scrollback.
+/// Claude, Codex, and Hermes can place a live interaction panel above a tall
+/// blank footer. Keep their most recent non-empty live rows without pulling in
+/// scrollback. For Codex this also keeps the first-run sign-in chooser visible
+/// to prompt admission instead of mistaking its blank footer for a composer.
 pub(crate) fn screen_uses_non_empty_rows(
     known_agent: &str,
     running: &[String],
@@ -345,6 +347,8 @@ pub(crate) fn screen_uses_non_empty_rows(
 ) -> bool {
     known_agent.eq_ignore_ascii_case("claude")
         || manifests.process_has_agent(running, "claude")
+        || known_agent.eq_ignore_ascii_case("codex")
+        || manifests.process_has_agent(running, "codex")
         || known_agent.eq_ignore_ascii_case("hermes")
         || manifests.process_has_agent(running, "hermes")
 }
@@ -956,9 +960,18 @@ impl RuleSpec {
 // ── public API ──────────────────────────────────────────────────────────────
 
 /// Result of classifying a pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PromptEvidence {
+    Unknown,
+    Ready,
+    Blocked,
+}
+
 pub struct Detection {
     pub state: State,
     pub agent: String,
+    /// Raw, non-debounced prompt-surface evidence from this screen.
+    pub(crate) prompt_evidence: PromptEvidence,
     /// Where identity came from. Stable, machine-readable values are exposed by
     /// `agent.explain`; no consumer needs to reverse-engineer detection order.
     pub identity_source: &'static str,
@@ -1047,7 +1060,7 @@ pub fn classify(
         State::Idle
     };
     let matched = manifests.evaluate(&agent, &regions);
-    let (state, state_source, rule_priority, rule_region) = match matched {
+    let (state, state_source, rule_priority, rule_region, prompt_blocked) = match matched {
         Some(rule) => (
             rule.state,
             "manifest_rule",
@@ -1056,18 +1069,63 @@ pub fn classify(
                 Region::Title => "title",
                 Region::Screen => "screen",
             }),
+            rule.state == State::Blocked,
         ),
-        None if fallback == State::Working => (fallback, "shell_activity", None, None),
-        None => (fallback, "no_positive_state_evidence", None, None),
+        None if fallback == State::Working => (fallback, "shell_activity", None, None, false),
+        None => (fallback, "no_positive_state_evidence", None, None, false),
     };
 
+    let prompt_evidence = if prompt_blocked {
+        PromptEvidence::Blocked
+    } else if agent.eq_ignore_ascii_case("codex") {
+        // Text alone cannot distinguish Codex's live composer from a prompt
+        // marker retained in the transcript. The app combines this raw state
+        // evidence with the VT engine's bounded composer geometry.
+        PromptEvidence::Unknown
+    } else {
+        PromptEvidence::Ready
+    };
     Detection {
         state,
         agent,
+        prompt_evidence,
         identity_source,
         state_source,
         rule_priority,
         rule_region,
+    }
+}
+
+/// Codex can be identified from its process/title before its startup chooser or
+/// composer exists. Server-owned launches keep prompt admission closed until
+/// the screen proves which surface won that race.
+pub(crate) fn prompt_requires_positive_evidence(agent: &str) -> bool {
+    agent.eq_ignore_ascii_case("codex")
+}
+
+/// Re-evaluate raw prompt readiness from the current bounded screen. This
+/// deliberately reuses manifest state rules instead of teaching API dispatch
+/// about individual agents, and runs only when output changed after the normal
+/// detection pass.
+pub(crate) fn prompt_evidence(
+    title: Option<&str>,
+    bottom: &str,
+    agent: &str,
+    manifests: &Manifests,
+) -> PromptEvidence {
+    let regions = Regions {
+        screen: bottom.to_lowercase(),
+        title: title.map(str::to_lowercase).unwrap_or_default(),
+    };
+    let blocked = manifests
+        .evaluate(&agent.to_lowercase(), &regions)
+        .is_some_and(|rule| rule.state == State::Blocked);
+    if blocked {
+        PromptEvidence::Blocked
+    } else if agent.eq_ignore_ascii_case("codex") {
+        PromptEvidence::Unknown
+    } else {
+        PromptEvidence::Ready
     }
 }
 
@@ -2150,7 +2208,7 @@ Would you like to proceed?
     }
 
     #[test]
-    fn claude_approval_panels_use_non_empty_screen_rows() {
+    fn tall_interaction_panels_use_non_empty_screen_rows() {
         let manifests = Manifests::builtin();
         assert!(screen_uses_non_empty_rows("claude", &[], &manifests));
         assert!(screen_uses_non_empty_rows(
@@ -2158,7 +2216,7 @@ Would you like to proceed?
             &["/usr/local/bin/claude".to_string()],
             &manifests
         ));
-        assert!(!screen_uses_non_empty_rows(
+        assert!(screen_uses_non_empty_rows(
             "codex",
             &["/usr/local/bin/codex".to_string()],
             &manifests
@@ -2169,8 +2227,68 @@ Would you like to proceed?
     fn claude_command_approval_screen_is_blocked() {
         let detection = detection_from_claude_screen(CLAUDE_COMMAND_APPROVAL_SCREEN);
         assert_eq!(detection.state, State::Blocked);
+        assert_eq!(detection.prompt_evidence, PromptEvidence::Blocked);
         assert_eq!(detection.state_source, "manifest_rule");
         assert_eq!(detection.rule_priority, Some(300));
+    }
+
+    #[test]
+    fn codex_sign_in_above_blank_footer_blocks_prompt_submission() {
+        let manifests = Manifests::builtin();
+        let screen = "Welcome to Codex, OpenAI's command-line coding agent\n\n\
+            Sign in with ChatGPT to use Codex as part of your paid plan\n\
+            or connect an API key for usage-based billing\n\n\
+            > 1. Sign in with ChatGPT\n\
+            2. Sign in with Device Code\n\
+            3. Provide your own API key\n\n\
+            Press enter to continue";
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(120, 32, tx, 1024 * 1024);
+        engine.advance(format!("\x1b[2J\x1b[H{}", screen.replace('\n', "\r\n")).as_bytes());
+
+        assert!(
+            engine.detection_text(14).trim().is_empty(),
+            "the normal bottom-row window misses the first-run chooser"
+        );
+        let bottom = engine.detection_text_non_empty(14);
+        let detection = classify(
+            Some("Codex"),
+            &bottom,
+            false,
+            false,
+            "codex",
+            "codex",
+            &["/usr/local/bin/codex".to_string()],
+            &manifests,
+        );
+        assert_eq!(detection.state, State::Blocked);
+        assert_eq!(detection.prompt_evidence, PromptEvidence::Blocked);
+        assert_eq!(
+            prompt_evidence(Some("Codex"), &bottom, "codex", &manifests),
+            PromptEvidence::Blocked
+        );
+    }
+
+    #[test]
+    fn codex_prompt_marker_text_alone_is_not_positive_prompt_evidence() {
+        let manifests = Manifests::builtin();
+        let bottom = "Ready to review.\n\n  › Write tests\n  100% context left";
+        let detection = classify(
+            Some("Codex"),
+            bottom,
+            false,
+            false,
+            "codex",
+            "codex",
+            &["/usr/local/bin/codex".to_string()],
+            &manifests,
+        );
+        assert_eq!(detection.state, State::Idle);
+        assert_eq!(detection.prompt_evidence, PromptEvidence::Unknown);
+        assert_eq!(
+            prompt_evidence(Some("Codex"), bottom, "codex", &manifests),
+            PromptEvidence::Unknown
+        );
     }
 
     #[test]

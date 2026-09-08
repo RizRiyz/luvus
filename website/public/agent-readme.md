@@ -281,6 +281,8 @@ user named a specific project.
 `agent prompt` submits one complete prompt and can wait semantically. Prefer it
 to separate text and Enter operations. A timeout does not prove that an agent
 failed or stopped. Inspect it before deciding what to do next.
+Detected startup, sign-in, selection, and approval screens reject prompt
+submission with `agent_not_ready` before either text or Enter is queued.
 
 `agent keys` refuses plain shells, validates every named key before sending any
 bytes, and queues a valid list as one ordered action. A closed target returns a

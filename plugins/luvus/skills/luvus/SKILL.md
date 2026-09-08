@@ -253,6 +253,10 @@ Without `--wait`, the immediate `submitted:true`, `evidence:"queued"` response i
 unchanged and omits `observed_state`. Submission still means queue admission;
 state transitions do not confirm consumption of the prompt text. Do not resend
 automatically after a timeout or lost response because queued input may execute.
+If the current screen is a detected startup, sign-in, selection, or approval
+surface, prompt submission returns `agent_not_ready` and queues no input. Read
+the visible screen before deciding whether an explicit `agent keys` action is
+authorized.
 
 When waiting was requested, keep it bounded and read a bounded result:
 

@@ -1440,6 +1440,13 @@ fn agent_prompt_response(
     response.to_string()
 }
 
+fn agent_prompt_not_ready_error() -> (String, String) {
+    (
+        "agent_not_ready".to_string(),
+        "target agent has not exposed a prompt-ready composer; no prompt input was queued; inspect it with agent read and use agent keys only for an explicit interaction".to_string(),
+    )
+}
+
 /// Debounce dwell for committing a newly-desired agent state (hysteresis).
 /// Active states publish instantly (responsive sidebar); the fall back to a
 /// quiet state waits `QUIET_DWELL` so streaming pauses don't flap the status.
@@ -2045,6 +2052,10 @@ impl App {
                 running_for_detection,
                 &self.manifests,
             );
+            let inspect_codex_composer = known_agent.eq_ignore_ascii_case("codex")
+                || self
+                    .manifests
+                    .process_has_agent(running_for_detection, "codex");
             let (last_generation, force_detect) = self
                 .status
                 .get(&id)
@@ -2064,10 +2075,13 @@ impl App {
                             } else {
                                 engine.detection_text(detection_rows)
                             };
+                            let codex_composer_ready = inspect_codex_composer
+                                .then(|| engine.codex_composer_region().is_some());
                             Some((
                                 generation,
                                 engine.title().map(Arc::<str>::from),
                                 Arc::<str>::from(text),
+                                codex_composer_ready,
                             ))
                         } else {
                             None
@@ -2076,8 +2090,11 @@ impl App {
                     Err(_) => None,
                 }
             };
+            let inspected_composer_ready = inspected
+                .as_ref()
+                .and_then(|(_, _, _, composer_ready)| *composer_ready);
             if let Some(s) = self.status.get_mut(&id) {
-                if let Some((generation, title, bottom)) = inspected {
+                if let Some((generation, title, bottom, _)) = inspected {
                     if audit_only {
                         self.detection_audit_recoveries =
                             self.detection_audit_recoveries.saturating_add(1);
@@ -2124,6 +2141,13 @@ impl App {
                 Some(report) => detect::Detection {
                     state: report.state,
                     agent: report.agent.clone(),
+                    prompt_evidence: if report.state == State::Blocked {
+                        detect::PromptEvidence::Blocked
+                    } else if report.agent.eq_ignore_ascii_case("codex") {
+                        detect::PromptEvidence::Unknown
+                    } else {
+                        detect::PromptEvidence::Ready
+                    },
                     identity_source: "integration_report",
                     state_source: "integration_report",
                     rule_priority: None,
@@ -2146,6 +2170,17 @@ impl App {
                 s.state_source = det.state_source;
                 s.rule_priority = det.rule_priority;
                 s.rule_region = det.rule_region;
+                s.prompt_evidence = if det.prompt_evidence == detect::PromptEvidence::Blocked {
+                    detect::PromptEvidence::Blocked
+                } else if det.agent.eq_ignore_ascii_case("codex") {
+                    match inspected_composer_ready {
+                        Some(true) => detect::PromptEvidence::Ready,
+                        Some(false) => detect::PromptEvidence::Unknown,
+                        None => s.prompt_evidence,
+                    }
+                } else {
+                    det.prompt_evidence
+                };
                 let focused = id == focus;
                 if focused {
                     s.seen = true;
@@ -3754,6 +3789,9 @@ impl App {
                         "invalid_request".to_string(),
                         "agent send text must not be empty".to_string(),
                     ));
+                }
+                if !self.agent_prompt_is_ready(id) {
+                    return Err(agent_prompt_not_ready_error());
                 }
                 let pane = self.panes.get(&id).ok_or_else(|| {
                     (
@@ -6261,6 +6299,11 @@ impl App {
             fail("send_failed", message);
             return;
         }
+        if let Some(status) = self.status.get_mut(&pane) {
+            status.prompt_evidence = detect::PromptEvidence::Unknown;
+            status.prompt_evidence_required = detect::prompt_requires_positive_evidence(kind);
+            status.force_detect = true;
+        }
         self.set_agent_name(pane, Some(name));
         self.agent_starts.insert(
             pane,
@@ -6273,6 +6316,66 @@ impl App {
                 cancelled,
             },
         );
+    }
+
+    /// Return current raw readiness evidence for prompt admission. Normal
+    /// detection already caches this result. If terminal output arrived after
+    /// that pass, inspect only the same bounded live rows once, on this request,
+    /// so an agent-start/prompt race cannot submit Enter before a composer exists.
+    fn agent_prompt_is_ready(&self, id: PaneId) -> bool {
+        let Some(status) = self.status.get(&id) else {
+            return true;
+        };
+        let positive_evidence_required = status.prompt_evidence_required
+            || status
+                .agent_session
+                .as_ref()
+                .is_some_and(|session| detect::prompt_requires_positive_evidence(&session.agent));
+        let admits = |evidence| match evidence {
+            detect::PromptEvidence::Ready => true,
+            detect::PromptEvidence::Blocked => false,
+            detect::PromptEvidence::Unknown => !positive_evidence_required,
+        };
+        let Some(pane) = self.panes.get(&id) else {
+            return true;
+        };
+        let Ok(engine) = pane.engine.lock() else {
+            return false;
+        };
+        if !status.force_detect && status.last_detect_generation == Some(engine.output_generation())
+        {
+            return admits(status.prompt_evidence);
+        }
+        let running = self
+            .proc_commands
+            .get(&id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let rows = detect::screen_rows(&status.agent, running, &self.manifests);
+        let bottom = if detect::screen_uses_non_empty_rows(&status.agent, running, &self.manifests)
+        {
+            engine.detection_text_non_empty(rows)
+        } else {
+            engine.detection_text(rows)
+        };
+        let raw = detect::prompt_evidence(
+            engine.title().as_deref(),
+            &bottom,
+            &status.agent,
+            &self.manifests,
+        );
+        let evidence = if raw == detect::PromptEvidence::Blocked {
+            raw
+        } else if status.agent.eq_ignore_ascii_case("codex") {
+            if engine.codex_composer_region().is_some() {
+                detect::PromptEvidence::Ready
+            } else {
+                detect::PromptEvidence::Unknown
+            }
+        } else {
+            raw
+        };
+        admits(evidence)
     }
 
     /// Atomically submit a prompt and, when requested, retain the response until
@@ -6368,6 +6471,11 @@ impl App {
                 );
                 return;
             }
+        }
+        if !self.agent_prompt_is_ready(pane) {
+            let (code, message) = agent_prompt_not_ready_error();
+            fail(&code, message);
+            return;
         }
         let Some(target) = self.panes.get(&pane) else {
             fail("not_found", "pane not found".to_string());
@@ -9345,6 +9453,106 @@ command = ["true"]
     }
 
     #[test]
+    fn prompt_apis_reject_a_fresh_interaction_screen_without_queueing_input() {
+        let _env = crate::persist::test_env("prompt-interaction-guard");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 32, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "codex".into();
+        app.panes[&pane].engine.lock().unwrap().advance(
+            b"\x1b[2J\x1b[HWelcome to Codex\r\n\r\n\
+              > 1. Sign in with ChatGPT\r\n\
+                2. Sign in with Device Code\r\n\
+                3. Provide your own API key\r\n\r\n\
+              Press enter to continue",
+        );
+        let (input, received) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input);
+
+        let error = app
+            .dispatch(
+                "agent.send",
+                &json!({"target":pane.0.to_string(),"text":"do not submit"}),
+            )
+            .expect_err("an interaction chooser must reject agent.send");
+        assert_eq!(error.0, "agent_not_ready");
+        assert!(error.1.contains("no prompt input was queued"));
+        assert!(received.try_recv().is_err());
+
+        let (reply, response) = std::sync::mpsc::channel();
+        app.start_agent_prompt(
+            "blocked-prompt".into(),
+            json!({"target":pane.0.to_string(),"text":"do not submit"}),
+            reply,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let value: Value = serde_json::from_str(&response.try_recv().unwrap()).unwrap();
+        assert_eq!(value["error"]["code"], "agent_not_ready");
+        assert!(value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no prompt input was queued"));
+        assert!(received.try_recv().is_err());
+        assert!(app.agent_prompts.is_empty());
+    }
+
+    #[test]
+    fn native_codex_requires_live_composer_geometry() {
+        let _env = crate::persist::test_env("prompt-composer-geometry");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let status = app.status.get_mut(&pane).unwrap();
+        status.agent = "codex".into();
+        status.agent_session = Some(crate::app::AgentSession {
+            agent: "codex".into(),
+            session_id: "native-session".into(),
+        });
+
+        let (input, received) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input);
+
+        // A transcript can retain the same marker as the composer. Text alone
+        // is not enough to admit another turn.
+        app.panes[&pane]
+            .engine
+            .lock()
+            .unwrap()
+            .advance("\x1b[1;1Htranscript\r\n› old prompt\r\nanswer".as_bytes());
+        let error = app
+            .dispatch(
+                "agent.send",
+                &json!({"target":pane.0.to_string(),"text":"new prompt"}),
+            )
+            .expect_err("transcript marker must not establish readiness");
+        assert_eq!(error.0, "agent_not_ready");
+        assert!(received.try_recv().is_err());
+
+        // The existing VT boundary recognizes the live Codex composer from its
+        // cursor and padding geometry; no echo polling is needed.
+        app.panes[&pane]
+            .engine
+            .lock()
+            .unwrap()
+            .advance("\x1b[2J\x1b[2;1H› ".as_bytes());
+        app.dispatch(
+            "agent.send",
+            &json!({"target":pane.0.to_string(),"text":"new prompt"}),
+        )
+        .expect("live composer accepts prompt");
+        let crate::terminal::pty::InputAction::Submit { .. } = received.try_recv().unwrap() else {
+            panic!("prompt must remain one atomic submit action")
+        };
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
     fn pane_input_methods_report_rejection_and_run_is_one_action() {
         let _env = crate::persist::test_env("pane-input-admission");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -9924,6 +10132,11 @@ command = ["true"]
             Arc::new(AtomicBool::new(false)),
         );
         assert_eq!(app.agent_names.get("reviewer"), Some(&pane));
+        assert!(
+            app.status[&pane].prompt_evidence_required
+                && app.status[&pane].prompt_evidence == detect::PromptEvidence::Unknown,
+            "a server-launched Codex pane needs positive composer evidence"
+        );
         assert!(response.try_recv().is_err());
 
         let status = app.status.get_mut(&pane).unwrap();

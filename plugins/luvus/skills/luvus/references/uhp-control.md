@@ -182,3 +182,6 @@ Without `wait:true`, the immediate `submitted:true`, `evidence:"queued"` respons
 unchanged and omits `observed_state`. Submission still means queue admission;
 state transitions do not confirm consumption of the prompt text. Do not resend
 automatically after a timeout or lost response because queued input may execute.
+Detected startup, sign-in, selection, and approval screens return
+`agent_not_ready` before text or Enter is queued. Inspect the visible screen and
+use `agent.keys` only for an explicitly authorized interaction.
