@@ -343,6 +343,10 @@ fn start_writer() -> Result<(Outbound, JoinHandle<()>)> {
 
 fn writer_loop(queue: Arc<OutboundQueue>) {
     let mut output = std::io::stdout().lock();
+    writer_loop_to(queue, &mut output);
+}
+
+fn writer_loop_to(queue: Arc<OutboundQueue>, output: &mut impl std::io::Write) {
     loop {
         let message = {
             let mut state = queue
@@ -365,7 +369,7 @@ fn writer_loop(queue: Arc<OutboundQueue>) {
         let Some(message) = message else {
             break;
         };
-        if crate::ipc::protocol::write_message(&mut output, &message).is_err() {
+        if crate::ipc::protocol::write_message(&mut *output, &message).is_err() {
             let mut state = queue
                 .state
                 .lock()
@@ -384,18 +388,23 @@ mod tests {
     #[test]
     fn control_queue_is_independent_from_a_full_surface_queue() {
         let queue = Arc::new(OutboundQueue::default());
-        {
-            let mut state = queue.state.lock().unwrap();
-            state.surface.push_back(ServerMessage::Pong { nonce: 1 });
-            state.control.push_back(ServerMessage::Pong { nonce: 9 });
-            assert!(matches!(
-                state.control.pop_front(),
-                Some(ServerMessage::Pong { nonce: 9 })
-            ));
-            assert!(matches!(
-                state.surface.pop_front(),
-                Some(ServerMessage::Pong { nonce: 1 })
-            ));
-        }
+        let outbound = Outbound {
+            queue: queue.clone(),
+        };
+        assert!(outbound.surface(ServerMessage::Pong { nonce: 1 }));
+        assert!(outbound.control(ServerMessage::Pong { nonce: 9 }));
+        outbound.close();
+
+        let mut bytes = Vec::new();
+        writer_loop_to(queue, &mut bytes);
+        let mut input = std::io::Cursor::new(bytes);
+        assert!(matches!(
+            crate::ipc::protocol::read_message(&mut input).unwrap(),
+            ServerMessage::Pong { nonce: 9 }
+        ));
+        assert!(matches!(
+            crate::ipc::protocol::read_message(&mut input).unwrap(),
+            ServerMessage::Pong { nonce: 1 }
+        ));
     }
 }

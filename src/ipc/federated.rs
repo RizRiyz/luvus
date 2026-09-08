@@ -102,6 +102,12 @@ struct SurfaceCandidate {
     deadline: Instant,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WarmSurface {
+    endpoint: Endpoint,
+    generation: u64,
+}
+
 struct DockState {
     rect: Option<ShellDockRect>,
     selector_rect: Option<Rect>,
@@ -194,7 +200,12 @@ fn run_inner(
         ServerMessage::Welcome { error: None, .. } => {}
         ServerMessage::Welcome {
             error: Some(error), ..
-        } => return Err(anyhow!(error)),
+        } => {
+            return Err(anyhow!(
+                "server: {error}\nAn older luvus server is likely still running — \
+                 run `luvus server restart` to load this version (your session is saved)."
+            ))
+        }
         _ => return Err(anyhow!("unexpected local server handshake")),
     }
     let probe_terminal = match protocol::read_message::<_, ServerMessage>(&mut reader)? {
@@ -262,7 +273,7 @@ fn run_inner(
         })
         .collect::<HashMap<_, _>>();
     let mut active = Endpoint::Local;
-    let mut warm: Option<Endpoint> = None;
+    let mut warm: Option<WarmSurface> = None;
     let mut candidate: Option<SurfaceCandidate> = None;
     let mut next_channel = 1u64;
     let mut next_request = 1u64;
@@ -321,9 +332,19 @@ fn run_inner(
                     continue;
                 }
                 if let Err(error) = send_surface(&active, &message, &machines, &writer) {
-                    if candidate.is_none() {
+                    if matches!(active, Endpoint::Local) {
                         return Err(error);
                     }
+                    dock.warning = Some("active machine connection lost".to_string());
+                    dock.dirty = true;
+                    request_switch(
+                        Endpoint::Local,
+                        &mut warm,
+                        &mut candidate,
+                        &mut next_channel,
+                        &machines,
+                        &writer,
+                    )?;
                 }
             }
             ShellEvent::Local(message) => {
@@ -543,7 +564,7 @@ fn handle_link_event(
     event: LinkEvent,
     machines: &mut HashMap<String, MachineRuntime>,
     active: &mut Endpoint,
-    warm: &mut Option<Endpoint>,
+    warm: &mut Option<WarmSurface>,
     candidate: &mut Option<SurfaceCandidate>,
     next_request: &mut u64,
     local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
@@ -588,10 +609,17 @@ fn handle_link_event(
                         machine.state = MachineState::Online;
                         machine.backoff = Duration::from_secs(1);
                         if let Some(control) = machine.control.as_ref() {
-                            control.send(&fleet::ClientMessage::Sessions {
+                            let result = control.send(&fleet::ClientMessage::Sessions {
                                 request_id: *next_request,
-                            })?;
-                            *next_request = next_request.saturating_add(1);
+                            });
+                            if result.is_ok() {
+                                *next_request = next_request.saturating_add(1);
+                            } else {
+                                stop_link(machine);
+                                machine.state = MachineState::Attention(
+                                    "could not request remote sessions".to_string(),
+                                );
+                            }
                         }
                     }
                     dock.dirty = true;
@@ -613,19 +641,30 @@ fn handle_link_event(
                             }
                             && candidate.generation == generation
                     }) {
-                        let control = machine
+                        let size = terminal.size()?;
+                        let result = machine
                             .control
                             .as_ref()
-                            .ok_or_else(|| anyhow!("machine link closed"))?;
-                        let size = terminal.size()?;
-                        control.send(&fleet::ClientMessage::Surface {
-                            channel_id,
-                            message: ClientMessage::Hello {
-                                version: PROTOCOL_VERSION,
-                                cols: size.width,
-                                rows: size.height,
-                            },
-                        })?;
+                            .ok_or_else(|| anyhow!("machine link closed"))
+                            .and_then(|control| {
+                                control.send(&fleet::ClientMessage::Surface {
+                                    channel_id,
+                                    message: ClientMessage::Hello {
+                                        version: PROTOCOL_VERSION,
+                                        cols: size.width,
+                                        rows: size.height,
+                                    },
+                                })
+                            });
+                        if result.is_err() {
+                            *candidate = None;
+                            stop_link(machine);
+                            machine.state = MachineState::Attention(
+                                "could not open remote session surface".to_string(),
+                            );
+                            dock.warning = Some("remote session switch failed".to_string());
+                            dock.dirty = true;
+                        }
                     }
                 }
                 fleet::ServerMessage::Surface {
@@ -668,7 +707,7 @@ fn handle_link_event(
                     {
                         *candidate = None;
                     }
-                    if warm.as_ref().is_some_and(&closed) {
+                    if warm.as_ref().is_some_and(|warm| closed(&warm.endpoint)) {
                         *warm = None;
                     }
                     if closed(active) && candidate.is_none() {
@@ -740,6 +779,11 @@ fn handle_link_event(
                 };
                 machine.backoff = (machine.backoff * 2).min(RECONNECT_MAX);
             }
+            if warm.as_ref().is_some_and(|warm| {
+                matches!(&warm.endpoint, Endpoint::Remote { machine_id: id, .. } if id == &machine_id)
+            }) {
+                *warm = None;
+            }
             if matches!(active, Endpoint::Remote { machine_id: id, .. } if id == &machine_id) {
                 *candidate = Some(SurfaceCandidate {
                     endpoint: Endpoint::Local,
@@ -774,7 +818,7 @@ fn handle_surface_message(
     endpoint: Endpoint,
     message: ServerMessage,
     active: &mut Endpoint,
-    warm: &mut Option<Endpoint>,
+    warm: &mut Option<WarmSurface>,
     candidate: &mut Option<SurfaceCandidate>,
     machines: &HashMap<String, MachineRuntime>,
     local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
@@ -788,48 +832,72 @@ fn handle_surface_message(
 ) -> Result<Option<super::client::ClientExit>> {
     match message {
         ServerMessage::Welcome { error, .. } => {
+            let is_candidate = candidate
+                .as_ref()
+                .is_some_and(|candidate| candidate.endpoint == endpoint);
+            if is_candidate {
+                if let Some(error) = error {
+                    if matches!(endpoint, Endpoint::Remote { .. }) {
+                        *candidate = None;
+                        dock.warning = Some(error);
+                        dock.dirty = true;
+                        return Ok(None);
+                    }
+                    return Err(anyhow!(error));
+                }
+            }
             if let Some(candidate) = candidate
                 .as_mut()
                 .filter(|candidate| candidate.endpoint == endpoint)
             {
-                if let Some(error) = error {
-                    return Err(anyhow!(error));
-                }
                 candidate.welcomed = true;
             }
         }
         ServerMessage::Ready { probe_terminal } => {
-            if let Some(candidate) = candidate
+            let mut negotiation_failed = false;
+            if let Some(pending) = candidate
                 .as_mut()
                 .filter(|candidate| candidate.endpoint == endpoint)
             {
-                candidate.ready = true;
+                pending.ready = true;
                 if let Endpoint::Remote {
                     machine_id,
                     channel_id,
                     ..
                 } = &endpoint
                 {
-                    let control = machines
-                        .get(machine_id)
-                        .and_then(|machine| machine.control.as_ref())
-                        .ok_or_else(|| anyhow!("machine link closed during surface negotiation"))?;
-                    if probe_terminal {
-                        let probe = crate::terminal::theme_probe::probe();
+                    let result = (|| {
+                        let control = machines
+                            .get(machine_id)
+                            .and_then(|machine| machine.control.as_ref())
+                            .ok_or_else(|| {
+                                anyhow!("machine link closed during surface negotiation")
+                            })?;
+                        if probe_terminal {
+                            let probe = crate::terminal::theme_probe::probe();
+                            control.send(&fleet::ClientMessage::Surface {
+                                channel_id: *channel_id,
+                                message: ClientMessage::TerminalColors(probe.colors),
+                            })?;
+                        }
                         control.send(&fleet::ClientMessage::Surface {
                             channel_id: *channel_id,
-                            message: ClientMessage::TerminalColors(probe.colors),
+                            message: ClientMessage::ShellDockRows(dock_rows),
                         })?;
+                        control.send(&fleet::ClientMessage::Surface {
+                            channel_id: *channel_id,
+                            message: ClientMessage::SurfaceInterest(SurfaceInterest::Prepared),
+                        })
+                    })();
+                    if result.is_err() {
+                        negotiation_failed = true;
                     }
-                    control.send(&fleet::ClientMessage::Surface {
-                        channel_id: *channel_id,
-                        message: ClientMessage::ShellDockRows(dock_rows),
-                    })?;
-                    control.send(&fleet::ClientMessage::Surface {
-                        channel_id: *channel_id,
-                        message: ClientMessage::SurfaceInterest(SurfaceInterest::Prepared),
-                    })?;
                 }
+            }
+            if negotiation_failed {
+                *candidate = None;
+                dock.warning = Some("remote session negotiation failed".to_string());
+                dock.dirty = true;
             }
         }
         ServerMessage::ShellDock(rect) => {
@@ -943,7 +1011,7 @@ fn handle_dock_input(
     message: &ClientMessage,
     dock: &mut DockState,
     active: &Endpoint,
-    warm: &mut Option<Endpoint>,
+    warm: &mut Option<WarmSurface>,
     candidate: &mut Option<SurfaceCandidate>,
     next_channel: &mut u64,
     machines: &HashMap<String, MachineRuntime>,
@@ -956,7 +1024,15 @@ fn handle_dock_input(
                 let endpoints = selector_endpoints(machines);
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
-                        close_selector(dock, active, machines, local_writer)?;
+                        close_selector(
+                            dock,
+                            active,
+                            warm,
+                            candidate,
+                            next_channel,
+                            machines,
+                            local_writer,
+                        )?;
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         dock.selector_cursor = dock.selector_cursor.saturating_sub(1);
@@ -994,7 +1070,15 @@ fn handle_dock_input(
                                 )?;
                             }
                         }
-                        close_selector(dock, active, machines, local_writer)?;
+                        close_selector(
+                            dock,
+                            active,
+                            warm,
+                            candidate,
+                            next_channel,
+                            machines,
+                            local_writer,
+                        )?;
                     }
                     _ => {}
                 }
@@ -1018,12 +1102,28 @@ fn handle_dock_input(
                             local_writer,
                         )?;
                     }
-                    close_selector(dock, active, machines, local_writer)?;
+                    close_selector(
+                        dock,
+                        active,
+                        warm,
+                        candidate,
+                        next_channel,
+                        machines,
+                        local_writer,
+                    )?;
                 } else if !dock
                     .selector_rect
                     .is_some_and(|rect| rect.contains((mouse.column, mouse.row).into()))
                 {
-                    close_selector(dock, active, machines, local_writer)?;
+                    close_selector(
+                        dock,
+                        active,
+                        warm,
+                        candidate,
+                        next_channel,
+                        machines,
+                        local_writer,
+                    )?;
                 }
             }
             ClientMessage::Resize { .. } => {
@@ -1117,7 +1217,7 @@ fn open_selector(
 fn refresh_catalog(
     machines: &mut HashMap<String, MachineRuntime>,
     active: &mut Endpoint,
-    warm: &mut Option<Endpoint>,
+    warm: &mut Option<WarmSurface>,
     candidate: &mut Option<SurfaceCandidate>,
     next_channel: &mut u64,
     local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
@@ -1148,6 +1248,7 @@ fn refresh_catalog(
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
 
+    let mut retired_generations = HashMap::<String, u64>::new();
     for id in &replaced {
         if candidate.as_ref().is_some_and(|candidate| {
             matches!(&candidate.endpoint, Endpoint::Remote { machine_id, .. } if machine_id == id)
@@ -1157,20 +1258,22 @@ fn refresh_catalog(
             }
         }
         if warm.as_ref().is_some_and(
-            |endpoint| matches!(endpoint, Endpoint::Remote { machine_id, .. } if machine_id == id),
+            |warm| matches!(&warm.endpoint, Endpoint::Remote { machine_id, .. } if machine_id == id),
         ) {
-            if let Some(endpoint) = warm.take() {
-                close_remote(&endpoint, machines);
+            if let Some(warm) = warm.take() {
+                close_remote(&warm.endpoint, machines);
             }
         }
         if let Some(mut runtime) = machines.remove(id) {
             stop_link(&mut runtime);
+            retired_generations.insert(id.clone(), runtime.generation);
         }
     }
 
     let active_removed =
         matches!(active, Endpoint::Remote { machine_id, .. } if replaced.contains(machine_id));
     for (id, profile) in next {
+        let retired_generation = retired_generations.get(&id).copied().unwrap_or(0);
         machines.entry(id).or_insert_with(|| {
             let state = if profile.enabled {
                 MachineState::Reconnecting { at: Instant::now() }
@@ -1180,7 +1283,7 @@ fn refresh_catalog(
             MachineRuntime {
                 profile,
                 state,
-                generation: 0,
+                generation: retired_generation,
                 control: None,
                 reader: None,
                 backoff: Duration::from_secs(1),
@@ -1218,6 +1321,9 @@ fn refresh_catalog(
 fn close_selector(
     dock: &mut DockState,
     active: &Endpoint,
+    warm: &mut Option<WarmSurface>,
+    candidate: &mut Option<SurfaceCandidate>,
+    next_channel: &mut u64,
     machines: &HashMap<String, MachineRuntime>,
     local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
 ) -> Result<()> {
@@ -1227,16 +1333,32 @@ fn close_selector(
     // Frames received beneath the client-owned selector were intentionally not
     // painted. Re-entering Active through Prepared invalidates the server-side
     // baseline and guarantees one complete frame before later diffs.
-    send_interest(active, SurfaceInterest::Prepared, machines, local_writer)?;
-    if let Ok((cols, rows)) = crossterm::terminal::size() {
-        send_surface(
-            active,
-            &ClientMessage::Resize { cols, rows },
+    let restored = (|| {
+        send_interest(active, SurfaceInterest::Prepared, machines, local_writer)?;
+        if let Ok((cols, rows)) = crossterm::terminal::size() {
+            send_surface(
+                active,
+                &ClientMessage::Resize { cols, rows },
+                machines,
+                local_writer,
+            )?;
+        }
+        send_interest(active, SurfaceInterest::Active, machines, local_writer)
+    })();
+    if let Err(error) = restored {
+        if matches!(active, Endpoint::Local) {
+            return Err(error);
+        }
+        dock.warning = Some("active machine connection lost".to_string());
+        request_switch(
+            Endpoint::Local,
+            warm,
+            candidate,
+            next_channel,
             machines,
             local_writer,
         )?;
     }
-    send_interest(active, SurfaceInterest::Active, machines, local_writer)?;
     Ok(())
 }
 
@@ -1261,7 +1383,7 @@ fn same_selection(left: &Endpoint, right: &Endpoint) -> bool {
 
 fn request_switch(
     mut endpoint: Endpoint,
-    warm: &mut Option<Endpoint>,
+    warm: &mut Option<WarmSurface>,
     candidate: &mut Option<SurfaceCandidate>,
     next_channel: &mut u64,
     machines: &HashMap<String, MachineRuntime>,
@@ -1272,24 +1394,11 @@ fn request_switch(
             close_remote(&previous.endpoint, machines);
         }
     }
-    let warm_matches = warm.as_ref().is_some_and(|existing| {
-        same_selection(existing, &endpoint)
-            && match existing {
-                Endpoint::Local => true,
-                Endpoint::Remote {
-                    machine_id,
-                    channel_id,
-                    ..
-                } => {
-                    *channel_id != 0
-                        && machines
-                            .get(machine_id)
-                            .is_some_and(|machine| matches!(machine.state, MachineState::Online))
-                }
-            }
-    });
+    let warm_matches = warm
+        .as_ref()
+        .is_some_and(|warm| warm_surface_matches(warm, &endpoint, machines));
     if warm_matches {
-        endpoint = warm.take().expect("matching warm endpoint exists");
+        endpoint = warm.take().expect("matching warm endpoint exists").endpoint;
         send_interest(&endpoint, SurfaceInterest::Prepared, machines, local_writer)?;
         if let Ok((cols, rows)) = crossterm::terminal::size() {
             send_surface(
@@ -1367,18 +1476,40 @@ fn request_switch(
     Ok(())
 }
 
+fn warm_surface_matches(
+    warm: &WarmSurface,
+    endpoint: &Endpoint,
+    machines: &HashMap<String, MachineRuntime>,
+) -> bool {
+    same_selection(&warm.endpoint, endpoint)
+        && match &warm.endpoint {
+            Endpoint::Local => true,
+            Endpoint::Remote {
+                machine_id,
+                channel_id,
+                ..
+            } => {
+                *channel_id != 0
+                    && machines.get(machine_id).is_some_and(|machine| {
+                        matches!(machine.state, MachineState::Online)
+                            && machine.generation == warm.generation
+                    })
+            }
+        }
+}
+
 fn endpoint_for_channel(
     machine_id: &str,
     channel_id: u64,
     active: &Endpoint,
-    warm: Option<&Endpoint>,
+    warm: Option<&WarmSurface>,
     candidate: Option<&SurfaceCandidate>,
 ) -> Option<Endpoint> {
     candidate
         .map(|candidate| &candidate.endpoint)
         .into_iter()
         .chain(std::iter::once(active))
-        .chain(warm)
+        .chain(warm.map(|warm| &warm.endpoint))
         .find(|endpoint| {
             matches!(
                 endpoint,
@@ -1395,7 +1526,7 @@ fn endpoint_for_channel(
 fn commit_candidate(
     endpoint: Endpoint,
     active: &mut Endpoint,
-    warm: &mut Option<Endpoint>,
+    warm: &mut Option<WarmSurface>,
     candidate: &mut Option<SurfaceCandidate>,
     machines: &HashMap<String, MachineRuntime>,
     local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
@@ -1405,11 +1536,20 @@ fn commit_candidate(
     // complete candidate frame is valid, a stale route must not veto commit.
     let _ = send_interest(active, SurfaceInterest::Suspended, machines, local_writer);
     if let Some(previous_warm) = warm.take() {
-        if previous_warm != *active && previous_warm != Endpoint::Local {
-            close_remote(&previous_warm, machines);
+        if previous_warm.endpoint != *active && previous_warm.endpoint != Endpoint::Local {
+            close_remote(&previous_warm.endpoint, machines);
         }
     }
-    *warm = Some(active.clone());
+    let generation = match active {
+        Endpoint::Local => 0,
+        Endpoint::Remote { machine_id, .. } => machines
+            .get(machine_id)
+            .map_or(0, |machine| machine.generation),
+    };
+    *warm = Some(WarmSurface {
+        endpoint: active.clone(),
+        generation,
+    });
     *active = endpoint;
     *candidate = None;
     Ok(())
@@ -1671,11 +1811,19 @@ fn paint_selector(
         &dock.base,
         Color::Reset,
     );
-    for (index, endpoint) in endpoints.iter().enumerate() {
-        let row = 2 + index as u16 * row_height;
-        if row >= rect.height {
-            break;
-        }
+    let visible_endpoints = usize::from(rect.height.saturating_sub(2) / row_height).max(1);
+    let first_endpoint = dock
+        .selector_cursor
+        .saturating_add(1)
+        .saturating_sub(visible_endpoints);
+    for (visible_index, (index, endpoint)) in endpoints
+        .iter()
+        .enumerate()
+        .skip(first_endpoint)
+        .take(visible_endpoints)
+        .enumerate()
+    {
+        let row = 2 + visible_index as u16 * row_height;
         let (label, status, tone) = match endpoint {
             Endpoint::Local => (
                 "Local".to_string(),
@@ -1798,10 +1946,14 @@ fn write_row(
     }
     for (offset, symbol) in text.chars().enumerate() {
         let x = rect.x + 1 + offset as u16;
-        if let Some((_, _, cell)) = cells
-            .iter_mut()
-            .find(|(cell_x, cell_y, _)| *cell_x == x && *cell_y == rect.y + row)
-        {
+        if x >= rect.x.saturating_add(rect.width) {
+            break;
+        }
+        // Both dock painters build `cells` in rect-relative row-major order.
+        let index = usize::from(row)
+            .saturating_mul(usize::from(rect.width))
+            .saturating_add(usize::from(x - rect.x));
+        if let Some((_, _, cell)) = cells.get_mut(index) {
             *cell = base.clone();
             cell.set_symbol(&symbol.to_string());
             if tone != Color::Reset {
@@ -1934,5 +2086,38 @@ mod tests {
             endpoint_for_channel("alpha", 8, &Endpoint::Local, None, Some(&candidate)),
             None
         );
+    }
+
+    #[test]
+    fn warm_remote_surface_is_fenced_by_link_generation() {
+        let profile = MachineProfile::new("box".into(), "box".into());
+        let machines = HashMap::from([(
+            profile.id.clone(),
+            MachineRuntime {
+                profile,
+                state: MachineState::Online,
+                generation: 2,
+                control: None,
+                reader: None,
+                backoff: Duration::from_secs(1),
+                sessions: Vec::new(),
+            },
+        )]);
+        let endpoint = Endpoint::Remote {
+            machine_id: "box".into(),
+            channel_id: 41,
+            session: "default".into(),
+        };
+        let stale = WarmSurface {
+            endpoint: endpoint.clone(),
+            generation: 1,
+        };
+        let current = WarmSurface {
+            endpoint: endpoint.clone(),
+            generation: 2,
+        };
+
+        assert!(!warm_surface_matches(&stale, &endpoint, &machines));
+        assert!(warm_surface_matches(&current, &endpoint, &machines));
     }
 }

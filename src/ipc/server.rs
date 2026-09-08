@@ -578,6 +578,8 @@ pub fn run() -> Result<()> {
         if std::mem::take(&mut app.pending_machine_selector) {
             if let Some(client) = foreground.and_then(|id| clients.get(&id)) {
                 let _ = client.send_control(ServerMessage::OpenMachineSelector);
+            } else {
+                app.show_toast("no attached client to open the machine selector".to_string());
             }
         }
 
@@ -1354,6 +1356,15 @@ fn remove_unbound_socket(path: &Path) -> io::Result<()> {
     }
 }
 
+fn ends_client_writer(message: &ServerMessage) -> bool {
+    matches!(
+        message,
+        ServerMessage::Detach
+            | ServerMessage::ServerShutdown { .. }
+            | ServerMessage::SwitchSession { .. }
+    )
+}
+
 fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme: Arc<AtomicBool>) {
     let mut reader = BufReader::new(stream.clone());
     let mut writer = stream;
@@ -1426,13 +1437,7 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
                 // even while the socket write itself is still in progress.
                 writer_frame_pending.store(false, Ordering::Release);
             }
-            let stop = matches!(
-                msg,
-                ServerMessage::Detach
-                    | ServerMessage::ServerShutdown { .. }
-                    | ServerMessage::SwitchSession { .. }
-                    | ServerMessage::OpenMachineSelector
-            );
+            let stop = ends_client_writer(&msg);
             match protocol::write_message_counted(&mut writer, &msg) {
                 Ok(bytes) => {
                     if let Some((full, runs)) = frame_stats {
@@ -1747,7 +1752,7 @@ mod shutdown {
 mod tests {
     use super::ServerMessage;
     use super::{
-        apply, broadcast, broadcast_effect, frame_cadence_ready, frame_wait,
+        apply, broadcast, broadcast_effect, ends_client_writer, frame_cadence_ready, frame_wait,
         record_event_render_request, render_clients, ClientSender, ClientState, EventRenderSource,
         FrameSendError, RenderCause, RenderRequest, RenderScratch, FRAME_INTERVAL,
     };
@@ -2307,6 +2312,15 @@ mod tests {
 
         assert!(matches!(rx.recv().unwrap(), ServerMessage::FrameDiff(_)));
         assert!(matches!(rx.recv().unwrap(), ServerMessage::Detach));
+    }
+
+    #[test]
+    fn machine_selector_does_not_end_the_client_writer() {
+        assert!(!ends_client_writer(&ServerMessage::OpenMachineSelector));
+        assert!(ends_client_writer(&ServerMessage::Detach));
+        assert!(ends_client_writer(&ServerMessage::SwitchSession {
+            name: "review".into(),
+        }));
     }
 
     #[test]

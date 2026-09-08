@@ -74,9 +74,34 @@ pub fn run(sock: &Path) -> Result<()> {
     crate::logging::event(crate::logging::EventKind::ClientConnect, &[]);
     // `Conn` is a cloneable duplex handle: one clone reads, the other writes.
     if crate::machine::catalog::path().exists() {
-        if let Ok(loaded) = crate::machine::catalog::load() {
-            if !loaded.catalog.machines.is_empty() {
-                return super::federated::run(stream.clone(), stream, loaded.catalog.machines);
+        match crate::machine::catalog::load() {
+            Ok(loaded) => {
+                if !loaded.warnings.is_empty() {
+                    crate::logging::event(
+                        crate::logging::EventKind::ClientMachineCatalog,
+                        &[
+                            crate::logging::Field::Outcome(crate::logging::Outcome::Error),
+                            crate::logging::Field::ErrorCode(
+                                crate::logging::SafeId::new("invalid_entry")
+                                    .expect("static id is valid"),
+                            ),
+                        ],
+                    );
+                }
+                if !loaded.catalog.machines.is_empty() {
+                    return super::federated::run(stream.clone(), stream, loaded.catalog.machines);
+                }
+            }
+            Err(_) => {
+                crate::logging::event(
+                    crate::logging::EventKind::ClientMachineCatalog,
+                    &[
+                        crate::logging::Field::Outcome(crate::logging::Outcome::Error),
+                        crate::logging::Field::ErrorCode(
+                            crate::logging::SafeId::new("load").expect("static id is valid"),
+                        ),
+                    ],
+                );
             }
         }
     }

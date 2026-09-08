@@ -57,10 +57,15 @@ impl LinkControl {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        if let Ok(mut writer) = self.writer.lock() {
+        {
+            let mut writer = self
+                .writer
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let _ = crate::ipc::protocol::write_message(&mut *writer, &ClientMessage::Close);
         }
-        if let Ok(mut child) = self.child.lock() {
+        {
+            let mut child = self.child.lock().unwrap_or_else(|error| error.into_inner());
             if child.try_wait().ok().flatten().is_none() {
                 let _ = child.kill();
             }
@@ -86,11 +91,22 @@ pub(crate) fn start(
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| anyhow!("machine SSH stdout was not captured"))?;
+        .ok_or_else(|| anyhow!("machine SSH stdout was not captured"));
     let stdin = child
         .stdin
         .take()
-        .ok_or_else(|| anyhow!("machine SSH stdin was not captured"))?;
+        .ok_or_else(|| anyhow!("machine SSH stdin was not captured"));
+    let (stdout, stdin) = match (stdout, stdin) {
+        (Ok(stdout), Ok(stdin)) => (stdout, stdin),
+        (stdout, stdin) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(stdout
+                .err()
+                .or_else(|| stdin.err())
+                .expect("one SSH pipe was not captured"));
+        }
+    };
     let writer = Arc::new(Mutex::new(stdin));
     let child = Arc::new(Mutex::new(child));
     let closed = Arc::new(AtomicBool::new(false));
@@ -99,9 +115,12 @@ pub(crate) fn start(
         child,
         closed,
     };
-    control.send(&ClientMessage::Hello {
+    if let Err(error) = control.send(&ClientMessage::Hello {
         version: FLEET_PROTOCOL_VERSION,
-    })?;
+    }) {
+        control.close();
+        return Err(error);
+    }
 
     let machine_id = profile.id.clone();
     let reader = thread::Builder::new()
