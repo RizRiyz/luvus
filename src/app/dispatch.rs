@@ -9446,7 +9446,7 @@ command = ["true"]
     }
 
     #[test]
-    fn atomic_agent_prompt_uses_output_evidence_for_a_fast_settled_turn() {
+    fn atomic_agent_prompt_ignores_output_without_a_relevant_transition() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let pane = app.layout().focus;
@@ -9471,11 +9471,40 @@ command = ["true"]
         revision.fetch_add(1, Ordering::Release);
         app.tick_agent_workflows(started + Duration::from_millis(10));
         app.tick_agent_workflows(started + AGENT_PROMPT_QUIET + Duration::from_millis(20));
+        assert!(
+            response.try_recv().is_err(),
+            "quiet output is not submission evidence"
+        );
+        app.status.get_mut(&pane).unwrap().state = State::Working;
+        app.check_agent_waits(pane);
+        app.status.get_mut(&pane).unwrap().state = State::Idle;
+        app.check_agent_waits(pane);
+        app.tick_agent_workflows(started + Duration::from_secs(2));
         let value: Value = serde_json::from_str(&response.recv().unwrap()).unwrap();
         assert_eq!(value["result"]["type"], "agent_prompt");
         assert_eq!(value["result"]["submitted"], true);
         assert_eq!(value["result"]["matched"], true);
-        assert_eq!(value["result"]["evidence"], "output_settled");
+        assert_eq!(value["result"]["evidence"], "state_transition");
+        assert!(app.agent_prompts.is_empty());
+    }
+
+    #[test]
+    fn observed_prompt_pane_exit_is_a_structured_failure() {
+        let _env = crate::persist::test_env("observed-prompt-exit");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "codex".into();
+        let (reply, response) = std::sync::mpsc::channel();
+        app.start_agent_prompt(
+            "prompt".into(),
+            json!({"target":pane.0.to_string(), "text":"review", "wait":true}),
+            reply,
+            Arc::new(AtomicBool::new(false)),
+        );
+        app.cancel_agent_waits(pane);
+        let value: Value = serde_json::from_str(&response.try_recv().unwrap()).unwrap();
+        assert_eq!(value["error"]["code"], "agent_not_running");
         assert!(app.agent_prompts.is_empty());
     }
 
