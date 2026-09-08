@@ -1,6 +1,7 @@
 //! Event-driven agent detection and runtime scan scheduling.
 
 use super::*;
+use std::sync::Arc;
 
 impl App {
     /// Recover a stale persisted selection before any periodic work indexes it.
