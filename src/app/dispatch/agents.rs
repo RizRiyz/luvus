@@ -165,6 +165,9 @@ impl App {
                     "agent send text must not be empty".to_string(),
                 ));
             }
+            if !self.agent_prompt_is_ready(id) {
+                return Err(super::agent_workflow::agent_prompt_not_ready_error());
+            }
             let pane = self.panes.get(&id).ok_or_else(|| {
                 (
                     "send_failed".to_string(),

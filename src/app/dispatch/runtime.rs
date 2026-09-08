@@ -588,6 +588,10 @@ impl App {
                 running_for_detection,
                 &self.manifests,
             );
+            let inspect_codex_composer = known_agent.eq_ignore_ascii_case("codex")
+                || self
+                    .manifests
+                    .process_has_agent(running_for_detection, "codex");
             let (last_generation, force_detect) = self
                 .status
                 .get(&id)
@@ -607,10 +611,13 @@ impl App {
                             } else {
                                 engine.detection_text(detection_rows)
                             };
+                            let codex_composer_ready = inspect_codex_composer
+                                .then(|| engine.codex_composer_region().is_some());
                             Some((
                                 generation,
                                 engine.title().map(Arc::<str>::from),
                                 Arc::<str>::from(text),
+                                codex_composer_ready,
                             ))
                         } else {
                             None
@@ -619,8 +626,11 @@ impl App {
                     Err(_) => None,
                 }
             };
+            let inspected_composer_ready = inspected
+                .as_ref()
+                .and_then(|(_, _, _, composer_ready)| *composer_ready);
             if let Some(s) = self.status.get_mut(&id) {
-                if let Some((generation, title, bottom)) = inspected {
+                if let Some((generation, title, bottom, _)) = inspected {
                     if audit_only {
                         self.detection_audit_recoveries =
                             self.detection_audit_recoveries.saturating_add(1);
@@ -667,6 +677,13 @@ impl App {
                 Some(report) => detect::Detection {
                     state: report.state,
                     agent: report.agent.clone(),
+                    prompt_evidence: if report.state == State::Blocked {
+                        detect::PromptEvidence::Blocked
+                    } else if report.agent.eq_ignore_ascii_case("codex") {
+                        detect::PromptEvidence::Unknown
+                    } else {
+                        detect::PromptEvidence::Ready
+                    },
                     identity_source: "integration_report",
                     state_source: "integration_report",
                     rule_priority: None,
@@ -689,6 +706,17 @@ impl App {
                 s.state_source = det.state_source;
                 s.rule_priority = det.rule_priority;
                 s.rule_region = det.rule_region;
+                s.prompt_evidence = if det.prompt_evidence == detect::PromptEvidence::Blocked {
+                    detect::PromptEvidence::Blocked
+                } else if det.agent.eq_ignore_ascii_case("codex") {
+                    match inspected_composer_ready {
+                        Some(true) => detect::PromptEvidence::Ready,
+                        Some(false) => detect::PromptEvidence::Unknown,
+                        None => s.prompt_evidence,
+                    }
+                } else {
+                    det.prompt_evidence
+                };
                 let focused = id == focus;
                 if focused {
                     s.seen = true;

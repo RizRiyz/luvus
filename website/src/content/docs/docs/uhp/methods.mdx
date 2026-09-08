@@ -439,6 +439,11 @@ response remains immediate: `submitted:true`, `matched:false`, `evidence:"queued
 with no `observed_state` field. Submission means queue admission, not confirmation
 that the agent consumed the prompt text.
 
+Before either prompt method queues input, Luvus rejects a currently detected
+startup, sign-in, selection, or approval screen with `agent_not_ready`. The
+rejection queues neither text nor Enter. Read the visible agent output and use
+`agent.keys` only when an explicit interaction is intended.
+
 With `wait:true`, a **new** `working` or `blocked` transition must be observed
 before a requested `until` state can complete the wait. An already active state,
 unchanged metadata, title flicker, and output settling alone do not qualify.

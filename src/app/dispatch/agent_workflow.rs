@@ -134,6 +134,13 @@ fn agent_prompt_response(
     response.to_string()
 }
 
+pub(in crate::app::dispatch) fn agent_prompt_not_ready_error() -> (String, String) {
+    (
+        "agent_not_ready".to_string(),
+        "target agent has not exposed a prompt-ready composer; no prompt input was queued; inspect it with agent read and use agent keys only for an explicit interaction".to_string(),
+    )
+}
+
 /// Debounce dwell for committing a newly-desired agent state (hysteresis).
 /// Active states publish instantly (responsive sidebar); the fall back to a
 /// quiet state waits `QUIET_DWELL` so streaming pauses don't flap the status.
@@ -445,6 +452,11 @@ impl App {
             fail("send_failed", message);
             return;
         }
+        if let Some(status) = self.status.get_mut(&pane) {
+            status.prompt_evidence = detect::PromptEvidence::Unknown;
+            status.prompt_evidence_required = detect::prompt_requires_positive_evidence(kind);
+            status.force_detect = true;
+        }
         self.set_agent_name(pane, Some(name));
         self.agent_starts.insert(
             pane,
@@ -457,6 +469,66 @@ impl App {
                 cancelled,
             },
         );
+    }
+
+    /// Return current raw readiness evidence for prompt admission. Normal
+    /// detection already caches this result. If terminal output arrived after
+    /// that pass, inspect only the same bounded live rows once, on this request,
+    /// so an agent-start/prompt race cannot submit Enter before a composer exists.
+    pub(in crate::app::dispatch) fn agent_prompt_is_ready(&self, id: PaneId) -> bool {
+        let Some(status) = self.status.get(&id) else {
+            return true;
+        };
+        let positive_evidence_required = status.prompt_evidence_required
+            || status
+                .agent_session
+                .as_ref()
+                .is_some_and(|session| detect::prompt_requires_positive_evidence(&session.agent));
+        let admits = |evidence| match evidence {
+            detect::PromptEvidence::Ready => true,
+            detect::PromptEvidence::Blocked => false,
+            detect::PromptEvidence::Unknown => !positive_evidence_required,
+        };
+        let Some(pane) = self.panes.get(&id) else {
+            return true;
+        };
+        let Ok(engine) = pane.engine.lock() else {
+            return false;
+        };
+        if !status.force_detect && status.last_detect_generation == Some(engine.output_generation())
+        {
+            return admits(status.prompt_evidence);
+        }
+        let running = self
+            .proc_commands
+            .get(&id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let rows = detect::screen_rows(&status.agent, running, &self.manifests);
+        let bottom = if detect::screen_uses_non_empty_rows(&status.agent, running, &self.manifests)
+        {
+            engine.detection_text_non_empty(rows)
+        } else {
+            engine.detection_text(rows)
+        };
+        let raw = detect::prompt_evidence(
+            engine.title().as_deref(),
+            &bottom,
+            &status.agent,
+            &self.manifests,
+        );
+        let evidence = if raw == detect::PromptEvidence::Blocked {
+            raw
+        } else if status.agent.eq_ignore_ascii_case("codex") {
+            if engine.codex_composer_region().is_some() {
+                detect::PromptEvidence::Ready
+            } else {
+                detect::PromptEvidence::Unknown
+            }
+        } else {
+            raw
+        };
+        admits(evidence)
     }
 
     /// Atomically submit a prompt and, when requested, retain the response until
@@ -552,6 +624,11 @@ impl App {
                 );
                 return;
             }
+        }
+        if !self.agent_prompt_is_ready(pane) {
+            let (code, message) = agent_prompt_not_ready_error();
+            fail(&code, message);
+            return;
         }
         let Some(target) = self.panes.get(&pane) else {
             fail("not_found", "pane not found".to_string());

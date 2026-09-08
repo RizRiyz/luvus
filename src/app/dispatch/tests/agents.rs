@@ -447,6 +447,102 @@ fn agent_send_admits_one_ordered_submission_and_reports_closed_queue() {
 }
 
 #[test]
+fn prompt_apis_reject_a_fresh_interaction_screen_without_queueing_input() {
+    let _env = crate::persist::test_env("prompt-interaction-guard");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(120, 32, tx).unwrap();
+    let pane = app.layout().focus;
+    app.status.get_mut(&pane).unwrap().agent = "codex".into();
+    app.panes[&pane].engine.lock().unwrap().advance(
+        b"\x1b[2J\x1b[HWelcome to Codex\r\n\r\n\
+          > 1. Sign in with ChatGPT\r\n\
+            2. Sign in with Device Code\r\n\
+            3. Provide your own API key\r\n\r\n\
+          Press enter to continue",
+    );
+    let (input, received) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&pane)
+        .unwrap()
+        .replace_input_sender_for_test(input);
+
+    let error = app
+        .dispatch(
+            "agent.send",
+            &json!({"target":pane.0.to_string(),"text":"do not submit"}),
+        )
+        .expect_err("an interaction chooser must reject agent.send");
+    assert_eq!(error.0, "agent_not_ready");
+    assert!(error.1.contains("no prompt input was queued"));
+    assert!(received.try_recv().is_err());
+
+    let (reply, response) = std::sync::mpsc::channel();
+    app.start_agent_prompt(
+        "blocked-prompt".into(),
+        json!({"target":pane.0.to_string(),"text":"do not submit"}),
+        reply,
+        Arc::new(AtomicBool::new(false)),
+    );
+    let value: Value = serde_json::from_str(&response.try_recv().unwrap()).unwrap();
+    assert_eq!(value["error"]["code"], "agent_not_ready");
+    assert!(value["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("no prompt input was queued"));
+    assert!(received.try_recv().is_err());
+    assert!(app.agent_prompts.is_empty());
+}
+
+#[test]
+fn native_codex_requires_live_composer_geometry() {
+    let _env = crate::persist::test_env("prompt-composer-geometry");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    let status = app.status.get_mut(&pane).unwrap();
+    status.agent = "codex".into();
+    status.agent_session = Some(crate::app::AgentSession {
+        agent: "codex".into(),
+        session_id: "native-session".into(),
+    });
+
+    let (input, received) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&pane)
+        .unwrap()
+        .replace_input_sender_for_test(input);
+
+    app.panes[&pane]
+        .engine
+        .lock()
+        .unwrap()
+        .advance("\x1b[1;1Htranscript\r\n› old prompt\r\nanswer".as_bytes());
+    let error = app
+        .dispatch(
+            "agent.send",
+            &json!({"target":pane.0.to_string(),"text":"new prompt"}),
+        )
+        .expect_err("transcript marker must not establish readiness");
+    assert_eq!(error.0, "agent_not_ready");
+    assert!(received.try_recv().is_err());
+
+    app.panes[&pane]
+        .engine
+        .lock()
+        .unwrap()
+        .advance("\x1b[2J\x1b[2;1H› ".as_bytes());
+    app.dispatch(
+        "agent.send",
+        &json!({"target":pane.0.to_string(),"text":"new prompt"}),
+    )
+    .expect("live composer accepts prompt");
+    let crate::terminal::pty::InputAction::Submit { .. } = received.try_recv().unwrap() else {
+        panic!("prompt must remain one atomic submit action")
+    };
+    assert!(received.try_recv().is_err());
+}
+
+#[test]
 fn atomic_agent_prompt_ignores_output_without_a_relevant_transition() {
     let _env = crate::persist::test_env("prompt-unrelated-output");
     let (tx, _rx) = std::sync::mpsc::channel();
@@ -917,6 +1013,11 @@ fn server_owned_agent_start_reserves_name_and_waits_for_detection() {
         Arc::new(AtomicBool::new(false)),
     );
     assert_eq!(app.agent_names.get("reviewer"), Some(&pane));
+    assert!(
+        app.status[&pane].prompt_evidence_required
+            && app.status[&pane].prompt_evidence == detect::PromptEvidence::Unknown,
+        "a server-launched Codex pane needs positive composer evidence"
+    );
     assert!(response.try_recv().is_err());
 
     let status = app.status.get_mut(&pane).unwrap();
