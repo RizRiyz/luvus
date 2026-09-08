@@ -302,6 +302,7 @@
     }
   },
   "allOf": [
+    {"if": {"properties": {"method": {"const": "agent.prompt"}}}, "then": {"properties": {"params": {"properties": {"confirm": {"type": "boolean", "default": true, "description": "Confirm exact input-region echo before Enter within two seconds. False retains atomic paste+Enter with unconfirmed queue evidence."}}}}}},
     { "if": { "properties": { "method": { "enum": ["host.capabilities", "host.info", "host.doctor", "host.update.check", "skill.status", "integration.status", "uhp.capabilities", "uhp.stats", "uhp.token.list", "session.list"] } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
     { "if": { "properties": { "method": { "const": "uhp.token.create" } } },

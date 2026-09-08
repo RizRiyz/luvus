@@ -43,3 +43,5 @@
 {"id":"42","method":"task.heartbeat","params":{"id":"t1","context":0.6}}
 {"id":"43","method":"agent.keys","params":{"target":"reviewer","keys":["up","enter","CTRL+C","x","\u00e9"]}}
 {"id":"access-keys","method":"agent.keys","params":{"target":"7","keys":["ctrl+z","esc","[","Z","\ud83d\ude42"]},"auth":"example-client-token"}
+{"id":"prompt-default-confirm","method":"agent.prompt","params":{"target":"7","text":"unique"}}
+{"id":"prompt-opt-out","method":"agent.prompt","params":{"target":"7","text":"unique","confirm":false}}

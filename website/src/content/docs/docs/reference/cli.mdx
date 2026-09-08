@@ -98,9 +98,9 @@ panes / agents:
   agent fork <target> [--name <alias>] [--no-focus]
                              fork a supported agent's session into a sibling pane
   agent name <name>          alias the current agent, same as pane name (--clear to drop)
-  agent prompt <target> <text> [--wait] [--until STATE] [--timeout <s>]
-                             atomically prompt and optionally wait (send is an alias)
-  agent send <target> <text> [--wait] [--until STATE] [--timeout <s>]
+  agent prompt <target> <text> [--no-confirm] [--wait] [--until STATE] [--timeout <s>]
+                             confirm prompt echo, submit, and optionally wait (send is an alias)
+  agent send <target> <text> [--no-confirm] [--wait] [--until STATE] [--timeout <s>]
                              compatibility alias for agent prompt
   agent keys <target> <key>...   send control keys (enter, esc, ctrl+c, up, …)
   agent read <target> [--lines N] [--source visible|recent]   print an agent's output
@@ -297,3 +297,30 @@ target pane's live working directory; with
 root instead. `--no-focus` preserves the caller's current view.
 
 `luvus uhp capabilities` on the owner endpoint reports supported methods. The same RPC through paired `luvus uhp access` adds `access.mode`, `access.allowed_methods`, and gateway connection/request limits; use that effective set for permission-aware clients.
+
+## Prompt confirmation
+
+`agent prompt` (CLI alias `agent send`) defaults to `confirm:true`. Luvus
+pastes without Enter, then waits up to two seconds for a fresh, exact match in
+the live input region. Only then does it queue one Enter. Successful results
+include `submitted:true`, `submission:"confirmed"`, `evidence:"input_echoed"`,
+and `reason:null`; this confirms input text, not task completion. No match
+returns `input_not_echoed` (CLI exit 2) with Enter withheld. Inspect the pane
+before retrying.
+
+`--no-confirm` (`confirm:false` in UHP) preserves the old atomic paste+Enter
+and immediate no-wait timing, labelled `submission:"unconfirmed"` and
+`evidence:"queued"`. Legacy responses without `submission` are unconfirmed.
+Human keystrokes can still interleave with a pending prompt.
+
+`--wait` starts after Enter and retains the existing until-state and output
+settling rules. Its absolute `--timeout` includes echo confirmation. A timeout
+after Enter returns `matched:false`, `evidence:"timeout"`, and retains the
+submission label; do not automatically resend. Before Enter, an expired echo
+bound returns `input_not_echoed`. A pane exit while pending returns
+`agent_not_running` (exit 2). These failures and input admission failures
+(`send_failed`, exit 1) carry `error.data` with `pane`, `queued`, `submitted`,
+`submission`, `reason`, `baseline_revision`, and `content_revision`.
+`submission:"failed"` means Enter was not queued; after Enter it is
+`"confirmed"` or `"unconfirmed"`. Pending prompts own their pane, so another
+`agent.prompt` or legacy UHP `agent.send` returns `agent_prompt_busy`.

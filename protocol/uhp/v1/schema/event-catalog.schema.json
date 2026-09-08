@@ -333,6 +333,7 @@
       }
     },
     "agent_status": {
+      "description": "Agent lifecycle state only; a status transition is not an acknowledgement that agent.prompt text was echoed or submitted.",
       "type": "object",
       "additionalProperties": false,
       "required": ["pane", "status", "agent", "cwd", "project", "branch", "authority"],

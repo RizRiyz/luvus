@@ -674,7 +674,50 @@ def valid_global_request(value, methods):
         return valid_automation_definition(value["params"], update=False)
     if value["method"] == "automation.update":
         return valid_automation_definition(value["params"], update=True)
+    if value["method"] == "agent.prompt":
+        return "confirm" not in value["params"] or isinstance(value["params"]["confirm"], bool)
     return True
+
+
+def valid_prompt_result(result):
+    boolean_fields = ("submitted", "matched")
+    revision_fields = ("baseline_revision", "content_revision")
+    for field in boolean_fields:
+        if field in result and not isinstance(result[field], bool):
+            return False
+    for field in revision_fields:
+        if field in result and not (integer(result[field]) and result[field] >= 0):
+            return False
+    if "submission" not in result:
+        return True  # Old servers did not expose confirmation coordinates.
+    if not set(boolean_fields + revision_fields) | {"type", "pane", "status", "submission", "reason", "evidence"} <= set(result):
+        return False
+    return (
+        isinstance(result["pane"], str)
+        and re.fullmatch(r"[1-9][0-9]{0,9}", result["pane"]) is not None
+        and result["status"] in ("idle", "working", "blocked", "done", None)
+        and result["reason"] is None
+        and (
+            result["submission"] == "confirmed" and result["evidence"] in ("input_echoed", "timeout")
+            or result["submission"] == "unconfirmed" and result["evidence"] in ("queued", "timeout")
+        )
+    )
+
+
+def valid_prompt_failure(error):
+    data = error.get("data")
+    return (
+        isinstance(error.get("message"), str)
+        and isinstance(data, dict)
+        and {"pane", "queued", "submitted", "submission", "reason", "baseline_revision", "content_revision"} <= set(data)
+        and isinstance(data["pane"], str)
+        and re.fullmatch(r"[1-9][0-9]{0,9}", data["pane"]) is not None
+        and isinstance(data["queued"], bool)
+        and isinstance(data["submitted"], bool)
+        and data["submission"] in ("failed", "confirmed", "unconfirmed")
+        and data["reason"] in ("input_not_echoed", "agent_not_running", "send_failed")
+        and all(integer(data[k]) and data[k] >= 0 for k in ("baseline_revision", "content_revision"))
+    )
 
 
 def valid_global_response(value):
@@ -695,6 +738,12 @@ def valid_global_response(value):
         return valid_effective_access(result)
     if isinstance(result, dict) and result.get("type") == "agent_wait":
         return valid_response(value)
+    if isinstance(result, dict) and result.get("type") == "agent_prompt":
+        return valid_prompt_result(result)
+    error = value.get("error")
+    if isinstance(error, dict) and error.get("code") in ("input_not_echoed", "agent_not_running", "send_failed"):
+        if error["code"] == "input_not_echoed" or isinstance(error.get("data"), dict) and "submission" in error["data"]:
+            return valid_prompt_failure(error)
     return True
 
 

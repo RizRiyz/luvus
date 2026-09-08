@@ -165,3 +165,30 @@ not prove a mutation failed. After a lost or uncertain response, inspect live
 state before retrying because input, prompts, starts, and closes can execute
 twice. Retry read-only idempotent methods when appropriate; reconcile every
 write against current revisions and identities first.
+
+### Prompt confirmation
+
+`agent prompt` (CLI alias `agent send`) defaults to `confirm:true`. Luvus
+pastes without Enter, then waits up to two seconds for a fresh, exact match in
+the live input region. Only then does it queue one Enter. Successful results
+include `submitted:true`, `submission:"confirmed"`, `evidence:"input_echoed"`,
+and `reason:null`; this confirms input text, not task completion. No match
+returns `input_not_echoed` (CLI exit 2) with Enter withheld. Inspect the pane
+before retrying.
+
+`--no-confirm` (`confirm:false` in UHP) preserves the old atomic paste+Enter
+and immediate no-wait timing, labelled `submission:"unconfirmed"` and
+`evidence:"queued"`. Legacy responses without `submission` are unconfirmed.
+Human keystrokes can still interleave with a pending prompt.
+
+`--wait` starts after Enter and retains the existing until-state and output
+settling rules. Its absolute `--timeout` includes echo confirmation. A timeout
+after Enter returns `matched:false`, `evidence:"timeout"`, and retains the
+submission label; do not automatically resend. Before Enter, an expired echo
+bound returns `input_not_echoed`. A pane exit while pending returns
+`agent_not_running` (exit 2). These failures and input admission failures
+(`send_failed`, exit 1) carry `error.data` with `pane`, `queued`, `submitted`,
+`submission`, `reason`, `baseline_revision`, and `content_revision`.
+`submission:"failed"` means Enter was not queued; after Enter it is
+`"confirmed"` or `"unconfirmed"`. Pending prompts own their pane, so another
+`agent.prompt` or legacy UHP `agent.send` returns `agent_prompt_busy`.

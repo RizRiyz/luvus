@@ -432,16 +432,44 @@ the pane, queues the launch as one submitted shell action, reserves the unique
 name, and waits for manifest-driven detection without composing separate UHP
 requests.
 
-`agent.prompt` takes `target`, `text`, optional `wait` (default `false`),
-optional `until`, and optional `timeout_s`. `until` and `timeout_s` require
-`wait:true`. Paste and Enter are one PTY queue action. With `wait:true`, the
-response is held until a requested state has post-submission evidence. Luvus
-accepts a detected Working transition or a newer output revision followed by a
-short quiet window, so a fast turn cannot disappear between detector ticks. A
-timeout returns `submitted:true`, `matched:false`, and `evidence:"timeout"`.
-Never resend that prompt automatically because it may already have executed.
-Only one waiting prompt may own a pane at a time. A conflicting call returns
-`agent_prompt_busy` before Luvus queues its text.
+`agent.prompt` takes `target`, `text`, optional `confirm` (default `true`),
+`wait` (default `false`), `until`, and `timeout_s`. `until` and `timeout_s`
+require `wait:true`. The default until set remains `idle`, `done`, `blocked`.
+
+`agent prompt` (CLI alias `agent send`) defaults to `confirm:true`. Luvus
+pastes without Enter, then waits up to two seconds for a fresh, exact match in
+the live input region. Only then does it queue one Enter. Successful results
+include `submitted:true`, `submission:"confirmed"`, `evidence:"input_echoed"`,
+and `reason:null`; this confirms input text, not task completion. No match
+returns `input_not_echoed` (CLI exit 2) with Enter withheld. Inspect the pane
+before retrying.
+
+`--no-confirm` (`confirm:false` in UHP) preserves the old atomic paste+Enter
+and immediate no-wait timing, labelled `submission:"unconfirmed"` and
+`evidence:"queued"`. Legacy responses without `submission` are unconfirmed.
+Human keystrokes can still interleave with a pending prompt.
+
+`--wait` starts after Enter and retains the existing until-state and output
+settling rules. Its absolute `--timeout` includes echo confirmation. A timeout
+after Enter returns `matched:false`, `evidence:"timeout"`, and retains the
+submission label; do not automatically resend. Before Enter, an expired echo
+bound returns `input_not_echoed`. A pane exit while pending returns
+`agent_not_running` (exit 2). These failures and input admission failures
+(`send_failed`, exit 1) carry `error.data` with `pane`, `queued`, `submitted`,
+`submission`, `reason`, `baseline_revision`, and `content_revision`.
+`submission:"failed"` means Enter was not queued; after Enter it is
+`"confirmed"` or `"unconfirmed"`. Pending prompts own their pane, so another
+`agent.prompt` or legacy UHP `agent.send` returns `agent_prompt_busy`.
+
+Confirmation reads the detected composer region, or the cursor's logical
+soft-wrapped input line, capped at eight text rows. Selection rules join soft
+wraps, preserve hard breaks and combining characters, and skip wide spacers.
+Trailing row spaces and composer padding are removed, and a leading `›` with
+at most one following space is stripped once. Matching is case-sensitive exact
+full text, exact first line, or an exact prefix filling the known input-cell
+capacity. There is no transcript search. A fresh content revision is required,
+even if the same text was visible before paste. Agent state events are not
+submission acknowledgements.
 
 ## Search
 

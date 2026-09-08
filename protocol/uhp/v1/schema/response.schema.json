@@ -42,9 +42,129 @@
         }
       },
       "then": { "properties": { "result": { "$ref": "#/$defs/agentWaitResult" } } }
-    }
+    },
+    {"if": {"required": ["result"], "properties": {"result": {"required": ["type"], "properties": {"type": {"const": "agent_prompt"}}}}}, "then": {"properties": {"result": {"$ref": "#/$defs/agentPromptResult"}}}},
+    {"if": {"required": ["error"], "properties": {"error": {"required": ["code"], "properties": {"code": {"const": "input_not_echoed"}}}}}, "then": {"properties": {"error": {"required": ["data"], "properties": {"data": {"$ref": "#/$defs/agentPromptFailureData"}}}}}},
+    {"if": {"required": ["error"], "properties": {"error": {"required": ["code", "data"], "properties": {"code": {"enum": ["input_not_echoed", "agent_not_running", "send_failed"]}, "data": {"required": ["submission"]}}}}}, "then": {"properties": {"error": {"properties": {"data": {"$ref": "#/$defs/agentPromptFailureData"}}}}}}
   ],
   "$defs": {
+    "agentPromptResult": {
+      "description": "Submission is text identity evidence, distinct from until-wait completion. Legacy results without submission remain valid and are unconfirmed.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "agent_prompt"
+        },
+        "pane": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,9}$"
+        },
+        "submitted": {
+          "type": "boolean"
+        },
+        "matched": {
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "idle",
+            "working",
+            "blocked",
+            "done",
+            null
+          ]
+        },
+        "baseline_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "content_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "submission": {
+          "enum": [
+            "confirmed",
+            "unconfirmed"
+          ]
+        },
+        "reason": {
+          "type": "null"
+        },
+        "evidence": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "submission"
+            ]
+          },
+          "then": {
+            "required": [
+              "type",
+              "pane",
+              "submitted",
+              "matched",
+              "status",
+              "baseline_revision",
+              "content_revision",
+              "submission",
+              "reason",
+              "evidence"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "submission"
+            ],
+            "properties": {
+              "submission": {
+                "const": "confirmed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "evidence": {
+                "enum": [
+                  "input_echoed",
+                  "timeout"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "submission"
+            ],
+            "properties": {
+              "submission": {
+                "const": "unconfirmed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "evidence": {
+                "enum": [
+                  "queued",
+                  "timeout"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "agentPromptFailureData": {"type": "object", "required": ["pane", "submitted", "baseline_revision", "content_revision", "queued", "submission", "reason"], "properties": {"pane": {"type": "string", "pattern": "^[1-9][0-9]{0,9}$"}, "submitted": {"type": "boolean"}, "baseline_revision": {"type": "integer", "minimum": 0}, "content_revision": {"type": "integer", "minimum": 0}, "queued": {"type": "boolean"}, "submission": {"enum": ["failed", "confirmed", "unconfirmed"]}, "reason": {"enum": ["input_not_echoed", "agent_not_running", "send_failed"]}}},
+
     "effectiveAccess": {
       "description": "Access-only endpoint authority. The owner endpoint omits this field; unknown additive fields remain valid. allowed_methods is a subset of methods enforced by the gateway.",
       "type": "object",
