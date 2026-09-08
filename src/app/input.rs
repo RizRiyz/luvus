@@ -680,6 +680,7 @@ impl App {
                 // ordinary typing so an image cannot leak through an overlay,
                 // native view, dashboard, or navigation mode.
                 if !self.focused_pane_accepts_image_paste() {
+                    crate::clipboard_image::discard_staged_png(&path);
                     return false;
                 }
                 self.paste_into_focused_pane(&path.to_string_lossy());
@@ -4614,9 +4615,13 @@ mod tests {
         assert_eq!(bytes, path.to_string_lossy().as_bytes());
 
         app.help_open = true;
-        assert!(!app.handle_event(AppEvent::PasteImage("clipboard-images/blocked.png".into())));
+        let png = crate::clipboard_image::encode_rgba_png(1, 1, |_, _| [1, 2, 3, 255])
+            .expect("fixture PNG");
+        let blocked = crate::clipboard_image::stage_png(&png).expect("staged image");
+        assert!(!app.handle_event(AppEvent::PasteImage(blocked.clone())));
         assert!(input_rx.try_recv().is_err());
         assert!(app.help_open, "the image gesture must not dismiss help");
+        assert!(!blocked.exists(), "rejected image must not remain staged");
     }
 
     #[test]

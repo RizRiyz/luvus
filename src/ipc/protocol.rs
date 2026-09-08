@@ -7,7 +7,7 @@ use std::io::{self, Read, Write};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::style::{Color, Modifier};
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, Error as _, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 use crate::sound::SoundSignal;
@@ -28,7 +28,7 @@ pub enum ClientMessage {
     Paste(String),
     /// PNG bytes read from the display client's local clipboard after an
     /// explicit image-paste gesture. The server validates and stages them.
-    ClipboardImage(Vec<u8>),
+    ClipboardImage(#[serde(deserialize_with = "deserialize_clipboard_image")] Vec<u8>),
     Resize {
         cols: u16,
         rows: u16,
@@ -36,6 +36,48 @@ pub enum ClientMessage {
     Detach,
     /// Response to [`ServerMessage::Ready`] when terminal colors were requested.
     TerminalColors(Option<TerminalColors>),
+}
+
+fn deserialize_clipboard_image<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct ClipboardImageVisitor;
+
+    impl<'de> Visitor<'de> for ClipboardImageVisitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                formatter,
+                "at most {} clipboard image bytes",
+                crate::clipboard_image::MAX_PNG_BYTES
+            )
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let length = sequence.size_hint().unwrap_or(0);
+            if length > crate::clipboard_image::MAX_PNG_BYTES {
+                return Err(A::Error::custom("clipboard image exceeds size limit"));
+            }
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(length)
+                .map_err(|_| A::Error::custom("clipboard image allocation failed"))?;
+            while let Some(byte) = sequence.next_element()? {
+                if bytes.len() == crate::clipboard_image::MAX_PNG_BYTES {
+                    return Err(A::Error::custom("clipboard image exceeds size limit"));
+                }
+                bytes.push(byte);
+            }
+            Ok(bytes)
+        }
+    }
+
+    deserializer.deserialize_seq(ClipboardImageVisitor)
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -212,7 +254,8 @@ pub fn read_message<R: Read, M: DeserializeOwned>(r: &mut R) -> io::Result<M> {
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
-    let (msg, _) = bincode::serde::decode_from_slice(&buf, bincode::config::standard())
+    let config = bincode::config::standard().with_limit::<MAX_FRAME>();
+    let (msg, _) = bincode::serde::decode_from_slice(&buf, config)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     Ok(msg)
 }
@@ -504,6 +547,35 @@ mod tests {
             read_message::<_, ClientMessage>(&mut &bytes[..]).unwrap(),
             ClientMessage::ClipboardImage(decoded) if decoded == png
         ));
+    }
+
+    #[test]
+    fn clipboard_image_rejects_an_oversized_declared_length_before_allocation() {
+        let config = bincode::config::standard();
+        let mut encoded =
+            bincode::serde::encode_to_vec(ClientMessage::ClipboardImage(Vec::new()), config)
+                .unwrap();
+        assert_eq!(
+            encoded.pop(),
+            Some(0),
+            "empty image ends with a zero length"
+        );
+        encoded.extend(
+            bincode::serde::encode_to_vec(crate::clipboard_image::MAX_PNG_BYTES + 1, config)
+                .unwrap(),
+        );
+
+        let mut frame = Vec::with_capacity(encoded.len() + 4);
+        frame.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&encoded);
+        let error = match read_message::<_, ClientMessage>(&mut &frame[..]) {
+            Ok(_) => panic!("oversized clipboard image length must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error
+            .to_string()
+            .contains("clipboard image exceeds size limit"));
     }
 
     /// A wide glyph written through ratatui's own `set_string` (the path modals,

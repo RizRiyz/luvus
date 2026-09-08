@@ -9,7 +9,7 @@ use windows_sys::Win32::System::DataExchange::{
 };
 use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 
-use crate::clipboard_image::{dib_to_png, validate_png, MAX_PNG_BYTES};
+use crate::clipboard_image::{dib_to_png, validated_png_prefix, MAX_PNG_BYTES};
 
 const CF_DIB: u32 = 8;
 const CF_DIBV5: u32 = 17;
@@ -60,7 +60,7 @@ pub(super) fn clipboard_image() -> Option<Vec<u8>> {
     let png_format = unsafe { RegisterClipboardFormatW(png_name.as_ptr()) };
     if png_format != 0 {
         if let Some(png) = with_format(png_format, |bytes| {
-            validate_png(bytes).ok().map(|_| bytes.to_vec())
+            validated_png_prefix(bytes).ok().map(|png| png.to_vec())
         })
         .flatten()
         {

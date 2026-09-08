@@ -160,6 +160,47 @@ pub(crate) fn validate_png(bytes: &[u8]) -> Result<PngInfo, &'static str> {
     info.ok_or("PNG is missing its header")
 }
 
+/// Return the exact PNG range from a bounded clipboard allocation.
+///
+/// Windows reports the allocation capacity through `GlobalSize`, which may be
+/// larger than the PNG placed on the clipboard. Walk structural chunk
+/// boundaries to the first IEND, then run the strict validator on only that
+/// range so allocator padding is never staged as image data.
+#[cfg(any(windows, test))]
+pub(crate) fn validated_png_prefix(bytes: &[u8]) -> Result<&[u8], &'static str> {
+    if bytes.len() > MAX_PNG_BYTES {
+        return Err("PNG exceeds clipboard image limit");
+    }
+    if !bytes.starts_with(PNG_SIGNATURE) {
+        return Err("invalid PNG signature");
+    }
+
+    let mut cursor = PNG_SIGNATURE.len();
+    while cursor < bytes.len() {
+        let header_end = cursor.checked_add(8).ok_or("PNG chunk overflow")?;
+        if header_end > bytes.len() {
+            return Err("truncated PNG chunk header");
+        }
+        let length = u32::from_be_bytes(
+            bytes[cursor..cursor + 4]
+                .try_into()
+                .map_err(|_| "invalid PNG chunk length")?,
+        ) as usize;
+        let data_end = header_end.checked_add(length).ok_or("PNG chunk overflow")?;
+        let chunk_end = data_end.checked_add(4).ok_or("PNG chunk overflow")?;
+        if chunk_end > bytes.len() {
+            return Err("truncated PNG chunk");
+        }
+        if &bytes[cursor + 4..header_end] == b"IEND" {
+            let exact = &bytes[..chunk_end];
+            validate_png(exact)?;
+            return Ok(exact);
+        }
+        cursor = chunk_end;
+    }
+    Err("PNG is missing its end marker")
+}
+
 /// Encode RGBA pixels without a compression dependency or a second full image
 /// buffer. Stored DEFLATE blocks are larger than compressed output but keep the
 /// transient memory bound predictable on the explicit paste path.
@@ -440,6 +481,19 @@ pub(crate) fn stage_png(bytes: &[u8]) -> io::Result<PathBuf> {
     ))
 }
 
+/// Remove a staged clipboard image that could not reach its input owner.
+/// Refuse every path outside the selected session's owned staging directory.
+pub(crate) fn discard_staged_png(path: &Path) {
+    let expected_dir = crate::persist::session_dir().join("clipboard-images");
+    let owned_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(STAGED_PREFIX) && name.ends_with(STAGED_SUFFIX));
+    if path.parent() == Some(expected_dir.as_path()) && owned_name {
+        let _ = fs::remove_file(path);
+    }
+}
+
 fn cleanup_staged(dir: &Path) {
     let now = SystemTime::now();
     let Ok(entries) = fs::read_dir(dir) else {
@@ -638,6 +692,16 @@ mod tests {
     }
 
     #[test]
+    fn registered_png_trims_allocator_padding_at_the_valid_end_marker() {
+        let png = encode_rgba_png(1, 1, |_, _| [7, 8, 9, 255]).unwrap();
+        let mut allocation = png.clone();
+        allocation.extend_from_slice(&[0xaa; 32]);
+
+        assert_eq!(validate_png(&allocation), Err("trailing PNG data"));
+        assert_eq!(validated_png_prefix(&allocation).unwrap(), png);
+    }
+
+    #[test]
     fn validator_rejects_dimensions_that_imply_excessive_decode_memory() {
         let png = encode_rgba_png(1, 1, |_, _| [0, 0, 0, 255]).unwrap();
         let mut oversized = png;
@@ -743,6 +807,25 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn discarded_staged_images_are_removed_without_touching_other_files() {
+        let _env = crate::persist::test_env("clipboard-image-discard");
+        crate::persist::ensure_session_dir();
+        let png = encode_rgba_png(1, 1, |_, _| [1, 2, 3, 255]).unwrap();
+        let staged = stage_png(&png).unwrap();
+        let unrelated = staged.parent().unwrap().join("keep.png");
+        fs::write(&unrelated, b"not owned by clipboard staging").unwrap();
+
+        discard_staged_png(&unrelated);
+        discard_staged_png(&staged);
+
+        assert!(!staged.exists());
+        assert_eq!(
+            fs::read(unrelated).unwrap(),
+            b"not owned by clipboard staging"
+        );
     }
 
     #[test]
