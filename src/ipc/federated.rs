@@ -785,13 +785,8 @@ fn handle_link_event(
                 *warm = None;
             }
             if matches!(active, Endpoint::Remote { machine_id: id, .. } if id == &machine_id) {
-                *candidate = Some(SurfaceCandidate {
-                    endpoint: Endpoint::Local,
-                    generation: 0,
-                    welcomed: true,
-                    ready: true,
-                    shell_dock: None,
-                    deadline: Instant::now() + SURFACE_PREPARE_TIMEOUT,
+                replace_candidate_with_local(candidate, |endpoint| {
+                    close_remote(endpoint, machines)
                 });
                 send_local(
                     local_writer,
@@ -811,6 +806,23 @@ fn handle_link_event(
         }
     }
     Ok(None)
+}
+
+fn replace_candidate_with_local(
+    candidate: &mut Option<SurfaceCandidate>,
+    mut close: impl FnMut(&Endpoint),
+) {
+    if let Some(previous) = candidate.take() {
+        close(&previous.endpoint);
+    }
+    *candidate = Some(SurfaceCandidate {
+        endpoint: Endpoint::Local,
+        generation: 0,
+        welcomed: true,
+        ready: true,
+        shell_dock: None,
+        deadline: Instant::now() + SURFACE_PREPARE_TIMEOUT,
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2086,6 +2098,32 @@ mod tests {
             endpoint_for_channel("alpha", 8, &Endpoint::Local, None, Some(&candidate)),
             None
         );
+    }
+
+    #[test]
+    fn local_failover_closes_a_replaced_remote_candidate() {
+        let remote = Endpoint::Remote {
+            machine_id: "other".into(),
+            channel_id: 9,
+            session: "review".into(),
+        };
+        let mut candidate = Some(SurfaceCandidate {
+            endpoint: remote.clone(),
+            generation: 2,
+            welcomed: true,
+            ready: false,
+            shell_dock: None,
+            deadline: Instant::now() + Duration::from_secs(1),
+        });
+        let mut closed = Vec::new();
+
+        replace_candidate_with_local(&mut candidate, |endpoint| closed.push(endpoint.clone()));
+
+        assert_eq!(closed, vec![remote]);
+        assert!(matches!(
+            candidate.as_ref().map(|candidate| &candidate.endpoint),
+            Some(Endpoint::Local)
+        ));
     }
 
     #[test]
