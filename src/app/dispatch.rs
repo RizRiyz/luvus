@@ -5,6 +5,10 @@ use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc::Sender, Arc};
 
+#[cfg(test)]
+#[path = "prompt_confirmation_tests.rs"]
+mod prompt_confirmation_tests;
+
 pub(crate) const MAX_AGENT_WAIT: Duration = Duration::from_secs(3600);
 pub(crate) const MAX_AGENT_WAITS_TOTAL: usize = 1024;
 pub(crate) const MAX_AGENT_WAITS_PER_PANE: usize = 64;

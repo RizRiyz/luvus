@@ -800,6 +800,17 @@ impl Pane {
         self.input_tx = sender.into();
     }
 
+    #[cfg(test)]
+    pub(crate) fn fill_input_queue_for_test(&mut self) -> impl Drop {
+        let (tx, rx) = input::InputSender::channel();
+        tx.send(InputAction::Bytes(Vec::with_capacity(
+            input::MAX_QUEUED_BYTES,
+        )))
+        .unwrap();
+        self.input_tx = tx;
+        rx
+    }
+
     /// Enqueue one atomic submitted-text action for protocol consumers. Queue
     /// success is dispatch evidence only; it does not claim the child consumed
     /// or acted on the bytes.

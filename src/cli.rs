@@ -5373,6 +5373,122 @@ mod tests {
         crate::ipc::transport::bind(&path).expect("bind wait test server")
     }
 
+    #[test]
+    fn prompt_confirmation_cli_compatibility_matrix() {
+        let _env = crate::persist::test_env("prompt-cli-matrix");
+        for (command, text, wait, confirm, until, timeout) in [
+            (
+                "luvus agent prompt 7 hello",
+                "hello",
+                false,
+                true,
+                Value::Null,
+                Value::Null,
+            ),
+            (
+                "luvus agent send 7 hello world",
+                "hello world",
+                false,
+                true,
+                Value::Null,
+                Value::Null,
+            ),
+            (
+                "luvus agent prompt 7 hello --wait",
+                "hello",
+                true,
+                true,
+                Value::Null,
+                Value::Null,
+            ),
+            (
+                "luvus agent send 7 hello --wait --until working",
+                "hello",
+                true,
+                true,
+                json!(["working"]),
+                Value::Null,
+            ),
+            (
+                "luvus agent prompt 7 hello --wait --until idle --until blocked --timeout 12.5",
+                "hello",
+                true,
+                true,
+                json!(["idle", "blocked"]),
+                json!(12.5),
+            ),
+            (
+                "luvus agent prompt 7 --wait --timeout 0 hello",
+                "hello",
+                true,
+                true,
+                Value::Null,
+                json!(0.0),
+            ),
+            (
+                "luvus agent prompt 7 -- --wait literal",
+                "--wait literal",
+                false,
+                true,
+                Value::Null,
+                Value::Null,
+            ),
+            (
+                "luvus agent prompt 7 hello --no-confirm",
+                "hello",
+                false,
+                false,
+                Value::Null,
+                Value::Null,
+            ),
+            (
+                "luvus agent send 7 hello --no-confirm --wait --until done --timeout 5",
+                "hello",
+                true,
+                false,
+                json!(["done"]),
+                json!(5.0),
+            ),
+            (
+                "luvus agent prompt 7 -- --no-confirm",
+                "--no-confirm",
+                false,
+                true,
+                Value::Null,
+                Value::Null,
+            ),
+        ] {
+            let listener = wait_test_server();
+            let server = std::thread::spawn(move || {
+                let (mut connection, request) = accept_wait_request(&listener);
+                writeln!(
+                    connection,
+                    "{}",
+                    json!({"id":"1","result":{"matched":true}})
+                )
+                .unwrap();
+                request
+            });
+            let result = agent_send_cmd(&argv(command));
+            if result.is_err() {
+                // Unblock the fixture when an old parser rejects the new flag.
+                let _ = send_request("test.parser_rejected", json!({}));
+            }
+            let request = server.join().unwrap();
+            assert_eq!(result.unwrap(), 0, "{command}");
+            assert_eq!(request["method"], "agent.prompt");
+            assert_eq!(request["params"]["text"], text);
+            assert_eq!(request["params"]["wait"], wait);
+            assert_eq!(
+                request["params"]["confirm"].as_bool().unwrap_or(true),
+                confirm
+            );
+            assert_eq!(request["params"]["until"], until);
+            assert_eq!(request["params"]["timeout_s"], timeout);
+        }
+        assert!(agent_send_cmd(&argv("luvus agent prompt 7 hello --unknown")).is_err());
+    }
+
     fn accept_wait_request(
         listener: &crate::ipc::transport::Listener,
     ) -> (crate::ipc::transport::Conn, Value) {
