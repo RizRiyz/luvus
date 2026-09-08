@@ -150,6 +150,17 @@ pub(crate) struct GraphicsQueue {
     retained_bytes: usize,
     /// Which retained image the transfer in progress is being collected into.
     retaining: Option<u32>,
+    /// The virtual rectangle last forwarded for each image Luvus positions
+    /// itself. A change is preceded by deleting the image's placements —
+    /// see [`GraphicsQueue::clear_stale_virtual_rect`].
+    virtual_rects: Vec<VirtualRect>,
+}
+
+/// The rectangle a terminal was last told to fit one image into.
+struct VirtualRect {
+    image_id: u32,
+    columns: usize,
+    rows: usize,
 }
 
 /// Everything a terminal needs in order to draw one image the pane holds.
@@ -158,6 +169,10 @@ struct RetainedImage {
     /// The commands that carried the image, in the order they arrived. A large
     /// transmission arrives in chunks, and means nothing until all of them do.
     commands: Vec<Vec<u8>>,
+    /// The placement that goes with it, when one was sent after the
+    /// transmission. One is enough: a newer placement with the same id
+    /// replaces the older on arrival, so only the newest is worth keeping.
+    placement: Option<Vec<u8>>,
     bytes: usize,
 }
 
@@ -220,11 +235,68 @@ impl GraphicsQueue {
             } => {
                 placement.line = cursor.0;
                 placement.column = cursor.1;
+                self.clear_stale_virtual_rect(&placement);
                 let retain = self.plan_retention(&control);
                 self.queue(&payload, retain);
                 self.placements.push(placement);
             }
         }
+    }
+
+    /// Delete a terminal's placements of an image whose virtual rectangle is
+    /// about to change, so the command that follows leaves it exactly one.
+    ///
+    /// The protocol says re-transmitting an id deletes its placements, but a
+    /// terminal that only replaces the image data — Ghostty 1.3 does — leaves
+    /// the old virtual placement standing beside the new one and may draw
+    /// either; the image then appears fitted into the rectangle it had
+    /// before. Deleting by id first is explicit, and harmless where the
+    /// terminal already did it. Only the rectangle matters here: the same
+    /// rectangle re-sent every frame, as a streaming child does, costs nothing.
+    fn clear_stale_virtual_rect(&mut self, placement: &Placement) {
+        let known = self
+            .virtual_rects
+            .iter_mut()
+            .find(|rect| rect.image_id == placement.image_id);
+        match known {
+            Some(rect) if rect.columns == placement.columns && rect.rows == placement.rows => {
+                return;
+            }
+            Some(rect) => {
+                rect.columns = placement.columns;
+                rect.rows = placement.rows;
+            }
+            None => {
+                if self.virtual_rects.len() == MAX_RETAINED_IMAGES {
+                    self.virtual_rects.remove(0);
+                }
+                self.virtual_rects.push(VirtualRect {
+                    image_id: placement.image_id,
+                    columns: placement.columns,
+                    rows: placement.rows,
+                });
+            }
+        }
+        // `d=i` takes the placements and leaves the image data, which the
+        // command that follows either replaces or places again.
+        let delete = format!("a=d,d=i,i={},q=2", placement.image_id);
+        self.queue(delete.as_bytes(), Retain::No);
+    }
+
+    /// Fit an image the terminal already holds into a new rectangle.
+    ///
+    /// For the engine that stretched an image's cells to a resized pane: the
+    /// cells alone change nothing on a terminal still fitting the image into
+    /// the old rectangle. This is the protocol's own resize — the same
+    /// placement id replaces the placement — and a client attaching later
+    /// is taught the image with this placement rather than the older one.
+    pub(crate) fn replace_virtual_rect(&mut self, placement: &Placement) {
+        self.clear_stale_virtual_rect(placement);
+        let place = format!(
+            "a=p,i={},p={},U=1,c={},r={},q=2",
+            placement.image_id, placement.placement_id, placement.columns, placement.rows
+        );
+        self.queue(place.as_bytes(), Retain::Place(placement.image_id));
     }
 
     /// Decide what one command leaves behind for a client yet to attach, and
@@ -284,6 +356,7 @@ impl GraphicsQueue {
 
     /// Keep a command so it can be replayed to a client that attaches later.
     fn retain(&mut self, command: &[u8], retain: Retain) {
+        let placing = matches!(retain, Retain::Place(_));
         let id = match retain {
             Retain::No => return,
             Retain::Chunk => match self.retaining {
@@ -295,6 +368,7 @@ impl GraphicsQueue {
                 self.retained.push(RetainedImage {
                     id,
                     commands: Vec::new(),
+                    placement: None,
                     bytes: 0,
                 });
                 self.retaining = Some(id);
@@ -306,7 +380,17 @@ impl GraphicsQueue {
         let Some(image) = self.retained.iter_mut().find(|image| image.id == id) else {
             return;
         };
-        image.commands.push(command.to_vec());
+        if placing {
+            // The newest placement is the only one a terminal ends up with,
+            // so it is the only one worth teaching a client that attaches.
+            if let Some(previous) = image.placement.take() {
+                image.bytes -= previous.len();
+                self.retained_bytes -= previous.len();
+            }
+            image.placement = Some(command.to_vec());
+        } else {
+            image.commands.push(command.to_vec());
+        }
         image.bytes += command.len();
         self.retained_bytes += command.len();
         self.enforce_retention_budget();
@@ -351,7 +435,7 @@ impl GraphicsQueue {
     pub(crate) fn retained(&self) -> Vec<Vec<u8>> {
         self.retained
             .iter()
-            .flat_map(|image| image.commands.iter().cloned())
+            .flat_map(|image| image.commands.iter().chain(image.placement.iter()).cloned())
             .collect()
     }
 
@@ -623,6 +707,10 @@ enum Handling {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Placement {
     pub(crate) image_id: u32,
+    /// The placement id the forwarded command carries. Keyed together with
+    /// the image id, it is what lets a later command with the same pair
+    /// replace this placement instead of standing beside it.
+    pub(crate) placement_id: u32,
     pub(crate) columns: usize,
     pub(crate) rows: usize,
     /// Grid position of the cursor when the command arrived, which is the
@@ -699,10 +787,18 @@ fn virtualize(control: &ControlData, payload: &[u8], cell_size: Option<CellSize>
         return Handling::Drop;
     }
 
+    // The child's own placement id is kept; one that named none gets 1. A
+    // placement with an id is the protocol's way to resize without flicker:
+    // the next command with the same (image id, placement id) replaces it.
+    // Without one, a terminal adds a fresh placement every frame and may draw
+    // any of them — Ghostty 1.3 drew the first, so a resized image kept
+    // fitting into the rectangle it had before the resize.
+    let placement_id = control.placement_id.unwrap_or(1);
     Handling::Virtualize {
-        payload: rewrite_placement(payload, columns, rows),
+        payload: rewrite_placement(payload, columns, rows, placement_id),
         placement: Placement {
             image_id,
+            placement_id,
             columns,
             rows,
             // Filled in by the caller, which knows where the cursor was.
@@ -713,12 +809,13 @@ fn virtualize(control: &ControlData, payload: &[u8], cell_size: Option<CellSize>
     }
 }
 
-/// The same command with its placement keys replaced by a virtual placement.
+/// The same command with its placement keys replaced by a virtual placement
+/// carrying `placement_id`.
 ///
 /// Everything else is preserved byte for byte, including keys Luvus does not
 /// understand: the protocol keeps growing, and the terminal receiving this is
 /// the one that has to make sense of the image.
-fn rewrite_placement(payload: &[u8], columns: usize, rows: usize) -> Vec<u8> {
+fn rewrite_placement(payload: &[u8], columns: usize, rows: usize, placement_id: u32) -> Vec<u8> {
     let (control, body) = match payload.iter().position(|byte| *byte == b';') {
         Some(end) => (&payload[..end], Some(&payload[end + 1..])),
         None => (payload, None),
@@ -743,7 +840,7 @@ fn rewrite_placement(payload: &[u8], columns: usize, rows: usize) -> Vec<u8> {
     if !rewritten.is_empty() {
         rewritten.push(b',');
     }
-    rewritten.extend_from_slice(format!("U=1,c={columns},r={rows}").as_bytes());
+    rewritten.extend_from_slice(format!("U=1,p={placement_id},c={columns},r={rows}").as_bytes());
     if let Some(body) = body {
         rewritten.push(b';');
         rewritten.extend_from_slice(body);
@@ -793,6 +890,9 @@ pub(crate) fn query_reply(payload: &[u8], supported: bool) -> Option<Vec<u8>> {
 struct ControlData {
     action: u8,
     image_id: Option<u32>,
+    /// `p=`: the placement id. Placements are keyed by (image id, placement
+    /// id), and one sent without an id is a new placement every time.
+    placement_id: Option<u32>,
     quiet: u8,
     /// `U=1`: the placement is a prototype and draws nothing on its own.
     virtual_placement: bool,
@@ -834,6 +934,7 @@ impl ControlData {
         let mut parsed = ControlData {
             action: b'T',
             image_id: None,
+            placement_id: None,
             quiet: 0,
             virtual_placement: false,
             width_px: None,
@@ -866,6 +967,7 @@ impl ControlData {
             match key {
                 b'a' => parsed.action = *value.first()?,
                 b'i' => parsed.image_id = Some(parse_u32(value)?).filter(|id| *id != 0),
+                b'p' => parsed.placement_id = Some(parse_u32(value)?).filter(|id| *id != 0),
                 b'q' => parsed.quiet = parse_u32(value)?.min(u32::from(u8::MAX)) as u8,
                 b'U' => parsed.virtual_placement = parse_u32(value)? != 0,
                 b's' => parsed.width_px = Some(parse_u32(value)?),
@@ -1066,15 +1168,22 @@ mod tests {
             (3, 5),
             Some(CELL),
         );
-        assert_eq!(commands.len(), 1);
-        let command = &commands[0];
+        assert_eq!(
+            commands.len(),
+            2,
+            "a rectangle the terminal has not been told about is preceded by a \
+             delete of whatever it holds for the id: {commands:?}"
+        );
+        assert_eq!(commands[0], "\x1b_Ga=d,d=i,i=7,q=2\x1b\\");
+        let command = &commands[1];
         assert!(
-            command.contains("U=1,c=2,r=2"),
-            "28x68 pixels over a 14x34 cell is 2x2 cells: {command:?}"
+            command.contains("U=1,p=1,c=2,r=2"),
+            "28x68 pixels over a 14x34 cell is 2x2 cells, under the child's own \
+             placement id: {command:?}"
         );
         assert!(
-            !command.contains("p=1") && !command.contains("C=1"),
-            "the old placement must not survive the rewrite: {command:?}"
+            !command.contains("C=1"),
+            "the placement at the cursor must not survive the rewrite: {command:?}"
         );
         assert!(
             command.contains("i=7")
@@ -1087,6 +1196,7 @@ mod tests {
             placements,
             vec![Placement {
                 image_id: 7,
+                placement_id: 1,
                 columns: 2,
                 rows: 2,
                 line: 3,
@@ -1097,12 +1207,94 @@ mod tests {
         );
     }
 
+    /// A child that streams re-sends the same placement every frame. The
+    /// delete that clears a stale rectangle must not ride along with each of
+    /// them — only with a rectangle the terminal has not been told about.
+    #[test]
+    fn a_rectangle_the_terminal_already_holds_is_not_deleted_again() {
+        let same = "a=T,f=32,s=28,v=68,t=d,i=7,p=1,C=1,q=2;AAAA";
+        let (commands, _) = queued_at(&[same, same, same], (0, 0), Some(CELL));
+        assert_eq!(
+            commands.len(),
+            4,
+            "one delete, then the three transmissions: {commands:?}"
+        );
+        assert!(commands[0].contains("a=d,d=i,i=7"));
+        assert!(commands[1..].iter().all(|command| command.contains("a=T")));
+
+        // A new size is a new rectangle. Ghostty 1.3 keeps the old virtual
+        // placement beside the new one and draws whichever it finds first,
+        // so the terminal's placements for the id go before the new one.
+        let wider = "a=T,f=32,s=56,v=68,t=d,i=7,p=1,C=1,q=2;BBBB";
+        let (commands, _) = queued_at(&[same, wider], (0, 0), Some(CELL));
+        assert_eq!(commands.len(), 4, "{commands:?}");
+        assert!(commands[2].contains("a=d,d=i,i=7"), "{commands:?}");
+        assert!(commands[3].contains("U=1,p=1,c=4,r=2"), "{commands:?}");
+    }
+
+    /// The engine stretched an image's cells to a resized pane. The terminal
+    /// has to be told the new rectangle or it keeps fitting the image into
+    /// the old one, and a client attaching later must learn the newest.
+    #[test]
+    fn replacing_a_virtual_rectangle_re_places_the_image_and_is_what_is_retained() {
+        let stretched = |columns, rows| Placement {
+            image_id: 7,
+            placement_id: 1,
+            columns,
+            rows,
+            line: 0,
+            column: 0,
+            move_cursor: false,
+        };
+        let mut queue = GraphicsQueue::default();
+        queue.push(
+            b"a=T,f=32,s=28,v=68,t=d,i=7,p=1,C=1,q=2;AAAA",
+            (0, 0),
+            Some(CELL),
+        );
+        queue.drain();
+
+        queue.replace_virtual_rect(&stretched(5, 3));
+        let commands: Vec<String> = queue
+            .drain()
+            .into_iter()
+            .map(|command| String::from_utf8(command).unwrap())
+            .collect();
+        assert_eq!(
+            commands,
+            vec![
+                "\x1b_Ga=d,d=i,i=7,q=2\x1b\\".to_string(),
+                "\x1b_Ga=p,i=7,p=1,U=1,c=5,r=3,q=2\x1b\\".to_string(),
+            ],
+            "the protocol's own resize: the same placement id, a new rectangle"
+        );
+
+        let retained = queue.retained();
+        assert_eq!(
+            retained.len(),
+            2,
+            "the transmission and its one placement: {retained:?}"
+        );
+        assert!(String::from_utf8(retained[1].clone())
+            .unwrap()
+            .contains("c=5,r=3"));
+
+        // Another resize replaces the retained placement rather than adding
+        // one: a later client is taught the image where it is now.
+        queue.replace_virtual_rect(&stretched(6, 3));
+        let retained = queue.retained();
+        assert_eq!(retained.len(), 2, "{retained:?}");
+        assert!(String::from_utf8(retained[1].clone())
+            .unwrap()
+            .contains("c=6,r=3"));
+    }
+
     #[test]
     fn a_sender_that_names_its_own_rectangle_is_taken_at_its_word() {
         // `c=`/`r=` say what the sender wants in cells, so no division is
         // needed and no cell size has to be known.
         let (commands, placements) = queued_at(&["a=T,i=9,c=4,r=3;AAAA"], (0, 0), None);
-        assert!(commands[0].contains("U=1,c=4,r=3"), "{:?}", commands[0]);
+        assert!(commands[1].contains("U=1,p=1,c=4,r=3"), "{commands:?}");
         assert_eq!(placements[0].columns, 4);
         assert_eq!(placements[0].rows, 3);
         assert!(
@@ -1222,8 +1414,12 @@ mod tests {
         queue.drain();
 
         let retained = String::from_utf8(queue.retained().concat()).unwrap();
-        assert!(retained.contains("U=1,c=2,r=2"), "{retained}");
+        assert!(retained.contains("U=1,p=1,c=2,r=2"), "{retained}");
         assert!(!retained.contains("C=1"), "{retained}");
+        assert!(
+            !retained.contains("a=d"),
+            "a delete teaches nothing and is not kept for a later client: {retained}"
+        );
     }
 
     /// A transfer split into chunks means nothing until every chunk arrives,

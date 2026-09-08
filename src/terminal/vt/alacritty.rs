@@ -187,6 +187,7 @@ impl Dimensions for Dims {
 #[derive(Clone, Copy)]
 struct AppliedPlacement {
     image_id: u32,
+    placement_id: u32,
     columns: usize,
     rows: usize,
     line: i32,
@@ -198,6 +199,7 @@ impl AppliedPlacement {
     fn from_placement(placement: &graphics::Placement) -> Self {
         Self {
             image_id: placement.image_id,
+            placement_id: placement.placement_id,
             columns: placement.columns,
             rows: placement.rows,
             line: placement.line,
@@ -236,6 +238,10 @@ pub struct AlacrittyEngine {
     // Placement geometry shares the retained-image working-set bound, so an
     // image-id stream cannot grow per-pane state without limit.
     applied: Vec<AppliedPlacement>,
+    /// Shared with the event proxy: the engine queues a command of its own
+    /// when it stretches an image to a resized pane, and has to wake the
+    /// render pass for it the same way the proxy does.
+    host_graphics: graphics::HostGraphics,
     damage_line_indices: Vec<u16>,
     damage_rows: Vec<DamageRow>,
 }
@@ -285,7 +291,7 @@ impl AlacrittyEngine {
             tx: resp_tx.clone(),
             title: title.clone(),
             appearance: appearance.clone(),
-            host_graphics,
+            host_graphics: host_graphics.clone(),
             graphics_queue: graphics_queue.clone(),
             grid: grid.clone(),
         };
@@ -316,6 +322,7 @@ impl AlacrittyEngine {
             history_maintenance_full_scan: false,
             placement_damage: false,
             applied: Vec::with_capacity(graphics::MAX_RETAINED_IMAGES),
+            host_graphics,
             damage_line_indices: Vec::new(),
             damage_rows: Vec::new(),
         }
@@ -732,6 +739,7 @@ impl VtEngine for AlacrittyEngine {
                 // than exposing a gap until the next image frame arrives.
                 let placement = graphics::Placement {
                     image_id: applied.image_id,
+                    placement_id: applied.placement_id,
                     columns: cols as usize,
                     rows: rows as usize,
                     line: 0,
@@ -739,6 +747,13 @@ impl VtEngine for AlacrittyEngine {
                     move_cursor: false,
                 };
                 self.write_placeholder_cells(&placement);
+                // The cells alone change nothing on the terminal, which is
+                // still fitting the image into the rectangle it was told
+                // about: tell it the new one, the protocol's own resize.
+                if let Ok(mut queue) = self.graphics_queue.lock() {
+                    queue.replace_virtual_rect(&placement);
+                }
+                self.host_graphics.mark_pending();
                 self.applied[index] = AppliedPlacement::from_placement(&placement);
             } else {
                 // A shrink may truncate non-anchor cells, so the anchor alone
@@ -2766,14 +2781,23 @@ mod tests {
         e.advance(b"\x1b_Ga=T,f=32,s=30,v=40,t=d,i=5,p=1,C=1,q=2;AAAA\x1b\\");
 
         let forwarded = e.take_graphics();
-        assert_eq!(forwarded.len(), 1);
-        let command = String::from_utf8(forwarded[0].clone()).unwrap();
+        assert_eq!(
+            forwarded.len(),
+            2,
+            "whatever the terminal holds for the id is deleted first, then the image"
+        );
+        assert_eq!(
+            String::from_utf8(forwarded[0].clone()).unwrap(),
+            "\x1b_Ga=d,d=i,i=5,q=2\x1b\\"
+        );
+        let command = String::from_utf8(forwarded[1].clone()).unwrap();
         assert!(
-            command.contains("U=1,c=3,r=2"),
-            "the placement must become virtual, sized in cells: {command:?}"
+            command.contains("U=1,p=1,c=3,r=2"),
+            "the placement must become virtual, sized in cells, under the child's \
+             own placement id: {command:?}"
         );
         assert!(
-            !command.contains("p=1") && !command.contains("C=1"),
+            !command.contains("C=1"),
             "the placement at the cursor must not survive: {command:?}"
         );
 
@@ -2970,8 +2994,31 @@ mod tests {
         engine.advance(b"\x1b_Ga=T,f=32,s=100,v=80,t=d,i=9,p=1,C=1,c=10,r=4,q=2;AAAA\x1b\\");
         let first_damage = engine.damage_snapshot();
         assert!(engine.acknowledge_damage(first_damage.generation));
+        assert!(
+            engine.host_graphics.take_pending(),
+            "the first image woke a render pass; consume that so the resize's own wake shows"
+        );
 
         engine.resize(14, 6);
+        // Stretching the cells alone changes nothing on a terminal still
+        // fitting the image into 10x4: it is told the new rectangle as the
+        // protocol's own resize — the same placement id, so it replaces.
+        let forwarded: Vec<String> = engine
+            .take_graphics()
+            .into_iter()
+            .map(|command| String::from_utf8(command).unwrap())
+            .collect();
+        assert_eq!(
+            forwarded.len(),
+            4,
+            "the first image with its delete, then the resize with its delete: {forwarded:?}"
+        );
+        assert!(forwarded[2].contains("a=d,d=i,i=9"), "{forwarded:?}");
+        assert_eq!(forwarded[3], "\x1b_Ga=p,i=9,p=1,U=1,c=14,r=6,q=2\x1b\\");
+        assert!(
+            engine.host_graphics.take_pending(),
+            "a render pass has to be woken to deliver it"
+        );
         let cells = placeholder_cells(&engine);
         assert_eq!(
             cells.len(),
