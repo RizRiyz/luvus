@@ -1,6 +1,7 @@
 //! Topology JSON API handlers.
 
 use super::*;
+use super::{params::*, projection::*};
 
 impl App {
     pub(super) fn api_pane_get(&mut self, method: &str, p: &Value) -> DispatchResult {
@@ -1224,5 +1225,304 @@ impl App {
             self.zoomed = true;
             Ok(json!({"type":"ok","pane": id.0.to_string()}))
         }
+    }
+}
+
+impl App {
+    pub(in crate::app::dispatch) fn resolve_optional_pane(
+        &self,
+        p: &Value,
+    ) -> Result<Option<PaneId>, (String, String)> {
+        if matches!(p.get("pane"), Some(Value::Null)) {
+            return Ok(None);
+        }
+        self.resolve_pane(p)
+    }
+
+    pub(crate) fn resolve_pane(&self, p: &Value) -> Result<Option<PaneId>, (String, String)> {
+        match p.get("pane") {
+            None | Some(Value::Null) => Ok(Some(self.layout().focus)),
+            Some(value) => {
+                let id = PaneId(parse_u32_value(value, "pane")?);
+                self.panes
+                    .contains_key(&id)
+                    .then_some(Some(id))
+                    .ok_or_else(not_found)
+            }
+        }
+    }
+
+    pub(in crate::app::dispatch) fn resolve_pane_or_focus(
+        &self,
+        p: &Value,
+    ) -> Result<PaneId, (String, String)> {
+        match p.get("pane") {
+            None | Some(Value::Null) => Ok(self.layout().focus),
+            Some(value) => {
+                let id = PaneId(parse_u32_value(value, "pane")?);
+                self.pane_location(id)
+                    .is_some()
+                    .then_some(id)
+                    .ok_or_else(not_found)
+            }
+        }
+    }
+
+    /// The pane's recent output snapshot — the same view `pane.read` exposes.
+    pub(crate) fn pane_recent_text(&self, id: PaneId) -> String {
+        self.panes
+            .get(&id)
+            .and_then(|pane| pane.engine.lock().ok().map(|e| e.detection_text(200)))
+            .unwrap_or_default()
+    }
+
+    pub(in crate::app::dispatch) fn optional_socket_workspace(
+        &self,
+        p: &Value,
+    ) -> Result<Option<usize>, (String, String)> {
+        let indexed = optional_workspace_param(p)?;
+        let by_id = match p.get("workspace_id") {
+            None => None,
+            Some(Value::String(id)) if !id.is_empty() => Some(
+                self.workspaces
+                    .iter()
+                    .position(|workspace| workspace.id == *id)
+                    .ok_or_else(|| {
+                        (
+                            "not_found".to_string(),
+                            format!("workspace id {id} not found"),
+                        )
+                    })?,
+            ),
+            Some(_) => {
+                return Err((
+                    "invalid_request".to_string(),
+                    "workspace_id must be a non-empty string".to_string(),
+                ))
+            }
+        };
+        if indexed.is_some() && by_id.is_some() {
+            return Err((
+                "invalid_request".to_string(),
+                "workspace and workspace_id cannot be used together".to_string(),
+            ));
+        }
+        Ok(indexed.or(by_id))
+    }
+
+    pub(in crate::app::dispatch) fn required_socket_workspace(
+        &self,
+        p: &Value,
+    ) -> Result<usize, (String, String)> {
+        self.optional_socket_workspace(p)?.ok_or_else(|| {
+            (
+                "invalid_request".to_string(),
+                "workspace or workspace_id is required".to_string(),
+            )
+        })
+    }
+
+    pub(in crate::app::dispatch) fn optional_socket_tab(
+        &self,
+        workspace: usize,
+        p: &Value,
+        position_key: &str,
+        id_key: &str,
+    ) -> Result<Option<usize>, (String, String)> {
+        let positioned = p
+            .get(position_key)
+            .map(|_| required_one_based_param(p, position_key))
+            .transpose()?;
+        let by_id = match p.get(id_key) {
+            None => None,
+            Some(Value::String(id)) if !id.is_empty() => Some(
+                self.workspaces
+                    .get(workspace)
+                    .and_then(|workspace| workspace.tabs.iter().position(|tab| tab.id == *id))
+                    .ok_or_else(|| ("not_found".to_string(), format!("tab id {id} not found")))?,
+            ),
+            Some(_) => {
+                return Err((
+                    "invalid_request".to_string(),
+                    format!("{id_key} must be a non-empty string"),
+                ))
+            }
+        };
+        if positioned.is_some() && by_id.is_some() {
+            return Err((
+                "invalid_request".to_string(),
+                format!("{position_key} and {id_key} cannot be used together"),
+            ));
+        }
+        Ok(positioned.or(by_id))
+    }
+
+    pub(in crate::app::dispatch) fn required_socket_tab(
+        &self,
+        workspace: usize,
+        p: &Value,
+        position_key: &str,
+        id_key: &str,
+    ) -> Result<usize, (String, String)> {
+        self.optional_socket_tab(workspace, p, position_key, id_key)?
+            .ok_or_else(|| {
+                (
+                    "invalid_request".to_string(),
+                    format!("{position_key} or {id_key} is required"),
+                )
+            })
+    }
+
+    pub(in crate::app::dispatch) fn socket_workspace(
+        &self,
+        index: usize,
+    ) -> Result<Value, (String, String)> {
+        let workspace = self
+            .workspaces
+            .get(index)
+            .ok_or_else(|| workspace_update_error(index, WorkspaceUpdateError::NotFound))?;
+        let terminal_cwd = self
+            .workspace_terminal_cwd(index)
+            .unwrap_or(&workspace.cwd)
+            .display()
+            .to_string();
+        Ok(json!({
+            "type":"workspace", "workspace":index.to_string(), "workspace_id":workspace.id,
+            "name":workspace.name,
+            "cwd":workspace.cwd.display().to_string(), "branch":workspace.branch,
+            "terminal_cwd":terminal_cwd,
+            "ahead":workspace.git_ahead_behind.map(|value| value.0),
+            "behind":workspace.git_ahead_behind.map(|value| value.1),
+            "pinned":workspace.pinned, "active":index == self.active_ws,
+            "display_position":self.workspace_display_position(index).unwrap_or(index).to_string(),
+            "active_tab":(workspace.active_tab + 1).to_string(), "tabs":workspace.tabs.len(),
+        }))
+    }
+
+    pub(in crate::app::dispatch) fn socket_tab(
+        &self,
+        workspace: usize,
+        tab: usize,
+    ) -> Result<Value, (String, String)> {
+        let ws = self
+            .workspaces
+            .get(workspace)
+            .ok_or_else(|| workspace_update_error(workspace, WorkspaceUpdateError::NotFound))?;
+        let value = ws.tabs.get(tab).ok_or_else(|| {
+            (
+                "not_found".to_string(),
+                format!("tab {} not found", tab + 1),
+            )
+        })?;
+        let kind = if value.is_git() {
+            "git"
+        } else if value.is_orch() {
+            "orch"
+        } else if value.is_mission() {
+            "mission"
+        } else {
+            "panes"
+        };
+        Ok(json!({
+            "type":"tab", "workspace":workspace.to_string(), "workspace_id":ws.id,
+            "tab":(tab+1).to_string(), "tab_id":value.id,
+            "active":workspace == self.active_ws && tab == ws.active_tab,
+            "name":value.name, "kind":kind, "focus":value.layout.focus.0.to_string(),
+            "panes":value.layout.leaves().into_iter().map(|id| id.0.to_string()).collect::<Vec<_>>(),
+        }))
+    }
+
+    pub(in crate::app::dispatch) fn socket_pane(
+        &self,
+        pane: PaneId,
+    ) -> Result<Value, (String, String)> {
+        let (workspace, tab) = self.pane_location(pane).ok_or_else(not_found)?;
+        let terminal = self.panes.get(&pane);
+        let status = self.status.get(&pane);
+        let history = terminal.map(|pane| pane.history_metrics());
+        Ok(json!({
+            "type":"pane", "pane":pane.0.to_string(), "workspace":workspace.to_string(),
+            "workspace_id":self.workspaces[workspace].id,
+            "tab":(tab+1).to_string(), "tab_id":self.workspaces[workspace].tabs[tab].id,
+            "terminal_id":terminal.and_then(|pane| pane.terminal_runtime()).map(|runtime| runtime.terminal_id),
+            "focused":workspace == self.active_ws
+                && tab == self.workspaces[workspace].active_tab
+                && self.workspaces[workspace].tabs[tab].layout.focus == pane,
+            "name":self.agent_name_for(pane),
+            "cwd":terminal.map(|pane| pane.cwd.display().to_string()),
+            "command":terminal.map(|pane| pane.command.as_str()),
+            "agent":status.map(|status| status.agent.as_str()),
+            "status":status.map(|status| state_str(status.state)).unwrap_or("unknown"),
+            "history_budget_bytes":history.map(|metrics| metrics.budget_bytes),
+            "history_bytes":history.map(|metrics| metrics.retained_bytes),
+            "module":self.module_panes.get(&pane).map(|module| json!({"id":module.module_id,"entrypoint":module.entrypoint})),
+        }))
+    }
+
+    pub(in crate::app::dispatch) fn socket_pane_layout(
+        &self,
+        pane: PaneId,
+    ) -> Result<Value, (String, String)> {
+        let (workspace, tab) = self.pane_location(pane).ok_or_else(not_found)?;
+        let area = crate::api::topology::logical_area();
+        let layout = &self.workspaces[workspace].tabs[tab].layout;
+        let rect = layout.pane_rect(area, pane).ok_or_else(not_found)?;
+        Ok(json!({
+            "type":"pane_layout", "pane":pane.0.to_string(), "workspace":workspace.to_string(),
+            "tab":(tab+1).to_string(), "logical_size":{"width":area.width,"height":area.height},
+            "rect":{"x":rect.x,"y":rect.y,"width":rect.width,"height":rect.height},
+            "tree":layout.to_tree(),
+        }))
+    }
+
+    pub(in crate::app::dispatch) fn reorder_workspace_block(
+        &mut self,
+        block: &[usize],
+        to: usize,
+    ) -> Result<Vec<usize>, (String, String)> {
+        let len = self.workspaces.len();
+        if block.is_empty() || to > len.saturating_sub(block.len()) {
+            return Err((
+                "invalid_request".to_string(),
+                "destination workspace position is out of range".to_string(),
+            ));
+        }
+        let selected: std::collections::HashSet<_> = block.iter().copied().collect();
+        if selected.len() != block.len() || block.iter().any(|index| *index >= len) {
+            return Err((
+                "invalid_request".to_string(),
+                "workspace block contains an invalid or duplicate index".to_string(),
+            ));
+        }
+        let mut order: Vec<usize> = (0..len).filter(|index| !selected.contains(index)).collect();
+        let insertion = to;
+        for (offset, index) in block.iter().copied().enumerate() {
+            order.insert(insertion + offset, index);
+        }
+        if !order.iter().copied().eq(0..len) {
+            let old_active = self.active_ws;
+            let mut old: Vec<Option<Workspace>> = std::mem::take(&mut self.workspaces)
+                .into_iter()
+                .map(Some)
+                .collect();
+            self.workspaces = order
+                .iter()
+                .map(|index| old[*index].take().unwrap())
+                .collect();
+            self.active_ws = order
+                .iter()
+                .position(|index| *index == old_active)
+                .unwrap_or(0);
+            self.session_dirty = true;
+        }
+        Ok(block
+            .iter()
+            .map(|index| {
+                order
+                    .iter()
+                    .position(|candidate| candidate == index)
+                    .unwrap()
+            })
+            .collect())
     }
 }

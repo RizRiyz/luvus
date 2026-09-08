@@ -1,6 +1,7 @@
 //! Content JSON API handlers.
 
 use super::*;
+use super::{params::*, projection::*};
 
 impl App {
     pub(super) fn api_search_capabilities(&mut self, method: &str, p: &Value) -> DispatchResult {
@@ -626,5 +627,18 @@ impl App {
             self.prepare_file_tree_api(true);
             Ok(json!({"type":"ok"}))
         }
+    }
+}
+
+impl App {
+    /// The cwd of the `workspace` param (else the active workspace) for git.* methods.
+    pub(in crate::app::dispatch) fn git_workspace_cwd(&self, p: &Value) -> PathBuf {
+        let i = param_usize(p, "workspace")
+            .or_else(|| param_usize(p, "node"))
+            .unwrap_or(self.active_ws);
+        self.workspaces
+            .get(i)
+            .map(|w| w.cwd.clone())
+            .unwrap_or_else(|| self.ws().cwd.clone())
     }
 }

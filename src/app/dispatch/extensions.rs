@@ -1,6 +1,7 @@
 //! Extensions JSON API handlers.
 
 use super::*;
+use super::{params::*, projection::*};
 
 impl App {
     pub(super) fn api_theme_list(&mut self, method: &str, p: &Value) -> DispatchResult {

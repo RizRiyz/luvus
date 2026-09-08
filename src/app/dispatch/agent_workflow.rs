@@ -1,6 +1,7 @@
 //! Parked output waits and atomic agent launch, prompt, and state workflows.
 
 use super::*;
+use super::{params::*, projection::*};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc::Sender, Arc};
 

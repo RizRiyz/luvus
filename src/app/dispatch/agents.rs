@@ -1,6 +1,8 @@
 //! Agents JSON API handlers.
 
+use super::runtime::log_agent_authority;
 use super::*;
+use super::{params::*, projection::*};
 
 impl App {
     pub(super) fn api_agent_list(&mut self, method: &str, p: &Value) -> DispatchResult {
@@ -535,6 +537,178 @@ impl App {
                     "not_found".to_string(),
                     "no resumable session with that id".to_string(),
                 )),
+            }
+        }
+    }
+}
+
+impl App {
+    /// Cached process identity for a pane. Callers that need a first or refreshed
+    /// observation queue `request_proc_scan_if_stale`; this getter itself does no
+    /// IO and returns executable names rather than full argv, which may contain
+    /// credentials or prompts.
+    pub(crate) fn pane_processes(&self, id: PaneId) -> Value {
+        let runtime = self
+            .panes
+            .get(&id)
+            .and_then(crate::terminal::pty::Pane::terminal_runtime);
+        let observed = self.proc_commands.get(&id);
+        let executables = observed
+            .map(|commands| process_executables(commands))
+            .unwrap_or_default();
+        json!({
+            "type":"pane_processes",
+            "pane":id.0.to_string(),
+            "terminal_id":runtime.as_ref().map(|runtime| runtime.terminal_id.clone()),
+            "root_process":runtime.as_ref().map(|runtime| json!({
+                "pid":runtime.pid,
+                "start_marker":runtime.start_marker,
+            })),
+            "scan":if observed.is_some() { "observed" } else { "unavailable" },
+            "executables":executables,
+            "arguments_exposed":false,
+        })
+    }
+
+    pub(crate) fn agent_explanation(&self, id: PaneId) -> Value {
+        let Some(status) = self.status.get(&id) else {
+            return json!({"type":"agent_explanation", "pane":id.0.to_string(), "available":false});
+        };
+        let now = Instant::now();
+        let report = status.agent_report.as_ref();
+        let identity_confidence = match status.identity_source {
+            "integration_report" | "process_tree" => "authoritative",
+            "launch_command" | "osc_title" => "high",
+            "screen_text" | "prior_identity" => "heuristic",
+            _ => "none",
+        };
+        let state_confidence = match status.state_source {
+            "integration_report" => "authoritative",
+            "manifest_rule" => "high",
+            "shell_activity" => "heuristic",
+            _ => "none",
+        };
+        json!({
+            "type":"agent_explanation",
+            "pane":id.0.to_string(),
+            "available":true,
+            "agent":status.agent,
+            "status":state_str(status.state),
+            "identity":{"source":status.identity_source, "confidence":identity_confidence},
+            "state_evidence":{
+                "source":status.state_source,
+                "confidence":state_confidence,
+                "rule_priority":status.rule_priority,
+                "rule_region":status.rule_region,
+                "blocked_hint":status.blocked_hint,
+            },
+            "authority":report.map(|report| json!({
+                "source":report.source,
+                "sequence":report.sequence,
+                "message":report.message,
+                "expires_in_ms":report.expires_at.saturating_duration_since(now).as_millis().min(u64::MAX as u128) as u64,
+            })),
+            "session":status.agent_session.as_ref().map(|session| json!({
+                "agent":session.agent,
+                "id":session.session_id,
+            })),
+        })
+    }
+
+    /// The display label for `pane`: a terminal-backend title when present,
+    /// otherwise the live alias set by `agent.name`.
+    pub(crate) fn agent_name_for(&self, pane: PaneId) -> Option<&str> {
+        self.backend_labels
+            .get(&pane)
+            .map(String::as_str)
+            .or_else(|| {
+                self.agent_names
+                    .iter()
+                    .find_map(|(name, p)| (*p == pane).then_some(name.as_str()))
+            })
+    }
+
+    /// The pane's live session title (the OSC title the agent set), trimmed, if
+    /// non-empty. The AGENTS sidebar shows it in place of the meta line when the
+    /// "show agent session title" setting is on (`config.layout.agent_title`).
+    pub(crate) fn pane_title(&self, pane: PaneId) -> Option<String> {
+        self.panes
+            .get(&pane)
+            .and_then(|p| p.engine.lock().ok().and_then(|e| e.title()))
+            .map(|s| strip_title_icon(&s))
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Whether `pane` currently hosts a recognised agent (detection) or a bound
+    /// agent session — the same test `agent.list` uses to decide what is an agent.
+    pub(crate) fn is_agent_pane(&self, pane: PaneId) -> bool {
+        self.status.get(&pane).is_some_and(|s| {
+            self.manifests.is_agent(&s.agent)
+                || s.agent_session.is_some()
+                || s.agent_report.is_some()
+        })
+    }
+
+    /// Resolve an `agent.*` `target` param (a live alias or a numeric pane id) to a
+    /// pane that still exists. Readiness (is it an agent?) is left to the caller so
+    /// each method can return its own precise error.
+    pub(in crate::app::dispatch) fn resolve_agent_pane(&self, p: &Value) -> Option<PaneId> {
+        let t = p.get("target").and_then(|v| v.as_str())?;
+        self.agent_names
+            .get(t)
+            .copied()
+            .or_else(|| t.parse::<u32>().ok().map(PaneId))
+            .filter(|id| self.panes.contains_key(id))
+    }
+
+    /// Resolve a target to a single pane: a live alias, a numeric pane id, or an
+    /// agent **kind** (`claude`, `kimi`, …) when exactly one live agent is that
+    /// kind. Two agents of the same kind are ambiguous, so the error names the
+    /// candidates and asks for a pane id or a name.
+    pub(in crate::app::dispatch) fn resolve_agent_target(
+        &self,
+        p: &Value,
+    ) -> Result<PaneId, (String, String)> {
+        let t = p.get("target").and_then(|v| v.as_str()).unwrap_or("");
+        if t.is_empty() {
+            return Err(agent_not_found());
+        }
+        // An alias or pane id wins outright.
+        if let Some(id) = self.resolve_agent_pane(p) {
+            return Ok(id);
+        }
+        // Otherwise treat the target as an agent kind and match live agents.
+        let mut hits: Vec<PaneId> = Vec::new();
+        for ws in self.workspaces.iter() {
+            for tab in ws.tabs.iter() {
+                for id in tab.layout.leaves() {
+                    if self.status.get(&id).is_some_and(|s| s.agent == t) && self.is_agent_pane(id)
+                    {
+                        hits.push(id);
+                    }
+                }
+            }
+        }
+        match hits.as_slice() {
+            [] => Err(agent_not_found()),
+            [one] => Ok(*one),
+            many => {
+                let list = many
+                    .iter()
+                    .map(|id| {
+                        let cwd = self
+                            .panes
+                            .get(id)
+                            .map(|pn| pn.cwd.display().to_string())
+                            .unwrap_or_default();
+                        format!("p{} ({cwd})", id.0)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err((
+                    "ambiguous_target".to_string(),
+                    format!("{t} matches several agents ({list}). Use a pane id or a name."),
+                ))
             }
         }
     }
