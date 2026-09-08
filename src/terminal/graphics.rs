@@ -121,7 +121,7 @@ const MAX_PENDING_GRAPHICS_COMMANDS: usize = 4_096;
 /// is worth keeping — an id names one image, and a child that redraws replaces
 /// it — so this holds a working set, not a history.
 const MAX_RETAINED_GRAPHICS_BYTES: usize = 8 * 1024 * 1024;
-const MAX_RETAINED_IMAGES: usize = 64;
+pub(crate) const MAX_RETAINED_IMAGES: usize = 64;
 
 /// Graphics commands a pane's child emitted, waiting to reach the terminals
 /// that can draw them.
