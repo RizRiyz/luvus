@@ -9,6 +9,7 @@ mod automation;
 mod bar;
 mod changelog;
 mod cli;
+mod clipboard_image;
 mod config;
 mod detect;
 mod diff;
@@ -1436,7 +1437,20 @@ fn send_input_event(tx: &Sender<AppEvent>, event: Event) -> bool {
 }
 
 fn app_event(event: Event) -> Option<AppEvent> {
+    app_event_with_image(event, || {
+        crate::platform::clipboard_image()
+            .and_then(|png| crate::clipboard_image::stage_png(&png).ok())
+    })
+}
+
+fn app_event_with_image(
+    event: Event,
+    image: impl FnOnce() -> Option<std::path::PathBuf>,
+) -> Option<AppEvent> {
     match crate::terminal::host_key::normalize_platform_modifiers(event) {
+        Event::Key(k) if crate::clipboard_image::is_image_paste_key(&k) => {
+            image().map(AppEvent::PasteImage).or(Some(AppEvent::Key(k)))
+        }
         Event::Key(k) => Some(AppEvent::Key(k)),
         Event::Mouse(m) => Some(AppEvent::Mouse(m)),
         Event::Resize(_, _) => Some(AppEvent::Resize),
@@ -1459,6 +1473,23 @@ mod tests {
         let _env = crate::persist::test_env("stop-absent");
         crate::persist::ensure_session_dir();
         assert!(!send_server_stop().expect("absent server is not an error"));
+    }
+
+    #[test]
+    fn local_image_paste_uses_a_staged_path_and_falls_back_to_the_key() {
+        let key = ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('v'),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        );
+        let path = std::path::PathBuf::from("clipboard-images/example.png");
+        assert!(matches!(
+            app_event_with_image(Event::Key(key), || Some(path.clone())),
+            Some(AppEvent::PasteImage(staged)) if staged == path
+        ));
+        assert!(matches!(
+            app_event_with_image(Event::Key(key), || None),
+            Some(AppEvent::Key(fallback)) if fallback == key
+        ));
     }
 
     #[test]

@@ -332,6 +332,35 @@ pub fn ensure_server_session_dir() -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
+/// Create the selected server's private clipboard-image directory.
+///
+/// Image data arrives from an authenticated display client, but the server
+/// still owns the final path. Reusing the server directory validation keeps a
+/// malicious symlink or permissive directory from redirecting staged input.
+pub fn ensure_clipboard_image_dir() -> std::io::Result<PathBuf> {
+    let session = ensure_server_session_dir()?;
+    let dir = session.join("clipboard-images");
+    ensure_private_server_dir(&dir)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        let metadata = fs::symlink_metadata(&dir)?;
+        if !metadata.file_type().is_dir()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "Luvus clipboard storage must be a real directory: {}",
+                    dir.display()
+                ),
+            ));
+        }
+    }
+    Ok(dir)
+}
+
 fn ensure_private_server_dir(dir: &std::path::Path) -> std::io::Result<()> {
     fs::create_dir_all(dir)?;
     #[cfg(unix)]

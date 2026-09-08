@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::sound::SoundSignal;
 use crate::terminal::theme_probe::TerminalColors;
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -26,6 +26,9 @@ pub enum ClientMessage {
     Key(KeyEvent),
     Mouse(MouseEvent),
     Paste(String),
+    /// PNG bytes read from the display client's local clipboard after an
+    /// explicit image-paste gesture. The server validates and stages them.
+    ClipboardImage(Vec<u8>),
     Resize {
         cols: u16,
         rows: u16,
@@ -488,6 +491,18 @@ mod tests {
         assert!(matches!(
             read_message::<_, ServerMessage>(&mut &bytes[..]).unwrap(),
             ServerMessage::SwitchSession { name } if name == "api"
+        ));
+    }
+
+    #[test]
+    fn clipboard_image_roundtrips_as_binary_png_data() {
+        let png = crate::clipboard_image::encode_rgba_png(1, 1, |_, _| [1, 2, 3, 255])
+            .expect("fixture PNG");
+        let mut bytes = Vec::new();
+        write_message(&mut bytes, &ClientMessage::ClipboardImage(png.clone())).unwrap();
+        assert!(matches!(
+            read_message::<_, ClientMessage>(&mut &bytes[..]).unwrap(),
+            ClientMessage::ClipboardImage(decoded) if decoded == png
         ));
     }
 

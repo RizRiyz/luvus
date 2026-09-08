@@ -788,6 +788,7 @@ fn apply(
                 ClientInput::Key(key) => AppEvent::Key(key),
                 ClientInput::Mouse(mouse) => AppEvent::Mouse(mouse),
                 ClientInput::Paste(text) => AppEvent::Paste(text),
+                ClientInput::PasteImage(path) => AppEvent::PasteImage(path),
                 ClientInput::Resize(..) => unreachable!("handled above"),
             };
             app.handle_event(event)
@@ -1348,6 +1349,21 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
                     })
                     .is_err()
                 {
+                    break;
+                }
+            }
+            Ok(ClientMessage::ClipboardImage(png)) => {
+                let Ok(path) = crate::clipboard_image::stage_png(&png) else {
+                    continue;
+                };
+                if app_tx
+                    .send(AppEvent::ClientInput {
+                        id,
+                        input: ClientInput::PasteImage(path.clone()),
+                    })
+                    .is_err()
+                {
+                    let _ = std::fs::remove_file(path);
                     break;
                 }
             }

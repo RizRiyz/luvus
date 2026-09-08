@@ -1,6 +1,7 @@
 //! Messages flowing into the main loop from input/PTY threads and (in server
 //! mode) from client connections.
 
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ pub enum ClientInput {
     Key(KeyEvent),
     Mouse(MouseEvent),
     Paste(String),
+    PasteImage(PathBuf),
     Resize(u16, u16),
 }
 
@@ -26,6 +28,8 @@ pub enum AppEvent {
     Key(KeyEvent),
     Mouse(MouseEvent),
     Paste(String),
+    /// A validated PNG staged in the selected server's private directory.
+    PasteImage(PathBuf),
     Resize,
     /// The given pane produced output; the screen changed.
     PtyData(PaneId),

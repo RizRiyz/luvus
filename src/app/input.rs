@@ -674,6 +674,17 @@ impl App {
                 self.paste_into_focused_pane(&s);
                 false // goes to the pane; its echo (PtyData) renders it
             }
+            AppEvent::PasteImage(path) => {
+                // Image paths are terminal input, never modal text. Restrict
+                // delivery to the same normal focused-pane state that accepts
+                // ordinary typing so an image cannot leak through an overlay,
+                // native view, dashboard, or navigation mode.
+                if !self.focused_pane_accepts_image_paste() {
+                    return false;
+                }
+                self.paste_into_focused_pane(&path.to_string_lossy());
+                false // the pane's echo is the event that changes the frame
+            }
             AppEvent::Resize => {
                 // A resize (or a same-size resize event a terminal emits on a
                 // move/expose) may have damaged the screen — force a full repaint.
@@ -3677,6 +3688,50 @@ impl App {
         target
     }
 
+    /// Whether the current input owner is the normal focused terminal pane.
+    /// Dedicated image paste is intentionally stricter than text paste because
+    /// a Luvus modal has no meaningful image value to accept.
+    fn focused_pane_accepts_image_paste(&self) -> bool {
+        self.mode == Mode::Normal
+            && self.bar.overflow.is_none()
+            && self.cmd_inspect.is_none()
+            && !self.help_open
+            && !self.changelog_open
+            && self.module_setting_edit.is_none()
+            && self.named_session_menu.is_none()
+            && self.settings.is_none()
+            && self.search.is_none()
+            && self.picker.is_none()
+            && self.worktree_prompt.is_none()
+            && self.worktree_open.is_none()
+            && self.tab_rename.is_none()
+            && self.tab_menu.is_none()
+            && self.ws_menu.is_none()
+            && self.pane_menu.is_none()
+            && self.agent_menu.is_none()
+            && self.file_prompt.is_none()
+            && self.file_delete.is_none()
+            && self.worktree_delete.is_none()
+            && self.file_menu.is_none()
+            && self.diff_menu.is_none()
+            && self.orch_menu.is_none()
+            && self.dock_menu.is_none()
+            && !self.switcher
+            && self.pane_rename.is_none()
+            && self.ws_rename.is_none()
+            && self.orch_form.is_none()
+            && self.orch_start.is_none()
+            && self.orch_detail.is_none()
+            && self.scroll_pane.is_none()
+            && self.copy_mode.is_none()
+            && self.sidebar_focus.is_none()
+            && !self.files_focused
+            && !self.active_is_git()
+            && !self.active_is_orch()
+            && !self.active_is_mission()
+            && self.focused().is_some()
+    }
+
     /// Record that the user just typed into the focused pane, so detection can
     /// tell typing (whose echo is PTY output) apart from the agent generating
     /// (docs/07). Only the focused pane receives typed input.
@@ -4537,6 +4592,31 @@ mod tests {
             app.orch_form.as_ref().unwrap().prompt,
             "first\nsecond\nthirdline"
         );
+    }
+
+    #[test]
+    fn image_path_paste_reaches_only_a_normal_focused_pane() {
+        let _env = crate::persist::test_env("image-path-paste-route");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let focus = app.layout().focus;
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&focus)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+
+        let path = std::path::PathBuf::from("clipboard-images/example.png");
+        assert!(!app.handle_event(AppEvent::PasteImage(path.clone())));
+        let crate::terminal::pty::InputAction::Bytes(bytes) = input_rx.try_recv().unwrap() else {
+            panic!("image path should use the ordinary paste queue");
+        };
+        assert_eq!(bytes, path.to_string_lossy().as_bytes());
+
+        app.help_open = true;
+        assert!(!app.handle_event(AppEvent::PasteImage("clipboard-images/blocked.png".into())));
+        assert!(input_rx.try_recv().is_err());
+        assert!(app.help_open, "the image gesture must not dismiss help");
     }
 
     #[test]
