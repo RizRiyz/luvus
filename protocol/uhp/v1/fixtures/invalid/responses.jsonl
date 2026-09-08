@@ -38,3 +38,11 @@
 {"id":"prompt-error-missing-reason","error":{"code":"input_not_echoed","message":"","data":{"pane":"7","queued":true,"submitted":false,"submission":"failed","baseline_revision":4,"content_revision":6}}}
 {"id":"prompt-error-message-numeric","error":{"code":"input_not_echoed","message":1,"data":{"pane":"7","queued":true,"submitted":false,"submission":"failed","reason":"input_not_echoed","baseline_revision":4,"content_revision":6}}}
 {"id":"prompt-error-message-null","error":{"code":"input_not_echoed","message":null,"data":{"pane":"7","queued":true,"submitted":false,"submission":"failed","reason":"input_not_echoed","baseline_revision":4,"content_revision":6}}}
+{"id":"prompt-incomplete-legacy","result":{"type":"agent_prompt"}}
+{"id":"prompt-legacy-missing-pane","result":{"type":"agent_prompt","submitted":true,"matched":false,"evidence":"queued","status":"idle","baseline_revision":0,"content_revision":0}}
+{"id":"prompt-legacy-missing-submitted","result":{"type":"agent_prompt","pane":"7","matched":false,"evidence":"queued","status":"idle","baseline_revision":0,"content_revision":0}}
+{"id":"prompt-legacy-missing-matched","result":{"type":"agent_prompt","pane":"7","submitted":true,"evidence":"queued","status":"idle","baseline_revision":0,"content_revision":0}}
+{"id":"prompt-legacy-missing-evidence","result":{"type":"agent_prompt","pane":"7","submitted":true,"matched":false,"status":"idle","baseline_revision":0,"content_revision":0}}
+{"id":"prompt-legacy-missing-status","result":{"type":"agent_prompt","pane":"7","submitted":true,"matched":false,"evidence":"queued","baseline_revision":0,"content_revision":0}}
+{"id":"prompt-legacy-missing-baseline_revision","result":{"type":"agent_prompt","pane":"7","submitted":true,"matched":false,"evidence":"queued","status":"idle","content_revision":0}}
+{"id":"prompt-legacy-missing-content_revision","result":{"type":"agent_prompt","pane":"7","submitted":true,"matched":false,"evidence":"queued","status":"idle","baseline_revision":0}}

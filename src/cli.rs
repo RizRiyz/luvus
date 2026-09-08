@@ -5497,6 +5497,35 @@ mod tests {
             assert_eq!(request["params"]["until"], until);
             assert_eq!(request["params"]["timeout_s"], timeout);
         }
+        for command in [
+            "luvus agent prompt --no-confirm hello",
+            "luvus agent send --no-confirm hello",
+            "luvus agent prompt --wait hello",
+        ] {
+            let listener = wait_test_server();
+            let server = std::thread::spawn(move || {
+                let (mut connection, request) = accept_wait_request(&listener);
+                writeln!(
+                    connection,
+                    "{}",
+                    json!({"id":"1","result":{"matched":true}})
+                )
+                .unwrap();
+                request
+            });
+            let result = agent_send_cmd(&argv(command));
+            if result.is_err() {
+                // Release the fixture listener after rejection without an RPC.
+                let _ = send_request("test.parser_rejected", json!({}));
+            }
+            let request = server.join().unwrap();
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "usage: luvus agent prompt <target> <text> [--no-confirm] [--wait] [--until STATE] [--timeout S]",
+                "{command}"
+            );
+            assert_eq!(request["method"], "test.parser_rejected", "{command}");
+        }
         assert!(agent_send_cmd(&argv("luvus agent prompt 7 hello --unknown")).is_err());
     }
 
