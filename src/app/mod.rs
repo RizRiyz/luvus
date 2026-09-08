@@ -3931,6 +3931,17 @@ impl App {
         commands
     }
 
+    /// Graphics produced since collection invalidate a drawing client's live
+    /// projection: its cells may already name an image not in that backlog.
+    pub(crate) fn pane_graphics_pending(&self) -> bool {
+        self.host_graphics.pending()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn host_graphics_for_test(&self) -> crate::terminal::graphics::HostGraphics {
+        self.host_graphics.clone()
+    }
+
     /// The images every pane's grid still refers to, for a client that has just
     /// attached and is about to be sent cells naming them.
     pub fn pane_graphics_history(&self) -> Vec<Vec<u8>> {
