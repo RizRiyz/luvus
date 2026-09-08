@@ -108,6 +108,14 @@ fn confirmed_prompt_echoes_first_line_then_sends_exactly_one_enter() {
             assert_eq!(value["result"]["submission"], "confirmed");
             assert_eq!(value["result"]["evidence"], "input_echoed");
             assert_eq!(value["result"]["reason"], Value::Null);
+            assert_eq!(
+                value["result"]["content_revision"],
+                app.panes[&pane].content_revision()
+            );
+            assert!(
+                value["result"]["content_revision"].as_u64().unwrap()
+                    > value["result"]["baseline_revision"].as_u64().unwrap()
+            );
             assert!(app.agent_prompts.is_empty());
         }
     }

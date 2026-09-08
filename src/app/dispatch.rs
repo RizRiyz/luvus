@@ -6528,19 +6528,22 @@ impl App {
                         return false;
                     }
                     let target = target.expect("live target has a revision");
-                    let echoed = target.engine.lock().ok().is_some_and(|engine| {
-                        let current = target.content_revision();
-                        let region = engine.prompt_input_region();
-                        // An unchanged pre-paste candidate alone is not evidence.
-                        let fresh = current > waiter.baseline_revision;
-                        if region == echo.before && !fresh {
-                            return false;
-                        }
-                        fresh
-                            && region.as_ref().is_some_and(|region| {
-                                prompt_confirmation::matches(region, &echo.text)
-                            })
-                    });
+                    // The revision must describe the same locked snapshot as
+                    // the echo, including when PTY output raced this tick.
+                    let (revision, region) =
+                        target.engine.lock().map_or((revision, None), |engine| {
+                            (target.content_revision(), engine.prompt_input_region())
+                        });
+                    waiter.last_revision = revision;
+                    let fresh = revision > waiter.baseline_revision;
+                    // An unchanged pre-paste candidate alone is not evidence.
+                    if region == echo.before && !fresh {
+                        return true;
+                    }
+                    let echoed = fresh
+                        && region
+                            .as_ref()
+                            .is_some_and(|region| prompt_confirmation::matches(region, &echo.text));
                     if !echoed {
                         return true;
                     }
