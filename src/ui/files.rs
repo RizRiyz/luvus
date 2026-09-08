@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::app::App;
-use crate::files::{FileLoad, FileView, SIZE_CAP};
+use crate::files::{highlight, FileLoad, FileView, SIZE_CAP};
 use crate::ui::theme::Theme;
 use crate::ui::RenderTarget;
 
@@ -446,6 +446,9 @@ fn draw_text(f: &mut RenderTarget, body: Rect, v: &FileView, lines: &[String], t
     if text_w == 0 {
         return;
     }
+    // The highlight language is a pure function of the path: one lookup per
+    // frame, then O(visible rows) tokenization below — never O(file).
+    let lang = highlight::language_for_path(&v.path);
     // The gutter is `marker + number + one space`, totalling `gutter + 1` — the
     // same width as before, so `text_x` and mouse-selection column mapping are
     // unchanged. The git change marker (docs/38 + docs/30) sits in column 0,
@@ -479,12 +482,16 @@ fn draw_text(f: &mut RenderTarget, body: Rect, v: &FileView, lines: &[String], t
     if v.wrap {
         // Soft-wrap: each file line occupies as many screen rows as it needs.
         // Scroll stays line-based (top row = file line `scroll`), so vertical
-        // scroll, goto, and search reveal are unchanged.
+        // scroll, goto, and search reveal are unchanged. Each segment is
+        // syntax-highlighted from the line's tokens, with search matches
+        // overlaid — the same spans the no-wrap path builds for whole lines.
         let mut y = body.y;
         let bottom = body.y + body.height;
         let mut i = v.scroll;
         while y < bottom && i < lines.len() {
             let line = &lines[i];
+            let tokens = highlight::tokenize(line, lang);
+            let (hits, qlen) = search_hits_for_line(v, i);
             for (si, range) in crate::files::wrap_ranges(line, text_w as usize)
                 .into_iter()
                 .enumerate()
@@ -493,11 +500,9 @@ fn draw_text(f: &mut RenderTarget, body: Rect, v: &FileView, lines: &[String], t
                     break;
                 }
                 gutter_cell(f, y, (si == 0).then_some(i + 1), i + 1);
+                let spans = spans_in_range(line, &tokens, range, &hits, qlen, t);
                 f.render_widget(
-                    Paragraph::new(Span::styled(
-                        crate::files::seg_text(line, range),
-                        Style::new().fg(t.text),
-                    )),
+                    Paragraph::new(Line::from(spans)),
                     Rect::new(text_x, y, text_w, 1),
                 );
                 y += 1;
@@ -511,9 +516,12 @@ fn draw_text(f: &mut RenderTarget, body: Rect, v: &FileView, lines: &[String], t
     for (i, line) in lines.iter().enumerate().skip(v.scroll).take(rows) {
         let y = body.y + (i - v.scroll) as u16;
         gutter_cell(f, y, Some(i + 1), i + 1);
-        let line_ui = search_line(v, i, line, t);
+        let tokens = highlight::tokenize(line, lang);
+        let (hits, qlen) = search_hits_for_line(v, i);
+        let width = line.chars().count();
+        let spans = spans_in_range(line, &tokens, (0, width), &hits, qlen, t);
         f.render_widget(
-            Paragraph::new(line_ui).scroll((0, v.hscroll)),
+            Paragraph::new(Line::from(spans)).scroll((0, v.hscroll)),
             Rect::new(text_x, y, text_w, 1),
         );
     }
@@ -547,46 +555,118 @@ fn human(n: u64) -> String {
     }
 }
 
-/// Build a line's spans, highlighting any search matches on it (the current
-/// match brighter). No match → one plain span.
-fn search_line<'a>(v: &FileView, line_idx: usize, line: &'a str, t: &Theme) -> Line<'a> {
-    let Some(s) = &v.search else {
-        return Line::from(Span::styled(line, Style::new().fg(t.text)));
+/// Base text style for one highlight role, resolved through the active theme
+/// so a theme switch recolors the viewer without reparsing any file.
+fn highlight_style(kind: highlight::Kind, t: &Theme) -> Style {
+    match kind {
+        highlight::Kind::Normal => Style::new().fg(t.text),
+        highlight::Kind::Keyword => Style::new().fg(t.accent),
+        highlight::Kind::String => Style::new().fg(t.green),
+        highlight::Kind::Comment => Style::new().fg(t.overlay1).italic(),
+        highlight::Kind::Number => Style::new().fg(t.amber),
+        highlight::Kind::Function => Style::new().fg(t.mint),
+        highlight::Kind::Type => Style::new().fg(t.subtext1),
+    }
+}
+
+/// Search hits on one file line as `(char column, is_current)` plus the query
+/// length in chars. `None`/editing/empty queries yield no hits, so plain
+/// syntax spans render alone. Columns follow the existing search convention
+/// (match offsets into the line's chars).
+fn search_hits_for_line(v: &FileView, line_idx: usize) -> (Vec<(usize, bool)>, usize) {
+    let Some(search) = &v.search else {
+        return (Vec::new(), 0);
     };
-    let hits: Vec<(usize, usize)> = s
+    if search.editing || search.query.is_empty() {
+        return (Vec::new(), 0);
+    }
+    let qlen = search.query.chars().count();
+    let hits: Vec<(usize, bool)> = search
         .matches
         .iter()
         .enumerate()
-        .filter(|(_, (l, _))| *l == line_idx)
-        .map(|(i, (_, c))| (i, *c))
+        .filter(|(_, (line, _))| *line == line_idx)
+        .map(|(index, (_, col))| (*col, index == search.current))
         .collect();
-    if hits.is_empty() || s.query.is_empty() {
-        return Line::from(Span::styled(line, Style::new().fg(t.text)));
-    }
-    let qlen = s.query.chars().count();
-    let mut spans: Vec<Span> = Vec::new();
-    let mut cursor = 0usize; // char index
+    (hits, qlen)
+}
+
+/// Build spans for the char range of one line: syntax tokens clipped to the
+/// range, split at search-match boundaries so the current match stays brighter
+/// than the rest. Adjacent pieces with the same style merge back into one span.
+fn spans_in_range(
+    line: &str,
+    tokens: &[highlight::Token],
+    range: (usize, usize),
+    hits: &[(usize, bool)],
+    query_len: usize,
+    t: &Theme,
+) -> Vec<Span<'static>> {
     let chars: Vec<char> = line.chars().collect();
-    for (mi, col) in hits {
-        if col > cursor {
-            let seg: String = chars[cursor..col.min(chars.len())].iter().collect();
-            spans.push(Span::styled(seg, Style::new().fg(t.text)));
+    let (seg_start, seg_end) = range;
+    let mut intervals: Vec<(usize, usize, bool)> = hits
+        .iter()
+        .map(|(col, current)| {
+            (
+                (*col).max(seg_start),
+                col.saturating_add(query_len).max(col + 1).min(seg_end),
+                *current,
+            )
+        })
+        .filter(|(start, end, _)| start < end)
+        .collect();
+    intervals.sort();
+    intervals.dedup();
+    let text_of = |start: usize, end: usize| -> String {
+        chars
+            .get(start..end)
+            .map(|slice| slice.iter().collect())
+            .unwrap_or_default()
+    };
+    let mut pieces: Vec<(String, Style)> = Vec::new();
+    let mut push = |text: String, style: Style| {
+        if text.is_empty() {
+            return;
         }
-        let end = (col + qlen).min(chars.len());
-        let seg: String = chars[col..end].iter().collect();
-        let hl = if mi == s.current {
-            Style::new().fg(t.base).bg(t.accent).bold()
+        if let Some(last) = pieces.last_mut().filter(|(_, prev)| *prev == style) {
+            last.0.push_str(&text);
         } else {
-            Style::new().fg(t.base).bg(t.amber)
-        };
-        spans.push(Span::styled(seg, hl));
-        cursor = end;
+            pieces.push((text, style));
+        }
+    };
+    for token in tokens {
+        let token_start = token.start.max(seg_start);
+        let token_end = token.end.min(seg_end);
+        if token_start >= token_end {
+            continue;
+        }
+        let base = highlight_style(token.kind, t);
+        let mut cursor = token_start;
+        for (hit_start, hit_end, current) in intervals
+            .iter()
+            .filter(|(start, end, _)| *end > token_start && *start < token_end)
+        {
+            let hit_start = (*hit_start).max(token_start);
+            let hit_end = (*hit_end).min(token_end);
+            if hit_start > cursor {
+                push(text_of(cursor, hit_start), base);
+            }
+            let highlight = if *current {
+                Style::new().fg(t.base).bg(t.accent).bold()
+            } else {
+                Style::new().fg(t.base).bg(t.amber)
+            };
+            push(text_of(hit_start, hit_end), highlight);
+            cursor = hit_end;
+        }
+        if cursor < token_end {
+            push(text_of(cursor, token_end), base);
+        }
     }
-    if cursor < chars.len() {
-        let seg: String = chars[cursor..].iter().collect();
-        spans.push(Span::styled(seg, Style::new().fg(t.text)));
-    }
-    Line::from(spans)
+    pieces
+        .into_iter()
+        .map(|(text, style)| Span::styled(text, style))
+        .collect()
 }
 
 /// The tint color for a git working-tree status in the FILES dock (docs/38).
@@ -751,5 +831,81 @@ mod tests {
         assert!(!file_selection_contains(&selection, 6, 2, text_x));
         assert!(file_selection_contains(&selection, 7, 2, text_x));
         assert!(file_selection_contains(&selection, 12, 3, text_x));
+    }
+
+    /// Syntax spans keep the line's text intact while coloring each role
+    /// through the theme: keywords use the accent, strings the idle green,
+    /// comments the dim overlay, numbers amber, calls mint, types subtext.
+    #[test]
+    fn rust_viewer_spans_color_each_role_through_the_theme() {
+        use crate::files::highlight;
+
+        let theme = Theme::quattro_rally();
+        let line = "fn load(path: &Path) -> usize { // open";
+        let tokens = highlight::tokenize(line, highlight::Language::Rust);
+        let width = line.chars().count();
+        let spans = super::spans_in_range(line, &tokens, (0, width), &[], 0, &theme);
+        let text: String = spans.iter().map(|span| span.content.as_ref()).collect();
+        assert_eq!(text, line, "spans must cover the line exactly");
+
+        let style_of = |needle: &str| {
+            spans
+                .iter()
+                .find(|span| span.content == needle)
+                .map(|span| span.style)
+        };
+        assert_eq!(
+            style_of("fn").map(|style| style.fg),
+            Some(Some(theme.accent)),
+            "keywords use the accent"
+        );
+        assert_eq!(
+            style_of("load").map(|style| style.fg),
+            Some(Some(theme.mint)),
+            "calls use mint"
+        );
+        assert_eq!(
+            style_of("Path").map(|style| style.fg),
+            Some(Some(theme.subtext1)),
+            "types use subtext"
+        );
+        assert!(
+            spans
+                .iter()
+                .find(|span| span.content.contains("// open"))
+                .is_some_and(|span| span.style.fg == Some(theme.overlay1)),
+            "the trailing comment is dim"
+        );
+    }
+
+    /// Search matches overlay the syntax color with the same backgrounds the
+    /// viewer used before highlighting, and wrapped segments clip both layers
+    /// to their own char range.
+    #[test]
+    fn viewer_search_overlays_syntax_and_clips_to_wrap_segments() {
+        use crate::files::highlight;
+
+        let theme = Theme::quattro_rally();
+        let line = "let loaded = load(path); // load";
+        let tokens = highlight::tokenize(line, highlight::Language::Rust);
+        let width = line.chars().count();
+        // `load` occurs at columns 4 ("loaded" prefix) and 13; highlight the
+        // standalone call as the current match.
+        let spans = super::spans_in_range(line, &tokens, (0, width), &[(13, true)], 4, &theme);
+        let current = spans
+            .iter()
+            .find(|span| span.content == "load")
+            .expect("current match is its own span");
+        assert_eq!(current.style.bg, Some(theme.accent));
+        assert_eq!(current.style.fg, Some(theme.base));
+
+        // A wrapped segment sees only its own slice of both layers.
+        let segment = super::spans_in_range(line, &tokens, (0, 10), &[(13, true)], 4, &theme);
+        let text: String = segment.iter().map(|span| span.content.as_ref()).collect();
+        assert_eq!(text, "let loaded");
+        assert!(
+            segment.iter().all(|span| span.style.bg.is_none()),
+            "the match outside the segment must not leak in"
+        );
     }
 }

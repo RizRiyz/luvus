@@ -198,7 +198,13 @@ source or editor.
 
 ## What this is not
 
-The source file viewer does not do syntax coloring. To review staged and working-tree
+The source file viewer highlights code as you read: keywords, strings, numbers,
+comments, function calls, and types are tinted through your active theme, in
+both wrapped and unwrapped modes, without changing search or selection colors.
+The language follows the file extension (Rust, Python, JavaScript/TypeScript,
+Go, C-like languages, shell, TOML, YAML, JSON, CSS, HTML, and SQL, among
+others); Markdown and plain text stay uncolored, and multi-line block comments
+are an approximation highlighted per line. To review staged and working-tree
 patches with split or stack layouts and local notes, switch the dock to
 [DIFF](/docs/guides/diff/). Use the [git tab](/docs/guides/git/) for branches,
 commits, pull requests, issues, and commit flow. To edit, open the file in an
