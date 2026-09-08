@@ -378,14 +378,22 @@ pub(super) fn validate_destination(destination: &str) -> Result<()> {
 }
 
 pub(super) fn validate_remote_binary(binary: &str) -> Result<()> {
-    if binary.len() > MAX_REMOTE_BINARY_BYTES
-        || !binary.starts_with('/')
-        || binary.chars().any(|character| {
-            !(character.is_ascii_alphanumeric() || matches!(character, '/' | '_' | '-' | '.' | '+'))
-        })
-    {
+    let posix = binary.starts_with('/')
+        && binary.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '/' | '_' | '-' | '.' | '+')
+        });
+    let bytes = binary.as_bytes();
+    let windows = bytes.len() >= 4
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+        && binary[2..].chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, '\\' | '/' | '_' | '-' | '.' | '+')
+        });
+    if binary.len() > MAX_REMOTE_BINARY_BYTES || !(posix || windows) {
         return Err(anyhow!(
-            "remote Luvus binary must be an absolute POSIX path containing only letters, digits, `/`, `_`, `-`, `.`, or `+`"
+            "remote Luvus binary must be a shell-safe absolute POSIX or Windows drive path without whitespace"
         ));
     }
     Ok(())
@@ -451,6 +459,11 @@ mod tests {
         assert!(validate_destination("host;touch-pwned").is_ok());
         assert!(validate_destination("host name").is_err());
         assert!(validate_remote_binary("/home/dev/.local/bin/luvus").is_ok());
+        assert!(validate_remote_binary(r"C:\Users\dev\AppData\Local\luvus\luvus.exe").is_ok());
+        assert!(validate_remote_binary("C:/Users/dev/.local/bin/luvus.exe").is_ok());
+        assert!(validate_remote_binary(r"C:\Program Files\luvus.exe").is_err());
+        assert!(validate_remote_binary(r"C:\temp\luvus.exe:stream").is_err());
+        assert!(validate_remote_binary(r"C:\temp\luvus.exe & whoami").is_err());
         assert!(validate_remote_binary("luvus").is_err());
         assert!(validate_remote_binary("/tmp/luvus;bad").is_err());
     }

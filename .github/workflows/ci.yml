@@ -121,6 +121,10 @@ jobs:
           cargo test --locked prefix_digits_jump_to_tabs_and_shifted_digits_jump_to_workspaces
           cargo test --locked diff::git::tests::tree_tint_uses_nested_visible_spelling_and_new_rename_path
           cargo test --locked agent::tests::claude_project_dir_encodes_every_non_alphanumeric
+          cargo test --locked machine::catalog::tests::destinations_and_remote_paths_cannot_be_ssh_options_or_shell_fragments
+          cargo test --locked machine::link::tests::persistent_link_passes_a_windows_binary_as_one_argument
+          cargo test --locked machine::provision::tests::windows_
+          cargo test --locked machine::ssh::tests::windows_probe_paths_compare_case_and_separator_insensitively
       - name: Validate published protocol fixtures
         shell: pwsh
         run: |

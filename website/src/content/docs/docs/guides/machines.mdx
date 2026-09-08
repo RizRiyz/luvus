@@ -26,16 +26,23 @@ luvus machine add build --host buildbox --label "Build box"
 For an enabled profile, Luvus first looks for an exact compatible remote
 binary. If none is available, the foreground `machine add` command
 automatically downloads the matching published release on the remote host,
-verifies its published SHA-256 digest and fleet capability, and atomically
-installs it at `~/.local/bin/luvus`. It never requests administrator access and
-never executes a downloaded installer script. The profile is saved only after
-a fresh `BatchMode=yes` capability probe succeeds.
+verifies its published SHA-256 digest and fleet capability, and installs it in
+that user's private prefix. macOS and Linux use `~/.local/bin/luvus`. Windows
+uses a versioned `%LOCALAPPDATA%\luvus\fleet\v<version>\luvus.exe` path so a
+running executable never needs to be replaced. It never requests administrator
+access, changes `PATH`, or executes a downloaded installer script. The profile
+is saved only after a fresh `BatchMode=yes` capability probe succeeds.
 
-Automatic provisioning requires `curl` or `wget`, `tar`, and one of
-`sha256sum`, `shasum`, or `openssl` on a supported macOS or Linux remote. An
-explicit `--remote-binary <absolute-path>` remains authoritative and is only
-validated; Luvus records `automatic_provisioning:false` and does not replace
-it. Automatically discovered or installed paths retain
+On macOS and Linux, automatic provisioning requires `curl` or `wget`, `tar`,
+and one of `sha256sum`, `shasum`, or `openssl`. Windows x86-64 provisioning uses
+the host's built-in Windows PowerShell and ZIP support. Its user-local install
+path must not contain whitespace because Luvus invokes the native executable
+directly across either cmd.exe or PowerShell OpenSSH defaults. If that
+constraint does not fit the account, install Luvus at another shell-safe
+absolute path and pass it explicitly. An explicit
+`--remote-binary <absolute-path>` remains authoritative and is only validated;
+Luvus records `automatic_provisioning:false` and does not replace it.
+Automatically discovered or installed paths retain
 `automatic_provisioning:true`, so a later foreground enable can repair a
 missing or incompatible managed binary. `machine status` is always read-only.
 Provisioning runs only for the explicit foreground `machine add` and `machine
@@ -60,8 +67,9 @@ luvus machine add staging --host staging --disabled
 luvus machine enable staging
 ```
 
-The first machine release accepts macOS and Linux remote hosts. The local TUI
-uses the installed OpenSSH client on macOS, Linux, or Windows.
+Saved machines accept macOS, Linux, and Windows remote hosts. Automatic Windows
+provisioning currently supports the published x86-64 MSVC release. The local
+TUI uses the installed OpenSSH client on macOS, Linux, or Windows.
 
 ## Switch machines
 

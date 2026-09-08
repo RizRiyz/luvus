@@ -199,4 +199,22 @@ mod tests {
         assert_eq!(args.last().map(String::as_str), Some("fleet-bridge"));
         assert!(args.windows(2).any(|pair| pair == ["-o", "BatchMode=yes"]));
     }
+
+    #[test]
+    fn persistent_link_passes_a_windows_binary_as_one_argument() {
+        let mut profile = MachineProfile::new("win".into(), "winbox".into());
+        profile.remote_binary = Some(r"C:\Users\dev\AppData\Local\luvus\luvus.exe".into());
+        let command = command(&profile, profile.remote_binary.as_deref().unwrap());
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.as_str() == r"C:\Users\dev\AppData\Local\luvus\luvus.exe")
+                .count(),
+            1
+        );
+        assert_eq!(args.last().map(String::as_str), Some("fleet-bridge"));
+    }
 }

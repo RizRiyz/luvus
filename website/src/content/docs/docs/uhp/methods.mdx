@@ -125,9 +125,11 @@ managed binary from an explicit path. Control methods are advertised only by
 An enabled `machine.add` or `machine.enable` request may provision the exact
 published Luvus release on the remote account before saving or enabling the
 profile. This foreground operation uses key-based OpenSSH, verifies the release
-checksum and fleet capability, installs only under `~/.local/bin`, and never
-restarts a running remote server. `machine.status` and all background reconnects
-remain read-only. Use `enabled:false` to save without provisioning.
+checksum and fleet capability, and installs only in a private user prefix:
+`~/.local/bin` on macOS/Linux or a versioned `%LOCALAPPDATA%\luvus\fleet`
+directory on Windows x86-64. It never restarts a running remote server.
+`machine.status` and all background reconnects remain read-only. Use
+`enabled:false` to save without provisioning.
 
 `task.add` accepts a short `title` and an optional multiline `prompt` containing
 the detailed worker briefing. `task.get`, `task.list`, and task events return

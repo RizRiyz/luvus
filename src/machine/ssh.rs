@@ -29,14 +29,35 @@ pub(super) struct ProbeResult {
 
 pub(crate) fn prepare(profile: &MachineProfile) -> Result<ProbeResult> {
     validate_destination(&profile.destination)?;
-    let binary = match profile.remote_binary.as_deref() {
-        Some(binary) => {
-            validate_remote_binary(binary)?;
-            binary.to_string()
-        }
-        None => discover_binary(&profile.destination)?,
-    };
-    let response = probe(&profile.destination, &binary, true)?;
+    if let Some(binary) = profile.remote_binary.as_deref() {
+        validate_remote_binary(binary)?;
+        return verified_probe(&profile.destination, binary, Some(binary));
+    }
+
+    // A bare command is the one discovery path shared by POSIX and Windows
+    // OpenSSH servers. The probe returns the absolute executable path that is
+    // saved for subsequent non-interactive links.
+    let path_probe = verified_probe(&profile.destination, "luvus", None);
+    if let Ok(probe) = path_probe {
+        return Ok(probe);
+    }
+    let path_error = path_probe.expect_err("the successful probe returned above");
+
+    // POSIX login environments commonly omit user-local bin directories from
+    // non-interactive PATH. Windows has no equivalent shell-neutral search;
+    // automatic provisioning handles that case after this read-only attempt.
+    let binary = discover_binary(&profile.destination)?;
+    verified_probe(&profile.destination, &binary, Some(&binary)).map_err(|fallback| {
+        anyhow!("PATH probe failed: {path_error}; user-local probe failed: {fallback}")
+    })
+}
+
+fn verified_probe(
+    destination: &str,
+    invocation: &str,
+    expected_binary: Option<&str>,
+) -> Result<ProbeResult> {
+    let response = probe(destination, invocation, true)?;
     if response.protocol != "luvus-fleet-v1" {
         return Err(anyhow!("remote Luvus does not advertise fleet protocol 1"));
     }
@@ -47,14 +68,14 @@ pub(crate) fn prepare(profile: &MachineProfile) -> Result<ProbeResult> {
             env!("CARGO_PKG_VERSION")
         ));
     }
-    if !matches!(response.os.as_str(), "linux" | "macos") {
+    if !matches!(response.os.as_str(), "linux" | "macos" | "windows") {
         return Err(anyhow!(
             "remote operating system `{}` is not supported for machine control",
             response.os
         ));
     }
     validate_remote_binary(&response.binary)?;
-    if response.binary != binary {
+    if expected_binary.is_some_and(|expected| !same_remote_binary(expected, &response.binary)) {
         return Err(anyhow!("remote probe returned a different executable path"));
     }
     Ok(ProbeResult {
@@ -63,6 +84,16 @@ pub(crate) fn prepare(profile: &MachineProfile) -> Result<ProbeResult> {
         arch: response.arch,
         remote_binary: response.binary,
     })
+}
+
+fn same_remote_binary(expected: &str, reported: &str) -> bool {
+    if expected.as_bytes().get(1) == Some(&b':') && reported.as_bytes().get(1) == Some(&b':') {
+        expected
+            .replace('\\', "/")
+            .eq_ignore_ascii_case(&reported.replace('\\', "/"))
+    } else {
+        expected == reported
+    }
 }
 
 /// Prepare an enabled machine, provisioning the matching published release
@@ -306,6 +337,22 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["-o", "BatchMode=yes"]));
         assert_eq!(args.last().map(String::as_str), Some("dev@buildbox"));
         assert!(!args.iter().any(|arg| arg.contains("ProxyCommand")));
+    }
+
+    #[test]
+    fn windows_probe_paths_compare_case_and_separator_insensitively() {
+        assert!(same_remote_binary(
+            r"C:\Users\Dev\AppData\Local\luvus\luvus.exe",
+            "c:/users/dev/appdata/local/luvus/luvus.exe"
+        ));
+        assert!(!same_remote_binary(
+            r"C:\Users\Dev\luvus.exe",
+            r"D:\Users\Dev\luvus.exe"
+        ));
+        assert!(!same_remote_binary(
+            "/home/dev/.local/bin/luvus",
+            "/home/DEV/.local/bin/luvus"
+        ));
     }
 
     #[cfg(unix)]
