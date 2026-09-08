@@ -751,10 +751,12 @@ impl App {
                 .map(|(i, t)| {
                     // `name` is what `tab.rename` writes; `kind` distinguishes
                     // the dashboard tabs, which have no panes and can't be named.
-                    let kind = if t.git.is_some() {
+                    let kind = if t.is_git() {
                         "git"
-                    } else if t.orch {
+                    } else if t.is_orch() {
                         "orch"
+                    } else if t.is_mission() {
+                        "mission"
                     } else {
                         "panes"
                     };

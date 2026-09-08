@@ -1,5 +1,22 @@
 use super::super::*;
 use super::support::*;
+
+#[test]
+fn task_update_rejects_an_unknown_task_without_emitting_null_success() {
+    let (_env, mut app) = app("socket-task-update-missing");
+
+    let error = app
+        .dispatch(
+            "task.update",
+            &json!({"id":"missing", "note":"must not be accepted"}),
+        )
+        .expect_err("an unknown task must not be updated");
+
+    assert_eq!(error.0, "not_found");
+    assert_eq!(error.1, "no such task: missing");
+    assert!(app.orch.tasks.is_empty());
+}
+
 #[test]
 fn task_start_api_supports_explicit_workspace_mode() {
     let (_env, mut app) = app("socket-task-workspace");

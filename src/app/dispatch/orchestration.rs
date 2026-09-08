@@ -441,6 +441,11 @@ impl App {
         {
             reject_api_fields(p, &["id", "status", "output", "note", "prompt"])?;
             let id = req_str(p, "id")?.to_string();
+            let current = self
+                .orch
+                .task(&id)
+                .ok_or_else(|| ("not_found".to_string(), format!("no such task: {id}")))?
+                .status;
             let status = if let Some(s) = p.get("status").and_then(|v| v.as_str()) {
                 let st = crate::orch::TaskStatus::parse(s)
                     .ok_or_else(|| ("bad_request".to_string(), format!("unknown status: {s}")))?;
@@ -457,16 +462,14 @@ impl App {
             } else {
                 None
             };
-            if let Some(current) = self.orch.task(&id).map(|task| task.status) {
-                if matches!(
-                    current,
-                    crate::orch::TaskStatus::Merging | crate::orch::TaskStatus::Merged
-                ) {
-                    return Err((
-                        "task_complete".to_string(),
-                        format!("{id} is already {}", current.as_str()),
-                    ));
-                }
+            if matches!(
+                current,
+                crate::orch::TaskStatus::Merging | crate::orch::TaskStatus::Merged
+            ) {
+                return Err((
+                    "task_complete".to_string(),
+                    format!("{id} is already {}", current.as_str()),
+                ));
             }
             if p.get("prompt").is_some() {
                 self.orch
@@ -483,8 +486,11 @@ impl App {
                 self.orch.add_note(&id, n.to_string()).map_err(orch_err)?;
             }
             self.orch.save();
-            let t = self.orch.task(&id).cloned();
-            let jv = t.as_ref().map(task_json).unwrap_or(Value::Null);
+            let task = self
+                .orch
+                .task(&id)
+                .ok_or_else(|| ("not_found".to_string(), format!("no such task: {id}")))?;
+            let jv = task_json(task);
             self.emit_event("task.updated", jv.clone());
             self.sync_automation_task(&id);
             Ok(json!({ "type": "task", "task": jv }))

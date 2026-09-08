@@ -195,7 +195,7 @@ fn workspace_block_move_is_atomic_and_keeps_active_workspace() {
     let before: Vec<_> = app
         .workspaces
         .iter()
-        .map(|workspace| workspace.cwd.clone())
+        .map(|workspace| workspace.id.clone())
         .collect();
     assert!(app
         .dispatch(
@@ -208,7 +208,7 @@ fn workspace_block_move_is_atomic_and_keeps_active_workspace() {
     assert_eq!(
         app.workspaces
             .iter()
-            .map(|workspace| workspace.cwd.clone())
+            .map(|workspace| workspace.id.clone())
             .collect::<Vec<_>>(),
         before
     );
@@ -224,7 +224,7 @@ fn workspace_block_move_is_atomic_and_keeps_active_workspace() {
     assert_eq!(
         app.workspaces
             .iter()
-            .map(|workspace| workspace.cwd.clone())
+            .map(|workspace| workspace.id.clone())
             .collect::<Vec<_>>(),
         before,
         "an impossible final block position is rejected atomically"
@@ -1154,6 +1154,20 @@ fn tab_rename_api_validates_target_name_and_dashboard_kind() {
         .expect_err("dashboard rename must fail");
     assert_eq!(err.0, "invalid_request");
     assert!(app.ws().tabs[mission - 1].name.is_none());
+}
+
+#[test]
+fn tab_list_and_get_report_the_same_mission_control_kind() {
+    let (_env, mut app) = app("tab-mission-kind");
+    app.open_mission_control(0);
+    let mission = app.ws().active_tab + 1;
+
+    let list = app.dispatch("tab.list", &json!({})).unwrap();
+    let listed = &list["tabs"][mission - 1];
+    let get = app.dispatch("tab.get", &json!({"tab":mission})).unwrap();
+
+    assert_eq!(listed["kind"], "mission");
+    assert_eq!(get["kind"], listed["kind"]);
 }
 
 #[test]
