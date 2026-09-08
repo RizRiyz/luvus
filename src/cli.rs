@@ -322,7 +322,8 @@ universal harness protocol:
   uhp schema                print the complete installed UHP JSON Schema bundle
   uhp snapshot              print a fenced session snapshot for harness bootstrap
   uhp events                stream sequenced UHP events
-  uhp access [--control] [--ttl <seconds> | --no-expiry]   expose scoped UHP through a private provider endpoint
+  uhp access [--machines] [--control] [--ttl <seconds> | --no-expiry]
+                             expose scoped UHP through a private provider endpoint
   uhp proxy                 forward one JSON request from stdin to the selected server
 
 sessions:
@@ -4623,7 +4624,9 @@ mod tests {
     #[test]
     fn uhp_help_includes_transport_neutral_access() {
         let help = rendered_topic_help("uhp", None);
-        assert!(help.contains("uhp access [--control] [--ttl <seconds> | --no-expiry]"));
+        assert!(
+            help.contains("uhp access [--machines] [--control] [--ttl <seconds> | --no-expiry]")
+        );
         assert!(help.contains("private provider endpoint"));
     }
 

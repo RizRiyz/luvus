@@ -34,6 +34,7 @@ struct Shared {
     upstream_token: Mutex<String>,
     pairing: Mutex<Pairing>,
     mode: AccessMode,
+    machine_access: bool,
     cancelled: Arc<AtomicBool>,
     active: AtomicUsize,
     next_connection_id: AtomicUsize,
@@ -77,6 +78,7 @@ impl RateWindow {
 }
 
 impl Gateway {
+    #[cfg(test)]
     pub(super) fn start(
         socket_path: PathBuf,
         client_token: String,
@@ -84,6 +86,26 @@ impl Gateway {
         upstream_token: String,
         pairing: Pairing,
         mode: AccessMode,
+    ) -> Result<Self> {
+        Self::start_with_machines(
+            socket_path,
+            client_token,
+            authority_expires_unix,
+            upstream_token,
+            pairing,
+            mode,
+            false,
+        )
+    }
+
+    pub(super) fn start_with_machines(
+        socket_path: PathBuf,
+        client_token: String,
+        authority_expires_unix: Option<u64>,
+        upstream_token: String,
+        pairing: Pairing,
+        mode: AccessMode,
+        machine_access: bool,
     ) -> Result<Self> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .context("cannot bind the private UHP access gateway")?;
@@ -96,6 +118,7 @@ impl Gateway {
             upstream_token: Mutex::new(upstream_token),
             pairing: Mutex::new(pairing),
             mode,
+            machine_access,
             cancelled: cancelled.clone(),
             active: AtomicUsize::new(0),
             next_connection_id: AtomicUsize::new(0),
@@ -120,6 +143,10 @@ impl Gateway {
 
     pub(super) fn address(&self) -> SocketAddr {
         self.address
+    }
+
+    pub(super) fn machine_access(&self) -> bool {
+        self.shared.machine_access
     }
 
     pub(super) fn replace_upstream_token(&self, token: String) {
@@ -297,13 +324,26 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) -> Result<()> {
     };
     if authority_expired(shared)
         || !constant_time_eq(shared.client_token.as_bytes(), auth.as_bytes())
-        || !allowed_method(shared.mode, &method)
+        || !allowed_method_with_machines(shared.mode, &method, shared.machine_access)
     {
         write_gateway_error(stream, id, "forbidden")?;
         return Ok(());
     }
     if shared.cancelled.load(Ordering::Acquire) {
         return Err(io::Error::new(io::ErrorKind::Interrupted, "UHP access stopped").into());
+    }
+
+    if method.starts_with("machine.") {
+        let params = value.get("params").cloned().unwrap_or_else(|| json!({}));
+        let response = match crate::machine::api::dispatch(&method, &params) {
+            Ok(result) => json!({"id":id,"result":result}),
+            Err(error) => json!({"id":id,"error":{
+                "code":"invalid_request","message":error.to_string()
+            }}),
+        };
+        writeln!(stream, "{}", serde_json::to_string(&response)?)?;
+        stream.flush()?;
+        return Ok(());
     }
 
     let mut local = match crate::ipc::transport::connect(&shared.socket_path) {
@@ -360,7 +400,12 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) -> Result<()> {
             }
         };
         let response = if method == "uhp.capabilities" {
-            match project_access_capabilities(&response, &id, shared.mode) {
+            match project_access_capabilities_with_machines(
+                &response,
+                &id,
+                shared.mode,
+                shared.machine_access,
+            ) {
                 Ok(response) => response,
                 Err(_) => {
                     write_gateway_error(stream, id, "unavailable")?;
@@ -379,7 +424,17 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) -> Result<()> {
 
 /// Add endpoint authority without replacing the owner's supported-method catalog.
 /// The effective set is compiled, advertised upstream, and permitted by this gateway.
+#[cfg(test)]
 fn project_access_capabilities(response: &str, id: &Value, mode: AccessMode) -> Result<String> {
+    project_access_capabilities_with_machines(response, id, mode, false)
+}
+
+fn project_access_capabilities_with_machines(
+    response: &str,
+    id: &Value,
+    mode: AccessMode,
+    machine_access: bool,
+) -> Result<String> {
     validate_response_id(response, id)?;
     let mut value: Value = serde_json::from_str(response)?;
     if let Some(error) = value.get("error") {
@@ -407,11 +462,33 @@ fn project_access_capabilities(response: &str, id: &Value, mode: AccessMode) -> 
         .map(|method| method.as_str().filter(|method| !method.is_empty()))
         .collect();
     let advertised = advertised.ok_or_else(|| anyhow!("invalid owner method catalog"))?;
-    let allowed: Vec<_> = crate::api::capabilities::METHODS
+    let mut allowed: Vec<_> = crate::api::capabilities::METHODS
         .iter()
         .copied()
         .filter(|method| advertised.contains(method) && allowed_method(mode, method))
         .collect();
+    if machine_access {
+        let mut machine_methods = crate::machine::api::READ_METHODS.to_vec();
+        if mode == AccessMode::Control {
+            machine_methods.extend(crate::machine::api::CONTROL_METHODS);
+        }
+        allowed.extend(machine_methods.iter().copied());
+        let methods = result
+            .get_mut("methods")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| anyhow!("missing owner method catalog"))?;
+        methods.extend(machine_methods.iter().map(|method| json!(method)));
+        if let Some(contracts) = result
+            .get_mut("method_contracts")
+            .and_then(Value::as_array_mut)
+        {
+            contracts.extend(machine_methods.iter().map(|method| {
+                let read = crate::machine::api::READ_METHODS.contains(method);
+                json!({"method":method,"access":if read {"read"} else {"write"},
+                    "scope":if read {"read"} else {"machine"},"idempotent":read})
+            }));
+        }
+    }
     if allowed.is_empty() {
         return Err(anyhow!("empty effective method catalog"));
     }
@@ -449,7 +526,7 @@ fn handle_pairing(mut stream: TcpStream, shared: &Shared, value: &Value) -> Resu
     let mut response = json!({
         "type":"paired",
         "token":shared.client_token,
-        "scopes":shared.mode.scopes(),
+        "scopes":super::access_scopes(shared.mode, shared.machine_access),
     });
     if let Some(expires_at) = shared.authority_expires_unix {
         response["expires_at"] = json!(expires_at);
@@ -462,6 +539,13 @@ fn handle_pairing(mut stream: TcpStream, shared: &Shared, value: &Value) -> Resu
 }
 
 fn allowed_method(mode: AccessMode, method: &str) -> bool {
+    allowed_method_with_machines(mode, method, false)
+}
+
+fn allowed_method_with_machines(mode: AccessMode, method: &str, machines: bool) -> bool {
+    if machines && crate::machine::api::allowed(method, mode == AccessMode::Control) {
+        return true;
+    }
     let safe_read =
         crate::api::capabilities::is_read_only(method) && !method.starts_with("uhp.token.");
     safe_read
@@ -1574,6 +1658,96 @@ mod tests {
             response["result"]["access"]["allowed_methods"],
             json!(["uhp.capabilities"])
         );
+    }
+
+    #[test]
+    fn machine_access_is_explicit_and_capability_projected() {
+        assert!(!allowed_method_with_machines(
+            AccessMode::Control,
+            "machine.add",
+            false
+        ));
+        assert!(allowed_method_with_machines(
+            AccessMode::ReadOnly,
+            "machine.list",
+            true
+        ));
+        assert!(!allowed_method_with_machines(
+            AccessMode::ReadOnly,
+            "machine.add",
+            true
+        ));
+        assert!(allowed_method_with_machines(
+            AccessMode::Control,
+            "machine.add",
+            true
+        ));
+
+        let owner = json!({"id":"caps","result":crate::api::capabilities::capabilities(0)});
+        let projected = project_access_capabilities_with_machines(
+            &owner.to_string(),
+            &json!("caps"),
+            AccessMode::Control,
+            true,
+        )
+        .unwrap();
+        let projected: Value = serde_json::from_str(&projected).unwrap();
+        assert!(projected["result"]["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|method| method == "machine.list"));
+        assert!(projected["result"]["access"]["allowed_methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|method| method == "machine.add"));
+    }
+
+    #[test]
+    fn machine_gateway_mutates_only_with_control_and_catalog_revision() {
+        let _env = crate::persist::test_env("uhp-machine-gateway");
+        let pairing = Pairing::new(Duration::from_secs(60)).unwrap();
+        let code = pairing.display_code().to_string();
+        let token = "luv_tok_machine_test".to_string();
+        let mut gateway = Gateway::start_with_machines(
+            PathBuf::from("target/test-state/uhp/no-machine-server.sock"),
+            token.clone(),
+            Some(4_000_000_000),
+            "unused-upstream".to_string(),
+            pairing,
+            AccessMode::Control,
+            true,
+        )
+        .unwrap();
+        let paired = exchange(gateway.address(), &json!({"type":"pair","code":code}));
+        assert!(paired["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scope| scope == "machine"));
+
+        let added = exchange(
+            gateway.address(),
+            &json!({"id":"add","method":"machine.add","params":{
+                "id":"build","host":"dev@build","enabled":false,"if_revision":0
+            },"auth":token}),
+        );
+        assert_eq!(added["result"]["revision"], 1);
+        assert!(added["result"]["machine"].get("destination").is_none());
+        assert!(added["result"]["machine"].get("remote_binary").is_none());
+
+        let stale = exchange(
+            gateway.address(),
+            &json!({"id":"stale","method":"machine.disable","params":{
+                "id":"build","if_revision":0
+            },"auth":token}),
+        );
+        assert!(stale["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("revision conflict"));
+        gateway.stop();
     }
 
     /// Malformed, mismatched and oversized owner replies fail closed with clean connections/input.
