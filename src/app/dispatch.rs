@@ -5,6 +5,9 @@ use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc::Sender, Arc};
 
+#[path = "prompt_confirmation.rs"]
+mod prompt_confirmation;
+
 #[cfg(test)]
 #[path = "prompt_confirmation_tests.rs"]
 mod prompt_confirmation_tests;
@@ -1352,6 +1355,9 @@ pub struct AgentStart {
 /// semantic detection ticks; the quiet window prevents prompt echo alone from
 /// being reported as completion immediately.
 pub struct AgentPrompt {
+    echo: Option<prompt_confirmation::Echo>,
+    submission: &'static str,
+    entered_state: Option<Option<State>>,
     request_id: String,
     until: Vec<State>,
     baseline_revision: u64,
@@ -1402,6 +1408,7 @@ fn agent_prompt_response(
     baseline_revision: u64,
     content_revision: u64,
     evidence: &str,
+    submission: &str,
 ) -> String {
     json!({
         "id":request_id,
@@ -1413,7 +1420,9 @@ fn agent_prompt_response(
             "status":state.map(state_str),
             "baseline_revision":baseline_revision,
             "content_revision":content_revision,
-            "evidence":evidence,
+            "evidence": if evidence == "timeout" { "timeout" } else if submission == "confirmed" { "input_echoed" } else { "queued" },
+            "submission":submission,
+            "reason":null,
         }
     })
     .to_string()
@@ -1617,6 +1626,9 @@ impl App {
         }
         for prompt in self.agent_prompts.values().flatten() {
             consider(prompt.deadline, true);
+            if let Some(echo) = &prompt.echo {
+                consider(echo.deadline, true);
+            }
             if prompt.saw_output {
                 consider(prompt.last_output_at + AGENT_PROMPT_QUIET, true);
             }
@@ -3735,6 +3747,12 @@ impl App {
                     return Err((
                         "invalid_request".to_string(),
                         "agent send text must not be empty".to_string(),
+                    ));
+                }
+                if self.agent_prompts.contains_key(&id) {
+                    return Err((
+                        "agent_prompt_busy".into(),
+                        "target agent already has a pending prompt".into(),
                     ));
                 }
                 let pane = self.panes.get(&id).ok_or_else(|| {
@@ -6274,9 +6292,10 @@ impl App {
         if cancelled.load(Ordering::Acquire) {
             return;
         }
-        if let Err((code, message)) =
-            reject_api_fields(&p, &["target", "text", "wait", "until", "timeout_s"])
-        {
+        if let Err((code, message)) = reject_api_fields(
+            &p,
+            &["target", "text", "wait", "until", "timeout_s", "confirm"],
+        ) {
             fail(&code, message);
             return;
         }
@@ -6302,6 +6321,14 @@ impl App {
             );
             return;
         }
+        let confirm = match p.get("confirm") {
+            None => true,
+            Some(Value::Bool(confirm)) => *confirm,
+            Some(_) => {
+                fail("invalid_request", "confirm must be a boolean".into());
+                return;
+            }
+        };
         let wait = match p.get("wait") {
             None => false,
             Some(Value::Bool(wait)) => *wait,
@@ -6331,7 +6358,14 @@ impl App {
                 return;
             }
         };
-        if wait {
+        if self.agent_prompts.contains_key(&pane) {
+            fail(
+                "agent_prompt_busy",
+                "target agent already has a pending prompt".into(),
+            );
+            return;
+        }
+        if wait || confirm {
             let total: usize = self.agent_prompts.values().map(Vec::len).sum();
             if total >= MAX_AGENT_WAITS_TOTAL {
                 fail(
@@ -6340,28 +6374,45 @@ impl App {
                 );
                 return;
             }
-            // A terminal stream has no turn identifier. Refuse a second
-            // server-owned turn instead of letting both callers claim the same
-            // state/output transition as their completion evidence.
-            if self.agent_prompts.contains_key(&pane) {
-                fail(
-                    "agent_prompt_busy",
-                    "target agent already has a prompt waiting for completion".to_string(),
-                );
-                return;
-            }
         }
         let Some(target) = self.panes.get(&pane) else {
             fail("not_found", "pane not found".to_string());
             return;
         };
-        let baseline_revision = target.content_revision();
-        if let Err(message) = target.try_submit_text(text) {
-            fail("send_failed", message);
+        let now = Instant::now();
+        let (baseline_revision, before) = match target.engine.lock() {
+            Ok(engine) => (
+                target.content_revision(),
+                if confirm {
+                    engine.prompt_input_region()
+                } else {
+                    None
+                },
+            ),
+            Err(_) => (target.content_revision(), None),
+        };
+        let submission = if confirm { "confirmed" } else { "unconfirmed" };
+        let admission = if confirm {
+            target.try_send_paste(text)
+        } else {
+            target.try_submit_text(text)
+        };
+        if let Err(message) = admission {
+            let _ = reply.send(prompt_confirmation::failure(
+                &request_id,
+                pane,
+                "send_failed",
+                &message,
+                false,
+                false,
+                "failed",
+                baseline_revision,
+                target.content_revision(),
+            ));
             return;
         }
         let status = self.status.get(&pane).map(|status| status.state);
-        if !wait {
+        if !wait && !confirm {
             let _ = reply.send(agent_prompt_response(
                 &request_id,
                 pane,
@@ -6371,14 +6422,27 @@ impl App {
                 baseline_revision,
                 baseline_revision,
                 "queued",
+                submission,
             ));
             return;
         }
-        let now = Instant::now();
         self.agent_prompts
             .entry(pane)
             .or_default()
             .push(AgentPrompt {
+                echo: confirm.then(|| prompt_confirmation::Echo {
+                    text: text.to_owned(),
+                    before,
+                    wait,
+                    deadline: now
+                        + if wait {
+                            timeout.min(Duration::from_secs(2))
+                        } else {
+                            Duration::from_secs(2)
+                        },
+                }),
+                submission,
+                entered_state: None,
                 request_id,
                 until,
                 baseline_revision,
@@ -6432,10 +6496,11 @@ impl App {
 
         let panes: Vec<PaneId> = self.agent_prompts.keys().copied().collect();
         for pane in panes {
-            let revision = self
+            let target = self
                 .panes
                 .get(&pane)
-                .map(crate::terminal::pty::Pane::content_revision);
+                .filter(|target| !target.child_exited());
+            let revision = target.map(crate::terminal::pty::Pane::content_revision);
             let state = self.status.get(&pane).map(|status| status.state);
             let Some(waiters) = self.agent_prompts.get_mut(&pane) else {
                 continue;
@@ -6445,18 +6510,92 @@ impl App {
                     return false;
                 }
                 let Some(revision) = revision else {
-                    let _ = waiter.reply.send(agent_prompt_response(
-                        &waiter.request_id,
+                    let _ = waiter.reply.send(waiter.failure(
                         pane,
-                        true,
-                        false,
-                        None,
-                        waiter.baseline_revision,
-                        waiter.last_revision,
-                        "pane_closed",
+                        "agent_not_running",
+                        "agent pane exited during prompt",
                     ));
                     return false;
                 };
+                if let Some(echo) = &waiter.echo {
+                    waiter.last_revision = revision;
+                    if now >= echo.deadline {
+                        let _ = waiter.reply.send(waiter.failure(
+                            pane,
+                            "input_not_echoed",
+                            "prompt text was not echoed before the deadline; Enter was not queued",
+                        ));
+                        return false;
+                    }
+                    let target = target.expect("live target has a revision");
+                    let echoed = target.engine.lock().ok().is_some_and(|engine| {
+                        let current = target.content_revision();
+                        let region = engine.prompt_input_region();
+                        // An unchanged pre-paste candidate alone is not evidence.
+                        let fresh = current > waiter.baseline_revision;
+                        if region == echo.before && !fresh {
+                            return false;
+                        }
+                        fresh
+                            && region.as_ref().is_some_and(|region| {
+                                prompt_confirmation::matches(region, &echo.text)
+                            })
+                    });
+                    if !echoed {
+                        return true;
+                    }
+                    if let Err(message) = target.try_send(b"\r") {
+                        let _ = waiter
+                            .reply
+                            .send(waiter.failure(pane, "send_failed", &message));
+                        return false;
+                    }
+                    if !echo.wait {
+                        let _ = waiter.reply.send(agent_prompt_response(
+                            &waiter.request_id,
+                            pane,
+                            true,
+                            false,
+                            state,
+                            waiter.baseline_revision,
+                            revision,
+                            "input_echoed",
+                            waiter.submission,
+                        ));
+                        return false;
+                    }
+                    waiter.echo = None;
+                    waiter.last_revision = revision;
+                    waiter.last_output_at = now;
+                    waiter.saw_output = false;
+                    waiter.saw_working = false;
+                    waiter.entered_state = Some(state);
+                    return true;
+                }
+                // Phase B begins on evidence after Enter, not an unchanged
+                // Working state that appeared while text was being pasted.
+                if let Some(entered) = waiter.entered_state {
+                    if state == entered
+                        && (revision == waiter.last_revision || entered == Some(State::Working))
+                    {
+                        if now >= waiter.deadline {
+                            let _ = waiter.reply.send(agent_prompt_response(
+                                &waiter.request_id,
+                                pane,
+                                true,
+                                false,
+                                state,
+                                waiter.baseline_revision,
+                                revision,
+                                "timeout",
+                                waiter.submission,
+                            ));
+                            return false;
+                        }
+                        return true;
+                    }
+                    waiter.entered_state = None;
+                }
                 if revision != waiter.last_revision {
                     waiter.last_revision = revision;
                     waiter.last_output_at = now;
@@ -6483,6 +6622,7 @@ impl App {
                         waiter.baseline_revision,
                         revision,
                         evidence,
+                        waiter.submission,
                     ));
                     return false;
                 }
@@ -6496,6 +6636,7 @@ impl App {
                         waiter.baseline_revision,
                         revision,
                         "timeout",
+                        waiter.submission,
                     ));
                     return false;
                 }
@@ -6614,16 +6755,13 @@ impl App {
         }
         if let Some(prompts) = self.agent_prompts.remove(&id) {
             for prompt in prompts {
-                let _ = prompt.reply.send(agent_prompt_response(
-                    &prompt.request_id,
-                    id,
-                    true,
-                    false,
-                    None,
-                    prompt.baseline_revision,
-                    prompt.last_revision,
-                    "pane_closed",
-                ));
+                if !prompt.cancelled.load(Ordering::Acquire) {
+                    let _ = prompt.reply.send(prompt.failure(
+                        id,
+                        "agent_not_running",
+                        "agent pane closed during prompt",
+                    ));
+                }
             }
         }
     }
@@ -9460,7 +9598,7 @@ command = ["true"]
         app.start_agent_prompt(
             "prompt-1".into(),
             json!({
-                "target":pane.0.to_string(), "text":"review this", "wait":true,
+                "target":pane.0.to_string(), "text":"review this", "wait":true, "confirm":false,
                 "until":["idle", "done", "blocked"], "timeout_s":10,
             }),
             reply,
@@ -9479,7 +9617,7 @@ command = ["true"]
         assert_eq!(value["result"]["type"], "agent_prompt");
         assert_eq!(value["result"]["submitted"], true);
         assert_eq!(value["result"]["matched"], true);
-        assert_eq!(value["result"]["evidence"], "output_settled");
+        assert_eq!(value["result"]["evidence"], "queued");
         assert!(app.agent_prompts.is_empty());
     }
 
@@ -9492,7 +9630,7 @@ command = ["true"]
         let (reply, response) = std::sync::mpsc::channel();
         app.start_agent_prompt(
             "prompt-timeout".into(),
-            json!({"target":pane.0.to_string(), "text":"review", "wait":true, "timeout_s":0}),
+            json!({"target":pane.0.to_string(), "text":"review", "wait":true, "timeout_s":0, "confirm":false}),
             reply,
             Arc::new(AtomicBool::new(false)),
         );

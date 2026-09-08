@@ -248,6 +248,13 @@ pub struct CodexComposerRegion {
     pub bottom: u16,
 }
 
+/// Bounded live input text, reconstructed using selection soft-wrap rules.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptInputRegion {
+    pub text: String,
+    pub capacity: usize,
+}
+
 /// Read-only scrollback accounting exposed by every terminal engine. Engines
 /// that cannot enforce a native byte cap report a conservative estimate rather
 /// than pretending it is exact.
@@ -346,6 +353,8 @@ pub trait VtEngine: Send {
     /// Detect Codex's live composer around the cursor. Returns `None` for
     /// scrollback, unrelated terminal content, or an incomplete layout.
     fn codex_composer_region(&self) -> Option<CodexComposerRegion>;
+
+    fn prompt_input_region(&self) -> Option<PromptInputRegion>;
 
     /// Visit every visible cell as `(row, col, symbol, style)`. `symbol` is the
     /// cell's full grapheme cluster (base char + any combining/VS16/ZWJ chars),

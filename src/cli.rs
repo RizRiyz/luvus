@@ -158,9 +158,9 @@ panes / agents:
   agent fork <target> [--name <alias>] [--no-focus]
                              fork a supported agent's session into a sibling pane
   agent name <name>          alias the current agent, same as pane name (--clear to drop)
-  agent prompt <target> <text> [--wait] [--until STATE] [--timeout <s>]
-                             atomically prompt and optionally wait (send is an alias)
-  agent send <target> <text> [--wait] [--until STATE] [--timeout <s>]
+  agent prompt <target> <text> [--no-confirm] [--wait] [--until STATE] [--timeout <s>]
+                             confirm prompt echo, submit, and optionally wait (send is an alias)
+  agent send <target> <text> [--no-confirm] [--wait] [--until STATE] [--timeout <s>]
                              compatibility alias for agent prompt
   agent keys <target> <key>...   send control keys (enter, esc, ctrl+c, up, …)
   agent read <target> [--lines N] [--source visible|recent]   print an agent's output
@@ -2130,11 +2130,12 @@ fn skill_cmd(rest: &[String], context: crate::i18n::cli::Context) -> Result<i32>
 /// compatibility alias.
 fn agent_send_cmd(args: &[String]) -> Result<i32> {
     let target = args.get(3).cloned().ok_or_else(|| {
-        anyhow!("usage: luvus agent prompt <target> <text> [--wait] [--until STATE] [--timeout S]")
+        anyhow!("usage: luvus agent prompt <target> <text> [--no-confirm] [--wait] [--until STATE] [--timeout S]")
     })?;
     let mut text_parts = Vec::new();
     let mut wait = false;
     let mut until = Vec::new();
+    let mut confirm = true;
     let mut timeout = None;
     let mut positional_only = false;
     let mut index = 4;
@@ -2148,6 +2149,10 @@ fn agent_send_cmd(args: &[String]) -> Result<i32> {
         match arg.as_str() {
             "--" => {
                 positional_only = true;
+                index += 1;
+            }
+            "--no-confirm" => {
+                confirm = false;
                 index += 1;
             }
             "--wait" => {
@@ -2188,6 +2193,9 @@ fn agent_send_cmd(args: &[String]) -> Result<i32> {
     params.insert("target".into(), json!(target));
     params.insert("text".into(), json!(text));
     params.insert("wait".into(), json!(wait));
+    if !confirm {
+        params.insert("confirm".into(), json!(false));
+    }
     if !until.is_empty() {
         params.insert("until".into(), json!(until));
     }
@@ -2202,7 +2210,10 @@ fn agent_send_cmd(args: &[String]) -> Result<i32> {
         serde_json::to_string_pretty(&response).unwrap_or_default()
     );
     Ok(if !ok {
-        1
+        match response["error"]["code"].as_str() {
+            Some("input_not_echoed" | "agent_not_running") => 2,
+            _ => 1,
+        }
     } else if wait && !matched {
         2
     } else {

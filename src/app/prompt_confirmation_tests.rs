@@ -339,6 +339,7 @@ fn confirmed_prompt_wait_starts_after_echo_and_preserves_until_and_timeout() {
         screen(&app, pane, "unique");
         app.tick_agent_workflows(Instant::now());
         bytes(&input, b"\r");
+        screen(&app, pane, "\x1b]0;unrelated post-Enter title\x07");
         app.tick_agent_workflows(Instant::now());
         assert!(
             rx.try_recv().is_err(),

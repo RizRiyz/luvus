@@ -478,6 +478,71 @@ impl VtEngine for AlacrittyEngine {
         })
     }
 
+    fn prompt_input_region(&self) -> Option<super::PromptInputRegion> {
+        let grid = self.term.grid();
+        let cols = grid.columns();
+        let rows = grid.screen_lines();
+        let cursor = usize::try_from(grid.cursor.point.line.0).ok()?;
+        if cols == 0 || cursor >= rows || grid.display_offset() != 0 {
+            return None;
+        }
+        let line = |row: usize| i32::try_from(row).ok().map(Line);
+        let wrapped = |row: usize| -> Option<bool> {
+            Some(
+                grid[line(row)?][Column(cols - 1)]
+                    .flags
+                    .intersects(Flags::WRAPLINE),
+            )
+        };
+        let blank = |row: usize| -> Option<bool> {
+            let row = &grid[line(row)?];
+            Some((0..cols).all(|col| matches!(row[Column(col)].c, '\0' | ' ')))
+        };
+        let (mut top, mut bottom) = if let Some(region) = self.codex_composer_region() {
+            (usize::from(region.top), usize::from(region.bottom))
+        } else {
+            let mut top = cursor;
+            // The cursor follows a paste across soft wraps. Recover only that
+            // logical line, never an earlier hard-broken transcript row.
+            while top > 0 && cursor - top < 7 && wrapped(top - 1)? {
+                top -= 1;
+            }
+            let mut bottom = cursor;
+            while bottom + 1 < rows && bottom - top < 7 && wrapped(bottom)? && !blank(bottom + 1)? {
+                bottom += 1;
+            }
+            (top, bottom)
+        };
+        // Composer padding has no input capacity. Keep whitespace within text.
+        while top < bottom && blank(top)? {
+            top += 1;
+        }
+        while bottom > top && blank(bottom)? {
+            bottom -= 1;
+        }
+        bottom = bottom.min(top + 7);
+        let mut text = String::new();
+        for row in top..=bottom {
+            let selected = self.term.bounds_to_string(
+                Point::new(line(row)?, Column(0)),
+                Point::new(line(row)?, Column(cols - 1)),
+            );
+            text.push_str(selected.trim_end_matches(' '));
+            if row != bottom && !wrapped(row)? {
+                text.push('\n');
+            }
+        }
+        let mut capacity = cols.checked_mul(bottom - top + 1)?;
+        let indentation = text.len() - text.trim_start_matches(' ').len();
+        if let Some(rest) = text[indentation..].strip_prefix('›') {
+            let rest = rest.strip_prefix(' ').unwrap_or(rest);
+            let removed = unicode_width::UnicodeWidthStr::width(&text[..text.len() - rest.len()]);
+            capacity = capacity.checked_sub(removed)?;
+            text = rest.to_owned();
+        }
+        Some(super::PromptInputRegion { text, capacity })
+    }
+
     fn for_each_cell(&self, f: &mut dyn FnMut(u16, u16, &str, RenderCell)) {
         // `display_iter` walks the *displayed* region, whose lines are *negative*
         // once scrolled into history (it starts at `Line(-display_offset)`).

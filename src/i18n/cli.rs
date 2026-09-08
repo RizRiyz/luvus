@@ -1388,15 +1388,15 @@ static HELP: &[Translation] = &[
         "현재 에이전트의 별칭 지정, 패널 이름과 동일 (--clear로 제거)"
     ),
     tr!(
-        "atomically prompt and optionally wait (send is an alias)",
-        "enviar un prompt de forma atómica y esperar opcionalmente (send es un alias)",
-        "enviar prompt atomicamente e aguardar opcionalmente (send é um alias)",
-        "envoyer une invite atomiquement et attendre si demandé (send est un alias)",
-        "Prompt atomar senden und optional warten (send ist ein Alias)",
-        "kirim prompt secara atomik dan opsional tunggu (send adalah alias)",
-        "原子提交提示，并可选择等待（send 是别名）",
-        "プロンプトをアトミックに送信し任意で待機（send は別名）",
-        "원자적으로 프롬프트 전송, 선택적으로 대기 (send는 별칭)"
+        "confirm prompt echo, submit, and optionally wait (send is an alias)",
+        "confirmar el eco del prompt, enviarlo y esperar opcionalmente (send es un alias)",
+        "confirmar o eco do prompt, enviar e aguardar opcionalmente (send é um alias)",
+        "confirmer l’écho du prompt, envoyer et attendre si demandé (send est un alias)",
+        "Prompt-Echo bestätigen, absenden und optional warten (send ist ein Alias)",
+        "konfirmasi gema prompt, kirim, dan opsional tunggu (send adalah alias)",
+        "确认提示回显、提交，并可选择等待（send 是别名）",
+        "プロンプトのエコーを確認して送信し、任意で待機（send は別名）",
+        "프롬프트 에코를 확인하고 전송한 뒤 선택적으로 대기 (send는 별칭)"
     ),
     tr!(
         "compatibility alias for agent prompt",
