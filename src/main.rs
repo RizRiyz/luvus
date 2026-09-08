@@ -23,6 +23,7 @@ mod ipc;
 mod layout;
 mod links;
 mod logging;
+mod machine;
 mod mission;
 mod module;
 mod orch;
@@ -91,6 +92,12 @@ fn main() -> Result<()> {
     if is_backend_discovery_request(&args) {
         std::process::exit(cli::run(&args)?);
     }
+    if args.get(1).map(String::as_str) == Some("fleet-bridge")
+        && args.get(2).map(String::as_str) == Some("--probe")
+        && args.len() == 3
+    {
+        return fleet_bridge_probe(&args);
+    }
     // Private foreground route used only by scheduled worker panes. Keep it
     // ahead of migrations and TUI/server routing: it must run exactly one
     // adapter process, settle its ORCH task, and exit.
@@ -115,6 +122,10 @@ fn main() -> Result<()> {
         Some("integration") => {
             std::process::exit(integration::run(&args, i18n::cli::Context::configured())?)
         }
+        Some("machine") => std::process::exit(machine::run_cli(
+            &args[2.min(args.len())..],
+            i18n::cli::Context::configured(),
+        )?),
         Some("--local") => return run_local(),
         Some(_) if cli::is_cli(&args) => {
             let code = cli::run(&args)?;
@@ -618,6 +629,62 @@ fn remote_client_bridge() -> Result<()> {
     ipc::client::remote_bridge(&sock)
 }
 
+/// Read-only capability probe used before a saved machine is enabled. It does
+/// not start a server, read a session, or mutate the remote installation.
+fn fleet_bridge_probe(args: &[String]) -> Result<()> {
+    let binary = args
+        .first()
+        .filter(|path| Path::new(path).is_absolute())
+        .cloned()
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .unwrap_or_default()
+                .display()
+                .to_string()
+        });
+    println!(
+        "{}",
+        serde_json::json!({
+            "protocol": "luvus-fleet-v1",
+            "version": env!("CARGO_PKG_VERSION"),
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "binary": binary,
+        })
+    );
+    Ok(())
+}
+
+/// Attach through one previously validated profile. Unlike legacy `--remote`,
+/// this path never searches a remote PATH and never accepts arbitrary SSH
+/// options; OpenSSH configuration owns keys, ports, and jump hosts.
+pub(crate) fn remote_attach_profile(
+    destination: &str,
+    binary: &str,
+    session_name: Option<&str>,
+) -> Result<()> {
+    let mut command = Command::new("ssh");
+    command
+        .arg("-T")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=10")
+        .arg("-o")
+        .arg("ServerAliveInterval=15")
+        .arg("-o")
+        .arg("ServerAliveCountMax=3")
+        .arg(destination)
+        .arg(binary);
+    if let Some(name) = session_name {
+        session::validate_name(name).map_err(anyhow::Error::msg)?;
+        command.arg("--session").arg(name);
+    }
+    command.arg("remote-client-bridge");
+    let (result, _) = remote_attach_attempt(command);
+    result
+}
+
 /// `luvus attach <id>` (docs/18 WA-2): focus + zoom the pane (one round-trip via
 /// `attach.pane`), then attach the client so it opens straight into that
 /// fullscreen terminal. Composes with `--remote` for a remote fullscreen attach.
@@ -670,6 +737,7 @@ fn remote_attach(args: &[String]) -> Result<()> {
 
 fn remote_attach_attempt(mut cmd: Command) -> (Result<()>, Option<std::process::ExitStatus>) {
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()); // stderr inherited so ssh can prompt for auth
+    platform::no_window(&mut cmd);
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow!("failed to launch ssh: {e}"));
