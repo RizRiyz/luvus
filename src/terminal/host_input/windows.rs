@@ -305,8 +305,20 @@ fn input_trace_enabled() -> bool {
     })
 }
 
-// This diagnostic is deliberately opt-in because UTF-16 key units can reveal
-// typed or pasted text. It is never emitted during normal logging.
+/// Classifies a UTF-16 unit without retaining the character itself.
+///
+/// 0 = none, 1 = control, 2 = printable, 3 = surrogate half.
+fn utf16_class(unit: u16) -> u8 {
+    match unit {
+        0 => 0,
+        0x01..=0x1f | 0x7f => 1,
+        0xd800..=0xdfff => 3,
+        _ => 2,
+    }
+}
+
+// This diagnostic is deliberately opt-in and records only the UTF-16 unit
+// class, never the character itself. It is never emitted during normal logging.
 fn trace_key_record(record: ConsoleKeyRecord) {
     if !input_trace_enabled() {
         return;
@@ -318,7 +330,7 @@ fn trace_key_record(record: ConsoleKeyRecord) {
             crate::logging::Field::RepeatCount(u64::from(record.repeat_count)),
             crate::logging::Field::VirtualKey(u64::from(record.virtual_key)),
             crate::logging::Field::ScanCode(u64::from(record.scan_code)),
-            crate::logging::Field::Utf16(u64::from(record.utf16)),
+            crate::logging::Field::Utf16Class(u64::from(utf16_class(record.utf16))),
             crate::logging::Field::ControlState(u64::from(record.control_state)),
         ],
     );
@@ -362,6 +374,14 @@ fn std_handle(kind: u32) -> io::Result<HANDLE> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_trace_classification_does_not_retain_characters() {
+        assert_eq!(utf16_class(0), 0);
+        assert_eq!(utf16_class(b'\n' as u16), 1);
+        assert_eq!(utf16_class(b'a' as u16), 2);
+        assert_eq!(utf16_class(0xd83d), 3);
+    }
 
     #[test]
     fn virtual_terminal_input_preserves_existing_console_flags() {

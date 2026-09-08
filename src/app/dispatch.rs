@@ -2687,8 +2687,18 @@ impl App {
             "pane.send_input" => {
                 let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
                 let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                let paste = match p.get("paste") {
+                    None => false,
+                    Some(Value::Bool(paste)) => *paste,
+                    Some(_) => {
+                        return Err((
+                            "invalid_request".to_string(),
+                            "paste must be a boolean".to_string(),
+                        ))
+                    }
+                };
                 let pane = self.panes.get(&id).ok_or_else(not_found)?;
-                let result = if p.get("paste").and_then(|value| value.as_bool()) == Some(true) {
+                let result = if paste {
                     pane.try_send_paste(text)
                 } else {
                     pane.try_send(text.as_bytes())
@@ -9221,6 +9231,19 @@ command = ["true"]
             panic!("expected bracketed paste")
         };
         assert_eq!(bytes, b"\x1b[200~first\nsecond\x1b[201~");
+        let error = app
+            .dispatch(
+                "pane.send_input",
+                &json!({
+                    "pane": pane.0.to_string(),
+                    "text": "must not be sent",
+                    "paste": "true",
+                }),
+            )
+            .expect_err("a non-boolean paste value must be rejected");
+        assert_eq!(error.0, "invalid_request");
+        assert_eq!(error.1, "paste must be a boolean");
+        assert!(rx.try_recv().is_err());
         drop(rx);
         for (method, params) in [
             (

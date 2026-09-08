@@ -311,7 +311,7 @@ pub(crate) enum FieldKey {
     RepeatCount,
     VirtualKey,
     ScanCode,
-    Utf16,
+    Utf16Class,
     ControlState,
     Bytes,
 }
@@ -353,7 +353,7 @@ impl FieldKey {
             Self::RepeatCount => "repeat_count",
             Self::VirtualKey => "virtual_key",
             Self::ScanCode => "scan_code",
-            Self::Utf16 => "utf16",
+            Self::Utf16Class => "utf16_class",
             Self::ControlState => "control_state",
             Self::Bytes => "bytes",
         }
@@ -397,7 +397,7 @@ pub enum Field {
     RepeatCount(u64),
     VirtualKey(u64),
     ScanCode(u64),
-    Utf16(u64),
+    Utf16Class(u64),
     ControlState(u64),
     Bytes(u64),
 }
@@ -439,7 +439,7 @@ impl Field {
             Self::RepeatCount(_) => FieldKey::RepeatCount,
             Self::VirtualKey(_) => FieldKey::VirtualKey,
             Self::ScanCode(_) => FieldKey::ScanCode,
-            Self::Utf16(_) => FieldKey::Utf16,
+            Self::Utf16Class(_) => FieldKey::Utf16Class,
             Self::ControlState(_) => FieldKey::ControlState,
             Self::Bytes(_) => FieldKey::Bytes,
         }
@@ -473,7 +473,7 @@ impl Field {
             | Self::RepeatCount(value)
             | Self::VirtualKey(value)
             | Self::ScanCode(value)
-            | Self::Utf16(value)
+            | Self::Utf16Class(value)
             | Self::ControlState(value)
             | Self::Bytes(value) => value.into(),
             Self::SpawnKind(value) => value.as_str().into(),
@@ -708,7 +708,7 @@ impl EventKind {
                     | F::RepeatCount
                     | F::VirtualKey
                     | F::ScanCode
-                    | F::Utf16
+                    | F::Utf16Class
                     | F::ControlState
             ),
             E::ClientInputDecoded => matches!(key, F::InputKind | F::Bytes),
@@ -759,9 +759,9 @@ mod tests {
         assert_eq!(EventKind::UhpRequestComplete.level(), Level::Debug);
         assert_eq!(EventKind::UhpRequestFailed.level(), Level::Warn);
         assert!(EventKind::UhpRequestFailed.allows(FieldKey::ErrorCode));
-        assert!(EventKind::ClientInputRecord.allows(FieldKey::Utf16));
+        assert!(EventKind::ClientInputRecord.allows(FieldKey::Utf16Class));
         assert!(!EventKind::ClientInputRecord.allows(FieldKey::Method));
         assert!(EventKind::ClientInputDecoded.allows(FieldKey::InputKind));
-        assert!(!EventKind::ClientInputDecoded.allows(FieldKey::Utf16));
+        assert!(!EventKind::ClientInputDecoded.allows(FieldKey::Utf16Class));
     }
 }

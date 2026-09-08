@@ -25,6 +25,7 @@ pub(super) const MOUSE_WHEELED: u32 = 0x0004;
 pub(super) const MOUSE_HWHEELED: u32 = 0x0008;
 
 const STREAM_TIMEOUT: Duration = Duration::from_millis(100);
+const MAX_STREAM_RECORDS: usize = 128;
 const START_MARKER: &str = "\u{1b}[200~";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -177,6 +178,9 @@ impl ConsoleStreamDecoder {
         }
         self.control.records.push(record);
         self.control.deadline = Some(now + STREAM_TIMEOUT);
+        if self.control.records.len() >= MAX_STREAM_RECORDS {
+            return self.flush_control(now);
+        }
         let text = record_text(&self.control.records);
 
         if text == START_MARKER {
@@ -225,6 +229,9 @@ impl Win32RecordFramer {
         }
         self.records.push(record);
         self.deadline = Some(now + STREAM_TIMEOUT);
+        if self.records.len() >= MAX_STREAM_RECORDS {
+            return self.flush();
+        }
 
         let text = record_text(&self.records);
         if text == "\u{1b}" || text == "\u{1b}[" {
@@ -934,5 +941,39 @@ mod tests {
                 control_state: 0,
             })
         );
+    }
+
+    #[test]
+    fn pending_win32_reports_are_bounded() {
+        let mut framer = Win32RecordFramer::default();
+        let now = Instant::now();
+        let mut output = Vec::new();
+        for ch in std::iter::once('\u{1b}')
+            .chain(std::iter::once('['))
+            .chain(std::iter::repeat_n('1', MAX_STREAM_RECORDS - 2))
+        {
+            output.extend(framer.push(key_char(ch), now));
+        }
+        assert_eq!(output.len(), 1);
+        assert!(matches!(&output[0], Win32Item::Raw(records)
+            if records.len() == MAX_STREAM_RECORDS));
+        assert!(framer.records.is_empty());
+        assert!(framer.deadline.is_none());
+    }
+
+    #[test]
+    fn pending_control_sequences_are_bounded() {
+        let mut decoder = ConsoleStreamDecoder::default();
+        let now = Instant::now();
+        let mut output = DecodedEvents::None;
+        for ch in std::iter::once('\u{1b}')
+            .chain("[<".chars())
+            .chain(std::iter::repeat_n('1', MAX_STREAM_RECORDS - 3))
+        {
+            output = output.combine(decoder.push_record(key_char(ch), now));
+        }
+        assert!(!matches!(output, DecodedEvents::None));
+        assert!(decoder.control.records.is_empty());
+        assert!(decoder.control.deadline.is_none());
     }
 }
