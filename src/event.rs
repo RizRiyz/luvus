@@ -10,6 +10,7 @@ use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 
 use crate::ids::PaneId;
 use crate::ipc::protocol::ServerMessage;
+use crate::ipc::protocol::SurfaceInterest;
 use crate::terminal::theme_probe::TerminalColors;
 
 /// Input originating from one attached display client. Keeping the source id at
@@ -81,6 +82,11 @@ pub enum AppEvent {
     /// A binary client detached.
     ClientDetach {
         id: u64,
+    },
+    /// Change one client's frame/input ownership without closing its transport.
+    ClientSurfaceInterest {
+        id: u64,
+        interest: SurfaceInterest,
     },
     /// Input from a binary display client. The server unwraps this only after
     /// activating the correct per-client viewport; it never reaches `App`.

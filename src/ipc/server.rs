@@ -19,7 +19,7 @@ use ratatui::layout::Rect;
 use crate::app::App;
 use crate::event::{AppEvent, ClientInput};
 use crate::ipc::api;
-use crate::ipc::protocol::{self, ClientMessage, ServerMessage};
+use crate::ipc::protocol::{self, ClientMessage, ServerMessage, SurfaceInterest};
 use crate::persist;
 use crate::ui;
 
@@ -225,6 +225,7 @@ struct ClientState {
     retained_pane_content: Vec<(crate::ids::PaneId, Rect)>,
     retained_ready: bool,
     last_activity: u64,
+    interest: SurfaceInterest,
 }
 
 #[derive(Default)]
@@ -255,6 +256,7 @@ impl ClientState {
             retained_pane_content: Vec::new(),
             retained_ready: false,
             last_activity,
+            interest: SurfaceInterest::Active,
         }
     }
 
@@ -439,7 +441,7 @@ pub fn run() -> Result<()> {
             // Already-due persist/re-arm must not `recv_timeout(0)`: that busy-loops
             // until the 100ms re-arm cadence elapses.
             None
-        } else if render_request.needs_render() && !clients.is_empty() {
+        } else if render_request.needs_render() && has_render_clients(&clients) {
             match rx.recv_timeout(frame_wait(last_render_attempt.elapsed())) {
                 Ok(ev) => Some(ev),
                 Err(RecvTimeoutError::Timeout) => {
@@ -449,7 +451,7 @@ pub fn run() -> Result<()> {
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         } else {
-            let mut deadline = app.next_runtime_deadline(now, !clients.is_empty());
+            let mut deadline = app.next_runtime_deadline(now, has_active_clients(&clients));
             if app.session_dirty && !app.session_save_inflight {
                 App::sooner_deadline(&mut deadline, last_save + SESSION_SAVE_DEBOUNCE);
             }
@@ -571,7 +573,7 @@ pub fn run() -> Result<()> {
         // A state transition here (e.g. a silent agent reaching Done) has no PtyData
         // to ride on, so repaint when detection reports a visible change.
         let now = Instant::now();
-        if app.detect_tick_with(now, !clients.is_empty()) {
+        if app.detect_tick_with(now, has_active_clients(&clients)) {
             render_request.record(RenderCause::Detection);
         }
         // Parked `wait.output` deadlines lapse on the tick (docs/81); a no-op
@@ -584,17 +586,17 @@ pub fn run() -> Result<()> {
             render_request.record(RenderCause::Detection);
         }
         for msg in app.pending_notify.drain(..) {
-            broadcast(&mut clients, ServerMessage::Notify(msg));
+            broadcast_effect(&mut clients, ServerMessage::Notify(msg));
         }
         if let Some(signal) = app.pending_sound.take() {
-            broadcast(&mut clients, ServerMessage::Sound(signal));
+            broadcast_effect(&mut clients, ServerMessage::Sound(signal));
         }
         // A finished mouse selection copies to the client's clipboard (OSC 52).
         if let Some(url) = app.pending_open_url.take() {
-            broadcast(&mut clients, ServerMessage::OpenUrl(url));
+            broadcast_effect(&mut clients, ServerMessage::OpenUrl(url));
         }
         if let Some(text) = app.pending_clipboard.take() {
-            broadcast(&mut clients, ServerMessage::Clipboard(text));
+            broadcast_effect(&mut clients, ServerMessage::Clipboard(text));
         }
         // An expired toast forces one render so it disappears (idle frames don't).
         if app.tick_toast(Instant::now()) {
@@ -629,7 +631,9 @@ pub fn run() -> Result<()> {
         // A forced redraw (resize / focus-regained / external damage) must render
         // even if nothing else changed this tick — and so must a client that is
         // waiting on its full-frame resync (see `needs_render`).
-        let any_behind = clients.values().any(|client| client.behind);
+        let any_behind = clients
+            .values()
+            .any(|client| client.interest != SurfaceInterest::Suspended && client.behind);
         if app.force_redraw {
             render_request.record(RenderCause::ForcedRepair);
         }
@@ -638,7 +642,7 @@ pub fn run() -> Result<()> {
         }
 
         if render_request.needs_render()
-            && !clients.is_empty()
+            && has_render_clients(&clients)
             && frame_cadence_ready(last_render_attempt.elapsed())
         {
             let forced = std::mem::take(&mut app.force_redraw);
@@ -666,6 +670,12 @@ pub fn run() -> Result<()> {
             if background {
                 render_request.record_hidden_pty();
             }
+        }
+        if !has_render_clients(&clients) {
+            // Suspended fleet channels retain no render debt. Preparing one
+            // later always starts with a complete fresh projection.
+            render_request.clear();
+            app.force_redraw = false;
         }
     }
 
@@ -736,11 +746,50 @@ fn apply(
             }
             was_foreground
         }
+        AppEvent::ClientSurfaceInterest { id, interest } => {
+            let Some(client) = clients.get_mut(&id) else {
+                return false;
+            };
+            if client.interest == interest {
+                return false;
+            }
+            client.interest = interest;
+            client.force_full = true;
+            client.behind = false;
+            client.retained_ready = false;
+            client.retained_pane_content.clear();
+            if interest == SurfaceInterest::Suspended {
+                client.last_frame = None;
+                client.render_buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+            }
+            if interest == SurfaceInterest::Active {
+                client.last_activity = *next_activity;
+                *next_activity = next_activity.saturating_add(1);
+                *foreground = Some(id);
+                apply_foreground_theme(app, clients, *foreground);
+            } else if *foreground == Some(id) {
+                *foreground = latest_client(clients);
+                apply_foreground_theme(app, clients, *foreground);
+            }
+            true
+        }
         AppEvent::ClientInput { id, input } => {
             let Some(client) = clients.get_mut(&id) else {
                 discard_client_input(input);
                 return false;
             };
+            if client.interest != SurfaceInterest::Active {
+                // A prepared channel may update only its candidate viewport.
+                if let (SurfaceInterest::Prepared, ClientInput::Resize(cols, rows)) =
+                    (client.interest, &input)
+                {
+                    client.size = ((*cols).max(1), (*rows).max(1));
+                    client.force_full = true;
+                    return true;
+                }
+                discard_client_input(input);
+                return false;
+            }
             client.last_activity = *next_activity;
             *next_activity = next_activity.saturating_add(1);
 
@@ -811,9 +860,28 @@ fn broadcast(clients: &mut Clients, msg: ServerMessage) {
     clients.retain(|_, client| client.send_control(msg.clone()).is_ok());
 }
 
+fn broadcast_effect(clients: &mut Clients, msg: ServerMessage) {
+    clients.retain(|_, client| {
+        client.interest != SurfaceInterest::Active || client.send_control(msg.clone()).is_ok()
+    });
+}
+
+fn has_active_clients(clients: &Clients) -> bool {
+    clients
+        .values()
+        .any(|client| client.interest == SurfaceInterest::Active)
+}
+
+fn has_render_clients(clients: &Clients) -> bool {
+    clients
+        .values()
+        .any(|client| client.interest != SurfaceInterest::Suspended)
+}
+
 fn latest_client(clients: &Clients) -> Option<u64> {
     clients
         .iter()
+        .filter(|(_, client)| client.interest == SurfaceInterest::Active)
         .max_by_key(|(_, client)| client.last_activity)
         .map(|(&id, _)| id)
 }
@@ -893,7 +961,10 @@ fn render_clients(
     scratch: &mut RenderScratch,
 ) -> bool {
     RENDER_PASSES.fetch_add(1, Ordering::Relaxed);
-    if clients.is_empty() {
+    if !clients
+        .values()
+        .any(|client| client.interest != SurfaceInterest::Suspended)
+    {
         return false;
     }
     if foreground.is_none_or(|id| !clients.contains_key(&id)) {
@@ -931,6 +1002,12 @@ fn render_clients(
     scratch.dead.clear();
     let mut presented = false;
     for id in scratch.order.iter().copied() {
+        if clients
+            .get(&id)
+            .is_some_and(|client| client.interest == SurfaceInterest::Suspended)
+        {
+            continue;
+        }
         let interactive = *foreground == Some(id);
         if let Some(client) = clients.get_mut(&id) {
             let outcome = render_client(
@@ -1386,6 +1463,14 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
                     break;
                 }
             }
+            Ok(ClientMessage::SurfaceInterest(interest)) => {
+                if app_tx
+                    .send(AppEvent::ClientSurfaceInterest { id, interest })
+                    .is_err()
+                {
+                    break;
+                }
+            }
             Ok(ClientMessage::Detach) | Err(_) => {
                 let _ = app_tx.send(AppEvent::ClientDetach { id });
                 break;
@@ -1592,13 +1677,13 @@ mod shutdown {
 mod tests {
     use super::ServerMessage;
     use super::{
-        apply, broadcast, frame_cadence_ready, frame_wait, record_event_render_request,
-        render_clients, ClientSender, ClientState, EventRenderSource, FrameSendError, RenderCause,
-        RenderRequest, RenderScratch, FRAME_INTERVAL,
+        apply, broadcast, broadcast_effect, frame_cadence_ready, frame_wait,
+        record_event_render_request, render_clients, ClientSender, ClientState, EventRenderSource,
+        FrameSendError, RenderCause, RenderRequest, RenderScratch, FRAME_INTERVAL,
     };
     use crate::app::App;
     use crate::event::{AppEvent, ClientInput};
-    use crate::ipc::protocol::FrameDiff;
+    use crate::ipc::protocol::{FrameDiff, SurfaceInterest};
     use crate::terminal::appearance::PaneAppearance;
     use crate::terminal::vt::{create_engine, VtEngineKind};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1635,6 +1720,85 @@ mod tests {
             ServerMessage::FrameDiff(frame) => (frame.width, frame.height),
             _ => panic!("expected rendered frame"),
         }
+    }
+
+    #[test]
+    fn suspended_surface_releases_frames_and_receives_no_render_or_effect() {
+        let _env = crate::persist::test_env("suspended-surface");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(80, 24, app_tx).unwrap();
+        let (client, rx) = display_client(80, 24, 1);
+        let mut clients = HashMap::from([(7, client)]);
+        let mut foreground = Some(7);
+        let mut interactive_size = (80, 24);
+        let mut next_activity = 2;
+        let mut scratch = RenderScratch::default();
+
+        assert!(render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            true,
+            false,
+            &mut scratch,
+        ));
+        assert!(matches!(rx.recv().unwrap(), ServerMessage::Frame(_)));
+        clients[&7]
+            .sender
+            .frame_pending
+            .store(false, Ordering::Release);
+
+        assert!(apply(
+            AppEvent::ClientSurfaceInterest {
+                id: 7,
+                interest: SurfaceInterest::Suspended,
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        ));
+        assert_eq!(foreground, None);
+        assert!(clients[&7].last_frame.is_none());
+        assert_eq!(
+            clients[&7].render_buf.area,
+            ratatui::layout::Rect::new(0, 0, 1, 1)
+        );
+        assert!(!render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            true,
+            false,
+            &mut scratch,
+        ));
+        broadcast_effect(&mut clients, ServerMessage::Notify("hidden".into()));
+        assert!(rx.try_recv().is_err());
+
+        assert!(apply(
+            AppEvent::ClientSurfaceInterest {
+                id: 7,
+                interest: SurfaceInterest::Prepared,
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        ));
+        assert!(render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            true,
+            false,
+            &mut scratch,
+        ));
+        assert!(matches!(rx.recv().unwrap(), ServerMessage::Frame(_)));
     }
 
     #[test]

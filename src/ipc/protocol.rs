@@ -33,9 +33,20 @@ pub enum ClientMessage {
         cols: u16,
         rows: u16,
     },
+    /// Negotiate whether this attached display owns a visible surface. A
+    /// suspended fleet channel remains connected but receives no frames,
+    /// cursor, resize ownership, input, or interactive host effects.
+    SurfaceInterest(SurfaceInterest),
     Detach,
     /// Response to [`ServerMessage::Ready`] when terminal colors were requested.
     TerminalColors(Option<TerminalColors>),
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SurfaceInterest {
+    Suspended,
+    Prepared,
+    Active,
 }
 
 fn deserialize_clipboard_image<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>

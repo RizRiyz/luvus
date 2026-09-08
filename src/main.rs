@@ -98,6 +98,9 @@ fn main() -> Result<()> {
     {
         return fleet_bridge_probe(&args);
     }
+    if args.get(1).map(String::as_str) == Some("fleet-bridge") && args.len() == 2 {
+        return machine::run_bridge();
+    }
     // Private foreground route used only by scheduled worker panes. Keep it
     // ahead of migrations and TUI/server routing: it must run exactly one
     // adapter process, settle its ORCH task, and exit.

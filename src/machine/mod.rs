@@ -4,8 +4,11 @@
 //! outside every selected server session so choosing a remote endpoint cannot
 //! transfer ownership of the user's SSH profiles to that server.
 
+mod bridge;
 mod catalog;
 mod cli;
+pub(crate) mod protocol;
 mod ssh;
 
+pub(crate) use bridge::run as run_bridge;
 pub(crate) use cli::run as run_cli;
