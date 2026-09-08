@@ -80,6 +80,10 @@ pub enum AppEvent {
         /// detach notifications can never be dropped merely because a frame is
         /// already queued.
         frame_pending: Arc<AtomicBool>,
+        /// The same one-message gate for the images a client is owed while its
+        /// projection is unchanged. Separate from the frame slot so a stalled
+        /// writer cannot let one starve the other.
+        graphics_pending: Arc<AtomicBool>,
         cols: u16,
         rows: u16,
         terminal_colors: Option<TerminalColors>,
@@ -132,6 +136,12 @@ pub enum AppEvent {
         id: u64,
         cell_width_px: u16,
         cell_height_px: u16,
+    },
+    /// A client's socket writer dequeued the images it was sent, freeing its
+    /// graphics gate. A backlog held back by a taken gate is flushed on this
+    /// event, not by rendering on every tick until the gate happens to be free.
+    ClientGraphicsSent {
+        id: u64,
     },
     /// Input from a binary display client. The server unwraps this only after
     /// activating the correct per-client viewport; it never reaches `App`.

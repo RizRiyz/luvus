@@ -372,6 +372,239 @@ impl GraphicsQueue {
     }
 }
 
+/// Most bytes of graphics one client may have waiting behind its socket
+/// writer, and the most entries across them.
+///
+/// The budget matches a pane's queue: coalescing means a client can never owe
+/// more than the panes emitted, and one image is the largest thing that has to
+/// fit whole.
+const MAX_BACKLOG_BYTES: usize = 8 * 1024 * 1024;
+const MAX_BACKLOG_ENTRIES: usize = 256;
+
+/// Graphics commands one client has yet to be sent, coalesced by image id.
+///
+/// A terminal has to learn an image before it is shown the cells naming it, so
+/// what a pane emits cannot simply be pushed at a client that is behind: its
+/// grid still holds the previous placement, and an image that arrives ahead of
+/// the frame is drawn into the old rectangle — the wrong size, anchored
+/// top-left, with the pane blank around it. Commands wait here for the frame
+/// they belong to.
+///
+/// They are coalesced because an id names one image. A child that redraws
+/// replaces what its id means, so an older command for that id is not merely
+/// wasteful: a child streaming frames reuses the file the command refers to,
+/// and sending the old command teaches the terminal today's pixels under
+/// yesterday's instructions. Only the newest command for an id is worth
+/// sending — and a chunked transfer is kept whole, because it means nothing in
+/// halves.
+///
+/// Overflow asks for a resync rather than a partial delivery. The entries
+/// depend on each other, and a client given some of them would draw an image it
+/// was taught in part; re-teaching it every image its panes still hold is the
+/// only state that is certainly right.
+#[derive(Default)]
+pub(crate) struct GraphicsBacklog {
+    entries: Vec<BacklogEntry>,
+    bytes: usize,
+    /// The entry continuation chunks belong to, named by sequence rather than
+    /// by position so that a delete removing an entry cannot silently redirect
+    /// the rest of a transfer into another image's.
+    collecting: Option<Collecting>,
+    next_seq: u64,
+    needs_resync: bool,
+}
+
+/// One image's pending commands, or one command that names no image.
+struct BacklogEntry {
+    /// The image this entry teaches, when its command named one. An entry
+    /// without an id stands on its own: nothing can replace it, because
+    /// nothing can be said to supersede it.
+    id: Option<u32>,
+    commands: Vec<Vec<u8>>,
+    bytes: usize,
+    seq: u64,
+}
+
+/// The transfer being chunked, and the image it carries.
+#[derive(Clone, Copy)]
+struct Collecting {
+    id: Option<u32>,
+    seq: u64,
+}
+
+impl GraphicsBacklog {
+    /// Add what a render pass collected from the panes.
+    pub(crate) fn push(&mut self, commands: &[Vec<u8>]) {
+        for command in commands {
+            self.push_one(command);
+        }
+    }
+
+    fn push_one(&mut self, command: &[u8]) {
+        let Some(control) = payload(command).and_then(ControlData::parse) else {
+            // Not a command this module wrapped, or control data it cannot
+            // read. Luvus does not interpret these bytes, so the honest thing
+            // is to pass them on in order rather than to decide they are junk.
+            self.open(None, command, false);
+            return;
+        };
+
+        if control.is_continuation {
+            self.chunk(command, control.more);
+            return;
+        }
+
+        match control.action {
+            // A transmission replaces the image its id names, and with it
+            // everything still waiting to teach that id.
+            b't' | b'T' => {
+                if let Some(id) = control.image_id {
+                    self.forget(id);
+                }
+                self.open(control.image_id, command, control.more);
+            }
+            // A placement only means anything alongside the image it places,
+            // so it travels with that image when one is still waiting.
+            b'p' => match control.image_id.and_then(|id| self.sequence_of(id)) {
+                Some(seq) => self.append(seq, command, control.more),
+                None => self.open(control.image_id, command, control.more),
+            },
+            b'd' => {
+                match (control.delete_scope, control.image_id) {
+                    (b'A' | b'a', _) => self.forget_all(),
+                    (b'I' | b'i', Some(id)) => self.forget(id),
+                    _ => {}
+                }
+                // The delete itself still has to arrive: it is the only thing
+                // that takes back an image the client already learned.
+                self.open(None, command, false);
+            }
+            // Anything else — a query, a key this build has never heard of —
+            // is kept where it arrived. The terminal is the one that has to
+            // make sense of it.
+            _ => self.open(None, command, false),
+        }
+    }
+
+    /// Add a chunk to the transfer being collected.
+    ///
+    /// That transfer may have been delivered since its opening chunk arrived,
+    /// in which case a fresh entry carries the rest: the chunks reach the
+    /// terminal in order either way, and it is reading one transfer. A chunk
+    /// with no transfer at all is dropped — it has no beginning to belong to,
+    /// and a terminal cannot make an image out of a middle.
+    fn chunk(&mut self, command: &[u8], more: bool) {
+        let Some(collecting) = self.collecting else {
+            return;
+        };
+        if self.entries.iter().any(|entry| entry.seq == collecting.seq) {
+            self.append(collecting.seq, command, more);
+        } else {
+            self.open(collecting.id, command, more);
+        }
+    }
+
+    /// Start an entry, and remember it while more of its transfer is coming.
+    fn open(&mut self, id: Option<u32>, command: &[u8], more: bool) {
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        self.bytes = self.bytes.saturating_add(command.len());
+        self.entries.push(BacklogEntry {
+            id,
+            commands: vec![command.to_vec()],
+            bytes: command.len(),
+            seq,
+        });
+        self.collecting = more.then_some(Collecting { id, seq });
+        self.enforce_budget();
+    }
+
+    fn append(&mut self, seq: u64, command: &[u8], more: bool) {
+        let Some(entry) = self.entries.iter_mut().find(|entry| entry.seq == seq) else {
+            return;
+        };
+        entry.commands.push(command.to_vec());
+        entry.bytes += command.len();
+        let id = entry.id;
+        self.bytes = self.bytes.saturating_add(command.len());
+        self.collecting = more.then_some(Collecting { id, seq });
+        self.enforce_budget();
+    }
+
+    fn sequence_of(&self, id: u32) -> Option<u64> {
+        self.entries
+            .iter()
+            .find(|entry| entry.id == Some(id))
+            .map(|entry| entry.seq)
+    }
+
+    fn forget(&mut self, id: u32) {
+        let mut dropped = 0;
+        self.entries.retain(|entry| {
+            let keep = entry.id != Some(id);
+            if !keep {
+                dropped += entry.bytes;
+            }
+            keep
+        });
+        self.bytes = self.bytes.saturating_sub(dropped);
+        if self
+            .collecting
+            .is_some_and(|collecting| collecting.id == Some(id))
+        {
+            self.collecting = None;
+        }
+    }
+
+    fn forget_all(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+        self.collecting = None;
+    }
+
+    /// Abandon everything once the budget is reached, and ask to be re-taught.
+    fn enforce_budget(&mut self) {
+        if self.bytes <= MAX_BACKLOG_BYTES && self.entries.len() <= MAX_BACKLOG_ENTRIES {
+            return;
+        }
+        self.entries.clear();
+        self.bytes = 0;
+        self.collecting = None;
+        self.needs_resync = true;
+    }
+
+    /// Take everything waiting, in the order the panes emitted it.
+    ///
+    /// A transfer still being chunked stays remembered, so its remaining chunks
+    /// are collected into a new entry rather than dropped for having lost the
+    /// one they opened with.
+    pub(crate) fn take(&mut self) -> Vec<Vec<u8>> {
+        self.bytes = 0;
+        std::mem::take(&mut self.entries)
+            .into_iter()
+            .flat_map(|entry| entry.commands)
+            .collect()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Whether this client has to be taught its panes' images again, clearing
+    /// the request so it is answered once.
+    pub(crate) fn take_resync(&mut self) -> bool {
+        std::mem::take(&mut self.needs_resync)
+    }
+}
+
+/// One command's control data and body, with the APC wrapper [`GraphicsQueue`]
+/// put around it stripped back off.
+fn payload(command: &[u8]) -> Option<&[u8]> {
+    command
+        .strip_prefix(b"\x1b_G".as_slice())?
+        .strip_suffix(b"\x1b\\".as_slice())
+}
+
 /// What Luvus does with one graphics command.
 enum Handling {
     /// Not something Luvus can pass on, so the child's command stops here.
@@ -1081,5 +1314,164 @@ mod tests {
         graphics.mark_pending();
         assert!(graphics.take_pending());
         assert!(!graphics.take_pending(), "the flag is consumed");
+    }
+
+    /// A command as a pane hands it over: the APC wrapper is what the backlog
+    /// has to look through to find the image an entry belongs to.
+    fn wrapped(payload: &str) -> Vec<u8> {
+        let mut command = b"\x1b_G".to_vec();
+        command.extend_from_slice(payload.as_bytes());
+        command.extend_from_slice(b"\x1b\\");
+        command
+    }
+
+    fn backlogged(payloads: &[&str]) -> Vec<String> {
+        let mut backlog = GraphicsBacklog::default();
+        let commands: Vec<Vec<u8>> = payloads.iter().copied().map(wrapped).collect();
+        backlog.push(&commands);
+        backlog
+            .take()
+            .into_iter()
+            .map(|command| String::from_utf8(command).unwrap())
+            .collect()
+    }
+
+    /// An id names one image. The command that carried the older version is
+    /// worse than wasted work: a child that streams frames reuses the file it
+    /// refers to, so sending it teaches the terminal the newest pixels under
+    /// instructions written for an older frame.
+    #[test]
+    fn a_redrawn_image_replaces_the_command_still_waiting_for_its_id() {
+        let waiting = backlogged(&[
+            "a=T,U=1,i=7,c=2,r=2,f=100;OLD",
+            "a=T,U=1,i=7,c=2,r=2,f=100;NEW",
+        ]);
+        assert_eq!(waiting.len(), 1, "one command per id: {waiting:?}");
+        assert!(waiting[0].contains("NEW"), "{waiting:?}");
+
+        // Another id is another image, and both are owed.
+        let two = backlogged(&["a=T,U=1,i=7,c=1,r=1;AAAA", "a=T,U=1,i=8,c=1,r=1;BBBB"]);
+        assert_eq!(two.len(), 2, "{two:?}");
+    }
+
+    /// A transfer means nothing in halves, so coalescing must never leave a
+    /// terminal holding part of one.
+    #[test]
+    fn a_chunked_transfer_is_kept_whole_and_replaced_whole() {
+        let chunks = backlogged(&["a=T,U=1,i=7,c=1,r=1,m=1;AAAA", "m=1;BBBB", "m=0;CCCC"]);
+        assert_eq!(chunks.len(), 3, "{chunks:?}");
+        assert!(chunks[2].contains("CCCC"), "{chunks:?}");
+
+        let redrawn = backlogged(&[
+            "a=T,U=1,i=7,c=1,r=1,m=1;AAAA",
+            "m=1;BBBB",
+            "m=0;CCCC",
+            "a=T,U=1,i=7,c=1,r=1;NEW",
+        ]);
+        assert_eq!(
+            redrawn.len(),
+            1,
+            "every chunk of the replaced transfer goes with it: {redrawn:?}"
+        );
+        assert!(redrawn[0].contains("NEW"), "{redrawn:?}");
+    }
+
+    /// The remaining chunks of a transfer already delivered still belong to it.
+    /// They are collected on their own rather than dropped for having lost the
+    /// chunk they opened with — the terminal is reading one transfer, and the
+    /// chunks reach it in order either way.
+    #[test]
+    fn chunks_that_follow_a_delivery_are_still_collected() {
+        let mut backlog = GraphicsBacklog::default();
+        backlog.push(&[wrapped("a=T,U=1,i=7,c=1,r=1,m=1;AAAA")]);
+        assert_eq!(backlog.take().len(), 1);
+
+        backlog.push(&[wrapped("m=0;BBBB")]);
+        let rest = backlog.take();
+        assert_eq!(rest.len(), 1, "the tail of the transfer is not dropped");
+        assert_eq!(rest[0], wrapped("m=0;BBBB"));
+
+        // A chunk with no transfer at all has no beginning to belong to.
+        let mut orphan = GraphicsBacklog::default();
+        orphan.push(&[wrapped("m=0;BBBB")]);
+        assert!(orphan.is_empty(), "a middle is not an image");
+    }
+
+    /// A placement is only worth sending alongside the image it places, so it
+    /// travels with that image when one is still waiting.
+    #[test]
+    fn a_placement_joins_the_image_it_places() {
+        let together = backlogged(&["a=T,U=1,i=7,c=1,r=1;AAAA", "a=p,U=1,i=7,c=1,r=1"]);
+        assert_eq!(together.len(), 2, "{together:?}");
+        assert!(together[0].contains("AAAA") && together[1].contains("a=p"));
+
+        // Replacing the image replaces the placement that came with it.
+        let redrawn = backlogged(&[
+            "a=T,U=1,i=7,c=1,r=1;AAAA",
+            "a=p,U=1,i=7,c=1,r=1",
+            "a=T,U=1,i=7,c=1,r=1;NEW",
+        ]);
+        assert_eq!(redrawn.len(), 1, "{redrawn:?}");
+
+        // A placement for an image the client already has stands on its own.
+        let alone = backlogged(&["a=p,U=1,i=7,c=1,r=1"]);
+        assert_eq!(alone.len(), 1, "{alone:?}");
+    }
+
+    /// A delete takes back an image the client may already have learned, so it
+    /// has to reach the terminal even though what it deletes never will.
+    #[test]
+    fn a_delete_drops_what_it_deletes_and_is_itself_delivered() {
+        let one = backlogged(&[
+            "a=T,U=1,i=7,c=1,r=1;AAAA",
+            "a=T,U=1,i=8,c=1,r=1;BBBB",
+            "a=d,d=I,i=7",
+        ]);
+        assert_eq!(one.len(), 2, "{one:?}");
+        assert!(
+            !one.iter().any(|command| command.contains("AAAA")),
+            "{one:?}"
+        );
+        assert!(one[0].contains("BBBB") && one[1].contains("a=d"), "{one:?}");
+
+        let all = backlogged(&[
+            "a=T,U=1,i=7,c=1,r=1;AAAA",
+            "a=T,U=1,i=8,c=1,r=1;BBBB",
+            "a=d,d=A",
+        ]);
+        assert_eq!(all, vec![String::from_utf8(wrapped("a=d,d=A")).unwrap()]);
+    }
+
+    /// The entries depend on each other, so a client given some of them would
+    /// draw an image it was taught in part. Overflow asks to be taught the
+    /// panes' whole working set again instead.
+    #[test]
+    fn an_overflowing_backlog_is_abandoned_and_asks_to_be_taught_again() {
+        let mut backlog = GraphicsBacklog::default();
+        for id in 1..=(MAX_BACKLOG_ENTRIES + 1) {
+            backlog.push(&[wrapped(&format!("a=T,U=1,i={id},c=1,r=1;AAAA"))]);
+        }
+        assert!(backlog.is_empty(), "nothing partial is kept");
+        assert!(backlog.take().is_empty());
+
+        // The byte budget stops a few large images just as the entry count
+        // stops many small ones.
+        let body = "A".repeat(64 * 1024);
+        let mut heavy = GraphicsBacklog::default();
+        let mut images = 0;
+        while images == 0 || !heavy.is_empty() {
+            images += 1;
+            assert!(images <= MAX_BACKLOG_ENTRIES, "the byte budget stops first");
+            heavy.push(&[wrapped(&format!("a=T,U=1,i={images},c=1,r=1;{body}"))]);
+        }
+        assert!(images * body.len() >= MAX_BACKLOG_BYTES);
+        assert!(heavy.take_resync());
+
+        assert!(backlog.take_resync(), "the client has to be re-taught");
+        assert!(!backlog.take_resync(), "and asked for it once");
+
+        // The backlog recovers: the next image is not punished for the last.
+        backlog.push(&[wrapped("a=T,U=1,i=1,c=1,r=1;AAAA")]);
+        assert_eq!(backlog.take().len(), 1);
     }
 }
