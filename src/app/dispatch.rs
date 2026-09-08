@@ -43,10 +43,6 @@ pub(crate) const PROC_SCAN_FAILURE_RETRIES: u8 = 1;
 const SESSION_SCAN_INTERVAL: Duration = Duration::from_secs(4);
 const WAIT_RETEST_INTERVAL: Duration = Duration::from_millis(100);
 
-#[cfg(test)]
-#[path = "dispatch/tests/socket_api.rs"]
-mod socket_api_tests;
-
 impl App {
     // ── api dispatch ──────────────────────────────────────────────────────────
 
@@ -359,5 +355,5 @@ impl App {
 }
 
 #[cfg(test)]
-#[path = "dispatch/tests/api.rs"]
+#[path = "dispatch/tests/mod.rs"]
 mod tests;
