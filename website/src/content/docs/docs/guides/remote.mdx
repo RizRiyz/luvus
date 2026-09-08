@@ -184,13 +184,17 @@ ssh devbox luvus session list
 ssh devbox luvus session list --json
 ```
 
-Inside a remote TUI, `Ctrl+Space t` opens the session switcher. Choosing a
+Inside a remote TUI, `Ctrl+Space t` focuses the session switcher. Choosing a
 different session starts it when needed and moves only the current client. The
-previous session and its panes stay alive.
+previous session and its panes stay alive. Press `a` on a selected row to open
+the same actions available by right click.
 
-To stop another running session from the switcher, right-click it and select
+To stop another running session from the switcher, open its actions and select
 **Stop**. This ends that session and its live panes without detaching the
-current client. The current session cannot be stopped from this menu.
+current client. A stopped session offers **Start**; a stopped named session also
+offers **Delete**, with confirmation, to remove its saved state. The current
+session cannot be stopped from this menu, and the default session cannot be
+deleted.
 
 ## Detach and reconnect
 

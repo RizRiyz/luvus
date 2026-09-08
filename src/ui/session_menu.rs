@@ -124,7 +124,7 @@ pub(crate) fn draw_session_menu(
         return;
     }
 
-    if loading {
+    if loading && item_count == 1 {
         f.render_widget(
             Paragraph::new(Span::styled(
                 format!(" {}", app.catalog.session_loading),
@@ -269,7 +269,17 @@ fn draw_row(
     else {
         return;
     };
-    let state = if row.current {
+    let pending = app.pending_named_session_actions.get(&row.name).copied();
+    let state = if let Some(action) = pending {
+        match action {
+            crate::app::session_menu::NamedSessionAction::Stop => {
+                app.catalog.session_stopping.to_string()
+            }
+            crate::app::session_menu::NamedSessionAction::Delete => {
+                app.catalog.session_deleting.to_string()
+            }
+        }
+    } else if row.current {
         format!(
             "{} · {}",
             app.catalog.session_current, app.catalog.session_running
@@ -309,6 +319,8 @@ fn draw_row(
             format!("  {state}"),
             Style::new().fg(if hot {
                 theme.crust
+            } else if pending.is_some() {
+                theme.accent
             } else if row.running {
                 theme.green
             } else {
@@ -327,6 +339,8 @@ fn draw_row(
                 format!("    {state}"),
                 Style::new().fg(if hot {
                     theme.crust
+                } else if pending.is_some() {
+                    theme.accent
                 } else if row.running {
                     theme.green
                 } else {
@@ -559,5 +573,52 @@ mod tests {
             .named_session_row_rects
             .iter()
             .all(|(_, rect)| rect.y >= close.bottom()));
+    }
+
+    #[test]
+    fn cached_rows_remain_visible_while_discovery_refreshes() {
+        let _env = crate::persist::test_env("named-session-menu-cached-render");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 30, tx).unwrap();
+        let mut cached = menu();
+        cached.loading = true;
+        app.named_session_menu = Some(cached);
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buffer = Buffer::empty(area);
+        let mut target = crate::ui::RenderTarget::new(&mut buffer, area);
+        let theme = app.theme.clone();
+
+        draw_session_menu(&mut target, area, &mut app, &theme);
+
+        assert_eq!(app.named_session_row_rects.len(), 3);
+    }
+
+    #[test]
+    fn pending_action_is_rendered_without_animation() {
+        let _env = crate::persist::test_env("named-session-menu-pending-render");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 30, tx).unwrap();
+        app.named_session_menu = Some(menu());
+        app.pending_named_session_actions.insert(
+            "review".into(),
+            crate::app::session_menu::NamedSessionAction::Delete,
+        );
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buffer = Buffer::empty(area);
+        let mut target = crate::ui::RenderTarget::new(&mut buffer, area);
+        let theme = app.theme.clone();
+
+        draw_session_menu(&mut target, area, &mut app, &theme);
+
+        let row = app
+            .named_session_row_rects
+            .iter()
+            .find(|(index, _)| *index == 2)
+            .unwrap()
+            .1;
+        let text: String = (row.x..row.right())
+            .map(|x| buffer.cell((x, row.y)).unwrap().symbol())
+            .collect();
+        assert!(text.contains(app.catalog.session_deleting));
     }
 }
