@@ -434,14 +434,39 @@ requests.
 
 `agent.prompt` takes `target`, `text`, optional `wait` (default `false`),
 optional `until`, and optional `timeout_s`. `until` and `timeout_s` require
-`wait:true`. Paste and Enter are one PTY queue action. With `wait:true`, the
-response is held until a requested state has post-submission evidence. Luvus
-accepts a detected Working transition or a newer output revision followed by a
-short quiet window, so a fast turn cannot disappear between detector ticks. A
-timeout returns `submitted:true`, `matched:false`, and `evidence:"timeout"`.
-Never resend that prompt automatically because it may already have executed.
-Only one waiting prompt may own a pane at a time. A conflicting call returns
-`agent_prompt_busy` before Luvus queues its text.
+`wait:true`. Paste and Enter remain one PTY queue action. Without `wait`, the
+response remains immediate: `submitted:true`, `matched:false`, `evidence:"queued"`,
+with no `observed_state` field. Submission means queue admission, not confirmation
+that the agent consumed the prompt text.
+
+With `wait:true`, a **new** `working` or `blocked` transition must be observed
+before a requested `until` state can complete the wait. An already active state,
+unchanged metadata, title flicker, and output settling alone do not qualify.
+`observed_state` identifies the first active transition, `status` is the current
+state, and `evidence:"state_transition"` explains a matched result. Transitions
+are captured on the app loop even when working and settling happen between
+workflow ticks. State evidence is not a native per-prompt turn identifier.
+
+The absolute `timeout_s` deadline (default 300 seconds) covers both observing the
+transition and reaching `until` (default `idle`, `done`, or `blocked`). Repeated
+`until` entries remain accepted. Timeout returns `submitted:true`, `matched:false`,
+`evidence:"timeout"`, and `observed_state` (null when no active transition was seen).
+Agents without detectable state transitions therefore time out. The standalone
+`agent.wait` retains its current-state matching and status-set semantics.
+
+Pane or terminal exit while a prompt wait is pending returns `agent_not_running`.
+Its `error.data` retains `pane`, `queued:true`, `submitted:true`, `observed_state`,
+`reason:"pane_closed"`, `baseline_revision`, and `content_revision`. CLI exit codes
+remain 0 for a matched wait or no-wait queue admission, 1 for request errors, and
+2 for timeouts or pane exit during a wait.
+
+Only one waiting prompt may own a pane. A conflicting waiting request returns
+`agent_prompt_busy` before input is queued. No-wait requests retain their existing
+behavior and do not acquire wait ownership. Cancellation, timeout, and exit release
+that ownership without resending or retracting queued input. Never resend a prompt
+automatically after a timeout or lost response because it may already have executed.
+Older wait responses omit `observed_state` and can report `output_settled`; callers
+requiring the new transition gate should check the response shape.
 
 ## Search
 

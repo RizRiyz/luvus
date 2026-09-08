@@ -43,3 +43,6 @@
 {"id":"42","method":"task.heartbeat","params":{"id":"t1","context":0.6}}
 {"id":"43","method":"agent.keys","params":{"target":"reviewer","keys":["up","enter","CTRL+C","x","\u00e9"]}}
 {"id":"access-keys","method":"agent.keys","params":{"target":"7","keys":["ctrl+z","esc","[","Z","\ud83d\ude42"]},"auth":"example-client-token"}
+{"id":"prompt-0","method":"agent.prompt","params":{"target":"7","text":"review"}}
+{"id":"prompt-1","method":"agent.prompt","params":{"target":"reviewer","text":"review","wait":true,"until":["idle","idle"],"timeout_s":0}}
+{"id":"prompt-2","method":"agent.prompt","params":{"target":"codex","text":"first\n\u7b2c\u4e8c\u884c","wait":true,"until":["idle","working","blocked","done"],"timeout_s":3600}}

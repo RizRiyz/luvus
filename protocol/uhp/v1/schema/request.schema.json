@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://luvus.dev/protocol/uhp/v1/request.schema.json",
   "title": "Luvus Universal Harness Protocol request",
+  "$comment": "agent.prompt preserves target/text/wait/until/timeout_s. No-wait returns queue admission immediately. wait=true requires a new working or blocked transition before matching until, bounded by timeout_s (default 300). until and timeout_s require wait=true. agent.wait remains a current-state matcher.",
   "type": "object",
   "additionalProperties": false,
   "required": ["id", "method", "params"],

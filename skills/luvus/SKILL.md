@@ -239,6 +239,21 @@ luvus agent send reviewer "Review the diff. When done, run: luvus agent send lea
 After a no-wait handoff, end the turn. The report-back message starts a fresh
 turn. An external terminal has no caller pane, so do not invent one.
 
+With `--wait`, `agent prompt` (also `agent send`) requires a new `working` or
+`blocked` transition before the requested `--until` state can complete the wait.
+An unchanged status, title flicker, or quiet output alone cannot complete it.
+`observed_state` records the first active transition; `status` is the current state.
+The absolute `--timeout` covers both stages (default 300 seconds). Timeout returns
+`matched:false`, `evidence:"timeout"`, and a null `observed_state` if no transition
+was seen. Pane or terminal exit returns `agent_not_running` with `pane`, `queued`,
+`submitted`, `observed_state`, `reason:"pane_closed"`, `baseline_revision`, and
+`content_revision` under `error.data`. Timeout and pane exit during a wait use CLI
+exit code 2. Cancellation, timeout, and exit release pending wait ownership.
+Without `--wait`, the immediate `submitted:true`, `evidence:"queued"` response is
+unchanged and omits `observed_state`. Submission still means queue admission;
+state transitions do not confirm consumption of the prompt text. Do not resend
+automatically after a timeout or lost response because queued input may execute.
+
 When waiting was requested, keep it bounded and read a bounded result:
 
 ```sh
