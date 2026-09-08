@@ -1,0 +1,130 @@
+---
+title: Multiple Machines
+description: Save SSH machines, keep bounded connections open, and switch complete Luvus sessions from one terminal.
+---
+
+Luvus can keep several SSH machines available in one TUI. Each enabled profile
+uses one persistent SSH connection while the machine-aware client is open,
+regardless of how many named sessions exist on that host. Only the selected
+session renders. The previous session may remain connected in a suspended state
+that produces no frames and does not own input, cursor, effects, or PTY size.
+
+## Prepare a machine
+
+First confirm normal OpenSSH access and install the same Luvus version on both
+machines:
+
+```sh
+ssh buildbox
+ssh buildbox luvus --version
+luvus --version
+```
+
+Then save the machine:
+
+```sh
+luvus machine add build --host buildbox --label "Build box"
+```
+
+An enabled profile is saved only after Luvus locates the remote executable,
+verifies the fleet protocol, and proves that a fresh `BatchMode=yes` connection
+works. Luvus never stores a password, private key, host-key answer, or SSH
+command. OpenSSH configuration remains authoritative for aliases, keys, jump
+hosts, and authentication agents.
+
+Use `--disabled` to record a profile without connecting or probing it:
+
+```sh
+luvus machine add staging --host staging --disabled
+luvus machine enable staging
+```
+
+The first machine release accepts macOS and Linux remote hosts. The local TUI
+uses the installed OpenSSH client on macOS, Linux, or Windows.
+
+## Switch machines
+
+Start Luvus normally after saving at least one profile. A compact **Machines**
+dock appears above the ordinary sidebar docks. Select **Local** or an online
+machine with the mouse. Selecting the **MACHINES** heading opens the keyboard
+selector:
+
+- `Up` / `Down` or `k` / `j` moves
+- `Home` / `End` jumps
+- `r` refreshes profiles after a CLI or UHP catalog change
+- `Enter` selects
+- `Esc` or `q` closes
+
+On mobile, open **Menu**, choose **Machines**, and use the same selector. The
+handoff is two-phase: Luvus keeps the current surface interactive until a fresh
+complete destination frame arrives, then changes display and input ownership
+together. A failed or timed-out destination does not replace the current
+surface.
+
+Workspaces, tabs, panes, agents, files, DIFF, ORCH, and Mission Control always
+belong to the selected machine and named session. Use the normal session
+selector after switching machines to move between that host's named sessions.
+
+## Manage profiles
+
+```sh
+luvus machine list
+luvus machine show build
+luvus machine status build
+luvus machine sessions build
+luvus machine rename build "Linux builder"
+luvus machine disable build
+luvus machine enable build
+luvus machine remove build
+```
+
+`disable` and `remove` close only the local federation transport. They never
+stop the remote Luvus server, panes, agents, or automations. Catalog writes are
+atomic and support optimistic `--revision <n>` checks for scripts.
+
+`luvus machine open build --session review` remains the one-shot compatibility
+path when you want a dedicated remote terminal instead of the Machines dock.
+
+## UHP machine access
+
+Machine profiles are owner-local and are not exposed by an ordinary per-session
+UHP endpoint. Opt in explicitly when starting a scoped access gateway:
+
+```sh
+luvus uhp access --machines
+luvus uhp access --machines --control --ttl 3600
+```
+
+Read-only mode adds `machine.list`, `machine.get`, `machine.status`, and
+`machine.sessions`. Control mode also adds `machine.add`, `machine.rename`,
+`machine.enable`, `machine.disable`, and `machine.remove`, plus the `machine`
+scope. Capability discovery advertises these methods only when `--machines` is
+present. Profile projections omit the SSH destination and absolute remote
+binary path.
+
+Mutations require `if_revision` to reject stale writers and duplicate retries:
+
+```json
+{"id":"rename","method":"machine.rename","params":{"id":"build","label":"Builder","if_revision":3},"auth":"<token>"}
+```
+
+Machine UHP access does not expand authority inside a remote Luvus session.
+Session and terminal control still use that selected server's ordinary scoped
+methods.
+
+## Resource behavior
+
+- An empty catalog keeps the existing thin-client path and starts no machine
+  worker.
+- Disabled profiles create no SSH process, reader, timer, or render work.
+- Each enabled machine uses one OpenSSH process and one blocking reader with a
+  small fixed stack; there is no polling loop.
+- Background links carry bounded control and session metadata. A terminal
+  surface is opened only when selected.
+- Surface and control queues are bounded separately so terminal output cannot
+  starve close, health, or discovery messages.
+- Reconnect uses bounded exponential backoff with jitter. Authentication,
+  binary, and protocol problems are shown as attention states.
+
+For a single remote session without a saved catalog, continue using
+[`luvus --remote`](/docs/guides/remote/).

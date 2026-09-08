@@ -28,6 +28,7 @@ printf '%s\n' '{"id":"snapshot","method":"session.snapshot","params":{}}' \
 luvus uhp access
 luvus uhp access --ttl 7200
 luvus uhp access --control --ttl 3600
+luvus uhp access --machines --control --ttl 3600
 luvus uhp access --no-expiry
 ```
 
@@ -39,6 +40,11 @@ value from 1 through 86400 seconds. Pairing lasts at most five minutes and is
 shortened automatically when the configured authority expires sooner.
 `--no-expiry` makes access process-bound instead: it remains valid until the
 foreground command exits or is interrupted.
+
+`--machines` explicitly adds the owner-local machine catalog. Read-only access
+can inspect redacted profiles and run bounded status/session probes. Control
+access can add, rename, enable, disable, and remove profiles and advertises the
+additional `machine` scope. Without this flag, machine methods are absent.
 
 The descriptor includes:
 
