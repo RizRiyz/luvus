@@ -499,7 +499,8 @@ def valid_response(value):
                 pane(result["pane"])
                 and type(result["submitted"]) is bool
                 and type(result["matched"]) is bool
-                and (result["status"] is None or result["status"] in STATES)
+                and (result["status"] is None or result["status"] in STATES
+                     or ("observed_state" in result and result["status"] == "unknown"))
                 and integer(result["baseline_revision"])
                 and result["baseline_revision"] >= 0
                 and integer(result["content_revision"])
@@ -690,9 +691,34 @@ def valid_global_response(value):
         return False
     if set(value) == {"id", "error"} and not isinstance(value["error"], dict):
         return False
+    error = value.get("error")
+    if isinstance(error, dict) and error.get("code") == "agent_not_running":
+        data = error.get("data")
+        if isinstance(data, dict) and "observed_state" in data:
+            return (
+                {"pane", "queued", "submitted", "observed_state", "reason",
+                 "baseline_revision", "content_revision"} <= set(data)
+                and pane(data["pane"])
+                and data["queued"] is True and data["submitted"] is True
+                and data["observed_state"] in ("working", "blocked", None)
+                and data["reason"] == "pane_closed"
+                and integer(data["baseline_revision"]) and data["baseline_revision"] >= 0
+                and integer(data["content_revision"]) and data["content_revision"] >= 0
+            )
     result = value.get("result")
     if isinstance(result, dict) and result.get("type") == "uhp_capabilities":
         return valid_effective_access(result)
+    if isinstance(result, dict) and result.get("type") == "agent_prompt" and "observed_state" in result:
+        return (
+            valid_response(value)
+            and result["submitted"] is True
+            and result["observed_state"] in ("working", "blocked", None)
+            and (
+                (result["evidence"] == "state_transition" and result["matched"] is True
+                 and result["observed_state"] in ("working", "blocked"))
+                or (result["evidence"] == "timeout" and result["matched"] is False)
+            )
+        )
     if isinstance(result, dict) and result.get("type") == "agent_wait":
         return valid_response(value)
     return True

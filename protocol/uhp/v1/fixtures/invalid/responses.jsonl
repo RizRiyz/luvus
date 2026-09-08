@@ -24,3 +24,7 @@
 {"id":"access-missing-connections","result":{"type":"uhp_capabilities","methods":["uhp.capabilities","agent.keys","automation.create"],"access":{"mode":"read_only","allowed_methods":["uhp.capabilities"],"limits":{"requests_per_minute":120}}}}
 {"id":"access-missing-requests_per_minute","result":{"type":"uhp_capabilities","methods":["uhp.capabilities","agent.keys","automation.create"],"access":{"mode":"read_only","allowed_methods":["uhp.capabilities"],"limits":{"connections":16}}}}
 {"id":"access-missing-methods","result":{"type":"uhp_capabilities","access":{"mode":"read_only","allowed_methods":["uhp.capabilities"],"limits":{"connections":16,"requests_per_minute":120}}}}
+{"id":"prompt-no-observation","result":{"type":"agent_prompt","pane":"7","submitted":true,"matched":true,"status":"idle","baseline_revision":10,"content_revision":11,"evidence":"state_transition","observed_state":null}}
+{"id":"prompt-queue-not-observation","result":{"type":"agent_prompt","pane":"7","submitted":true,"matched":true,"status":"idle","baseline_revision":10,"content_revision":11,"evidence":"queued","observed_state":"working"}}
+{"id":"prompt-contradictory","result":{"type":"agent_prompt","pane":"7","submitted":false,"matched":true,"status":"idle","baseline_revision":10,"content_revision":11,"evidence":"state_transition","observed_state":"working"}}
+{"id":"prompt-exit-missing-pane","error":{"code":"agent_not_running","message":"pane closed","data":{"queued":true,"submitted":true,"observed_state":null,"reason":"pane_closed","baseline_revision":10,"content_revision":11}}}
