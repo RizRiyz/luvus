@@ -54,7 +54,7 @@ luvus puts context in the environment, flat, so a bash module never parses JSON:
 
 Run the `luvus` CLI from inside the command; it talks to the running server over `$LUVUS_SOCKET_PATH`. Use `"$LUVUS_BIN_PATH"` to guarantee the same binary as the session. Module-facing methods:
 
-- `luvus ui dock push --id <dock> --rows <json>` (or pipe the JSON on stdin) — fill your dock. Rows are `{text, action?, value?}`; a row's `action` invokes one of your `[[actions]]` on click, with the row's `value` in `LUVUS_MODULE_ROW_VALUE`.
+- `luvus ui dock push --id <dock> --rows <json>` (or pipe the JSON on stdin) — fill your dock. Rows are `{text, dot?, tone?, spans?, action?, value?, menu?}`; a row's `action` invokes one of your `[[actions]]` on click, with the row's `value` in `LUVUS_MODULE_ROW_VALUE`. `tone` is a Luvus Bar tone name (`normal`, `muted`, `accent`, `success`, `warning`, `error`) for the text, and `spans` is `[{text, tone?}]` to color segments of one row with the same tone names (a span without a tone takes the row's). Both are optional and theme-bound, raw colors and ANSI are not accepted. Omitting `tone` gives the default row color, which is not the same as `normal`.
 - `luvus bar push --id <widget> --content <json>` — atomically publish structured `text`, `symbol`, `state`, `badge`, `progress`, `spacer`, and `separator` segments. Add `--compact-content`; an `action` must name one of your `[[actions]]`.
 - `luvus ui notification push --text <text> --level info|success|warning|error` — publish bounded transient status; use `--dedupe-key` for replacement.
 - `luvus ui toast "<text>"` — flash a one-line confirmation.

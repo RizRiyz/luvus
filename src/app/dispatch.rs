@@ -4106,54 +4106,94 @@ impl App {
                     .and_then(|v| v.as_array())
                     .map(|arr| {
                         arr.iter()
-                            .map(|r| crate::app::DockRow {
-                                text: r
-                                    .get("text")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string(),
-                                dot: r.get("dot").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                                action: r
-                                    .get("action")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string()),
-                                value: r
-                                    .get("value")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string()),
-                                // Right-click menu for this row (docs/52).
-                                // Absent — every module written before this —
-                                // leaves the row with no menu, as before. An
-                                // entry with no `action` is a divider.
-                                menu: r
-                                    .get("menu")
+                            .map(|r| {
+                                // A span with no text draws nothing, so drop it
+                                // here: a malformed list (`["a", "b"]`, `[{}]`)
+                                // then parses to no spans and the row falls
+                                // back to `text` instead of rendering blank.
+                                let spans: Vec<crate::app::DockSpan> = r
+                                    .get("spans")
                                     .and_then(|v| v.as_array())
                                     .map(|items| {
                                         items
                                             .iter()
-                                            .map(|it| crate::app::DockRowMenuItem {
-                                                title: it
-                                                    .get("title")
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("")
-                                                    .to_string(),
-                                                action: it
-                                                    .get("action")
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("")
-                                                    .to_string(),
-                                                value: it
-                                                    .get("value")
-                                                    .and_then(|v| v.as_str())
-                                                    .map(|s| s.to_string()),
-                                                destructive: it
-                                                    .get("destructive")
-                                                    .and_then(|v| v.as_bool())
-                                                    .unwrap_or(false),
+                                            .filter_map(|sp| {
+                                                let text = sp.get("text")?.as_str()?;
+                                                (!text.is_empty()).then(|| crate::app::DockSpan {
+                                                    text: text.to_string(),
+                                                    tone: sp
+                                                        .get("tone")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(|s| s.to_string()),
+                                                })
                                             })
                                             .collect()
                                     })
-                                    .unwrap_or_default(),
+                                    .unwrap_or_default();
+                                // `text` is what a click hands to the action. A
+                                // spans-only row gets the joined span text, so
+                                // moving a row from `text` to `spans` cannot
+                                // leave its action with an empty target.
+                                let text = r
+                                    .get("text")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| {
+                                        spans.iter().map(|sp| sp.text.as_str()).collect()
+                                    });
+                                crate::app::DockRow {
+                                    text,
+                                    dot: r
+                                        .get("dot")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string()),
+                                    tone: r
+                                        .get("tone")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string()),
+                                    spans,
+                                    action: r
+                                        .get("action")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string()),
+                                    value: r
+                                        .get("value")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string()),
+                                    // Right-click menu for this row (docs/52).
+                                    // Absent — every module written before this —
+                                    // leaves the row with no menu, as before. An
+                                    // entry with no `action` is a divider.
+                                    menu: r
+                                        .get("menu")
+                                        .and_then(|v| v.as_array())
+                                        .map(|items| {
+                                            items
+                                                .iter()
+                                                .map(|it| crate::app::DockRowMenuItem {
+                                                    title: it
+                                                        .get("title")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("")
+                                                        .to_string(),
+                                                    action: it
+                                                        .get("action")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("")
+                                                        .to_string(),
+                                                    value: it
+                                                        .get("value")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(|s| s.to_string()),
+                                                    destructive: it
+                                                        .get("destructive")
+                                                        .and_then(|v| v.as_bool())
+                                                        .unwrap_or(false),
+                                                })
+                                                .collect()
+                                        })
+                                        .unwrap_or_default(),
+                                }
                             })
                             .collect()
                     })
@@ -8766,6 +8806,110 @@ command = ["true"]
 
         // Resolution through the real click path is covered end-to-end by
         // `dock_menu_click_spawns_the_action_with_the_clicked_rows_env`.
+    }
+
+    /// `ui.dock.push` carries a row's `tone` and `spans` through to the stored
+    /// `DockRow`, a span without its own tone stays `None` so the renderer can
+    /// fall back to the row's, and a row that sends neither keeps the
+    /// pre-existing shape. The tone name is stored as sent: an unknown name is
+    /// resolved (and ignored) at draw time, never rejected here.
+    #[test]
+    fn dock_push_preserves_row_tone_and_spans() {
+        let _env = crate::persist::test_env("dock-push-tone");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        app.dispatch(
+            "ui.dock.push",
+            &json!({
+                "id": "quota",
+                "rows": [
+                    {"text": "session 72%", "tone": "success"},
+                    {"text": "week [━━━───] 41%", "tone": "warning",
+                     "spans": [
+                         {"text": "week "},
+                         {"text": "[", "tone": "muted"},
+                         {"text": "━━━", "tone": "success"},
+                         {"text": "───] 41%"}
+                     ]},
+                    {"text": "plain"},
+                    {"text": "typo", "tone": "reddish"}
+                ]
+            }),
+        )
+        .expect("dock.push ok");
+
+        let rows = &app.module_docks.get("quota").expect("dock stored").rows;
+        assert_eq!(rows.len(), 4);
+
+        assert_eq!(rows[0].tone.as_deref(), Some("success"));
+        assert!(rows[0].spans.is_empty(), "no spans key stays empty");
+
+        assert_eq!(rows[1].tone.as_deref(), Some("warning"));
+        assert_eq!(
+            rows[1].text, "week [━━━───] 41%",
+            "text is kept beside spans"
+        );
+        let spans = &rows[1].spans;
+        assert_eq!(spans.len(), 4);
+        assert_eq!(spans[0].text, "week ");
+        assert_eq!(
+            spans[0].tone, None,
+            "a span without a tone inherits at draw"
+        );
+        assert_eq!(spans[1].tone.as_deref(), Some("muted"));
+        assert_eq!(spans[2].text, "━━━");
+        assert_eq!(spans[2].tone.as_deref(), Some("success"));
+
+        // Neither key: exactly what every earlier module pushes.
+        assert_eq!(rows[2].tone, None);
+        assert!(rows[2].spans.is_empty());
+
+        // An unknown tone is stored verbatim; the draw path decides the fallback.
+        assert_eq!(rows[3].tone.as_deref(), Some("reddish"));
+    }
+
+    /// Two easy module mistakes must not blank a row or hand its action an
+    /// empty target: a spans list of bare strings (or empty objects) parses
+    /// to no spans so the row falls back to `text`, and a spans-only row gets
+    /// `text` filled from its spans so `LUVUS_MODULE_ROW_TEXT` still names it.
+    #[test]
+    fn dock_push_drops_empty_spans_and_backfills_text_from_spans() {
+        let _env = crate::persist::test_env("dock-push-span-edges");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        app.dispatch(
+            "ui.dock.push",
+            &json!({
+                "id": "q",
+                "rows": [
+                    {"text": "kept", "spans": ["not", "objects"]},
+                    {"text": "kept too", "spans": [{}, {"tone": "error"}, {"text": ""}]},
+                    {"spans": [{"text": "week "}, {"text": "41%", "tone": "warning"}]},
+                    {"text": "explicit", "spans": [{"text": "shown"}]}
+                ]
+            }),
+        )
+        .expect("push ok");
+
+        let rows = &app.module_docks.get("q").unwrap().rows;
+        assert!(rows[0].spans.is_empty(), "bare strings are not spans");
+        assert_eq!(rows[0].text, "kept");
+        assert!(
+            rows[1].spans.is_empty(),
+            "spans without text draw nothing, so drop them"
+        );
+        assert_eq!(rows[1].text, "kept too");
+        assert_eq!(
+            rows[2].text, "week 41%",
+            "spans-only: text is the joined spans"
+        );
+        assert_eq!(rows[2].spans.len(), 2);
+        assert_eq!(
+            rows[3].text, "explicit",
+            "an explicit text is never overwritten"
+        );
     }
 
     /// External clients patch their rows from **both** `agent.list`
