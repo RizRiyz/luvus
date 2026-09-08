@@ -12,6 +12,10 @@ fn fixture() -> (App, PaneId, Receiver<InputAction>) {
     app.panes
         .get_mut(&pane)
         .unwrap()
+        .isolate_engine_for_test(tx.clone());
+    app.panes
+        .get_mut(&pane)
+        .unwrap()
         .replace_input_sender_for_test(tx);
     screen(&app, pane, "\x1b[2J\x1b[H\r\n› ");
     (app, pane, rx)
@@ -381,12 +385,15 @@ fn confirmed_prompt_full_input_queue_never_sends_enter() {
 fn confirmed_prompt_capacity_failure_queues_nothing() {
     let _env = crate::persist::test_env("echo-capacity-limit");
     let (mut app, pane, input) = fixture();
-    for offset in 0..MAX_AGENT_WAITS_TOTAL {
+    for _ in 0..MAX_AGENT_WAITS_TOTAL {
         let (_rx, _) = start(&mut app, pane, json!({"text":"unique"}));
         bytes(&input, b"unique");
         let owner = app.agent_prompts.remove(&pane).unwrap();
+        // Zero is never a live pane ID; accumulate independent occupied slots.
         app.agent_prompts
-            .insert(PaneId(u32::try_from(offset + 1000).unwrap()), owner);
+            .entry(PaneId(0))
+            .or_default()
+            .extend(owner);
     }
     let (rx, _) = start(&mut app, pane, json!({"text":"unique"}));
     assert_eq!(response(&rx)["error"]["code"], "unavailable");

@@ -801,6 +801,14 @@ impl Pane {
     }
 
     #[cfg(test)]
+    pub(crate) fn isolate_engine_for_test(&mut self, sender: Sender<InputAction>) {
+        self.engine = Arc::new(Mutex::new(
+            crate::terminal::vt::alacritty::AlacrittyEngine::new(80, 24, sender, 1024 * 1024),
+        ));
+        self.content_revision = Arc::new(AtomicU64::new(0));
+    }
+
+    #[cfg(test)]
     pub(crate) fn fill_input_queue_for_test(&mut self) -> impl Sized {
         let (tx, rx) = input::InputSender::channel();
         tx.send(InputAction::Bytes(Vec::with_capacity(
