@@ -70,7 +70,6 @@ pub fn language_for_path(path: &Path) -> Language {
         Some("css" | "scss" | "less") => Language::Css,
         Some("html" | "htm" | "xml" | "svg" | "vue" | "svelte") => Language::Html,
         Some("sql") => Language::Sql,
-        Some("lua") => Language::Sql,
         Some("md" | "markdown" | "txt" | "text" | "log") => Language::Plain,
         _ => Language::Generic,
     }
@@ -661,6 +660,11 @@ mod tests {
         assert_eq!(
             language_for_path(Path::new("mystery.xyz")),
             Language::Generic
+        );
+        assert_eq!(
+            language_for_path(Path::new("init.lua")),
+            Language::Generic,
+            "Lua has no dedicated variant; SQL keywords must not leak into it"
         );
     }
 
