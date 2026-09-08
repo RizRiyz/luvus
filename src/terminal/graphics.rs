@@ -959,10 +959,8 @@ impl ControlData {
             if pair.is_empty() {
                 continue;
             }
-            let (key, value) = match pair.iter().position(|byte| *byte == b'=') {
-                Some(split) => (&pair[..split], &pair[split + 1..]),
-                None => return None,
-            };
+            let split = pair.iter().position(|byte| *byte == b'=')?;
+            let (key, value) = (&pair[..split], &pair[split + 1..]);
             // Every key in the protocol is a single character.
             let [key] = key else {
                 return None;
@@ -1107,6 +1105,8 @@ mod tests {
     fn malformed_control_data_is_never_answered() {
         for payload in [
             "a",                    // no value
+            "a=q,i",                // missing separator after a valid pair
+            "a=q,=9",               // empty key
             "aa=q",                 // multi-character key
             "a=q,i=99999999999999", // id beyond the protocol's range
             "a=q,i=-1",             // negative where unsigned is required
@@ -1114,6 +1114,11 @@ mod tests {
             "a=q,i=12x",            // trailing garbage
         ] {
             assert_eq!(reply(payload), None, "must not answer {payload:?}");
+            assert_eq!(
+                reply_when_supported(payload),
+                None,
+                "must not answer {payload:?}"
+            );
         }
     }
 
