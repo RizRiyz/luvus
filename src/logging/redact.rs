@@ -306,6 +306,14 @@ pub(crate) enum FieldKey {
     DurationMs,
     Dropped,
     Reason,
+    InputKind,
+    KeyDown,
+    RepeatCount,
+    VirtualKey,
+    ScanCode,
+    Utf16Class,
+    ControlState,
+    Bytes,
 }
 
 impl FieldKey {
@@ -340,6 +348,14 @@ impl FieldKey {
             Self::DurationMs => "duration_ms",
             Self::Dropped => "dropped",
             Self::Reason => "reason",
+            Self::InputKind => "input_kind",
+            Self::KeyDown => "key_down",
+            Self::RepeatCount => "repeat_count",
+            Self::VirtualKey => "virtual_key",
+            Self::ScanCode => "scan_code",
+            Self::Utf16Class => "utf16_class",
+            Self::ControlState => "control_state",
+            Self::Bytes => "bytes",
         }
     }
 }
@@ -376,6 +392,14 @@ pub enum Field {
     DurationMs(u64),
     Dropped(u64),
     Reason(Reason),
+    InputKind(SafeId),
+    KeyDown(bool),
+    RepeatCount(u64),
+    VirtualKey(u64),
+    ScanCode(u64),
+    Utf16Class(u64),
+    ControlState(u64),
+    Bytes(u64),
 }
 
 impl Field {
@@ -410,6 +434,14 @@ impl Field {
             Self::DurationMs(_) => FieldKey::DurationMs,
             Self::Dropped(_) => FieldKey::Dropped,
             Self::Reason(_) => FieldKey::Reason,
+            Self::InputKind(_) => FieldKey::InputKind,
+            Self::KeyDown(_) => FieldKey::KeyDown,
+            Self::RepeatCount(_) => FieldKey::RepeatCount,
+            Self::VirtualKey(_) => FieldKey::VirtualKey,
+            Self::ScanCode(_) => FieldKey::ScanCode,
+            Self::Utf16Class(_) => FieldKey::Utf16Class,
+            Self::ControlState(_) => FieldKey::ControlState,
+            Self::Bytes(_) => FieldKey::Bytes,
         }
     }
 
@@ -422,8 +454,9 @@ impl Field {
             | Self::Method(value)
             | Self::RequestId(value)
             | Self::Agent(value)
-            | Self::ModuleId(value) => value.as_str().into(),
-            Self::IdOmitted(value) => value.into(),
+            | Self::ModuleId(value)
+            | Self::InputKind(value) => value.as_str().into(),
+            Self::IdOmitted(value) | Self::KeyDown(value) => value.into(),
             Self::PaneId(value)
             | Self::WorkspaceIndex(value)
             | Self::TabIndex(value)
@@ -436,7 +469,13 @@ impl Field {
             | Self::RestorePanes(value)
             | Self::RestoreSkipped(value)
             | Self::DurationMs(value)
-            | Self::Dropped(value) => value.into(),
+            | Self::Dropped(value)
+            | Self::RepeatCount(value)
+            | Self::VirtualKey(value)
+            | Self::ScanCode(value)
+            | Self::Utf16Class(value)
+            | Self::ControlState(value)
+            | Self::Bytes(value) => value.into(),
             Self::SpawnKind(value) => value.as_str().into(),
             Self::ExitClass(value) => value.as_str().into(),
             Self::AgentState(value) | Self::FromState(value) => value.as_str().into(),
@@ -489,6 +528,8 @@ pub enum EventKind {
     ClientResize,
     ClientFrameError,
     ClientRenderFailed,
+    ClientInputRecord,
+    ClientInputDecoded,
     LogWriteRecovered,
     UhpConnectionOpen,
     UhpConnectionClose,
@@ -542,6 +583,8 @@ impl EventKind {
             Self::ClientResize => "client.resize",
             Self::ClientFrameError => "client.frame_error",
             Self::ClientRenderFailed => "client.render_failed",
+            Self::ClientInputRecord => "client.input_record",
+            Self::ClientInputDecoded => "client.input_decoded",
             Self::LogWriteRecovered => "log.write_recovered",
             Self::UhpConnectionOpen => "uhp.connection.open",
             Self::UhpConnectionClose => "uhp.connection.close",
@@ -575,6 +618,8 @@ impl EventKind {
             | Self::TabClose
             | Self::PtyResize
             | Self::ClientResize
+            | Self::ClientInputRecord
+            | Self::ClientInputDecoded
             | Self::UhpConnectionOpen
             | Self::UhpConnectionClose
             | Self::UhpRequestStart
@@ -594,7 +639,9 @@ impl EventKind {
             | Self::ClientDisconnect
             | Self::ClientResize
             | Self::ClientFrameError
-            | Self::ClientRenderFailed => Some(LoggerKind::Client),
+            | Self::ClientRenderFailed
+            | Self::ClientInputRecord
+            | Self::ClientInputDecoded => Some(LoggerKind::Client),
             Self::LogWriteRecovered => None,
             _ => Some(LoggerKind::Server),
         }
@@ -655,6 +702,16 @@ impl EventKind {
             E::ClientDisconnect => matches!(key, F::Reason),
             E::ClientResize => matches!(key, F::Cols | F::Rows),
             E::ClientFrameError => matches!(key, F::ErrorCode),
+            E::ClientInputRecord => matches!(
+                key,
+                F::KeyDown
+                    | F::RepeatCount
+                    | F::VirtualKey
+                    | F::ScanCode
+                    | F::Utf16Class
+                    | F::ControlState
+            ),
+            E::ClientInputDecoded => matches!(key, F::InputKind | F::Bytes),
             E::LogWriteRecovered => matches!(key, F::ErrorCode | F::Dropped),
             E::UhpRequestStart => matches!(key, F::RequestId | F::Method | F::IdOmitted),
             E::UhpRequestComplete | E::UhpRequestFailed => matches!(
@@ -702,5 +759,9 @@ mod tests {
         assert_eq!(EventKind::UhpRequestComplete.level(), Level::Debug);
         assert_eq!(EventKind::UhpRequestFailed.level(), Level::Warn);
         assert!(EventKind::UhpRequestFailed.allows(FieldKey::ErrorCode));
+        assert!(EventKind::ClientInputRecord.allows(FieldKey::Utf16Class));
+        assert!(!EventKind::ClientInputRecord.allows(FieldKey::Method));
+        assert!(EventKind::ClientInputDecoded.allows(FieldKey::InputKind));
+        assert!(!EventKind::ClientInputDecoded.allows(FieldKey::Utf16Class));
     }
 }

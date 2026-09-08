@@ -1278,15 +1278,15 @@ static HELP: &[Translation] = &[
         "패널에서 명령어 실행"
     ),
     tr!(
-        "send raw text to a pane",
-        "enviar texto sin procesar a un panel",
-        "enviar texto bruto para um painel",
-        "envoyer du texte brut à un volet",
-        "Rohtext an einen Bereich senden",
-        "kirim teks mentah ke panel",
-        "向窗格发送原始文本",
-        "ペインへ生テキストを送信",
-        "패널에 원본 텍스트 전송"
+        "paste text into a pane",
+        "pegar texto en un panel",
+        "colar texto em um painel",
+        "coller du texte dans un volet",
+        "Text in einen Bereich einfügen",
+        "tempelkan teks ke panel",
+        "将文本粘贴到窗格",
+        "ペインにテキストを貼り付け",
+        "패널에 텍스트 붙여넣기"
     ),
     tr!(
         "print a pane's recent output",

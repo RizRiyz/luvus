@@ -45,11 +45,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
-#[cfg(windows)]
-use ratatui::crossterm::event::poll as poll_event;
+#[cfg(not(windows))]
+use ratatui::crossterm::event::read as read_event;
 use ratatui::crossterm::event::{
-    read as read_event, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture,
-    EnableBracketedPaste, EnableFocusChange, EnableMouseCapture, Event, KeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, Event, KeyboardEnhancementFlags,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
@@ -1297,6 +1297,8 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
         EnableFocusChange,
         crossterm::terminal::SetTitle(window_title())
     );
+    #[cfg(windows)]
+    let _windows_input_mode = terminal::host_input::enable_input_mode();
     push_key_protocol();
     {
         let tx = tx.clone();
@@ -1411,32 +1413,7 @@ fn remove_unbound_socket(path: &Path) -> std::io::Result<()> {
 fn input_loop(tx: Sender<AppEvent>, pending: Vec<Event>) {
     #[cfg(windows)]
     {
-        let mut decoder = crate::terminal::host_input::HostInputDecoder::default();
-        for event in pending {
-            if !send_decoded_input(&tx, decoder.push(event)) {
-                return;
-            }
-        }
-        loop {
-            if let Some(timeout) = decoder.wait_timeout() {
-                match poll_event(timeout) {
-                    Ok(false) => {
-                        if !send_decoded_input(&tx, decoder.flush_expired()) {
-                            break;
-                        }
-                        continue;
-                    }
-                    Ok(true) => {}
-                    Err(_) => break,
-                }
-            }
-            let Ok(event) = read_event() else {
-                break;
-            };
-            if !send_decoded_input(&tx, decoder.push(event)) {
-                break;
-            }
-        }
+        crate::terminal::host_input::run_input_loop(pending, |event| send_input_event(&tx, event));
     }
 
     #[cfg(not(windows))]
@@ -1456,20 +1433,6 @@ fn input_loop(tx: Sender<AppEvent>, pending: Vec<Event>) {
 
 fn send_input_event(tx: &Sender<AppEvent>, event: Event) -> bool {
     app_event(event).is_none_or(|event| tx.send(event).is_ok())
-}
-
-#[cfg(windows)]
-fn send_decoded_input(
-    tx: &Sender<AppEvent>,
-    decoded: crate::terminal::host_input::DecodedEvents,
-) -> bool {
-    let mut connected = true;
-    decoded.for_each(|event| {
-        if connected {
-            connected = send_input_event(tx, event);
-        }
-    });
-    connected
 }
 
 fn app_event(event: Event) -> Option<AppEvent> {
