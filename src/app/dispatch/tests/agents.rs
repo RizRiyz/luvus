@@ -2,6 +2,15 @@ use super::super::params::*;
 use super::super::*;
 use crate::app::App;
 
+fn mark_codex_prompt_ready(app: &mut App, pane: PaneId) {
+    let generation = app.panes[&pane].engine.lock().unwrap().output_generation();
+    let status = app.status.get_mut(&pane).unwrap();
+    status.agent = "codex".into();
+    status.prompt_evidence = detect::PromptEvidence::Ready;
+    status.last_detect_generation = Some(generation);
+    status.force_detect = false;
+}
+
 #[test]
 fn reported_usage_rejects_malformed_and_out_of_range_values() {
     let valid = json!({
@@ -494,6 +503,40 @@ fn prompt_apis_reject_a_fresh_interaction_screen_without_queueing_input() {
 }
 
 #[test]
+fn reported_codex_without_a_composer_rejects_prompt_input() {
+    let _env = crate::persist::test_env("reported-codex-prompt-guard");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    app.dispatch(
+        "agent.report",
+        &json!({
+            "pane":pane.0.to_string(),
+            "source":"prompt-guard-test",
+            "agent":"codex",
+            "status":"idle"
+        }),
+    )
+    .unwrap();
+    assert!(app.status[&pane].agent_session.is_none());
+
+    let (input, received) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&pane)
+        .unwrap()
+        .replace_input_sender_for_test(input);
+    let error = app
+        .dispatch(
+            "agent.send",
+            &json!({"target":pane.0.to_string(),"text":"do not submit"}),
+        )
+        .expect_err("reported Codex needs positive composer evidence");
+
+    assert_eq!(error.0, "agent_not_ready");
+    assert!(received.try_recv().is_err());
+}
+
+#[test]
 fn native_codex_requires_live_composer_geometry() {
     let _env = crate::persist::test_env("prompt-composer-geometry");
     let (tx, _rx) = std::sync::mpsc::channel();
@@ -548,7 +591,7 @@ fn atomic_agent_prompt_ignores_output_without_a_relevant_transition() {
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
     let pane = app.layout().focus;
-    app.status.get_mut(&pane).unwrap().agent = "codex".into();
+    mark_codex_prompt_ready(&mut app, pane);
     let (reply, response) = std::sync::mpsc::channel();
     let started = Instant::now();
     app.start_agent_prompt(
@@ -598,7 +641,7 @@ fn observed_prompt_pane_exit_is_a_structured_failure() {
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
     let pane = app.layout().focus;
-    app.status.get_mut(&pane).unwrap().agent = "codex".into();
+    mark_codex_prompt_ready(&mut app, pane);
     let (reply, response) = std::sync::mpsc::channel();
     app.start_agent_prompt(
         "prompt".into(),
@@ -625,7 +668,7 @@ fn observed_prompt_no_wait_keeps_the_queued_response_and_no_ownership() {
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
     let pane = app.layout().focus;
-    app.status.get_mut(&pane).unwrap().agent = "codex".into();
+    mark_codex_prompt_ready(&mut app, pane);
     let (input, received) = std::sync::mpsc::channel();
     app.panes
         .get_mut(&pane)
@@ -670,7 +713,7 @@ fn observed_prompt_exited_terminal_releases_ownership_before_pane_removal() {
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
     let pane = app.layout().focus;
-    app.status.get_mut(&pane).unwrap().agent = "codex".into();
+    mark_codex_prompt_ready(&mut app, pane);
     let (reply, response) = std::sync::mpsc::channel();
     app.start_agent_prompt(
         "exit".into(),
@@ -702,8 +745,8 @@ fn observed_prompt_requires_a_new_active_state_and_preserves_until() {
                 let (tx, _rx) = std::sync::mpsc::channel();
                 let mut app = App::new(80, 24, tx).unwrap();
                 let pane = app.layout().focus;
+                mark_codex_prompt_ready(&mut app, pane);
                 let status = app.status.get_mut(&pane).unwrap();
-                status.agent = "codex".into();
                 status.state = initial;
                 let (reply, response) = std::sync::mpsc::channel();
                 app.start_agent_prompt("states".into(), json!({"target":pane.0.to_string(),"text":"review","wait":true,"until":[state_str(until)]}), reply, Arc::new(AtomicBool::new(false)));
@@ -737,8 +780,8 @@ fn observed_prompt_unknown_state_times_out_without_changing_status() {
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
     let pane = app.layout().focus;
+    mark_codex_prompt_ready(&mut app, pane);
     let status = app.status.get_mut(&pane).unwrap();
-    status.agent = "codex".into();
     status.state = State::Unknown;
     let (reply, response) = std::sync::mpsc::channel();
     app.start_agent_prompt(
@@ -763,7 +806,7 @@ fn observed_prompt_cancellation_and_missing_terminal_release_ownership() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let pane = app.layout().focus;
-        app.status.get_mut(&pane).unwrap().agent = "codex".into();
+        mark_codex_prompt_ready(&mut app, pane);
         let (reply, response) = std::sync::mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         app.start_agent_prompt(
@@ -795,7 +838,7 @@ fn observed_prompt_rejected_requests_never_queue_input() {
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
     let pane = app.layout().focus;
-    app.status.get_mut(&pane).unwrap().agent = "codex".into();
+    mark_codex_prompt_ready(&mut app, pane);
     let (input, received) = std::sync::mpsc::channel();
     app.panes
         .get_mut(&pane)
@@ -879,7 +922,7 @@ fn observed_prompt_admission_failures_preserve_input_and_ownership() {
     assert_eq!(value["error"]["code"], "agent_not_ready");
     assert!(received.try_recv().is_err());
     assert!(app.agent_prompts.is_empty());
-    app.status.get_mut(&pane).unwrap().agent = "codex".into();
+    mark_codex_prompt_ready(&mut app, pane);
     let (reply, _response) = std::sync::mpsc::channel();
     app.start_agent_prompt(
         "first".into(),
@@ -931,7 +974,7 @@ fn observed_prompt_completion_timeout_preserves_transition_evidence() {
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
     let pane = app.layout().focus;
-    app.status.get_mut(&pane).unwrap().agent = "codex".into();
+    mark_codex_prompt_ready(&mut app, pane);
     let (reply, response) = std::sync::mpsc::channel();
     app.start_agent_prompt("prompt".into(), json!({"target":pane.0.to_string(),"text":"review","wait":true,"until":["done"],"timeout_s":1}), reply, Arc::new(AtomicBool::new(false)));
     app.status.get_mut(&pane).unwrap().state = State::Working;
@@ -952,7 +995,7 @@ fn atomic_agent_prompt_reports_queued_timeout_without_resubmitting() {
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
     let pane = app.layout().focus;
-    app.status.get_mut(&pane).unwrap().agent = "codex".into();
+    mark_codex_prompt_ready(&mut app, pane);
     let (reply, response) = std::sync::mpsc::channel();
     app.start_agent_prompt(
         "prompt-timeout".into(),
@@ -976,7 +1019,7 @@ fn atomic_agent_prompt_rejects_an_overlapping_wait_before_queueing() {
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
     let pane = app.layout().focus;
-    app.status.get_mut(&pane).unwrap().agent = "codex".into();
+    mark_codex_prompt_ready(&mut app, pane);
     let (first_reply, _first_response) = std::sync::mpsc::channel();
     app.start_agent_prompt(
         "prompt-first".into(),

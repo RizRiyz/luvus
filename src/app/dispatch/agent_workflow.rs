@@ -480,6 +480,7 @@ impl App {
             return true;
         };
         let positive_evidence_required = status.prompt_evidence_required
+            || detect::prompt_requires_positive_evidence(&status.agent)
             || status
                 .agent_session
                 .as_ref()
