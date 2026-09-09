@@ -1522,6 +1522,36 @@ mod tests {
             assert!(!app.session_dirty);
             assert_eq!(app.layout().focus, pane);
         }
+
+        // Reusing an alias transfers it, just as it does on the owner endpoint.
+        let split = app.dispatch("pane.split", &json!({})).unwrap();
+        let second = crate::ids::PaneId(split["pane"].as_str().unwrap().parse().unwrap());
+        assert_ne!(second, pane);
+        let first = relay(&mut app, json!({"pane":pane.0.to_string(),"name":"shared"}));
+        assert_eq!(first["result"]["name"], "shared");
+        assert_eq!(app.agent_name_for(pane), Some("shared"));
+        assert_eq!(app.agent_name_for(second), None);
+        let sequence = crate::ipc::api::current_sequence(&app.events);
+        app.session_dirty = false;
+        let transferred = relay(
+            &mut app,
+            json!({"pane":second.0.to_string(),"name":"shared"}),
+        );
+        assert_eq!(
+            transferred["result"],
+            json!({"type":"pane_rename","pane":second.0.to_string(),"name":"shared"})
+        );
+        assert_eq!(app.agent_name_for(pane), None);
+        assert_eq!(app.agent_name_for(second), Some("shared"));
+        assert_eq!(app.agent_names.len(), 1);
+        assert!(app.session_dirty);
+        let events = crate::ipc::api::replayed_events_after(&app.events, sequence);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event"], "pane.renamed");
+        assert_eq!(
+            events[0]["data"],
+            json!({"pane":second.0.to_string(),"name":"shared"})
+        );
         gateway.stop();
     }
 
