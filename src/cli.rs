@@ -1910,7 +1910,9 @@ enum AgentStartTarget {
     Existing(String),
     Split {
         anchor: Option<String>,
-        direction: &'static str,
+        /// Present only for an explicit `--auto`/`--right`/`--down`. Omitted
+        /// direction lets an older server keep its left/right default.
+        direction: Option<&'static str>,
     },
 }
 
@@ -1935,11 +1937,13 @@ fn parse_agent_start_target(args: &[String], caller: Option<String>) -> Result<A
         None => AgentStartTarget::Split {
             anchor: anchor.or(caller),
             direction: if down {
-                "down"
+                Some("down")
             } else if right {
-                "right"
+                Some("right")
+            } else if auto {
+                Some("auto")
             } else {
-                "auto"
+                None
             },
         },
     })
@@ -1974,7 +1978,9 @@ fn agent_start_cmd(args: &[String]) -> Result<i32> {
             if let Some(anchor) = anchor {
                 params.insert("anchor".into(), json!(anchor));
             }
-            params.insert("direction".into(), json!(direction));
+            if let Some(direction) = direction {
+                params.insert("direction".into(), json!(direction));
+            }
         }
     }
     if let Some(timeout) = flag(options, "--timeout") {
@@ -3181,16 +3187,13 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             if usize::from(down) + usize::from(right) + usize::from(auto) > 1 {
                 return Err(anyhow!("pass only one of --auto, --right, or --down"));
             }
-            obj.insert(
-                "direction".to_string(),
-                json!(if down {
-                    "down"
-                } else if right {
-                    "right"
-                } else {
-                    "auto"
-                }),
-            );
+            if down {
+                obj.insert("direction".to_string(), json!("down"));
+            } else if right {
+                obj.insert("direction".to_string(), json!("right"));
+            } else if auto {
+                obj.insert("direction".to_string(), json!("auto"));
+            }
             if args.iter().any(|a| a == "--no-focus") {
                 obj.insert("focus".to_string(), json!(false));
             }
@@ -4696,6 +4699,10 @@ mod tests {
 
         let (m, p) = parse(&argv("luvus pane split")).unwrap();
         assert_eq!(m, "pane.split");
+        assert!(p.get("direction").is_none());
+
+        let (m, p) = parse(&argv("luvus pane split --auto")).unwrap();
+        assert_eq!(m, "pane.split");
         assert_eq!(p.get("direction").and_then(|v| v.as_str()), Some("auto"));
 
         let (m, p) = parse(&argv("luvus pane split --right")).unwrap();
@@ -5828,7 +5835,7 @@ mod tests {
             .unwrap(),
             AgentStartTarget::Split {
                 anchor: Some("4".into()),
-                direction: "down",
+                direction: Some("down"),
             }
         );
         assert_eq!(
@@ -5839,7 +5846,18 @@ mod tests {
             .unwrap(),
             AgentStartTarget::Split {
                 anchor: Some("7".into()),
-                direction: "auto",
+                direction: None,
+            }
+        );
+        assert_eq!(
+            parse_agent_start_target(
+                &argv("luvus agent start worker --kind codex --auto"),
+                Some("7".into())
+            )
+            .unwrap(),
+            AgentStartTarget::Split {
+                anchor: Some("7".into()),
+                direction: Some("auto"),
             }
         );
         assert_eq!(
@@ -5850,7 +5868,7 @@ mod tests {
             .unwrap(),
             AgentStartTarget::Split {
                 anchor: Some("7".into()),
-                direction: "right",
+                direction: Some("right"),
             }
         );
         assert!(parse_agent_start_target(

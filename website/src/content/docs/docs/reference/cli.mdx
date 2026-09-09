@@ -292,8 +292,9 @@ server:
 
 When `pane split <id>` targets a pane outside the current view, the new pane is
 inserted beside that target in the same workspace and tab. With no direction
-flag, Luvus splits along the longer side of the target pane (side by side when
-it is wider, stacked when it is taller). `--right` and `--down` force a
+flag, Luvus omits `direction` on the wire so an older server still accepts the
+request and splits side by side; a current server splits along the longer side
+of the target pane. `--auto`, `--right`, and `--down` send an explicit
 direction. It starts in the target pane's live working directory; with
 `layout.new_pane_to_workspace_root = true`, it starts at the target workspace
 root instead. `--no-focus` preserves the caller's current view.
