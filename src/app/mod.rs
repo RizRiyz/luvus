@@ -4786,6 +4786,47 @@ impl App {
         let _ = self.split_pane(pane, axis, true);
     }
 
+    /// Split the focused pane along its longer side.
+    fn split_auto(&mut self) {
+        let pane = self.layout().focus;
+        let axis = self.auto_split_axis_for(pane);
+        let _ = self.split_pane(pane, axis, true);
+    }
+
+    /// Geometry used when choosing an automatic split. Prefer the last rendered
+    /// pane area so a live client decides; fall back to the square logical area
+    /// used by headless topology queries, which keeps the historical left/right
+    /// default when no client has painted yet.
+    fn split_area(&self) -> Rect {
+        if self.last_pane_area.width > 1 && self.last_pane_area.height > 1 {
+            self.last_pane_area
+        } else {
+            crate::api::topology::logical_area()
+        }
+    }
+
+    /// Axis that cuts the longer side of `pane` in its current tab.
+    fn auto_split_axis_for(&self, pane: PaneId) -> Axis {
+        let area = self.split_area();
+        let rect = self
+            .pane_location(pane)
+            .and_then(|(workspace, tab)| {
+                self.workspaces[workspace].tabs[tab]
+                    .layout
+                    .pane_rect(area, pane)
+            })
+            .unwrap_or(area);
+        crate::layout::auto_split_axis(rect.width, rect.height)
+    }
+
+    /// Attach a newly allocated leaf beside the focused pane, choosing the split
+    /// axis from that pane's current aspect ratio.
+    fn split_focused_auto(&mut self, new_id: PaneId) {
+        let focus = self.layout().focus;
+        let axis = self.auto_split_axis_for(focus);
+        self.layout_mut().split_focused(axis, new_id);
+    }
+
     /// Spawn and attach a sibling beside `target`, preserving inactive view state
     /// when the caller requests a background operation.
     fn spawn_and_attach_new_pane(

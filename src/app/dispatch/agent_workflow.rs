@@ -343,11 +343,11 @@ impl App {
         };
         if !matches!(
             p.get("direction").and_then(Value::as_str),
-            None | Some("right" | "down")
+            None | Some("auto" | "right" | "down")
         ) {
             fail(
                 "invalid_request",
-                "direction must be right or down".to_string(),
+                "direction must be auto, right, or down".to_string(),
             );
             return;
         }

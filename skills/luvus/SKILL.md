@@ -218,8 +218,9 @@ luvus pane split <anchor-pane-id> --no-focus
 luvus agent start reviewer --kind codex --pane <new-pane-id> --timeout 30
 ```
 
-Omit `--down` for a right-side split and add it to the split or anchored start
-for a split below. Never combine `--anchor` and `--pane`.
+Omit direction flags to split along the longer side of the anchor pane. Pass
+`--right` or `--down` on the split or anchored start to force a direction.
+Never combine `--anchor` and `--pane`.
 
 Send work with `agent send`, not raw pane text and Enter:
 

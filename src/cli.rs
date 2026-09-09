@@ -142,7 +142,7 @@ tabs:
 
 panes / agents:
   pane list                  list panes and read-only history metrics in the current tab
-  pane split [<id>] [--down] [--no-focus]   split a pane (default: side by side, creates a workspace if empty)
+  pane split [<id>] [--auto|--right|--down] [--no-focus]   split a pane (default: auto by size, creates a workspace if empty)
   pane focus <id>            focus a pane (jumps to its workspace/tab)
   pane move [<id>] (--tab <n> | --new-tab)  move a pane within its workspace
   pane run [<id>] <cmd...>   run a command in a pane
@@ -153,7 +153,7 @@ panes / agents:
   pane name <name>           name a pane so you can mention it (--pane <id>; --clear)
   pane close [<id>]          close a pane
   agent list                 list every agent across all workspaces/tabs
-  agent start <name> --kind <k> [--pane <id> | --anchor <id>] [--down] [--timeout <s>] [-- <args>]
+  agent start <name> --kind <k> [--pane <id> | --anchor <id>] [--auto|--right|--down] [--timeout <s>] [-- <args>]
                              spawn beside an anchor or reuse a pane, wait until ready, name it
   agent fork <target> [--name <alias>] [--no-focus]
                              fork a supported agent's session into a sibling pane
@@ -1908,7 +1908,10 @@ fn agent_wait_fallback(response: &Value, uses_statuses: bool) -> AgentWaitFallba
 #[derive(Debug, PartialEq)]
 enum AgentStartTarget {
     Existing(String),
-    Split { anchor: Option<String>, down: bool },
+    Split {
+        anchor: Option<String>,
+        direction: &'static str,
+    },
 }
 
 fn parse_agent_start_target(args: &[String], caller: Option<String>) -> Result<AgentStartTarget> {
@@ -1919,22 +1922,36 @@ fn parse_agent_start_target(args: &[String], caller: Option<String>) -> Result<A
             "agent start accepts either --pane <id> or --anchor <id>, not both"
         ));
     }
+    let down = args.iter().any(|a| a == "--down");
+    let right = args.iter().any(|a| a == "--right");
+    let auto = args.iter().any(|a| a == "--auto");
+    if usize::from(down) + usize::from(right) + usize::from(auto) > 1 {
+        return Err(anyhow!(
+            "agent start accepts only one of --auto, --right, or --down"
+        ));
+    }
     Ok(match pane {
         Some(pane) => AgentStartTarget::Existing(pane),
         None => AgentStartTarget::Split {
             anchor: anchor.or(caller),
-            down: args.iter().any(|a| a == "--down"),
+            direction: if down {
+                "down"
+            } else if right {
+                "right"
+            } else {
+                "auto"
+            },
         },
     })
 }
 
-/// `luvus agent start <name> --kind <kind> [--pane <id> | --anchor <id>] [--down] [--timeout S] [-- <extra…>]` —
+/// `luvus agent start <name> --kind <kind> [--pane <id> | --anchor <id>] [--auto|--right|--down] [--timeout S] [-- <extra…>]` —
 /// spawn a coding agent in a sibling pane (or a given one), wait until detection
 /// recognizes it, and give it a name, all in one command. Exit 0 when it becomes
 /// ready, 2 if it did not within the timeout (the pane and name still exist).
 fn agent_start_cmd(args: &[String]) -> Result<i32> {
     let name = args.get(3).cloned().ok_or_else(|| {
-        anyhow!("usage: luvus agent start <name> --kind <kind> [--pane <id> | --anchor <id>] [--down] [--timeout S] [-- <extra>]")
+        anyhow!("usage: luvus agent start <name> --kind <kind> [--pane <id> | --anchor <id>] [--auto|--right|--down] [--timeout S] [-- <extra>]")
     })?;
     let separator = args.iter().position(|arg| arg == "--");
     let options = &args[..separator.unwrap_or(args.len())];
@@ -1953,14 +1970,11 @@ fn agent_start_cmd(args: &[String]) -> Result<i32> {
         AgentStartTarget::Existing(pane) => {
             params.insert("pane".into(), json!(pane));
         }
-        AgentStartTarget::Split { anchor, down } => {
+        AgentStartTarget::Split { anchor, direction } => {
             if let Some(anchor) = anchor {
                 params.insert("anchor".into(), json!(anchor));
             }
-            params.insert(
-                "direction".into(),
-                json!(if down { "down" } else { "right" }),
-            );
+            params.insert("direction".into(), json!(direction));
         }
     }
     if let Some(timeout) = flag(options, "--timeout") {
@@ -1988,7 +2002,7 @@ fn validate_agent_start_options(args: &[String]) -> Result<()> {
                 }
                 index += 2;
             }
-            "--down" => index += 1,
+            "--down" | "--right" | "--auto" => index += 1,
             option if option.starts_with("--") => {
                 return Err(anyhow!("unknown agent start option: {option}"));
             }
@@ -3161,9 +3175,22 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
 
         ("pane", "split") => {
             let mut obj = serde_json::Map::new();
-            if args.iter().any(|a| a == "--down" || a == "--stack") {
-                obj.insert("direction".to_string(), json!("down"));
+            let down = args.iter().any(|a| a == "--down" || a == "--stack");
+            let right = args.iter().any(|a| a == "--right");
+            let auto = args.iter().any(|a| a == "--auto");
+            if usize::from(down) + usize::from(right) + usize::from(auto) > 1 {
+                return Err(anyhow!("pass only one of --auto, --right, or --down"));
             }
+            obj.insert(
+                "direction".to_string(),
+                json!(if down {
+                    "down"
+                } else if right {
+                    "right"
+                } else {
+                    "auto"
+                }),
+            );
             if args.iter().any(|a| a == "--no-focus") {
                 obj.insert("focus".to_string(), json!(false));
             }
@@ -4667,6 +4694,15 @@ mod tests {
         assert_eq!(m, "pane.split");
         assert_eq!(p.get("direction").and_then(|v| v.as_str()), Some("down"));
 
+        let (m, p) = parse(&argv("luvus pane split")).unwrap();
+        assert_eq!(m, "pane.split");
+        assert_eq!(p.get("direction").and_then(|v| v.as_str()), Some("auto"));
+
+        let (m, p) = parse(&argv("luvus pane split --right")).unwrap();
+        assert_eq!(m, "pane.split");
+        assert_eq!(p.get("direction").and_then(|v| v.as_str()), Some("right"));
+        assert!(parse(&argv("luvus pane split --auto --down")).is_err());
+
         let (m, p) = parse(&argv("luvus pane run 3 echo hi")).unwrap();
         assert_eq!(m, "pane.run");
         assert_eq!(p.get("pane").and_then(|v| v.as_str()), Some("3"));
@@ -5792,7 +5828,7 @@ mod tests {
             .unwrap(),
             AgentStartTarget::Split {
                 anchor: Some("4".into()),
-                down: true,
+                direction: "down",
             }
         );
         assert_eq!(
@@ -5803,11 +5839,27 @@ mod tests {
             .unwrap(),
             AgentStartTarget::Split {
                 anchor: Some("7".into()),
-                down: false,
+                direction: "auto",
+            }
+        );
+        assert_eq!(
+            parse_agent_start_target(
+                &argv("luvus agent start worker --kind codex --right"),
+                Some("7".into())
+            )
+            .unwrap(),
+            AgentStartTarget::Split {
+                anchor: Some("7".into()),
+                direction: "right",
             }
         );
         assert!(parse_agent_start_target(
             &argv("luvus agent start worker --kind codex --pane 9 --anchor 4"),
+            None
+        )
+        .is_err());
+        assert!(parse_agent_start_target(
+            &argv("luvus agent start worker --kind codex --auto --down"),
             None
         )
         .is_err());

@@ -82,7 +82,7 @@ tabs:
 
 panes / agents:
   pane list                  list panes and read-only history metrics in the current tab
-  pane split [<id>] [--down] [--no-focus]   split a pane (default: side by side, creates a workspace if empty)
+  pane split [<id>] [--auto|--right|--down] [--no-focus]   split a pane (default: auto by size, creates a workspace if empty)
   pane focus <id>            focus a pane (jumps to its workspace/tab)
   pane move [<id>] (--tab <n> | --new-tab)  move a pane within its workspace
   pane run [<id>] <cmd...>   run a command in a pane
@@ -93,7 +93,7 @@ panes / agents:
   pane name <name>           name a pane so you can mention it (--pane <id>; --clear)
   pane close [<id>]          close a pane
   agent list                 list every agent across all workspaces/tabs
-  agent start <name> --kind <k> [--pane <id> | --anchor <id>] [--down] [--timeout <s>] [-- <args>]
+  agent start <name> --kind <k> [--pane <id> | --anchor <id>] [--auto|--right|--down] [--timeout <s>] [-- <args>]
                              spawn beside an anchor or reuse a pane, wait until ready, name it
   agent fork <target> [--name <alias>] [--no-focus]
                              fork a supported agent's session into a sibling pane
@@ -291,8 +291,10 @@ server:
 ```
 
 When `pane split <id>` targets a pane outside the current view, the new pane is
-inserted beside that target in the same workspace and tab. It starts in the
-target pane's live working directory; with
+inserted beside that target in the same workspace and tab. With no direction
+flag, Luvus splits along the longer side of the target pane (side by side when
+it is wider, stacked when it is taller). `--right` and `--down` force a
+direction. It starts in the target pane's live working directory; with
 `layout.new_pane_to_workspace_root = true`, it starts at the target workspace
 root instead. `--no-focus` preserves the caller's current view.
 

@@ -43,7 +43,7 @@ See [effective permissions](/docs/uhp/remote-access/#effective-permissions).
 One request per connection, newline-terminated, and one JSON reply:
 
 ```json
-→ {"id":"1","method":"pane.split","params":{"down":true}}
+→ {"id":"1","method":"pane.split","params":{"direction":"auto"}}
 ← {"id":"1","result":{"type":"ok","pane":"7"}}
 ```
 
@@ -289,7 +289,10 @@ not change focus:
 logical area. Headless clients therefore receive deterministic geometry that
 does not depend on the latest attached terminal size. `pane.edges` reports
 which outer edges the pane touches. Directional queries use the same geometric
-selection as the TUI.
+selection as the TUI. `pane.split` takes optional `direction`: `"auto"`
+(default; split the longer side of the target pane using the last interactive
+client size, or side by side when no client has painted), `"right"`, or
+`"down"` (`"stack"` is an alias for `"down"`).
 
 `layout.export` returns the complete binary split tree and focused pane.
 `layout.apply` accepts that tree plus an optional focus. It succeeds only when

@@ -24,6 +24,17 @@ pub enum Axis {
     Row,
 }
 
+/// Split the longer side of a pane so the two halves stay closer to square.
+/// Wide panes go side by side; tall panes stack. Equal sides keep the historical
+/// left/right default.
+pub fn auto_split_axis(width: u16, height: u16) -> Axis {
+    if height > width {
+        Axis::Row
+    } else {
+        Axis::Col
+    }
+}
+
 enum Node {
     Leaf(PaneId),
     Split {
@@ -1004,5 +1015,14 @@ mod tests {
         let l2 = TileLayout::from_tree(&tree, &remap, a.0).unwrap();
         let got = l2.panes(area).into_iter().find(|p| p.id == a).unwrap().rect;
         assert_eq!(want, got, "resized ratio persisted");
+    }
+
+    #[test]
+    fn auto_split_axis_cuts_the_longer_side() {
+        assert_eq!(auto_split_axis(120, 30), Axis::Col);
+        assert_eq!(auto_split_axis(40, 80), Axis::Row);
+        assert_eq!(auto_split_axis(50, 50), Axis::Col);
+        assert_eq!(auto_split_axis(0, 0), Axis::Col);
+        assert_eq!(auto_split_axis(1, 2), Axis::Row);
     }
 }
