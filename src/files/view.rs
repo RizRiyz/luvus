@@ -35,8 +35,11 @@ pub struct Search {
     pub query: String,
     /// True while the user is still typing the query (before Enter).
     pub editing: bool,
-    /// `(line, start_col)` of every match, in document order.
-    pub matches: Vec<(usize, usize)>,
+    /// `(line, start_col, end_col)` of every match, in document order.
+    /// Columns address the original line in characters, never the lowercased
+    /// copy: Unicode lowercasing can expand text (`İ` folds to two
+    /// characters), so offsets into the folded copy would shift the highlight.
+    pub matches: Vec<(usize, usize, usize)>,
     /// Index into `matches` of the current hit.
     pub current: usize,
 }
@@ -266,26 +269,43 @@ impl FileView {
     }
 
     fn run_search(&mut self, query: &str) {
-        let needle = query.to_lowercase();
+        // Case-fold per character while remembering each folded character's
+        // origin column: whole-string lowercasing can expand the text (e.g.
+        // `İ` folds to `i` plus a combining dot), so offsets into the folded
+        // copy do not address the original line.
+        let needle: Vec<char> = query.to_lowercase().chars().collect();
         let mut matches = Vec::new();
         if let FileLoad::Text(lines) = &self.load {
             for (li, line) in lines.iter().enumerate() {
-                let hay = line.to_lowercase();
+                let hay: Vec<char> = line.chars().collect();
+                let mut folded: Vec<char> = Vec::with_capacity(hay.len());
+                let mut origin: Vec<usize> = Vec::with_capacity(hay.len());
+                for (col, ch) in hay.iter().enumerate() {
+                    for folded_ch in ch.to_lowercase() {
+                        origin.push(col);
+                        folded.push(folded_ch);
+                    }
+                }
+                if needle.is_empty() {
+                    continue;
+                }
                 let mut from = 0;
-                while let Some(rel) = hay[from..].find(&needle) {
-                    let byte_col = from + rel;
-                    // The renderer consumes matches as character columns
-                    // (tokens, wrap ranges), so translate the byte offset.
-                    let col = hay[..byte_col].chars().count();
-                    matches.push((li, col));
-                    from = byte_col + needle.len().max(1);
+                while from + needle.len() <= folded.len() {
+                    if folded[from..from + needle.len()] == needle[..] {
+                        let start = origin[from];
+                        let end = origin[from + needle.len() - 1] + 1;
+                        matches.push((li, start, end));
+                        from += needle.len();
+                    } else {
+                        from += 1;
+                    }
                 }
             }
         }
         // Jump to the first match at/after the current viewport top.
         let current = matches
             .iter()
-            .position(|(l, _)| *l >= self.scroll)
+            .position(|(l, _, _)| *l >= self.scroll)
             .unwrap_or(0);
         self.search = Some(Search {
             query: query.to_string(),
@@ -297,7 +317,7 @@ impl FileView {
 
     fn reveal_current_match(&mut self, viewport: usize) {
         if let Some(s) = &self.search {
-            if let Some((line, _)) = s.matches.get(s.current).copied() {
+            if let Some((line, _, _)) = s.matches.get(s.current).copied() {
                 // Center-ish: keep the match on screen.
                 if line < self.scroll || line >= self.scroll + viewport.max(1) {
                     self.scroll = line.saturating_sub(viewport / 2);
@@ -833,8 +853,27 @@ mod tests {
         v.search_commit();
         let s = v.search.as_ref().unwrap();
         // `é` is two bytes but one column: byte offsets 4 and 0 would
-        // misplace the overlay, character columns 2 and 0 do not.
-        assert_eq!(s.matches, vec![(0, 2), (1, 0)]);
+        // misplace the overlay, character columns do not.
+        assert_eq!(s.matches, vec![(0, 2, 5), (1, 0, 3)]);
+    }
+
+    #[test]
+    fn search_maps_folded_offsets_back_to_original_columns() {
+        let mut v = FileView::new(PathBuf::from("/x"));
+        // `İ` folds to two characters (`i` plus a combining dot), so offsets
+        // into the lowercased copy run ahead of the original line's columns:
+        // the `f` is folded index 3 but original column 2.
+        v.apply(FileLoad::Text(vec!["aİfoo".into()]));
+        v.search_begin();
+        for c in "foo".chars() {
+            v.search_push(c);
+        }
+        v.search_commit();
+        assert_eq!(
+            v.search.as_ref().unwrap().matches,
+            vec![(0, 2, 5)],
+            "match columns must address the original line"
+        );
     }
 
     #[test]

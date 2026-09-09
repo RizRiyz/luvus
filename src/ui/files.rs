@@ -492,7 +492,7 @@ fn draw_text(f: &mut RenderTarget, body: Rect, v: &FileView, lines: &[String], t
             let line = &lines[i];
             let open = v.string_states.get(i).copied().flatten();
             let tokens = highlight::tokenize_continued(line, lang, open);
-            let (hits, qlen) = search_hits_for_line(v, i);
+            let hits = search_hits_for_line(v, i);
             for (si, range) in crate::files::wrap_ranges(line, text_w as usize)
                 .into_iter()
                 .enumerate()
@@ -501,7 +501,7 @@ fn draw_text(f: &mut RenderTarget, body: Rect, v: &FileView, lines: &[String], t
                     break;
                 }
                 gutter_cell(f, y, (si == 0).then_some(i + 1), i + 1);
-                let spans = spans_in_range(line, &tokens, range, &hits, qlen, t);
+                let spans = spans_in_range(line, &tokens, range, &hits, t);
                 f.render_widget(
                     Paragraph::new(Line::from(spans)),
                     Rect::new(text_x, y, text_w, 1),
@@ -519,9 +519,9 @@ fn draw_text(f: &mut RenderTarget, body: Rect, v: &FileView, lines: &[String], t
         gutter_cell(f, y, Some(i + 1), i + 1);
         let open = v.string_states.get(i).copied().flatten();
         let tokens = highlight::tokenize_continued(line, lang, open);
-        let (hits, qlen) = search_hits_for_line(v, i);
+        let hits = search_hits_for_line(v, i);
         let width = line.chars().count();
-        let spans = spans_in_range(line, &tokens, (0, width), &hits, qlen, t);
+        let spans = spans_in_range(line, &tokens, (0, width), &hits, t);
         f.render_widget(
             Paragraph::new(Line::from(spans)).scroll((0, v.hscroll)),
             Rect::new(text_x, y, text_w, 1),
@@ -571,26 +571,23 @@ fn highlight_style(kind: highlight::Kind, t: &Theme) -> Style {
     }
 }
 
-/// Search hits on one file line as `(char column, is_current)` plus the query
-/// length in chars. `None`/editing/empty queries yield no hits, so plain
-/// syntax spans render alone. Columns follow the existing search convention
-/// (match offsets into the line's chars).
-fn search_hits_for_line(v: &FileView, line_idx: usize) -> (Vec<(usize, bool)>, usize) {
+/// Search hits on one file line as `(start_col, end_col, is_current)` in
+/// original-line character columns. `None`/editing/empty queries yield no
+/// hits, so plain syntax spans render alone.
+fn search_hits_for_line(v: &FileView, line_idx: usize) -> Vec<(usize, usize, bool)> {
     let Some(search) = &v.search else {
-        return (Vec::new(), 0);
+        return Vec::new();
     };
     if search.editing || search.query.is_empty() {
-        return (Vec::new(), 0);
+        return Vec::new();
     }
-    let qlen = search.query.chars().count();
-    let hits: Vec<(usize, bool)> = search
+    search
         .matches
         .iter()
         .enumerate()
-        .filter(|(_, (line, _))| *line == line_idx)
-        .map(|(index, (_, col))| (*col, index == search.current))
-        .collect();
-    (hits, qlen)
+        .filter(|(_, (line, _, _))| *line == line_idx)
+        .map(|(index, (_, start, end))| (*start, *end, index == search.current))
+        .collect()
 }
 
 /// Build spans for the char range of one line: syntax tokens clipped to the
@@ -600,21 +597,15 @@ fn spans_in_range(
     line: &str,
     tokens: &[highlight::Token],
     range: (usize, usize),
-    hits: &[(usize, bool)],
-    query_len: usize,
+    hits: &[(usize, usize, bool)],
     t: &Theme,
 ) -> Vec<Span<'static>> {
     let chars: Vec<char> = line.chars().collect();
     let (seg_start, seg_end) = range;
     let mut intervals: Vec<(usize, usize, bool)> = hits
         .iter()
-        .map(|(col, current)| {
-            (
-                (*col).max(seg_start),
-                col.saturating_add(query_len).max(col + 1).min(seg_end),
-                *current,
-            )
-        })
+        .map(|(start, end, current)| (*start, *end, *current))
+        .map(|(start, end, current)| (start.max(seg_start), end.min(seg_end), current))
         .filter(|(start, end, _)| start < end)
         .collect();
     intervals.sort();
@@ -846,7 +837,7 @@ mod tests {
         let line = "fn load(path: &Path) -> usize { // open";
         let tokens = highlight::tokenize_continued(line, highlight::Language::Rust, None);
         let width = line.chars().count();
-        let spans = super::spans_in_range(line, &tokens, (0, width), &[], 0, &theme);
+        let spans = super::spans_in_range(line, &tokens, (0, width), &[], &theme);
         let text: String = spans.iter().map(|span| span.content.as_ref()).collect();
         assert_eq!(text, line, "spans must cover the line exactly");
 
@@ -893,7 +884,7 @@ mod tests {
         let width = line.chars().count();
         // `load` occurs at columns 4 ("loaded" prefix) and 13; highlight the
         // standalone call as the current match.
-        let spans = super::spans_in_range(line, &tokens, (0, width), &[(13, true)], 4, &theme);
+        let spans = super::spans_in_range(line, &tokens, (0, width), &[(13, 17, true)], &theme);
         let current = spans
             .iter()
             .find(|span| span.content == "load")
@@ -902,7 +893,7 @@ mod tests {
         assert_eq!(current.style.fg, Some(theme.base));
 
         // A wrapped segment sees only its own slice of both layers.
-        let segment = super::spans_in_range(line, &tokens, (0, 10), &[(13, true)], 4, &theme);
+        let segment = super::spans_in_range(line, &tokens, (0, 10), &[(13, 17, true)], &theme);
         let text: String = segment.iter().map(|span| span.content.as_ref()).collect();
         assert_eq!(text, "let loaded");
         assert!(
