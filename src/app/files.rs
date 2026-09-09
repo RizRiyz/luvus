@@ -312,7 +312,7 @@ impl App {
     /// an editor.
     ///
     /// `line` scrolls the built-in viewer to that line. It survives the async read
-    /// because `FileView::apply` keeps `scroll` and clamps it to the file's length.
+    /// because `FileView::apply_prepared` keeps `scroll` and clamps it to the file's length.
     /// A configured *editor* opens at the top: the flag for "start at line N"
     /// differs per editor, and guessing it wrong is worse than not jumping.
     pub fn open_file_at(&mut self, path: PathBuf, line: Option<u32>) {
@@ -1164,7 +1164,10 @@ impl App {
         let token = v.read_token;
         let tx = self.app_tx.clone();
         std::thread::spawn(move || {
-            let load = crate::files::read_file(&path);
+            // Syntax preparation rides the same worker: `continuation_states`
+            // scans every line, so doing it here keeps a large-file open from
+            // stalling input and rendering on the application thread.
+            let (load, string_states) = crate::files::read_file_prepared(&path);
             // Both events carry the token they were issued with and the file
             // they are about. This worker cannot be cancelled, so the handler is
             // what drops a result the view has moved past.
@@ -1173,6 +1176,7 @@ impl App {
                 path: path.clone(),
                 token,
                 load,
+                string_states,
             });
             // Change markers ride the same worker, *after* the text: the file
             // must render immediately even in a huge repo where `git diff` is
@@ -2364,6 +2368,7 @@ mod tests {
             path: b.clone(),
             token: b_token,
             load: FileLoad::Text(vec!["B CONTENT".to_string()]),
+            string_states: vec![None],
         });
         assert!(repaint, "the matching read repaints");
         let b_marks = vec![ChangeSpan {
@@ -2384,6 +2389,7 @@ mod tests {
             path: a.clone(),
             token: a_token,
             load: FileLoad::Text(vec!["A CONTENT".to_string()]),
+            string_states: vec![None],
         });
         assert!(!stale, "a stale read is dropped without a repaint");
         let stale_marks = app.handle_event(AppEvent::FileChanges {
@@ -2406,6 +2412,7 @@ mod tests {
             path: a,
             token: b_token,
             load: FileLoad::Text(vec!["A CONTENT".to_string()]),
+            string_states: vec![None],
         });
         assert!(
             !mismatched,
@@ -2464,6 +2471,7 @@ mod tests {
             path: a.clone(),
             token: second_a,
             load: FileLoad::Text(vec!["A AFTER THE EDIT".to_string()]),
+            string_states: vec![None],
         }));
 
         // The very first read of A finally finishes, carrying what A said
@@ -2473,6 +2481,7 @@ mod tests {
             path: a.clone(),
             token: first_a,
             load: FileLoad::Text(vec!["A BEFORE THE EDIT".to_string()]),
+            string_states: vec![None],
         });
         assert!(!stale, "the superseded read is dropped without a repaint");
 

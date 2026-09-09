@@ -117,20 +117,46 @@ pub enum MultilineKind {
 /// When the line may continue a multiline string opened on an earlier line,
 /// pass the opener active at its first character (taken from
 /// [`continuation_states`]) instead of `None`.
+///
+/// Adjacent plain-text characters (operators, punctuation, whitespace) are
+/// coalesced into a single `Normal` token so a minified line does not produce
+/// one token per character.
+/// Direct-call fallback (tests, one-off lookups); the render path uses
+/// [] through the bounded cache.
+#[allow(dead_code)]
 pub fn tokenize_continued(line: &str, lang: Language, open: Option<MultilineKind>) -> Vec<Token> {
-    scan(line, lang, open).0
+    scan(line, lang, open, None).0
+}
+
+/// Tokenize only the `[0, end_exclusive)` char window of `line`.
+///
+/// The render path highlights at most one viewport of cells, so tokenizing a
+/// 5 MiB single-line file to its end every frame would allocate millions of
+/// tokens repeatedly. Windowed tokenization scans from the line start (the
+/// `open` state makes the prefix load-bearing) but stops at `end_exclusive`,
+/// bounding per-frame work to the visible width. The returned tokens cover
+/// `[0, min(end_exclusive, len))` with the same classification the full scan
+/// would produce on that prefix.
+pub fn tokenize_window(
+    line: &str,
+    lang: Language,
+    open: Option<MultilineKind>,
+    end_exclusive: usize,
+) -> Vec<Token> {
+    scan(line, lang, open, Some(end_exclusive)).0
 }
 
 /// The multiline-string opener active at the start of each line, in order.
-/// The viewer rebuilds this once per file load and threads one entry per
-/// visible line into [`tokenize_continued`], so rendering stays O(visible
-/// rows) while continuation lines keep their string color.
+/// Prepared once per file load on the file-read worker and folded in via
+/// `FileView::apply_prepared`, then threaded one entry per visible line into
+/// [`tokenize_continued`]/[`tokenize_window`], so rendering stays O(visible
+/// rows × visible width) while continuation lines keep their string color.
 pub fn continuation_states(lines: &[String], lang: Language) -> Vec<Option<MultilineKind>> {
     let mut states = Vec::with_capacity(lines.len());
     let mut open = None;
     for line in lines {
         states.push(open);
-        open = scan(line, lang, open).1;
+        open = scan(line, lang, open, None).1;
     }
     states
 }
@@ -139,10 +165,31 @@ fn scan(
     line: &str,
     lang: Language,
     open: Option<MultilineKind>,
+    end_limit: Option<usize>,
 ) -> (Vec<Token>, Option<MultilineKind>) {
-    let chars: Vec<char> = line.chars().collect();
+    // Windowed scans bound per-frame work to the viewport: collect at most
+    // `limit + lookahead` chars instead of the whole line. The extra 64 chars
+    // exist only so classification at the window edge (function-call parens,
+    // char-literal shapes, identifier boundaries) agrees with the full scan;
+    // token coverage stops at `target`.
+    let (chars, target): (Vec<char>, usize) = match end_limit {
+        None => {
+            let chars: Vec<char> = line.chars().collect();
+            let len = chars.len();
+            (chars, len)
+        }
+        Some(limit) => {
+            if limit == 0 {
+                return (Vec::new(), open);
+            }
+            let take = limit.saturating_add(64);
+            let chars: Vec<char> = line.chars().take(take).collect();
+            let target = chars.len().min(limit);
+            (chars, target)
+        }
+    };
     let len = chars.len();
-    if len == 0 {
+    if target == 0 {
         // An empty line never opens or closes a multiline string.
         return (Vec::new(), open);
     }
@@ -150,7 +197,7 @@ fn scan(
         return (
             vec![Token {
                 start: 0,
-                end: len,
+                end: target,
                 kind: Kind::Normal,
             }],
             None,
@@ -159,10 +206,15 @@ fn scan(
     let mut tokens = Vec::new();
     let mut i = 0;
     let mut open = open;
+    // Helper: clip a token end to the visible window. Full scans have
+    // `target == len`, so this is a no-op there; windowed scans stop at the
+    // viewport instead of tokenizing a multi-megabyte line to its end.
+    let clip = |end: usize| end.min(target);
     // A line that begins inside a multiline string: emit string content up to
     // the closer (if any), then tokenize the remainder as fresh code.
     if let Some(kind) = open {
         if let Some(end) = find_multiline_close(&chars, 0, lang, kind) {
+            let end = clip(end);
             tokens.push(Token {
                 start: 0,
                 end,
@@ -170,27 +222,31 @@ fn scan(
             });
             i = end;
             open = None;
+            if i >= target {
+                return (tokens, open);
+            }
         } else {
             tokens.push(Token {
                 start: 0,
-                end: len,
+                end: target,
                 kind: Kind::String,
             });
             return (tokens, open);
         }
     }
-    while i < len {
+    while i < target {
         // Line comments (checked before anything else at this position).
         if starts_line_comment(&chars, i, lang) {
             tokens.push(Token {
                 start: i,
-                end: len,
+                end: target,
                 kind: Kind::Comment,
             });
             break;
         }
         // Same-line block comments: `/* … */` or `<!-- … -->`.
         if let Some(end) = block_comment_end(&chars, i, lang) {
+            let end = clip(end);
             tokens.push(Token {
                 start: i,
                 end,
@@ -207,6 +263,7 @@ fn scan(
         if let Some(kind) = multiline_opener_at(&chars, i, lang) {
             let body = i + opener_len(kind);
             if let Some(end) = find_multiline_close(&chars, body, lang, kind) {
+                let end = clip(end);
                 tokens.push(Token {
                     start: i,
                     end,
@@ -217,7 +274,7 @@ fn scan(
             }
             tokens.push(Token {
                 start: i,
-                end: len,
+                end: target,
                 kind: Kind::String,
             });
             return (tokens, Some(kind));
@@ -252,12 +309,16 @@ fn scan(
                 }
                 j += 1;
             }
+            let end = if closed { clip(j) } else { target };
             tokens.push(Token {
                 start: i,
-                end: if closed { j } else { len },
+                end,
                 kind: Kind::String,
             });
-            i = if closed { j } else { len };
+            i = end;
+            // An unclosed single-line string runs to the window end; the loop
+            // exits (`i == target`) and `open` is unchanged (single-line
+            // strings never carry). Windowed and full scans agree here.
             continue;
         }
         // Numbers: hex/binary/octal prefixes, decimals, floats, type suffixes.
@@ -301,10 +362,12 @@ fn scan(
             }
             tokens.push(Token {
                 start: i,
-                end: j.max(i + 1),
+                end: clip(j.max(i + 1)),
                 kind: Kind::Number,
             });
-            i = j.max(i + 1);
+            i = clip(j.max(i + 1));
+            // A number split by the window edge keeps the prefix; the loop
+            // exits when the window is covered.
             continue;
         }
         // Identifiers and keywords.
@@ -327,21 +390,60 @@ fn scan(
             } else {
                 Kind::Normal
             };
+            // Clip an identifier split by the window edge to its visible
+            // prefix; classification uses the full word (plus lookahead for
+            // the call paren), so the prefix keeps the right style.
+            let end = clip(j);
+            tokens.push(Token {
+                start: i,
+                end,
+                kind,
+            });
+            i = end;
+            continue;
+        }
+        // Anything else (operators, punctuation, whitespace): coalesce the
+        // whole run into one `Normal` token instead of one token per char.
+        // A minified JSON line is mostly such runs, so this cuts millions of
+        // transient tokens down to thousands.
+        {
+            let mut j = i + 1;
+            while j < target {
+                // Stop where the next position would start something else.
+                if starts_line_comment(&chars, j, lang) {
+                    break;
+                }
+                if block_comment_end(&chars, j, lang).is_some() {
+                    break;
+                }
+                if j < len && multiline_opener_at(&chars, j, lang).is_some() {
+                    break;
+                }
+                let c = chars[j];
+                if c.is_ascii_digit() {
+                    break;
+                }
+                if c == '_' || c.is_alphabetic() {
+                    break;
+                }
+                if c == '"' {
+                    break;
+                }
+                if c == '`' && backtick_is_string(lang) {
+                    break;
+                }
+                if c == '\'' && quote_is_string(&chars, j, lang) {
+                    break;
+                }
+                j += 1;
+            }
             tokens.push(Token {
                 start: i,
                 end: j,
-                kind,
+                kind: Kind::Normal,
             });
             i = j;
-            continue;
         }
-        // Anything else (operators, punctuation, whitespace): one char.
-        tokens.push(Token {
-            start: i,
-            end: i + 1,
-            kind: Kind::Normal,
-        });
-        i += 1;
     }
     (tokens, open)
 }
@@ -1018,5 +1120,58 @@ mod tests {
         let owned = vec!["'open".to_string(), "return".to_string()];
         let states = continuation_states(&owned, Language::Python);
         assert_eq!(states, vec![None, None]);
+    }
+
+    /// Adjacent plain-text runs (punctuation/whitespace) must coalesce: a
+    /// minified line must not produce one token per character.
+    #[test]
+    fn adjacent_normal_text_coalesces() {
+        let tokens = tokenize_continued("   ", Language::Rust, None);
+        assert_eq!(tokens.len(), 1, "spaces are one Normal run, not per char");
+        assert_eq!(tokens[0].kind, Kind::Normal);
+
+        let tokens = tokenize_continued("{}}", Language::Json, None);
+        assert_eq!(
+            tokens.len(),
+            1,
+            "adjacent punctuation coalesces, not one token per brace"
+        );
+
+        // Strings/keywords still split the run.
+        let tokens = tokenize_continued(r#"{"a":1}"#, Language::Json, None);
+        assert!(
+            tokens.len() < r#"{"a":1}"#.chars().count(),
+            "coalesced tokens are fewer than chars (got {})",
+            tokens.len()
+        );
+        assert!(tokens.iter().any(|t| t.kind == Kind::String));
+        assert!(tokens.iter().any(|t| t.kind == Kind::Number));
+    }
+
+    /// Windowed tokenization covers exactly the visible prefix with the same
+    /// classification the full scan produces there.
+    #[test]
+    fn windowed_prefix_matches_full_scan() {
+        let line = r#"fn load(path: &Path) -> usize { // open"#;
+        let full = tokenize_continued(line, Language::Rust, None);
+        for end in [0usize, 1, 5, 10, 20, line.chars().count()] {
+            let win = tokenize_window(line, Language::Rust, None, end);
+            // Clip the full scan to the window for comparison.
+            let mut expected = Vec::new();
+            for t in &full {
+                if t.start >= end {
+                    break;
+                }
+                expected.push(Token {
+                    start: t.start,
+                    end: t.end.min(end),
+                    kind: t.kind,
+                });
+                if t.end >= end {
+                    break;
+                }
+            }
+            assert_eq!(win, expected, "window end {end}");
+        }
     }
 }

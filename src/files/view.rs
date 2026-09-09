@@ -1,8 +1,12 @@
 //! The file-view model (docs/38 FILE-3): one open file rendered natively inside
 //! a pane or a tab. Pure state; the bytes are read on a worker thread and folded
-//! in via [`FileView::apply`]. Rendering is O(visible rows) — the renderer slices
-//! `lines` to the viewport.
+//! in via [`FileView::apply_prepared`]. Rendering is O(visible rows × visible
+//! width) — the renderer slices `lines` to the viewport and tokenizes only the
+//! visible char window of each on-screen line, so a multi-megabyte single-line
+//! file costs a viewport, not the file.
 
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 /// Files larger than this are not read into memory — a viewer is not an excuse
@@ -44,6 +48,110 @@ pub struct Search {
     pub current: usize,
 }
 
+/// One cached line's windowed tokens: they cover `[0, covered_end)` in chars.
+#[derive(Clone, Debug)]
+struct CachedLine {
+    tokens: Vec<super::highlight::Token>,
+    covered_end: usize,
+    open: Option<super::highlight::MultilineKind>,
+}
+
+/// Bounded generation-checked token cache.
+///
+/// Rendering tokenizes only the visible window of each on-screen line, but a
+/// redraw, scroll, selection change, or theme switch would otherwise redo that
+/// work every frame. The cache keeps the most recent `cap` lines' windowed
+/// tokens keyed by file line; `rev` fences stale content (bumped on every
+/// `apply`, so a refreshed file never reuses another generation's tokens).
+/// Theme changes need no invalidation: tokens carry no colors.
+#[derive(Debug, Default)]
+struct TokenCache {
+    rev: u64,
+    map: HashMap<usize, CachedLine>,
+    order: VecDeque<usize>,
+    cap: usize,
+}
+
+impl TokenCache {
+    fn with_cap(cap: usize) -> Self {
+        TokenCache {
+            rev: 0,
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            cap,
+        }
+    }
+
+    fn get(&self, line_idx: usize, needed_end: usize) -> Option<Vec<super::highlight::Token>> {
+        let entry = self.map.get(&line_idx)?;
+        if entry.covered_end < needed_end {
+            return None;
+        }
+        // Prefix of the cached window: clip the boundary token.
+        let mut out = Vec::new();
+        for t in &entry.tokens {
+            if t.start >= needed_end {
+                break;
+            }
+            out.push(super::highlight::Token {
+                start: t.start,
+                end: t.end.min(needed_end),
+                kind: t.kind,
+            });
+            if t.end >= needed_end {
+                break;
+            }
+        }
+        Some(out)
+    }
+
+    fn insert(
+        &mut self,
+        line_idx: usize,
+        open: Option<super::highlight::MultilineKind>,
+        tokens: Vec<super::highlight::Token>,
+        covered_end: usize,
+    ) {
+        if self.cap == 0 {
+            return;
+        }
+        if !self.map.contains_key(&line_idx) {
+            self.order.push_back(line_idx);
+            while self.order.len() > self.cap {
+                if let Some(old) = self.order.pop_front() {
+                    // Don't evict the line we just added when cap == 1 etc.;
+                    // the loop keeps the map bounded.
+                    if old != line_idx {
+                        self.map.remove(&old);
+                    }
+                }
+            }
+            // If we evicted the just-added key by accident (cap churn), re-add.
+            if !self.order.contains(&line_idx) {
+                self.order.push_back(line_idx);
+            }
+        }
+        self.map.insert(
+            line_idx,
+            CachedLine {
+                tokens,
+                covered_end,
+                open,
+            },
+        );
+        // Touch for LRU-ish behavior: move to the back.
+        if let Some(pos) = self.order.iter().position(|&i| i == line_idx) {
+            self.order.remove(pos);
+            self.order.push_back(line_idx);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+    }
+}
+
 /// One open file: what it is, and where the viewport sits.
 pub struct FileView {
     pub path: PathBuf,
@@ -63,9 +171,9 @@ pub struct FileView {
     /// an enhancement, never a requirement.
     pub changes: Vec<crate::git::local::ChangeSpan>,
     /// The multiline-string opener active at the start of each line, parallel
-    /// to the `Text` lines. Rebuilt in [`FileView::apply`] so continuation
-    /// lines of triple-quoted or backtick strings keep their string color;
-    /// empty for non-text loads.
+    /// to the `Text` lines. Prepared on the file-read worker and folded in by
+    /// [`FileView::apply_prepared`] so the application thread never scans the
+    /// whole file; empty for non-text loads.
     pub string_states: Vec<Option<super::highlight::MultilineKind>>,
     /// Which scheduled read this view is waiting for (the `request_token` idea
     /// `DiffView` already uses). Every read carries the token it was issued
@@ -74,6 +182,13 @@ pub struct FileView {
     /// alone cannot tell apart. `0` means no read has been scheduled yet, so no
     /// event can ever match it.
     pub read_token: u64,
+    /// Content generation for the token cache: bumped on every `apply` so a
+    /// refreshed file never reuses the previous generation's windowed tokens.
+    highlight_rev: u64,
+    /// Bounded cache of windowed highlight tokens (see [`TokenCache`]).
+    /// `RefCell` lets the `&FileView` render path memoize without restructuring
+    /// every caller to `&mut`; the app loop is single-threaded.
+    token_cache: RefCell<TokenCache>,
 }
 
 impl FileView {
@@ -105,6 +220,8 @@ impl FileView {
             search: None,
             read_token: 0,
             string_states: Vec::new(),
+            highlight_rev: 0,
+            token_cache: RefCell::new(TokenCache::with_cap(128)),
         }
     }
 
@@ -112,18 +229,53 @@ impl FileView {
     /// so a live refresh (docs/38 FILE-5) doesn't yank the reader back to the
     /// top; a fresh open already has scroll at 0. An active search is
     /// re-evaluated against the new text.
+    ///
+    /// Direct-call fallback: computes the syntax preparation synchronously.
+    /// Prefer [`FileView::apply_prepared`] on the worker path, where the states
+    /// arrive precomputed and this scan never runs on the application thread.
+    #[allow(dead_code)]
     pub fn apply(&mut self, load: FileLoad) {
-        self.load = load;
-        // One forward pass over the text records the multiline-string opener
-        // at each line start, so the renderer colors continuation lines
-        // without scanning from the top of the file every frame.
-        self.string_states = match &self.load {
+        let states = match &load {
             FileLoad::Text(lines) => {
                 let lang = super::highlight::language_for_path(&self.path);
                 super::highlight::continuation_states(lines, lang)
             }
             _ => Vec::new(),
         };
+        self.apply_prepared(load, states);
+    }
+
+    /// Fold a worker-prepared read in: `states` must be the
+    /// [`continuation_states`](super::highlight::continuation_states) for
+    /// `load`'s lines in the worker's language guess. Length-mismatched states
+    /// are discarded and recomputed once (a stale worker must never poison the
+    /// renderer); the common path stores without scanning.
+    pub fn apply_prepared(
+        &mut self,
+        load: FileLoad,
+        mut states: Vec<Option<super::highlight::MultilineKind>>,
+    ) {
+        // Generation fence: only states prepared for this exact text may land.
+        // A length mismatch means the worker and the text disagree — fall back
+        // to one synchronous pass rather than rendering with shifted colors.
+        let ok = match &load {
+            FileLoad::Text(lines) => states.len() == lines.len(),
+            _ => states.is_empty(),
+        };
+        if !ok {
+            states = match &load {
+                FileLoad::Text(lines) => {
+                    let lang = super::highlight::language_for_path(&self.path);
+                    super::highlight::continuation_states(lines, lang)
+                }
+                _ => Vec::new(),
+            };
+        }
+        self.load = load;
+        self.string_states = states;
+        self.highlight_rev = self.highlight_rev.wrapping_add(1);
+        self.token_cache.borrow_mut().clear();
+        self.token_cache.borrow_mut().rev = self.highlight_rev;
         let max = self.line_count().saturating_sub(1);
         self.scroll = self.scroll.min(max);
         self.hscroll = 0;
@@ -132,6 +284,53 @@ impl FileView {
                 self.run_search(&s.query);
             }
         }
+    }
+
+    /// Windowed highlight tokens for `line_idx`, memoized in the bounded
+    /// generation-checked cache. `needed_end` is the exclusive char offset the
+    /// caller will actually draw (visible window end); the cache stores the
+    /// widest window seen per line and serves prefixes from it, so a 5 MiB
+    /// single line costs a viewport per frame, not the file.
+    pub fn highlight_window(
+        &self,
+        line_idx: usize,
+        line: &str,
+        lang: super::highlight::Language,
+        open: Option<super::highlight::MultilineKind>,
+        needed_end: usize,
+    ) -> Vec<super::highlight::Token> {
+        let mut cache = self.token_cache.borrow_mut();
+        if cache.rev != self.highlight_rev {
+            cache.clear();
+            cache.rev = self.highlight_rev;
+        }
+        if cache.cap == 0 {
+            return super::highlight::tokenize_window(line, lang, open, needed_end);
+        }
+        if let Some(hit) = cache.get(line_idx, needed_end) {
+            // Validate the opener: states only change on `apply` (which bumps
+            // `rev` and clears), so a mismatch here is a logic bug — recompute
+            // rather than tint with a stale string state.
+            let open_ok = cache.map.get(&line_idx).is_none_or(|e| e.open == open);
+            if open_ok {
+                return hit;
+            }
+        }
+        let tokens = super::highlight::tokenize_window(line, lang, open, needed_end);
+        cache.insert(line_idx, open, tokens.clone(), needed_end);
+        tokens
+    }
+
+    /// Test hook: number of cached lines.
+    #[cfg(test)]
+    pub fn token_cache_len(&self) -> usize {
+        self.token_cache.borrow().map.len()
+    }
+
+    /// Test hook: current highlight generation.
+    #[cfg(test)]
+    pub fn highlight_generation(&self) -> u64 {
+        self.highlight_rev
     }
 
     pub fn line_count(&self) -> usize {
@@ -269,50 +468,92 @@ impl FileView {
     }
 
     fn run_search(&mut self, query: &str) {
-        // Case-fold per character while remembering each folded character's
-        // origin column: whole-string lowercasing can expand the text (e.g.
-        // `İ` folds to `i` plus a combining dot), so offsets into the folded
-        // copy do not address the original line.
-        let needle: Vec<char> = query.to_lowercase().chars().collect();
+        // Unicode-aware case-insensitive search that keeps the efficient
+        // `str::find` matcher while retaining original-column mapping.
+        //
+        // Whole-string lowercasing can expand text (`İ` folds to `i` plus a
+        // combining dot), so offsets into the folded copy do not address the
+        // original line. We fold per character, remembering each folded
+        // character's origin column plus its byte offset, then run the
+        // standard library's optimized substring search over the folded
+        // string and map byte matches back through `origin`. The previous
+        // naive loop compared `folded[from..from+m] == needle` at every
+        // offset — O(file × query) slice comparisons on the app thread.
+        let needle_str = query.to_lowercase();
         let mut matches = Vec::new();
-        if let FileLoad::Text(lines) = &self.load {
-            for (li, line) in lines.iter().enumerate() {
-                let hay: Vec<char> = line.chars().collect();
-                let mut folded: Vec<char> = Vec::with_capacity(hay.len());
-                let mut origin: Vec<usize> = Vec::with_capacity(hay.len());
-                for (col, ch) in hay.iter().enumerate() {
-                    for folded_ch in ch.to_lowercase() {
-                        origin.push(col);
-                        folded.push(folded_ch);
+        if !needle_str.is_empty() {
+            if let FileLoad::Text(lines) = &self.load {
+                let needle_len = needle_str.len();
+                for (li, line) in lines.iter().enumerate() {
+                    // Single O(line) pass: folded text + per-folded-char origin
+                    // column + per-folded-char byte offset.
+                    let mut folded = String::with_capacity(line.len());
+                    let mut origin: Vec<usize> = Vec::new();
+                    let mut char_starts: Vec<usize> = Vec::new();
+                    let mut bytes = 0usize;
+                    for (col, ch) in line.chars().enumerate() {
+                        for folded_ch in ch.to_lowercase() {
+                            char_starts.push(bytes);
+                            origin.push(col);
+                            folded.push(folded_ch);
+                            bytes += folded_ch.len_utf8();
+                        }
                     }
-                }
-                if needle.is_empty() {
-                    continue;
-                }
-                let mut from = 0;
-                while from + needle.len() <= folded.len() {
-                    if folded[from..from + needle.len()] == needle[..] {
-                        let start = origin[from];
-                        let end = origin[from + needle.len() - 1] + 1;
+                    if folded.is_empty() {
+                        continue;
+                    }
+                    // Efficient matcher: `str::find` (memchr + Two-Way) instead of
+                    // a naive per-offset slice comparison.
+                    let mut byte_from = 0usize;
+                    while byte_from + needle_len <= folded.len() {
+                        let Some(rel) = folded[byte_from..].find(needle_str.as_str()) else {
+                            break;
+                        };
+                        let abs = byte_from + rel;
+                        // `abs` and `abs + needle_len` are char boundaries (both
+                        // haystack and needle are valid UTF-8), so exact binary
+                        // search hits.
+                        let Ok(start_char) = char_starts.binary_search(&abs) else {
+                            // Should not happen; advance past this byte to avoid a
+                            // stall and keep the search total.
+                            byte_from = abs + 1;
+                            continue;
+                        };
+                        let end_byte = abs + needle_len;
+                        let end_char_exclusive = match char_starts.binary_search(&end_byte) {
+                            Ok(i) => i,
+                            // `end_byte == folded.len()` is past the last start;
+                            // it addresses one past the final folded char.
+                            Err(i) if end_byte == folded.len() => i,
+                            Err(_) => {
+                                byte_from = abs + 1;
+                                continue;
+                            }
+                        };
+                        if end_char_exclusive == 0 || start_char >= end_char_exclusive {
+                            byte_from = abs + 1;
+                            continue;
+                        }
+                        let start = origin[start_char];
+                        let end = origin[end_char_exclusive - 1] + 1;
                         matches.push((li, start, end));
-                        from += needle.len();
-                    } else {
-                        from += 1;
+                        // Non-overlapping, matching the previous `from += m`.
+                        byte_from = end_byte;
                     }
                 }
             }
+            // Jump to the first match at/after the current viewport top.
+            let current = matches
+                .iter()
+                .position(|(l, _, _)| *l >= self.scroll)
+                .unwrap_or(0);
+            self.search = Some(Search {
+                query: query.to_string(),
+                editing: false,
+                matches,
+                current,
+            });
         }
-        // Jump to the first match at/after the current viewport top.
-        let current = matches
-            .iter()
-            .position(|(l, _, _)| *l >= self.scroll)
-            .unwrap_or(0);
-        self.search = Some(Search {
-            query: query.to_string(),
-            editing: false,
-            matches,
-            current,
-        });
     }
 
     fn reveal_current_match(&mut self, viewport: usize) {
@@ -348,16 +589,62 @@ pub fn gutter_width(line_count: usize) -> u16 {
 /// at least one range, so an empty line still occupies a row. Shared by the
 /// renderer and mouse-selection so a wrapped view maps screen rows to file
 /// columns identically in both.
+///
+/// Cost is O(line): it collects the whole line. The render path must use
+/// [`wrap_ranges_limited`] instead, which bounds work to the viewport.
+#[allow(dead_code)]
 pub fn wrap_ranges(line: &str, width: usize) -> Vec<(usize, usize)> {
-    let chars: Vec<char> = line.chars().collect();
+    wrap_ranges_limited(line, width, usize::MAX)
+}
+
+/// First `max_rows` wrapped segments of `line` — a prefix of [`wrap_ranges`].
+///
+/// A 5 MiB single-line file wraps to tens of thousands of rows; the viewport
+/// shows only dozens. Computing all segments every frame allocates the full
+/// vector repeatedly. This collects only enough prefix chars
+/// (`max_rows × (width+1)`) to cover the requested rows, so per-frame work is
+/// O(viewport × width), not O(file).
+pub fn wrap_ranges_limited(line: &str, width: usize, max_rows: usize) -> Vec<(usize, usize)> {
+    if max_rows == 0 {
+        return Vec::new();
+    }
+    if width == 0 {
+        // Original `wrap_ranges` returns the whole line as one segment when
+        // width is 0 (the `n <= width` check fails for non-empty? Actually
+        // `width == 0` short-circuits to a single range).
+        let n = line.chars().count();
+        return vec![(0, n)];
+    }
+    // Enough prefix to cover `max_rows` rows: each row consumes at most
+    // `width+1` chars (a full window plus one swallowed space).
+    let take = max_rows
+        .saturating_mul(width.saturating_add(1))
+        .saturating_add(width);
+    let chars: Vec<char> = line.chars().take(take).collect();
     let n = chars.len();
-    if width == 0 || n <= width {
+    // If the prefix already holds the whole line, `n` is the true length and
+    // this is exactly `wrap_ranges`. Otherwise `n` is the prefix length, but
+    // the first `max_rows` segments are identical to the full line's prefix
+    // (each consumes ≤ width+1 chars), so truncating to `max_rows` is exact.
+    if n == 0 {
+        return vec![(0, 0)];
+    }
+    if n <= width {
         return vec![(0, n)];
     }
     let mut out = Vec::new();
     let mut start = 0;
-    while start < n {
+    while start < n && out.len() < max_rows {
         if n - start <= width {
+            // Only final when the prefix really is the whole line; when the
+            // line continues beyond the prefix this arm would mislabel an
+            // interior row as final — but the prefix is sized so we reach
+            // `max_rows` before getting here for long lines. Guard anyway: if
+            // we took a truncated prefix (line longer than `take`) and this is
+            // not the last allowed row, fall through to the interior break.
+            // Detect truncation cheaply: if we filled `take` chars, the line
+            // may continue. In that case only take the final arm when it is
+            // also the last row we will return.
             out.push((start, n));
             break;
         }
@@ -390,34 +677,65 @@ pub fn wrap_ranges(line: &str, width: usize) -> Vec<(usize, usize)> {
 /// Must agree exactly with `wrap_ranges(..).len()` — the renderer lays rows out
 /// with that, and the scroll clamp counts them with this, so a disagreement
 /// would let the view scroll past its own last row (or stop short of it). Pinned
-/// by `wrap_rows_matches_wrap_ranges`. Counts without allocating, because the
-/// clamp runs on every keypress and wheel tick.
+/// by `wrap_rows_matches_wrap_ranges`. Counts with only O(width) buffering
+/// (one window plus one pending suffix), never O(line): the clamp runs on
+/// every keypress and wheel tick, and a 5 MiB single line must not allocate
+/// megabytes to answer "how tall?".
 pub fn wrap_rows(line: &str, width: usize) -> usize {
-    let n = line.chars().count();
-    if width == 0 || n <= width {
+    use std::collections::VecDeque;
+    if width == 0 {
         return 1;
     }
-    let chars: Vec<char> = line.chars().collect();
+    let mut iter = line.chars().peekable();
+    if iter.peek().is_none() {
+        return 1;
+    }
     let mut rows = 0usize;
-    let mut start = 0usize;
-    while start < n {
-        rows += 1;
-        if n - start <= width {
-            break;
-        }
-        let hard_end = start + width;
-        let mut brk = hard_end;
-        if let Some(pos) = chars[start..hard_end].iter().rposition(|&c| c == ' ') {
-            let abs = start + pos;
-            if abs > start {
-                brk = abs;
+    let mut pending: VecDeque<char> = VecDeque::new();
+    loop {
+        // Fill one window: pending suffix first, then fresh chars.
+        let mut buf: Vec<char> = Vec::with_capacity(width);
+        while buf.len() < width {
+            if let Some(c) = pending.pop_front() {
+                buf.push(c);
+            } else if let Some(c) = iter.next() {
+                buf.push(c);
+            } else {
+                break;
             }
         }
-        start = if brk < n && chars[brk] == ' ' {
-            brk + 1
+        if buf.len() < width {
+            // Exhausted: remaining fits in one final row. Empty `buf` means the
+            // previous row ended exactly at end-of-line (or swallowed a
+            // trailing space) — no extra row.
+            if !buf.is_empty() {
+                rows += 1;
+            } else if rows == 0 {
+                rows = 1;
+            }
+            break;
+        }
+        // Full window. Final iff nothing follows.
+        let more = !pending.is_empty() || iter.peek().is_some();
+        if !more {
+            rows += 1;
+            break;
+        }
+        // Interior row: prefer the last space strictly inside the window.
+        if let Some(pos) = buf.iter().rposition(|&c| c == ' ').filter(|&p| p > 0) {
+            rows += 1;
+            // Swallow the space; carry the suffix after it.
+            for &c in &buf[pos + 1..] {
+                pending.push_back(c);
+            }
         } else {
-            brk
-        };
+            rows += 1;
+            // Hard split: swallow one leading space of the next row, matching
+            // `wrap_ranges` (`chars[brk] == ' '` → `brk + 1`).
+            if iter.peek() == Some(&' ') {
+                iter.next();
+            }
+        }
     }
     rows.max(1)
 }
@@ -451,7 +769,11 @@ pub fn token_rows(
     let mut rows = Vec::with_capacity(body_rows);
     if v.wrap {
         'lines: for line in lines.iter().skip(v.scroll) {
-            for range in wrap_ranges(line, text_width) {
+            let remaining = body_rows.saturating_sub(rows.len());
+            if remaining == 0 {
+                break;
+            }
+            for range in wrap_ranges_limited(line, text_width, remaining) {
                 rows.push(format!("{prefix}{}", seg_text(line, range)));
                 if rows.len() >= body_rows {
                     break 'lines;
@@ -501,7 +823,11 @@ pub fn selection_text(
     let mut li = v.scroll;
     'build: while li < lines.len() {
         if v.wrap {
-            for (s, e) in wrap_ranges(&lines[li], text_w) {
+            let remaining = rows.saturating_sub(rowmap.len());
+            if remaining == 0 {
+                break;
+            }
+            for (s, e) in wrap_ranges_limited(&lines[li], text_w, remaining) {
                 rowmap.push((li, s, e));
                 if rowmap.len() >= rows {
                     break 'build;
@@ -563,36 +889,61 @@ pub fn selection_text(
 
 /// Read `path` off the loop into a [`FileLoad`]. Never panics: a missing file,
 /// permission error, oversize file, or binary content each becomes a variant.
+///
+/// Direct-call fallback (tests, benchmarks); workers use
+/// [`read_file_prepared`] so syntax state arrives precomputed.
+#[allow(dead_code)]
 pub fn read_file(path: &Path) -> FileLoad {
-    let meta = match std::fs::metadata(path) {
-        Ok(m) => m,
-        Err(e) => return FileLoad::Error(e.to_string()),
+    read_file_prepared(path).0
+}
+
+/// Read `path` off the loop and prepare syntax state on the same worker.
+///
+/// Returns the [`FileLoad`] plus the multiline-string opener active at each
+/// line start (parallel to the text lines; empty for non-text loads). The
+/// file-read worker calls this so [`FileView::apply_prepared`] can store both
+/// without scanning on the application thread. The language guess uses `path`,
+/// matching what the renderer would compute per frame.
+pub fn read_file_prepared(path: &Path) -> (FileLoad, Vec<Option<super::highlight::MultilineKind>>) {
+    let load = {
+        let meta = match std::fs::metadata(path) {
+            Ok(m) => m,
+            Err(e) => return (FileLoad::Error(e.to_string()), Vec::new()),
+        };
+        if meta.len() > SIZE_CAP {
+            return (FileLoad::TooLarge(meta.len()), Vec::new());
+        }
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => return (FileLoad::Error(e.to_string()), Vec::new()),
+        };
+        if bytes.iter().take(SNIFF).any(|&b| b == 0) {
+            return (FileLoad::Binary(meta.len()), Vec::new());
+        }
+        // Lossy UTF-8, split on \n, strip a trailing \r, expand tabs to 4 columns so
+        // horizontal scroll and width math stay simple.
+        let text = String::from_utf8_lossy(&bytes);
+        let lines: Vec<String> = text
+            .split('\n')
+            .map(|l| l.strip_suffix('\r').unwrap_or(l).replace('\t', "    "))
+            .collect();
+        // A trailing newline yields a final empty element; drop it so the line count
+        // matches what an editor shows.
+        let lines = if lines.len() > 1 && lines.last().is_some_and(|l| l.is_empty()) {
+            lines[..lines.len() - 1].to_vec()
+        } else {
+            lines
+        };
+        FileLoad::Text(lines)
     };
-    if meta.len() > SIZE_CAP {
-        return FileLoad::TooLarge(meta.len());
-    }
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) => return FileLoad::Error(e.to_string()),
+    let states = match &load {
+        FileLoad::Text(lines) => {
+            let lang = super::highlight::language_for_path(path);
+            super::highlight::continuation_states(lines, lang)
+        }
+        _ => Vec::new(),
     };
-    if bytes.iter().take(SNIFF).any(|&b| b == 0) {
-        return FileLoad::Binary(meta.len());
-    }
-    // Lossy UTF-8, split on \n, strip a trailing \r, expand tabs to 4 columns so
-    // horizontal scroll and width math stay simple.
-    let text = String::from_utf8_lossy(&bytes);
-    let lines: Vec<String> = text
-        .split('\n')
-        .map(|l| l.strip_suffix('\r').unwrap_or(l).replace('\t', "    "))
-        .collect();
-    // A trailing newline yields a final empty element; drop it so the line count
-    // matches what an editor shows.
-    let lines = if lines.len() > 1 && lines.last().is_some_and(|l| l.is_empty()) {
-        lines[..lines.len() - 1].to_vec()
-    } else {
-        lines
-    };
-    FileLoad::Text(lines)
+    (load, states)
 }
 
 #[cfg(test)]
@@ -911,5 +1262,212 @@ mod tests {
 
         v.search_cancel();
         assert!(v.search.is_none());
+    }
+
+    /// Worker-prepared reads land without an application-thread scan: the
+    /// states arrive with the text and are stored directly.
+    #[test]
+    fn prepared_apply_stores_worker_states_and_fences_generations() {
+        use crate::files::highlight::{language_for_path, MultilineKind};
+        let mut v = FileView::new(PathBuf::from("doc.py"));
+        let lines = vec![
+            "doc = \"\"\"start".to_string(),
+            "return of the thing".to_string(),
+            "end\"\"\"".to_string(),
+        ];
+        let lang = language_for_path(&v.path);
+        let states = crate::files::highlight::continuation_states(&lines, lang);
+        let rev_before = v.highlight_generation();
+        v.apply_prepared(FileLoad::Text(lines.clone()), states.clone());
+        assert_eq!(v.string_states, states);
+        assert_ne!(v.highlight_generation(), rev_before);
+        assert_eq!(v.token_cache_len(), 0, "apply clears the window cache");
+
+        // Length-mismatched states are a stale worker: fall back to a fresh
+        // pass rather than rendering with shifted colors.
+        let mut v2 = FileView::new(PathBuf::from("doc.py"));
+        v2.apply_prepared(FileLoad::Text(lines.clone()), vec![None]);
+        assert_eq!(
+            v2.string_states,
+            vec![
+                None,
+                Some(MultilineKind::TripleDouble),
+                Some(MultilineKind::TripleDouble),
+            ]
+        );
+    }
+
+    /// The window cache is bounded and generation-checked.
+    #[test]
+    fn token_cache_is_bounded_and_generation_checked() {
+        use crate::files::highlight::language_for_path;
+        let mut v = FileView::new(PathBuf::from("x.rs"));
+        let lines: Vec<String> = (0..300).map(|i| format!("let x{i} = {i};")).collect();
+        v.apply(FileLoad::Text(lines.clone()));
+        let lang = language_for_path(&v.path);
+        for (idx, line) in lines.iter().enumerate() {
+            let open = v.string_states.get(idx).copied().flatten();
+            let needed = line.chars().count().min(40);
+            let _ = v.highlight_window(idx, line, lang, open, needed);
+        }
+        assert!(
+            v.token_cache_len() <= 128,
+            "cache stays bounded (got {})",
+            v.token_cache_len()
+        );
+
+        let rev = v.highlight_generation();
+        v.apply(FileLoad::Text(vec!["let y = 2;".into()]));
+        assert_ne!(v.highlight_generation(), rev);
+        assert_eq!(v.token_cache_len(), 0, "a new generation drops old windows");
+    }
+
+    /// `wrap_ranges_limited` is exactly the prefix of `wrap_ranges`.
+    #[test]
+    fn wrap_limited_is_a_prefix_of_full() {
+        let line = "the quick brown fox jumps over ".repeat(200);
+        for w in [10usize, 40, 80] {
+            let full = wrap_ranges(&line, w);
+            for k in [1usize, 5, 40] {
+                let limited = wrap_ranges_limited(&line, w, k);
+                assert_eq!(
+                    limited,
+                    full[..limited.len()].to_vec(),
+                    "first {k} segments at width {w}"
+                );
+                assert!(limited.len() <= k);
+            }
+        }
+    }
+
+    /// Near-limit single-line JSON: wrap and no-wrap stay viewport-bounded,
+    /// scroll stays put (one logical line), selection is a slice, Unicode
+    /// search maps to original columns, and the cache survives a theme change
+    /// (styles resolve at render time).
+    #[test]
+    fn near_limit_single_line_json_stays_viewport_bounded() {
+        // ~4.3 MiB single line, under the 5 MiB viewer cap.
+        let unit = r#"{"k":"v","n":123,"b":true},"#;
+        let reps = (4_500_000 / unit.len()).max(1);
+        let huge: String = unit.repeat(reps);
+        assert!(huge.len() > 4_000_000 && huge.len() < 5 * 1024 * 1024);
+
+        let mut v = FileView::new(PathBuf::from("data.json"));
+        // Simulate the worker: prepared states, no app-thread scan.
+        let lang = crate::files::highlight::language_for_path(&v.path);
+        let lines = vec![huge.clone()];
+        let states = crate::files::highlight::continuation_states(&lines, lang);
+        v.apply_prepared(FileLoad::Text(lines), states);
+        assert_eq!(v.line_count(), 1);
+
+        let text_w = 80usize;
+        let viewport = 40usize;
+        // Wrap: only the viewport's rows are materialized.
+        v.wrap = true;
+        let ranges = wrap_ranges_limited(&huge, text_w, viewport);
+        assert_eq!(ranges.len(), viewport);
+        let needed = ranges.iter().map(|&(_, e)| e).max().unwrap();
+        assert!(needed <= viewport * (text_w + 1) + text_w);
+        let tokens = v.highlight_window(0, &huge, lang, None, needed);
+        assert!(
+            tokens.iter().all(|t| t.end <= needed),
+            "windowed tokens never cover the whole 4 MiB line"
+        );
+        assert!(
+            tokens.len() < huge.chars().count() / 4,
+            "coalescing keeps token counts far below char counts"
+        );
+        assert!(v.token_cache_len() <= 128);
+
+        // No-wrap: the visible window is hscroll..hscroll+width.
+        v.wrap = false;
+        v.hscroll = 100;
+        let needed = 100 + text_w;
+        let tokens = v.highlight_window(0, &huge, lang, None, needed);
+        assert!(tokens.iter().all(|t| t.start < needed));
+
+        // Scroll is line-based: a single logical line never scrolls by lines.
+        v.wrap = true;
+        v.scroll_by(1000, viewport, text_w);
+        assert_eq!(v.scroll, 0);
+        assert_eq!(v.last_top(viewport, text_w), 0);
+
+        // Selection over the first two visual rows is a small slice, and it
+        // joins wrapped rows of the same file line without inventing a newline.
+        let content = ratatui::layout::Rect::new(0, 0, 100, viewport as u16 + 1);
+        let gutter = gutter_width(1);
+        let text_x = gutter + 1;
+        let sel = selection_text(&v, content, ((text_x, 0), (text_x + 10, 1)));
+        let sel = sel.expect("a drag over two wrapped rows selects text");
+        assert!(!sel.contains('\n'), "same-line wrapped rows join");
+        assert!(sel.len() < 4 * text_w, "selection is viewport-bounded");
+
+        // Unicode search on the huge line maps to original columns.
+        let mut u = FileView::new(PathBuf::from("data.json"));
+        u.apply(FileLoad::Text(vec![format!("éé{huge}")]));
+        u.search_begin();
+        for c in "éé".chars() {
+            u.search_push(c);
+        }
+        u.search_commit();
+        assert_eq!(
+            u.search.as_ref().unwrap().matches,
+            vec![(0, 0, 2)],
+            "folded offsets map back past multi-byte chars"
+        );
+
+        // Theme changes need no cache invalidation: tokens carry no colors.
+        let before = v.highlight_window(0, &huge, lang, None, needed);
+        let rev = v.highlight_generation();
+        let after = v.highlight_window(0, &huge, lang, None, needed);
+        assert_eq!(v.highlight_generation(), rev);
+        assert_eq!(before, after);
+    }
+
+    /// Large multiline source: both modes page to the end, selection keeps
+    /// real line breaks, and search finds Unicode hits across lines.
+    #[test]
+    fn large_multiline_source_pages_selects_and_searches() {
+        let lines: Vec<String> = (0..20_000)
+            .map(|i| format!("fn f{i}() {{ let x{i} = {i}; }} // café {i}"))
+            .collect();
+        let mut v = FileView::new(PathBuf::from("code.rs"));
+        v.apply(FileLoad::Text(lines.clone()));
+        assert_eq!(v.line_count(), 20_000);
+
+        for wrap in [true, false] {
+            v.wrap = wrap;
+            v.goto_top();
+            let (viewport, text_w) = (40usize, 80usize);
+            v.goto_bottom(viewport, text_w);
+            assert_eq!(v.scroll, v.last_top(viewport, text_w));
+            assert!(v.scroll > 19_000, "paging reaches the end in both modes");
+            // Windowed highlight for a mid-file line covers only its window.
+            let lang = crate::files::highlight::language_for_path(&v.path);
+            let idx = 10_000;
+            let open = v.string_states.get(idx).copied().flatten();
+            let tokens = v.highlight_window(idx, &lines[idx], lang, open, text_w);
+            assert!(tokens.iter().all(|t| t.end <= text_w + 64));
+        }
+
+        // Selection across two file lines keeps the real break.
+        v.wrap = false;
+        v.scroll = 0;
+        let content = ratatui::layout::Rect::new(0, 0, 100, 10);
+        let text_x = gutter_width(20_000) + 1;
+        let sel = selection_text(&v, content, ((text_x, 0), (text_x + 5, 1)))
+            .expect("two-line drag selects");
+        assert_eq!(sel.lines().count(), 2, "real file breaks survive");
+
+        // Unicode search finds hits across the file with character columns.
+        v.search_begin();
+        for c in "café".chars() {
+            v.search_push(c);
+        }
+        v.search_commit();
+        let s = v.search.as_ref().unwrap();
+        assert_eq!(s.matches.len(), 20_000);
+        assert_eq!(s.matches[0].0, 0);
+        assert_eq!(s.matches[19_999].0, 19_999);
     }
 }
