@@ -1712,7 +1712,22 @@ fn closing_a_workspace_cancels_parked_waiters() {
     assert!(app.output_waits.is_empty(), "no waiters leak");
 }
 
-// Keep the real terminal lifetime, but observe admission through a private queue.
+// Launched only by the fixture below: after READY there is no unsolicited output.
+#[test]
+#[ignore = "PTY child for content fence tests"]
+fn content_fence_quiet_child() {
+    if std::env::var("LUVUS_CONTENT_FENCE_CHILD").as_deref() != Ok("1") {
+        return;
+    }
+    use std::io::{Read, Write};
+    println!("\nU02_QUIET_CHILD_READY");
+    std::io::stdout().flush().unwrap();
+    let mut byte = [0];
+    while std::io::stdin().read(&mut byte).unwrap_or(0) != 0 {}
+}
+
+// Keep a real terminal lifetime with controlled output, and observe admission
+// through a private queue. A normal interactive shell can redraw after a read.
 fn content_fence_app() -> (
     App,
     PaneId,
@@ -1721,6 +1736,47 @@ fn content_fence_app() -> (
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
     let pane = app.layout().focus;
+    let child = Pane::spawn_command(
+        pane,
+        80,
+        24,
+        app.ws().cwd.clone(),
+        app.app_tx.clone(),
+        &[
+            std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            "--exact".into(),
+            "app::dispatch::tests::agents::content_fence_quiet_child".into(),
+            "--ignored".into(),
+            "--nocapture".into(),
+            "--quiet".into(),
+        ],
+        &[("LUVUS_CONTENT_FENCE_CHILD".into(), "1".into())],
+        app.config.scrollback_bytes(),
+        app.pane_appearance,
+    )
+    .unwrap();
+    app.panes.insert(pane, child);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let ready = app.panes[&pane]
+            .engine
+            .lock()
+            .unwrap()
+            .visible_rows()
+            .iter()
+            .any(|line| line.trim() == "U02_QUIET_CHILD_READY");
+        if ready {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "quiet child did not become ready"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
     app.status.get_mut(&pane).unwrap().agent = "claude".into();
     let (input_tx, input_rx) = std::sync::mpsc::channel();
     app.panes

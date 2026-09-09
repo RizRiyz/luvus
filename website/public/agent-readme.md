@@ -293,6 +293,26 @@ without that requirement retain the permissive Unknown-evidence fallback.
 bytes, and queues a valid list as one ordered action. A closed target returns a
 structured `send_failed` error.
 
+For UHP interactions that must match the inspected screen, use `agent.read`
+with `source:"visible"` and pass its `content_revision` as `if_content_revision`
+together with its `terminal_id` in `agent.keys` params. The revision is a
+non-negative integer; the terminal ID is exactly 32 lowercase hex characters.
+Both fields are optional as a pair; a one-sided or malformed pair is
+`invalid_request`. A deferred pane has `terminal_id:null` and cannot be fenced.
+An unavailable read snapshot has empty text and null coordinates.
+
+The server checks the pair and queues keys under the same engine lock used to
+capture the text. `content_revision_conflict` means no keys were queued: re-read
+and reassess the authorized action, never retry the same pair. Generic response
+`revision` / request `if_revision` are global event coordinates, not the pane's
+content counter. Without the pair, behavior is unchanged. Older servers omit the
+coordinates or reject the new fields; omit the pair only when legacy unfenced
+admission is acceptable. These are UHP params, not CLI flags.
+
+The fence covers queue admission only. Already queued input and child-side
+changes not yet observed remain outside it. Cursor/SGR output can make a pair
+stale even if the dialog text looks unchanged.
+
 Identity, live state, lifecycle hooks, usage, native resume, and fork support
 are separate capabilities. An agent can be detected without supporting every
 other capability. Use `agent explain`, the supported-agent reference, and UHP

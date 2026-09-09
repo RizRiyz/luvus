@@ -191,7 +191,7 @@ impl App {
     pub(super) fn api_agent_keys(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = (method, p);
         {
-            reject_api_fields(p, &["target", "keys"])?;
+            reject_api_fields(p, &["target", "keys", "if_content_revision", "terminal_id"])?;
             let id = self.resolve_agent_target(p)?;
             if !self.is_agent_pane(id) {
                 return Err((
@@ -223,11 +223,66 @@ impl App {
                     ("invalid_request".to_string(), format!("unknown key: {key}"))
                 })?);
             }
-            self.panes
-                .get(&id)
-                .ok_or_else(not_found)?
-                .try_send(&bytes)
-                .map_err(|message| ("send_failed".to_string(), message))?;
+            let fence = match (p.get("if_content_revision"), p.get("terminal_id")) {
+                (None, None) => None,
+                (Some(revision), Some(terminal_id)) => {
+                    let revision = revision.as_u64().ok_or_else(|| {
+                        (
+                            "invalid_request".to_string(),
+                            "if_content_revision must be a non-negative integer".to_string(),
+                        )
+                    })?;
+                    let terminal_id = terminal_id
+                        .as_str()
+                        .filter(|id| crate::terminal::backend::valid_id(id))
+                        .ok_or_else(|| {
+                            (
+                                "invalid_request".to_string(),
+                                "terminal_id must be 32 lowercase hexadecimal characters"
+                                    .to_string(),
+                            )
+                        })?;
+                    Some((revision, terminal_id))
+                }
+                _ => {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "if_content_revision and terminal_id must be supplied together".to_string(),
+                    ));
+                }
+            };
+            let pane = self.panes.get(&id).ok_or_else(not_found)?;
+            if let Some((expected_revision, expected_terminal)) = fence {
+                // The PTY reader advances content_revision under this same lock.
+                // Keep it through queue admission, but never through child I/O.
+                let engine = pane.engine.lock().map_err(|_| {
+                    (
+                        "content_revision_conflict".to_string(),
+                        format!(
+                            "expected terminal_id={expected_terminal} content_revision={expected_revision}; actual unavailable (terminal engine lock failed)"
+                        ),
+                    )
+                })?;
+                let actual_revision = pane.content_revision();
+                let actual_terminal = pane.terminal_runtime().map(|runtime| runtime.terminal_id);
+                if actual_revision != expected_revision
+                    || actual_terminal.as_deref() != Some(expected_terminal)
+                {
+                    return Err((
+                        "content_revision_conflict".to_string(),
+                        format!(
+                            "expected terminal_id={expected_terminal} content_revision={expected_revision}; actual terminal_id={} content_revision={actual_revision}",
+                            actual_terminal.as_deref().unwrap_or("null")
+                        ),
+                    ));
+                }
+                let sent = pane.try_send(&bytes);
+                drop(engine);
+                sent.map_err(|message| ("send_failed".to_string(), message))?;
+            } else {
+                pane.try_send(&bytes)
+                    .map_err(|message| ("send_failed".to_string(), message))?;
+            }
             Ok(json!({"type":"ok","pane": id.0.to_string()}))
         }
     }
@@ -241,20 +296,29 @@ impl App {
             // `visible` = the current screen; anything else = recent output
             // (soft wraps joined), the default and best for transcripts.
             let source = p.get("source").and_then(|v| v.as_str()).unwrap_or("recent");
-            let text = self
+            let (text, content_revision, terminal_id) = self
                 .panes
                 .get(&id)
                 .and_then(|pane| {
                     pane.engine.lock().ok().map(|e| {
-                        if source == "visible" {
+                        let text = if source == "visible" {
                             e.visible_rows().join("\n")
                         } else {
                             e.detection_text(lines)
-                        }
+                        };
+                        // Capture coordinates with the text, as terminal capture does.
+                        (
+                            text,
+                            Some(pane.content_revision()),
+                            pane.terminal_runtime().map(|runtime| runtime.terminal_id),
+                        )
                     })
                 })
                 .unwrap_or_default();
-            Ok(json!({"type":"agent_read","pane": id.0.to_string(), "text": text}))
+            Ok(
+                json!({"type":"agent_read","pane": id.0.to_string(), "text": text,
+                "content_revision": content_revision, "terminal_id": terminal_id}),
+            )
         }
     }
 
