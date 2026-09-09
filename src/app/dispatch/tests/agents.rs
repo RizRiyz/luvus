@@ -1711,3 +1711,261 @@ fn closing_a_workspace_cancels_parked_waiters() {
     );
     assert!(app.output_waits.is_empty(), "no waiters leak");
 }
+
+// Keep the real terminal lifetime, but observe admission through a private queue.
+fn content_fence_app() -> (
+    App,
+    PaneId,
+    std::sync::mpsc::Receiver<crate::terminal::pty::InputAction>,
+) {
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    app.status.get_mut(&pane).unwrap().agent = "claude".into();
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&pane)
+        .unwrap()
+        .replace_input_sender_for_test(input_tx);
+    (app, pane, input_rx)
+}
+
+fn content_fence_pair(app: &App, pane_id: PaneId) -> Value {
+    let pane = &app.panes[&pane_id];
+    let _engine = pane.engine.lock().unwrap();
+    json!({
+        "target": pane_id.0.to_string(), "keys": ["enter"],
+        "if_content_revision": pane.content_revision(),
+        "terminal_id": pane.terminal_runtime().unwrap().terminal_id,
+    })
+}
+
+fn content_fence_advance(app: &App, pane: PaneId) {
+    let pane = &app.panes[&pane];
+    let mut engine = pane.engine.lock().unwrap();
+    engine.advance(b"\x1b[2J\x1b[HCHOOSER_B");
+    pane.content_revision_handle()
+        .fetch_add(1, Ordering::Release);
+}
+
+#[test]
+fn content_fence_legacy_keys_still_queue_after_output_changes() {
+    let _env = crate::persist::test_env("content-fence-legacy");
+    let (mut app, pane, input) = content_fence_app();
+    content_fence_advance(&app, pane);
+    app.dispatch(
+        "agent.keys",
+        &json!({"target":pane.0.to_string(),"keys":["enter"]}),
+    )
+    .unwrap();
+    let crate::terminal::pty::InputAction::Bytes(bytes) = input.try_recv().unwrap() else {
+        panic!("expected bytes")
+    };
+    assert_eq!(bytes, b"\r");
+    assert!(input.try_recv().is_err());
+}
+
+#[test]
+fn content_fence_matching_pair_queues_one_ordered_batch() {
+    let _env = crate::persist::test_env("content-fence-match");
+    let (mut app, pane, input) = content_fence_app();
+    let mut params = content_fence_pair(&app, pane);
+    params["keys"] = json!(["up", "enter", "CTRL+C", "é"]);
+    app.dispatch("agent.keys", &params).unwrap();
+    let crate::terminal::pty::InputAction::Bytes(bytes) = input.try_recv().unwrap() else {
+        panic!("expected bytes")
+    };
+    assert_eq!(bytes, "\x1b[A\r\x03é".as_bytes());
+    assert!(input.try_recv().is_err());
+}
+
+#[test]
+fn content_fence_stale_revision_queues_nothing() {
+    let _env = crate::persist::test_env("content-fence-stale");
+    let (mut app, pane, input) = content_fence_app();
+    let params = content_fence_pair(&app, pane);
+    content_fence_advance(&app, pane);
+    let error = app.dispatch("agent.keys", &params).unwrap_err();
+    assert_eq!(error.0, "content_revision_conflict");
+    assert!(error.1.contains("expected"));
+    assert!(error.1.contains("actual"));
+    assert!(error.1.contains(&params["if_content_revision"].to_string()));
+    assert!(input.try_recv().is_err());
+}
+
+#[test]
+fn content_fence_wrong_terminal_identity_queues_nothing() {
+    let _env = crate::persist::test_env("content-fence-identity");
+    let (mut app, pane, input) = content_fence_app();
+    let mut params = content_fence_pair(&app, pane);
+    let actual = params["terminal_id"].as_str().unwrap().to_owned();
+    let first = if actual.starts_with('0') { "1" } else { "0" };
+    params["terminal_id"] = json!(format!("{first}{}", &actual[1..]));
+    let error = app.dispatch("agent.keys", &params).unwrap_err();
+    assert_eq!(error.0, "content_revision_conflict");
+    assert!(error.1.contains(params["terminal_id"].as_str().unwrap()));
+    assert!(error.1.contains(&actual));
+    assert!(input.try_recv().is_err());
+}
+
+#[test]
+fn content_fence_requires_both_fields() {
+    let _env = crate::persist::test_env("content-fence-pair");
+    let (mut app, pane, input) = content_fence_app();
+    for missing in ["if_content_revision", "terminal_id"] {
+        let mut params = content_fence_pair(&app, pane);
+        params.as_object_mut().unwrap().remove(missing);
+        assert_eq!(
+            app.dispatch("agent.keys", &params).unwrap_err().0,
+            "invalid_request"
+        );
+        assert!(input.try_recv().is_err());
+    }
+}
+
+#[test]
+fn content_fence_read_returns_text_and_runtime_coordinates() {
+    let _env = crate::persist::test_env("content-fence-read");
+    let (mut app, pane, _input) = content_fence_app();
+    content_fence_advance(&app, pane);
+    for source in ["visible", "recent"] {
+        let result = app
+            .dispatch(
+                "agent.read",
+                &json!({"target":pane.0.to_string(), "source":source}),
+            )
+            .unwrap();
+        assert_eq!(
+            result["content_revision"],
+            app.panes[&pane].content_revision()
+        );
+        assert_eq!(
+            result["terminal_id"],
+            app.panes[&pane].terminal_runtime().unwrap().terminal_id
+        );
+        assert!(result["text"].as_str().unwrap().contains("CHOOSER_B"));
+    }
+}
+
+#[test]
+fn content_fence_invalid_keys_validate_before_comparison() {
+    let _env = crate::persist::test_env("content-fence-invalid-keys");
+    let (mut app, pane, input) = content_fence_app();
+    for stale in [false, true] {
+        let mut params = content_fence_pair(&app, pane);
+        if stale {
+            content_fence_advance(&app, pane);
+        }
+        for keys in [
+            json!([]),
+            Value::Null,
+            json!("enter"),
+            json!(["enter", 7]),
+            json!(["enter", "not-a-key"]),
+        ] {
+            params["keys"] = keys;
+            assert_eq!(
+                app.dispatch("agent.keys", &params).unwrap_err().0,
+                "invalid_request"
+            );
+            assert!(input.try_recv().is_err());
+        }
+    }
+}
+
+#[test]
+fn content_fence_rejects_malformed_coordinates() {
+    let _env = crate::persist::test_env("content-fence-malformed");
+    let (mut app, pane, input) = content_fence_app();
+    for (field, values) in [
+        (
+            "if_content_revision",
+            vec![Value::Null, json!(-1), json!(1.5), json!(true), json!("1")],
+        ),
+        (
+            "terminal_id",
+            vec![
+                Value::Null,
+                json!(7),
+                json!(""),
+                json!("0123456789ABCDEF0123456789ABCDEF"),
+                json!("0123456789abcdef0123456789abcdeg"),
+                json!("0123456789abcdef0123456789abcdef\n"),
+            ],
+        ),
+    ] {
+        for value in values {
+            let mut params = content_fence_pair(&app, pane);
+            params[field] = value;
+            assert_eq!(
+                app.dispatch("agent.keys", &params).unwrap_err().0,
+                "invalid_request"
+            );
+            assert!(input.try_recv().is_err());
+        }
+    }
+}
+
+#[test]
+fn content_fence_closed_writer_is_send_failed() {
+    let _env = crate::persist::test_env("content-fence-closed");
+    let (mut app, pane, input) = content_fence_app();
+    drop(input);
+    let params = content_fence_pair(&app, pane);
+    assert_eq!(
+        app.dispatch("agent.keys", &params).unwrap_err().0,
+        "send_failed"
+    );
+}
+
+#[test]
+fn content_fence_missing_runtime_is_conflict_and_read_identity_is_null() {
+    let _env = crate::persist::test_env("content-fence-no-runtime");
+    let (mut app, _, _) = content_fence_app();
+    app.config.shell = "luvus-content-fence-nonexistent-shell".into();
+    let pane = app.spawn_into_deferred(app.ws().cwd.clone(), &[]).unwrap();
+    assert!(app.panes[&pane].terminal_runtime().is_none());
+    app.status.get_mut(&pane).unwrap().agent = "claude".into();
+    let (sender, input) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&pane)
+        .unwrap()
+        .replace_input_sender_for_test(sender);
+    let params = json!({"target":pane.0.to_string(),"keys":["enter"],"if_content_revision":0,"terminal_id":"0123456789abcdef0123456789abcdef"});
+    let error = app.dispatch("agent.keys", &params).unwrap_err();
+    assert_eq!(error.0, "content_revision_conflict");
+    assert!(error.1.contains("expected"));
+    assert!(error.1.contains("actual"));
+    assert!(input.try_recv().is_err());
+    let result = app
+        .dispatch("agent.read", &json!({"target":pane.0.to_string()}))
+        .unwrap();
+    assert!(result.as_object().unwrap().contains_key("terminal_id"));
+    assert!(result["terminal_id"].is_null());
+    assert_eq!(
+        result["content_revision"],
+        app.panes[&pane].content_revision()
+    );
+}
+
+#[test]
+fn content_fence_unavailable_engine_queues_nothing() {
+    let _env = crate::persist::test_env("content-fence-poison");
+    let (mut app, pane, input) = content_fence_app();
+    let params = content_fence_pair(&app, pane);
+    let engine = app.panes[&pane].engine.clone();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = engine.lock().unwrap();
+        panic!("fixture poisons the engine lock");
+    }));
+    let error = app.dispatch("agent.keys", &params).unwrap_err();
+    assert_eq!(error.0, "content_revision_conflict");
+    assert!(input.try_recv().is_err());
+    let result = app
+        .dispatch("agent.read", &json!({"target":pane.0.to_string()}))
+        .unwrap();
+    assert_eq!(result["text"], "");
+    assert!(result["content_revision"].is_null());
+    // Clear poison so unrelated teardown does not inherit the fixture failure.
+    engine.clear_poison();
+}
