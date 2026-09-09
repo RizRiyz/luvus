@@ -986,6 +986,8 @@ mod tests {
         assert!(allowed_method(AccessMode::Control, "workspace.focus"));
         assert!(allowed_method(AccessMode::Control, "tab.focus"));
         assert!(allowed_method(AccessMode::Control, "pane.focus"));
+        assert!(!allowed_method(AccessMode::ReadOnly, "pane.rename"));
+        assert!(allowed_method(AccessMode::Control, "pane.rename"));
         assert!(allowed_method(AccessMode::Control, "agent.prompt"));
         assert!(allowed_method(AccessMode::Control, "agent.keys"));
         assert!(!allowed_method(AccessMode::ReadOnly, "agent.keys"));
@@ -1018,6 +1020,9 @@ mod tests {
         assert!(!allowed_method(AccessMode::Control, "pane.send_input"));
         assert!(!allowed_method(AccessMode::Control, "pane.run"));
         assert!(!allowed_method(AccessMode::Control, "pane.close"));
+        for method in ["agent.name", "Pane.rename", "pane.rename.", "pane.rename "] {
+            assert!(!allowed_method(AccessMode::Control, method), "{method}");
+        }
         assert!(!allowed_method(AccessMode::Control, "agent.start"));
         assert!(!allowed_method(AccessMode::Control, "agent.fork"));
         assert!(!allowed_method(AccessMode::Control, "uhp.token.list"));
@@ -1123,6 +1128,13 @@ mod tests {
         assert_eq!(mutation["id"], "1");
         assert_eq!(mutation["error"]["code"], "forbidden");
 
+        let rename = exchange(
+            gateway.address(),
+            &json!({"id":"rename","method":"pane.rename","params":{"pane":"1","name":"worker"},"auth":token}),
+        );
+        assert_eq!(rename["id"], "rename");
+        assert_eq!(rename["error"]["code"], "forbidden");
+
         let omitted_auth = exchange(
             gateway.address(),
             &json!({"id":"2","method":"session.snapshot","params":{}}),
@@ -1159,6 +1171,12 @@ mod tests {
             &json!({"id":"focus","method":"workspace.focus","params":{"workspace":0},"auth":token}),
         );
         assert_eq!(focus["error"]["code"], "unavailable");
+        let rename = exchange(
+            gateway.address(),
+            &json!({"id":"rename","method":"pane.rename","params":{"pane":"1","name":"worker"},"auth":token}),
+        );
+        assert_eq!(rename["id"], "rename");
+        assert_eq!(rename["error"]["code"], "unavailable");
         let terminal_write = exchange(
             gateway.address(),
             &json!({"id":"write","method":"pane.send_input","params":{"pane":"1","text":"x"},"auth":token}),
@@ -1389,6 +1407,124 @@ mod tests {
     }
 
     #[test]
+    fn control_access_forwards_validated_pane_rename() {
+        // Fail before starting an upstream accept if the RPC is still denied.
+        assert!(allowed_method(AccessMode::Control, "pane.rename"));
+        let _env = crate::persist::test_env("access-pane-rename");
+        let path = crate::persist::ensure_config_dir().join("rename.sock");
+        let listener = crate::ipc::transport::bind(&path).unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let mut gateway = Gateway::start(
+            path,
+            "client".into(),
+            None,
+            "upstream-rename-test".into(),
+            Pairing::new(Duration::from_secs(60)).unwrap(),
+            AccessMode::Control,
+        )
+        .unwrap();
+        let relay = |app: &mut crate::app::App, params: Value| {
+            let request =
+                json!({"id":"rename","method":"pane.rename","params":params,"auth":"client"});
+            thread::scope(|scope| {
+                let address = gateway.address();
+                let client = scope.spawn(move || exchange(address, &request));
+                let mut local = BufReader::new(listener.accept().unwrap());
+                let forwarded: Value = serde_json::from_str(
+                    &crate::ipc::api::read_response_frame(&mut local).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(forwarded["method"], "pane.rename");
+                assert_eq!(forwarded["auth"], "upstream-rename-test");
+                let response = match app.dispatch("pane.rename", &forwarded["params"]) {
+                    Ok(result) => json!({"id":"rename","result":result}),
+                    Err((code, message)) => {
+                        json!({"id":"rename","error":{"code":code,"message":message}})
+                    }
+                };
+                writeln!(local.get_mut(), "{response}").unwrap();
+                local.get_mut().flush().unwrap();
+                client.join().unwrap()
+            })
+        };
+        for (name, expected) in [
+            ("worker", Some("worker")),
+            ("  worker-2_a  ", Some("worker-2_a")),
+            (
+                "a1234567890123456789012345678901_2",
+                Some("a1234567890123456789012345678901_2"),
+            ),
+            ("", None),
+            ("  ", None),
+        ] {
+            let sequence = crate::ipc::api::current_sequence(&app.events);
+            let result = relay(&mut app, json!({"pane":pane.0.to_string(),"name":name}));
+            assert_eq!(
+                result["result"],
+                json!({
+                    "type":"pane_rename","pane":pane.0.to_string(),"name":expected
+                })
+            );
+            assert_eq!(
+                app.agent_names.get(expected.unwrap_or("")),
+                expected.map(|_| &pane)
+            );
+            assert_eq!(app.agent_names.len(), usize::from(expected.is_some()));
+            assert!(app.session_dirty);
+            let events = crate::ipc::api::replayed_events_after(&app.events, sequence);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["event"], "pane.renamed");
+            assert_eq!(
+                events[0]["data"],
+                json!({"pane":pane.0.to_string(),"name":expected})
+            );
+            assert_eq!(app.layout().focus, pane);
+        }
+        app.set_agent_name(pane, Some("original"));
+        app.session_dirty = false;
+        for (params, code) in [
+            (json!({"pane":pane.0.to_string()}), "invalid_request"),
+            (
+                json!({"pane":pane.0.to_string(),"name":null}),
+                "invalid_request",
+            ),
+            (
+                json!({"pane":pane.0.to_string(),"name":7}),
+                "invalid_request",
+            ),
+            (
+                json!({"pane":pane.0.to_string(),"name":"Bad"}),
+                "invalid_request",
+            ),
+            (
+                json!({"pane":pane.0.to_string(),"name":"bad name"}),
+                "invalid_request",
+            ),
+            (
+                json!({"pane":pane.0.to_string(),"name":"a".repeat(33)}),
+                "invalid_request",
+            ),
+            (
+                json!({"pane":pane.0.to_string(),"name":"worker","extra":true}),
+                "invalid_request",
+            ),
+            (json!({"pane":"4294967295","name":"worker"}), "not_found"),
+        ] {
+            let before = app.agent_names.clone();
+            let sequence = crate::ipc::api::current_sequence(&app.events);
+            let result = relay(&mut app, params.clone());
+            assert_eq!(result["error"]["code"], code, "{params}: {result}");
+            assert_eq!(app.agent_names, before);
+            assert_eq!(crate::ipc::api::current_sequence(&app.events), sequence);
+            assert!(!app.session_dirty);
+            assert_eq!(app.layout().focus, pane);
+        }
+        gateway.stop();
+    }
+
+    #[test]
     fn access_keys_rejections_never_admit_input() {
         let _env = crate::persist::test_env("access-keys-denied");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -1553,6 +1689,10 @@ mod tests {
             assert_eq!(access.as_object().unwrap().len(), 3);
             assert_eq!(
                 expected.contains(&"agent.keys"),
+                mode == AccessMode::Control
+            );
+            assert_eq!(
+                expected.contains(&"pane.rename"),
                 mode == AccessMode::Control
             );
             assert_eq!(
