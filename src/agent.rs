@@ -169,6 +169,12 @@ fn filter_launch_flags(agent: &str, launch: &[String]) -> Vec<String> {
             }
             continue;
         }
+        // Devin reads everything after `--` as the initial prompt. Replaying it
+        // on `devin --resume <id>` would run the captured task briefing again,
+        // so the separator ends the copy; the flags before it still apply.
+        if agent == "devin" && t == "--" {
+            break;
+        }
         if t.contains('=') && TAKES_VALUE.contains(&head) {
             i += 1; // glued form, e.g. --resume=<id>
             continue;
@@ -698,6 +704,25 @@ mod tests {
             f("copilot", &["--resume=old", "--banner"]),
             vec!["--banner"]
         );
+        // Devin: the flags before `--` are kept; the separator and the task
+        // briefing after it are not, and a stale selector before it still goes.
+        assert_eq!(
+            f(
+                "devin",
+                &[
+                    "--permission-mode",
+                    "auto",
+                    "--",
+                    "fix",
+                    "the",
+                    "login",
+                    "bug"
+                ]
+            ),
+            vec!["--permission-mode", "auto"]
+        );
+        assert!(f("devin", &["--", "fix", "the", "login", "bug"]).is_empty());
+        assert!(f("devin", &["--resume", "old", "--", "fix"]).is_empty());
         // Standalone selectors, a fork flag, and one-shot print mode all go.
         assert_eq!(
             f(
@@ -775,6 +800,24 @@ mod tests {
         assert_eq!(
             resume_command_with_flags("opencode2", "ses_2", &opencode2_launch).as_deref(),
             Some("opencode2 --session 'ses_2' '--standalone'\r")
+        );
+
+        // Devin keeps its option but never the `-- <briefing>` it was launched with.
+        let devin_launch = [
+            "--permission-mode",
+            "auto",
+            "--",
+            "fix",
+            "the",
+            "login",
+            "bug",
+        ]
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+        assert_eq!(
+            resume_command_with_flags("devin", "quiet-meadow", &devin_launch).as_deref(),
+            Some("devin --resume 'quiet-meadow' '--permission-mode' 'auto'\r")
         );
 
         // All-filtered input and empty input both fall back to the plain command.

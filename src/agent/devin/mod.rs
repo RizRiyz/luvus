@@ -1,8 +1,11 @@
 //! Native Devin CLI support.
 //!
 //! Devin keeps its session history in a private SQLite store under its config
-//! directory. Luvus does not open it: detection is native, and a session whose
-//! exact id is already known resumes with `devin --resume <id>`.
+//! directory. Luvus does not open it, so there is no session discovery: a pane
+//! resumes on restore only from an exact binding that was reported to Luvus
+//! (`luvus pane report --agent devin --session <id>`) and persisted, and
+//! `luvus agent resume <id>` cannot find Devin sessions. A known id resumes
+//! with `devin --resume <id>`.
 //!
 //! Devin also reads hook definitions from the `hooks` key of its user config
 //! (`~/.config/devin/config.json`, `%APPDATA%\devin\config.json` on Windows) in

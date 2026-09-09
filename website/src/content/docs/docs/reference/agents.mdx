@@ -90,6 +90,14 @@ description: What luvus supports per agent, covering live status, session resume
   available only with explicit **Full access**, which maps to Kilo's documented
   `kilo run --auto` contract; read-only and workspace automation are rejected.
 
+  Devin is detected through its `devin` executable, which is also an ordinary
+  given name, so only process, launch-command, or title evidence names it.
+  Luvus can resume `devin --resume <id>` when an exact session ID was reported
+  and persisted, but does not open Devin's private session database, so
+  `luvus agent resume <id>` cannot find Devin sessions and there is no native
+  fork. Automation profiles and the optional hook integration are not
+  declared yet.
+
   Hermes installs `~/.hermes/plugins/luvus-agent-state`, or the equivalent
   directory under `HERMES_HOME`, and enables only that plugin in
   `config.yaml`. Its callbacks report each exact CLI session once. Native
