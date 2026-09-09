@@ -1074,10 +1074,14 @@ fn print_server_card(
 
 fn print_detached_status(context: i18n::cli::Context) {
     let session = session::display_name();
+    print_detached_status_for(context, &session);
+}
+
+fn print_detached_status_for(context: i18n::cli::Context, session: &str) {
     let runtime = format!("{} + {}", context.text("server"), context.text("panes"));
     let rows = [
         (context.text("status"), context.text("detached")),
-        (context.text("session"), session.as_str()),
+        (context.text("session"), session),
         (runtime.as_str(), context.text("running")),
     ];
     cli::print_status_card("Luvus session", &rows);
