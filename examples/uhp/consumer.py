@@ -291,6 +291,7 @@ def agent_key(value):
 
 
 def valid_agent_keys_params(params):
+    """Validate an atomic key batch and its optional paired snapshot coordinates."""
     fields = set(params)
     if fields == {"target", "keys", "if_content_revision", "terminal_id"}:
         if not (

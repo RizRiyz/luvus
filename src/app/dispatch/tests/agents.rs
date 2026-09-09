@@ -1712,7 +1712,7 @@ fn closing_a_workspace_cancels_parked_waiters() {
     assert!(app.output_waits.is_empty(), "no waiters leak");
 }
 
-// Launched only by the fixture below: after READY there is no unsolicited output.
+/// Launched only by the fixture below: after READY there is no unsolicited output.
 #[test]
 #[ignore = "PTY child for content fence tests"]
 fn content_fence_quiet_child() {
@@ -1726,8 +1726,8 @@ fn content_fence_quiet_child() {
     while std::io::stdin().read(&mut byte).unwrap_or(0) != 0 {}
 }
 
-// Keep a real terminal lifetime with controlled output, and observe admission
-// through a private queue. A normal interactive shell can redraw after a read.
+/// Keep a real terminal lifetime with controlled output and a private input queue.
+/// A normal interactive shell can redraw after a read and invalidate test pairs.
 fn content_fence_app() -> (
     App,
     PaneId,
@@ -1786,6 +1786,7 @@ fn content_fence_app() -> (
     (app, pane, input_rx)
 }
 
+/// Capture valid fence parameters from the fixture terminal under its engine lock.
 fn content_fence_pair(app: &App, pane_id: PaneId) -> Value {
     let pane = &app.panes[&pane_id];
     let _engine = pane.engine.lock().unwrap();
@@ -1796,6 +1797,7 @@ fn content_fence_pair(app: &App, pane_id: PaneId) -> Value {
     })
 }
 
+/// Replace fixture output and increment its revision while holding the reader lock.
 fn content_fence_advance(app: &App, pane: PaneId) {
     let pane = &app.panes[&pane];
     let mut engine = pane.engine.lock().unwrap();
@@ -1804,6 +1806,7 @@ fn content_fence_advance(app: &App, pane: PaneId) {
         .fetch_add(1, Ordering::Release);
 }
 
+/// Unfenced callers retain their existing admission behavior after output changes.
 #[test]
 fn content_fence_legacy_keys_still_queue_after_output_changes() {
     let _env = crate::persist::test_env("content-fence-legacy");
@@ -1821,6 +1824,7 @@ fn content_fence_legacy_keys_still_queue_after_output_changes() {
     assert!(input.try_recv().is_err());
 }
 
+/// Matching coordinates admit exactly one ordered batch, including aliases and Unicode.
 #[test]
 fn content_fence_matching_pair_queues_one_ordered_batch() {
     let _env = crate::persist::test_env("content-fence-match");
@@ -1835,6 +1839,7 @@ fn content_fence_matching_pair_queues_one_ordered_batch() {
     assert!(input.try_recv().is_err());
 }
 
+/// A changed output revision rejects the complete batch without admitting a prefix.
 #[test]
 fn content_fence_stale_revision_queues_nothing() {
     let _env = crate::persist::test_env("content-fence-stale");
@@ -1849,6 +1854,7 @@ fn content_fence_stale_revision_queues_nothing() {
     assert!(input.try_recv().is_err());
 }
 
+/// A different terminal lifetime rejects keys even when the revision matches.
 #[test]
 fn content_fence_wrong_terminal_identity_queues_nothing() {
     let _env = crate::persist::test_env("content-fence-identity");
@@ -1864,6 +1870,7 @@ fn content_fence_wrong_terminal_identity_queues_nothing() {
     assert!(input.try_recv().is_err());
 }
 
+/// Either one-sided fence is a validation error and leaves the queue empty.
 #[test]
 fn content_fence_requires_both_fields() {
     let _env = crate::persist::test_env("content-fence-pair");
@@ -1879,6 +1886,7 @@ fn content_fence_requires_both_fields() {
     }
 }
 
+/// Visible and recent reads report the coordinates belonging to their captured text.
 #[test]
 fn content_fence_read_returns_text_and_runtime_coordinates() {
     let _env = crate::persist::test_env("content-fence-read");
@@ -1903,6 +1911,7 @@ fn content_fence_read_returns_text_and_runtime_coordinates() {
     }
 }
 
+/// Invalid key arrays fail before both matching and stale fence comparisons.
 #[test]
 fn content_fence_invalid_keys_validate_before_comparison() {
     let _env = crate::persist::test_env("content-fence-invalid-keys");
@@ -1929,6 +1938,7 @@ fn content_fence_invalid_keys_validate_before_comparison() {
     }
 }
 
+/// Malformed revision and identity values cannot admit keys.
 #[test]
 fn content_fence_rejects_malformed_coordinates() {
     let _env = crate::persist::test_env("content-fence-malformed");
@@ -1962,6 +1972,7 @@ fn content_fence_rejects_malformed_coordinates() {
     }
 }
 
+/// A matching fence preserves the existing closed-writer delivery error.
 #[test]
 fn content_fence_closed_writer_is_send_failed() {
     let _env = crate::persist::test_env("content-fence-closed");
@@ -1974,6 +1985,7 @@ fn content_fence_closed_writer_is_send_failed() {
     );
 }
 
+/// Deferred panes expose no terminal identity and cannot accept a fenced batch.
 #[test]
 fn content_fence_missing_runtime_is_conflict_and_read_identity_is_null() {
     let _env = crate::persist::test_env("content-fence-no-runtime");
@@ -2004,6 +2016,7 @@ fn content_fence_missing_runtime_is_conflict_and_read_identity_is_null() {
     );
 }
 
+/// An unavailable engine cannot admit fenced input or fabricate a read revision.
 #[test]
 fn content_fence_unavailable_engine_queues_nothing() {
     let _env = crate::persist::test_env("content-fence-poison");

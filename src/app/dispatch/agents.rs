@@ -186,8 +186,8 @@ impl App {
         }
     }
 
-    // Send named control keys (enter, esc, ctrl+c, up, …) to a target agent,
-    // e.g. to answer a blocked approval prompt. All keys validate first.
+    /// Send an atomic key batch to an agent, optionally fenced to read coordinates.
+    /// Validate every key before comparing the fence or admitting input.
     pub(super) fn api_agent_keys(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = (method, p);
         {
@@ -287,7 +287,7 @@ impl App {
         }
     }
 
-    // Read a target agent's output, addressed by name or pane id.
+    /// Read an agent's text and terminal coordinates under one engine lock.
     pub(super) fn api_agent_read(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = (method, p);
         {
