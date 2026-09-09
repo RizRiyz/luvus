@@ -115,6 +115,10 @@ jobs:
           cargo test --locked app::cwd::tests
           cargo test --locked platform::tests::no_window_keeps_the_command_working
           cargo test --locked ipc::transport::windows_
+          cargo test --locked machine::
+          if ($LASTEXITCODE -ne 0) { throw "Windows saved-machine tests failed" }
+          cargo test --locked ipc::server::tests::client_sidebars
+          if ($LASTEXITCODE -ne 0) { throw "Windows client-sidebar tests failed" }
           cargo test --locked app::backend::tests
           cargo test --locked terminal::backend::tests
           cargo test --locked altgr

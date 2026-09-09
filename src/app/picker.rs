@@ -59,6 +59,8 @@ pub enum Row {
 /// keeps the picker open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PickerHit {
+    OpenWorkspaceTab,
+    RemoteMachineTab,
     Row(usize),
     /// A footer key hint; a click behaves exactly like pressing that key.
     Hint(KeyCode),
@@ -129,6 +131,15 @@ impl App {
 
     pub fn close_folder_picker(&mut self) {
         self.picker = None;
+    }
+
+    /// Hand the remote tab to the owner-local thin client. The selected server
+    /// deliberately receives no profile fields or SSH destination.
+    pub fn picker_open_remote_machine(&mut self) {
+        if self.client_machine_capable {
+            self.picker = None;
+            self.pending_machine_create = true;
+        }
     }
 
     /// Re-read the browsed path's entries (folders + files), dirs first.
@@ -268,6 +279,9 @@ impl App {
             }
         }
         match key.code {
+            KeyCode::Tab | KeyCode::BackTab if self.client_machine_capable => {
+                self.picker_open_remote_machine()
+            }
             KeyCode::Char('j') | KeyCode::Down => self.picker_move(1),
             KeyCode::Char('k') | KeyCode::Up => self.picker_move(-1),
             KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h') => self.picker_up(),
@@ -508,6 +522,25 @@ mod tests {
         assert!(matches!(p.row(2), Row::Home));
         assert!(matches!(p.row(3), Row::Up));
         assert!(matches!(p.row(4), Row::Entry(0)));
+    }
+
+    #[test]
+    fn remote_picker_tab_requests_owner_local_machine_form() {
+        let _env = crate::persist::test_env("picker-remote-machine");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.client_machine_capable = true;
+        app.open_folder_picker();
+
+        app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert!(app.picker.is_none());
+        assert!(app.pending_machine_create);
+        app.pending_machine_create = false;
+        app.open_folder_picker();
+        app.handle_picker_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert!(app.picker.is_none());
+        assert!(app.pending_machine_create);
     }
 
     #[test]

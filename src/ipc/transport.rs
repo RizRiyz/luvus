@@ -168,6 +168,21 @@ impl Conn {
         self.0.set_nonblocking(false)
     }
 
+    /// Restore a negotiated client connection to ordinary blocking streaming.
+    pub fn clear_timeouts(&self) -> io::Result<()> {
+        use interprocess::local_socket::traits::Stream as _;
+        #[cfg(not(windows))]
+        {
+            self.0.set_recv_timeout(None).map_err(|error| {
+                io::Error::new(error.kind(), format!("clear receive timeout: {error}"))
+            })?;
+            self.0.set_send_timeout(None).map_err(|error| {
+                io::Error::new(error.kind(), format!("clear send timeout: {error}"))
+            })?;
+        }
+        self.0.set_nonblocking(false)
+    }
+
     /// True when a Windows deadline reader can issue a blocking read without
     /// waiting. `ERROR_NO_DATA` / not-yet-accepted pipes count as empty.
     ///

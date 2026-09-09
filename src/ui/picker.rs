@@ -13,6 +13,7 @@ pub(super) fn draw_picker(
     f: &mut RenderTarget,
     area: Rect,
     p: &FolderPicker,
+    machine_capable: bool,
     mobile: bool,
     cat: &Catalog,
     t: &Theme,
@@ -34,14 +35,36 @@ pub(super) fn draw_picker(
     let inner = block.inner(modal);
     f.render_widget(block, modal);
 
-    // Title + the path being browsed.
+    // The same `+` surface owns local and remote creation. Only a
+    // machine-aware display sees the remote tab; profile data remains client
+    // local and is never rendered by this server.
+    let mut tab_hits = Vec::new();
+    let workspace_label = format!(" {} ", cat.open_workspace);
+    let workspace_width = display_width(&workspace_label) as u16;
+    let workspace_tab = Rect::new(inner.x, inner.y, workspace_width.min(inner.width), 1);
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!(" {}", cat.open_workspace),
-            Style::new().fg(t.text).bold(),
+            workspace_label,
+            Style::new().fg(t.crust).bg(t.accent).bold(),
         )),
-        Rect::new(inner.x, inner.y, inner.width, 1),
+        workspace_tab,
     );
+    tab_hits.push((PickerHit::OpenWorkspaceTab, workspace_tab));
+    if machine_capable {
+        let remote_label = format!(" {} ", cat.remote_machine);
+        let x = workspace_tab.right().saturating_add(1);
+        let remote_tab = Rect::new(
+            x,
+            inner.y,
+            (display_width(&remote_label) as u16).min(inner.right().saturating_sub(x)),
+            1,
+        );
+        f.render_widget(
+            Paragraph::new(Span::styled(remote_label, Style::new().fg(t.subtext0))),
+            remote_tab,
+        );
+        tab_hits.push((PickerHit::RemoteMachineTab, remote_tab));
+    }
     let path = p.path.display().to_string();
     let path = trunc_tail(&path, inner.width.saturating_sub(2) as usize);
     f.render_widget(
@@ -150,7 +173,7 @@ pub(super) fn draw_picker(
     );
     let avail = list.height.max(1) as usize;
     let scroll = p.cursor.saturating_sub(avail.saturating_sub(1));
-    let mut rects = Vec::new();
+    let mut rects = tab_hits;
     for (vi, i) in (scroll..p.row_count()).take(avail).enumerate() {
         let y = list.y + vi as u16;
         let row_rect = Rect::new(list.x, y, list.width, 1);

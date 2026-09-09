@@ -75,7 +75,12 @@ pub fn run(sock: &Path) -> Result<()> {
     };
     crate::logging::event(crate::logging::EventKind::ClientConnect, &[]);
     // `Conn` is a cloneable duplex handle: one clone reads, the other writes.
-    attach_inner(stream.clone(), stream, true)
+    // A damaged optional machine catalog must not make local panes inaccessible.
+    // The machine selector reports the catalog error when explicitly opened.
+    let profiles = crate::machine::catalog::load()
+        .map(|loaded| loaded.catalog.machines)
+        .unwrap_or_default();
+    super::federated::run(stream.clone(), stream, profiles)
 }
 
 /// Attach a thin client over **any** reader/writer carrying the binary frame
@@ -158,7 +163,7 @@ where
     }
 }
 
-enum ClientExit {
+pub(super) enum ClientExit {
     Done,
     Detached,
     ServerStopped,
@@ -347,7 +352,22 @@ where
             Ok(ServerMessage::Sound(signal)) => crate::emit_sound(signal),
             Ok(ServerMessage::Clipboard(text)) => crate::emit_clipboard(&text),
             Ok(ServerMessage::OpenUrl(url)) => crate::platform::open_url(&url),
-            Ok(ServerMessage::SwitchSession { name }) => break ClientExit::SwitchSession(name),
+            Ok(ServerMessage::SwitchSession { name }) => {
+                // The server retains the source for transactional clients.
+                // This legacy direct-attach path explicitly releases it before
+                // handing off to another client process.
+                if let Some(writer) = input
+                    .route
+                    .writer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .active
+                    .as_mut()
+                {
+                    let _ = protocol::write_message(writer, &ClientMessage::Detach);
+                }
+                break ClientExit::SwitchSession(name);
+            }
             Ok(ServerMessage::Detach) => break ClientExit::Detached,
             Ok(ServerMessage::ServerShutdown { .. }) => break ClientExit::ServerStopped,
             Ok(_) => {}
@@ -430,7 +450,7 @@ impl InputRoute {
 /// and immediately lets this process exit, so the old terminal-input thread is
 /// never left reading alongside the new client. Local launches and `--remote`
 /// retain their existing arguments and SSH options.
-fn switch_session_process(name: &str) -> Result<()> {
+pub(super) fn switch_session_process(name: &str) -> Result<()> {
     crate::session::validate_name(name).map_err(anyhow::Error::msg)?;
     let raw: Vec<String> = std::env::args().collect();
     let args = switched_args(&raw, name);
@@ -490,7 +510,7 @@ fn input_loop(route: InputRoute, pending: Vec<Event>) {
     }
 }
 
-fn event_message(event: Event) -> Option<ClientMessage> {
+pub(super) fn event_message(event: Event) -> Option<ClientMessage> {
     event_message_with_image(event, crate::platform::clipboard_image)
 }
 
@@ -531,32 +551,34 @@ fn event_message_with_image(
 /// over the pipe unchanged.
 pub fn remote_bridge(sock: &Path) -> Result<()> {
     let conn = transport::connect(sock).map_err(|_| anyhow!("cannot connect to luvus server"))?;
-    relay(conn.clone(), conn, std::io::stdin(), std::io::stdout())
-}
-
-/// Pump bytes both directions: `input → local_writer` (a background thread) and
-/// `local_reader → output` (this thread). Returns when either side closes.
-/// Protocol-agnostic — it copies and flushes each available chunk so a
-/// long-lived SSH pipe cannot buffer interactive frames indefinitely.
-pub fn relay<LR, LW, I, O>(
-    local_reader: LR,
-    local_writer: LW,
-    input: I,
-    mut output: O,
-) -> Result<()>
-where
-    LR: Read,
-    LW: Write + Send + 'static,
-    I: Read + Send + 'static,
-    O: Write,
-{
-    let mut local_writer = local_writer;
-    let mut input = input;
-    thread::spawn(move || {
-        let _ = copy_and_flush(&mut input, &mut local_writer);
-    });
-    let mut local_reader = local_reader;
-    copy_and_flush(&mut local_reader, &mut output)?;
+    // This is a dedicated stdio bridge process, never the server or a TUI.
+    // Either EOF must end the process. Dropping only the input-side clone
+    // leaves the output-side socket alive and can orphan the bridge forever
+    // when a suspended endpoint produces no more frames.
+    let (closed, receiver) = std::sync::mpsc::sync_channel(2);
+    let input_closed = closed.clone();
+    let mut writer = conn.clone();
+    thread::Builder::new()
+        .name("bridge-input".into())
+        .stack_size(128 * 1024)
+        .spawn(move || {
+            let result = copy_and_flush(&mut std::io::stdin(), &mut writer);
+            let _ = input_closed.send(result);
+        })?;
+    thread::Builder::new()
+        .name("bridge-output".into())
+        .stack_size(128 * 1024)
+        .spawn(move || {
+            let mut reader = conn;
+            let result = copy_and_flush(&mut reader, &mut std::io::stdout());
+            let _ = closed.send(result);
+        })?;
+    // Do not join the opposite direction: it may legitimately be blocked.
+    // Returning from this process-only role lets process teardown reclaim it
+    // on every platform without stopping the independent Luvus server.
+    receiver
+        .recv()
+        .map_err(|_| anyhow!("bridge workers disconnected"))??;
     Ok(())
 }
 
@@ -584,12 +606,12 @@ fn copy_and_flush<R: Read, W: Write>(reader: &mut R, writer: &mut W) -> std::io:
 
 /// Begin/end a DEC 2026 synchronized update so a frame paints atomically (no
 /// tearing). Terminals without it ignore the sequence.
-fn sync_begin() {
+pub(super) fn sync_begin() {
     let mut out = std::io::stdout().lock();
     let _ = out.write_all(b"\x1b[?2026h");
     let _ = out.flush();
 }
-fn sync_end() {
+pub(super) fn sync_end() {
     let mut out = std::io::stdout().lock();
     let _ = out.write_all(b"\x1b[?2026l");
     let _ = out.flush();
@@ -597,7 +619,7 @@ fn sync_end() {
 
 /// Build one ratatui `Cell` from wire fields (control chars → space; 256-color
 /// downsampling on non-truecolor terminals).
-fn make_cell(sym: &str, fg: u32, bg: u32, mods: u16, truecolor: bool) -> Cell {
+pub(super) fn make_cell(sym: &str, fg: u32, bg: u32, mods: u16, truecolor: bool) -> Cell {
     let adjust = |c| if truecolor { c } else { protocol::to_256(c) };
     // ratatui panics on control chars in a symbol; the server filters, but never
     // trust the wire. (Empty symbols are wide-char continuations and are already
@@ -616,7 +638,7 @@ fn make_cell(sym: &str, fg: u32, bg: u32, mods: u16, truecolor: bool) -> Cell {
 }
 
 /// Every cell of a full frame as `(x, y, Cell)`.
-fn frame_cells(frame: &FrameData, truecolor: bool) -> Vec<(u16, u16, Cell)> {
+pub(super) fn frame_cells(frame: &FrameData, truecolor: bool) -> Vec<(u16, u16, Cell)> {
     frame
         .cells
         .iter()
@@ -640,7 +662,7 @@ fn frame_cells(frame: &FrameData, truecolor: bool) -> Vec<(u16, u16, Cell)> {
 }
 
 /// Only the changed cells of a diff as `(x, y, Cell)` — the whole point: O(changed).
-fn diff_cells(diff: &FrameDiff, truecolor: bool) -> Vec<(u16, u16, Cell)> {
+pub(super) fn diff_cells(diff: &FrameDiff, truecolor: bool) -> Vec<(u16, u16, Cell)> {
     let w = diff.width as u32;
     let mut cells = Vec::new();
     for run in &diff.runs {
@@ -672,7 +694,7 @@ fn ime_position(cursor: Option<(u16, u16)>, tw: u16, th: u16) -> Option<(u16, u1
 /// Hide, write cells, CUP to the pane PTY (hidden still parks), then show/hide.
 /// `backend.draw` walks the hardware cursor onto the last cell (e.g. a
 /// `working` spinner); IME must not observe that cell.
-fn paint<B>(
+pub(super) fn paint<B>(
     terminal: &mut Terminal<B>,
     cells: &[(u16, u16, Cell)],
     cursor: Option<(u16, u16)>,
@@ -724,8 +746,7 @@ where
 #[cfg(all(test, unix))]
 mod tests {
     use super::{
-        copy_and_flush, is_handshake_io_error, read_handshake_message, relay,
-        write_handshake_message,
+        copy_and_flush, is_handshake_io_error, read_handshake_message, write_handshake_message,
     };
     use crate::ipc::protocol::{ClientMessage, PROTOCOL_VERSION};
     use std::cell::RefCell;
@@ -816,7 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_pumps_both_directions() {
+    fn streaming_copy_handles_bidirectional_bridge_traffic() {
         // `client_side` simulates the local server socket the bridge connects to;
         // `server_side` is the (fake) server on the other end.
         let (client_side, mut server_side) = UnixStream::pair().unwrap();
@@ -827,15 +848,13 @@ mod tests {
             got // drop server_side after → client read EOFs, relay returns
         });
 
-        let reader = client_side.try_clone().unwrap();
+        let mut reader = client_side.try_clone().unwrap();
         let mut output: Vec<u8> = Vec::new();
-        relay(
-            reader,
-            client_side,
-            Cursor::new(b"hello".to_vec()),
-            &mut output,
-        )
-        .unwrap();
+        let input = thread::spawn(move || {
+            copy_and_flush(&mut Cursor::new(b"hello".to_vec()), &mut { client_side }).unwrap();
+        });
+        copy_and_flush(&mut reader, &mut output).unwrap();
+        input.join().unwrap();
 
         assert_eq!(&srv.join().unwrap(), b"hello", "input forwarded to server");
         assert_eq!(output, b"world", "server reply forwarded to output");

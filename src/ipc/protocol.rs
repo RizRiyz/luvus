@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::sound::SoundSignal;
 use crate::terminal::theme_probe::TerminalColors;
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 13;
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -33,9 +33,64 @@ pub enum ClientMessage {
         cols: u16,
         rows: u16,
     },
+    /// Negotiate whether this attached display owns a visible surface. A
+    /// suspended remote endpoint remains connected but receives no frames,
+    /// cursor, resize ownership, input, or interactive host effects.
+    SurfaceInterest(SurfaceInterest),
+    /// Advertise a machine-aware client and its legacy bounded-row hint. A
+    /// capable server returns the complete native Workspaces dock geometry so
+    /// the client can keep one owner-local navigation shell while endpoint
+    /// content changes. Machine data itself never crosses into the server.
+    ShellDockLayout(ShellDockLayout),
+    ShellSidebars(ShellSidebars),
+    /// Focus one workspace on the owner-local server before a machine-aware
+    /// client switches its visible surface back from a remote endpoint.
+    ShellWorkspaceFocus {
+        workspace_id: String,
+    },
+    /// Ask the selected server to reopen its workspace picker after the
+    /// owner-local remote-machine form switches back to the local tab.
+    OpenWorkspacePicker,
     Detach,
     /// Response to [`ServerMessage::Ready`] when terminal colors were requested.
     TerminalColors(Option<TerminalColors>),
+    /// Request a fresh candidate frame. The opaque ticket is echoed in the
+    /// same frame envelope so an older queued frame cannot commit a switch.
+    PrepareSurface {
+        ticket: u64,
+        cols: u16,
+        rows: u16,
+    },
+    /// Open the native workspace menu on the active owning endpoint.
+    ShellWorkspaceMenu {
+        workspace_id: String,
+        col: u16,
+        row: u16,
+    },
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SurfaceInterest {
+    Suspended,
+    Prepared,
+    Active,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ShellDockLayout {
+    pub workspace_width: Option<u16>,
+    pub owns_workspaces: bool,
+    pub rows: u16,
+    pub leading: bool,
+    pub indent_workspaces: bool,
+}
+
+/// Client-owned dock arrangement, independent of endpoint-owned file trees
+/// and agent data. Revision fences late updates from a previous surface.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ShellSidebars {
+    pub revision: u64,
+    pub layout: crate::config::SidebarsConfig,
 }
 
 fn deserialize_clipboard_image<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
@@ -82,6 +137,7 @@ where
 
 #[derive(Serialize, Deserialize, Clone)]
 pub enum ServerMessage {
+    ShellSidebars(ShellSidebars),
     Welcome {
         version: u32,
         error: Option<String>,
@@ -119,6 +175,85 @@ pub enum ServerMessage {
     Ready {
         probe_terminal: bool,
     },
+    /// Exact client-owned Workspaces dock for the current viewport. `None`
+    /// means the client must use its modal/mobile fallback.
+    ShellDock(Option<ShellDockRect>),
+    /// Bounded owner-local workspace metadata used only by a machine-aware
+    /// client to keep local workspaces reachable while a remote surface is
+    /// visible. Remote endpoints never receive this catalog.
+    ShellWorkspaces(Vec<ShellWorkspace>),
+    /// Ask a machine-aware thin client to open its owner-local selector. Plain
+    /// clients ignore this optional shell action.
+    OpenMachineSelector,
+    /// Ask a machine-aware thin client to open its owner-local profile form.
+    /// SSH destinations and profile data never enter the selected server.
+    OpenMachineCreate {
+        theme: MachineFormTheme,
+    },
+    PreparedFrame {
+        ticket: u64,
+        frame: FrameData,
+    },
+}
+
+/// Theme projection for the owner-local Remote Machine form. Keeping this
+/// semantic and bounded lets the thin client match the selected server's
+/// ordinary modal chrome without sending profile fields to that server.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MachineFormTheme {
+    pub surface: u32,
+    pub border: u32,
+    pub text: u32,
+    pub subtext0: u32,
+    pub subtext1: u32,
+    pub accent: u32,
+    pub accent_text: u32,
+    pub divider: u32,
+    pub rule: u32,
+    pub error: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShellDockRect {
+    pub resize: Option<ShellResize>,
+    pub workspace_focused: bool,
+    pub workspace_modal: bool,
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+    pub show_paths: bool,
+    pub normal_fg: u32,
+    pub secondary_fg: u32,
+    pub active_fg: u32,
+    pub active_secondary_fg: u32,
+    pub active_bg: u32,
+    pub branch_fg: u32,
+    pub chrome: MachineFormTheme,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShellResize {
+    pub left: bool,
+    pub column: u16,
+    pub top: u16,
+    pub bottom: u16,
+    pub origin: u16,
+    pub maximum: u16,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]
+pub struct ShellWorkspace {
+    pub dot: String,
+    pub dot_color: u32,
+    pub id: String,
+    pub index: u16,
+    pub name: String,
+    pub cwd: String,
+    pub branch: Option<String>,
+    pub active: bool,
+    pub selected: bool,
+    pub nested: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]

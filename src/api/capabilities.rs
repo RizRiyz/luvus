@@ -340,6 +340,8 @@ pub fn all_methods() -> impl Iterator<Item = &'static str> {
         .iter()
         .copied()
         .chain(crate::api::host::METHODS.iter().copied())
+        .chain(crate::machine::api::READ_METHODS.iter().copied())
+        .chain(crate::machine::api::CONTROL_METHODS.iter().copied())
 }
 
 fn is_idempotent(method: &str) -> bool {

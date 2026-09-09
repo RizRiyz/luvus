@@ -327,7 +327,7 @@ pub const SHIFT_ENTER_CHOICES: &[(&str, &str, &[u8])] = &[
 ];
 
 /// Left + right sidebar layout (docs/29). Serialized under `sidebars`.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SidebarsConfig {
     #[serde(default = "SideConfig::left_default")]
     pub left: SideConfig,
@@ -340,7 +340,7 @@ pub struct SidebarsConfig {
 }
 
 /// One sidebar's persisted state: shown/hidden, width, and its ordered dock ids.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SideConfig {
     #[serde(default = "yes")]
     pub visible: bool,

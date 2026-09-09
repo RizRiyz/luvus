@@ -82,7 +82,8 @@ mod preview;
 mod search;
 mod session_menu;
 mod settings;
-mod sidebar;
+pub(crate) mod sidebar;
+pub(crate) mod workspace_row;
 pub(crate) use sidebar::SIDEBAR_CHROME_ROWS;
 mod status;
 pub(crate) mod switcher;
@@ -126,7 +127,12 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
 /// client's cursor, scroll position, compact mode, or click targets.
 /// Return the passive client's content geometry before restoring all active
 /// hit-test state. Each client owns this baseline, never the shared App.
-pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> Vec<(PaneId, Rect)> {
+pub(crate) struct ClientProjection {
+    pub pane_content: Vec<(PaneId, Rect)>,
+    pub shell_dock: Option<Rect>,
+}
+
+pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientProjection {
     let compact = app.compact;
     let last_main_area = app.last_main_area;
     let last_pane_area = app.last_pane_area;
@@ -238,6 +244,7 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> Vec<(Pan
     let settings_icon_rect = app.settings_icon_rect;
     let sidebar_toggle_rect = app.sidebar_toggle_rect;
     let right_sidebar_toggle_rect = app.right_sidebar_toggle_rect;
+    let client_shell_dock_rect = app.client_shell_dock_rect;
     let version_rect = app.version_rect;
     let files_area = app.files_area;
     let workspaces_area = app.workspaces_area;
@@ -273,6 +280,8 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> Vec<(Pan
     });
 
     render_into_mode(f, app, false);
+
+    let projected_shell_dock = app.client_shell_dock_rect;
 
     app.compact = compact;
     app.last_main_area = last_main_area;
@@ -377,6 +386,7 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> Vec<(Pan
     app.settings_icon_rect = settings_icon_rect;
     app.sidebar_toggle_rect = sidebar_toggle_rect;
     app.right_sidebar_toggle_rect = right_sidebar_toggle_rect;
+    app.client_shell_dock_rect = client_shell_dock_rect;
     app.version_rect = version_rect;
     app.files_area = files_area;
     app.workspaces_area = workspaces_area;
@@ -404,7 +414,10 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> Vec<(Pan
             git.contributors_more_rect = contributors_more_rect;
         }
     }
-    projected_content
+    ClientProjection {
+        pane_content: projected_content,
+        shell_dock: projected_shell_dock,
+    }
 }
 
 /// Whether a PTY-only frame may reuse a client's complete UI buffer.
@@ -483,6 +496,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // leave a dock divider behind as a live drag target.
     app.dock_dividers.clear();
     app.agents_elsewhere_rect = None;
+    app.client_shell_dock_rect = None;
     app.mobile_pane_prev_rect = None;
     app.mobile_pane_next_rect = None;
 
@@ -823,7 +837,8 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     let picker_open = app.picker.is_some();
     let mut picker_rects = Vec::new();
     if let Some(p) = &app.picker {
-        picker_rects = picker::draw_picker(f, area, p, app.compact, cat, &t);
+        picker_rects =
+            picker::draw_picker(f, area, p, app.client_machine_capable, app.compact, cat, &t);
     }
     app.picker_rects = picker_rects;
 
@@ -1329,7 +1344,7 @@ fn pane_state(app: &App, id: PaneId) -> State {
 }
 
 /// Collapse `$HOME` to `~` and truncate from the left to fit `max` columns.
-fn short_path(p: &Path, max: u16) -> String {
+pub(crate) fn short_path(p: &Path, max: u16) -> String {
     let mut s = p.display().to_string();
     if let Some(home) = crate::platform::home_dir() {
         if let Some(rest) = s.strip_prefix(home.to_string_lossy().as_ref()) {
@@ -1621,5 +1636,72 @@ mod dock_projection_tests {
             app.begin_dock_resize(col, dy),
             "the recorded divider row is still a hit target after projection"
         );
+    }
+
+    #[test]
+    fn machine_capability_without_profiles_preserves_native_workspace_rendering() {
+        let _env = crate::persist::test_env("machine-native-workspaces");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let area = Rect::new(0, 0, 120, 40);
+        let mut before = Buffer::empty(area);
+        render_projection(&mut RenderTarget::new(&mut before, area), &mut app);
+        app.client_machine_capable = true;
+        app.client_shell_owns_workspaces = false;
+        let mut after = Buffer::empty(area);
+        let projection = render_projection(&mut RenderTarget::new(&mut after, area), &mut app);
+        assert_eq!(
+            before, after,
+            "machine capability must not redesign the ordinary workspace dock"
+        );
+        assert!(projection.shell_dock.is_some());
+    }
+
+    #[test]
+    fn machine_rows_follow_the_workspace_dock_without_mutating_active_geometry() {
+        let _env = crate::persist::test_env("machine-slot-projection");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.sidebars.left.visible = false;
+        app.sidebars.right.visible = true;
+        app.sidebars.right.docks = vec![DockKind::Workspaces];
+        app.client_machine_capable = true;
+        app.client_shell_owns_workspaces = true;
+        let pane = app.layout().focus;
+        let pty_size = app.panes[&pane].size();
+
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+        let projection = render_projection(&mut target, &mut app);
+        let slot = projection
+            .shell_dock
+            .expect("machine-aware client owns the right Workspaces dock");
+        assert_eq!(slot.height, 37);
+        assert!(slot.x > area.width / 2);
+        assert_eq!(app.panes[&pane].size(), pty_size);
+        assert!(app.client_shell_dock_rect.is_none());
+
+        app.config.layout.workspace_paths = false;
+        let mut compact = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut compact, area);
+        let projection = render_projection(&mut target, &mut app);
+        assert_eq!(
+            projection
+                .shell_dock
+                .expect("hidden paths retain the client-owned Workspaces dock")
+                .height,
+            37
+        );
+
+        let mut remote = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut remote, area);
+        let projection = render_projection(&mut target, &mut app);
+        let dock = projection
+            .shell_dock
+            .expect("projection keeps the complete client-owned dock");
+        assert_eq!(dock.height, 37);
+        assert_eq!(remote[(dock.x + 2, dock.y)].symbol(), " ");
+        assert_eq!(app.panes[&pane].size(), pty_size);
     }
 }
