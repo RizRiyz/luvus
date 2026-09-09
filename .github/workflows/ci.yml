@@ -76,6 +76,41 @@ jobs:
           python3 examples/uhp/terminal/live_conformance.py --luvus target/debug/luvus
           python3 examples/uhp/terminal/failure_conformance.py --luvus target/debug/luvus
 
+  # Native amd64 coverage, not a cross-compile-only claim. Release packaging
+  # and automatic remote provisioning remain separate platform work.
+  freebsd:
+    name: freebsd amd64 test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Build and test on FreeBSD
+        uses: vmactions/freebsd-vm@f0552d3b69211736abd97f02ff3d4674c56b73b1 # v1.5.5
+        with:
+          release: '14.4'
+          arch: x86_64
+          mem: 6144
+          envs: 'CARGO_TERM_COLOR CARGO_NET_RETRY CARGO_HTTP_MULTIPLEXING'
+          copyback: false
+          prepare: |
+            set -eu
+            pkg install -y rust git python3 pkgconf sqlite3
+          run: |
+            set -eu
+            freebsd-version
+            rustc --version
+            cargo --version
+            cargo test --locked
+            cargo build --release --locked
+            ./target/release/luvus --version
+            python3 examples/uhp/terminal/consumer.py --fixtures
+            python3 examples/uhp/terminal/mock_conformance.py
+            python3 examples/uhp/consumer.py
+            python3 examples/uhp/terminal/live_conformance.py --luvus target/release/luvus
+            python3 examples/uhp/terminal/failure_conformance.py --luvus target/release/luvus
+
   binary-size:
     name: macos binary size
     runs-on: macos-14
