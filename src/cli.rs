@@ -2855,6 +2855,9 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             if let Ok(owner) = std::env::var("LUVUS_MODULE_ID") {
                 obj.insert("owner".into(), json!(owner));
             }
+            if let Ok(token) = std::env::var(crate::module::runtime::MODULE_TOKEN_ENV) {
+                obj.insert("module_token".into(), json!(token));
+            }
             match sub {
                 "push" => {
                     let titles_str = match flag(args, "--titles") {
@@ -5081,6 +5084,7 @@ mod tests {
     fn maps_luvus_bar_and_notification_commands() {
         let _env = crate::persist::test_env("cli-bar");
         std::env::set_var("LUVUS_MODULE_ID", "you.ci");
+        std::env::set_var(crate::module::runtime::MODULE_TOKEN_ENV, "module-token");
         let args = vec![
             "luvus".into(),
             "bar".into(),
@@ -5103,9 +5107,11 @@ mod tests {
         .unwrap();
         assert_eq!(method, "ui.agent_title.push");
         assert_eq!(params["owner"], "you.ci");
+        assert_eq!(params["module_token"], "module-token");
         let (method, params) = parse(&argv("luvus ui agent-title clear")).unwrap();
         assert_eq!(method, "ui.agent_title.clear");
         assert_eq!(params["owner"], "you.ci");
+        assert_eq!(params["module_token"], "module-token");
 
         let (method, params) =
             parse(&argv("luvus bar move --id status --region bottom-right")).unwrap();
@@ -5120,6 +5126,7 @@ mod tests {
         assert_eq!(params["ttl_ms"], 6000);
         assert_eq!(params["owner"], "you.ci");
         std::env::remove_var("LUVUS_MODULE_ID");
+        std::env::remove_var(crate::module::runtime::MODULE_TOKEN_ENV);
 
         for bad in [
             "luvus bar push --id status",

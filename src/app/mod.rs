@@ -258,8 +258,8 @@ pub struct ModuleDock {
     pub rows: Vec<DockRow>,
 }
 
-/// One volatile AGENTS-row title and the module that owns it. `None` is reserved
-/// for direct local-owner API calls; module commands always include their id.
+/// One volatile AGENTS-row title and its authenticated publishing module.
+/// `None` is reserved for direct local control-API calls.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct AgentRowTitle {
     pub(crate) owner: Option<String>,
@@ -283,8 +283,8 @@ pub(crate) fn set_owned_agent_row_title(
     owner: Option<&str>,
 ) -> Result<bool, String> {
     if let Some(existing) = titles.get(&pane) {
-        if owner.is_some() && existing.owner.as_deref() != owner {
-            return Err("agent row title belongs to another module".into());
+        if existing.owner.as_deref() != owner {
+            return Err("agent row title belongs to another publisher".into());
         }
     }
     match text {
@@ -315,8 +315,8 @@ pub(crate) fn set_owned_agent_session_title(
         .get(&agent)
         .and_then(|sessions| sessions.get(&session_id));
     if let Some(existing) = existing {
-        if owner.is_some() && existing.owner.as_deref() != owner {
-            return Err("agent row title belongs to another module".into());
+        if existing.owner.as_deref() != owner {
+            return Err("agent row title belongs to another publisher".into());
         }
     }
     match text {
@@ -2902,6 +2902,9 @@ pub struct App {
     pub settings_arrow_rects: Vec<(usize, i32, Rect)>,
     /// Installed modules (docs/13) and the ring buffer of their command logs.
     pub modules: crate::module::ModuleRegistry,
+    /// Per-server credentials injected only into processes Luvus starts for each
+    /// module. Public API owner fields are accepted only with the matching token.
+    pub(crate) module_tokens: HashMap<String, String>,
     pub module_logs: Vec<crate::module::ModuleCommandLog>,
     /// Live module panes by pane id, untracked automatically on close (MOD-2).
     pub module_panes: HashMap<PaneId, crate::module::ModulePaneRecord>,
@@ -2920,6 +2923,17 @@ pub struct ModuleSettingEdit {
     pub title: String,
     pub buffer: String,
     pub secret: bool,
+}
+
+fn module_tokens_for(
+    modules: &crate::module::ModuleRegistry,
+) -> Result<HashMap<String, String>, String> {
+    modules
+        .modules
+        .iter()
+        .filter(|module| module.is_runnable())
+        .map(|module| crate::terminal::backend::random_id().map(|token| (module.id.clone(), token)))
+        .collect()
 }
 
 fn child_appearance(
@@ -2956,6 +2970,7 @@ impl App {
         let direct_keymap = keys::build_direct_keymap(&config.direct_keybindings);
         let prefix = keys::PrefixSpec::parse(&config.prefix).unwrap_or_default();
         let modules = crate::module::registry::load();
+        let module_tokens = module_tokens_for(&modules).map_err(anyhow::Error::msg)?;
         let mut bar = crate::bar::BarState::default();
         bar.sync_modules(&modules);
 
@@ -3284,6 +3299,7 @@ impl App {
             theme_selection_revision: 0,
             settings_arrow_rects: Vec::new(),
             modules,
+            module_tokens,
             module_logs: Vec::new(),
             module_panes: HashMap::new(),
             module_startup_done: std::collections::HashSet::new(),
@@ -3325,6 +3341,7 @@ impl App {
         let shell = crate::platform::resolve_shell(&config.shell);
         let history_budget_bytes = config.scrollback_bytes();
         let modules = crate::module::registry::load();
+        let module_tokens = module_tokens_for(&modules).ok()?;
         let mut panes = HashMap::new();
         let mut status = HashMap::new();
         let mut module_panes: HashMap<PaneId, crate::module::ModulePaneRecord> = HashMap::new();
@@ -3506,7 +3523,7 @@ impl App {
                     // installed + runnable; otherwise it falls back to a shell.
                     let restored = ps.module.as_ref().and_then(|(mid, ep)| {
                         restore_module_pane(
-                            &modules,
+                            (&modules, &module_tokens),
                             mid,
                             ep,
                             id,
@@ -3942,6 +3959,7 @@ impl App {
             theme_selection_revision: 0,
             settings_arrow_rects: Vec::new(),
             modules,
+            module_tokens,
             module_logs: Vec::new(),
             module_panes,
             module_startup_done: std::collections::HashSet::new(),
@@ -7131,7 +7149,7 @@ impl App {
             title,
             None,
         )
-        .expect("the direct local owner may replace any title")
+        .expect("the test helper writes only unowned title keys")
     }
 
     pub(crate) fn clear_agent_row_titles_for_owner(&mut self, owner: &str) -> bool {
@@ -7152,6 +7170,7 @@ impl App {
         agent: &str,
         session_id: &str,
     ) -> Option<&str> {
+        let agent = crate::agent::canonical_builtin(agent)?;
         self.agent_title_sessions
             .get(agent)?
             .get(session_id)
@@ -8056,7 +8075,7 @@ pub(crate) fn worktree_membership(cwd: &std::path::Path) -> Option<crate::git::W
 /// Re-spawn a saved module pane if its module is still installed + runnable;
 /// returns the pane + its tracking record, or `None` to fall back to a shell.
 fn restore_module_pane(
-    modules: &crate::module::ModuleRegistry,
+    module_runtime: (&crate::module::ModuleRegistry, &HashMap<String, String>),
     mid: &str,
     ep: &str,
     id: PaneId,
@@ -8064,6 +8083,7 @@ fn restore_module_pane(
     history_budget_bytes: usize,
     appearance: crate::terminal::appearance::PaneAppearance,
 ) -> Option<(Pane, crate::module::ModulePaneRecord)> {
+    let (modules, module_tokens) = module_runtime;
     let m = modules.find(mid).filter(|m| m.is_runnable())?;
     let argv = m
         .manifest
@@ -8074,6 +8094,7 @@ fn restore_module_pane(
     let ctx = serde_json::json!({ "invocation_source": "restore" });
     let env = crate::module::runtime::env(
         m,
+        module_tokens.get(mid)?,
         &ctx,
         vec![("LUVUS_MODULE_ENTRYPOINT_ID".to_string(), ep.to_string())],
     );

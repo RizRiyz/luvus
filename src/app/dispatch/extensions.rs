@@ -81,7 +81,7 @@ impl App {
 
     pub(super) fn api_ui_agent_title_push(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = method;
-        reject_api_fields(p, &["owner", "titles"])?;
+        reject_api_fields(p, &["owner", "module_token", "titles"])?;
         let owner = self.agent_row_title_owner(p)?;
         let titles = p.get("titles").and_then(Value::as_array).ok_or_else(|| {
             (
@@ -102,7 +102,7 @@ impl App {
 
     pub(super) fn api_ui_agent_title_clear(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = method;
-        reject_api_fields(p, &["owner", "pane", "agent", "session_id"])?;
+        reject_api_fields(p, &["owner", "module_token", "pane", "agent", "session_id"])?;
         let owner = self.agent_row_title_owner(p)?;
         let pane = match p.get("pane") {
             Some(value) => Some(self.parse_agent_row_title_pane(value)?),
@@ -115,6 +115,12 @@ impl App {
 
     fn agent_row_title_owner(&self, p: &Value) -> Result<Option<String>, (String, String)> {
         let Some(owner) = p.get("owner") else {
+            if p.get("module_token").is_some() {
+                return Err((
+                    "invalid_request".into(),
+                    "module_token requires owner".into(),
+                ));
+            }
             return Ok(None);
         };
         let owner = owner
@@ -122,6 +128,14 @@ impl App {
             .filter(|owner| !owner.is_empty() && owner.len() <= 120)
             .ok_or_else(|| ("invalid_request".into(), "invalid module owner".into()))?;
         validate_bar_action(self, owner, None)?;
+        let token = p
+            .get("module_token")
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| ("forbidden".into(), "module token required".into()))?;
+        if self.module_tokens.get(owner).map(String::as_str) != Some(token) {
+            return Err(("forbidden".into(), "invalid module token".into()));
+        }
         Ok(Some(owner.to_string()))
     }
 
@@ -210,16 +224,10 @@ impl App {
         owner: Option<&str>,
     ) -> Result<bool, (String, String)> {
         if pane.is_none() && session.is_none() {
-            return Ok(match owner {
-                Some(owner) => self.clear_agent_row_titles_for_owner(owner),
-                None => {
-                    let changed =
-                        !self.agent_title_panes.is_empty() || !self.agent_title_sessions.is_empty();
-                    self.agent_title_panes.clear();
-                    self.agent_title_sessions.clear();
-                    changed
-                }
-            });
+            let Some(owner) = owner else {
+                return Ok(false);
+            };
+            return Ok(self.clear_agent_row_titles_for_owner(owner));
         }
         let update = AgentRowTitleUpdate {
             pane,

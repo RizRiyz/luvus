@@ -166,9 +166,10 @@ command = ["true"]
     assert_eq!(result["changed"], true);
     let before = app.bar.widgets["you.ci:status"].clone();
 
+    let title_token = app.module_tokens["you.ci"].clone();
     app.dispatch(
         "ui.agent_title.push",
-        &json!({"owner":"you.ci","titles":[{
+        &json!({"owner":"you.ci","module_token":title_token,"titles":[{
             "agent":"pi","session_id":"owned-session","title":"Owned title"
         }]}),
     )
@@ -269,6 +270,24 @@ fn agent_row_titles_are_module_provided_and_never_use_alias() {
     )
     .unwrap();
     assert!(app.agent_row_title_for_session("pi", "old-1").is_none());
+
+    app.dispatch(
+        "ui.agent_title.push",
+        &json!({"titles": [{
+            "agent":"cursor-agent", "session_id":"alias-session", "title":"Alias title"
+        }]}),
+    )
+    .unwrap();
+    app.status.get_mut(&pane).unwrap().agent_session = Some(crate::app::AgentSession {
+        agent: "cursor-agent".into(),
+        session_id: "alias-session".into(),
+    });
+    assert_eq!(
+        app.pane_title(pane).as_deref(),
+        Some("Alias title"),
+        "live session aliases must use the canonical title key"
+    );
+
     for invalid in [
         json!({"titles": [{"title": "no target"}]}),
         json!({"titles": [{"agent":"pi","session_id":"old-1"}]}),
@@ -281,6 +300,56 @@ fn agent_row_titles_are_module_provided_and_never_use_alias() {
             "invalid_request"
         );
     }
+}
+
+#[test]
+fn ownerless_clear_does_not_remove_module_owned_agent_titles() {
+    let _env = crate::persist::test_env("agent-row-title-ownerless-clear");
+    let module =
+        std::path::PathBuf::from(std::env::var_os("LUVUS_HOME").unwrap()).join("title-module");
+    std::fs::create_dir_all(&module).unwrap();
+    std::fs::write(
+        module.join("luvus-module.toml"),
+        r#"
+id = "module.alpha"
+name = "Alpha"
+version = "0.1.0"
+min_luvus_version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.module_link_with(&module, true, None).unwrap();
+    let token = app.module_tokens["module.alpha"].clone();
+    app.dispatch(
+        "ui.agent_title.push",
+        &json!({"owner":"module.alpha","module_token":token,"titles":[{
+            "agent":"pi","session_id":"owned","title":"Owned"
+        }]}),
+    )
+    .unwrap();
+
+    let spoof = app
+        .dispatch(
+            "ui.agent_title.push",
+            &json!({"owner":"module.alpha","module_token":"forged","titles":[{
+                "agent":"pi","session_id":"owned","title":"Spoofed"
+            }]}),
+        )
+        .unwrap_err();
+    assert_eq!(spoof.0, "forbidden");
+    assert_eq!(
+        app.agent_row_title_for_session("pi", "owned"),
+        Some("Owned")
+    );
+
+    let cleared = app.dispatch("ui.agent_title.clear", &json!({})).unwrap();
+    assert_eq!(cleared["changed"], false);
+    assert_eq!(
+        app.agent_row_title_for_session("pi", "owned"),
+        Some("Owned")
+    );
 }
 
 #[test]

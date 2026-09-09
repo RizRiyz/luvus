@@ -53,6 +53,9 @@ impl App {
         if self.modules.find(&id).is_some() {
             return Err(format!("module {id} is already registered"));
         }
+        let token = enabled
+            .then(crate::terminal::backend::random_id)
+            .transpose()?;
         self.modules.modules.push(InstalledModule {
             id: id.clone(),
             root,
@@ -61,6 +64,9 @@ impl App {
             manifest,
             warning: None,
         });
+        if let Some(token) = token {
+            self.module_tokens.insert(id.clone(), token);
+        }
         registry::save(&self.modules);
         self.bar.sync_modules(&self.modules);
         // A freshly linked module gets its startup hooks now rather than at the
@@ -90,6 +96,7 @@ impl App {
         self.remove_module_docks(&dock_ids);
         self.bar.clear_owner(id);
         self.clear_agent_row_titles_for_owner(id);
+        self.module_tokens.remove(id);
         self.bar.sync_modules(&self.modules);
         Ok(())
     }
@@ -107,17 +114,26 @@ impl App {
         self.remove_module_docks(&dock_ids);
         self.bar.clear_owner(id);
         self.clear_agent_row_titles_for_owner(id);
+        self.module_tokens.remove(id);
         self.bar.sync_modules(&self.modules);
         Ok(())
     }
 
     pub fn module_set_enabled(&mut self, spec: &str, on: bool) -> Result<(), String> {
         let id = &self.module_id_for(spec)?;
-        let m = self
+        let was_enabled = self
             .modules
+            .find(id)
+            .ok_or_else(|| format!("no module {id}"))?
+            .enabled;
+        if was_enabled == on {
+            return Ok(());
+        }
+        let replacement_token = on.then(crate::terminal::backend::random_id).transpose()?;
+        self.modules
             .find_mut(id)
-            .ok_or_else(|| format!("no module {id}"))?;
-        m.enabled = on;
+            .ok_or_else(|| format!("no module {id}"))?
+            .enabled = on;
         registry::save(&self.modules);
         // Disabling a module retires its docks; re-enabling re-runs its startup
         // hooks so it can repaint them (docs/29, DOCK-4).
@@ -126,9 +142,14 @@ impl App {
             self.remove_module_docks(&dock_ids);
             self.bar.clear_owner(id);
             self.clear_agent_row_titles_for_owner(id);
+            self.module_tokens.remove(id);
             self.module_startup_done.remove(id);
             self.bar.sync_modules(&self.modules);
         } else {
+            self.module_tokens.insert(
+                id.clone(),
+                replacement_token.expect("enabled modules receive a token"),
+            );
             // Make declarations visible before the asynchronous startup command
             // can call `luvus bar push` (`ui.bar.push` on the UHP).
             self.bar.sync_modules(&self.modules);
@@ -512,6 +533,9 @@ impl App {
                 m.root.clone(),
                 runtime::env(
                     m,
+                    self.module_tokens
+                        .get(module_id)
+                        .ok_or_else(|| format!("module {module_id} has no runtime token"))?,
                     &ctx,
                     vec![(
                         "LUVUS_MODULE_ENTRYPOINT_ID".to_string(),
@@ -622,7 +646,14 @@ impl App {
         let ctx = context::build_for(self, source, &target);
         let (root, env) = {
             let module = self.modules.find(module_id).unwrap();
-            (module.root.clone(), runtime::env(module, &ctx, extra_env))
+            let token = self
+                .module_tokens
+                .get(module_id)
+                .ok_or_else(|| format!("module {module_id} has no runtime token"))?;
+            (
+                module.root.clone(),
+                runtime::env(module, token, &ctx, extra_env),
+            )
         };
         let log_id = runtime::next_log_id();
         self.push_module_log(ModuleCommandLog {
@@ -921,6 +952,8 @@ command = ["sh", "-c", "echo hello-from-module; echo oops 1>&2"]
         assert_eq!(id, "you.echo");
         assert!(app.modules.find(&id).unwrap().is_runnable());
 
+        let original_token = app.module_tokens[&id].clone();
+
         // Invoke the action; pump the loop until its log resolves.
         let log_id = app.module_invoke_action("refresh", None, "test").unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -965,6 +998,7 @@ command = ["sh", "-c", "echo hello-from-module; echo oops 1>&2"]
         // Disabling makes it non-runnable; unlink removes it.
         app.module_set_enabled(&id, false).unwrap();
         assert!(!app.modules.find(&id).unwrap().is_runnable());
+        assert!(!app.module_tokens.contains_key(&id));
         assert!(app
             .agent_row_title_for_session("pi", "owned-session")
             .is_none());
@@ -974,7 +1008,13 @@ command = ["sh", "-c", "echo hello-from-module; echo oops 1>&2"]
             .module_invoke_action("refresh", Some(&id), "test")
             .unwrap_err();
         assert!(err.contains("disabled"), "got: {err}");
+        app.module_set_enabled(&id, true).unwrap();
+        let replacement_token = app.module_tokens[&id].clone();
+        assert_ne!(replacement_token, original_token);
+        app.module_set_enabled(&id, true).unwrap();
+        assert_eq!(app.module_tokens[&id], replacement_token);
         app.module_unlink(&id).unwrap();
+        assert!(!app.module_tokens.contains_key(&id));
         assert!(app.modules.find(&id).is_none());
 
         std::env::remove_var("LUVUS_HOME");
