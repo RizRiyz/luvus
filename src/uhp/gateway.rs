@@ -471,6 +471,7 @@ fn allowed_method(mode: AccessMode, method: &str) -> bool {
                 "workspace.focus"
                     | "tab.focus"
                     | "pane.focus"
+                    | "pane.rename"
                     | "agent.prompt"
                     | "agent.keys"
                     | "automation.create"
@@ -1453,8 +1454,8 @@ mod tests {
             ("worker", Some("worker")),
             ("  worker-2_a  ", Some("worker-2_a")),
             (
-                "a1234567890123456789012345678901_2",
-                Some("a1234567890123456789012345678901_2"),
+                "abcdefghijklmnopqrstuvwxyz0123_-",
+                Some("abcdefghijklmnopqrstuvwxyz0123_-"),
             ),
             ("", None),
             ("  ", None),

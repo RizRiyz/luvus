@@ -170,3 +170,9 @@ use the [method reference](/docs/uhp/methods/) and
 [terminal methods](/docs/uhp/terminal/).
 
 The `examples/uhp/access_capabilities_conformance.py` harness accepts an exact `--binary`, fresh `--home`, and `--session luvus-pr-test`. Run `--expect missing` against an older gateway and `--expect present` against the projection build. It compares paired read/control capability catalogs with owner capabilities, validates permission examples, proves rejected input stays empty, and stops its isolated processes.
+
+Add `--expect-rename denied` to verify a baseline that forbids `pane.rename`, or
+`--expect-rename allowed` to verify Control rename and effective permission
+parity. Both modes verify that read-only Access denies rename; the Control
+success case also checks the alias through owner readback. Omitting this flag
+keeps the original capabilities-only checks for older builds.
