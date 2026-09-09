@@ -376,13 +376,24 @@ where
 /// during a handoff is discarded rather than sent to an old pane.
 #[derive(Clone, Default)]
 struct InputRoute {
-    writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
+    writer: Arc<Mutex<RouteWriter>>,
     closed: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct RouteWriter {
+    generation: u64,
+    active: Option<Box<dyn Write + Send>>,
 }
 
 impl InputRoute {
     fn replace(&self, writer: Option<Box<dyn Write + Send>>) {
-        *self.writer.lock().unwrap_or_else(|e| e.into_inner()) = writer;
+        let retired = {
+            let mut route = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+            route.generation = route.generation.wrapping_add(1);
+            std::mem::replace(&mut route.active, writer)
+        };
+        drop(retired);
     }
 
     fn close(&self) {
@@ -397,10 +408,17 @@ impl InputRoute {
         let Some(message) = event_message(event) else {
             return true;
         };
-        let mut route = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(writer) = route.as_mut() {
-            if protocol::write_message(writer, &message).is_err() {
-                *route = None;
+        // The sole input reader owns the writer during I/O. Replacement and
+        // shutdown must remain possible even if the peer stops reading.
+        let (generation, writer) = {
+            let mut route = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+            (route.generation, route.active.take())
+        };
+        if let Some(mut writer) = writer {
+            let sent = protocol::write_message(&mut writer, &message).is_ok();
+            let mut route = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+            if sent && route.generation == generation && !self.closed.load(Ordering::Acquire) {
+                route.active = Some(writer);
             }
         }
         true
@@ -1067,6 +1085,90 @@ mod tests {
 mod render_tests {
     use super::*;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn blocked_input_write_does_not_block_switch_or_close_or_restore_retired_writer() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct BlockedWriter {
+            entered: Option<mpsc::Sender<()>>,
+            release: mpsc::Receiver<()>,
+            fail: bool,
+        }
+        impl Write for BlockedWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if let Some(entered) = self.entered.take() {
+                    entered.send(()).unwrap();
+                    self.release.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                if self.fail {
+                    Err(std::io::ErrorKind::BrokenPipe.into())
+                } else {
+                    Ok(bytes.len())
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        for close in [false, true] {
+            for fail in [false, true] {
+                let route = InputRoute::default();
+                let (entered_tx, entered_rx) = mpsc::channel();
+                let (release_tx, release_rx) = mpsc::channel();
+                route.replace(Some(Box::new(BlockedWriter {
+                    entered: Some(entered_tx),
+                    release: release_rx,
+                    fail,
+                })));
+                let sender = route.clone();
+                let sending = thread::spawn(move || sender.send(Event::Paste("old".into())));
+                entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                let capture = Capture::default();
+                let replacement = capture.clone();
+                let changing = route.clone();
+                let (done_tx, done_rx) = mpsc::channel();
+                let replacing = thread::spawn(move || {
+                    if close {
+                        changing.close();
+                    } else {
+                        changing.replace(Some(Box::new(replacement)));
+                    }
+                    done_tx.send(()).unwrap();
+                });
+                let completed = done_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+                // Always release and join the workers, including on regression.
+                release_tx.send(()).unwrap();
+                sending.join().unwrap();
+                replacing.join().unwrap();
+                assert!(completed, "route change waited for the blocked write");
+                assert_eq!(route.send(Event::Paste("new".into())), !close);
+                let bytes = capture.0.lock().unwrap().clone();
+                if close {
+                    assert!(bytes.is_empty());
+                    assert!(route.writer.lock().unwrap().active.is_none());
+                } else {
+                    let mut bytes = std::io::Cursor::new(bytes);
+                    assert!(matches!(protocol::read_message(&mut bytes).unwrap(),
+                        ClientMessage::Paste(text) if text == "new"));
+                    assert_eq!(bytes.position(), bytes.get_ref().len() as u64);
+                }
+            }
+        }
+    }
 
     #[test]
     fn session_input_route_moves_complete_events_and_survives_old_disconnect() {
