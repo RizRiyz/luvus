@@ -17,7 +17,7 @@ mod console;
 mod windows;
 
 #[cfg(windows)]
-pub use windows::{enable_input_mode, run_input_loop};
+pub use windows::{enable_input_mode, run_input_loop, WindowsInputModeGuard};
 
 const START_MARKER: &[char] = &['\u{1b}', '[', '2', '0', '0', '~'];
 const END_MARKER: &[char] = &['\u{1b}', '[', '2', '0', '1', '~'];

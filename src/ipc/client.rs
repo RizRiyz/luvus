@@ -3,6 +3,8 @@
 
 use std::io::{BufReader, Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use anyhow::{anyhow, Result};
@@ -73,7 +75,7 @@ pub fn run(sock: &Path) -> Result<()> {
     };
     crate::logging::event(crate::logging::EventKind::ClientConnect, &[]);
     // `Conn` is a cloneable duplex handle: one clone reads, the other writes.
-    attach_inner(stream.clone(), stream)
+    attach_inner(stream.clone(), stream, true)
 }
 
 /// Attach a thin client over **any** reader/writer carrying the binary frame
@@ -81,7 +83,7 @@ pub fn run(sock: &Path) -> Result<()> {
 /// (docs/18 RA) passes an `ssh` child's stdout/stdin — the protocol is the same.
 pub fn attach<R, W>(reader: R, writer: W) -> Result<()>
 where
-    R: Read,
+    R: Read + 'static,
     W: Write + Send + 'static,
 {
     let _logging = crate::logging::init(crate::logging::Role::Client);
@@ -90,17 +92,44 @@ where
         &[crate::logging::Field::Role(crate::logging::Role::Client)],
     );
     crate::logging::event(crate::logging::EventKind::ClientConnect, &[]);
-    attach_inner(reader, writer)
+    attach_inner(reader, writer, false)
 }
 
-fn attach_inner<R, W>(reader: R, writer: W) -> Result<()>
+fn attach_inner<R, W>(reader: R, writer: W, local: bool) -> Result<()>
 where
-    R: Read,
+    R: Read + 'static,
     W: Write + Send + 'static,
 {
     let mut terminal = ratatui::init();
     crate::install_tui_panic_hook();
-    let result = run_inner(reader, writer, &mut terminal);
+    let mut input = ClientInput::default();
+    let mut selected = crate::session::display_name();
+    let result = (|| {
+        let mut reader: Box<dyn Read> = Box::new(reader);
+        let mut writer: Box<dyn Write + Send> = Box::new(writer);
+        loop {
+            let exit = run_inner(reader, writer, &mut terminal, &mut input, &selected)?;
+            input.route.replace(None);
+            match exit {
+                ClientExit::SwitchSession(name) if local => {
+                    let name =
+                        crate::session::parse_target_name(&name).map_err(anyhow::Error::msg)?;
+                    let sock = crate::session::client_socket_path_for(name.as_deref());
+                    // The selector prepares the target server before emitting
+                    // SwitchSession. Never resolve through an inherited pane socket.
+                    let stream =
+                        transport::connect_timeout(&sock, std::time::Duration::from_secs(5))?;
+                    selected = name.unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.into());
+                    reader = Box::new(stream.clone());
+                    writer = Box::new(stream);
+                }
+                exit => break Ok::<_, anyhow::Error>(exit),
+            }
+        }
+    })();
+    input.route.close();
+    #[cfg(windows)]
+    drop(input.windows_input_mode.take());
     let _ = execute!(
         std::io::stdout(),
         crossterm::event::PopKeyboardEnhancementFlags,
@@ -112,12 +141,12 @@ where
     match result? {
         ClientExit::Done => Ok(()),
         ClientExit::Detached => {
-            crate::print_detached_status(crate::i18n::cli::Context::configured());
+            crate::print_detached_status_for(crate::i18n::cli::Context::configured(), &selected);
             Ok(())
         }
         ClientExit::ServerStopped => {
             let context = crate::i18n::cli::Context::configured();
-            let session = crate::session::display_name();
+            let session = selected;
             let rows = [
                 (context.text("status"), context.text("stopped")),
                 (context.text("session"), session.as_str()),
@@ -136,7 +165,22 @@ enum ClientExit {
     SwitchSession(String),
 }
 
-fn run_inner<R, W>(reader: R, mut writer: W, terminal: &mut DefaultTerminal) -> Result<ClientExit>
+#[derive(Default)]
+struct ClientInput {
+    route: InputRoute,
+    started: bool,
+    colors: Option<crate::terminal::theme_probe::TerminalColors>,
+    #[cfg(windows)]
+    windows_input_mode: Option<crate::terminal::host_input::WindowsInputModeGuard>,
+}
+
+fn run_inner<R, W>(
+    reader: R,
+    mut writer: W,
+    terminal: &mut DefaultTerminal,
+    input: &mut ClientInput,
+    selected: &str,
+) -> Result<ClientExit>
 where
     R: Read,
     W: Write + Send + 'static,
@@ -185,11 +229,22 @@ where
         ServerMessage::Ready { probe_terminal } => probe_terminal,
         _ => return Err(anyhow!("unexpected handshake negotiation")),
     };
-    let pending = if probe_terminal {
+    let pending = if probe_terminal && !input.started {
         let probe = crate::terminal::theme_probe::probe();
-        protocol::write_message(&mut writer, &ClientMessage::TerminalColors(probe.colors))?;
+        input.colors = probe.colors;
+        protocol::write_message(
+            &mut writer,
+            &ClientMessage::TerminalColors(input.colors.clone()),
+        )?;
         probe.pending
     } else {
+        if probe_terminal {
+            // The sole input reader already owns stdin after initial attach.
+            protocol::write_message(
+                &mut writer,
+                &ClientMessage::TerminalColors(input.colors.clone()),
+            )?;
+        }
         Vec::new()
     };
     crate::logging::event(
@@ -212,16 +267,28 @@ where
         // back) is our cue that the terminal may have been repainted underneath us,
         // so we ask the server for a full frame (see the input loop).
         EnableFocusChange,
-        crossterm::terminal::SetTitle(crate::window_title())
+        crossterm::terminal::SetTitle(if selected == crate::session::DEFAULT_SESSION_NAME {
+            match std::env::var("TERM_PROGRAM") {
+                Ok(program) if program == "Apple_Terminal" => String::new(),
+                _ => "luvus".to_string(),
+            }
+        } else {
+            format!("luvus · {selected}")
+        })
     );
     #[cfg(windows)]
-    let _windows_input_mode = crate::terminal::host_input::enable_input_mode();
+    if !input.started {
+        input.windows_input_mode = Some(crate::terminal::host_input::enable_input_mode());
+    }
     // Let the terminal report Shift+Enter et al. as distinct keys, so agents get
     // a real "new line" key instead of a bare CR (see `push_key_protocol`).
-    crate::push_key_protocol();
-
-    // Input thread: terminal events → the server.
-    thread::spawn(move || input_loop(writer, pending));
+    input.route.replace(Some(Box::new(writer)));
+    if !input.started {
+        crate::push_key_protocol();
+        let route = input.route.clone();
+        thread::spawn(move || input_loop(route, pending));
+        input.started = true;
+    }
 
     // Main thread: paint frames as they arrive. A full frame repaints the screen; a
     // diff writes only its changed cells straight to the terminal (no full re-blit,
@@ -304,6 +371,42 @@ where
     Ok(exit)
 }
 
+/// One terminal reader for the entire local client lifetime. Replacing the
+/// destination drops the previous connection before the next handshake; input
+/// during a handoff is discarded rather than sent to an old pane.
+#[derive(Clone, Default)]
+struct InputRoute {
+    writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
+    closed: Arc<AtomicBool>,
+}
+
+impl InputRoute {
+    fn replace(&self, writer: Option<Box<dyn Write + Send>>) {
+        *self.writer.lock().unwrap_or_else(|e| e.into_inner()) = writer;
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.replace(None);
+    }
+
+    fn send(&self, event: Event) -> bool {
+        if self.closed.load(Ordering::Acquire) {
+            return false;
+        }
+        let Some(message) = event_message(event) else {
+            return true;
+        };
+        let mut route = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(writer) = route.as_mut() {
+            if protocol::write_message(writer, &message).is_err() {
+                *route = None;
+            }
+        }
+        true
+    }
+}
+
 /// Hand this thin client process to the same launch mode targeting another
 /// logical session. Unix replaces the process. Windows starts the successor
 /// and immediately lets this process exit, so the old terminal-input thread is
@@ -348,31 +451,25 @@ fn switched_args(raw: &[String], name: &str) -> Vec<String> {
     out
 }
 
-fn input_loop<W: Write>(mut writer: W, pending: Vec<Event>) {
+fn input_loop(route: InputRoute, pending: Vec<Event>) {
     #[cfg(windows)]
     {
-        crate::terminal::host_input::run_input_loop(pending, |event| {
-            write_input_event(&mut writer, event)
-        });
+        crate::terminal::host_input::run_input_loop(pending, |event| route.send(event));
     }
 
     #[cfg(not(windows))]
     {
         for event in pending {
-            if !write_input_event(&mut writer, event) {
+            if !route.send(event) {
                 return;
             }
         }
         while let Ok(event) = read_event() {
-            if !write_input_event(&mut writer, event) {
+            if !route.send(event) {
                 break;
             }
         }
     }
-}
-
-fn write_input_event(writer: &mut impl Write, event: Event) -> bool {
-    event_message(event).is_none_or(|message| protocol::write_message(writer, &message).is_ok())
 }
 
 fn event_message(event: Event) -> Option<ClientMessage> {
@@ -970,6 +1067,58 @@ mod tests {
 mod render_tests {
     use super::*;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn session_input_route_moves_complete_events_and_survives_old_disconnect() {
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        struct Disconnected;
+        impl Write for Disconnected {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        use ratatui::crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+        let route = InputRoute::default();
+        route.replace(Some(Box::new(Disconnected)));
+        assert!(route.send(Event::Paste("old".into())));
+        assert!(route.send(Event::Paste("during handoff".into())));
+        for _ in 0..10 {
+            let capture = Capture::default();
+            route.replace(Some(Box::new(capture.clone())));
+            let mouse = MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: 7,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            };
+            assert!(route.send(Event::Mouse(mouse)));
+            assert!(route.send(Event::Paste("new\n雪".into())));
+            route.replace(None);
+            assert!(route.send(Event::Paste("gap".into())));
+            let bytes = capture.0.lock().unwrap().clone();
+            let mut bytes = std::io::Cursor::new(bytes);
+            assert!(matches!(protocol::read_message(&mut bytes).unwrap(),
+                ClientMessage::Mouse(received) if received == mouse));
+            assert!(matches!(protocol::read_message(&mut bytes).unwrap(),
+                ClientMessage::Paste(text) if text == "new\n雪"));
+            assert_eq!(bytes.position(), bytes.get_ref().len() as u64);
+        }
+        route.close();
+        assert!(!route.send(Event::Paste("after detach".into())));
+    }
 
     #[test]
     fn paste_event_preserves_windows_paths_quotes_and_unicode() {
