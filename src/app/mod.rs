@@ -2806,6 +2806,8 @@ pub struct App {
     /// `(previous theme, selection revision)` restores an automatically replaced
     /// active theme only when the user has not selected another theme meanwhile.
     pub(crate) pending_theme_uninstalls: HashMap<String, Option<(String, u64)>>,
+    /// Pending removals waiting for configuration persistence, not worker completion.
+    pub(crate) deferred_theme_uninstalls: Vec<String>,
     pub(crate) theme_selection_revision: u64,
     /// Slider arrows in the modal: (control index, ±1 direction, rect).
     pub settings_arrow_rects: Vec<(usize, i32, Rect)>,
@@ -3188,6 +3190,7 @@ impl App {
             settings_ctl_rects: Vec::new(),
             settings_theme_remove_rects: Vec::new(),
             pending_theme_uninstalls: HashMap::new(),
+            deferred_theme_uninstalls: Vec::new(),
             theme_selection_revision: 0,
             settings_arrow_rects: Vec::new(),
             modules,
@@ -3844,6 +3847,7 @@ impl App {
             settings_ctl_rects: Vec::new(),
             settings_theme_remove_rects: Vec::new(),
             pending_theme_uninstalls: HashMap::new(),
+            deferred_theme_uninstalls: Vec::new(),
             theme_selection_revision: 0,
             settings_arrow_rects: Vec::new(),
             modules,
