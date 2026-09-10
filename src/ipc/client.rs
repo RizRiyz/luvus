@@ -187,14 +187,7 @@ where
 {
     let truecolor = protocol::truecolor_supported();
     let size = terminal.size()?;
-    write_handshake_message(
-        &mut writer,
-        &ClientMessage::Hello {
-            version: protocol::PROTOCOL_VERSION,
-            cols: size.width,
-            rows: size.height,
-        },
-    )?;
+    write_handshake_message(&mut writer, &hello_message(size.width, size.height))?;
 
     let mut reader = BufReader::new(reader);
     match read_handshake_message(&mut reader)? {
@@ -490,6 +483,27 @@ fn input_loop(route: InputRoute, pending: Vec<Event>) {
     }
 }
 
+fn hello_message(cols: u16, rows: u16) -> ClientMessage {
+    let (cell_width_px, cell_height_px) = protocol::local_cell_pixels();
+    ClientMessage::Hello {
+        version: protocol::PROTOCOL_VERSION,
+        cols,
+        rows,
+        cell_width_px,
+        cell_height_px,
+    }
+}
+
+fn resize_message(cols: u16, rows: u16) -> ClientMessage {
+    let (cell_width_px, cell_height_px) = protocol::local_cell_pixels();
+    ClientMessage::Resize {
+        cols,
+        rows,
+        cell_width_px,
+        cell_height_px,
+    }
+}
+
 fn event_message(event: Event) -> Option<ClientMessage> {
     event_message_with_image(event, crate::platform::clipboard_image)
 }
@@ -512,7 +526,7 @@ fn event_message_with_image(
                     crate::logging::Field::Rows(u64::from(rows)),
                 ],
             );
-            Some(ClientMessage::Resize { cols, rows })
+            Some(resize_message(cols, rows))
         }
         Event::Paste(s) => Some(ClientMessage::Paste(s)),
         // Regained focus: the window may have moved or been repainted while we
@@ -520,7 +534,7 @@ fn event_message_with_image(
         // server treats as a forced full repaint, healing any stale cells.
         Event::FocusGained => crossterm::terminal::size()
             .ok()
-            .map(|(cols, rows)| ClientMessage::Resize { cols, rows }),
+            .map(|(cols, rows)| resize_message(cols, rows)),
         _ => None,
     }
 }
@@ -769,6 +783,8 @@ mod tests {
                 version: PROTOCOL_VERSION,
                 cols: 80,
                 rows: 24,
+                cell_width_px: 0,
+                cell_height_px: 0,
             },
         )
         .unwrap_err();
@@ -1015,6 +1031,8 @@ mod tests {
                 version: PROTOCOL_VERSION,
                 cols: 80,
                 rows: 24,
+                cell_width_px: 0,
+                cell_height_px: 0,
             },
         )
         .unwrap();

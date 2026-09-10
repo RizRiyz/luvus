@@ -698,6 +698,9 @@ impl App {
                 // A resize (or a same-size resize event a terminal emits on a
                 // move/expose) may have damaged the screen — force a full repaint.
                 self.force_redraw = true;
+                if let Some((width, height)) = crate::platform::terminal_cell_pixels() {
+                    self.set_client_cell_pixels(width, height);
+                }
                 true
             }
             AppEvent::PtyInputRejected(id) => {

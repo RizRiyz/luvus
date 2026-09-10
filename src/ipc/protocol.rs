@@ -13,8 +13,13 @@ use serde::{Deserialize, Serialize};
 use crate::sound::SoundSignal;
 use crate::terminal::theme_probe::TerminalColors;
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 const MAX_FRAME: usize = 64 * 1024 * 1024;
+
+/// Local display cell size in pixels, or `(0, 0)` when the host does not report it.
+pub fn local_cell_pixels() -> (u16, u16) {
+    crate::platform::terminal_cell_pixels().unwrap_or((0, 0))
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub enum ClientMessage {
@@ -22,6 +27,10 @@ pub enum ClientMessage {
         version: u32,
         cols: u16,
         rows: u16,
+        /// Display cell width in pixels. `0` when the host does not report it.
+        cell_width_px: u16,
+        /// Display cell height in pixels. `0` when the host does not report it.
+        cell_height_px: u16,
     },
     Key(KeyEvent),
     Mouse(MouseEvent),
@@ -32,6 +41,8 @@ pub enum ClientMessage {
     Resize {
         cols: u16,
         rows: u16,
+        cell_width_px: u16,
+        cell_height_px: u16,
     },
     Detach,
     /// Response to [`ServerMessage::Ready`] when terminal colors were requested.

@@ -1566,6 +1566,18 @@ mod tests {
     }
 
     #[test]
+    fn pane_split_auto_uses_reported_square_cells() {
+        let _env = crate::persist::test_env("pane-split-auto-square-cells");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.last_pane_area = Rect::new(0, 0, 60, 40);
+        app.set_client_cell_pixels(10, 10);
+        app.dispatch("pane.split", &json!({"direction": "auto"}))
+            .expect("square-cell auto split");
+        assert_eq!(split_axis(&app), 0, "square cells keep 60x40 landscape");
+    }
+
+    #[test]
     fn pane_split_auto_stacks_a_portrait_cell_pane() {
         let _env = crate::persist::test_env("pane-split-auto-portrait-cells");
         let (tx, _rx) = std::sync::mpsc::channel();

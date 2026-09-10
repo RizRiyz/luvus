@@ -217,6 +217,8 @@ impl ClientSender {
 struct ClientState {
     sender: ClientSender,
     size: (u16, u16),
+    cell_width_px: u16,
+    cell_height_px: u16,
     terminal_colors: Option<crate::terminal::theme_probe::TerminalColors>,
     render_buf: Buffer,
     last_frame: Option<protocol::FrameData>,
@@ -240,6 +242,8 @@ impl ClientState {
         sender: ClientSender,
         cols: u16,
         rows: u16,
+        cell_width_px: u16,
+        cell_height_px: u16,
         terminal_colors: Option<crate::terminal::theme_probe::TerminalColors>,
         last_activity: u64,
     ) -> Self {
@@ -247,6 +251,8 @@ impl ClientState {
         Self {
             sender,
             size,
+            cell_width_px,
+            cell_height_px,
             terminal_colors,
             render_buf: Buffer::empty(Rect::new(0, 0, size.0, size.1)),
             last_frame: None,
@@ -689,6 +695,8 @@ fn apply(
             frame_pending,
             cols,
             rows,
+            cell_width_px,
+            cell_height_px,
             terminal_colors,
         } => {
             crate::logging::event(
@@ -711,6 +719,8 @@ fn apply(
                     },
                     cols,
                     rows,
+                    cell_width_px,
+                    cell_height_px,
                     terminal_colors,
                     activity,
                 ),
@@ -744,7 +754,13 @@ fn apply(
             client.last_activity = *next_activity;
             *next_activity = next_activity.saturating_add(1);
 
-            if let ClientInput::Resize(cols, rows) = input {
+            if let ClientInput::Resize {
+                cols,
+                rows,
+                cell_width_px,
+                cell_height_px,
+            } = input
+            {
                 crate::logging::event(
                     crate::logging::EventKind::ServerClientResize,
                     &[
@@ -754,6 +770,11 @@ fn apply(
                     ],
                 );
                 client.size = (cols.max(1), rows.max(1));
+                client.cell_width_px = cell_width_px;
+                client.cell_height_px = cell_height_px;
+                if *foreground == Some(id) {
+                    app.set_client_cell_pixels(cell_width_px, cell_height_px);
+                }
                 // Resize/focus repair is local to this terminal. Its next frame
                 // must be complete, but other clients keep their diff baselines.
                 client.force_full = true;
@@ -791,7 +812,7 @@ fn apply(
                 ClientInput::Mouse(mouse) => AppEvent::Mouse(mouse),
                 ClientInput::Paste(text) => AppEvent::Paste(text),
                 ClientInput::PasteImage(path) => AppEvent::PasteImage(path),
-                ClientInput::Resize(..) => unreachable!("handled above"),
+                ClientInput::Resize { .. } => unreachable!("handled above"),
             };
             app.handle_event(event)
         }
@@ -819,6 +840,9 @@ fn latest_client(clients: &Clients) -> Option<u64> {
 }
 
 fn apply_foreground_theme(app: &mut App, clients: &Clients, foreground: Option<u64>) {
+    if let Some(client) = foreground.and_then(|id| clients.get(&id)) {
+        app.set_client_cell_pixels(client.cell_width_px, client.cell_height_px);
+    }
     if app.config.theme != "terminal" {
         return;
     }
@@ -846,7 +870,7 @@ fn event_render_source(app: &App, event: &AppEvent) -> EventRenderSource {
         AppEvent::PtyData(_) => EventRenderSource::HiddenPty,
         AppEvent::ClientConnected { .. }
         | AppEvent::ClientInput {
-            input: ClientInput::Resize(..),
+            input: ClientInput::Resize { .. },
             ..
         } => EventRenderSource::Cause(RenderCause::ClientAttachOrResize),
         AppEvent::Api(_) => EventRenderSource::Cause(RenderCause::ApiOrMaintenance),
@@ -1220,33 +1244,36 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
     let mut reader = BufReader::new(stream.clone());
     let mut writer = stream;
 
-    let (cols, rows) = match protocol::read_message::<_, ClientMessage>(&mut reader) {
-        Ok(ClientMessage::Hello {
-            version,
-            cols,
-            rows,
-        }) => {
-            if version != protocol::PROTOCOL_VERSION {
-                crate::logging::event(
-                    crate::logging::EventKind::ServerClientHandshakeRejected,
-                    &[
-                        crate::logging::Field::Reason(crate::logging::Reason::VersionMismatch),
-                        crate::logging::Field::ProtocolVersion(u64::from(version)),
-                    ],
-                );
-                let _ = protocol::write_message(
-                    &mut writer,
-                    &ServerMessage::Welcome {
-                        version: protocol::PROTOCOL_VERSION,
-                        error: Some("protocol version mismatch".into()),
-                    },
-                );
-                return;
+    let (cols, rows, cell_width_px, cell_height_px) =
+        match protocol::read_message::<_, ClientMessage>(&mut reader) {
+            Ok(ClientMessage::Hello {
+                version,
+                cols,
+                rows,
+                cell_width_px,
+                cell_height_px,
+            }) => {
+                if version != protocol::PROTOCOL_VERSION {
+                    crate::logging::event(
+                        crate::logging::EventKind::ServerClientHandshakeRejected,
+                        &[
+                            crate::logging::Field::Reason(crate::logging::Reason::VersionMismatch),
+                            crate::logging::Field::ProtocolVersion(u64::from(version)),
+                        ],
+                    );
+                    let _ = protocol::write_message(
+                        &mut writer,
+                        &ServerMessage::Welcome {
+                            version: protocol::PROTOCOL_VERSION,
+                            error: Some("protocol version mismatch".into()),
+                        },
+                    );
+                    return;
+                }
+                (cols, rows, cell_width_px, cell_height_px)
             }
-            (cols, rows)
-        }
-        _ => return,
-    };
+            _ => return,
+        };
 
     if protocol::write_message(
         &mut writer,
@@ -1318,6 +1345,8 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
             frame_pending,
             cols,
             rows,
+            cell_width_px,
+            cell_height_px,
             terminal_colors,
         })
         .is_err()
@@ -1375,11 +1404,21 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
                     break;
                 }
             }
-            Ok(ClientMessage::Resize { cols, rows }) => {
+            Ok(ClientMessage::Resize {
+                cols,
+                rows,
+                cell_width_px,
+                cell_height_px,
+            }) => {
                 if app_tx
                     .send(AppEvent::ClientInput {
                         id,
-                        input: ClientInput::Resize(cols, rows),
+                        input: ClientInput::Resize {
+                            cols,
+                            rows,
+                            cell_width_px,
+                            cell_height_px,
+                        },
                     })
                     .is_err()
                 {
@@ -1622,6 +1661,8 @@ mod tests {
                 },
                 cols,
                 rows,
+                0,
+                0,
                 None,
                 activity,
             ),
@@ -1923,6 +1964,8 @@ mod tests {
             },
             120,
             32,
+            0,
+            0,
             None,
             1,
         );
@@ -2077,7 +2120,12 @@ mod tests {
         assert!(apply(
             AppEvent::ClientInput {
                 id: 2,
-                input: ClientInput::Resize(46, 16),
+                input: ClientInput::Resize {
+                    cols: 46,
+                    rows: 16,
+                    cell_width_px: 0,
+                    cell_height_px: 0,
+                },
             },
             &mut app,
             &mut clients,

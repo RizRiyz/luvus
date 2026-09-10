@@ -53,6 +53,45 @@ pub fn clipboard_image() -> Option<Vec<u8>> {
     None
 }
 
+/// Pixel size of one terminal cell on the local display, when the host reports it.
+///
+/// Unix uses `TIOCGWINSZ` `ws_xpixel`/`ws_ypixel`. Windows uses the current
+/// console font. Many hosts leave these fields at zero; callers must fall back.
+#[cfg(unix)]
+pub fn terminal_cell_pixels() -> Option<(u16, u16)> {
+    unix_terminal_cell_pixels()
+}
+
+#[cfg(windows)]
+pub fn terminal_cell_pixels() -> Option<(u16, u16)> {
+    windows::terminal_cell_pixels()
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn terminal_cell_pixels() -> Option<(u16, u16)> {
+    None
+}
+
+#[cfg(unix)]
+fn unix_terminal_cell_pixels() -> Option<(u16, u16)> {
+    for fd in [libc::STDOUT_FILENO, libc::STDERR_FILENO, libc::STDIN_FILENO] {
+        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+        if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut size) } != 0 {
+            continue;
+        }
+        if size.ws_col == 0 || size.ws_row == 0 || size.ws_xpixel == 0 || size.ws_ypixel == 0 {
+            continue;
+        }
+        let width = size.ws_xpixel / size.ws_col;
+        let height = size.ws_ypixel / size.ws_row;
+        if width == 0 || height == 0 {
+            continue;
+        }
+        return Some((width, height));
+    }
+    None
+}
+
 /// Do two paths name the same folder? (docs/43 WIN-6.)
 ///
 /// Node lookup used to compare `PathBuf`s with `==`, so any difference in

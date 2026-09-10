@@ -17,6 +17,9 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::{
     MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
+use windows_sys::Win32::System::Console::{
+    GetCurrentConsoleFontEx, GetStdHandle, CONSOLE_FONT_INFOEX, STD_OUTPUT_HANDLE,
+};
 use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -31,6 +34,26 @@ mod clipboard;
 
 pub(super) fn clipboard_image() -> Option<Vec<u8>> {
     clipboard::clipboard_image()
+}
+
+pub(super) fn terminal_cell_pixels() -> Option<(u16, u16)> {
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut info: CONSOLE_FONT_INFOEX = std::mem::zeroed();
+        info.cbSize = size_of::<CONSOLE_FONT_INFOEX>() as u32;
+        if GetCurrentConsoleFontEx(handle, 0, &mut info) == 0 {
+            return None;
+        }
+        let width = info.dwFontSize.X;
+        let height = info.dwFontSize.Y;
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        Some((width as u16, height as u16))
+    }
 }
 
 const MAX_PROCESS_ENTRIES: usize = 16_384;
