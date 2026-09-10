@@ -444,6 +444,51 @@ startup, sign-in, selection, or approval screen with `agent_not_ready`. The
 rejection queues neither text nor Enter. Read the visible agent output and use
 `agent.keys` only when an explicit interaction is intended.
 
+For explicit key interactions, `agent.read` adds `content_revision` (the pane's
+PTY output counter) and `terminal_id` (32 lowercase hexadecimal characters for
+that PTY lifetime) alongside `text`. Text and coordinates are captured under the
+same engine lock for both `source:"visible"` and recent output. A deferred pane
+without a runtime has `terminal_id:null`; an unavailable engine snapshot returns
+empty text and null coordinates. These fields are additive: legacy results stay
+valid. The response's generic `revision` is a global event sequence and is not
+this pane counter.
+
+`agent.keys` still requires only `target` and a non-empty `keys` array. UHP callers
+may optionally supply **both** `if_content_revision` (a non-negative integer)
+and `terminal_id` from the read they inspected:
+
+```json
+{"id":"inspect","method":"agent.read","params":{"target":"reviewer","source":"visible"}}
+{"id":"answer","method":"agent.keys","params":{"target":"reviewer","keys":["enter"],"if_content_revision":12,"terminal_id":"0123456789abcdef0123456789abcdef"}}
+```
+
+The example coordinates must be replaced with the actual read result. Supplying
+only one field, malformed coordinates, an unknown parameter, or any invalid key
+returns `invalid_request` without queuing input. The complete key list validates
+before the fence comparison. Plain shells still return `agent_not_ready`.
+
+For a fenced request, the server holds the existing engine lock while comparing
+identity and content revision and admitting the entire key batch. A stale
+revision, different terminal lifetime, missing runtime, or unavailable engine
+returns `content_revision_conflict` with expected/actual values (or an explicit
+unavailable actual value), and queues no bytes. A matching fence still reports
+`send_failed` if the writer rejects admission.
+
+On conflict, re-read the visible screen and reassess the intended action; never
+retry the same pair. Without the pair, admission is unchanged. Older servers omit
+the read coordinates or reject the unknown parameters; use the legacy unfenced
+request only when that compatibility behavior is acceptable for the authorized
+action. The pair is a UHP parameter option, not a new CLI flag.
+
+This is an **admission-only** fence: it does not cancel already queued input or
+cover child-side changes the server has not observed. Cursor, SGR, and other PTY
+output can increment the counter without changing visible dialog text; a conflict
+still requires a fresh read. Generic `if_revision` cannot replace this fence:
+it tracks unrelated global events and is checked before dispatch without the
+engine lock. The prompt guard introduced in #320 routes explicit interactions
+to `agent.keys`; this opt-in fence binds those interactions to the inspected
+terminal snapshot.
+
 With `wait:true`, a **new** `working` or `blocked` transition must be observed
 before a requested `until` state can complete the wait. An already active state,
 unchanged metadata, title flicker, and output settling alone do not qualify.

@@ -289,6 +289,26 @@ For a blocked agent:
 key names. It validates the entire list before queuing one ordered action; any
 invalid entry sends nothing, and a closed target returns `send_failed`.
 
+For UHP interactions that must match the inspected screen, use `agent.read`
+with `source:"visible"` and pass its `content_revision` as `if_content_revision`
+together with its `terminal_id` in `agent.keys` params. The revision is a
+non-negative integer; the terminal ID is exactly 32 lowercase hex characters.
+Both fields are optional as a pair; a one-sided or malformed pair is
+`invalid_request`. A deferred pane has `terminal_id:null` and cannot be fenced.
+An unavailable read snapshot has empty text and null coordinates.
+
+The server checks the pair and queues keys under the same engine lock used to
+capture the text. `content_revision_conflict` means no keys were queued: re-read
+and reassess the authorized action, never retry the same pair. Generic response
+`revision` / request `if_revision` are global event coordinates, not the pane's
+content counter. Without the pair, behavior is unchanged. Older servers omit the
+coordinates or reject the new fields; omit the pair only when legacy unfenced
+admission is acceptable. These are UHP params, not CLI flags.
+
+The fence covers queue admission only. Already queued input and child-side
+changes not yet observed remain outside it. Cursor/SGR output can make a pair
+stale even if the dialog text looks unchanged.
+
 ## Control panes, tabs, and workspaces
 
 Use these read routes before a write whose target is not already known:
