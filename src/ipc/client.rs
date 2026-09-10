@@ -254,14 +254,7 @@ where
 {
     let truecolor = protocol::truecolor_supported();
     let size = terminal.size()?;
-    write_handshake_message(
-        &mut writer,
-        &ClientMessage::Hello {
-            version: protocol::PROTOCOL_VERSION,
-            cols: size.width,
-            rows: size.height,
-        },
-    )?;
+    write_handshake_message(&mut writer, &hello_message(size.width, size.height))?;
 
     #[cfg(unix)]
     let (completion, wake) = crate::clipboard::Completion::channel()?;
@@ -333,6 +326,11 @@ where
             crate::logging::Field::Rows(u64::from(size.height)),
         ],
     );
+
+    // Cell pixels ride a post-handshake message, never `Hello`: both peers have
+    // now agreed on the protocol version, so this shape is safe to extend. The
+    // server needs it before the first split, not only after a resize.
+    protocol::write_message(&mut writer, &cell_pixels_message())?;
 
     // Enable input protocols only after probing. That bounds the pending-input
     // decoder to ordinary terminal key sequences and avoids mouse/paste replies
@@ -574,6 +572,32 @@ fn input_loop(route: InputRoute, pending: Vec<Event>) {
     }
 }
 
+fn hello_message(cols: u16, rows: u16) -> ClientMessage {
+    ClientMessage::Hello {
+        version: protocol::PROTOCOL_VERSION,
+        cols,
+        rows,
+    }
+}
+
+fn cell_pixels_message() -> ClientMessage {
+    let (cell_width_px, cell_height_px) = protocol::local_cell_pixels();
+    ClientMessage::CellPixels {
+        cell_width_px,
+        cell_height_px,
+    }
+}
+
+fn resize_message(cols: u16, rows: u16) -> ClientMessage {
+    let (cell_width_px, cell_height_px) = protocol::local_cell_pixels();
+    ClientMessage::Resize {
+        cols,
+        rows,
+        cell_width_px,
+        cell_height_px,
+    }
+}
+
 fn event_message(event: Event) -> Option<ClientMessage> {
     event_message_with_image(event, crate::platform::clipboard_image)
 }
@@ -596,7 +620,7 @@ fn event_message_with_image(
                     crate::logging::Field::Rows(u64::from(rows)),
                 ],
             );
-            Some(ClientMessage::Resize { cols, rows })
+            Some(resize_message(cols, rows))
         }
         Event::Paste(s) => Some(ClientMessage::Paste(s)),
         // Regained focus: the window may have moved or been repainted while we
@@ -604,7 +628,7 @@ fn event_message_with_image(
         // server treats as a forced full repaint, healing any stale cells.
         Event::FocusGained => crossterm::terminal::size()
             .ok()
-            .map(|(cols, rows)| ClientMessage::Resize { cols, rows }),
+            .map(|(cols, rows)| resize_message(cols, rows)),
         _ => None,
     }
 }

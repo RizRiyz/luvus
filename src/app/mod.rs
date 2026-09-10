@@ -2701,6 +2701,10 @@ pub struct App {
     pub menu_scroll: MenuScroll,
     app_tx: Sender<AppEvent>,
     pub last_pane_area: Rect,
+    /// Pixel size of one cell on the interactive display client. `0` means the
+    /// host did not report it; auto-split then uses the documented 2:1 fallback.
+    pub cell_width_px: u16,
+    pub cell_height_px: u16,
     // Hit-test geometry from the last render, for mouse clicks.
     pub pane_rects: Vec<(PaneId, Rect)>,
     /// Each pane's **content** rect (inside the border/title) — maps a mouse
@@ -3148,6 +3152,8 @@ impl App {
             menu_scroll: MenuScroll::default(),
             app_tx,
             last_pane_area: Rect::ZERO,
+            cell_width_px: 0,
+            cell_height_px: 0,
             pane_rects: Vec::new(),
             pane_content_rects: Vec::new(),
             scroll_pane: None,
@@ -3805,6 +3811,8 @@ impl App {
             menu_scroll: MenuScroll::default(),
             app_tx,
             last_pane_area: Rect::ZERO,
+            cell_width_px: 0,
+            cell_height_px: 0,
             pane_rects: Vec::new(),
             pane_content_rects: Vec::new(),
             scroll_pane: None,
@@ -4788,6 +4796,78 @@ impl App {
     fn split(&mut self, axis: Axis) {
         let pane = self.layout().focus;
         let _ = self.split_pane(pane, axis, true);
+    }
+
+    /// Split the focused pane along its longer side.
+    fn split_auto(&mut self) {
+        let pane = self.layout().focus;
+        let axis = self.auto_split_axis_for(pane);
+        let _ = self.split_pane(pane, axis, true);
+    }
+
+    /// Has an interactive client painted a usable pane area yet? Automatic splits
+    /// only trust reported cell geometry once one has; before that the square
+    /// logical area keeps the historical left/right default.
+    fn has_painted_area(&self) -> bool {
+        self.last_pane_area.width > 1 && self.last_pane_area.height > 1
+    }
+
+    /// Geometry used when choosing an automatic split. Prefer the last rendered
+    /// pane area so a live client decides; fall back to the square logical area
+    /// used by headless topology queries.
+    fn split_area(&self) -> Rect {
+        if self.has_painted_area() {
+            self.last_pane_area
+        } else {
+            crate::api::topology::logical_area()
+        }
+    }
+
+    pub(crate) fn set_client_cell_pixels(&mut self, width: u16, height: u16) {
+        self.cell_width_px = width;
+        self.cell_height_px = height;
+    }
+
+    fn painted_cell_aspect(&self) -> f32 {
+        if self.cell_width_px > 0 && self.cell_height_px > 0 {
+            f32::from(self.cell_height_px) / f32::from(self.cell_width_px)
+        } else {
+            crate::layout::CELL_ASPECT_HEIGHT_OVER_WIDTH
+        }
+    }
+
+    /// Axis that cuts the longer physical side of `pane` in its current tab.
+    /// Painted clients use reported cell pixels when available, else the
+    /// documented 2:1 fallback. The square logical area used before any client
+    /// has painted keeps the historical left/right split.
+    fn auto_split_axis_for(&self, pane: PaneId) -> Axis {
+        let painted = self.has_painted_area();
+        let area = self.split_area();
+        let rect = self
+            .pane_location(pane)
+            .and_then(|(workspace, tab)| {
+                self.workspaces[workspace].tabs[tab]
+                    .layout
+                    .pane_rect(area, pane)
+            })
+            .unwrap_or(area);
+        if painted {
+            crate::layout::auto_split_axis_with_cell_aspect(
+                rect.width,
+                rect.height,
+                self.painted_cell_aspect(),
+            )
+        } else {
+            crate::layout::auto_split_axis(rect.width, rect.height)
+        }
+    }
+
+    /// Attach a newly allocated leaf beside the focused pane, choosing the split
+    /// axis from that pane's current aspect ratio.
+    fn split_focused_auto(&mut self, new_id: PaneId) {
+        let focus = self.layout().focus;
+        let axis = self.auto_split_axis_for(focus);
+        self.layout_mut().split_focused(axis, new_id);
     }
 
     /// Spawn and attach a sibling beside `target`, preserving inactive view state

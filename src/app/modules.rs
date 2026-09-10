@@ -547,11 +547,11 @@ impl App {
                 self.zoomed = false;
             }
             "overlay" => {
-                self.layout_mut().split_focused(Axis::Col, id);
+                self.split_focused_auto(id);
                 self.zoomed = true; // fill the screen, overlay-style
             }
             _ => {
-                self.layout_mut().split_focused(Axis::Col, id);
+                self.split_focused_auto(id);
                 self.zoomed = false;
             }
         }

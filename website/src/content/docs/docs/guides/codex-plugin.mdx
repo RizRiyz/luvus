@@ -242,7 +242,8 @@ for waiting on a specific lifecycle state after work has been sent.
 
 From an external Codex terminal, `agent start --anchor <pane-id>` creates the
 new no-focus sibling beside an explicit pane and completes the launch in one
-invocation. Omit `--down` for a right-side split and add it for a split below.
+invocation. Omit direction flags to split along the longer side of the anchor
+pane; pass `--right` or `--down` to force a direction.
 On an older installed release without `--anchor`, the skill uses `pane split
 <pane-id> --no-focus` followed by `agent start --pane <new-pane-id>`. This keeps
 Cargo, Homebrew, and `install.sh` releases compatible while newer versions use

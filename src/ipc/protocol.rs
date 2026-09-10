@@ -13,11 +13,23 @@ use serde::{Deserialize, Serialize};
 use crate::sound::SoundSignal;
 use crate::terminal::theme_probe::TerminalColors;
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 const MAX_FRAME: usize = 64 * 1024 * 1024;
+
+/// Local display cell size in pixels, or `(0, 0)` when the host does not report it.
+pub fn local_cell_pixels() -> (u16, u16) {
+    crate::platform::terminal_cell_pixels().unwrap_or((0, 0))
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub enum ClientMessage {
+    /// **Frozen wire shape.** `Hello` is decoded *before* the version check, so a
+    /// server must be able to read it from every client that ever shipped. bincode
+    /// is not self-describing: adding a field here makes an older client's shorter
+    /// frame fail to decode, and the server then cannot reply with the
+    /// version-mismatch `Welcome` that tells the user to restart. Carry new
+    /// per-client data in a post-handshake message such as [`ClientMessage::CellPixels`]
+    /// instead, where both peers have already agreed on the protocol version.
     Hello {
         version: u32,
         cols: u16,
@@ -32,10 +44,20 @@ pub enum ClientMessage {
     Resize {
         cols: u16,
         rows: u16,
+        cell_width_px: u16,
+        cell_height_px: u16,
     },
     Detach,
     /// Response to [`ServerMessage::Ready`] when terminal colors were requested.
     TerminalColors(Option<TerminalColors>),
+    /// Display cell size in pixels, sent once immediately after the handshake and
+    /// then on every resize. `0` means the host does not report it, and auto-split
+    /// falls back to the documented cell aspect. Sent after the version check, so
+    /// this shape is only ever exchanged between peers of the same version.
+    CellPixels {
+        cell_width_px: u16,
+        cell_height_px: u16,
+    },
 }
 
 fn deserialize_clipboard_image<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
@@ -471,6 +493,54 @@ fn sq(x: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Hello` is decoded before the version check, so its encoded shape must stay
+    /// byte-for-byte stable across releases. If this fails, an older client can no
+    /// longer reach the version-mismatch `Welcome` that tells the user to restart —
+    /// put the new field in a post-handshake message instead of `Hello`.
+    #[test]
+    fn hello_wire_shape_is_frozen() {
+        let mut buf = Vec::new();
+        write_message(
+            &mut buf,
+            &ClientMessage::Hello {
+                version: 7,
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .unwrap();
+        // 4-byte length prefix, then variant 0 followed by three varints.
+        assert_eq!(buf, [4, 0, 0, 0, 0, 7, 80, 24], "Hello wire shape changed");
+    }
+
+    /// The reverse of the guarantee above: a peer that only knows the three frozen
+    /// fields still decodes a current `Hello`, which is what lets an older server
+    /// read the version and answer with a mismatch error instead of hanging up.
+    #[test]
+    fn frozen_hello_decodes_without_later_fields() {
+        #[derive(Deserialize)]
+        enum LegacyClientMessage {
+            Hello { version: u32, cols: u16, rows: u16 },
+        }
+
+        let mut buf = Vec::new();
+        write_message(
+            &mut buf,
+            &ClientMessage::Hello {
+                version: PROTOCOL_VERSION,
+                cols: 100,
+                rows: 40,
+            },
+        )
+        .unwrap();
+        let LegacyClientMessage::Hello {
+            version,
+            cols,
+            rows,
+        } = read_message::<_, LegacyClientMessage>(&mut &buf[..]).unwrap();
+        assert_eq!((version, cols, rows), (PROTOCOL_VERSION, 100, 40));
+    }
 
     #[test]
     fn message_roundtrip() {

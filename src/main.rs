@@ -1299,6 +1299,11 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     };
     app.events = events.clone();
     app.set_color_mode(ipc::protocol::truecolor_supported());
+    // This process owns the terminal here, so measure cells once at startup the
+    // way an attaching client reports them after its handshake. Without this a
+    // local session that never resizes would split on the fallback aspect.
+    let (cell_width_px, cell_height_px) = ipc::protocol::local_cell_pixels();
+    app.set_client_cell_pixels(cell_width_px, cell_height_px);
     let pending = if app.config.theme == "terminal" {
         let probe = terminal::theme_probe::probe();
         if let Some(colors) = probe.colors.as_ref() {

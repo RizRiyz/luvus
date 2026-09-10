@@ -217,6 +217,8 @@ impl ClientSender {
 struct ClientState {
     sender: ClientSender,
     size: (u16, u16),
+    cell_width_px: u16,
+    cell_height_px: u16,
     terminal_colors: Option<crate::terminal::theme_probe::TerminalColors>,
     render_buf: Buffer,
     last_frame: Option<protocol::FrameData>,
@@ -240,6 +242,8 @@ impl ClientState {
         sender: ClientSender,
         cols: u16,
         rows: u16,
+        cell_width_px: u16,
+        cell_height_px: u16,
         terminal_colors: Option<crate::terminal::theme_probe::TerminalColors>,
         last_activity: u64,
     ) -> Self {
@@ -247,6 +251,8 @@ impl ClientState {
         Self {
             sender,
             size,
+            cell_width_px,
+            cell_height_px,
             terminal_colors,
             render_buf: Buffer::empty(Rect::new(0, 0, size.0, size.1)),
             last_frame: None,
@@ -551,7 +557,7 @@ pub fn run() -> Result<()> {
                     let _ = c.send_control(ServerMessage::Detach);
                 }
                 foreground = latest_client(&clients);
-                apply_foreground_theme(&mut app, &clients, foreground);
+                apply_foreground_client(&mut app, &clients, foreground);
                 render_request.record(RenderCause::UserInterface);
             }
         }
@@ -561,7 +567,7 @@ pub fn run() -> Result<()> {
                     let _ = client.send_control(ServerMessage::SwitchSession { name });
                 }
                 foreground = latest_client(&clients);
-                apply_foreground_theme(&mut app, &clients, foreground);
+                apply_foreground_client(&mut app, &clients, foreground);
                 render_request.record(RenderCause::UserInterface);
             } else {
                 app.show_toast("no attached client to switch".to_string());
@@ -711,12 +717,17 @@ fn apply(
                     },
                     cols,
                     rows,
+                    // The client reports cell pixels in a separate post-handshake
+                    // message; until it lands, auto-split uses the documented
+                    // fallback aspect.
+                    0,
+                    0,
                     terminal_colors,
                     activity,
                 ),
             );
             *foreground = Some(id);
-            apply_foreground_theme(app, clients, *foreground);
+            apply_foreground_client(app, clients, *foreground);
             app.mark_runtime_scans_dirty();
             true
         }
@@ -732,9 +743,26 @@ fn apply(
             clients.remove(&id);
             if was_foreground {
                 *foreground = latest_client(clients);
-                apply_foreground_theme(app, clients, *foreground);
+                apply_foreground_client(app, clients, *foreground);
             }
             was_foreground
+        }
+        AppEvent::ClientCellPixels {
+            id,
+            cell_width_px,
+            cell_height_px,
+        } => {
+            let Some(client) = clients.get_mut(&id) else {
+                return false;
+            };
+            client.cell_width_px = cell_width_px;
+            client.cell_height_px = cell_height_px;
+            // Passive metadata: only the interactive client's display may define
+            // the geometry shared state uses, and it never forces a repaint.
+            if *foreground == Some(id) {
+                app.set_client_cell_pixels(cell_width_px, cell_height_px);
+            }
+            false
         }
         AppEvent::ClientInput { id, input } => {
             let Some(client) = clients.get_mut(&id) else {
@@ -744,7 +772,13 @@ fn apply(
             client.last_activity = *next_activity;
             *next_activity = next_activity.saturating_add(1);
 
-            if let ClientInput::Resize(cols, rows) = input {
+            if let ClientInput::Resize {
+                cols,
+                rows,
+                cell_width_px,
+                cell_height_px,
+            } = input
+            {
                 crate::logging::event(
                     crate::logging::EventKind::ServerClientResize,
                     &[
@@ -754,6 +788,11 @@ fn apply(
                     ],
                 );
                 client.size = (cols.max(1), rows.max(1));
+                client.cell_width_px = cell_width_px;
+                client.cell_height_px = cell_height_px;
+                if *foreground == Some(id) {
+                    app.set_client_cell_pixels(cell_width_px, cell_height_px);
+                }
                 // Resize/focus repair is local to this terminal. Its next frame
                 // must be complete, but other clients keep their diff baselines.
                 client.force_full = true;
@@ -766,7 +805,7 @@ fn apply(
             let promoted = *foreground != Some(id);
             if promoted {
                 *foreground = Some(id);
-                apply_foreground_theme(app, clients, *foreground);
+                apply_foreground_client(app, clients, *foreground);
             }
             let target_size = clients.get(&id).map(|client| client.size);
             if promoted || target_size.is_some_and(|size| size != *interactive_size) {
@@ -777,7 +816,7 @@ fn apply(
                 if disconnected {
                     clients.remove(&id);
                     *foreground = latest_client(clients);
-                    apply_foreground_theme(app, clients, *foreground);
+                    apply_foreground_client(app, clients, *foreground);
                     discard_client_input(input);
                     return true;
                 }
@@ -791,7 +830,7 @@ fn apply(
                 ClientInput::Mouse(mouse) => AppEvent::Mouse(mouse),
                 ClientInput::Paste(text) => AppEvent::Paste(text),
                 ClientInput::PasteImage(path) => AppEvent::PasteImage(path),
-                ClientInput::Resize(..) => unreachable!("handled above"),
+                ClientInput::Resize { .. } => unreachable!("handled above"),
             };
             app.handle_event(event)
         }
@@ -818,14 +857,17 @@ fn latest_client(clients: &Clients) -> Option<u64> {
         .map(|(&id, _)| id)
 }
 
-fn apply_foreground_theme(app: &mut App, clients: &Clients, foreground: Option<u64>) {
+/// Adopt the foreground client's per-display state. Cell pixels drive automatic
+/// split geometry; the palette only matters for the `terminal` theme.
+fn apply_foreground_client(app: &mut App, clients: &Clients, foreground: Option<u64>) {
+    let Some(client) = foreground.and_then(|id| clients.get(&id)) else {
+        return;
+    };
+    app.set_client_cell_pixels(client.cell_width_px, client.cell_height_px);
     if app.config.theme != "terminal" {
         return;
     }
-    if let Some(colors) = foreground
-        .and_then(|id| clients.get(&id))
-        .and_then(|client| client.terminal_colors.as_ref())
-    {
+    if let Some(colors) = client.terminal_colors.as_ref() {
         app.apply_terminal_colors(colors);
     }
 }
@@ -846,9 +888,12 @@ fn event_render_source(app: &App, event: &AppEvent) -> EventRenderSource {
         AppEvent::PtyData(_) => EventRenderSource::HiddenPty,
         AppEvent::ClientConnected { .. }
         | AppEvent::ClientInput {
-            input: ClientInput::Resize(..),
+            input: ClientInput::Resize { .. },
             ..
         } => EventRenderSource::Cause(RenderCause::ClientAttachOrResize),
+        // Cell-size metadata changes future split geometry, never the current
+        // frame. `apply` reports no damage, so this never asks for a render.
+        AppEvent::ClientCellPixels { .. } => EventRenderSource::Cause(RenderCause::Metadata),
         AppEvent::Api(_) => EventRenderSource::Cause(RenderCause::ApiOrMaintenance),
         _ => EventRenderSource::Cause(RenderCause::UserInterface),
     }
@@ -898,7 +943,7 @@ fn render_clients(
     }
     if foreground.is_none_or(|id| !clients.contains_key(&id)) {
         *foreground = latest_client(clients);
-        apply_foreground_theme(app, clients, *foreground);
+        apply_foreground_client(app, clients, *foreground);
     }
 
     let retained_client_ready = foreground
@@ -954,7 +999,7 @@ fn render_clients(
     }
     if foreground.is_some_and(|id| !clients.contains_key(&id)) {
         *foreground = latest_client(clients);
-        apply_foreground_theme(app, clients, *foreground);
+        apply_foreground_client(app, clients, *foreground);
     }
     if partial_candidate {
         acknowledge_visible_terminal_damage(app, &mut scratch.damage);
@@ -1220,6 +1265,27 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
     let mut reader = BufReader::new(stream.clone());
     let mut writer = stream;
 
+    // Reject with a reason the user can act on. `Hello` keeps a frozen wire shape
+    // so every released client decodes here, but a corrupt or truly foreign frame
+    // still has to answer with the mismatch error rather than hanging up silently:
+    // the client turns a dropped socket into an opaque IO error.
+    let reject_version = |writer: &mut Conn, version: Option<u32>| {
+        crate::logging::event(
+            crate::logging::EventKind::ServerClientHandshakeRejected,
+            &[
+                crate::logging::Field::Reason(crate::logging::Reason::VersionMismatch),
+                crate::logging::Field::ProtocolVersion(u64::from(version.unwrap_or(0))),
+            ],
+        );
+        let _ = protocol::write_message(
+            writer,
+            &ServerMessage::Welcome {
+                version: protocol::PROTOCOL_VERSION,
+                error: Some("protocol version mismatch".into()),
+            },
+        );
+    };
+
     let (cols, rows) = match protocol::read_message::<_, ClientMessage>(&mut reader) {
         Ok(ClientMessage::Hello {
             version,
@@ -1227,25 +1293,19 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
             rows,
         }) => {
             if version != protocol::PROTOCOL_VERSION {
-                crate::logging::event(
-                    crate::logging::EventKind::ServerClientHandshakeRejected,
-                    &[
-                        crate::logging::Field::Reason(crate::logging::Reason::VersionMismatch),
-                        crate::logging::Field::ProtocolVersion(u64::from(version)),
-                    ],
-                );
-                let _ = protocol::write_message(
-                    &mut writer,
-                    &ServerMessage::Welcome {
-                        version: protocol::PROTOCOL_VERSION,
-                        error: Some("protocol version mismatch".into()),
-                    },
-                );
+                reject_version(&mut writer, Some(version));
                 return;
             }
             (cols, rows)
         }
-        _ => return,
+        Ok(_) => {
+            reject_version(&mut writer, None);
+            return;
+        }
+        Err(_) => {
+            reject_version(&mut writer, None);
+            return;
+        }
     };
 
     if protocol::write_message(
@@ -1375,11 +1435,36 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
                     break;
                 }
             }
-            Ok(ClientMessage::Resize { cols, rows }) => {
+            Ok(ClientMessage::Resize {
+                cols,
+                rows,
+                cell_width_px,
+                cell_height_px,
+            }) => {
                 if app_tx
                     .send(AppEvent::ClientInput {
                         id,
-                        input: ClientInput::Resize(cols, rows),
+                        input: ClientInput::Resize {
+                            cols,
+                            rows,
+                            cell_width_px,
+                            cell_height_px,
+                        },
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMessage::CellPixels {
+                cell_width_px,
+                cell_height_px,
+            }) => {
+                if app_tx
+                    .send(AppEvent::ClientCellPixels {
+                        id,
+                        cell_width_px,
+                        cell_height_px,
                     })
                     .is_err()
                 {
@@ -1592,9 +1677,9 @@ mod shutdown {
 mod tests {
     use super::ServerMessage;
     use super::{
-        apply, broadcast, frame_cadence_ready, frame_wait, record_event_render_request,
-        render_clients, ClientSender, ClientState, EventRenderSource, FrameSendError, RenderCause,
-        RenderRequest, RenderScratch, FRAME_INTERVAL,
+        apply, broadcast, frame_cadence_ready, frame_wait, handle_client,
+        record_event_render_request, render_clients, ClientSender, ClientState, EventRenderSource,
+        FrameSendError, RenderCause, RenderRequest, RenderScratch, FRAME_INTERVAL,
     };
     use crate::app::App;
     use crate::event::{AppEvent, ClientInput};
@@ -1607,6 +1692,57 @@ mod tests {
     use std::sync::mpsc;
     use std::sync::Arc;
     use std::time::Duration;
+
+    /// A client built before `Hello` carried anything but these three fields must
+    /// still receive the version-mismatch `Welcome`. If the server cannot decode
+    /// the frame it hangs up instead, and the client reports an opaque IO error
+    /// rather than telling the user to run `luvus server restart`.
+    #[test]
+    fn legacy_hello_still_gets_the_version_mismatch_reply() {
+        #[derive(serde::Serialize)]
+        enum LegacyClientMessage {
+            Hello { version: u32, cols: u16, rows: u16 },
+        }
+
+        let dir = std::env::temp_dir().join(format!("luvus-legacy-hello-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("s");
+        let _ = std::fs::remove_file(&sock);
+        let listener = crate::ipc::transport::bind(&sock).unwrap();
+
+        let server = std::thread::spawn(move || {
+            let conn = crate::ipc::transport::incoming(&listener).next().unwrap();
+            let (tx, _rx) = mpsc::channel();
+            handle_client(1, conn, tx, Arc::new(AtomicBool::new(false)));
+        });
+
+        let mut client = crate::ipc::transport::connect(&sock).unwrap();
+        // An older release announces protocol 6 with the frozen three-field shape.
+        crate::ipc::protocol::write_message(
+            &mut client,
+            &LegacyClientMessage::Hello {
+                version: 6,
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .unwrap();
+
+        let mut reader = std::io::BufReader::new(client);
+        let reply = crate::ipc::protocol::read_message::<_, ServerMessage>(&mut reader)
+            .expect("the server must answer instead of hanging up");
+        match reply {
+            ServerMessage::Welcome { version, error } => {
+                assert_eq!(version, crate::ipc::protocol::PROTOCOL_VERSION);
+                assert_eq!(error.as_deref(), Some("protocol version mismatch"));
+            }
+            _ => panic!("expected a Welcome carrying the mismatch error"),
+        }
+
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&sock);
+        let _ = std::fs::remove_dir(&dir);
+    }
 
     fn display_client(
         cols: u16,
@@ -1622,6 +1758,8 @@ mod tests {
                 },
                 cols,
                 rows,
+                0,
+                0,
                 None,
                 activity,
             ),
@@ -1923,6 +2061,8 @@ mod tests {
             },
             120,
             32,
+            0,
+            0,
             None,
             1,
         );
@@ -2077,7 +2217,12 @@ mod tests {
         assert!(apply(
             AppEvent::ClientInput {
                 id: 2,
-                input: ClientInput::Resize(46, 16),
+                input: ClientInput::Resize {
+                    cols: 46,
+                    rows: 16,
+                    cell_width_px: 0,
+                    cell_height_px: 0,
+                },
             },
             &mut app,
             &mut clients,
