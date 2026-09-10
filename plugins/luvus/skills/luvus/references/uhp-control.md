@@ -74,9 +74,11 @@ Use this order for a stateful harness:
 
 Snapshot terminal rows carry `pane_id` and nullable `agent_name`, the operator
 alias only; backend titles do not override it. Native view rows omit the field.
-Use the ID for routing and the alias for display. Alias changes do not emit an
-event or advance `event_sequence`, so refresh snapshots rather than treating
-the sequence as an alias ETag. Older servers may omit the field.
+Use the ID for routing and the alias for display. `agent.name` changes aliases
+without emitting an event or advancing `event_sequence`. `pane.rename` updates
+the same map, emits `pane.renamed`, and advances `event_sequence`, including when
+clearing a name. Refresh snapshots to read aliases; the sequence is not an alias
+ETag because `agent.name` is silent. Older servers may omit the field.
 
 Use `events.wait` for one bounded semantic condition. Use `events.subscribe`
 only when the user asked for continuous monitoring or a harness genuinely needs

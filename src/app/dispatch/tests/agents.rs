@@ -1249,6 +1249,61 @@ fn snapshot_preserves_agent_alias_across_inactive_tabs() {
 }
 
 #[test]
+fn snapshot_alias_events_follow_the_naming_mutator() {
+    let _env = crate::persist::test_env("snapshot-alias-mutators");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus.0.to_string();
+    for (method, params, alias, emits_event) in [
+        (
+            "agent.name",
+            json!({"pane":pane,"name":"agent-alias"}),
+            json!("agent-alias"),
+            false,
+        ),
+        (
+            "agent.name",
+            json!({"pane":pane,"clear":true}),
+            Value::Null,
+            false,
+        ),
+        (
+            "pane.rename",
+            json!({"pane":pane,"name":"pane-alias"}),
+            json!("pane-alias"),
+            true,
+        ),
+        (
+            "pane.rename",
+            json!({"pane":pane,"name":""}),
+            Value::Null,
+            true,
+        ),
+    ] {
+        let before = app.runtime_snapshot()["event_sequence"].as_u64().unwrap();
+        app.dispatch(method, &params).unwrap();
+        let snapshot = app.dispatch("session.snapshot", &json!({})).unwrap();
+        let row = &snapshot["workspaces"][0]["tabs"][0]["panes"][0];
+        assert_eq!(row["pane_id"], pane);
+        assert_eq!(row.get("agent_name"), Some(&alias), "{method}: {params}");
+        let events = crate::ipc::api::replayed_events_after(&app.events, before);
+        if emits_event {
+            assert_eq!(snapshot["event_sequence"], before + 1);
+            assert_eq!(
+                events,
+                vec![json!({
+                    "event":"pane.renamed", "sequence":before + 1,
+                    "data":{"pane":pane,"name":alias}
+                })]
+            );
+        } else {
+            assert_eq!(snapshot["event_sequence"], before);
+            assert!(events.is_empty(), "{method}: {params}");
+        }
+    }
+}
+
+#[test]
 /// Names belong only to terminal rows; empty sessions stay valid.
 fn snapshot_alias_excludes_native_views_and_handles_no_workspace() {
     let _env = crate::persist::test_env("snapshot-alias-views");
