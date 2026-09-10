@@ -856,9 +856,38 @@ impl App {
             .retain(|(theme_id, _)| theme_id != id);
         self.pending_theme_uninstalls
             .insert(id.to_string(), restore);
+        self.show_toast(self.catalog.settings.theme_removing.replace("{id}", id));
+        self.deferred_theme_uninstalls.push(id.to_string());
+        self.flush_theme_uninstalls(true);
+    }
+
+    /// Saving and removing use separate workers. Do not let removal observe the
+    /// previous active theme on disk while the fallback save is still in flight.
+    pub(super) fn flush_theme_uninstalls(&mut self, saved: bool) -> bool {
+        if saved && self.config_save_pending() {
+            return false;
+        }
+        let changed = !self.deferred_theme_uninstalls.is_empty();
+        for id in std::mem::take(&mut self.deferred_theme_uninstalls) {
+            if !saved {
+                self.finish_theme_uninstall(
+                    id,
+                    Err("settings save failed; theme was not removed".into()),
+                );
+            } else if theme::canonical(&self.config.theme) == id {
+                self.finish_theme_uninstall(
+                    id,
+                    Err("theme is active again; removal cancelled".into()),
+                );
+            } else {
+                self.start_theme_uninstall(id);
+            }
+        }
+        changed
+    }
+
+    fn start_theme_uninstall(&self, id: String) {
         let tx = self.app_tx.clone();
-        let id = id.to_string();
-        self.show_toast(self.catalog.settings.theme_removing.replace("{id}", &id));
         std::thread::spawn(move || {
             let result = crate::theme::install::uninstall(&id)
                 .map(|_| crate::theme::ThemeRegistry::load())
@@ -2366,6 +2395,8 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut app = crate::app::App::new(80, 24, tx).unwrap();
         app.apply_theme("custom-enter");
+        app.flush_config_for_test(&rx);
+        assert_eq!(crate::config::load().theme, "custom-enter");
         app.open_settings();
         app.settings_set_tab(SettingsTab::Theme);
         let index = app.theme_registry.index_of("custom-enter").unwrap();
@@ -2375,6 +2406,7 @@ mod tests {
 
         assert_eq!(app.config.theme, theme::THEMES[0]);
         assert!(app.theme_uninstall_pending("custom-enter"));
+        assert_eq!(app.deferred_theme_uninstalls, vec!["custom-enter"]);
         let event = loop {
             match rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap() {
                 event @ crate::event::AppEvent::ThemeUninstalled { .. } => break event,
@@ -2385,6 +2417,43 @@ mod tests {
         };
         app.handle_event(event);
         assert!(app.theme_registry.get("custom-enter").is_none());
+    }
+
+    #[test]
+    fn theme_removal_save_failure_keeps_the_file_and_restores_selection() {
+        let _env = crate::persist::test_env("theme-remove-save-failure");
+        let source = crate::persist::ensure_config_dir().join("custom-save-failure.toml");
+        crate::theme::install::init(&source, "custom-save-failure", None).unwrap();
+        let installed = crate::theme::install::install(source.to_str().unwrap(), true).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        app.apply_theme("custom-save-failure");
+        app.flush_config_for_test(&rx);
+        app.request_theme_uninstall("custom-save-failure");
+        app.flush_theme_uninstalls(false);
+        assert!(installed.path.exists());
+        assert!(!app.theme_uninstall_pending("custom-save-failure"));
+        assert!(app.deferred_theme_uninstalls.is_empty());
+        assert_eq!(app.config.theme, "custom-save-failure");
+        app.flush_config_for_test(&rx);
+    }
+
+    #[test]
+    fn theme_removal_cancels_when_reselected_before_save_completes() {
+        let _env = crate::persist::test_env("theme-remove-reselected");
+        let source = crate::persist::ensure_config_dir().join("custom-reselected.toml");
+        crate::theme::install::init(&source, "custom-reselected", None).unwrap();
+        let installed = crate::theme::install::install(source.to_str().unwrap(), true).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        app.apply_theme("custom-reselected");
+        app.flush_config_for_test(&rx);
+        app.request_theme_uninstall("custom-reselected");
+        app.apply_theme("custom-reselected");
+        app.flush_config_for_test(&rx);
+        assert!(installed.path.exists());
+        assert!(!app.theme_uninstall_pending("custom-reselected"));
+        assert_eq!(app.config.theme, "custom-reselected");
     }
 
     #[test]
