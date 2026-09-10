@@ -44,7 +44,7 @@ fn list(params: &Value) -> Result<Value> {
     Ok(
         json!({"type":"machine_list","revision":loaded.catalog.revision,
         "machines":loaded.catalog.machines.iter().map(project).collect::<Vec<_>>(),
-        "warnings":loaded.warnings}),
+        "warnings":public_warnings(&loaded.warnings)}),
     )
 }
 
@@ -54,7 +54,25 @@ fn get(params: &Value) -> Result<Value> {
     catalog::validate_id(id)?;
     let loaded = catalog::load()?;
     Ok(json!({"type":"machine","revision":loaded.catalog.revision,
-        "machine":project(find(&loaded.catalog, id)?),"warnings":loaded.warnings}))
+        "machine":project(find(&loaded.catalog, id)?),"warnings":public_warnings(&loaded.warnings)}))
+}
+
+fn public_warnings(warnings: &[String]) -> Vec<&'static str> {
+    if warnings.is_empty() {
+        Vec::new()
+    } else {
+        vec!["catalog_entries_invalid"]
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn catalog_warning_projection_never_exposes_owner_details() {
+    assert!(public_warnings(&[]).is_empty());
+    assert_eq!(
+        public_warnings(&["private-user@host /private/catalog.json".into()]),
+        vec!["catalog_entries_invalid"]
+    );
 }
 
 fn status(params: &Value) -> Result<Value> {
@@ -112,6 +130,7 @@ fn add(params: &Value) -> Result<Value> {
     if current.machines.iter().any(|machine| machine.id == id) {
         return Err(anyhow!("machine `{id}` already exists"));
     }
+    catalog::preflight_profile(&current, &profile)?;
     let probe = if profile.enabled {
         let probe = super::ssh::prepare_or_provision(&profile, false)?;
         profile.remote_binary = Some(probe.remote_binary.clone());
@@ -150,7 +169,10 @@ fn set_enabled(params: &Value, enabled: bool) -> Result<Value> {
     let expected = required_revision(params)?;
     let prepared = if enabled {
         let current = catalog::preflight_mutation(Some(expected))?;
-        Some(super::ssh::prepare_or_provision(find(&current, id)?, false)?.remote_binary)
+        let mut profile = find(&current, id)?.clone();
+        profile.enabled = true;
+        catalog::preflight_profile(&current, &profile)?;
+        Some(super::ssh::prepare_or_provision(&profile, false)?.remote_binary)
     } else {
         None
     };

@@ -337,9 +337,16 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) -> Result<()> {
         let params = value.get("params").cloned().unwrap_or_else(|| json!({}));
         let response = match crate::machine::api::dispatch(&method, &params) {
             Ok(result) => json!({"id":id,"result":result}),
-            Err(error) => json!({"id":id,"error":{
-                "code":"invalid_request","message":error.to_string()
-            }}),
+            Err(error) => {
+                let conflict = error
+                    .to_string()
+                    .starts_with("machine catalog revision conflict:");
+                json!({"id":id,"error":{
+                    "code":if conflict {"revision_conflict"} else {"invalid_request"},
+                    "message":if conflict {"Machine catalog revision conflict; refresh and retry."}
+                        else {"Machine operation failed; inspect the owner-local machine catalog or CLI status."}
+                }})
+            }
         };
         writeln!(stream, "{}", serde_json::to_string(&response)?)?;
         stream.flush()?;
@@ -468,6 +475,18 @@ fn project_access_capabilities_with_machines(
         .filter(|method| advertised.contains(method) && allowed_method(mode, method))
         .collect();
     if machine_access {
+        if mode == AccessMode::Control {
+            if let Some(scopes) = result
+                .get_mut("authorization")
+                .and_then(|auth| auth.get_mut("scopes"))
+            {
+                if let Some(scopes) = scopes.as_array_mut() {
+                    if !scopes.iter().any(|scope| scope == "machine") {
+                        scopes.push(json!("machine"));
+                    }
+                }
+            }
+        }
         let mut machine_methods = crate::machine::api::READ_METHODS.to_vec();
         if mode == AccessMode::Control {
             machine_methods.extend(crate::machine::api::CONTROL_METHODS);
@@ -1692,6 +1711,16 @@ mod tests {
         )
         .unwrap();
         let projected: Value = serde_json::from_str(&projected).unwrap();
+        assert!(projected["result"]["authorization"]["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scope| scope == "machine"));
+        assert!(!owner["result"]["authorization"]["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scope| scope == "machine"));
         assert!(projected["result"]["methods"]
             .as_array()
             .unwrap()
@@ -1747,6 +1776,15 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("revision conflict"));
+        let private = exchange(
+            gateway.address(),
+            &json!({
+                "id":"private","method":"machine.get",
+                "params":{"id":"/private/secret-host"},"auth":token
+            }),
+        );
+        assert_eq!(private["error"]["code"], "invalid_request");
+        assert!(!private.to_string().contains("secret-host"));
         gateway.stop();
     }
 

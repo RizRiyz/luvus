@@ -356,15 +356,15 @@ where
                 // The server retains the source for transactional clients.
                 // This legacy direct-attach path explicitly releases it before
                 // handing off to another client process.
-                if let Some(writer) = input
+                let retired = input
                     .route
                     .writer
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .active
-                    .as_mut()
-                {
-                    let _ = protocol::write_message(writer, &ClientMessage::Detach);
+                    .take();
+                if let Some(mut writer) = retired {
+                    let _ = protocol::write_message(&mut writer, &ClientMessage::Detach);
                 }
                 break ClientExit::SwitchSession(name);
             }

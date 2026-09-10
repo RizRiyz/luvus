@@ -34,6 +34,7 @@ pub(crate) fn add_profile(
     profile.label = label.trim().to_string();
     profile.preferred_session = preferred_session;
     profile.automatic_provisioning = allow_install;
+    catalog::preflight_profile(&current, &profile)?;
     let prepared = ssh::prepare_or_provision(&profile, allow_install)?;
     profile.remote_binary = Some(prepared.remote_binary);
     let expected_revision = current.revision;
@@ -62,6 +63,8 @@ pub(crate) fn enable_profile(id: &str, approved: bool) -> anyhow::Result<catalog
         .find(|profile| profile.id == id)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("saved machine was removed"))?;
+    profile.enabled = true;
+    catalog::preflight_profile(&current, &profile)?;
     let probe = ssh::prepare_or_provision(&profile, approved)?;
     if profile.remote_binary.is_none() && approved {
         profile.automatic_provisioning = true;

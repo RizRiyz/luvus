@@ -15,7 +15,6 @@ const MAX_ID_BYTES: usize = 48;
 const MAX_LABEL_CHARS: usize = 64;
 const MAX_DESTINATION_BYTES: usize = 255;
 const MAX_REMOTE_BINARY_BYTES: usize = 1024;
-pub(crate) const MAX_SESSIONS_PER_MACHINE: usize = 16;
 pub(crate) const MAX_ENABLED_ENDPOINTS: usize = 16;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -103,17 +102,8 @@ impl MachineProfile {
         if let Some(session) = self.preferred_session.as_deref() {
             crate::session::validate_name(session).map_err(anyhow::Error::msg)?;
         }
-        if self.sessions.len() > MAX_SESSIONS_PER_MACHINE {
-            return Err(anyhow!(
-                "a machine may save at most {MAX_SESSIONS_PER_MACHINE} sessions"
-            ));
-        }
-        for (index, session) in self.sessions.iter().enumerate() {
-            crate::session::validate_name(session).map_err(anyhow::Error::msg)?;
-            if self.sessions[..index].contains(session) {
-                return Err(anyhow!("duplicate machine session `{session}`"));
-            }
-        }
+        // Legacy session lists are bounded by the catalog byte limit and are
+        // never used for routing. Do not let obsolete values block migration.
         Ok(())
     }
 
@@ -300,6 +290,22 @@ pub(crate) fn preflight_mutation(expected_revision: Option<u64>) -> Result<Catal
     checked_for_mutation(load()?, expected_revision)
 }
 
+/// Check the proposed state before any remote side effects. The final write
+/// must still fence the revision because network work runs without this lock.
+pub(crate) fn preflight_profile(current: &Catalog, profile: &MachineProfile) -> Result<()> {
+    let mut proposed = current.clone();
+    if let Some(saved) = proposed
+        .machines
+        .iter_mut()
+        .find(|saved| saved.id == profile.id)
+    {
+        *saved = profile.clone();
+    } else {
+        proposed.machines.push(profile.clone());
+    }
+    validate_catalog(&proposed)
+}
+
 fn checked_for_mutation(loaded: LoadedCatalog, expected_revision: Option<u64>) -> Result<Catalog> {
     if !loaded.warnings.is_empty() {
         return Err(anyhow!(
@@ -463,6 +469,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn proposed_enabled_profile_is_rejected_before_preparation() {
+        let current = Catalog {
+            machines: (0..MAX_ENABLED_ENDPOINTS)
+                .map(|n| MachineProfile::new(format!("box-{n}"), format!("box-{n}")))
+                .collect(),
+            ..Catalog::default()
+        };
+        let mut extra = MachineProfile::new("extra".into(), "extra".into());
+        assert!(preflight_profile(&current, &extra).is_err());
+        extra.enabled = false;
+        assert!(preflight_profile(&current, &extra).is_ok());
+        let mut full = current.clone();
+        full.machines.push(extra.clone());
+        extra.enabled = true;
+        assert!(preflight_profile(&full, &extra).is_err());
+    }
+
+    #[test]
     fn label_changes_preserve_transport_identity() {
         let profile = MachineProfile::new("build".into(), "build-host".into());
         let mut renamed = profile.clone();
@@ -577,7 +601,10 @@ mod tests {
         assert!(machine.validate().is_ok());
 
         machine.sessions.push("release".into());
-        assert!(machine.validate().is_err());
+        machine
+            .sessions
+            .extend((0..100).map(|_| "obsolete invalid/name".into()));
+        assert!(machine.validate().is_ok());
 
         let catalog = Catalog {
             machines: (0..=MAX_ENABLED_ENDPOINTS)

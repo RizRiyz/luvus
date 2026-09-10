@@ -731,6 +731,12 @@ def main():
     manifest = json.loads((PACKAGE / "fixtures" / "manifest.json").read_text())
     assert manifest["protocol"] == {"name": "luvus-uhp", "major": 1, "minor": 0}
     request_schema = json.loads((PACKAGE / "schema" / "request.schema.json").read_text())
+    machine_id = request_schema["$defs"]["machineIdParams"]
+    machine_mutation = request_schema["$defs"]["machineMutationParams"]
+    assert set(machine_id["required"]) == {"id"}
+    assert set(machine_mutation["required"]) == {"id", "if_revision"}
+    for shape in (machine_id, machine_mutation):
+        assert set(shape["required"]) <= set(shape["properties"])
     methods = set(request_schema["properties"]["method"]["enum"])
     checked = 0
     for entry in manifest["files"]:

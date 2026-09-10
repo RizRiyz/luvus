@@ -272,6 +272,18 @@ Windows saved-machine compilation and focused CI coverage are included; real
 Windows-to-remote and Windows SSH-host lifecycle validation is still required
 before claiming the same runtime verification as macOS-to-Linux.
 
+FreeBSD amd64 currently has native build and portable-contract CI coverage,
+not full runtime support. Process inspection and PTY lifecycle tests still
+need platform work; published FreeBSD artifacts and automatic provisioning
+are not provided by this feature.
+
+Catalog limits are checked before preparation, and a revision fence rejects
+concurrent changes before saving. Remote installation and the local catalog
+are not a distributed transaction: if saving fails after an approved install,
+the verified remote binary may remain. Luvus does not delete it automatically
+because another client may already be using it. Refresh the catalog and retry
+setup using the existing compatible installation.
+
 ## Client-owned sidebars
 
 Both sidebars follow the client window across Local, remote workspaces, and

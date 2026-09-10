@@ -89,6 +89,7 @@ fn add(args: &[String]) -> Result<i32> {
     if current.machines.iter().any(|machine| machine.id == id) {
         return Err(anyhow!("machine `{id}` already exists"));
     }
+    catalog::preflight_profile(&current, &profile)?;
 
     let probe = if profile.enabled {
         let result = prepare_foreground(&mut profile, flag(args, "--install"))?;
@@ -97,7 +98,7 @@ fn add(args: &[String]) -> Result<i32> {
     } else {
         None
     };
-    let (_, catalog) = catalog::mutate(expected, |catalog| {
+    let (_, catalog) = catalog::mutate(Some(current.revision), |catalog| {
         if catalog.machines.iter().any(|machine| machine.id == id) {
             return Err(anyhow!("machine `{id}` already exists"));
         }
@@ -139,16 +140,20 @@ fn set_enabled(args: &[String], enabled: bool) -> Result<i32> {
     catalog::validate_id(id)?;
     let expected = revision(args)?;
     let mut prepared = None;
+    let mut fence = expected;
     if enabled {
         let current = catalog::preflight_mutation(expected)?;
+        fence = Some(current.revision);
         let mut profile = find(&current, id)?.clone();
+        profile.enabled = true;
+        catalog::preflight_profile(&current, &profile)?;
         if flag(args, "--install") && profile.remote_binary.is_none() {
             profile.automatic_provisioning = true;
         }
         let result = prepare_foreground(&mut profile, flag(args, "--install"))?;
         prepared = Some((result.remote_binary, profile.automatic_provisioning));
     }
-    let (_, catalog) = catalog::mutate(expected, |catalog| {
+    let (_, catalog) = catalog::mutate(fence, |catalog| {
         let profile = find_mut(catalog, id)?;
         profile.enabled = enabled;
         profile.connection_policy = if enabled {

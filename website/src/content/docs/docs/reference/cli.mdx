@@ -14,6 +14,12 @@ a trailing `--help`. Pass-through commands preserve that flag as payload, so
 use the explicit `luvus help` form for them. Help writes to stdout, while
 invalid usage writes to stderr.
 
+For `machine add` and `machine enable`, remote validation does not authorize
+installation. Provisioning requires `--install` or an explicit Yes at the
+interactive permission prompt; its default is No. Non-interactive callers
+must supply `--install` when installation is needed. Existing explicit binary
+paths are never replaced. See [Multiple Machines](/docs/guides/machines/).
+
 ## Language and stable automation
 
 Human CLI information follows the language selected in **Settings → Language**.

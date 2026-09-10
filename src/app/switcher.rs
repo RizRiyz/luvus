@@ -198,7 +198,7 @@ impl App {
             // Keep the established desktop action here. Mobile groups common
             // phone-safe actions in its dedicated Actions section below.
             if query.is_empty() && !self.compact {
-                if self.client_shell_dock_rows > 0 {
+                if self.client_machine_capable {
                     rows.push(SwitcherRow::Action {
                         target: SwitcherTarget::Machines,
                         label: self.catalog.machines.to_string(),
@@ -219,7 +219,7 @@ impl App {
         }
         if self.compact && scope == SwitcherScope::All && query.is_empty() {
             rows.push(SwitcherRow::Header(self.catalog.mobile_actions.to_string()));
-            if self.client_shell_dock_rows > 0 {
+            if self.client_machine_capable {
                 rows.push(SwitcherRow::Action {
                     target: SwitcherTarget::Machines,
                     label: self.catalog.machines.to_string(),
@@ -856,7 +856,8 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(60, 24, tx).unwrap();
         app.compact = true;
-        app.client_shell_dock_rows = 3;
+        app.client_machine_capable = true;
+        assert_eq!(app.client_shell_dock_rows, 0);
         let target = app
             .switcher_rows()
             .into_iter()
@@ -877,7 +878,8 @@ mod tests {
         let _env = crate::persist::test_env("switcher-machines-fallback");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(100, 30, tx).unwrap();
-        app.client_shell_dock_rows = 4;
+        app.client_machine_capable = true;
+        assert_eq!(app.client_shell_dock_rows, 0);
         assert!(app.switcher_rows().into_iter().any(|row| matches!(
             row,
             SwitcherRow::Action {

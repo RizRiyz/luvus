@@ -42,11 +42,11 @@
   "$defs": {
     "emptyParams": { "type": "object", "additionalProperties": false, "maxProperties": 0 },
     "machineIdParams": {
-      "type": "object", "additionalProperties": false, "required": ["id", "if_revision"],
+      "type": "object", "additionalProperties": false, "required": ["id"],
       "properties": { "id": { "type": "string", "minLength": 1, "maxLength": 48, "pattern": "^[a-z0-9][a-z0-9._-]*$" } }
     },
     "machineMutationParams": {
-      "type": "object", "additionalProperties": false, "required": ["id"],
+      "type": "object", "additionalProperties": false, "required": ["id", "if_revision"],
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 48, "pattern": "^[a-z0-9][a-z0-9._-]*$" },
         "if_revision": { "type": "integer", "minimum": 0 }
