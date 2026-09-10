@@ -280,8 +280,32 @@ Catalog limits are checked before preparation, and a revision fence rejects
 concurrent changes before saving. Remote installation and the local catalog
 are not a distributed transaction: if saving fails after an approved install,
 the verified remote binary may remain. Luvus does not delete it automatically
-because another client may already be using it. Refresh the catalog and retry
-setup using the existing compatible installation.
+because another client may already be using it.
+
+Before an approved installation starts, Luvus writes an owner-local receipt to
+`machine-preparations.json`, next to `machines.json`. The receipt records the
+operation, intended profile, version, and protocol. The returned binary path
+is saved before verification and the catalog commit. A missing path means the
+installation result is unknown, not that the host was unchanged.
+
+If setup fails after installation:
+
+1. Run `luvus machine list` and inspect `preparations`. This owner-local field
+   is not exposed through UHP or the remote display protocol.
+2. Compare the receipt's destination and binary path with the current profile.
+   Retry a new profile with `machine add <id> --host <host> --remote-binary <path>`,
+   or retry `machine enable <id>` for an existing profile. Resolve any conflicting
+   profile change first; Luvus never overwrites it automatically.
+3. A matching saved profile reconciles the receipt without deleting remote files.
+   If the result was unknown, verify the remote installation manually before
+   removing that operation from the journal. Back up the journal and edit it only
+   when no installation is running.
+
+Receipts survive process exits and installation failures. Successful commits
+clear their matching receipt; a later preparation also reconciles receipts left
+after a crash. At most 64 unreconciled receipts and 256 KiB are retained. A full,
+invalid, or unwritable journal blocks new installations before remote changes.
+Recovery never starts in the background or reuses an earlier installation approval.
 
 ## Client-owned sidebars
 

@@ -25,6 +25,16 @@ pub(super) struct ProbeResult {
     pub os: String,
     pub arch: String,
     pub remote_binary: String,
+    #[serde(skip)]
+    recovery: Option<String>,
+}
+
+impl ProbeResult {
+    pub(super) fn committed(&self) {
+        if let Some(operation) = &self.recovery {
+            let _ = super::recovery::finish(operation);
+        }
+    }
 }
 
 pub(crate) fn prepare(profile: &MachineProfile) -> Result<ProbeResult> {
@@ -92,6 +102,7 @@ fn verified_probe(
         os: response.os,
         arch: response.arch,
         remote_binary: response.binary,
+        recovery: None,
     })
 }
 
@@ -117,14 +128,18 @@ pub(crate) fn prepare_or_provision(
         Ok(probe) => Ok(probe),
         Err(initial) if !provision_allowed(profile, approved) => Err(initial),
         Err(initial) => {
-            let binary = super::provision::install(&profile.destination).map_err(|provision| {
+            let (binary, operation) = super::recovery::install(profile, || super::provision::install(&profile.destination)).map_err(|provision| {
                 anyhow!(
                     "remote preparation failed: {initial}; automatic provisioning failed: {provision}"
                 )
             })?;
             let mut provisioned = profile.clone();
             provisioned.remote_binary = Some(binary);
-            prepare(&provisioned)
+            let mut probe = prepare(&provisioned).context(
+                "installation receipt retained; inspect `luvus machine list` before retrying",
+            )?;
+            probe.recovery = Some(operation);
+            Ok(probe)
         }
     }
 }

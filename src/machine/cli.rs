@@ -38,6 +38,7 @@ fn list() -> Result<i32> {
             "revision": loaded.catalog.revision,
             "machines": loaded.catalog.machines,
             "warnings": loaded.warnings,
+            "preparations": super::recovery::pending()?,
         }))?
     );
     Ok(0)
@@ -111,6 +112,9 @@ fn add(args: &[String]) -> Result<i32> {
             None => error,
         },
     )?;
+    if let Some(probe) = &probe {
+        probe.committed();
+    }
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
@@ -146,6 +150,7 @@ fn set_enabled(args: &[String], enabled: bool) -> Result<i32> {
     catalog::validate_id(id)?;
     let expected = revision(args)?;
     let mut prepared = None;
+    let mut preparation = None;
     let mut fence = expected;
     if enabled {
         let current = catalog::preflight_mutation(expected)?;
@@ -157,7 +162,8 @@ fn set_enabled(args: &[String], enabled: bool) -> Result<i32> {
             profile.automatic_provisioning = true;
         }
         let result = prepare_foreground(&mut profile, flag(args, "--install"))?;
-        prepared = Some((result.remote_binary, profile.automatic_provisioning));
+        prepared = Some((result.remote_binary.clone(), profile.automatic_provisioning));
+        preparation = Some(result);
     }
     let prepared_binary = prepared.as_ref().map(|(binary, _)| binary.clone());
     let (_, catalog) = catalog::mutate(fence, |catalog| {
@@ -178,6 +184,9 @@ fn set_enabled(args: &[String], enabled: bool) -> Result<i32> {
         Some(binary) => catalog::prepared_commit_error(error, binary),
         None => error,
     })?;
+    if let Some(probe) = preparation {
+        probe.committed();
+    }
     print_mutation(&catalog, id)
 }
 

@@ -140,7 +140,7 @@ pub(crate) struct LoadedCatalog {
     pub warnings: Vec<String>,
 }
 
-struct CatalogLock {
+pub(super) struct CatalogLock {
     _file: File,
 }
 
@@ -148,7 +148,7 @@ pub(crate) fn path() -> PathBuf {
     crate::persist::config_dir().join("machines.json")
 }
 
-fn acquire_lock() -> Result<CatalogLock> {
+pub(super) fn acquire_lock() -> Result<CatalogLock> {
     let root = crate::persist::ensure_config_dir();
     let path = root.join("machines.lock");
     let file = OpenOptions::new()
@@ -309,7 +309,7 @@ pub(crate) fn preflight_profile(current: &Catalog, profile: &MachineProfile) -> 
 /// Owner-local recovery information only; UHP projects errors separately.
 pub(crate) fn prepared_commit_error(error: anyhow::Error, binary: &str) -> anyhow::Error {
     error.context(format!(
-        "Remote preparation succeeded, but the machine catalog was not saved. The verified binary at `{binary}` may remain in use; it was not deleted or rolled back. Refresh `luvus machine list` and retry setup using that existing binary (--remote-binary for a new profile)."
+        "Remote preparation succeeded, but the machine catalog was not saved. The verified binary at `{binary}` may remain in use; it was not deleted or rolled back. Inspect the preparations in `luvus machine list` for durable approved-installation receipts, then retry setup using that existing binary (--remote-binary for a new profile)."
     ))
 }
 
@@ -361,11 +361,14 @@ fn validate_catalog(catalog: &Catalog) -> Result<()> {
 
 fn save(catalog: &Catalog) -> Result<()> {
     let path = path();
+    write_private_json(&path, &serde_json::to_vec_pretty(catalog)?)
+}
+
+pub(super) fn write_private_json(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("machine catalog has no parent directory"))?;
     fs::create_dir_all(parent)?;
-    let bytes = serde_json::to_vec_pretty(catalog)?;
     if bytes.len() as u64 > MAX_CATALOG_BYTES {
         return Err(anyhow!("machine catalog exceeds its size limit"));
     }
@@ -390,11 +393,11 @@ fn save(catalog: &Catalog) -> Result<()> {
         .transpose()?
         .ok_or_else(|| anyhow!("could not reserve a machine catalog temporary file"))?;
     let result = (|| -> Result<()> {
-        file.write_all(&bytes)?;
+        file.write_all(bytes)?;
         file.flush()?;
         file.sync_all()?;
         drop(file);
-        crate::platform::atomic_replace_file(&temporary, &path)?;
+        crate::platform::atomic_replace_file(&temporary, path)?;
         #[cfg(unix)]
         File::open(parent)?.sync_all()?;
         Ok(())

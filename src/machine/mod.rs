@@ -10,6 +10,7 @@ mod cli;
 pub(crate) mod command;
 pub(crate) mod link;
 mod provision;
+mod recovery;
 mod ssh;
 
 pub(crate) use cli::run as run_cli;
@@ -37,7 +38,7 @@ pub(crate) fn add_profile(
     profile.automatic_provisioning = allow_install;
     catalog::preflight_profile(&current, &profile)?;
     let prepared = ssh::prepare_or_provision(&profile, allow_install)?;
-    profile.remote_binary = Some(prepared.remote_binary);
+    profile.remote_binary = Some(prepared.remote_binary.clone());
     let expected_revision = current.revision;
     let (_, catalog) = catalog::mutate(Some(expected_revision), |catalog| {
         if catalog.machines.iter().any(|machine| machine.id == id) {
@@ -49,6 +50,7 @@ pub(crate) fn add_profile(
     .map_err(|error| {
         catalog::prepared_commit_error(error, profile.remote_binary.as_deref().unwrap_or_default())
     })?;
+    prepared.committed();
     catalog
         .machines
         .into_iter()
@@ -73,7 +75,7 @@ pub(crate) fn enable_profile(id: &str, approved: bool) -> anyhow::Result<catalog
     if profile.remote_binary.is_none() && approved {
         profile.automatic_provisioning = true;
     }
-    profile.remote_binary = Some(probe.remote_binary);
+    profile.remote_binary = Some(probe.remote_binary.clone());
     profile.enabled = true;
     profile.connection_policy = catalog::ConnectionPolicy::PersistentWhileOpen;
     catalog::mutate(Some(current.revision), |catalog| {
@@ -88,6 +90,7 @@ pub(crate) fn enable_profile(id: &str, approved: bool) -> anyhow::Result<catalog
     .map_err(|error| {
         catalog::prepared_commit_error(error, profile.remote_binary.as_deref().unwrap_or_default())
     })?;
+    probe.committed();
     Ok(profile)
 }
 
