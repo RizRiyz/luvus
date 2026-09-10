@@ -4801,12 +4801,18 @@ impl App {
         let _ = self.split_pane(pane, axis, true);
     }
 
+    /// Has an interactive client painted a usable pane area yet? Automatic splits
+    /// only trust reported cell geometry once one has; before that the square
+    /// logical area keeps the historical left/right default.
+    fn has_painted_area(&self) -> bool {
+        self.last_pane_area.width > 1 && self.last_pane_area.height > 1
+    }
+
     /// Geometry used when choosing an automatic split. Prefer the last rendered
     /// pane area so a live client decides; fall back to the square logical area
-    /// used by headless topology queries, which keeps the historical left/right
-    /// default when no client has painted yet.
+    /// used by headless topology queries.
     fn split_area(&self) -> Rect {
-        if self.last_pane_area.width > 1 && self.last_pane_area.height > 1 {
+        if self.has_painted_area() {
             self.last_pane_area
         } else {
             crate::api::topology::logical_area()
@@ -4831,7 +4837,7 @@ impl App {
     /// documented 2:1 fallback. The square logical area used before any client
     /// has painted keeps the historical left/right split.
     fn auto_split_axis_for(&self, pane: PaneId) -> Axis {
-        let painted = self.last_pane_area.width > 1 && self.last_pane_area.height > 1;
+        let painted = self.has_painted_area();
         let area = self.split_area();
         let rect = self
             .pane_location(pane)

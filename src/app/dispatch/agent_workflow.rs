@@ -343,7 +343,7 @@ impl App {
         };
         if !matches!(
             p.get("direction").and_then(Value::as_str),
-            None | Some("auto" | "right" | "down")
+            None | Some("auto" | "right" | "down" | "stack")
         ) {
             fail(
                 "invalid_request",

@@ -1916,6 +1916,28 @@ enum AgentStartTarget {
     },
 }
 
+/// The explicit split direction in `args`, or `None` when the caller passed no
+/// direction flag. `None` deliberately leaves `direction` off the wire so an
+/// older server keeps its own left/right default instead of rejecting `"auto"`.
+/// `--stack` is the documented alias for `--down`.
+fn split_direction_flag(args: &[String], usage: &str) -> Result<Option<&'static str>> {
+    let down = args.iter().any(|a| a == "--down" || a == "--stack");
+    let right = args.iter().any(|a| a == "--right");
+    let auto = args.iter().any(|a| a == "--auto");
+    if usize::from(down) + usize::from(right) + usize::from(auto) > 1 {
+        return Err(anyhow!("{usage}"));
+    }
+    Ok(if down {
+        Some("down")
+    } else if right {
+        Some("right")
+    } else if auto {
+        Some("auto")
+    } else {
+        None
+    })
+}
+
 fn parse_agent_start_target(args: &[String], caller: Option<String>) -> Result<AgentStartTarget> {
     let pane = flag(args, "--pane");
     let anchor = flag(args, "--anchor");
@@ -1924,27 +1946,15 @@ fn parse_agent_start_target(args: &[String], caller: Option<String>) -> Result<A
             "agent start accepts either --pane <id> or --anchor <id>, not both"
         ));
     }
-    let down = args.iter().any(|a| a == "--down");
-    let right = args.iter().any(|a| a == "--right");
-    let auto = args.iter().any(|a| a == "--auto");
-    if usize::from(down) + usize::from(right) + usize::from(auto) > 1 {
-        return Err(anyhow!(
-            "agent start accepts only one of --auto, --right, or --down"
-        ));
-    }
+    let direction = split_direction_flag(
+        args,
+        "agent start accepts only one of --auto, --right, or --down",
+    )?;
     Ok(match pane {
         Some(pane) => AgentStartTarget::Existing(pane),
         None => AgentStartTarget::Split {
             anchor: anchor.or(caller),
-            direction: if down {
-                Some("down")
-            } else if right {
-                Some("right")
-            } else if auto {
-                Some("auto")
-            } else {
-                None
-            },
+            direction,
         },
     })
 }
@@ -2008,7 +2018,7 @@ fn validate_agent_start_options(args: &[String]) -> Result<()> {
                 }
                 index += 2;
             }
-            "--down" | "--right" | "--auto" => index += 1,
+            "--down" | "--stack" | "--right" | "--auto" => index += 1,
             option if option.starts_with("--") => {
                 return Err(anyhow!("unknown agent start option: {option}"));
             }
@@ -3181,18 +3191,10 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
 
         ("pane", "split") => {
             let mut obj = serde_json::Map::new();
-            let down = args.iter().any(|a| a == "--down" || a == "--stack");
-            let right = args.iter().any(|a| a == "--right");
-            let auto = args.iter().any(|a| a == "--auto");
-            if usize::from(down) + usize::from(right) + usize::from(auto) > 1 {
-                return Err(anyhow!("pass only one of --auto, --right, or --down"));
-            }
-            if down {
-                obj.insert("direction".to_string(), json!("down"));
-            } else if right {
-                obj.insert("direction".to_string(), json!("right"));
-            } else if auto {
-                obj.insert("direction".to_string(), json!("auto"));
+            if let Some(direction) =
+                split_direction_flag(args, "pass only one of --auto, --right, or --down")?
+            {
+                obj.insert("direction".to_string(), json!(direction));
             }
             if args.iter().any(|a| a == "--no-focus") {
                 obj.insert("focus".to_string(), json!(false));

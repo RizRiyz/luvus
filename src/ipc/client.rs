@@ -249,6 +249,11 @@ where
         ],
     );
 
+    // Cell pixels ride a post-handshake message, never `Hello`: both peers have
+    // now agreed on the protocol version, so this shape is safe to extend. The
+    // server needs it before the first split, not only after a resize.
+    protocol::write_message(&mut writer, &cell_pixels_message())?;
+
     // Enable input protocols only after probing. That bounds the pending-input
     // decoder to ordinary terminal key sequences and avoids mouse/paste replies
     // becoming interleaved with OSC palette responses.
@@ -484,11 +489,16 @@ fn input_loop(route: InputRoute, pending: Vec<Event>) {
 }
 
 fn hello_message(cols: u16, rows: u16) -> ClientMessage {
-    let (cell_width_px, cell_height_px) = protocol::local_cell_pixels();
     ClientMessage::Hello {
         version: protocol::PROTOCOL_VERSION,
         cols,
         rows,
+    }
+}
+
+fn cell_pixels_message() -> ClientMessage {
+    let (cell_width_px, cell_height_px) = protocol::local_cell_pixels();
+    ClientMessage::CellPixels {
         cell_width_px,
         cell_height_px,
     }
@@ -783,8 +793,6 @@ mod tests {
                 version: PROTOCOL_VERSION,
                 cols: 80,
                 rows: 24,
-                cell_width_px: 0,
-                cell_height_px: 0,
             },
         )
         .unwrap_err();
@@ -1031,8 +1039,6 @@ mod tests {
                 version: PROTOCOL_VERSION,
                 cols: 80,
                 rows: 24,
-                cell_width_px: 0,
-                cell_height_px: 0,
             },
         )
         .unwrap();

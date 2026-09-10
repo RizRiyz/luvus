@@ -1090,6 +1090,7 @@ impl App {
             // Handled by the server loop; never reaches here at runtime.
             AppEvent::ClientConnected { .. }
             | AppEvent::ClientDetach { .. }
+            | AppEvent::ClientCellPixels { .. }
             | AppEvent::ClientInput { .. }
             | AppEvent::Shutdown => false,
             // Consumed by the pre-dispatch worker-result branch above.

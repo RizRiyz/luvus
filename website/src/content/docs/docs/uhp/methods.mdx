@@ -297,6 +297,12 @@ by side. `"right"` and `"down"` force a direction (`"stack"` is an alias for
 `"down"`). Older servers reject `"auto"` and treat an omitted direction as
 right, so callers that want the server default should omit the field.
 
+`direction` is now validated: any other value, or a non-string, returns
+`invalid_request`. Earlier servers silently treated an unrecognized value as
+`"right"`, so a caller that sent something like `"vertical"` used to get a
+side-by-side split and now gets an error. Send `"right"` explicitly, or omit the
+field, to keep that behavior.
+
 `layout.export` returns the complete binary split tree and focused pane.
 `layout.apply` accepts that tree plus an optional focus. It succeeds only when
 the tree contains every current pane in the target tab exactly once. It never
