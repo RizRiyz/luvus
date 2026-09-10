@@ -335,6 +335,22 @@ impl WindowsChildJob {
     }
 }
 
+// Each foreground Unix SSH command owns a fresh process group. On failure,
+// close descendant-held pipes too so detached IO workers release their buffers.
+#[cfg(unix)]
+struct UnixChildGroup(Option<libc::pid_t>);
+
+#[cfg(unix)]
+impl Drop for UnixChildGroup {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            // The group was created by CommandExt::process_group(0), never
+            // inherited from the caller's terminal or production server.
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+        }
+    }
+}
+
 pub(super) fn run_bounded_with_owned_input(
     mut command: Command,
     timeout: Duration,
@@ -350,7 +366,14 @@ pub(super) fn run_bounded_with_owned_input(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::platform::no_window(&mut command);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = command.spawn().context("failed to launch ssh")?;
+    #[cfg(unix)]
+    let mut group = UnixChildGroup(Some(child.id() as libc::pid_t));
     #[cfg(windows)]
     let _job = WindowsChildJob::attach(&mut child)?;
     let stdout = match child.stdout.take() {
@@ -475,6 +498,12 @@ pub(super) fn run_bounded_with_owned_input(
     if stdout.len() as u64 > MAX_OUTPUT_BYTES || stderr.len() as u64 > MAX_OUTPUT_BYTES {
         return Err(anyhow!("SSH response exceeds the 64 KiB limit"));
     }
+    #[cfg(unix)]
+    {
+        // The child has been reaped and every pipe worker has finished. Avoid
+        // targeting a group ID after successful completion and possible reuse.
+        group.0 = None;
+    }
     Ok(Output {
         status,
         stdout,
@@ -485,6 +514,45 @@ pub(super) fn run_bounded_with_owned_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_group_cleanup_releases_descendant_pipes_and_upload_worker() {
+        use std::os::unix::process::CommandExt;
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 60 & printf ready; wait"])
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let group = UnixChildGroup(Some(child.id() as libc::pid_t));
+        let mut stdout = child.stdout.take().unwrap();
+        let mut ready = [0; 5];
+        stdout.read_exact(&mut ready).unwrap();
+        assert_eq!(&ready, b"ready");
+        let reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes)
+        });
+        let mut stdin = child.stdin.take().unwrap();
+        let writer = std::thread::spawn(move || stdin.write_all(&vec![0; 1024 * 1024]));
+        drop(group);
+        child.wait().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !(reader.is_finished() && writer.is_finished())
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            reader.is_finished(),
+            "descendant retained stdout after cleanup"
+        );
+        assert!(writer.is_finished(), "upload worker retained its buffer");
+        reader.join().unwrap().unwrap();
+        assert!(writer.join().unwrap().is_err());
+    }
 
     #[cfg(unix)]
     #[test]
