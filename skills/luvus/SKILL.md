@@ -477,6 +477,10 @@ surface:
   session ownership and structured usage. Without it, usage stays unavailable.
 - OpenCode 2 Preview is a separate `opencode2` agent. Do not install the
   OpenCode V1 integration for it or infer session IDs from its live database.
+- Devin has native detection and exact-ID resume only. Do not infer session
+  IDs from its private database; `luvus agent resume <id>` cannot find Devin
+  sessions, so bind a pane with `luvus pane report --agent devin --session
+  <id>` when the exact id is known.
 - For Hermes, `luvus integration install hermes` adds exact per-pane session
   ownership for restart resume. Detection remains native, but Luvus does not
   scan Hermes's private history store.

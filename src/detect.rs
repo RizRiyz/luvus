@@ -336,10 +336,11 @@ pub(crate) fn screen_rows(known_agent: &str, running: &[String], manifests: &Man
     }
 }
 
-/// Claude, Codex, and Hermes can place a live interaction panel above a tall
-/// blank footer. Keep their most recent non-empty live rows without pulling in
-/// scrollback. For Codex this also keeps the first-run sign-in chooser visible
-/// to prompt admission instead of mistaking its blank footer for a composer.
+/// Claude, Codex, Hermes, and Devin can place a live interaction panel above a
+/// tall blank footer. Keep their most recent non-empty live rows without pulling
+/// in scrollback. For Codex this also keeps the first-run sign-in chooser
+/// visible to prompt admission instead of mistaking its blank footer for a
+/// composer; for Devin, the first-run workspace-trust menu.
 pub(crate) fn screen_uses_non_empty_rows(
     known_agent: &str,
     running: &[String],
@@ -351,6 +352,8 @@ pub(crate) fn screen_uses_non_empty_rows(
         || manifests.process_has_agent(running, "codex")
         || known_agent.eq_ignore_ascii_case("hermes")
         || manifests.process_has_agent(running, "hermes")
+        || known_agent.eq_ignore_ascii_case("devin")
+        || manifests.process_has_agent(running, "devin")
 }
 
 /// The compiled-in default rules (generic first, then per-agent).
@@ -758,6 +761,28 @@ fn builtin_rules() -> Vec<Rule> {
             325,
             Region::Screen,
             vec![all(&["yes, proceed", "yes, don't ask again this session"])],
+        ),
+        // Devin's first-run workspace-trust screen is a numbered menu without
+        // the generic paired enter/esc controls, worded both "…authors of this
+        // directory?" and "…authors of <dir>?". Match the shared stem together
+        // with its exit label, so transcript prose cannot fake it.
+        per(
+            "devin",
+            State::Blocked,
+            310,
+            Region::Screen,
+            vec![all(&["trust the authors of", "no, exit"])],
+        ),
+        // Devin says "esc again to interrupt" (or "esc twice…") while it
+        // generates. Neither phrase contains a generic WORKING_HINT, so without
+        // this rule the pane reads as working only while a spinner frame
+        // happens to lead a line.
+        per(
+            "devin",
+            State::Working,
+            105,
+            Region::Screen,
+            vec![any(&["esc again to interrupt", "esc twice to interrupt"])],
         ),
     ]
 }
@@ -2992,5 +3017,132 @@ Would you like to proceed?
             &manifests,
         );
         assert_eq!(prose.agent, "zsh");
+    }
+
+    #[test]
+    fn devin_identity_needs_deliberate_evidence() {
+        let manifests = Manifests::builtin();
+        for command in [
+            "/usr/local/bin/devin",
+            r"C:\Users\me\AppData\Local\devin\cli\bin\devin.exe --resume quiet-meadow",
+            // Windows delivers the PEB command line quoted, which is how
+            // an install path containing spaces stays one argv token.
+            "\"C:\\Users\\Ada Lovelace\\AppData\\Local\\devin\\cli\\bin\\devin.exe\"",
+        ] {
+            assert_eq!(
+                manifests.agent_in_processes(&[command.to_string()]),
+                Some("devin".to_string()),
+                "failed to recognize {command}"
+            );
+        }
+
+        // The bare launch command names the agent when no process scan is
+        // available (Windows, remote)...
+        let launched = classify(
+            Some("zsh"),
+            "",
+            false,
+            false,
+            "devin",
+            "devin",
+            &[],
+            &manifests,
+        );
+        assert_eq!(launched.agent, "devin");
+        assert_eq!(launched.identity_source, "launch_command");
+
+        // ...but `devin` is also a person's name, so prose must not claim it.
+        let prose = classify(
+            Some("zsh"),
+            "Devin reviewed our pull request yesterday\n",
+            true,
+            false,
+            "zsh",
+            "",
+            &[],
+            &manifests,
+        );
+        assert_eq!(prose.agent, "zsh");
+    }
+
+    #[test]
+    fn devin_state_reads_its_trust_and_interrupt_screens() {
+        let manifests = Manifests::builtin();
+        let detect = |screen: &str| {
+            classify(
+                Some("zsh"),
+                screen,
+                false,
+                false,
+                "zsh",
+                "devin",
+                &["/usr/local/bin/devin".to_string()],
+                &manifests,
+            )
+            .state
+        };
+
+        // Both wordings of the workspace-trust menu.
+        assert_eq!(
+            detect("Do you trust the authors of this directory?\n❭ 1 Yes, trust\n· 2 No, exit\n"),
+            State::Blocked
+        );
+        assert_eq!(
+            detect("Do you trust the authors of luvus?\n❭ 1 Yes, trust\n· 2 No, exit\n"),
+            State::Blocked
+        );
+        // Its interrupt hint is not a generic WORKING_HINT.
+        assert_eq!(detect("Thinking… esc again to interrupt\n"), State::Working);
+        assert_eq!(
+            detect("Running tests · esc twice to interrupt\n"),
+            State::Working
+        );
+        // Its permission menu already matches the generic prompt list.
+        assert_eq!(
+            detect("Run cargo test?\n❭ 1 Yes, allow once\n· 2 Yes, allow for this session\n"),
+            State::Blocked
+        );
+        assert_eq!(
+            detect("❭ Ask Devin to build features, fix bugs, or work on your code\n"),
+            State::Idle
+        );
+    }
+
+    // The live trust screen, transcribed from a captured pane: the CLI paints
+    // it on the first five rows of the grid and leaves everything below blank,
+    // so the ordinary bottom-row window sees only empty rows.
+    const DEVIN_WORKSPACE_TRUST_SCREEN: &str = r#"PS C:\luvus-devin-demo> devin
+Do you trust the authors of this directory?
+For security, devin.exe should not be run in directories with untrusted content.
+· 1 Yes, trust C:\luvus-devin-demo
+❭ 2 No, exit"#;
+
+    #[test]
+    fn devin_trust_screen_sits_above_the_bottom_rows() {
+        let manifests = Manifests::builtin();
+        let running = ["/usr/local/bin/devin".to_string()];
+        let rows = screen_rows("devin", &running, &manifests);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(80, 30, tx, 1024 * 1024);
+        let screen = DEVIN_WORKSPACE_TRUST_SCREEN.replace('\n', "\r\n");
+        engine.advance(format!("\x1b[2J\x1b[H{screen}").as_bytes());
+
+        assert!(
+            engine.detection_text(rows).trim().is_empty(),
+            "the trust menu is above the ordinary bottom-row window"
+        );
+        assert!(screen_uses_non_empty_rows("devin", &running, &manifests));
+        let detection = classify(
+            Some("devin"),
+            &engine.detection_text_non_empty(rows),
+            false,
+            false,
+            "devin",
+            "devin",
+            &running,
+            &manifests,
+        );
+        assert_eq!(detection.state, State::Blocked);
+        assert_eq!(detection.state_source, "manifest_rule");
     }
 }

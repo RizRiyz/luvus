@@ -10230,6 +10230,65 @@ mod tests {
         assert_eq!(old.agent_launch, None);
     }
 
+    /// A Devin pane restores from the exact binding Luvus persisted (it has no
+    /// session discovery), and the restore never replays the `-- <briefing>`
+    /// the pane was launched with: only the options before the separator come
+    /// back.
+    #[test]
+    fn devin_restores_its_exact_binding_without_replaying_the_briefing() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let focus = app.layout().focus;
+        let st = app.status.get_mut(&focus).unwrap();
+        st.agent = "devin".into();
+        st.agent_session = Some(AgentSession {
+            agent: "devin".into(),
+            session_id: "quiet-meadow".into(),
+        });
+        app.proc_commands.insert(
+            focus,
+            vec!["devin --permission-mode auto -- fix the login bug".into()],
+        );
+
+        let snap = persist::snapshot(&app);
+        let ps = snap
+            .workspaces
+            .iter()
+            .flat_map(|w| &w.tabs)
+            .flat_map(|t| &t.panes)
+            .find(|(id, _)| *id == focus.0)
+            .map(|(_, ps)| ps)
+            .unwrap();
+        assert_eq!(
+            ps.agent_session,
+            Some(("devin".to_string(), "quiet-meadow".to_string()))
+        );
+        assert_eq!(
+            ps.agent_launch.as_deref(),
+            Some(
+                &[
+                    "--permission-mode".to_string(),
+                    "auto".into(),
+                    "--".into(),
+                    "fix".into(),
+                    "the".into(),
+                    "login".into(),
+                    "bug".into(),
+                ][..]
+            )
+        );
+
+        let (agent, sid) = ps.agent_session.clone().unwrap();
+        assert_eq!(
+            crate::agent::resume_for(&agent, &sid, ps.agent_launch.as_deref(), true).as_deref(),
+            Some("devin --resume 'quiet-meadow' '--permission-mode' 'auto'\r")
+        );
+        assert_eq!(
+            crate::agent::resume_for(&agent, &sid, ps.agent_launch.as_deref(), false).as_deref(),
+            Some("devin --resume 'quiet-meadow'\r")
+        );
+    }
+
     /// The captured CLI options are **per pane**, not one global set (docs/62).
     ///
     /// `proc_commands` is keyed by `PaneId` and filled from each pane's own

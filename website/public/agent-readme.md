@@ -84,11 +84,11 @@ for an agent to receive it:
 `luvus skill enable` makes no network request. It installs the same bundled
 skill into detected native skill locations without overwriting external or
 modified content. The shared `~/.agents/skills/luvus/` copy serves Codex,
-GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, fx, and Kilo Code.
-Dedicated adapters serve Claude Code, OpenCode, OpenCode 2 Preview, Kimi Code
-CLI, Grok Build, Hermes CLI, Qwen Code, and Kiro. Aider has no native Agent
-Skills installation surface, so use `luvus skill show` when an Aider
-conversation needs the instructions.
+GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, fx, Kilo Code, and
+Devin. Dedicated adapters serve Claude Code, OpenCode, OpenCode 2 Preview,
+Kimi Code CLI, Grok Build, Hermes CLI, Qwen Code, and Kiro. Aider has no
+native Agent Skills installation surface, so use `luvus skill show` when an
+Aider conversation needs the instructions.
 
 Start a new agent conversation after installation, or use that agent's skill
 reload command when it provides one. To remove unchanged Luvus-managed copies:

@@ -232,10 +232,11 @@ behalf.
 | Pi | yes | no | no |
 | fx | no | yes | yes |
 
-Luvus also detects Antigravity and Amp, but their current CLIs do not expose a
-reviewed unattended permission profile, so they are not available as new
-automation workers. They can still appear when an automation targets a live
-agent that is already running in a pane.
+Luvus also detects Antigravity, Amp, and Devin, but they are not available as
+new automation workers: Antigravity and Amp do not expose a reviewed unattended
+permission profile, and Devin's workspace-trust gate has not been validated for
+unattended runs. They can still appear when an automation targets a live agent
+that is already running in a pane.
 
 Kilo Code currently exposes one reviewed unattended profile: **Full access**,
 launched as `kilo run --auto`. Kilo documents that `--auto` may approve actions
