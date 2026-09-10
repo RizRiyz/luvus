@@ -434,6 +434,10 @@ Read-only Access denies it. A rejected batch queues no prefix; success returns
 the resolved `pane` and means queued, not consumed. This does not authorize
 `agent.send`, raw pane input, launch, fork, or close through the gateway.
 
+Control also permits `pane.rename` with the existing `pane` and `name` parameters;
+read-only Access denies it. Rename retains the owner name validation and
+`pane.renamed` event. An empty name clears the pane alias.
+
 ## Remote use
 
 Observe/control `terminal.frame` messages replace the previous capture at the
@@ -456,7 +460,7 @@ adds `access.mode`, `access.allowed_methods`, and gateway-specific
 `access.limits.connections` / `requests_per_minute`. Intersect the allowed set
 with server methods and your supported actions. Owner endpoints omit `access`;
 older gateways may omit it too, which never proves write permission. Control
-includes keys and existing automation writes, but excludes standalone terminal
+includes `pane.rename`, keys, and existing automation writes, but excludes standalone terminal
 input and token administration. Re-discover after reconnect; accept unknown
 additive fields. No owner socket/token or new event is exposed.
 
