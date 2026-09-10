@@ -1,5 +1,23 @@
 //! Client-side clipboard helpers. Never borrow a remote server's display environment.
 
+// A coalesced completion event, consumed only by the UI owner. In the thin
+// client it is drained with the next server message, without idle polling or
+// another transport-reader thread. The worker never writes terminal output.
+static NOTIFICATION: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
+
+fn report_failure() {
+    let language = crate::config::load().language;
+    *NOTIFICATION.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some(crate::i18n::by_code(&language).clipboard_failed);
+}
+
+pub(crate) fn take_notification() -> Option<&'static str> {
+    NOTIFICATION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+}
+
 #[cfg(unix)]
 mod native {
     use std::io::{self, Write};
@@ -34,8 +52,7 @@ mod native {
                     {
                         // Do not log clipboard contents or helper stderr (either
                         // can contain private data). OSC 52 was already requested.
-                        let language = crate::config::load().language;
-                        crate::emit_notification(crate::i18n::by_code(&language).clipboard_failed);
+                        super::report_failure();
                     }
                 })
                 .ok()
@@ -268,5 +285,18 @@ pub(crate) fn copy_native(text: &str) {
     #[cfg(unix)]
     native::copy(text);
     #[cfg(not(unix))]
-    let _ = crate::system_clipboard_copy(text);
+    if crate::system_clipboard_copy(text).is_err() {
+        report_failure();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn clipboard_completion_is_coalesced_and_consumed_once() {
+        *super::NOTIFICATION.lock().unwrap() = Some("first");
+        *super::NOTIFICATION.lock().unwrap() = Some("latest");
+        assert_eq!(super::take_notification(), Some("latest"));
+        assert_eq!(super::take_notification(), None);
+    }
 }

@@ -78,7 +78,9 @@ Unix helper work runs off the rendering loop with a two-second timeout per
 helper. Failed helpers fall through to another applicable helper. Rapid copies
 retain only the latest pending selection. If all attempted helpers fail, Luvus
 requests a terminal notification explaining that native copy failed and OSC 52
-was requested instead. Notifications also depend on terminal support. When no
+was requested instead. Failure notifications are queued for the UI thread; an
+idle thin client shows them with the next server message. Notifications also
+depend on terminal support. When no
 native helper applies, OSC 52 remains available without a native-success claim.
 No clipboard text or helper stderr is logged.
 

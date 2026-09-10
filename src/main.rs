@@ -1381,6 +1381,9 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
         if let Some(text) = app.pending_clipboard.take() {
             emit_clipboard(&text);
         }
+        if let Some(notification) = clipboard::take_notification() {
+            emit_notification(notification);
+        }
         app.tick_toast(Instant::now());
         app.tick_copy_highlight(Instant::now());
         app.tick_search_flash(Instant::now());
