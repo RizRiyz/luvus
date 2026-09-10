@@ -9,6 +9,7 @@ mod automation;
 mod bar;
 mod changelog;
 mod cli;
+mod clipboard;
 mod clipboard_image;
 mod config;
 mod detect;
@@ -199,7 +200,7 @@ pub(crate) fn emit_notification(msg: &str) {
 /// 2. **OSC 52** — a terminal escape; covers terminals that bridge it and setups
 ///    where no clipboard tool is installed. Harmless if unsupported.
 pub(crate) fn emit_clipboard(text: &str) {
-    let _ = system_clipboard_copy(text);
+    clipboard::copy_native(text);
 
     use std::io::Write;
     let b64 = base64_encode(text.as_bytes());
@@ -392,6 +393,7 @@ fn play_sound_file(path: &Path) {
 }
 
 /// Pipe `text` into the first available OS clipboard command.
+#[cfg(not(unix))]
 fn system_clipboard_copy(text: &str) -> std::io::Result<()> {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -418,10 +420,15 @@ fn system_clipboard_copy(text: &str) -> std::io::Result<()> {
             continue; // tool not installed — try the next
         };
         if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes());
+            if stdin.write_all(text.as_bytes()).is_err() {
+                let _ = child.kill();
+                let _ = child.wait();
+                continue;
+            }
         }
-        let _ = child.wait();
-        return Ok(());
+        if child.wait().is_ok_and(|status| status.success()) {
+            return Ok(());
+        }
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::NotFound,
@@ -1373,6 +1380,9 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
         }
         if let Some(text) = app.pending_clipboard.take() {
             emit_clipboard(&text);
+        }
+        if let Some(notification) = clipboard::take_notification() {
+            emit_notification(notification);
         }
         app.tick_toast(Instant::now());
         app.tick_copy_highlight(Instant::now());

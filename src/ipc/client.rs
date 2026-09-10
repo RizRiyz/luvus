@@ -297,7 +297,11 @@ where
     // pane even after `?25l`, so composition does not follow chrome.
     let mut last_cursor = None;
     let exit = loop {
-        match protocol::read_message::<_, ServerMessage>(&mut reader) {
+        let message = protocol::read_message::<_, ServerMessage>(&mut reader);
+        if let Some(notification) = crate::clipboard::take_notification() {
+            crate::emit_notification(notification);
+        }
+        match message {
             // A full frame repaints the whole screen; a diff writes *only its changed
             // cells* straight to the terminal (O(changed), not a whole re-blit). Each
             // is wrapped in a DEC 2026 synchronized update so it paints atomically.
