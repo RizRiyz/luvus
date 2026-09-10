@@ -309,7 +309,7 @@ pub(crate) fn preflight_profile(current: &Catalog, profile: &MachineProfile) -> 
 /// Owner-local recovery information only; UHP projects errors separately.
 pub(crate) fn prepared_commit_error(error: anyhow::Error, binary: &str) -> anyhow::Error {
     error.context(format!(
-        "Remote preparation succeeded, but the machine catalog was not saved. The verified binary at `{binary}` may remain in use; it was not deleted or rolled back. Inspect the preparations in `luvus machine list` for durable approved-installation receipts, then retry setup using that existing binary (--remote-binary for a new profile)."
+        "Remote preparation succeeded, but the machine catalog was not saved. The verified binary at `{binary}` may remain in use; it was not deleted or rolled back. Retry setup using that existing binary (--remote-binary for a new profile). If this operation installed the binary, `luvus machine list` includes its durable approved-installation receipt."
     ))
 }
 
@@ -463,8 +463,8 @@ pub(super) fn validate_remote_binary(binary: &str) -> Result<()> {
         && bytes[1] == b':'
         && matches!(bytes[2], b'\\' | b'/')
         && binary[2..].chars().all(|character| {
-            character.is_ascii_alphanumeric()
-                || matches!(character, '\\' | '/' | '_' | '-' | '.' | '+' | ' ')
+            character.is_alphanumeric()
+                || matches!(character, '\\' | '/' | '_' | '-' | '.' | '+' | ' ' | '\'')
         });
     if binary.len() > MAX_REMOTE_BINARY_BYTES || !(posix || windows) {
         return Err(anyhow!(
@@ -489,6 +489,9 @@ mod tests {
             .to_string()
             .contains(r"C:\Users\Alice Smith\luvus.exe"));
         assert!(error.to_string().contains("luvus machine list"));
+        assert!(error
+            .to_string()
+            .contains("If this operation installed the binary"));
         assert!(format!("{error:#}").contains("revision conflict"));
     }
 

@@ -162,6 +162,7 @@ printf '%s\n' "$dir/luvus"
 // a running image. Paths with spaces use an encoded native-process launcher
 // with inherited byte streams under either OpenSSH default shell.
 const INSTALL_WINDOWS: &str = r#"$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $Version = '__LUVUS_VERSION__'
 $Protocol = __LUVUS_PROTOCOL__
@@ -175,9 +176,8 @@ try {
     $Temp = Join-Path $env:TEMP ("luvus-machine-" + [Guid]::NewGuid().ToString('N'))
     $InstallDir = Join-Path $env:LOCALAPPDATA "luvus\remote\$Tag-p$Protocol"
     $Destination = Join-Path $InstallDir 'luvus.exe'
-    if ($Destination -notmatch '^[A-Za-z]:[\\/][0-9A-Za-z\\/_.+ -]*$') {
-        throw 'automatic install path is not shell-safe; pass --remote-binary with a shell-safe absolute path'
-    }
+    # Join-Path values remain data, never shell source. User directories may
+    # contain Unicode and apostrophes; Rust validates the returned drive path.
 
     function Download-Bounded([string]$Uri, [string]$Path, [long]$Limit) {
         $Request = [Net.HttpWebRequest]::Create($Uri)
@@ -547,6 +547,19 @@ fn installed_path(destination: &str, stdout: Vec<u8>) -> Result<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn installed_windows_paths_support_unicode_and_apostrophes() {
+        for user in ["O'Brien", "Jörg", "李雷"] {
+            let path = format!(r"C:\Users\{user}\AppData\Local\luvus\luvus.exe");
+            assert_eq!(
+                installed_path("test-host", path.as_bytes().to_vec()).unwrap(),
+                path
+            );
+        }
+        assert!(!INSTALL_WINDOWS.contains("$Destination -notmatch"));
+        assert!(installed_path("test-host", b"C:\\temp\\luvus.exe & whoami".to_vec()).is_err());
+    }
+
     #[cfg(unix)]
     fn write_executable(path: &std::path::Path, body: &str) {
         use std::os::unix::fs::PermissionsExt;
@@ -665,11 +678,7 @@ mod tests {
         assert!(INSTALL_WINDOWS.contains("Expand-Archive"));
         assert!(INSTALL_WINDOWS.contains("remote-client-info --json"));
         assert!(INSTALL_WINDOWS.contains("luvus\\remote\\$Tag"));
-        assert!(INSTALL_WINDOWS
-            .contains("$Destination -notmatch '^[A-Za-z]:[\\\\/][0-9A-Za-z\\\\/_.+ -]*$'"));
-        assert!(INSTALL_WINDOWS.contains(
-            "automatic install path is not shell-safe; pass --remote-binary with a shell-safe absolute path"
-        ));
+        assert!(INSTALL_WINDOWS.contains("Move-Item -LiteralPath $Stage -Destination $Destination"));
         assert!(INSTALL_WINDOWS.contains("67108864"));
         assert!(INSTALL_WINDOWS.contains("4096"));
         assert!(!INSTALL_WINDOWS.contains("Invoke-Expression"));

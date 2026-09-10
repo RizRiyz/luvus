@@ -12,7 +12,7 @@ pub(crate) fn append(command: &mut Command, binary: &str, args: &[&str]) -> anyh
     }) {
         anyhow::bail!("invalid remote machine command argument");
     }
-    if binary.contains(' ') {
+    if binary.contains(':') && (binary.contains([' ', '\'']) || !binary.is_ascii()) {
         // Do not send native stdout through a PowerShell pipeline: that would
         // decode/re-encode the binary client protocol. Start the child with
         // raw byte streams instead, with no shell interpretation.
@@ -34,6 +34,7 @@ pub(crate) fn append(command: &mut Command, binary: &str, args: &[&str]) -> anyh
 }
 
 fn windows_script(binary: &str, args: &[&str]) -> String {
+    let binary = binary.replace('\'', "''");
     format!(
         r#"$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -89,7 +90,7 @@ mod tests {
     #[test]
     fn windows_space_path_preserves_binary_stdio_under_both_shells() {
         let _env = crate::persist::test_env("machine-space-path");
-        let directory = crate::persist::config_dir().join("Alice Smith");
+        let directory = crate::persist::config_dir().join("Alice O'Brien Jörg 李雷");
         std::fs::create_dir_all(&directory).unwrap();
         let binary = directory.join("luvus.exe");
         std::fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
@@ -164,6 +165,21 @@ mod tests {
         assert!(script.contains("StandardError.BaseStream.CopyToAsync"));
         assert!(!script.contains('|'));
         assert!(append(&mut command, binary, &["review;whoami"]).is_err());
-        assert!(append(&mut command, r"C:\Users\Alice' Smith\luvus.exe", &[]).is_err());
+        assert!(append(&mut command, r"C:\Users\Alice' Smith\luvus.exe", &[]).is_ok());
+    }
+
+    #[test]
+    fn windows_unicode_and_apostrophe_paths_are_encoded_and_quoted() {
+        for user in ["O'Brien", "Jörg", "李雷"] {
+            let binary = format!(r"C:\Users\{user}\AppData\Local\luvus\luvus.exe");
+            let mut command = Command::new("ssh");
+            append(&mut command, &binary, &["remote-client-info", "--json"]).unwrap();
+            assert_eq!(command.get_args().next().unwrap(), "powershell.exe");
+            let script = windows_script(&binary, &[]);
+            assert!(script.contains(&format!(
+                "$info.FileName = '{}'",
+                binary.replace('\'', "''")
+            )));
+        }
     }
 }
