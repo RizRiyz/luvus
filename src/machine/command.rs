@@ -15,7 +15,7 @@ pub(crate) fn append(command: &mut Command, binary: &str, args: &[&str]) -> anyh
     if binary.contains(' ') {
         // Do not send native stdout through a PowerShell pipeline: that would
         // decode/re-encode the binary client protocol. Start the child with
-        // inherited standard handles instead, with no shell interpretation.
+        // raw byte streams instead, with no shell interpretation.
         let script = windows_script(binary, args);
         let bytes: Vec<_> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
         command
@@ -41,11 +41,22 @@ $info.FileName = '{binary}'
 $info.Arguments = '{}'
 $info.UseShellExecute = $false
 $info.CreateNoWindow = $true
-$info.RedirectStandardInput = $false
-$info.RedirectStandardOutput = $false
-$info.RedirectStandardError = $false
+$info.RedirectStandardInput = $true
+$info.RedirectStandardOutput = $true
+$info.RedirectStandardError = $true
 $child = [System.Diagnostics.Process]::Start($info)
-$child.WaitForExit()
+$inputCopy = [Console]::OpenStandardInput().CopyToAsync($child.StandardInput.BaseStream)
+$outputCopy = $child.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput())
+$errorCopy = $child.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError())
+$inputClosed = $false
+while (-not $child.WaitForExit(50)) {{
+ if (-not $inputClosed -and $inputCopy.IsCompleted) {{
+  $child.StandardInput.Close()
+  $inputClosed = $true
+ }}
+}}
+$outputCopy.GetAwaiter().GetResult()
+$errorCopy.GetAwaiter().GetResult()
 $code = $child.ExitCode
 $child.Dispose()
 exit $code
@@ -109,7 +120,7 @@ mod tests {
                 std::time::Duration::from_secs(30),
                 Some(&payload),
             )
-            .unwrap();
+            .unwrap_or_else(|error| panic!("{shell} binary stream failed: {error:#}"));
             // PowerShell -Command maps a failing nested native process to 1;
             // cmd.exe retains 37. Both must preserve failure, not report success.
             assert!(
@@ -141,6 +152,10 @@ mod tests {
         assert!(script.contains("$info.FileName = 'C:\\Users\\Alice Smith"));
         assert!(script.contains("$info.UseShellExecute = $false"));
         assert!(script.contains("$info.CreateNoWindow = $true"));
+        assert!(script.contains("$info.RedirectStandardInput = $true"));
+        assert!(script.contains("$child.StandardInput.Close()"));
+        assert!(script.contains("StandardOutput.BaseStream.CopyToAsync"));
+        assert!(script.contains("StandardError.BaseStream.CopyToAsync"));
         assert!(!script.contains('|'));
         assert!(append(&mut command, binary, &["review;whoami"]).is_err());
         assert!(append(&mut command, r"C:\Users\Alice' Smith\luvus.exe", &[]).is_err());

@@ -89,6 +89,7 @@ struct SessionRuntime {
     control: Option<LinkControl>,
     reader: Option<JoinHandle<()>>,
     backoff: Duration,
+    handshake_failures: u8,
 }
 
 impl MachineRuntime {
@@ -146,6 +147,7 @@ fn new_session_runtime(enabled: bool, generation: u64) -> SessionRuntime {
         control: None,
         reader: None,
         backoff: Duration::from_secs(1),
+        handshake_failures: 0,
     }
 }
 
@@ -1113,6 +1115,13 @@ fn expire_connecting(machines: &mut HashMap<String, MachineRuntime>) {
         {
             if matches!(endpoint.state, MachineState::Connecting { deadline } if deadline <= now) {
                 stop_link(endpoint);
+                endpoint.handshake_failures = endpoint.handshake_failures.saturating_add(1);
+                if endpoint.handshake_failures >= 3 {
+                    endpoint.state = MachineState::Attention(
+                        "connection timed out repeatedly; select the machine to retry".into(),
+                    );
+                    continue;
+                }
                 endpoint.state = MachineState::Reconnecting {
                     at: now
                         + reconnect_delay(
@@ -1436,6 +1445,7 @@ fn handle_surface_message(
                         .ok_or_else(|| anyhow!("remote session disappeared during negotiation"))?;
                     runtime.state = MachineState::Online;
                     runtime.backoff = Duration::from_secs(1);
+                    runtime.handshake_failures = 0;
                     let control = runtime
                         .control
                         .as_ref()
@@ -2770,6 +2780,7 @@ fn activate_machine_form(
             stop_link(&mut machine.runtime);
             machine.runtime.state = MachineState::Reconnecting { at: Instant::now() };
             machine.runtime.backoff = Duration::from_secs(1);
+            machine.runtime.handshake_failures = 0;
         }
         *pending = Some(Endpoint::Remote {
             machine_id: id,
@@ -3262,6 +3273,7 @@ fn request_user_switch(
                     stop_link(runtime);
                     runtime.state = MachineState::Reconnecting { at: Instant::now() };
                     runtime.backoff = Duration::from_secs(1);
+                    runtime.handshake_failures = 0;
                 }
                 MachineState::Online => unreachable!(),
             }
@@ -4907,6 +4919,43 @@ mod tests {
         let machine = machine_with_sessions("box", &["default"], MachineState::Disabled);
         let machines = HashMap::from([("box".to_string(), machine)]);
         assert!(next_deadline(&machines, None).is_none());
+    }
+
+    #[test]
+    fn handshake_timeouts_exhaust_budget_without_idle_retries() {
+        let machine = machine_with_sessions("box", &["default"], MachineState::Disabled);
+        let mut machines = HashMap::from([("box".to_string(), machine)]);
+        for attempt in 1..=3 {
+            machines.get_mut("box").unwrap().runtime.state = MachineState::Connecting {
+                deadline: Instant::now(),
+            };
+            expire_connecting(&mut machines);
+            let runtime = &machines["box"].runtime;
+            assert_eq!(runtime.handshake_failures, attempt);
+            if attempt < 3 {
+                assert!(matches!(runtime.state, MachineState::Reconnecting { .. }));
+            } else {
+                assert!(matches!(runtime.state, MachineState::Attention(_)));
+                assert!(next_deadline(&machines, None).is_none());
+            }
+        }
+        expire_connecting(&mut machines);
+        assert_eq!(machines["box"].runtime.handshake_failures, 3);
+        let mut dock = DockState {
+            machine_form: Some(MachineForm {
+                selected_saved: Some("box".into()),
+                ..MachineForm::default()
+            }),
+            ..DockState::default()
+        };
+        let (events, _receiver) = mpsc::sync_channel(1);
+        let mut pending = None;
+        activate_machine_form(&mut dock, &events, &mut pending, &mut machines).unwrap();
+        assert_eq!(machines["box"].runtime.handshake_failures, 0);
+        assert!(matches!(
+            machines["box"].runtime.state,
+            MachineState::Reconnecting { .. }
+        ));
     }
 
     #[test]

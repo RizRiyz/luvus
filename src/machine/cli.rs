@@ -343,13 +343,19 @@ fn flag(args: &[String], name: &str) -> bool {
 }
 
 fn revision(args: &[String]) -> Result<Option<u64>> {
-    option(args, "--revision")
+    let explicit = option(args, "--revision")
         .map(|value| {
             value
                 .parse::<u64>()
                 .map_err(|_| anyhow!("--revision must be an unsigned integer"))
         })
-        .transpose()
+        .transpose()?;
+    // Even interactive commands fence the snapshot they started from. An
+    // explicit revision still lets automation reject an older caller snapshot.
+    match explicit {
+        Some(revision) => Ok(Some(revision)),
+        None => Ok(Some(catalog::preflight_mutation(None)?.revision)),
+    }
 }
 
 fn machine_help() -> &'static str {
@@ -385,6 +391,16 @@ remains authoritative for aliases, keys, jump hosts, and host verification.
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn implicit_revision_rejects_a_concurrent_writer() {
+        let _env = crate::persist::test_env("machine-cli-implicit-revision");
+        let first = revision(&[]).unwrap();
+        let second = revision(&[]).unwrap();
+        assert!(first.is_some());
+        catalog::mutate(first, |_| Ok(())).unwrap();
+        assert!(catalog::mutate(second, |_| Ok(())).is_err());
+    }
 
     #[test]
     fn disabled_profile_round_trip_never_needs_ssh() {
