@@ -216,6 +216,7 @@ enum MachinePopup {
         anchor: (u16, u16),
         rect: Option<Rect>,
         remove_rect: Option<Rect>,
+        selected: usize,
     },
     Confirm {
         machine_id: String,
@@ -877,6 +878,8 @@ fn run_inner(
                     if let Some(form) = dock.machine_form.as_mut() {
                         form.submitting = false;
                         form.error = Some(error);
+                    } else {
+                        dock.warning = Some(error);
                     }
                     dock.dirty = true;
                 }
@@ -1870,6 +1873,72 @@ fn handle_dock_input(
         }
     }
     if dock.machine_popup.is_some() {
+        if let Some(MachinePopup::Menu {
+            machine_id,
+            rect,
+            selected,
+            ..
+        }) = dock.machine_popup.as_mut()
+        {
+            let mut activate_connection = false;
+            match message {
+                ClientMessage::Key(key) => match key.code {
+                    KeyCode::Up | KeyCode::Down | KeyCode::Tab => {
+                        *selected = 1 - *selected;
+                        dock.dirty = true;
+                    }
+                    KeyCode::Enter if *selected == 0 => activate_connection = true,
+                    _ => {}
+                },
+                ClientMessage::Mouse(mouse)
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) =>
+                {
+                    activate_connection = rect.is_some_and(|rect| {
+                        rect.contains((mouse.column, mouse.row).into()) && mouse.row == rect.y + 1
+                    });
+                }
+                _ => {}
+            }
+            if activate_connection {
+                let id = machine_id.clone();
+                close_selector(dock, active, candidate, machines, local_writer)?;
+                if let Some(machine) = machines.get_mut(&id) {
+                    if machine_can_disconnect(&machine.runtime.state) {
+                        disconnect_machine_runtime(&mut machine.runtime);
+                        if dock.pending_workspace_menu.as_ref().is_some_and(|(endpoint, ..)| matches!(endpoint, Endpoint::Remote { machine_id, .. } if machine_id == &id)) {
+                            dock.pending_workspace_menu = None;
+                        }
+                        if pending_endpoint.as_ref().is_some_and(|endpoint| matches!(endpoint, Endpoint::Remote { machine_id, .. } if machine_id == &id)) {
+                            *pending_endpoint = None;
+                        }
+                        if candidate.as_ref().is_some_and(|surface| matches!(&surface.endpoint, Endpoint::Remote { machine_id, .. } if machine_id == &id)) {
+                            *candidate = None;
+                        }
+                        if matches!(active, Endpoint::Remote { machine_id, .. } if machine_id == &id)
+                        {
+                            prepare_local_failover(candidate, local_writer, terminal)?;
+                        }
+                    } else if machine.profile.enabled {
+                        disconnect_machine_runtime(&mut machine.runtime);
+                        machine.runtime.state = MachineState::Reconnecting { at: Instant::now() };
+                        machine.runtime.backoff = Duration::from_secs(1);
+                        machine.runtime.handshake_failures = 0;
+                    } else {
+                        let events = events.clone();
+                        std::thread::Builder::new()
+                            .name("machine-enable".into())
+                            .stack_size(512 * 1024)
+                            .spawn(move || {
+                                let result = crate::machine::enable_profile(&id, false)
+                                    .map_err(|error| error.to_string());
+                                let _ = events.send(ShellEvent::MachineCreated(result));
+                            })?;
+                    }
+                }
+                dock.dirty = true;
+                return Ok(true);
+            }
+        }
         match message {
             ClientMessage::Key(key) => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n')
@@ -1877,7 +1946,12 @@ fn handle_dock_input(
                 {
                     close_selector(dock, active, candidate, machines, local_writer)?
                 }
-                KeyCode::Enter | KeyCode::Char('y') => {
+                KeyCode::Enter => {
+                    advance_machine_popup(dock, events)?;
+                }
+                KeyCode::Char('y')
+                    if matches!(dock.machine_popup, Some(MachinePopup::Confirm { .. })) =>
+                {
                     advance_machine_popup(dock, events)?;
                 }
                 _ => {}
@@ -2417,6 +2491,7 @@ fn handle_dock_input(
                     anchor: (mouse.column, mouse.row),
                     rect: None,
                     remove_rect: None,
+                    selected: 0,
                 });
                 dock.dirty = true;
                 return Ok(true);
@@ -2575,6 +2650,19 @@ fn workspace_hit_target(
             .map(|workspace| (endpoint.clone(), workspace.id.clone())),
         _ => None,
     }
+}
+
+fn machine_can_disconnect(state: &MachineState) -> bool {
+    matches!(
+        state,
+        MachineState::Online | MachineState::Connecting { .. } | MachineState::Reconnecting { .. }
+    )
+}
+
+fn disconnect_machine_runtime(runtime: &mut SessionRuntime) {
+    runtime.generation = next_connection_generation();
+    runtime.state = MachineState::Disabled;
+    stop_link(runtime);
 }
 
 fn advance_machine_popup(dock: &mut DockState, events: &Sender<ShellEvent>) -> Result<()> {
@@ -2779,7 +2867,10 @@ fn activate_machine_form(
         return Ok(());
     };
     if machine.profile.enabled {
-        if matches!(machine.runtime.state, MachineState::Attention(_)) {
+        if matches!(
+            machine.runtime.state,
+            MachineState::Attention(_) | MachineState::Disabled
+        ) {
             stop_link(&mut machine.runtime);
             machine.runtime.state = MachineState::Reconnecting { at: Instant::now() };
             machine.runtime.backoff = Duration::from_secs(1);
@@ -3508,7 +3599,7 @@ fn paint_dock(
         return paint_selector(terminal, dock, machines, active, cursor);
     }
     if dock.machine_popup.is_some() {
-        return paint_machine_popup(terminal, dock, cursor);
+        return paint_machine_popup(terminal, dock, machines, cursor);
     }
     if machines.is_empty() {
         // No machine navigation means the server's existing Workspaces UI
@@ -3850,6 +3941,7 @@ fn resized_workspace_width(drag: protocol::ShellResize, column: u16) -> u16 {
 fn paint_machine_popup(
     terminal: &mut DefaultTerminal,
     dock: &mut DockState,
+    machines: &HashMap<String, MachineRuntime>,
     cursor: &mut Option<(u16, u16)>,
 ) -> Result<()> {
     let size = terminal.size()?;
@@ -3865,9 +3957,9 @@ fn paint_machine_popup(
         Some(MachinePopup::Menu { anchor, .. }) => {
             let width = display_columns(dock.delete_label).saturating_add(4).max(14);
             let x = anchor.0.min(size.width.saturating_sub(width));
-            let y = anchor.1.min(size.height.saturating_sub(3));
+            let y = anchor.1.min(size.height.saturating_sub(4));
             (
-                Rect::new(x, y, width.min(size.width), 3.min(size.height)),
+                Rect::new(x, y, width.min(size.width), 4.min(size.height)),
                 true,
             )
         }
@@ -3904,16 +3996,46 @@ fn paint_machine_popup(
     draw_popup_border(&mut cells, rect, border);
 
     if menu {
+        let (connection_label, selected) = match dock.machine_popup.as_ref() {
+            Some(MachinePopup::Menu {
+                machine_id,
+                selected,
+                ..
+            }) => (
+                if machines
+                    .get(machine_id)
+                    .is_some_and(|machine| machine_can_disconnect(&machine.runtime.state))
+                {
+                    "Disconnect"
+                } else {
+                    "Connect"
+                },
+                *selected,
+            ),
+            _ => unreachable!(),
+        };
         write_endpoint_text(
             &mut cells,
             rect,
             1,
             2,
+            connection_label,
+            StyleSpec {
+                fg: if selected == 0 { accent } else { text },
+                bg: None,
+                bold: selected == 0,
+            },
+        );
+        write_endpoint_text(
+            &mut cells,
+            rect,
+            2,
+            2,
             dock.delete_label,
             StyleSpec {
                 fg: error_color,
                 bg: None,
-                bold: false,
+                bold: selected == 1,
             },
         );
         if let Some(MachinePopup::Menu {
@@ -3923,7 +4045,12 @@ fn paint_machine_popup(
         }) = dock.machine_popup.as_mut()
         {
             *popup_rect = Some(rect);
-            *remove_rect = Some(Rect::new(rect.x + 1, rect.y + 1, rect.width - 2, 1));
+            *remove_rect = Some(Rect::new(
+                rect.x + 1,
+                rect.y + 2,
+                rect.width.saturating_sub(2),
+                1,
+            ));
         }
     } else {
         let (label, removing, message) = match dock.machine_popup.as_ref() {
@@ -4774,6 +4901,32 @@ fn write_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn machine_connection_menu_tracks_runtime_not_saved_enabled_flag() {
+        assert!(!machine_can_disconnect(&MachineState::Disabled));
+        assert!(!machine_can_disconnect(&MachineState::Attention(
+            "offline".into()
+        )));
+        assert!(machine_can_disconnect(&MachineState::Online));
+        assert!(machine_can_disconnect(&MachineState::Connecting {
+            deadline: Instant::now()
+        }));
+        assert!(machine_can_disconnect(&MachineState::Reconnecting {
+            at: Instant::now()
+        }));
+    }
+
+    #[test]
+    fn machine_disconnect_fences_events_and_stops_retry_without_clearing_workspaces() {
+        let mut runtime = new_session_runtime(true, next_connection_generation());
+        let generation = runtime.generation;
+        disconnect_machine_runtime(&mut runtime);
+        assert_ne!(runtime.generation, generation);
+        assert!(matches!(runtime.state, MachineState::Disabled));
+        assert!(runtime.control.is_none());
+        assert!(runtime.reader.is_none());
+    }
 
     #[test]
     fn saved_machine_navigation_preserves_fields_and_uses_catalog_identity() {
