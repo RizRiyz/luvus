@@ -949,8 +949,11 @@ with that token, so one module cannot publish or clear another module's titles.
 `clear` with no filters drops every title owned by the authenticated module.
 Direct local control-API calls may omit both fields; those calls can mutate only
 unowned titles, and an unfiltered clear is a no-op. Luvus clears an owner's
-titles and revokes its token when that module is disabled, unlinked, or
-uninstalled. The CLI wrappers are `luvus ui agent-title push|clear` (`push` also
+titles when that module is disabled, unlinked, or uninstalled, and a disabled
+module cannot publish. A module's token stays valid for as long as it remains
+registered on that server, so toggling a module does not strand a module process
+that is still running; the token is dropped on unlink or uninstall. The CLI
+wrappers are `luvus ui agent-title push|clear` (`push` also
 reads `--titles` from stdin). Raw local API clients acting for a module must pass
 the injected `LUVUS_MODULE_TOKEN` as `module_token`; module scripts calling the
 CLI do not handle it themselves.

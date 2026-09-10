@@ -2925,13 +2925,16 @@ pub struct ModuleSettingEdit {
     pub secret: bool,
 }
 
+/// One publisher credential per registered module, valid for this server's
+/// lifetime. Every registered module gets one regardless of its enabled state,
+/// so toggling a module cannot strand a still-running module process with a
+/// stale token. Authorization is enforced per request against `is_runnable()`.
 fn module_tokens_for(
     modules: &crate::module::ModuleRegistry,
 ) -> Result<HashMap<String, String>, String> {
     modules
         .modules
         .iter()
-        .filter(|module| module.is_runnable())
         .map(|module| crate::terminal::backend::random_id().map(|token| (module.id.clone(), token)))
         .collect()
 }

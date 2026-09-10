@@ -41,7 +41,7 @@ Then any of these tables, each declaring an argv `command` (a list, run as-is, c
 luvus puts context in the environment, flat, so a bash module never parses JSON:
 
 - `LUVUS_MODULE_ID`, `LUVUS_MODULE_ROOT` (the module dir), `LUVUS_MODULE_VERSION`
-- `LUVUS_MODULE_TOKEN` — process-scoped UI-publisher credential; the Luvus CLI forwards it automatically, so do not persist or override it
+- `LUVUS_MODULE_TOKEN` — UI-publisher credential for this server; the Luvus CLI forwards it automatically, so do not persist or override it
 - `LUVUS_MODULE_CONFIG_DIR`, `LUVUS_MODULE_STATE_DIR` — writable per-module dirs
 - `LUVUS_WORKSPACE_ID`, `LUVUS_WORKSPACE_CWD`, `LUVUS_TAB_INDEX`
 - `LUVUS_PANE_ID`, `LUVUS_PANE_CWD`, `LUVUS_PANE_AGENT`, `LUVUS_PANE_STATUS` (the clicked/target pane)

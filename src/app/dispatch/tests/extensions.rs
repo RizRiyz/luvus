@@ -353,6 +353,53 @@ min_luvus_version = "0.1.0"
 }
 
 #[test]
+fn re_enabling_a_module_keeps_live_publisher_credentials_valid() {
+    let _env = crate::persist::test_env("agent-row-title-reenable-token");
+    let module =
+        std::path::PathBuf::from(std::env::var_os("LUVUS_HOME").unwrap()).join("reenable-module");
+    std::fs::create_dir_all(&module).unwrap();
+    std::fs::write(
+        module.join("luvus-module.toml"),
+        r#"
+id = "module.reenable"
+name = "Reenable"
+version = "0.1.0"
+min_luvus_version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.module_link_with(&module, true, None).unwrap();
+    // The credential a live module process received when it was spawned.
+    let spawned_token = app.module_tokens["module.reenable"].clone();
+
+    app.module_set_enabled("module.reenable", false).unwrap();
+    let disabled = app
+        .dispatch(
+            "ui.agent_title.push",
+            &json!({"owner":"module.reenable","module_token":spawned_token,"titles":[{
+                "agent":"pi","session_id":"live","title":"Disabled"
+            }]}),
+        )
+        .expect_err("a disabled module cannot publish");
+    assert_eq!(disabled.0, "module_error");
+
+    app.module_set_enabled("module.reenable", true).unwrap();
+    app.dispatch(
+        "ui.agent_title.push",
+        &json!({"owner":"module.reenable","module_token":spawned_token,"titles":[{
+            "agent":"pi","session_id":"live","title":"Still mine"
+        }]}),
+    )
+    .expect("a surviving module process keeps publishing after re-enable");
+    assert_eq!(
+        app.agent_row_title_for_session("pi", "live"),
+        Some("Still mine")
+    );
+}
+
+#[test]
 fn agent_row_title_push_is_atomic_and_globally_bounded() {
     let _env = crate::persist::test_env("agent-row-title-bounds");
     let (tx, _rx) = std::sync::mpsc::channel();

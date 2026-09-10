@@ -670,9 +670,11 @@ the `agent`+`session_id` title. If neither exists, live rows keep
 Luvus pane alias (`=name`) as `title`. Empty `title` clears that key. Clear all
 titles owned by your module with `ui agent-title clear`, or one row with
 `--pane` / `--agent` + `--session-id`. The CLI authenticates these updates with
-the process-scoped module token automatically; do not pass or persist it
-manually. Luvus removes a module's titles and revokes the token when the module
-is disabled, unlinked, or uninstalled.
+the module token automatically; do not pass or persist it manually. Luvus removes
+a module's titles when the module is disabled, unlinked, or uninstalled, and a
+disabled module cannot publish. Your token stays valid while the module remains
+registered on that server, so a pane or command that outlives a disable/enable
+toggle keeps working.
 
 Repaint from `[[startup]]` and `[[events]]` such as `pane.agent_status_changed`.
 Pi's `session_info.name` belongs in that module, not in Luvus core.
