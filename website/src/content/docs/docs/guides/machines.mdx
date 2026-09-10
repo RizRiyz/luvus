@@ -388,6 +388,8 @@ luvus machine remove build
 `disable` and `remove` close only the local remote-session connections. They never
 stop the remote Luvus server, panes, agents, or automations. Catalog writes are
 atomic and support optimistic `--revision <n>` checks for scripts.
+Without that flag, CLI mutations snapshot the current revision automatically
+and reject a conflicting write rather than overwriting a concurrent change.
 
 `luvus machine open build --session review` remains the one-shot compatibility
 path when you want a dedicated remote terminal instead of switching the active
@@ -445,6 +447,9 @@ Debug and release homes are separate. If the entry exists, refresh with
 Connecting means the initial connection is being prepared; reconnecting means
 Luvus is retrying a lost connection with backoff. Attention means the endpoint
 needs intervention, such as correcting authentication or binary compatibility.
+Three consecutive handshake timeouts also enter Attention and stop automatic
+attempts. Selecting the machine again explicitly resets that retry budget;
+a successful connection resets it too.
 Inspect the failure with:
 
 ```sh

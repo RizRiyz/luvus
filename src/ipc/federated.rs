@@ -1114,6 +1114,9 @@ fn expire_connecting(machines: &mut HashMap<String, MachineRuntime>) {
             std::iter::once((&machine.selected_session, &mut machine.runtime))
         {
             if matches!(endpoint.state, MachineState::Connecting { deadline } if deadline <= now) {
+                // Closing a link can enqueue its final disconnect or startup
+                // result. Neither may revive an expired attempt.
+                endpoint.generation = next_connection_generation();
                 stop_link(endpoint);
                 endpoint.handshake_failures = endpoint.handshake_failures.saturating_add(1);
                 if endpoint.handshake_failures >= 3 {
@@ -4926,11 +4929,13 @@ mod tests {
         let machine = machine_with_sessions("box", &["default"], MachineState::Disabled);
         let mut machines = HashMap::from([("box".to_string(), machine)]);
         for attempt in 1..=3 {
+            let old_generation = machines["box"].runtime.generation;
             machines.get_mut("box").unwrap().runtime.state = MachineState::Connecting {
                 deadline: Instant::now(),
             };
             expire_connecting(&mut machines);
             let runtime = &machines["box"].runtime;
+            assert_ne!(runtime.generation, old_generation);
             assert_eq!(runtime.handshake_failures, attempt);
             if attempt < 3 {
                 assert!(matches!(runtime.state, MachineState::Reconnecting { .. }));

@@ -55,8 +55,8 @@ while (-not $child.WaitForExit(50)) {{
   $inputClosed = $true
  }}
 }}
-$outputCopy.GetAwaiter().GetResult()
-$errorCopy.GetAwaiter().GetResult()
+[void]$outputCopy.GetAwaiter().GetResult()
+[void]$errorCopy.GetAwaiter().GetResult()
 $code = $child.ExitCode
 $child.Dispose()
 exit $code
@@ -129,7 +129,11 @@ mod tests {
             );
             assert!(
                 output.stdout.ends_with(&payload),
-                "{shell} changed protocol bytes"
+                "{shell} changed protocol bytes: status={:?}, length={}, tail={:?}, stderr={}",
+                output.status,
+                output.stdout.len(),
+                &output.stdout[output.stdout.len().saturating_sub(128)..],
+                String::from_utf8_lossy(&output.stderr),
             );
             assert_eq!(output.stderr, b"machine-stderr");
         }
