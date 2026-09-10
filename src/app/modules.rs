@@ -1208,6 +1208,66 @@ command = ["sh", "-c", "sleep 5"]
     }
 
     #[test]
+    fn module_pane_restores_from_a_snapshot_that_names_the_install_shorthand() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("luvus-restoreshort-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("LUVUS_HOME", &home);
+
+        let dir = home.join("short-mod");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("luvus-module.toml"),
+            r#"
+id = "you.short"
+name = "Short"
+version = "0.1.0"
+min_luvus_version = "0.1.0"
+
+[[panes]]
+id = "board"
+title = "Board"
+command = ["sh", "-c", "sleep 5"]
+"#,
+        )
+        .unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.module_link_with(&dir, true, Some("Riz/luvus-short@abc123".into()))
+            .unwrap();
+        let pid = app
+            .module_open_pane("you.short", "board", Some("split"), "test")
+            .unwrap();
+
+        // A snapshot written by an older build stored whatever spec the caller
+        // used, so the persisted id can be the `owner/repo` install shorthand
+        // rather than the manifest id. Restore must still re-run the module.
+        app.module_panes.get_mut(&pid).unwrap().module_id = "Riz/luvus-short".into();
+        let snap = crate::persist::snapshot(&app);
+        let (tx2, _rx2) = std::sync::mpsc::channel();
+        let restored = App::from_snapshot(snap, tx2).expect("restore");
+
+        let rec = restored
+            .module_panes
+            .iter()
+            .find(|(_, r)| r.entrypoint == "board");
+        assert!(
+            rec.is_some(),
+            "a shorthand-named module pane still restores as a module pane"
+        );
+        let (rid, _) = rec.unwrap();
+        assert_eq!(
+            restored.panes.get(rid).map(|p| p.command.as_str()),
+            Some("sh"),
+            "it re-ran the module command, not the login shell"
+        );
+
+        std::env::remove_var("LUVUS_HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn settings_modules_tab_lists_and_toggles() {
         use ratatui::backend::TestBackend;
         use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};

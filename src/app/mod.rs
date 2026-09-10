@@ -8097,7 +8097,9 @@ fn restore_module_pane(
     let ctx = serde_json::json!({ "invocation_source": "restore" });
     let env = crate::module::runtime::env(
         m,
-        module_tokens.get(mid)?,
+        // A snapshot may name the module by its install shorthand, which
+        // `find` accepts but the token map (keyed by manifest id) does not.
+        module_tokens.get(m.id.as_str())?,
         &ctx,
         vec![("LUVUS_MODULE_ENTRYPOINT_ID".to_string(), ep.to_string())],
     );
@@ -8116,7 +8118,7 @@ fn restore_module_pane(
     Some((
         pane,
         crate::module::ModulePaneRecord {
-            module_id: mid.to_string(),
+            module_id: m.id.clone(),
             entrypoint: ep.to_string(),
         },
     ))
