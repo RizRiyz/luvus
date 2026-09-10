@@ -104,7 +104,13 @@ fn add(args: &[String]) -> Result<i32> {
         }
         catalog.machines.push(profile.clone());
         Ok(())
-    })?;
+    })
+    .map_err(
+        |error| match profile.remote_binary.as_deref().filter(|_| probe.is_some()) {
+            Some(binary) => catalog::prepared_commit_error(error, binary),
+            None => error,
+        },
+    )?;
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
@@ -153,6 +159,7 @@ fn set_enabled(args: &[String], enabled: bool) -> Result<i32> {
         let result = prepare_foreground(&mut profile, flag(args, "--install"))?;
         prepared = Some((result.remote_binary, profile.automatic_provisioning));
     }
+    let prepared_binary = prepared.as_ref().map(|(binary, _)| binary.clone());
     let (_, catalog) = catalog::mutate(fence, |catalog| {
         let profile = find_mut(catalog, id)?;
         profile.enabled = enabled;
@@ -166,6 +173,10 @@ fn set_enabled(args: &[String], enabled: bool) -> Result<i32> {
             profile.automatic_provisioning = provisioning;
         }
         Ok(())
+    })
+    .map_err(|error| match prepared_binary.as_deref() {
+        Some(binary) => catalog::prepared_commit_error(error, binary),
+        None => error,
     })?;
     print_mutation(&catalog, id)
 }

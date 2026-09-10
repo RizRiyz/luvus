@@ -7,6 +7,7 @@
 pub(crate) mod api;
 pub(crate) mod catalog;
 mod cli;
+pub(crate) mod command;
 pub(crate) mod link;
 mod provision;
 mod ssh;
@@ -44,6 +45,9 @@ pub(crate) fn add_profile(
         }
         catalog.machines.push(profile.clone());
         Ok(())
+    })
+    .map_err(|error| {
+        catalog::prepared_commit_error(error, profile.remote_binary.as_deref().unwrap_or_default())
     })?;
     catalog
         .machines
@@ -80,6 +84,9 @@ pub(crate) fn enable_profile(id: &str, approved: bool) -> anyhow::Result<catalog
             .ok_or_else(|| anyhow::anyhow!("saved machine was removed"))?;
         *saved = profile.clone();
         Ok(())
+    })
+    .map_err(|error| {
+        catalog::prepared_commit_error(error, profile.remote_binary.as_deref().unwrap_or_default())
     })?;
     Ok(profile)
 }

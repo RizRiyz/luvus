@@ -96,7 +96,7 @@ pub(crate) fn start(
         .remote_binary
         .as_deref()
         .ok_or_else(|| anyhow!("machine `{}` has no verified remote binary", profile.id))?;
-    let mut child = command(profile, binary, session)
+    let mut child = command(profile, binary, session)?
         .spawn()
         .context("failed to launch remote session SSH connection")?;
     let stdout = child
@@ -211,7 +211,7 @@ pub(crate) fn start(
     Ok(LinkTask { control, reader })
 }
 
-fn command(profile: &MachineProfile, binary: &str, session: &str) -> Command {
+fn command(profile: &MachineProfile, binary: &str, session: &str) -> Result<Command> {
     let mut command = Command::new("ssh");
     command
         .arg("-T")
@@ -224,15 +224,16 @@ fn command(profile: &MachineProfile, binary: &str, session: &str) -> Command {
         .arg("-o")
         .arg("ServerAliveCountMax=3")
         .arg(&profile.destination)
-        .arg(binary)
-        .arg("--session")
-        .arg(session)
-        .arg("remote-client-bridge")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     crate::platform::no_window(&mut command);
-    command
+    super::command::append(
+        &mut command,
+        binary,
+        &["--session", session, "remote-client-bridge"],
+    )?;
+    Ok(command)
 }
 
 #[cfg(test)]
@@ -247,7 +248,8 @@ mod tests {
             &profile,
             profile.remote_binary.as_deref().unwrap(),
             "review",
-        );
+        )
+        .unwrap();
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -271,7 +273,8 @@ mod tests {
             &profile,
             profile.remote_binary.as_deref().unwrap(),
             "default",
-        );
+        )
+        .unwrap();
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())

@@ -674,13 +674,14 @@ pub(crate) fn remote_attach_profile(
         .arg("ServerAliveInterval=15")
         .arg("-o")
         .arg("ServerAliveCountMax=3")
-        .arg(destination)
-        .arg(binary);
+        .arg(destination);
+    let mut remote_args = Vec::new();
     if let Some(name) = session_name {
         session::validate_name(name).map_err(anyhow::Error::msg)?;
-        command.arg("--session").arg(name);
+        remote_args.extend(["--session", name]);
     }
-    command.arg("remote-client-bridge");
+    remote_args.push("remote-client-bridge");
+    machine::command::append(&mut command, binary, &remote_args)?;
     let (result, _) = remote_attach_attempt(command);
     result
 }

@@ -306,6 +306,13 @@ pub(crate) fn preflight_profile(current: &Catalog, profile: &MachineProfile) -> 
     validate_catalog(&proposed)
 }
 
+/// Owner-local recovery information only; UHP projects errors separately.
+pub(crate) fn prepared_commit_error(error: anyhow::Error, binary: &str) -> anyhow::Error {
+    error.context(format!(
+        "Remote preparation succeeded, but the machine catalog was not saved. The verified binary at `{binary}` may remain in use; it was not deleted or rolled back. Refresh `luvus machine list` and retry setup using that existing binary (--remote-binary for a new profile)."
+    ))
+}
+
 fn checked_for_mutation(loaded: LoadedCatalog, expected_revision: Option<u64>) -> Result<Catalog> {
     if !loaded.warnings.is_empty() {
         return Err(anyhow!(
@@ -454,11 +461,11 @@ pub(super) fn validate_remote_binary(binary: &str) -> Result<()> {
         && matches!(bytes[2], b'\\' | b'/')
         && binary[2..].chars().all(|character| {
             character.is_ascii_alphanumeric()
-                || matches!(character, '\\' | '/' | '_' | '-' | '.' | '+')
+                || matches!(character, '\\' | '/' | '_' | '-' | '.' | '+' | ' ')
         });
     if binary.len() > MAX_REMOTE_BINARY_BYTES || !(posix || windows) {
         return Err(anyhow!(
-            "remote Luvus binary must be a shell-safe absolute POSIX or Windows drive path without whitespace"
+            "remote Luvus binary must be a shell-safe absolute POSIX or Windows drive path"
         ));
     }
     Ok(())
@@ -467,6 +474,20 @@ pub(super) fn validate_remote_binary(binary: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_write_failure_has_recovery_details_and_retains_cause() {
+        let error = prepared_commit_error(
+            anyhow!("machine catalog revision conflict: expected 1, current 2"),
+            r"C:\Users\Alice Smith\luvus.exe",
+        );
+        assert!(error.to_string().contains("catalog was not saved"));
+        assert!(error
+            .to_string()
+            .contains(r"C:\Users\Alice Smith\luvus.exe"));
+        assert!(error.to_string().contains("luvus machine list"));
+        assert!(format!("{error:#}").contains("revision conflict"));
+    }
 
     #[test]
     fn proposed_enabled_profile_is_rejected_before_preparation() {
@@ -625,7 +646,7 @@ mod tests {
         assert!(validate_remote_binary("/home/dev/.local/bin/luvus").is_ok());
         assert!(validate_remote_binary(r"C:\Users\dev\AppData\Local\luvus\luvus.exe").is_ok());
         assert!(validate_remote_binary("C:/Users/dev/.local/bin/luvus.exe").is_ok());
-        assert!(validate_remote_binary(r"C:\Program Files\luvus.exe").is_err());
+        assert!(validate_remote_binary(r"C:\Program Files\luvus.exe").is_ok());
         assert!(validate_remote_binary(r"C:\temp\luvus.exe:stream").is_err());
         assert!(validate_remote_binary(r"C:\temp\luvus.exe & whoami").is_err());
         assert!(validate_remote_binary("luvus").is_err());

@@ -230,11 +230,10 @@ saved only after a fresh `BatchMode=yes` capability probe succeeds.
 
 On macOS and Linux, automatic provisioning requires `curl` or `wget`, `tar`,
 and one of `sha256sum`, `shasum`, or `openssl`. Windows x86-64 provisioning uses
-the host's built-in Windows PowerShell and ZIP support. Its user-local install
-path must not contain whitespace because Luvus invokes the native executable
-directly across either cmd.exe or PowerShell OpenSSH defaults. If that
-constraint does not fit the account, install Luvus at another shell-safe
-absolute path and pass it explicitly. An explicit
+the host's built-in Windows PowerShell and ZIP support. Windows drive paths
+can contain spaces. Those paths use an encoded native-process launcher with
+inherited standard streams instead of passing terminal bytes through a
+PowerShell text pipeline. Other shell metacharacters remain rejected. An explicit
 `--remote-binary <absolute-path>` remains authoritative and is only validated;
 Luvus records `automatic_provisioning:false` and does not replace it.
 Profiles retain `automatic_provisioning:true` only to identify a managed

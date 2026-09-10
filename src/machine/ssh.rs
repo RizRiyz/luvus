@@ -217,7 +217,7 @@ exit 127"#.replace("__VERSION__", env!("CARGO_PKG_VERSION"))
 
 fn probe(destination: &str, binary: &str, batch: bool) -> Result<ProbeResponse> {
     let mut command = ssh_command(destination, batch);
-    command.arg(binary).arg("remote-client-info").arg("--json");
+    super::command::append(&mut command, binary, &["remote-client-info", "--json"])?;
     let output = run_bounded(command, PROBE_TIMEOUT)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -238,7 +238,7 @@ pub(crate) fn sessions(profile: &MachineProfile) -> Result<serde_json::Value> {
         .ok_or_else(|| anyhow!("machine `{}` must be prepared before use", profile.id))?;
     validate_remote_binary(binary)?;
     let mut command = ssh_command(&profile.destination, true);
-    command.arg(binary).arg("session").arg("list").arg("--json");
+    super::command::append(&mut command, binary, &["session", "list", "--json"])?;
     let output = run_bounded(command, PROBE_TIMEOUT)?;
     if !output.status.success() {
         return Err(anyhow!("could not list remote Luvus sessions"));

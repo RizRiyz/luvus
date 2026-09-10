@@ -159,8 +159,8 @@ printf '%s\n' "$dir/luvus"
 
 // Windows uses only built-in PowerShell and .NET facilities. The executable
 // lives under a versioned directory because Windows does not permit replacing
-// a running image. Keeping the direct path free of whitespace also lets the
-// persistent bridge run under either cmd.exe or PowerShell OpenSSH defaults.
+// a running image. Paths with spaces use an encoded native-process launcher
+// with inherited byte streams under either OpenSSH default shell.
 const INSTALL_WINDOWS: &str = r#"$ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $Version = '__LUVUS_VERSION__'
@@ -175,7 +175,7 @@ try {
     $Temp = Join-Path $env:TEMP ("luvus-machine-" + [Guid]::NewGuid().ToString('N'))
     $InstallDir = Join-Path $env:LOCALAPPDATA "luvus\remote\$Tag-p$Protocol"
     $Destination = Join-Path $InstallDir 'luvus.exe'
-    if ($Destination -notmatch '^[A-Za-z]:[\\/][0-9A-Za-z\\/_.+-]*$') {
+    if ($Destination -notmatch '^[A-Za-z]:[\\/][0-9A-Za-z\\/_.+ -]*$') {
         throw 'automatic install path is not shell-safe; pass --remote-binary with a shell-safe absolute path'
     }
 
@@ -666,7 +666,7 @@ mod tests {
         assert!(INSTALL_WINDOWS.contains("remote-client-info --json"));
         assert!(INSTALL_WINDOWS.contains("luvus\\remote\\$Tag"));
         assert!(INSTALL_WINDOWS
-            .contains("$Destination -notmatch '^[A-Za-z]:[\\\\/][0-9A-Za-z\\\\/_.+-]*$'"));
+            .contains("$Destination -notmatch '^[A-Za-z]:[\\\\/][0-9A-Za-z\\\\/_.+ -]*$'"));
         assert!(INSTALL_WINDOWS.contains(
             "automatic install path is not shell-safe; pass --remote-binary with a shell-safe absolute path"
         ));
