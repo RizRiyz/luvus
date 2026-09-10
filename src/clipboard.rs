@@ -1,21 +1,83 @@
 //! Client-side clipboard helpers. Never borrow a remote server's display environment.
 
-// A coalesced completion event, consumed only by the UI owner. In the thin
-// client it is drained with the next server message, without idle polling or
-// another transport-reader thread. The worker never writes terminal output.
-static NOTIFICATION: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
+use std::sync::{Arc, Mutex, OnceLock};
 
-fn report_failure() {
-    let language = crate::config::load().language;
-    *NOTIFICATION.lock().unwrap_or_else(|e| e.into_inner()) =
-        Some(crate::i18n::by_code(&language).clipboard_failed);
+/// One bounded completion slot per attachment. Retired attachments reject late
+/// completions, so a previous session cannot notify a newly attached client.
+pub(crate) struct Completion {
+    state: Mutex<(bool, Option<&'static str>)>,
+    #[cfg(unix)]
+    wake: Option<std::os::unix::net::UnixStream>,
+}
+
+impl Completion {
+    pub(crate) fn local() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new((true, None)),
+            #[cfg(unix)]
+            wake: None,
+        })
+    }
+
+    pub(crate) fn take(&self) -> Option<&'static str> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .1
+            .take()
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn close(&self) {
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = (false, None);
+    }
+
+    pub(crate) fn publish(&self, message: &'static str) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.0 {
+            return;
+        }
+        state.1 = Some(message);
+        #[cfg(unix)]
+        if let Some(mut wake) = self.wake.as_ref() {
+            use std::io::Write;
+            // Nonblocking, coalesced wakeup. A full socket already signals work.
+            loop {
+                match wake.write(&[1]) {
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    _ => break,
+                }
+            }
+        }
+    }
+
+    fn failure(&self) {
+        let language = crate::config::load().language;
+        self.publish(crate::i18n::by_code(&language).clipboard_failed);
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn channel() -> std::io::Result<(Arc<Self>, std::os::unix::net::UnixStream)> {
+        let (read, write) = std::os::unix::net::UnixStream::pair()?;
+        read.set_nonblocking(true)?;
+        write.set_nonblocking(true)?;
+        Ok((
+            Arc::new(Self {
+                state: Mutex::new((true, None)),
+                wake: Some(write),
+            }),
+            read,
+        ))
+    }
+}
+
+fn local_completion() -> Arc<Completion> {
+    static LOCAL: OnceLock<Arc<Completion>> = OnceLock::new();
+    LOCAL.get_or_init(Completion::local).clone()
 }
 
 pub(crate) fn take_notification() -> Option<&'static str> {
-    NOTIFICATION
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
+    local_completion().take()
 }
 
 #[cfg(unix)]
@@ -23,22 +85,39 @@ mod native {
     use std::io::{self, Write};
     use std::os::fd::AsRawFd;
     use std::process::{Command, Stdio};
-    use std::sync::{Arc, Condvar, Mutex, OnceLock};
+    use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
 
-    type Pending = Arc<(Mutex<Option<String>>, Condvar)>;
+    struct Request {
+        text: String,
+        completion: Arc<super::Completion>,
+    }
+    type Pending = Arc<(Mutex<Option<Request>>, Condvar)>;
+
+    fn worker(
+        queue: &Mutex<Option<Pending>>,
+        spawn: impl FnOnce() -> io::Result<Pending>,
+    ) -> io::Result<Pending> {
+        let mut slot = queue.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(pending) = slot.as_ref() {
+            return Ok(pending.clone());
+        }
+        let pending = spawn()?;
+        *slot = Some(pending.clone());
+        Ok(pending)
+    }
 
     /// One lazy worker, one pending selection. Rapid copies replace pending work
     /// instead of spawning a thread/process for every mouse gesture.
-    pub(super) fn copy(text: &str) {
-        static WORKER: OnceLock<Option<Pending>> = OnceLock::new();
-        let worker = WORKER.get_or_init(|| {
+    pub(super) fn copy(text: &str, completion: Arc<super::Completion>) {
+        static WORKER: Mutex<Option<Pending>> = Mutex::new(None);
+        let worker = worker(&WORKER, || {
             let pending: Pending = Arc::new((Mutex::new(None), Condvar::new()));
             let queue = pending.clone();
             std::thread::Builder::new()
                 .name("clipboard".into())
                 .spawn(move || loop {
-                    let text = {
+                    let request = {
                         let (lock, ready) = &*queue;
                         let mut slot = lock.lock().unwrap_or_else(|e| e.into_inner());
                         while slot.is_none() {
@@ -48,19 +127,23 @@ mod native {
                     };
                     let helpers = tools();
                     if !helpers.is_empty()
-                        && copy_with_tools(&text, &helpers, Duration::from_secs(2)).is_err()
+                        && copy_with_tools(&request.text, &helpers, Duration::from_secs(2)).is_err()
                     {
                         // Do not log clipboard contents or helper stderr (either
                         // can contain private data). OSC 52 was already requested.
-                        super::report_failure();
+                        request.completion.failure();
                     }
                 })
-                .ok()
                 .map(|_| pending)
         });
-        if let Some(queue) = worker {
-            *queue.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(text.to_owned());
+        if let Ok(queue) = worker {
+            *queue.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(Request {
+                text: text.to_owned(),
+                completion,
+            });
             queue.1.notify_one();
+        } else {
+            completion.failure();
         }
     }
 
@@ -165,6 +248,18 @@ mod native {
 
     #[cfg(test)]
     mod tests {
+        #[test]
+        fn clipboard_worker_retries_failed_start_and_reuses_success() {
+            let slot = Mutex::new(None);
+            assert!(worker(&slot, || Err(io::Error::other("spawn failed"))).is_err());
+            assert!(slot.lock().unwrap().is_none());
+            let pending: Pending = Arc::new((Mutex::new(None), Condvar::new()));
+            let started = worker(&slot, || Ok(pending.clone())).unwrap();
+            let reused = worker(&slot, || panic!("must reuse the running worker")).unwrap();
+            assert!(Arc::ptr_eq(&started, &pending));
+            assert!(Arc::ptr_eq(&started, &reused));
+        }
+
         use super::*;
 
         /// Run explicitly against a disposable compositor, never a user's desktop.
@@ -189,7 +284,7 @@ mod native {
             assert_eq!(result.stdout, text.as_bytes());
             // Also exercise the production worker and latest-pending policy.
             for n in 0..20 {
-                copy(&format!("selection {n}"));
+                copy(&format!("selection {n}"), super::super::local_completion());
             }
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
@@ -282,21 +377,36 @@ mod native {
 }
 
 pub(crate) fn copy_native(text: &str) {
+    copy_native_to(text, local_completion());
+}
+
+pub(crate) fn copy_native_to(text: &str, completion: Arc<Completion>) {
     #[cfg(unix)]
-    native::copy(text);
+    native::copy(text, completion);
     #[cfg(not(unix))]
     if crate::system_clipboard_copy(text).is_err() {
-        report_failure();
+        completion.failure();
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn clipboard_retired_completion_rejects_late_results() {
+        let (completion, _wake) = super::Completion::channel().unwrap();
+        completion.publish("before detach");
+        completion.close();
+        completion.publish("after detach");
+        assert_eq!(completion.take(), None);
+    }
+
     #[test]
     fn clipboard_completion_is_coalesced_and_consumed_once() {
-        *super::NOTIFICATION.lock().unwrap() = Some("first");
-        *super::NOTIFICATION.lock().unwrap() = Some("latest");
-        assert_eq!(super::take_notification(), Some("latest"));
-        assert_eq!(super::take_notification(), None);
+        let completion = super::Completion::local();
+        completion.publish("first");
+        completion.publish("latest");
+        assert_eq!(completion.take(), Some("latest"));
+        assert_eq!(completion.take(), None);
     }
 }

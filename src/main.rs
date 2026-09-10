@@ -201,7 +201,15 @@ pub(crate) fn emit_notification(msg: &str) {
 ///    where no clipboard tool is installed. Harmless if unsupported.
 pub(crate) fn emit_clipboard(text: &str) {
     clipboard::copy_native(text);
+    emit_clipboard_escape(text);
+}
 
+pub(crate) fn emit_clipboard_to(text: &str, completion: std::sync::Arc<clipboard::Completion>) {
+    clipboard::copy_native_to(text, completion);
+    emit_clipboard_escape(text);
+}
+
+fn emit_clipboard_escape(text: &str) {
     use std::io::Write;
     let b64 = base64_encode(text.as_bytes());
     let mut out = std::io::stdout().lock();

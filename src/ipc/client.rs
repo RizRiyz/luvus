@@ -23,6 +23,73 @@ use ratatui::{DefaultTerminal, Terminal};
 use crate::ipc::protocol::{self, ClientMessage, FrameData, FrameDiff, ServerMessage};
 use crate::ipc::transport;
 
+#[cfg(unix)]
+pub trait ClientRead: Read + std::os::fd::AsRawFd {}
+#[cfg(unix)]
+impl<T: Read + std::os::fd::AsRawFd> ClientRead for T {}
+#[cfg(not(unix))]
+pub trait ClientRead: Read {}
+#[cfg(not(unix))]
+impl<T: Read> ClientRead for T {}
+
+/// Wake the UI thread without a polling timer or interrupting frame decoding.
+#[cfg(unix)]
+struct CompletionReader<F: FnMut(&str)> {
+    source: Box<dyn ClientRead>,
+    wake: std::os::unix::net::UnixStream,
+    completion: Arc<crate::clipboard::Completion>,
+    notify: F,
+}
+
+#[cfg(unix)]
+impl<F: FnMut(&str)> Read for CompletionReader<F> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        use std::os::fd::AsRawFd;
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let mut fds = [
+                libc::pollfd {
+                    fd: self.source.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: self.wake.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            // Both descriptors remain owned by this reader throughout poll.
+            if unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if fds[1].revents != 0 {
+                let mut drain = [0; 128];
+                while self.wake.read(&mut drain).is_ok_and(|n| n > 0) {}
+                if let Some(message) = self.completion.take() {
+                    (self.notify)(message);
+                }
+            }
+            if fds[0].revents != 0 {
+                return self.source.read(bytes);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl<F: FnMut(&str)> Drop for CompletionReader<F> {
+    fn drop(&mut self) {
+        self.completion.close();
+    }
+}
+
 #[derive(Debug)]
 struct HandshakeIoError(std::io::Error);
 
@@ -78,12 +145,13 @@ pub fn run(sock: &Path) -> Result<()> {
     attach_inner(stream.clone(), stream, true)
 }
 
-/// Attach a thin client over **any** reader/writer carrying the binary frame
+/// Attach a thin client over a reader/writer carrying the binary frame
 /// protocol. The local path passes the two halves of a `Conn`; remote attach
 /// (docs/18 RA) passes an `ssh` child's stdout/stdin — the protocol is the same.
+/// Unix readers expose their descriptor so clipboard completion can wake reads.
 pub fn attach<R, W>(reader: R, writer: W) -> Result<()>
 where
-    R: Read + 'static,
+    R: ClientRead + 'static,
     W: Write + Send + 'static,
 {
     let _logging = crate::logging::init(crate::logging::Role::Client);
@@ -97,7 +165,7 @@ where
 
 fn attach_inner<R, W>(reader: R, writer: W, local: bool) -> Result<()>
 where
-    R: Read + 'static,
+    R: ClientRead + 'static,
     W: Write + Send + 'static,
 {
     let mut terminal = ratatui::init();
@@ -105,7 +173,7 @@ where
     let mut input = ClientInput::default();
     let mut selected = crate::session::display_name();
     let result = (|| {
-        let mut reader: Box<dyn Read> = Box::new(reader);
+        let mut reader: Box<dyn ClientRead> = Box::new(reader);
         let mut writer: Box<dyn Write + Send> = Box::new(writer);
         loop {
             let exit = run_inner(reader, writer, &mut terminal, &mut input, &selected)?;
@@ -174,15 +242,14 @@ struct ClientInput {
     windows_input_mode: Option<crate::terminal::host_input::WindowsInputModeGuard>,
 }
 
-fn run_inner<R, W>(
-    reader: R,
+fn run_inner<W>(
+    reader: Box<dyn ClientRead>,
     mut writer: W,
     terminal: &mut DefaultTerminal,
     input: &mut ClientInput,
     selected: &str,
 ) -> Result<ClientExit>
 where
-    R: Read,
     W: Write + Send + 'static,
 {
     let truecolor = protocol::truecolor_supported();
@@ -196,6 +263,17 @@ where
         },
     )?;
 
+    #[cfg(unix)]
+    let (completion, wake) = crate::clipboard::Completion::channel()?;
+    #[cfg(unix)]
+    let reader = CompletionReader {
+        source: reader,
+        wake,
+        completion: completion.clone(),
+        notify: crate::emit_notification,
+    };
+    #[cfg(not(unix))]
+    let completion = crate::clipboard::Completion::local();
     let mut reader = BufReader::new(reader);
     match read_handshake_message(&mut reader)? {
         // The one user-facing handshake failure is an old server after an
@@ -298,9 +376,6 @@ where
     let mut last_cursor = None;
     let exit = loop {
         let message = protocol::read_message::<_, ServerMessage>(&mut reader);
-        if let Some(notification) = crate::clipboard::take_notification() {
-            crate::emit_notification(notification);
-        }
         match message {
             // A full frame repaints the whole screen; a diff writes *only its changed
             // cells* straight to the terminal (O(changed), not a whole re-blit). Each
@@ -349,7 +424,12 @@ where
             }
             Ok(ServerMessage::Notify(msg)) => crate::emit_notification(&msg),
             Ok(ServerMessage::Sound(signal)) => crate::emit_sound(signal),
-            Ok(ServerMessage::Clipboard(text)) => crate::emit_clipboard(&text),
+            Ok(ServerMessage::Clipboard(text)) => {
+                crate::emit_clipboard_to(&text, completion.clone());
+                if let Some(message) = completion.take() {
+                    crate::emit_notification(message);
+                }
+            }
             Ok(ServerMessage::OpenUrl(url)) => crate::platform::open_url(&url),
             Ok(ServerMessage::SwitchSession { name }) => break ClientExit::SwitchSession(name),
             Ok(ServerMessage::Detach) => break ClientExit::Detached,
@@ -727,6 +807,53 @@ where
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[test]
+    fn clipboard_completion_wakes_idle_and_partial_frame_reads() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        for prefix in [0, 2, 5] {
+            let (source, mut server) = UnixStream::pair().unwrap();
+            let (completion, wake) = crate::clipboard::Completion::channel().unwrap();
+            let mut frame = Vec::new();
+            crate::ipc::protocol::write_message(
+                &mut frame,
+                &super::ServerMessage::Notify("server message".into()),
+            )
+            .unwrap();
+            server.write_all(&frame[..prefix]).unwrap();
+            let (notified, received) = mpsc::channel();
+            let retained = completion.clone();
+            let reader_thread = std::thread::spawn(move || {
+                let mut reader = super::CompletionReader {
+                    source: Box::new(source),
+                    wake,
+                    completion,
+                    notify: move |message: &str| {
+                        notified.send(message.to_owned()).unwrap();
+                    },
+                };
+                let message =
+                    crate::ipc::protocol::read_message::<_, super::ServerMessage>(&mut reader)
+                        .unwrap();
+                assert!(
+                    matches!(message, super::ServerMessage::Notify(text) if text == "server message")
+                );
+                assert_eq!(reader.read(&mut []).unwrap(), 0);
+            });
+            retained.publish("clipboard failed");
+            let notification = received.recv_timeout(Duration::from_secs(3));
+            // Always unblock the reader even when the wakeup assertion fails.
+            server.write_all(&frame[prefix..]).unwrap();
+            reader_thread.join().unwrap();
+            assert_eq!(notification.unwrap(), "clipboard failed");
+            retained.publish("stale attachment");
+            assert_eq!(retained.take(), None);
+        }
+    }
+
     use super::{
         copy_and_flush, is_handshake_io_error, read_handshake_message, relay,
         write_handshake_message,
