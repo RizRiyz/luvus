@@ -1566,6 +1566,29 @@ mod tests {
     }
 
     #[test]
+    fn pane_split_auto_stacks_a_portrait_cell_pane() {
+        let _env = crate::persist::test_env("pane-split-auto-portrait-cells");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        // 60×40 cells at the documented 2:1 cell aspect is physically taller.
+        app.last_pane_area = Rect::new(0, 0, 60, 40);
+        app.dispatch("pane.split", &json!({"direction": "auto"}))
+            .expect("portrait auto split");
+        assert_eq!(split_axis(&app), 1, "physically tall panes stack");
+    }
+
+    #[test]
+    fn pane_split_auto_keeps_headless_left_right_default() {
+        let _env = crate::persist::test_env("pane-split-auto-headless");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.last_pane_area = Rect::ZERO;
+        app.dispatch("pane.split", &json!({}))
+            .expect("headless auto split");
+        assert_eq!(split_axis(&app), 0, "unpainted clients keep left/right");
+    }
+
+    #[test]
     fn pane_split_auto_stacks_a_tall_pane() {
         let _env = crate::persist::test_env("pane-split-auto-tall");
         let (tx, _rx) = std::sync::mpsc::channel();

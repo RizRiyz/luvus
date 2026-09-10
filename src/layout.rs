@@ -24,15 +24,32 @@ pub enum Axis {
     Row,
 }
 
-/// Split the longer side of a pane so the two halves stay closer to square.
-/// Wide panes go side by side; tall panes stack. Equal sides keep the historical
-/// left/right default.
-pub fn auto_split_axis(width: u16, height: u16) -> Axis {
-    if height > width {
+/// Typical monospace cell height divided by width. Terminal glyphs are about
+/// twice as tall as they are wide (for example 8×16 pixels), so comparing
+/// columns to rows directly treats a physically tall pane as landscape.
+pub const CELL_ASPECT_HEIGHT_OVER_WIDTH: f32 = 2.0;
+
+/// Split the longer *physical* side of a pane so the two halves stay closer to
+/// square. `cell_aspect` is cell height / cell width. `1.0` treats cells as
+/// square and is the headless fallback: a 10_000×10_000 logical area still
+/// splits left/right. Equal physical sides keep the historical left/right default.
+pub fn auto_split_axis_with_cell_aspect(width: u16, height: u16, cell_aspect: f32) -> Axis {
+    let aspect = if cell_aspect.is_finite() && cell_aspect > 0.0 {
+        cell_aspect
+    } else {
+        1.0
+    };
+    if (height as f32) * aspect > f32::from(width) {
         Axis::Row
     } else {
         Axis::Col
     }
+}
+
+/// Split using square cells. Prefer [`auto_split_axis_with_cell_aspect`] for
+/// painted terminal geometry.
+pub fn auto_split_axis(width: u16, height: u16) -> Axis {
+    auto_split_axis_with_cell_aspect(width, height, 1.0)
 }
 
 enum Node {
@@ -1024,5 +1041,22 @@ mod tests {
         assert_eq!(auto_split_axis(50, 50), Axis::Col);
         assert_eq!(auto_split_axis(0, 0), Axis::Col);
         assert_eq!(auto_split_axis(1, 2), Axis::Row);
+    }
+
+    #[test]
+    fn auto_split_axis_accounts_for_tall_terminal_cells() {
+        let aspect = CELL_ASPECT_HEIGHT_OVER_WIDTH;
+        // 60×40 cells at 8×16 px is 480×640 px, physically taller.
+        assert_eq!(auto_split_axis_with_cell_aspect(60, 40, aspect), Axis::Row);
+        assert_eq!(auto_split_axis(60, 40), Axis::Col);
+        assert_eq!(auto_split_axis_with_cell_aspect(120, 30, aspect), Axis::Col);
+        assert_eq!(auto_split_axis_with_cell_aspect(40, 80, aspect), Axis::Row);
+        // Equal physical sides keep the left/right default.
+        assert_eq!(auto_split_axis_with_cell_aspect(80, 40, aspect), Axis::Col);
+        assert_eq!(auto_split_axis_with_cell_aspect(60, 40, 0.0), Axis::Col);
+        assert_eq!(
+            auto_split_axis_with_cell_aspect(60, 40, f32::NAN),
+            Axis::Col
+        );
     }
 }

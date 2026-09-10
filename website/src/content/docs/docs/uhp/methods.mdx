@@ -290,10 +290,11 @@ logical area. Headless clients therefore receive deterministic geometry that
 does not depend on the latest attached terminal size. `pane.edges` reports
 which outer edges the pane touches. Directional queries use the same geometric
 selection as the TUI. `pane.split` takes optional `direction`: omitted or `"auto"` splits the longer
-side of the target pane using the last interactive client size (or side by side
-when no client has painted), `"right"`, or `"down"` (`"stack"` is an alias for
-`"down"`). Older servers reject `"auto"` and treat an omitted direction as
-right, so callers that want the server default should omit the field.
+physical side of the target pane using the last interactive client size and a
+documented 2:1 cell height/width (or side by side when no client has painted),
+`"right"`, or `"down"` (`"stack"` is an alias for `"down"`). Older servers
+reject `"auto"` and treat an omitted direction as right, so callers that want
+the server default should omit the field.
 
 `layout.export` returns the complete binary split tree and focused pane.
 `layout.apply` accepts that tree plus an optional focus. It succeeds only when

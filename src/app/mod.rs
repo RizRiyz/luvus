@@ -4805,8 +4805,11 @@ impl App {
         }
     }
 
-    /// Axis that cuts the longer side of `pane` in its current tab.
+    /// Axis that cuts the longer physical side of `pane` in its current tab.
+    /// Painted clients use the documented cell aspect; the square logical area
+    /// used before any client has painted keeps the historical left/right split.
     fn auto_split_axis_for(&self, pane: PaneId) -> Axis {
+        let painted = self.last_pane_area.width > 1 && self.last_pane_area.height > 1;
         let area = self.split_area();
         let rect = self
             .pane_location(pane)
@@ -4816,7 +4819,15 @@ impl App {
                     .pane_rect(area, pane)
             })
             .unwrap_or(area);
-        crate::layout::auto_split_axis(rect.width, rect.height)
+        if painted {
+            crate::layout::auto_split_axis_with_cell_aspect(
+                rect.width,
+                rect.height,
+                crate::layout::CELL_ASPECT_HEIGHT_OVER_WIDTH,
+            )
+        } else {
+            crate::layout::auto_split_axis(rect.width, rect.height)
+        }
     }
 
     /// Attach a newly allocated leaf beside the focused pane, choosing the split
