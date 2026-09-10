@@ -41,7 +41,8 @@ luvus skill enable
 The command makes no network request. It detects supported coding-agent
 environments and installs the one bundled Luvus skill through their native
 skill directories. The shared `~/.agents/skills/luvus/` destination serves
-Codex, GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, fx, and Kilo Code.
+Codex, GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, fx, Kilo Code,
+and Devin.
 Claude Code, OpenCode, Kimi Code CLI, Grok Build, Hermes CLI, Qwen Code, and
 Kiro use their native dedicated destinations. It does not add an always-on
 pointer to `~/.codex/AGENTS.md`, and it never overwrites an installation it
@@ -241,7 +242,8 @@ for waiting on a specific lifecycle state after work has been sent.
 
 From an external Codex terminal, `agent start --anchor <pane-id>` creates the
 new no-focus sibling beside an explicit pane and completes the launch in one
-invocation. Omit `--down` for a right-side split and add it for a split below.
+invocation. Omit direction flags to split along the longer side of the anchor
+pane; pass `--right` or `--down` to force a direction.
 On an older installed release without `--anchor`, the skill uses `pane split
 <pane-id> --no-focus` followed by `agent start --pane <new-pane-id>`. This keeps
 Cargo, Homebrew, and `install.sh` releases compatible while newer versions use

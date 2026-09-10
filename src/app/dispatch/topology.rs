@@ -140,14 +140,25 @@ impl App {
                 None | Some(Value::Null) => self.layout().focus,
                 Some(_) => self.resolve_pane(p)?.ok_or_else(not_found)?,
             };
-            let dir = p
-                .get("direction")
-                .and_then(|v| v.as_str())
-                .unwrap_or("right");
-            let axis = if dir == "down" || dir == "stack" {
-                Axis::Row
-            } else {
-                Axis::Col
+            let axis = match p.get("direction") {
+                None | Some(Value::Null) => self.auto_split_axis_for(base),
+                Some(Value::String(dir)) => match dir.as_str() {
+                    "auto" => self.auto_split_axis_for(base),
+                    "down" | "stack" => Axis::Row,
+                    "right" => Axis::Col,
+                    _ => {
+                        return Err((
+                            "invalid_request".to_string(),
+                            "direction must be auto, right, or down".to_string(),
+                        ))
+                    }
+                },
+                Some(_) => {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "direction must be auto, right, or down".to_string(),
+                    ))
+                }
             };
             let focus = p.get("focus").and_then(|v| v.as_bool()) != Some(false);
             let new = self.split_pane(base, axis, focus).ok_or_else(not_found)?;
@@ -1526,5 +1537,99 @@ impl App {
                     .unwrap()
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::App;
+    use crate::layout::LayoutTree;
+    use ratatui::layout::Rect;
+    use serde_json::json;
+
+    fn split_axis(app: &App) -> u8 {
+        match app.layout().to_tree() {
+            LayoutTree::Split { axis, .. } => axis,
+            LayoutTree::Leaf(_) => panic!("expected a split tree"),
+        }
+    }
+
+    #[test]
+    fn pane_split_auto_cuts_a_wide_pane_side_by_side() {
+        let _env = crate::persist::test_env("pane-split-auto-wide");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.last_pane_area = Rect::new(0, 0, 120, 30);
+        app.dispatch("pane.split", &json!({"direction": "auto"}))
+            .expect("wide auto split");
+        assert_eq!(split_axis(&app), 0, "wide panes split side by side");
+    }
+
+    #[test]
+    fn pane_split_auto_uses_reported_square_cells() {
+        let _env = crate::persist::test_env("pane-split-auto-square-cells");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.last_pane_area = Rect::new(0, 0, 60, 40);
+        app.set_client_cell_pixels(10, 10);
+        app.dispatch("pane.split", &json!({"direction": "auto"}))
+            .expect("square-cell auto split");
+        assert_eq!(split_axis(&app), 0, "square cells keep 60x40 landscape");
+    }
+
+    #[test]
+    fn pane_split_auto_stacks_a_portrait_cell_pane() {
+        let _env = crate::persist::test_env("pane-split-auto-portrait-cells");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        // 60×40 cells at the documented 2:1 cell aspect is physically taller.
+        app.last_pane_area = Rect::new(0, 0, 60, 40);
+        app.dispatch("pane.split", &json!({"direction": "auto"}))
+            .expect("portrait auto split");
+        assert_eq!(split_axis(&app), 1, "physically tall panes stack");
+    }
+
+    #[test]
+    fn pane_split_auto_keeps_headless_left_right_default() {
+        let _env = crate::persist::test_env("pane-split-auto-headless");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.last_pane_area = Rect::ZERO;
+        app.dispatch("pane.split", &json!({}))
+            .expect("headless auto split");
+        assert_eq!(split_axis(&app), 0, "unpainted clients keep left/right");
+    }
+
+    #[test]
+    fn pane_split_auto_stacks_a_tall_pane() {
+        let _env = crate::persist::test_env("pane-split-auto-tall");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.last_pane_area = Rect::new(0, 0, 40, 80);
+        app.dispatch("pane.split", &json!({}))
+            .expect("tall default split");
+        assert_eq!(split_axis(&app), 1, "tall panes stack");
+    }
+
+    #[test]
+    fn pane_split_right_overrides_a_tall_pane() {
+        let _env = crate::persist::test_env("pane-split-right-override");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.last_pane_area = Rect::new(0, 0, 40, 80);
+        app.dispatch("pane.split", &json!({"direction": "right"}))
+            .expect("explicit right split");
+        assert_eq!(split_axis(&app), 0);
+    }
+
+    #[test]
+    fn pane_split_rejects_unknown_direction() {
+        let _env = crate::persist::test_env("pane-split-bad-direction");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let err = app
+            .dispatch("pane.split", &json!({"direction": "left"}))
+            .unwrap_err();
+        assert_eq!(err.0, "invalid_request");
     }
 }

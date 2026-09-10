@@ -1711,3 +1711,330 @@ fn closing_a_workspace_cancels_parked_waiters() {
     );
     assert!(app.output_waits.is_empty(), "no waiters leak");
 }
+
+/// Launched only by the fixture below: after READY there is no unsolicited output.
+#[test]
+#[ignore = "PTY child for content fence tests"]
+fn content_fence_quiet_child() {
+    if std::env::var("LUVUS_CONTENT_FENCE_CHILD").as_deref() != Ok("1") {
+        return;
+    }
+    use std::io::{Read, Write};
+    println!("\nU02_QUIET_CHILD_READY");
+    std::io::stdout().flush().unwrap();
+    let mut byte = [0];
+    while std::io::stdin().read(&mut byte).unwrap_or(0) != 0 {}
+}
+
+/// Keep a real terminal lifetime with controlled output and a private input queue.
+/// A normal interactive shell can redraw after a read and invalidate test pairs.
+fn content_fence_app() -> (
+    App,
+    PaneId,
+    std::sync::mpsc::Receiver<crate::terminal::pty::InputAction>,
+) {
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    let child = Pane::spawn_command(
+        pane,
+        80,
+        24,
+        app.ws().cwd.clone(),
+        app.app_tx.clone(),
+        &[
+            std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            "--exact".into(),
+            "app::dispatch::tests::agents::content_fence_quiet_child".into(),
+            "--ignored".into(),
+            "--nocapture".into(),
+            "--quiet".into(),
+        ],
+        &[("LUVUS_CONTENT_FENCE_CHILD".into(), "1".into())],
+        app.config.scrollback_bytes(),
+        app.pane_appearance,
+    )
+    .unwrap();
+    app.panes.insert(pane, child);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let ready = app.panes[&pane]
+            .engine
+            .lock()
+            .unwrap()
+            .visible_rows()
+            .iter()
+            .any(|line| line.trim() == "U02_QUIET_CHILD_READY");
+        if ready {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "quiet child did not become ready"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    app.status.get_mut(&pane).unwrap().agent = "claude".into();
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&pane)
+        .unwrap()
+        .replace_input_sender_for_test(input_tx);
+    (app, pane, input_rx)
+}
+
+/// Capture valid fence parameters from the fixture terminal under its engine lock.
+fn content_fence_pair(app: &App, pane_id: PaneId) -> Value {
+    let pane = &app.panes[&pane_id];
+    let _engine = pane.engine.lock().unwrap();
+    json!({
+        "target": pane_id.0.to_string(), "keys": ["enter"],
+        "if_content_revision": pane.content_revision(),
+        "terminal_id": pane.terminal_runtime().unwrap().terminal_id,
+    })
+}
+
+/// Replace fixture output and increment its revision while holding the reader lock.
+fn content_fence_advance(app: &App, pane: PaneId) {
+    let pane = &app.panes[&pane];
+    let mut engine = pane.engine.lock().unwrap();
+    engine.advance(b"\x1b[2J\x1b[HCHOOSER_B");
+    pane.content_revision_handle()
+        .fetch_add(1, Ordering::Release);
+}
+
+/// Unfenced callers retain their existing admission behavior after output changes.
+#[test]
+fn content_fence_legacy_keys_still_queue_after_output_changes() {
+    let _env = crate::persist::test_env("content-fence-legacy");
+    let (mut app, pane, input) = content_fence_app();
+    content_fence_advance(&app, pane);
+    app.dispatch(
+        "agent.keys",
+        &json!({"target":pane.0.to_string(),"keys":["enter"]}),
+    )
+    .unwrap();
+    let crate::terminal::pty::InputAction::Bytes(bytes) = input.try_recv().unwrap() else {
+        panic!("expected bytes")
+    };
+    assert_eq!(bytes, b"\r");
+    assert!(input.try_recv().is_err());
+}
+
+/// Matching coordinates admit exactly one ordered batch, including aliases and Unicode.
+#[test]
+fn content_fence_matching_pair_queues_one_ordered_batch() {
+    let _env = crate::persist::test_env("content-fence-match");
+    let (mut app, pane, input) = content_fence_app();
+    let mut params = content_fence_pair(&app, pane);
+    params["keys"] = json!(["up", "enter", "CTRL+C", "é"]);
+    app.dispatch("agent.keys", &params).unwrap();
+    let crate::terminal::pty::InputAction::Bytes(bytes) = input.try_recv().unwrap() else {
+        panic!("expected bytes")
+    };
+    assert_eq!(bytes, "\x1b[A\r\x03é".as_bytes());
+    assert!(input.try_recv().is_err());
+}
+
+/// A changed output revision rejects the complete batch without admitting a prefix.
+#[test]
+fn content_fence_stale_revision_queues_nothing() {
+    let _env = crate::persist::test_env("content-fence-stale");
+    let (mut app, pane, input) = content_fence_app();
+    let params = content_fence_pair(&app, pane);
+    content_fence_advance(&app, pane);
+    let error = app.dispatch("agent.keys", &params).unwrap_err();
+    assert_eq!(error.0, "content_revision_conflict");
+    assert!(error.1.contains("expected"));
+    assert!(error.1.contains("actual"));
+    assert!(error.1.contains(&params["if_content_revision"].to_string()));
+    assert!(input.try_recv().is_err());
+}
+
+/// A different terminal lifetime rejects keys even when the revision matches.
+#[test]
+fn content_fence_wrong_terminal_identity_queues_nothing() {
+    let _env = crate::persist::test_env("content-fence-identity");
+    let (mut app, pane, input) = content_fence_app();
+    let mut params = content_fence_pair(&app, pane);
+    let actual = params["terminal_id"].as_str().unwrap().to_owned();
+    let first = if actual.starts_with('0') { "1" } else { "0" };
+    params["terminal_id"] = json!(format!("{first}{}", &actual[1..]));
+    let error = app.dispatch("agent.keys", &params).unwrap_err();
+    assert_eq!(error.0, "content_revision_conflict");
+    assert!(error.1.contains(params["terminal_id"].as_str().unwrap()));
+    assert!(error.1.contains(&actual));
+    assert!(input.try_recv().is_err());
+}
+
+/// Either one-sided fence is a validation error and leaves the queue empty.
+#[test]
+fn content_fence_requires_both_fields() {
+    let _env = crate::persist::test_env("content-fence-pair");
+    let (mut app, pane, input) = content_fence_app();
+    for missing in ["if_content_revision", "terminal_id"] {
+        let mut params = content_fence_pair(&app, pane);
+        params.as_object_mut().unwrap().remove(missing);
+        assert_eq!(
+            app.dispatch("agent.keys", &params).unwrap_err().0,
+            "invalid_request"
+        );
+        assert!(input.try_recv().is_err());
+    }
+}
+
+/// Visible and recent reads report the coordinates belonging to their captured text.
+#[test]
+fn content_fence_read_returns_text_and_runtime_coordinates() {
+    let _env = crate::persist::test_env("content-fence-read");
+    let (mut app, pane, _input) = content_fence_app();
+    content_fence_advance(&app, pane);
+    for source in ["visible", "recent"] {
+        let result = app
+            .dispatch(
+                "agent.read",
+                &json!({"target":pane.0.to_string(), "source":source}),
+            )
+            .unwrap();
+        assert_eq!(
+            result["content_revision"],
+            app.panes[&pane].content_revision()
+        );
+        assert_eq!(
+            result["terminal_id"],
+            app.panes[&pane].terminal_runtime().unwrap().terminal_id
+        );
+        assert!(result["text"].as_str().unwrap().contains("CHOOSER_B"));
+    }
+}
+
+/// Invalid key arrays fail before both matching and stale fence comparisons.
+#[test]
+fn content_fence_invalid_keys_validate_before_comparison() {
+    let _env = crate::persist::test_env("content-fence-invalid-keys");
+    let (mut app, pane, input) = content_fence_app();
+    for stale in [false, true] {
+        let mut params = content_fence_pair(&app, pane);
+        if stale {
+            content_fence_advance(&app, pane);
+        }
+        for keys in [
+            json!([]),
+            Value::Null,
+            json!("enter"),
+            json!(["enter", 7]),
+            json!(["enter", "not-a-key"]),
+        ] {
+            params["keys"] = keys;
+            assert_eq!(
+                app.dispatch("agent.keys", &params).unwrap_err().0,
+                "invalid_request"
+            );
+            assert!(input.try_recv().is_err());
+        }
+    }
+}
+
+/// Malformed revision and identity values cannot admit keys.
+#[test]
+fn content_fence_rejects_malformed_coordinates() {
+    let _env = crate::persist::test_env("content-fence-malformed");
+    let (mut app, pane, input) = content_fence_app();
+    for (field, values) in [
+        (
+            "if_content_revision",
+            vec![Value::Null, json!(-1), json!(1.5), json!(true), json!("1")],
+        ),
+        (
+            "terminal_id",
+            vec![
+                Value::Null,
+                json!(7),
+                json!(""),
+                json!("0123456789ABCDEF0123456789ABCDEF"),
+                json!("0123456789abcdef0123456789abcdeg"),
+                json!("0123456789abcdef0123456789abcdef\n"),
+            ],
+        ),
+    ] {
+        for value in values {
+            let mut params = content_fence_pair(&app, pane);
+            params[field] = value;
+            assert_eq!(
+                app.dispatch("agent.keys", &params).unwrap_err().0,
+                "invalid_request"
+            );
+            assert!(input.try_recv().is_err());
+        }
+    }
+}
+
+/// A matching fence preserves the existing closed-writer delivery error.
+#[test]
+fn content_fence_closed_writer_is_send_failed() {
+    let _env = crate::persist::test_env("content-fence-closed");
+    let (mut app, pane, input) = content_fence_app();
+    drop(input);
+    let params = content_fence_pair(&app, pane);
+    assert_eq!(
+        app.dispatch("agent.keys", &params).unwrap_err().0,
+        "send_failed"
+    );
+}
+
+/// Deferred panes expose no terminal identity and cannot accept a fenced batch.
+#[test]
+fn content_fence_missing_runtime_is_conflict_and_read_identity_is_null() {
+    let _env = crate::persist::test_env("content-fence-no-runtime");
+    let (mut app, _, _) = content_fence_app();
+    app.config.shell = "luvus-content-fence-nonexistent-shell".into();
+    let pane = app.spawn_into_deferred(app.ws().cwd.clone(), &[]).unwrap();
+    assert!(app.panes[&pane].terminal_runtime().is_none());
+    app.status.get_mut(&pane).unwrap().agent = "claude".into();
+    let (sender, input) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&pane)
+        .unwrap()
+        .replace_input_sender_for_test(sender);
+    let params = json!({"target":pane.0.to_string(),"keys":["enter"],"if_content_revision":0,"terminal_id":"0123456789abcdef0123456789abcdef"});
+    let error = app.dispatch("agent.keys", &params).unwrap_err();
+    assert_eq!(error.0, "content_revision_conflict");
+    assert!(error.1.contains("expected"));
+    assert!(error.1.contains("actual"));
+    assert!(input.try_recv().is_err());
+    let result = app
+        .dispatch("agent.read", &json!({"target":pane.0.to_string()}))
+        .unwrap();
+    assert!(result.as_object().unwrap().contains_key("terminal_id"));
+    assert!(result["terminal_id"].is_null());
+    assert_eq!(
+        result["content_revision"],
+        app.panes[&pane].content_revision()
+    );
+}
+
+/// An unavailable engine cannot admit fenced input or fabricate a read revision.
+#[test]
+fn content_fence_unavailable_engine_queues_nothing() {
+    let _env = crate::persist::test_env("content-fence-poison");
+    let (mut app, pane, input) = content_fence_app();
+    let params = content_fence_pair(&app, pane);
+    let engine = app.panes[&pane].engine.clone();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = engine.lock().unwrap();
+        panic!("fixture poisons the engine lock");
+    }));
+    let error = app.dispatch("agent.keys", &params).unwrap_err();
+    assert_eq!(error.0, "content_revision_conflict");
+    assert!(input.try_recv().is_err());
+    let result = app
+        .dispatch("agent.read", &json!({"target":pane.0.to_string()}))
+        .unwrap();
+    assert_eq!(result["text"], "");
+    assert!(result["content_revision"].is_null());
+    // Clear poison so unrelated teardown does not inherit the fixture failure.
+    engine.clear_poison();
+}

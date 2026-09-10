@@ -21,7 +21,12 @@ pub enum ClientInput {
     Mouse(MouseEvent),
     Paste(String),
     PasteImage(PathBuf),
-    Resize(u16, u16),
+    Resize {
+        cols: u16,
+        rows: u16,
+        cell_width_px: u16,
+        cell_height_px: u16,
+    },
 }
 
 pub enum AppEvent {
@@ -116,6 +121,14 @@ pub enum AppEvent {
     /// the server-rendered workspace picker.
     ClientOpenWorkspacePicker {
         id: u64,
+    },
+    /// A display client reported its cell size in pixels, once after the handshake
+    /// and again on resize. This is passive metadata, not interaction: it must not
+    /// promote the reporting client to foreground or disturb render baselines.
+    ClientCellPixels {
+        id: u64,
+        cell_width_px: u16,
+        cell_height_px: u16,
     },
     /// Input from a binary display client. The server unwraps this only after
     /// activating the correct per-client viewport; it never reaches `App`.

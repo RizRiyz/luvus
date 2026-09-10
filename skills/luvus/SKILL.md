@@ -218,8 +218,9 @@ luvus pane split <anchor-pane-id> --no-focus
 luvus agent start reviewer --kind codex --pane <new-pane-id> --timeout 30
 ```
 
-Omit `--down` for a right-side split and add it to the split or anchored start
-for a split below. Never combine `--anchor` and `--pane`.
+Omit direction flags to split along the longer side of the anchor pane. Pass
+`--right` or `--down` on the split or anchored start to force a direction.
+Never combine `--anchor` and `--pane`.
 
 Send work with `agent send`, not raw pane text and Enter:
 
@@ -288,6 +289,26 @@ For a blocked agent:
 `agent keys` accepts only a recognized agent pane and a non-empty list of known
 key names. It validates the entire list before queuing one ordered action; any
 invalid entry sends nothing, and a closed target returns `send_failed`.
+
+For UHP interactions that must match the inspected screen, use `agent.read`
+with `source:"visible"` and pass its `content_revision` as `if_content_revision`
+together with its `terminal_id` in `agent.keys` params. The revision is a
+non-negative integer; the terminal ID is exactly 32 lowercase hex characters.
+Both fields are optional as a pair; a one-sided or malformed pair is
+`invalid_request`. A deferred pane has `terminal_id:null` and cannot be fenced.
+An unavailable read snapshot has empty text and null coordinates.
+
+The server checks the pair and queues keys under the same engine lock used to
+capture the text. `content_revision_conflict` means no keys were queued: re-read
+and reassess the authorized action, never retry the same pair. Generic response
+`revision` / request `if_revision` are global event coordinates, not the pane's
+content counter. Without the pair, behavior is unchanged. Older servers omit the
+coordinates or reject the new fields; omit the pair only when legacy unfenced
+admission is acceptable. These are UHP params, not CLI flags.
+
+The fence covers queue admission only. Already queued input and child-side
+changes not yet observed remain outside it. Cursor/SGR output can make a pair
+stale even if the dialog text looks unchanged.
 
 ## Control panes, tabs, and workspaces
 
@@ -457,6 +478,10 @@ surface:
   session ownership and structured usage. Without it, usage stays unavailable.
 - OpenCode 2 Preview is a separate `opencode2` agent. Do not install the
   OpenCode V1 integration for it or infer session IDs from its live database.
+- Devin has native detection and exact-ID resume only. Do not infer session
+  IDs from its private database; `luvus agent resume <id>` cannot find Devin
+  sessions, so bind a pane with `luvus pane report --agent devin --session
+  <id>` when the exact id is known.
 - For Hermes, `luvus integration install hermes` adds exact per-pane session
   ownership for restart resume. Detection remains native, but Luvus does not
   scan Hermes's private history store.

@@ -9,6 +9,7 @@ mod automation;
 mod bar;
 mod changelog;
 mod cli;
+mod clipboard;
 mod clipboard_image;
 mod config;
 mod detect;
@@ -210,8 +211,16 @@ pub(crate) fn emit_notification(msg: &str) {
 /// 2. **OSC 52** — a terminal escape; covers terminals that bridge it and setups
 ///    where no clipboard tool is installed. Harmless if unsupported.
 pub(crate) fn emit_clipboard(text: &str) {
-    let _ = system_clipboard_copy(text);
+    clipboard::copy_native(text);
+    emit_clipboard_escape(text);
+}
 
+pub(crate) fn emit_clipboard_to(text: &str, completion: std::sync::Arc<clipboard::Completion>) {
+    clipboard::copy_native_to(text, completion);
+    emit_clipboard_escape(text);
+}
+
+fn emit_clipboard_escape(text: &str) {
     use std::io::Write;
     let b64 = base64_encode(text.as_bytes());
     let mut out = std::io::stdout().lock();
@@ -403,6 +412,7 @@ fn play_sound_file(path: &Path) {
 }
 
 /// Pipe `text` into the first available OS clipboard command.
+#[cfg(not(unix))]
 fn system_clipboard_copy(text: &str) -> std::io::Result<()> {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -429,10 +439,15 @@ fn system_clipboard_copy(text: &str) -> std::io::Result<()> {
             continue; // tool not installed — try the next
         };
         if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes());
+            if stdin.write_all(text.as_bytes()).is_err() {
+                let _ = child.kill();
+                let _ = child.wait();
+                continue;
+            }
         }
-        let _ = child.wait();
-        return Ok(());
+        if child.wait().is_ok_and(|status| status.success()) {
+            return Ok(());
+        }
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::NotFound,
@@ -1353,6 +1368,11 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     };
     app.events = events.clone();
     app.set_color_mode(ipc::protocol::truecolor_supported());
+    // This process owns the terminal here, so measure cells once at startup the
+    // way an attaching client reports them after its handshake. Without this a
+    // local session that never resizes would split on the fallback aspect.
+    let (cell_width_px, cell_height_px) = ipc::protocol::local_cell_pixels();
+    app.set_client_cell_pixels(cell_width_px, cell_height_px);
     let pending = if app.config.theme == "terminal" {
         let probe = terminal::theme_probe::probe();
         if let Some(colors) = probe.colors.as_ref() {
@@ -1442,6 +1462,9 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
         }
         if let Some(text) = app.pending_clipboard.take() {
             emit_clipboard(&text);
+        }
+        if let Some(notification) = clipboard::take_notification() {
+            emit_notification(notification);
         }
         app.tick_toast(Instant::now());
         app.tick_copy_highlight(Instant::now());

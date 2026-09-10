@@ -63,3 +63,9 @@ and means queue admission, not child consumption. `agent.send`, pane raw input,
 agent launch/fork, close, token management, and standalone terminal input
 actions remain forbidden through Access. No request, response, or event shape
 changes are introduced by this permission.
+
+Control also permits `pane.rename` with the existing `pane` and `name` parameters;
+read-only Access denies it. Rename retains the owner name validation and
+`pane.renamed` event. An empty name clears the pane alias. Effective
+`access.allowed_methods` includes `pane.rename` only for Control endpoints
+whose owner advertises it; the request, response, and event schemas are unchanged.

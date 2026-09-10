@@ -59,11 +59,36 @@ application-cursor pager), Luvus forwards those keys unchanged. `Shift+↑`,
 
 ## Copying
 
-Drag across a pane to select. Release **auto-copies** and flashes a *Copied*
-toast. luvus writes both your native OS clipboard (`pbcopy` / `wl-copy` /
-`xclip` / `clip`) and OSC 52, so it works locally *and* over SSH.
+Drag across a pane to select. Release requests a copy and flashes a *Copy requested*
+toast. Luvus requests both your native OS clipboard (`pbcopy` / `wl-copy` /
+`xclip` / `clip`) and OSC 52. The terminal must permit OSC 52 clipboard writes;
+that escape sequence does not acknowledge whether the clipboard changed.
 Soft-wrapped display rows copy as one logical line. Hard line breaks and any
 leading indentation inside the selection remain unchanged.
+
+Clipboard helpers run on the **client machine**, including when attached over
+SSH. On Linux, the client uses `wl-copy` when `WAYLAND_DISPLAY` is set and
+X11 helpers when `DISPLAY` is set. It preserves the client's display environment,
+including `XDG_RUNTIME_DIR` and sockets named `wayland-1`; it does not use the
+remote server's display or guess a socket name. Launch the client from your
+desktop terminal with those variables intact. Restarting the background server
+does not repair a missing client display environment.
+
+Unix helper work runs off the rendering loop with a two-second timeout per
+helper. Failed helpers fall through to another applicable helper. Rapid copies
+retain only the latest pending selection. If all attempted helpers fail, Luvus
+requests a terminal notification explaining that native copy failed and OSC 52
+was requested instead. Failure notifications are queued for the UI thread; an
+idle thin client shows them with the next server message. Notifications also
+depend on terminal support. When no
+native helper applies, OSC 52 remains available without a native-success claim.
+No clipboard text or helper stderr is logged.
+
+For Wayland troubleshooting, run `wl-copy` and `wl-paste` from the same outer
+terminal that launches the Luvus client. Check `WAYLAND_DISPLAY` and
+`XDG_RUNTIME_DIR` there, not just in the detached server. A socket symlink is not
+required. This behavior concerns Luvus selection copy, not OSC 52 emitted by
+applications running inside a pane.
 
 For keyboard selection, press **`Ctrl+Space`**, then **`y`** by default. Change
 the second key in **Settings → Keys → Copy terminal text**. Shift-based `V`

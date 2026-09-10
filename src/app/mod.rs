@@ -2725,6 +2725,10 @@ pub struct App {
     pub menu_scroll: MenuScroll,
     app_tx: Sender<AppEvent>,
     pub last_pane_area: Rect,
+    /// Pixel size of one cell on the interactive display client. `0` means the
+    /// host did not report it; auto-split then uses the documented 2:1 fallback.
+    pub cell_width_px: u16,
+    pub cell_height_px: u16,
     // Hit-test geometry from the last render, for mouse clicks.
     pub pane_rects: Vec<(PaneId, Rect)>,
     /// Each pane's **content** rect (inside the border/title) — maps a mouse
@@ -2830,6 +2834,8 @@ pub struct App {
     /// `(previous theme, selection revision)` restores an automatically replaced
     /// active theme only when the user has not selected another theme meanwhile.
     pub(crate) pending_theme_uninstalls: HashMap<String, Option<(String, u64)>>,
+    /// Pending removals waiting for configuration persistence, not worker completion.
+    pub(crate) deferred_theme_uninstalls: Vec<String>,
     pub(crate) theme_selection_revision: u64,
     /// Slider arrows in the modal: (control index, ±1 direction, rect).
     pub settings_arrow_rects: Vec<(usize, i32, Rect)>,
@@ -3180,6 +3186,8 @@ impl App {
             menu_scroll: MenuScroll::default(),
             app_tx,
             last_pane_area: Rect::ZERO,
+            cell_width_px: 0,
+            cell_height_px: 0,
             pane_rects: Vec::new(),
             pane_content_rects: Vec::new(),
             scroll_pane: None,
@@ -3222,6 +3230,7 @@ impl App {
             settings_ctl_rects: Vec::new(),
             settings_theme_remove_rects: Vec::new(),
             pending_theme_uninstalls: HashMap::new(),
+            deferred_theme_uninstalls: Vec::new(),
             theme_selection_revision: 0,
             settings_arrow_rects: Vec::new(),
             modules,
@@ -3846,6 +3855,8 @@ impl App {
             menu_scroll: MenuScroll::default(),
             app_tx,
             last_pane_area: Rect::ZERO,
+            cell_width_px: 0,
+            cell_height_px: 0,
             pane_rects: Vec::new(),
             pane_content_rects: Vec::new(),
             scroll_pane: None,
@@ -3888,6 +3899,7 @@ impl App {
             settings_ctl_rects: Vec::new(),
             settings_theme_remove_rects: Vec::new(),
             pending_theme_uninstalls: HashMap::new(),
+            deferred_theme_uninstalls: Vec::new(),
             theme_selection_revision: 0,
             settings_arrow_rects: Vec::new(),
             modules,
@@ -4833,6 +4845,78 @@ impl App {
     fn split(&mut self, axis: Axis) {
         let pane = self.layout().focus;
         let _ = self.split_pane(pane, axis, true);
+    }
+
+    /// Split the focused pane along its longer side.
+    fn split_auto(&mut self) {
+        let pane = self.layout().focus;
+        let axis = self.auto_split_axis_for(pane);
+        let _ = self.split_pane(pane, axis, true);
+    }
+
+    /// Has an interactive client painted a usable pane area yet? Automatic splits
+    /// only trust reported cell geometry once one has; before that the square
+    /// logical area keeps the historical left/right default.
+    fn has_painted_area(&self) -> bool {
+        self.last_pane_area.width > 1 && self.last_pane_area.height > 1
+    }
+
+    /// Geometry used when choosing an automatic split. Prefer the last rendered
+    /// pane area so a live client decides; fall back to the square logical area
+    /// used by headless topology queries.
+    fn split_area(&self) -> Rect {
+        if self.has_painted_area() {
+            self.last_pane_area
+        } else {
+            crate::api::topology::logical_area()
+        }
+    }
+
+    pub(crate) fn set_client_cell_pixels(&mut self, width: u16, height: u16) {
+        self.cell_width_px = width;
+        self.cell_height_px = height;
+    }
+
+    fn painted_cell_aspect(&self) -> f32 {
+        if self.cell_width_px > 0 && self.cell_height_px > 0 {
+            f32::from(self.cell_height_px) / f32::from(self.cell_width_px)
+        } else {
+            crate::layout::CELL_ASPECT_HEIGHT_OVER_WIDTH
+        }
+    }
+
+    /// Axis that cuts the longer physical side of `pane` in its current tab.
+    /// Painted clients use reported cell pixels when available, else the
+    /// documented 2:1 fallback. The square logical area used before any client
+    /// has painted keeps the historical left/right split.
+    fn auto_split_axis_for(&self, pane: PaneId) -> Axis {
+        let painted = self.has_painted_area();
+        let area = self.split_area();
+        let rect = self
+            .pane_location(pane)
+            .and_then(|(workspace, tab)| {
+                self.workspaces[workspace].tabs[tab]
+                    .layout
+                    .pane_rect(area, pane)
+            })
+            .unwrap_or(area);
+        if painted {
+            crate::layout::auto_split_axis_with_cell_aspect(
+                rect.width,
+                rect.height,
+                self.painted_cell_aspect(),
+            )
+        } else {
+            crate::layout::auto_split_axis(rect.width, rect.height)
+        }
+    }
+
+    /// Attach a newly allocated leaf beside the focused pane, choosing the split
+    /// axis from that pane's current aspect ratio.
+    fn split_focused_auto(&mut self, new_id: PaneId) {
+        let focus = self.layout().focus;
+        let axis = self.auto_split_axis_for(focus);
+        self.layout_mut().split_focused(axis, new_id);
     }
 
     /// Spawn and attach a sibling beside `target`, preserving inactive view state
@@ -10277,6 +10361,65 @@ mod tests {
         let old: persist::PaneSnap =
             serde_json::from_str(r#"{"cwd":"/tmp/x","command":"sh"}"#).unwrap();
         assert_eq!(old.agent_launch, None);
+    }
+
+    /// A Devin pane restores from the exact binding Luvus persisted (it has no
+    /// session discovery), and the restore never replays the `-- <briefing>`
+    /// the pane was launched with: only the options before the separator come
+    /// back.
+    #[test]
+    fn devin_restores_its_exact_binding_without_replaying_the_briefing() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let focus = app.layout().focus;
+        let st = app.status.get_mut(&focus).unwrap();
+        st.agent = "devin".into();
+        st.agent_session = Some(AgentSession {
+            agent: "devin".into(),
+            session_id: "quiet-meadow".into(),
+        });
+        app.proc_commands.insert(
+            focus,
+            vec!["devin --permission-mode auto -- fix the login bug".into()],
+        );
+
+        let snap = persist::snapshot(&app);
+        let ps = snap
+            .workspaces
+            .iter()
+            .flat_map(|w| &w.tabs)
+            .flat_map(|t| &t.panes)
+            .find(|(id, _)| *id == focus.0)
+            .map(|(_, ps)| ps)
+            .unwrap();
+        assert_eq!(
+            ps.agent_session,
+            Some(("devin".to_string(), "quiet-meadow".to_string()))
+        );
+        assert_eq!(
+            ps.agent_launch.as_deref(),
+            Some(
+                &[
+                    "--permission-mode".to_string(),
+                    "auto".into(),
+                    "--".into(),
+                    "fix".into(),
+                    "the".into(),
+                    "login".into(),
+                    "bug".into(),
+                ][..]
+            )
+        );
+
+        let (agent, sid) = ps.agent_session.clone().unwrap();
+        assert_eq!(
+            crate::agent::resume_for(&agent, &sid, ps.agent_launch.as_deref(), true).as_deref(),
+            Some("devin --resume 'quiet-meadow' '--permission-mode' 'auto'\r")
+        );
+        assert_eq!(
+            crate::agent::resume_for(&agent, &sid, ps.agent_launch.as_deref(), false).as_deref(),
+            Some("devin --resume 'quiet-meadow'\r")
+        );
     }
 
     /// The captured CLI options are **per pane**, not one global set (docs/62).

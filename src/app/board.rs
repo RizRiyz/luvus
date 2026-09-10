@@ -3317,6 +3317,7 @@ mod tests {
             ("codex", "codex"),
             ("copilot", "copilot --interactive"),
             ("cursor", "cursor-agent"),
+            ("devin", "devin --"),
             ("droid", "droid"),
             ("fx", "fx ask --prompt-permissions"),
             ("gemini", "gemini --prompt-interactive"),

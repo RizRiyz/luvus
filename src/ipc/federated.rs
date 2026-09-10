@@ -450,6 +450,7 @@ fn run_inner(
         ServerMessage::Ready { probe_terminal } => probe_terminal,
         _ => return Err(anyhow!("unexpected local server negotiation")),
     };
+    protocol::write_message(&mut writer, &super::client::cell_pixels_message())?;
     let probe = if probe_terminal {
         crate::terminal::theme_probe::probe()
     } else {
@@ -1430,6 +1431,12 @@ fn handle_surface_message(
             }
         }
         ServerMessage::Ready { probe_terminal } => {
+            send_surface(
+                &endpoint,
+                &super::client::cell_pixels_message(),
+                machines,
+                local_writer,
+            )?;
             let is_candidate = candidate
                 .as_ref()
                 .is_some_and(|candidate| candidate.endpoint == endpoint);
@@ -3284,7 +3291,7 @@ fn close_selector(
         if let Ok((cols, rows)) = crossterm::terminal::size() {
             send_surface(
                 active,
-                &ClientMessage::Resize { cols, rows },
+                &super::client::resize_message(cols, rows),
                 machines,
                 local_writer,
             )?;
@@ -3420,7 +3427,7 @@ fn request_switch(
                 &ClientMessage::SurfaceInterest(SurfaceInterest::Prepared),
             )?;
             if let Ok((cols, rows)) = crossterm::terminal::size() {
-                send_local(local_writer, &ClientMessage::Resize { cols, rows })?;
+                send_local(local_writer, &super::client::resize_message(cols, rows))?;
             }
             *candidate = Some(SurfaceCandidate {
                 ticket: next_connection_generation(),
@@ -3453,7 +3460,7 @@ fn request_switch(
             )))?;
             control.send(&ClientMessage::SurfaceInterest(SurfaceInterest::Prepared))?;
             if let Ok((cols, rows)) = crossterm::terminal::size() {
-                control.send(&ClientMessage::Resize { cols, rows })?;
+                control.send(&super::client::resize_message(cols, rows))?;
             }
             *candidate = Some(SurfaceCandidate {
                 ticket: next_connection_generation(),
