@@ -409,9 +409,12 @@ impl App {
         source: &str,
         extra_env: Vec<(String, String)>,
     ) -> Result<u64, String> {
+        let module_filter = module_filter
+            .map(|spec| self.module_id_for(spec))
+            .transpose()?;
         // When a specific module is named, validate it up front for a clear
         // error (e.g. "disabled") instead of a generic "no runnable module …".
-        if let Some(mid) = module_filter {
+        if let Some(mid) = module_filter.as_deref() {
             match self.modules.find(mid) {
                 None => return Err(format!("no module {mid}")),
                 Some(m) if !m.is_runnable() => {
@@ -431,7 +434,7 @@ impl App {
             .modules
             .iter()
             .filter(|m| m.is_runnable())
-            .filter(|m| module_filter.is_none_or(|f| m.id == f))
+            .filter(|m| module_filter.as_deref().is_none_or(|f| m.id == f))
             .filter_map(|m| {
                 m.manifest
                     .action(action_id)
@@ -504,10 +507,11 @@ impl App {
         placement: Option<&str>,
         source: &str,
     ) -> Result<PaneId, String> {
+        let module_id = self.module_id_for(module_id)?;
         let argv = {
             let m = self
                 .modules
-                .find(module_id)
+                .find(&module_id)
                 .ok_or_else(|| format!("no module {module_id}"))?;
             if !m.is_runnable() {
                 return Err(m
@@ -528,13 +532,13 @@ impl App {
 
         let ctx = context::build(self, source);
         let (root, env) = {
-            let m = self.modules.find(module_id).unwrap();
+            let m = self.modules.find(&module_id).unwrap();
             (
                 m.root.clone(),
                 runtime::env(
                     m,
                     self.module_tokens
-                        .get(module_id)
+                        .get(m.id.as_str())
                         .ok_or_else(|| format!("module {module_id} has no runtime token"))?,
                     &ctx,
                     vec![(
@@ -585,7 +589,7 @@ impl App {
         self.module_panes.insert(
             id,
             ModulePaneRecord {
-                module_id: module_id.to_string(),
+                module_id: module_id.clone(),
                 entrypoint: entrypoint.to_string(),
             },
         );
@@ -620,10 +624,11 @@ impl App {
         source: &str,
         target: Target,
     ) -> Result<u64, String> {
+        let module_id = self.module_id_for(module_id)?;
         {
             let module = self
                 .modules
-                .find(module_id)
+                .find(&module_id)
                 .ok_or_else(|| format!("no module {module_id}"))?;
             if !module.is_runnable() {
                 return Err(module
@@ -645,10 +650,10 @@ impl App {
         }
         let ctx = context::build_for(self, source, &target);
         let (root, env) = {
-            let module = self.modules.find(module_id).unwrap();
+            let module = self.modules.find(&module_id).unwrap();
             let token = self
                 .module_tokens
-                .get(module_id)
+                .get(module.id.as_str())
                 .ok_or_else(|| format!("module {module_id} has no runtime token"))?;
             (
                 module.root.clone(),
@@ -658,7 +663,7 @@ impl App {
         let log_id = runtime::next_log_id();
         self.push_module_log(ModuleCommandLog {
             id: log_id,
-            module_id: module_id.to_string(),
+            module_id: module_id.clone(),
             label,
             argv: argv.clone(),
             status: ModuleStatus::Running,
@@ -1848,7 +1853,7 @@ secret = true
         let _ = std::fs::remove_dir_all(&home);
         std::env::set_var("LUVUS_HOME", &home);
 
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
 
         let dir = home.join("spec-mod");
@@ -1865,6 +1870,16 @@ min_luvus_version = "0.1.0"
 key = "token"
 title = "Token"
 type = "string"
+
+[[actions]]
+id = "ping"
+title = "Ping"
+command = ["sh", "-c", "echo shorthand-action"]
+
+[[panes]]
+id = "status"
+title = "Status"
+command = ["sh", "-c", "sleep 5"]
 "#,
         )
         .unwrap();
@@ -1914,6 +1929,27 @@ type = "string"
         assert!(!app.modules.find("example.agent-ping").unwrap().enabled);
         app.module_set_enabled("Riz/luvus-agent-ping", true)
             .unwrap();
+
+        // Executable entrypoints also resolve before looking up their runtime
+        // token, and every retained identity uses the canonical manifest id.
+        let log_id = app
+            .module_invoke_action("ping", Some("Riz/luvus-agent-ping"), "test")
+            .unwrap();
+        settle(&mut app, &rx, log_id);
+        let log = app.module_logs.iter().find(|log| log.id == log_id).unwrap();
+        assert_eq!(log.module_id, "example.agent-ping");
+        assert_eq!(log.status, ModuleStatus::Succeeded);
+
+        let pane = app
+            .module_open_pane("Riz/luvus-agent-ping", "status", Some("split"), "test")
+            .unwrap();
+        assert_eq!(
+            app.module_panes
+                .get(&pane)
+                .map(|record| record.module_id.as_str()),
+            Some("example.agent-ping")
+        );
+        app.close_pane(pane);
 
         // And unlink by owner/repo actually removes it, rather than reporting
         // success while the module stays registered.
