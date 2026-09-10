@@ -93,7 +93,8 @@ mod tests {
         let encoded = crate::base64_encode(&bytes);
         let remote =
             format!("powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}");
-        let payload: Vec<u8> = (0..=255).cycle().take(65536).collect();
+        // Leave room for the Rust test harness within the probe's 64 KiB cap.
+        let payload: Vec<u8> = (0..=255).cycle().take(8192).collect();
         for shell in ["cmd.exe", "powershell.exe"] {
             let mut command = Command::new(shell);
             if shell == "cmd.exe" {

@@ -284,6 +284,57 @@ pub(super) fn run_bounded_with_input(
     run_bounded_with_owned_input(command, timeout, input.map(<[u8]>::to_vec))
 }
 
+// Closing this handle terminates descendants too, so nested Windows shells
+// cannot retain pipe handles after the direct child is killed or exits.
+#[cfg(windows)]
+struct WindowsChildJob(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for WindowsChildJob {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl WindowsChildJob {
+    fn attach(child: &mut std::process::Child) -> Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::*;
+        let result = (|| {
+            let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if handle.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+            let job = Self(handle);
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if unsafe {
+                SetInformationJobObject(
+                    handle,
+                    JobObjectExtendedLimitInformation,
+                    &limits as *const _ as *const _,
+                    std::mem::size_of_val(&limits) as u32,
+                )
+            } == 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            if unsafe { AssignProcessToJobObject(handle, child.as_raw_handle()) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(job)
+        })();
+        if result.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        result.context("cannot contain Windows machine process tree")
+    }
+}
+
 pub(super) fn run_bounded_with_owned_input(
     mut command: Command,
     timeout: Duration,
@@ -300,6 +351,8 @@ pub(super) fn run_bounded_with_owned_input(
         .stderr(Stdio::piped());
     crate::platform::no_window(&mut command);
     let mut child = command.spawn().context("failed to launch ssh")?;
+    #[cfg(windows)]
+    let _job = WindowsChildJob::attach(&mut child)?;
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
@@ -347,7 +400,7 @@ pub(super) fn run_bounded_with_owned_input(
         Err(error) => {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = stdout_reader.join();
+
             return Err(error.into());
         }
     };
@@ -355,8 +408,7 @@ pub(super) fn run_bounded_with_owned_input(
         let Some(mut stdin) = child.stdin.take() else {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
+
             return Err(anyhow!("ssh stdin was not captured"));
         };
         match std::thread::Builder::new()
@@ -371,8 +423,7 @@ pub(super) fn run_bounded_with_owned_input(
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
+
                 return Err(error.into());
             }
         }
@@ -380,29 +431,32 @@ pub(super) fn run_bounded_with_owned_input(
         None
     };
     let deadline = std::time::Instant::now() + timeout;
+    let mut exited = None;
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
+            Ok(Some(status)) => exited = Some(status),
             Ok(None) => {}
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                if let Some(writer) = input_writer {
-                    let _ = writer.join();
-                }
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
+
                 return Err(error.into());
+            }
+        }
+        if let Some(status) = exited {
+            if stdout_reader.is_finished()
+                && stderr_reader.is_finished()
+                && input_writer
+                    .as_ref()
+                    .is_none_or(|writer| writer.is_finished())
+            {
+                break status;
             }
         }
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            if let Some(writer) = input_writer {
-                let _ = writer.join();
-            }
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
+
             return Err(anyhow!("SSH operation timed out"));
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -431,6 +485,33 @@ pub(super) fn run_bounded_with_owned_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn deadline_includes_pipes_inherited_after_parent_exit() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 2 & exit 0"]);
+        let started = std::time::Instant::now();
+        let error = run_bounded(command, Duration::from_millis(100)).unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_timeout_does_not_join_pipes_held_by_nested_shells() {
+        let mut command = Command::new("cmd.exe");
+        command.args([
+            "/d",
+            "/s",
+            "/c",
+            "powershell.exe -NoLogo -NoProfile -NonInteractive -Command Start-Sleep 60",
+        ]);
+        let started = std::time::Instant::now();
+        let error = run_bounded(command, Duration::from_secs(2)).unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error:#}");
+        assert!(started.elapsed() < Duration::from_secs(8));
+    }
 
     #[test]
     fn installation_permission_is_per_operation_not_saved_in_the_profile() {
