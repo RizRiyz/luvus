@@ -36,6 +36,7 @@ pub(crate) fn append(command: &mut Command, binary: &str, args: &[&str]) -> anyh
 fn windows_script(binary: &str, args: &[&str]) -> String {
     format!(
         r#"$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $info = New-Object System.Diagnostics.ProcessStartInfo
 $info.FileName = '{binary}'
 $info.Arguments = '{}'
@@ -135,7 +136,7 @@ mod tests {
                 &output.stdout[output.stdout.len().saturating_sub(128)..],
                 String::from_utf8_lossy(&output.stderr),
             );
-            assert_eq!(output.stderr, b"machine-stderr");
+            assert_eq!(output.stderr, b"machine-stderr", "{shell} changed stderr");
         }
     }
 
@@ -156,6 +157,7 @@ mod tests {
         assert!(script.contains("$info.FileName = 'C:\\Users\\Alice Smith"));
         assert!(script.contains("$info.UseShellExecute = $false"));
         assert!(script.contains("$info.CreateNoWindow = $true"));
+        assert!(script.contains("$ProgressPreference = 'SilentlyContinue'"));
         assert!(script.contains("$info.RedirectStandardInput = $true"));
         assert!(script.contains("$child.StandardInput.Close()"));
         assert!(script.contains("StandardOutput.BaseStream.CopyToAsync"));
