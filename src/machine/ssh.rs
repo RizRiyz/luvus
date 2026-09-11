@@ -147,7 +147,9 @@ pub(crate) fn prepare_or_provision(
         Ok(probe) => Ok(probe),
         Err(initial) if !provision_allowed(profile, approved) => Err(initial),
         Err(initial) => {
-            let (binary, operation) = super::recovery::install(profile, || super::provision::install(&profile.destination)).map_err(|provision| {
+            let (binary, operation) = super::recovery::install(profile, |record_plan| {
+                super::provision::install(&profile.destination, record_plan)
+            }).map_err(|provision| {
                 anyhow!(
                     "remote preparation failed: {initial}; automatic provisioning failed: {provision}"
                 )
@@ -556,14 +558,15 @@ pub(super) fn run_bounded_with_owned_input(
     let stderr = stderr_reader
         .join()
         .map_err(|_| anyhow!("ssh stderr reader failed"))??;
-    if stdout.len() as u64 > MAX_OUTPUT_BYTES || stderr.len() as u64 > MAX_OUTPUT_BYTES {
-        return Err(anyhow!("SSH response exceeds the 64 KiB limit"));
-    }
     #[cfg(unix)]
     {
         // The child has been reaped and every pipe worker has finished. Avoid
-        // targeting a group ID after successful completion and possible reuse.
+        // targeting a group ID after completion and possible reuse, including
+        // when a later output validation returns an error.
         group.0 = None;
+    }
+    if stdout.len() as u64 > MAX_OUTPUT_BYTES || stderr.len() as u64 > MAX_OUTPUT_BYTES {
+        return Err(anyhow!("SSH response exceeds the 64 KiB limit"));
     }
     Ok(Output {
         status,

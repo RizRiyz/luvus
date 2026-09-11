@@ -142,6 +142,9 @@ pub(crate) struct ClientProjection {
 /// Semantic server-owned overlay bounds for a machine-aware thin client.
 /// These bounds come from render geometry, never inferred from cell colors.
 pub(crate) fn shell_overlay_rect(app: &App, area: Rect) -> Option<Rect> {
+    if area.width < 24 || area.height < 6 || app.workspaces.is_empty() {
+        return None;
+    }
     // The machine-aware client owns the Workspaces rows outside this modal.
     // Publish the picker's exact bounds so those rows remain visible instead
     // of treating its dimmed backdrop as an opaque full-screen surface.
@@ -620,6 +623,12 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.dock_dividers.clear();
     app.agents_elsewhere_rect = None;
     app.client_shell_dock_rect = None;
+    app.left_seam = None;
+    app.right_seam = None;
+    app.last_main_area = Rect::ZERO;
+    app.last_pane_area = Rect::ZERO;
+    app.named_session_slot_rect = None;
+    app.named_session_button_rect = None;
     app.mobile_pane_prev_rect = None;
     app.mobile_pane_next_rect = None;
 
@@ -1760,6 +1769,56 @@ mod dock_projection_tests {
             app.begin_dock_resize(col, dy),
             "the recorded divider row is still a hit target after projection"
         );
+    }
+
+    #[test]
+    fn early_projection_returns_do_not_export_stale_geometry() {
+        let _env = crate::persist::test_env("early-projection-geometry");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.open_settings();
+
+        let stale = Rect::new(5, 4, 12, 3);
+        let assert_empty_projection = |projection: ClientProjection| {
+            assert!(projection.pane_content.is_empty());
+            assert_eq!(projection.shell_dock, None);
+            assert_eq!(projection.left_seam, None);
+            assert_eq!(projection.right_seam, None);
+            assert_eq!(projection.main_area, Rect::ZERO);
+            assert_eq!(projection.pane_area, Rect::ZERO);
+            assert_eq!(projection.shell_overlay, None);
+            assert_eq!(projection.session_slot, None);
+            assert_eq!(projection.session_button, None);
+        };
+        let seed_stale_geometry = |app: &mut App| {
+            app.client_shell_dock_rect = Some(stale);
+            app.left_seam = Some(stale);
+            app.right_seam = Some(stale);
+            app.last_main_area = stale;
+            app.last_pane_area = stale;
+            app.named_session_slot_rect = Some(stale);
+            app.named_session_button_rect = Some(stale);
+            app.settings_modal_rect = Some(stale);
+        };
+
+        seed_stale_geometry(&mut app);
+        let small = Rect::new(0, 0, 20, 5);
+        let mut small_buffer = Buffer::empty(small);
+        assert_empty_projection(render_projection(
+            &mut RenderTarget::new(&mut small_buffer, small),
+            &mut app,
+        ));
+        assert_eq!(app.left_seam, Some(stale));
+
+        app.workspaces.clear();
+        seed_stale_geometry(&mut app);
+        let normal = Rect::new(0, 0, 80, 24);
+        let mut normal_buffer = Buffer::empty(normal);
+        assert_empty_projection(render_projection(
+            &mut RenderTarget::new(&mut normal_buffer, normal),
+            &mut app,
+        ));
+        assert_eq!(app.named_session_button_rect, Some(stale));
     }
 
     #[test]

@@ -681,7 +681,7 @@ fn ensure_server_start_if_missing(sock: &Path) -> Result<()> {
         Err(error) if error.kind() == io::ErrorKind::TimedOut => Err(anyhow!(
             "selected remote Luvus session endpoint is busy; no restart was attempted"
         )),
-        Err(_) => {
+        Err(error) if remote_endpoint_is_missing(&error) => {
             spawn_server()?;
             wait_for_socket(sock)?;
             let _running = retry_control_probe(
@@ -692,7 +692,14 @@ fn ensure_server_start_if_missing(sock: &Path) -> Result<()> {
             .context("new remote Luvus session did not become responsive")?;
             Ok(())
         }
+        Err(error) => Err(error).context(
+            "selected remote Luvus session endpoint could not be accessed; no server was started",
+        ),
     }
+}
+
+fn remote_endpoint_is_missing(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound
 }
 
 /// Read-only capability probe used before a saved machine is enabled. It does
@@ -1700,6 +1707,23 @@ mod tests {
 
         assert_eq!(result.expect("recovery probe succeeds"), "0.13.1");
         assert_eq!(attempts, vec![ordinary, recovery]);
+    }
+
+    #[test]
+    fn remote_start_if_missing_rejects_non_missing_endpoint_errors() {
+        assert!(remote_endpoint_is_missing(&io::Error::from(
+            io::ErrorKind::NotFound
+        )));
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::ConnectionRefused,
+        ] {
+            assert!(
+                !remote_endpoint_is_missing(&io::Error::from(kind)),
+                "{kind:?} must not authorize starting a server"
+            );
+        }
     }
 
     #[test]

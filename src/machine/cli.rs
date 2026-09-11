@@ -384,7 +384,7 @@ fn machine_help() -> &'static str {
     r#"luvus machine <command> [args]
 
 Saved SSH machines:
-  machine add <id> --host <ssh-alias> [--label <label>] [--session <name>] [--remote-binary <path>] [--install] [--disabled]
+  machine add <id> --host <ssh-alias> [--label <label>] [--session <name>] [--remote-binary <path>] [--install] [--disabled] [--revision <n>]
       validate one SSH machine; --install permits user-local installation
   machine list
       List saved profiles and the current catalog revision.

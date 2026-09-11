@@ -28,6 +28,12 @@ enum RemoteTarget {
     WindowsX86_64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DetectedTarget {
+    platform: RemoteTarget,
+    install_root: String,
+}
+
 impl RemoteTarget {
     fn triple(self) -> &'static str {
         match self {
@@ -268,15 +274,18 @@ try {
 }
 "#;
 
-pub(super) fn install(destination: &str) -> Result<String> {
+pub(super) fn install(
+    destination: &str,
+    record_plan: &mut dyn FnMut(&str) -> Result<()>,
+) -> Result<String> {
     validate_destination(destination)?;
     let target = detect_target(destination)?;
-    let local = local_binary_for(target);
+    let local = local_binary_for(target.platform);
     if let Some(binary) = local.as_deref() {
-        match install_local(destination, target, binary) {
+        match install_local(destination, &target, binary, record_plan) {
             Ok(path) => return Ok(path),
             Err(local_error) => {
-                return install_release(destination, target).map_err(|release_error| {
+                return install_release(destination, &target, record_plan).map_err(|release_error| {
                     anyhow!(
                         "compatible local build `{}` could not be installed: {local_error}; matching release provisioning also failed: {release_error}",
                         binary.display()
@@ -285,31 +294,35 @@ pub(super) fn install(destination: &str) -> Result<String> {
             }
         }
     }
-    install_release(destination, target)
+    install_release(destination, &target, record_plan)
 }
 
-fn detect_target(destination: &str) -> Result<RemoteTarget> {
+fn detect_target(destination: &str) -> Result<DetectedTarget> {
     let mut posix = super::ssh::ssh_command(destination, true);
-    posix.arg("uname -s; uname -m");
+    posix.arg("uname -s; uname -m; printf '%s\\n' \"$HOME\"");
     let output = super::ssh::run_bounded_with_input(posix, PROVISION_TIMEOUT, None)?;
     if output.status.success() {
         let identity = String::from_utf8_lossy(&output.stdout);
         let mut lines = identity.lines().map(str::trim);
-        match (lines.next(), lines.next()) {
-            (Some("Darwin"), Some("x86_64")) => return Ok(RemoteTarget::MacosX86_64),
-            (Some("Darwin"), Some("arm64" | "aarch64")) => {
-                return Ok(RemoteTarget::MacosAarch64);
-            }
-            (Some("Linux"), Some("x86_64")) => return Ok(RemoteTarget::LinuxX86_64),
-            (Some("Linux"), Some("aarch64" | "arm64")) => {
-                return Ok(RemoteTarget::LinuxAarch64);
-            }
-            _ => {}
+        let platform = match (lines.next(), lines.next()) {
+            (Some("Darwin"), Some("x86_64")) => Some(RemoteTarget::MacosX86_64),
+            (Some("Darwin"), Some("arm64" | "aarch64")) => Some(RemoteTarget::MacosAarch64),
+            (Some("Linux"), Some("x86_64")) => Some(RemoteTarget::LinuxX86_64),
+            (Some("Linux"), Some("aarch64" | "arm64")) => Some(RemoteTarget::LinuxAarch64),
+            _ => None,
+        };
+        if let (Some(platform), Some(home)) = (platform, lines.next()) {
+            let target = DetectedTarget {
+                platform,
+                install_root: home.to_string(),
+            };
+            managed_release_path(&target)?;
+            return Ok(target);
         }
     }
 
     let mut windows = super::ssh::ssh_command(destination, true);
-    let script = "[Console]::Out.WriteLine('windows'); [Console]::Out.WriteLine($env:PROCESSOR_ARCHITECTURE)";
+    let script = "[Console]::Out.WriteLine('windows'); [Console]::Out.WriteLine($env:PROCESSOR_ARCHITECTURE); [Console]::Out.WriteLine($env:LOCALAPPDATA)";
     let encoded: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     windows
         .args([
@@ -322,9 +335,21 @@ fn detect_target(destination: &str) -> Result<RemoteTarget> {
         .arg(crate::base64_encode(&encoded));
     let output = super::ssh::run_bounded_with_input(windows, PROVISION_TIMEOUT, None)?;
     if output.status.success() {
-        let identity = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
-        if identity.contains("windows") && identity.lines().any(|line| line.trim() == "amd64") {
-            return Ok(RemoteTarget::WindowsX86_64);
+        let identity = String::from_utf8_lossy(&output.stdout);
+        let mut lines = identity.lines().map(str::trim);
+        let is_windows = lines
+            .next()
+            .is_some_and(|line| line.eq_ignore_ascii_case("windows"))
+            && lines
+                .next()
+                .is_some_and(|line| line.eq_ignore_ascii_case("amd64"));
+        if let (true, Some(root)) = (is_windows, lines.next()) {
+            let target = DetectedTarget {
+                platform: RemoteTarget::WindowsX86_64,
+                install_root: root.to_string(),
+            };
+            managed_release_path(&target)?;
+            return Ok(target);
         }
     }
     Err(anyhow!(
@@ -339,12 +364,60 @@ pub(super) fn verify_install_target(destination: &str) -> Result<()> {
     detect_target(destination).map(|_| ())
 }
 
-fn install_release(destination: &str, target: RemoteTarget) -> Result<String> {
-    if target.is_posix() {
+fn install_release(
+    destination: &str,
+    target: &DetectedTarget,
+    record_plan: &mut dyn FnMut(&str) -> Result<()>,
+) -> Result<String> {
+    let planned = managed_release_path(target)?;
+    record_plan(&planned)?;
+    let installed = if target.platform.is_posix() {
         install_posix(destination)
     } else {
         install_windows(destination)
+    }?;
+    ensure_planned_path(&planned, installed)
+}
+
+fn managed_release_path(target: &DetectedTarget) -> Result<String> {
+    let suffix = format!(
+        "v{}-p{}",
+        env!("CARGO_PKG_VERSION"),
+        crate::ipc::protocol::PROTOCOL_VERSION
+    );
+    managed_path(target, &suffix)
+}
+
+fn managed_path(target: &DetectedTarget, suffix: &str) -> Result<String> {
+    let path = if target.platform.is_posix() {
+        format!(
+            "{}/.local/share/luvus/remote/{suffix}/luvus",
+            target.install_root.trim_end_matches('/')
+        )
+    } else {
+        format!(
+            "{}\\luvus\\remote\\{suffix}\\luvus.exe",
+            target.install_root.trim_end_matches(['\\', '/'])
+        )
+    };
+    validate_remote_binary(&path)?;
+    Ok(path)
+}
+
+fn ensure_planned_path(planned: &str, installed: String) -> Result<String> {
+    let matches = if planned.as_bytes().get(1) == Some(&b':') {
+        planned
+            .replace('\\', "/")
+            .eq_ignore_ascii_case(&installed.replace('\\', "/"))
+    } else {
+        planned == installed
+    };
+    if !matches {
+        return Err(anyhow!(
+            "remote installer returned a path other than its durable plan"
+        ));
     }
+    Ok(installed)
 }
 
 fn local_binary_for(target: RemoteTarget) -> Option<PathBuf> {
@@ -446,8 +519,13 @@ fn binary_matches_target(bytes: &[u8], target: RemoteTarget) -> bool {
     }
 }
 
-fn install_local(destination: &str, target: RemoteTarget, binary: &Path) -> Result<String> {
-    if !target.is_posix() {
+fn install_local(
+    destination: &str,
+    target: &DetectedTarget,
+    binary: &Path,
+    record_plan: &mut dyn FnMut(&str) -> Result<()>,
+) -> Result<String> {
+    if !target.platform.is_posix() {
         return Err(anyhow!(
             "local build streaming is not available for Windows SSH hosts"
         ));
@@ -460,13 +538,18 @@ fn install_local(destination: &str, target: RemoteTarget, binary: &Path) -> Resu
     }
     let bytes = fs::read(binary)
         .with_context(|| format!("read local remote binary `{}`", binary.display()))?;
-    if !binary_matches_target(&bytes, target) {
+    if !binary_matches_target(&bytes, target.platform) {
         return Err(anyhow!(
             "local remote binary does not match remote target {}",
-            target.triple()
+            target.platform.triple()
         ));
     }
     let checksum = format!("{:x}", Sha256::digest(&bytes));
+    let planned = managed_path(
+        target,
+        &format!("v{}/{checksum}", env!("CARGO_PKG_VERSION")),
+    )?;
+    record_plan(&planned)?;
     let remote_command = format!(
         "sh -c {} -- {} {} {} {}",
         quote_posix(INSTALL_LOCAL_POSIX),
@@ -488,7 +571,7 @@ fn install_local(destination: &str, target: RemoteTarget, binary: &Path) -> Resu
             "could not install the compatible local Luvus build on `{destination}`: {detail}"
         ));
     }
-    installed_path(destination, output.stdout)
+    ensure_planned_path(&planned, installed_path(destination, output.stdout)?)
 }
 
 fn quote_posix(value: &str) -> String {
@@ -572,6 +655,44 @@ fn installed_path(destination: &str, stdout: Vec<u8>) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_paths_match_each_remote_installer_destination() {
+        let posix = DetectedTarget {
+            platform: RemoteTarget::LinuxX86_64,
+            install_root: "/home/build".into(),
+        };
+        assert_eq!(
+            managed_release_path(&posix).unwrap(),
+            format!(
+                "/home/build/.local/share/luvus/remote/v{}-p{}/luvus",
+                env!("CARGO_PKG_VERSION"),
+                crate::ipc::protocol::PROTOCOL_VERSION
+            )
+        );
+        assert_eq!(
+            managed_path(&posix, "v1.2.3/checksum").unwrap(),
+            "/home/build/.local/share/luvus/remote/v1.2.3/checksum/luvus"
+        );
+
+        let windows = DetectedTarget {
+            platform: RemoteTarget::WindowsX86_64,
+            install_root: r"C:\Users\Alice Smith\AppData\Local".into(),
+        };
+        assert_eq!(
+            managed_release_path(&windows).unwrap(),
+            format!(
+                r"C:\Users\Alice Smith\AppData\Local\luvus\remote\v{}-p{}\luvus.exe",
+                env!("CARGO_PKG_VERSION"),
+                crate::ipc::protocol::PROTOCOL_VERSION
+            )
+        );
+        assert!(ensure_planned_path(
+            r"C:\Users\Alice Smith\AppData\Local\luvus.exe",
+            r"c:/users/alice smith/appdata/local/luvus.exe".into()
+        )
+        .is_ok());
+    }
 
     #[test]
     fn installed_windows_paths_support_unicode_and_apostrophes() {

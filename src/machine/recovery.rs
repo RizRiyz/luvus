@@ -21,6 +21,8 @@ pub(super) struct Record {
     profile: MachineProfile,
     version: String,
     protocol_version: u32,
+    /// The exact managed path is planned durably before remote installation.
+    /// It remains useful for recovery whether the side effect completed or not.
     installed_binary: Option<String>,
 }
 
@@ -124,24 +126,41 @@ fn begin(profile: &MachineProfile) -> Result<String> {
     Ok(operation)
 }
 
+fn record_binary(operation: &str, binary: &str) -> Result<()> {
+    catalog::validate_remote_binary(binary)?;
+    let _lock = catalog::acquire_lock()?;
+    let mut journal = load()?;
+    let record = journal
+        .records
+        .iter_mut()
+        .find(|record| record.operation == operation)
+        .ok_or_else(|| anyhow!("machine preparation receipt was removed"))?;
+    record.installed_binary = Some(binary.to_string());
+    save(&journal)
+}
+
 /// Persist intent before any remote side effects; retain it on every failure.
 pub(super) fn install(
     profile: &MachineProfile,
-    install: impl FnOnce() -> Result<String>,
+    install: impl FnOnce(&mut dyn FnMut(&str) -> Result<()>) -> Result<String>,
 ) -> Result<(String, String)> {
     let operation = begin(profile)?;
     let result: Result<(String, String)> = (|| {
-        let binary = install()?;
+        let mut planned_binary = None;
+        let binary = {
+            let mut record_plan = |binary: &str| {
+                record_binary(&operation, binary)?;
+                planned_binary = Some(binary.to_string());
+                Ok(())
+            };
+            install(&mut record_plan)?
+        };
         catalog::validate_remote_binary(&binary)?;
-        let _lock = catalog::acquire_lock()?;
-        let mut journal = load()?;
-        let record = journal
-            .records
-            .iter_mut()
-            .find(|record| record.operation == operation)
-            .ok_or_else(|| anyhow!("machine preparation receipt was removed"))?;
-        record.installed_binary = Some(binary.clone());
-        save(&journal)?;
+        if planned_binary.as_deref() != Some(binary.as_str()) {
+            return Err(anyhow!(
+                "machine installer returned a binary other than its durable plan"
+            ));
+        }
         Ok((binary, operation))
     })();
     result.with_context(|| {
@@ -175,10 +194,15 @@ mod tests {
         let revision = catalog::load().unwrap().catalog.revision;
         let marker = crate::persist::config_dir().join("mock-installed-binary");
         assert!(!marker.exists());
-        let (binary, operation) = install(&profile, || {
+        let (binary, operation) = install(&profile, |plan| {
             // Intent is durable before installation starts, with no catalog
             // lock held across the remote operation.
             assert_eq!(pending().unwrap().len(), 1);
+            plan("/opt/luvus")?;
+            assert_eq!(
+                pending().unwrap()[0].installed_binary.as_deref(),
+                Some("/opt/luvus")
+            );
             std::fs::write(&marker, b"installed").unwrap();
             catalog::mutate(Some(revision), |_| Ok(())).unwrap();
             Ok("/opt/luvus".into())
@@ -208,10 +232,15 @@ mod tests {
     fn failed_install_and_concurrent_operations_keep_separate_receipts() {
         let _env = crate::persist::test_env("machine-recovery-failure");
         let profile = MachineProfile::new("box".into(), "host".into());
-        assert!(install(&profile, || Err(anyhow!("lost SSH after install"))).is_err());
-        install(&profile, || {
+        assert!(install(&profile, |_| Err(anyhow!("lost SSH before install"))).is_err());
+        install(&profile, |outer_plan| {
+            outer_plan("/opt/outer")?;
             // Interleave a second operation before the outer install returns.
-            install(&profile, || Ok("/opt/inner".into())).unwrap();
+            install(&profile, |inner_plan| {
+                inner_plan("/opt/inner")?;
+                Ok("/opt/inner".into())
+            })
+            .unwrap();
             Ok("/opt/outer".into())
         })
         .unwrap();
@@ -230,7 +259,31 @@ mod tests {
         crate::persist::ensure_config_dir();
         std::fs::write(path(), b"invalid").unwrap();
         let profile = MachineProfile::new("box".into(), "host".into());
-        assert!(install(&profile, || panic!("must not install without a receipt")).is_err());
+        assert!(install(&profile, |_| panic!("must not install without a receipt")).is_err());
+    }
+
+    #[test]
+    fn planned_binary_survives_a_post_install_crash_window() {
+        let _env = crate::persist::test_env("machine-recovery-post-install-crash");
+        let profile = MachineProfile::new("box".into(), "host".into());
+        assert!(install(&profile, |plan| {
+            plan("/opt/luvus")?;
+            Err(anyhow!("process exited after the remote install"))
+        })
+        .is_err());
+
+        let records = pending().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].installed_binary.as_deref(), Some("/opt/luvus"));
+
+        let mut saved = profile;
+        saved.remote_binary = Some("/opt/luvus".into());
+        catalog::mutate(None, |catalog| {
+            catalog.machines.push(saved);
+            Ok(())
+        })
+        .unwrap();
+        assert!(pending().unwrap().is_empty());
     }
 
     #[test]
@@ -240,7 +293,7 @@ mod tests {
         for _ in 0..MAX_RECORDS {
             begin(&profile).unwrap();
         }
-        assert!(install(&profile, || panic!("full journal must block installation")).is_err());
+        assert!(install(&profile, |_| panic!("full journal must block installation")).is_err());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
