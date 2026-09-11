@@ -33,6 +33,11 @@ pub(super) struct ProbeResult {
     recovery: Option<String>,
 }
 
+pub(super) enum ForegroundPreparation {
+    Ready(ProbeResult),
+    ApprovalRequired(String),
+}
+
 impl ProbeResult {
     pub(super) fn committed(&self) {
         if let Some(operation) = &self.recovery {
@@ -155,6 +160,30 @@ pub(crate) fn prepare_or_provision(
             probe.recovery = Some(operation);
             Ok(probe)
         }
+    }
+}
+
+/// Prepare an explicit foreground setup without assuming installation
+/// authority. A missing or incompatible managed binary becomes an approval
+/// request only after a separate read-only SSH target check succeeds.
+pub(super) fn prepare_for_foreground(
+    profile: &MachineProfile,
+    approved: bool,
+) -> Result<ForegroundPreparation> {
+    if approved {
+        return prepare_or_provision(profile, true).map(ForegroundPreparation::Ready);
+    }
+    match prepare(profile) {
+        Ok(probe) => Ok(ForegroundPreparation::Ready(probe)),
+        Err(initial) if profile.remote_binary.is_some() && !profile.automatic_provisioning => {
+            Err(initial)
+        }
+        Err(initial) => match super::provision::verify_install_target(&profile.destination) {
+            Ok(()) => Ok(ForegroundPreparation::ApprovalRequired(initial.to_string())),
+            Err(target) => Err(initial.context(format!(
+                "SSH target cannot be prepared automatically: {target}"
+            ))),
+        },
     }
 }
 

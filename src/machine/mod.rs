@@ -20,6 +20,11 @@ pub(crate) use cli::run as run_cli;
 pub(crate) const MACHINE_ENDPOINT_CAPABILITY: &str = "machine_endpoint_v1";
 pub(crate) const MACHINE_ENDPOINT_VERSION: u32 = 1;
 
+pub(crate) enum ProfileSetupOutcome {
+    Ready(catalog::MachineProfile),
+    ApprovalRequired(String),
+}
+
 /// Wake machine-aware clients attached to the selected owner-local session.
 /// Notification is best-effort: committing the owner-local catalog remains
 /// valid when no server or display client is currently running.
@@ -66,7 +71,7 @@ pub(crate) fn add_profile(
     destination: String,
     preferred_session: Option<String>,
     allow_install: bool,
-) -> anyhow::Result<catalog::MachineProfile> {
+) -> anyhow::Result<ProfileSetupOutcome> {
     catalog::validate_label(label.trim())?;
     catalog::validate_destination(destination.trim())?;
     if let Some(session) = preferred_session.as_deref() {
@@ -79,7 +84,12 @@ pub(crate) fn add_profile(
     profile.preferred_session = preferred_session;
     profile.automatic_provisioning = allow_install;
     catalog::preflight_profile(&current, &profile)?;
-    let prepared = ssh::prepare_or_provision(&profile, allow_install)?;
+    let prepared = match ssh::prepare_for_foreground(&profile, allow_install)? {
+        ssh::ForegroundPreparation::Ready(prepared) => prepared,
+        ssh::ForegroundPreparation::ApprovalRequired(reason) => {
+            return Ok(ProfileSetupOutcome::ApprovalRequired(reason));
+        }
+    };
     profile.remote_binary = Some(prepared.remote_binary.clone());
     verify_prepared_endpoint(&profile, &prepared)?;
     let expected_revision = current.revision;
@@ -99,12 +109,13 @@ pub(crate) fn add_profile(
         .machines
         .into_iter()
         .find(|machine| machine.id == id)
+        .map(ProfileSetupOutcome::Ready)
         .ok_or_else(|| anyhow::anyhow!("created machine was not persisted"))
 }
 
 /// Enable an existing catalog entry from the saved list. Preparation stays
 /// off-loop and approval applies only to this explicit operation.
-pub(crate) fn enable_profile(id: &str, approved: bool) -> anyhow::Result<catalog::MachineProfile> {
+pub(crate) fn enable_profile(id: &str, approved: bool) -> anyhow::Result<ProfileSetupOutcome> {
     catalog::validate_id(id)?;
     let current = catalog::preflight_mutation(None)?;
     let mut profile = current
@@ -115,7 +126,12 @@ pub(crate) fn enable_profile(id: &str, approved: bool) -> anyhow::Result<catalog
         .ok_or_else(|| anyhow::anyhow!("saved machine was removed"))?;
     profile.enabled = true;
     catalog::preflight_profile(&current, &profile)?;
-    let probe = ssh::prepare_or_provision(&profile, approved)?;
+    let probe = match ssh::prepare_for_foreground(&profile, approved)? {
+        ssh::ForegroundPreparation::Ready(probe) => probe,
+        ssh::ForegroundPreparation::ApprovalRequired(reason) => {
+            return Ok(ProfileSetupOutcome::ApprovalRequired(reason));
+        }
+    };
     if profile.remote_binary.is_none() && approved {
         profile.automatic_provisioning = true;
     }
@@ -137,7 +153,7 @@ pub(crate) fn enable_profile(id: &str, approved: bool) -> anyhow::Result<catalog
     })?;
     probe.committed();
     notify_catalog_changed(saved.revision);
-    Ok(profile)
+    Ok(ProfileSetupOutcome::Ready(profile))
 }
 
 /// Remove one owner-local profile without contacting or mutating the remote

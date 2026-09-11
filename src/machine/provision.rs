@@ -332,6 +332,13 @@ fn detect_target(destination: &str) -> Result<RemoteTarget> {
     ))
 }
 
+/// Prove that foreground managed installation is possible without changing the
+/// remote host. This is used only after ordinary binary discovery fails, so a
+/// TUI can ask for permission only when SSH reached a supported target.
+pub(super) fn verify_install_target(destination: &str) -> Result<()> {
+    detect_target(destination).map(|_| ())
+}
+
 fn install_release(destination: &str, target: RemoteTarget) -> Result<String> {
     if target.is_posix() {
         install_posix(destination)

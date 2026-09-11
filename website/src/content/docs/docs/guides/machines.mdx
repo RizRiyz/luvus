@@ -60,18 +60,23 @@ Fill in:
 | Session name | Leave empty | Uses the remote `default` session; enter a name only when you need an independent remote session |
 
 Use Up/Down to move between fields. Tab switches the dialog tab rather than
-advancing to the next field. Unfinished remote form text survives tab switches.
+advancing to the next field. Left/Right and Home/End edit at the field cursor.
+Alt/Ctrl+Backspace deletes the previous word, while Command/Super+Backspace
+deletes to the start of the field. The corresponding Delete shortcuts remove
+text after the cursor. Unfinished remote form text survives tab switches.
 
-### 3. Decide whether to allow installation
+### 3. Approve installation only when needed
 
-Leave **Install compatible Luvus if needed** unchecked if you have already
-installed a compatible binary. Otherwise, select the checkbox with Space or
-the mouse to authorize installation for this attempt, then press Enter to
-create the profile.
+Press Enter to create the profile. Luvus first checks SSH and looks for a
+compatible remote binary without changing the remote host. If one is already
+available, setup continues immediately. If installation or managed replacement
+is required, the same dialog asks for permission. Press `y` to install, or use
+`n`, Enter, or Escape to decline and return to the completed form.
 
-Approval is optional and off by default. Switching dialog tabs clears it.
-Luvus never treats a previous approval as permission for a future install.
-It also never restarts an already-running remote server automatically.
+Approval applies only to that setup attempt. Luvus never treats an earlier
+approval as permission for a future install, and authentication or unsupported
+host failures do not become installation prompts. It also never restarts an
+already-running remote server automatically.
 
 Luvus prepares the connection on a bounded worker and saves the profile only
 after the selected server returns its identity and a complete workspace
@@ -255,8 +260,8 @@ Luvus records `automatic_provisioning:false` and does not replace it.
 Profiles retain `automatic_provisioning:true` only to identify a managed
 binary. It is not standing permission. A later foreground enable asks again
 before repairing a missing or incompatible managed binary, unless that command
-explicitly includes `--install`. The UI checkbox applies only to that setup
-attempt. `machine status` and background reconnects never install anything.
+explicitly includes `--install`. The UI approval prompt applies only to that
+setup attempt. `machine status` and background reconnects never install anything.
 Provisioning runs only for the explicit foreground `machine add` and `machine
 enable` operations. Background connect and reconnect paths never install,
 update, restart, or answer prompts.

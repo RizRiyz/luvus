@@ -49,7 +49,7 @@ enum ShellEvent {
     Local(u64, ServerMessage),
     LocalClosed(u64),
     Link(LinkEvent),
-    MachineCreated(std::result::Result<MachineProfile, String>),
+    MachineCreated(std::result::Result<crate::machine::ProfileSetupOutcome, String>),
     MachineRemoved {
         machine_id: String,
         result: std::result::Result<(), String>,
@@ -197,7 +197,8 @@ enum MachineFormHit {
     OpenWorkspaceTab,
     RemoteMachineTab,
     Field(usize),
-    AllowInstall,
+    ApproveInstall,
+    DeclineInstall,
     Saved(usize),
     Submit,
     Cancel,
@@ -208,9 +209,10 @@ enum MachineFormHit {
 struct MachineForm {
     fields: [String; 3],
     cursor: usize,
+    edit_cursors: [usize; 3],
     submitting: bool,
     error: Option<String>,
-    allow_install: bool,
+    install_prompt: Option<String>,
     selected_saved: Option<String>,
 }
 
@@ -245,6 +247,7 @@ struct DockState {
     /// SSH writer queue with obsolete mouse coordinates.
     sidebar_sync: Option<(Endpoint, u64)>,
     install_label: &'static str,
+    install_action_label: &'static str,
     saved_labels: (&'static str, &'static str, &'static str),
     width_drag: Option<protocol::ShellResize>,
     selector_rect: Option<Rect>,
@@ -304,6 +307,9 @@ impl Default for DockState {
             sidebars: None,
             sidebar_sync: None,
             install_label: crate::i18n::cli::machine_install_label(
+                crate::i18n::cli::Context::configured().language(),
+            ),
+            install_action_label: crate::i18n::cli::machine_install_action_label(
                 crate::i18n::cli::Context::configured().language(),
             ),
             saved_labels: crate::i18n::cli::machine_saved_labels(
@@ -795,10 +801,11 @@ fn run_inner(
                 }
             }
             ShellEvent::MachineCreated(result) => match result {
-                Ok(profile) => {
+                Ok(crate::machine::ProfileSetupOutcome::Ready(profile)) => {
                     if let Some(form) = dock.machine_form.as_mut() {
                         form.submitting = true;
                         form.error = None;
+                        form.install_prompt = None;
                     }
                     pending_endpoint = Some(Endpoint::Remote {
                         machine_id: profile.id,
@@ -809,10 +816,21 @@ fn run_inner(
                     dock.refresh_catalog = true;
                     dock.dirty = true;
                 }
+                Ok(crate::machine::ProfileSetupOutcome::ApprovalRequired(reason)) => {
+                    if let Some(form) = dock.machine_form.as_mut() {
+                        form.submitting = false;
+                        form.error = None;
+                        form.install_prompt = Some(reason);
+                    } else {
+                        dock.warning = Some(reason);
+                    }
+                    dock.dirty = true;
+                }
                 Err(error) => {
                     if let Some(form) = dock.machine_form.as_mut() {
                         form.submitting = false;
                         form.error = Some(error);
+                        form.install_prompt = None;
                     } else {
                         dock.warning = Some(error);
                     }
@@ -2117,6 +2135,45 @@ fn handle_dock_input(
         return Ok(true);
     }
     if dock.machine_form.is_some() {
+        if machine_form_awaiting_approval(dock) {
+            match message {
+                ClientMessage::Key(key) => match install_prompt_choice(&key.code) {
+                    Some(true) => {
+                        clear_install_prompt(dock);
+                        activate_machine_form(dock, events, pending_endpoint, machines, true)?;
+                    }
+                    Some(false) => clear_install_prompt(dock),
+                    None => {}
+                },
+                ClientMessage::Mouse(mouse)
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) =>
+                {
+                    let hit = dock
+                        .machine_form_hits
+                        .iter()
+                        .find(|(_, rect)| rect.contains((mouse.column, mouse.row).into()))
+                        .map(|(hit, _)| *hit);
+                    match hit {
+                        Some(MachineFormHit::ApproveInstall) => {
+                            clear_install_prompt(dock);
+                            activate_machine_form(dock, events, pending_endpoint, machines, true)?;
+                        }
+                        Some(MachineFormHit::DeclineInstall) | None => clear_install_prompt(dock),
+                        _ => {}
+                    }
+                }
+                ClientMessage::Resize { .. } => {
+                    dock.machine_form_rect = None;
+                    dock.machine_form_backdrop_pending = true;
+                    dock.dirty = true;
+                }
+                _ => {}
+            }
+            if dock.dirty {
+                paint_dock(terminal, dock, machines, active, &mut None, false)?;
+            }
+            return Ok(true);
+        }
         match message {
             ClientMessage::Key(key) => match key.code {
                 KeyCode::Esc if !machine_form_submitting(dock) => {
@@ -2132,16 +2189,25 @@ fn handle_dock_input(
                     move_machine_form_cursor(dock, -1);
                 }
                 KeyCode::Enter if !machine_form_submitting(dock) => {
-                    activate_machine_form(dock, events, pending_endpoint, machines)?;
+                    activate_machine_form(dock, events, pending_endpoint, machines, false)?;
+                }
+                KeyCode::Left if !machine_form_submitting(dock) => {
+                    move_machine_form_edit_cursor(dock, -1, key.modifiers);
+                }
+                KeyCode::Right if !machine_form_submitting(dock) => {
+                    move_machine_form_edit_cursor(dock, 1, key.modifiers);
+                }
+                KeyCode::Home if !machine_form_submitting(dock) => {
+                    move_machine_form_edit_cursor_to_edge(dock, false);
+                }
+                KeyCode::End if !machine_form_submitting(dock) => {
+                    move_machine_form_edit_cursor_to_edge(dock, true);
                 }
                 KeyCode::Backspace if !machine_form_submitting(dock) => {
-                    if let Some(form) = dock.machine_form.as_mut() {
-                        if let Some(field) = form.fields.get_mut(form.cursor) {
-                            field.pop();
-                        }
-                        form.error = None;
-                        dock.dirty = true;
-                    }
+                    delete_machine_form_text(dock, false, key.modifiers);
+                }
+                KeyCode::Delete if !machine_form_submitting(dock) => {
+                    delete_machine_form_text(dock, true, key.modifiers);
                 }
                 KeyCode::Char(character)
                     if !machine_form_submitting(dock)
@@ -2149,19 +2215,7 @@ fn handle_dock_input(
                             .modifiers
                             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
-                    if let Some(form) = dock.machine_form.as_mut().filter(|form| form.cursor == 3) {
-                        if character == ' '
-                            && dock
-                                .machine_form_hits
-                                .iter()
-                                .any(|(hit, _)| *hit == MachineFormHit::AllowInstall)
-                        {
-                            form.allow_install = !form.allow_install;
-                            dock.dirty = true;
-                        }
-                    } else {
-                        append_machine_form_text(dock, &character.to_string());
-                    }
+                    append_machine_form_text(dock, &character.to_string());
                 }
                 _ => {}
             },
@@ -2189,20 +2243,12 @@ fn handle_dock_input(
                         }
                     }
                     Some(MachineFormHit::Submit) if !machine_form_submitting(dock) => {
-                        activate_machine_form(dock, events, pending_endpoint, machines)?;
-                    }
-                    Some(MachineFormHit::AllowInstall) if !machine_form_submitting(dock) => {
-                        if let Some(form) = dock.machine_form.as_mut() {
-                            form.cursor = 3;
-                            form.selected_saved = None;
-                            form.allow_install = !form.allow_install;
-                            dock.dirty = true;
-                        }
+                        activate_machine_form(dock, events, pending_endpoint, machines, false)?;
                     }
                     Some(MachineFormHit::Saved(index)) if !machine_form_submitting(dock) => {
                         if let Some(id) = dock.saved_ids.get(index).cloned() {
                             if let Some(form) = dock.machine_form.as_mut() {
-                                form.cursor = 4 + index;
+                                form.cursor = form.fields.len() + index;
                                 form.selected_saved = Some(id.clone());
                                 form.error = None;
                             }
@@ -2213,7 +2259,13 @@ fn handle_dock_input(
                                 .get(&id)
                                 .is_some_and(|machine| machine.profile.enabled)
                             {
-                                activate_machine_form(dock, events, pending_endpoint, machines)?;
+                                activate_machine_form(
+                                    dock,
+                                    events,
+                                    pending_endpoint,
+                                    machines,
+                                    false,
+                                )?;
                             }
                         }
                     }
@@ -2940,17 +2992,169 @@ fn set_machine_form_error(dock: &mut DockState, message: &str) {
     }
 }
 
+fn machine_form_awaiting_approval(dock: &DockState) -> bool {
+    dock.machine_form
+        .as_ref()
+        .is_some_and(|form| form.install_prompt.is_some())
+}
+
+fn install_prompt_choice(code: &KeyCode) -> Option<bool> {
+    match code {
+        KeyCode::Char('y' | 'Y') => Some(true),
+        KeyCode::Char('n' | 'N') | KeyCode::Enter | KeyCode::Esc => Some(false),
+        _ => None,
+    }
+}
+
+fn clear_install_prompt(dock: &mut DockState) {
+    if let Some(form) = dock.machine_form.as_mut() {
+        form.install_prompt = None;
+        form.submitting = false;
+        form.error = None;
+    }
+    dock.dirty = true;
+}
+
 fn move_machine_form_cursor(dock: &mut DockState, delta: i32) {
     if let Some(form) = dock.machine_form.as_mut() {
-        let max = (form.fields.len() + dock.saved_ids.len()) as i32;
+        let max = form
+            .fields
+            .len()
+            .saturating_add(dock.saved_ids.len())
+            .saturating_sub(1) as i32;
         form.cursor = (form.cursor as i32 + delta).clamp(0, max) as usize;
         form.selected_saved = form
             .cursor
-            .checked_sub(4)
+            .checked_sub(form.fields.len())
             .and_then(|index| dock.saved_ids.get(index).cloned());
         form.error = None;
         dock.dirty = true;
     }
+}
+
+fn active_machine_form_field(form: &MachineForm) -> Option<(&str, usize)> {
+    let field = form.fields.get(form.cursor)?;
+    let cursor = form
+        .edit_cursors
+        .get(form.cursor)
+        .copied()
+        .unwrap_or_default()
+        .min(field.chars().count());
+    Some((field, cursor))
+}
+
+fn char_byte_index(text: &str, char_index: usize) -> usize {
+    text.char_indices()
+        .nth(char_index)
+        .map_or(text.len(), |(index, _)| index)
+}
+
+fn previous_word_boundary(text: &str, cursor: usize) -> usize {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut index = cursor.min(chars.len());
+    while index > 0 && chars[index - 1].is_whitespace() {
+        index -= 1;
+    }
+    while index > 0 && !chars[index - 1].is_whitespace() {
+        index -= 1;
+    }
+    index
+}
+
+fn next_word_boundary(text: &str, cursor: usize) -> usize {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut index = cursor.min(chars.len());
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    while index < chars.len() && !chars[index].is_whitespace() {
+        index += 1;
+    }
+    index
+}
+
+fn machine_form_line_modifier(modifiers: KeyModifiers) -> bool {
+    modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META)
+}
+
+fn machine_form_word_modifier(modifiers: KeyModifiers) -> bool {
+    modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL)
+}
+
+fn move_machine_form_edit_cursor(dock: &mut DockState, delta: i32, modifiers: KeyModifiers) {
+    let Some(form) = dock.machine_form.as_mut() else {
+        return;
+    };
+    let Some((field, cursor)) = active_machine_form_field(form) else {
+        return;
+    };
+    let next = if machine_form_line_modifier(modifiers) {
+        if delta < 0 {
+            0
+        } else {
+            field.chars().count()
+        }
+    } else if machine_form_word_modifier(modifiers) {
+        if delta < 0 {
+            previous_word_boundary(field, cursor)
+        } else {
+            next_word_boundary(field, cursor)
+        }
+    } else {
+        (cursor as i32 + delta).clamp(0, field.chars().count() as i32) as usize
+    };
+    form.edit_cursors[form.cursor] = next;
+    form.error = None;
+    dock.dirty = true;
+}
+
+fn move_machine_form_edit_cursor_to_edge(dock: &mut DockState, end: bool) {
+    let Some(form) = dock.machine_form.as_mut() else {
+        return;
+    };
+    let Some((field, _)) = active_machine_form_field(form) else {
+        return;
+    };
+    form.edit_cursors[form.cursor] = if end { field.chars().count() } else { 0 };
+    form.error = None;
+    dock.dirty = true;
+}
+
+fn delete_machine_form_text(dock: &mut DockState, forward: bool, modifiers: KeyModifiers) {
+    let Some(form) = dock.machine_form.as_mut() else {
+        return;
+    };
+    let field_index = form.cursor;
+    let Some(field) = form.fields.get_mut(field_index) else {
+        return;
+    };
+    let cursor = form.edit_cursors[field_index].min(field.chars().count());
+    let char_count = field.chars().count();
+    let (start, end) = if machine_form_line_modifier(modifiers) {
+        if forward {
+            (cursor, char_count)
+        } else {
+            (0, cursor)
+        }
+    } else if machine_form_word_modifier(modifiers) {
+        if forward {
+            (cursor, next_word_boundary(field, cursor))
+        } else {
+            (previous_word_boundary(field, cursor), cursor)
+        }
+    } else if forward {
+        (cursor, cursor.saturating_add(1).min(char_count))
+    } else {
+        (cursor.saturating_sub(1), cursor)
+    };
+    if start < end {
+        let byte_start = char_byte_index(field, start);
+        let byte_end = char_byte_index(field, end);
+        field.replace_range(byte_start..byte_end, "");
+        form.edit_cursors[field_index] = start;
+    }
+    form.error = None;
+    dock.dirty = true;
 }
 
 fn append_machine_form_text(dock: &mut DockState, text: &str) {
@@ -2958,14 +3162,22 @@ fn append_machine_form_text(dock: &mut DockState, text: &str) {
     let Some(form) = dock.machine_form.as_mut() else {
         return;
     };
-    let Some(field) = form.fields.get_mut(form.cursor) else {
+    let field_index = form.cursor;
+    let Some(field) = form.fields.get_mut(field_index) else {
         return;
     };
-    for character in text.chars().filter(|character| !character.is_control()) {
-        if field.chars().count() >= LIMITS[form.cursor] {
-            break;
-        }
-        field.push(character);
+    let cursor = form.edit_cursors[field_index].min(field.chars().count());
+    let available = LIMITS[field_index].saturating_sub(field.chars().count());
+    let inserted = text
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(available)
+        .collect::<String>();
+    if !inserted.is_empty() {
+        let inserted_chars = inserted.chars().count();
+        let byte_index = char_byte_index(field, cursor);
+        field.insert_str(byte_index, &inserted);
+        form.edit_cursors[field_index] = cursor + inserted_chars;
     }
     form.error = None;
     dock.dirty = true;
@@ -2978,11 +3190,7 @@ fn switch_to_workspace_tab(
     machines: &HashMap<String, MachineRuntime>,
     writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
 ) -> Result<()> {
-    let mut draft = dock.machine_form.take();
-    // Keep text while switching tabs, but do not retain installation authority.
-    if let Some(form) = draft.as_mut() {
-        form.allow_install = false;
-    }
+    let draft = dock.machine_form.take();
     close_selector(dock, active, candidate, machines, writer)?;
     dock.machine_draft = draft;
     Ok(())
@@ -3013,13 +3221,14 @@ fn activate_machine_form(
     events: &Sender<ShellEvent>,
     pending: &mut Option<Endpoint>,
     machines: &mut HashMap<String, MachineRuntime>,
+    approved: bool,
 ) -> Result<()> {
     let Some(id) = dock
         .machine_form
         .as_ref()
         .and_then(|form| form.selected_saved.clone())
     else {
-        return submit_machine_form(dock, events);
+        return submit_machine_form(dock, events, approved);
     };
     let Some(machine) = machines.get_mut(&id) else {
         set_machine_form_error(dock, "This saved machine was removed.");
@@ -3031,10 +3240,6 @@ fn activate_machine_form(
             session: machine.session(),
         });
     } else {
-        let approved = dock
-            .machine_form
-            .as_ref()
-            .is_some_and(|form| form.allow_install);
         let events = events.clone();
         std::thread::Builder::new()
             .name("machine-enable".into())
@@ -3053,7 +3258,11 @@ fn activate_machine_form(
     Ok(())
 }
 
-fn submit_machine_form(dock: &mut DockState, events: &Sender<ShellEvent>) -> Result<()> {
+fn submit_machine_form(
+    dock: &mut DockState,
+    events: &Sender<ShellEvent>,
+    approved: bool,
+) -> Result<()> {
     let Some(form) = dock.machine_form.as_mut() else {
         return Ok(());
     };
@@ -3066,7 +3275,7 @@ fn submit_machine_form(dock: &mut DockState, events: &Sender<ShellEvent>) -> Res
         return Ok(());
     }
     form.submitting = true;
-    let allow_install = form.allow_install;
+    form.install_prompt = None;
     form.error = None;
     dock.dirty = true;
     let events = events.clone();
@@ -3074,7 +3283,7 @@ fn submit_machine_form(dock: &mut DockState, events: &Sender<ShellEvent>) -> Res
         .name("machine-create".to_string())
         .stack_size(512 * 1024)
         .spawn(move || {
-            let result = crate::machine::add_profile(label, destination, session, allow_install)
+            let result = crate::machine::add_profile(label, destination, session, approved)
                 .map_err(|error| error.to_string());
             let _ = events.send(ShellEvent::MachineCreated(result));
         })?;
@@ -4615,9 +4824,9 @@ fn paint_machine_form(
     if let Some(form) = dock.machine_form.as_mut() {
         if let Some(id) = &form.selected_saved {
             if let Some(index) = dock.saved_ids.iter().position(|saved| saved == id) {
-                form.cursor = 4 + index;
+                form.cursor = form.fields.len() + index;
             } else {
-                form.cursor = 3;
+                form.cursor = form.fields.len().saturating_sub(1);
                 form.selected_saved = None;
             }
         }
@@ -4630,6 +4839,7 @@ fn paint_machine_form(
         format!("{}:", dock.ssh_destination_label),
         format!("{}:", dock.session_name_label),
     ];
+    let mut input_cursor = None;
     let label_width = labels
         .iter()
         .map(|label| display_columns(label))
@@ -4652,7 +4862,18 @@ fn paint_machine_form(
         );
         let value_x = 4u16.saturating_add(label_width);
         let value_width = rect.width.saturating_sub(value_x + 2);
-        let shown = truncate_form_tail(value, usize::from(value_width.saturating_sub(1)));
+        let active = field == form.cursor;
+        let (shown, caret_offset) = if active {
+            machine_form_value_window(
+                value,
+                form.edit_cursors[field],
+                usize::from(value_width.saturating_sub(1)),
+            )
+        } else {
+            let shown = truncate_form_tail(value, usize::from(value_width.saturating_sub(1)));
+            let width = display_columns(&shown);
+            (shown, width)
+        };
         write_endpoint_text(
             &mut cells,
             rect,
@@ -4660,16 +4881,16 @@ fn paint_machine_form(
             value_x,
             &shown,
             StyleSpec {
-                fg: if field == form.cursor { accent } else { text },
+                fg: if active { accent } else { text },
                 bg: None,
-                bold: field == form.cursor,
+                bold: active,
             },
         );
-        if field == form.cursor && !form.submitting {
-            let caret = value_x
-                .saturating_add(display_columns(&shown))
+        if active && !form.submitting {
+            let caret_x = value_x
+                .saturating_add(caret_offset)
                 .min(rect.width.saturating_sub(2));
-            set_form_symbol(&mut cells, rect, caret, row, "▏", accent, true);
+            input_cursor = Some((rect.x + caret_x, rect.y + row));
         }
         dock.machine_form_hits.push((
             MachineFormHit::Field(field),
@@ -4677,36 +4898,42 @@ fn paint_machine_form(
         ));
     }
 
-    if rect.height >= 14 {
-        let label = format!(
-            "[{}] {}",
-            if form.allow_install { "x" } else { " " },
-            dock.install_label
-        );
+    if let Some(reason) = form.install_prompt.as_deref() {
+        let message = truncate_form_tail(reason, usize::from(rect.width.saturating_sub(5)));
         write_endpoint_text(
             &mut cells,
             rect,
             10,
             2,
-            &label,
+            &message,
             StyleSpec {
-                fg: if form.cursor == 3 { accent } else { subtext0 },
+                fg: error,
                 bg: None,
-                bold: form.cursor == 3,
+                bold: false,
             },
         );
-        dock.machine_form_hits.push((
-            MachineFormHit::AllowInstall,
-            Rect::new(rect.x + 1, rect.y + 10, rect.width.saturating_sub(2), 1),
-        ));
-    }
-    let footer_row = rect.height.saturating_sub(2);
-    let divider_row = footer_row.saturating_sub(1);
-    if !dock.saved_ids.is_empty() {
+        let question = format!("{}?", dock.install_label);
+        let question = truncate_form_tail(&question, usize::from(rect.width.saturating_sub(5)));
         write_endpoint_text(
             &mut cells,
             rect,
-            12,
+            11,
+            2,
+            &question,
+            StyleSpec {
+                fg: accent,
+                bg: None,
+                bold: true,
+            },
+        );
+    }
+    let footer_row = rect.height.saturating_sub(2);
+    let divider_row = footer_row.saturating_sub(1);
+    if form.install_prompt.is_none() && !dock.saved_ids.is_empty() {
+        write_endpoint_text(
+            &mut cells,
+            rect,
+            10,
             2,
             dock.saved_labels.0,
             StyleSpec {
@@ -4715,14 +4942,14 @@ fn paint_machine_form(
                 bold: true,
             },
         );
-        let capacity = usize::from(divider_row.saturating_sub(14) / 2);
+        let capacity = usize::from(divider_row.saturating_sub(12) / 2);
         let selected = form
             .selected_saved
             .as_ref()
             .and_then(|id| dock.saved_ids.iter().position(|saved| saved == id));
         let start = selected.map_or(0, |index| index.saturating_add(1).saturating_sub(capacity));
         for (index, machine) in saved.iter().enumerate().skip(start).take(capacity) {
-            let y = 14 + ((index - start) * 2) as u16;
+            let y = 12 + ((index - start) * 2) as u16;
             let selected = form.selected_saved.as_deref() == Some(machine.profile.id.as_str());
             let status = machine.runtime.status();
             let status_x = rect.width.saturating_sub(display_columns(status) + 2);
@@ -4775,7 +5002,68 @@ fn paint_machine_form(
             set_form_symbol(&mut cells, rect, column, divider_row, "─", rule, false);
         }
     }
-    if form.submitting {
+    if form.install_prompt.is_some() {
+        let mut x = 1u16;
+        let approve = format!("y {}", dock.install_action_label);
+        write_endpoint_text(
+            &mut cells,
+            rect,
+            footer_row,
+            x,
+            &approve,
+            StyleSpec {
+                fg: accent,
+                bg: None,
+                bold: true,
+            },
+        );
+        dock.machine_form_hits.push((
+            MachineFormHit::ApproveInstall,
+            Rect::new(
+                rect.x + x,
+                rect.y + footer_row,
+                display_columns(&approve),
+                1,
+            ),
+        ));
+        x = x.saturating_add(display_columns(&approve));
+        let separator = " · ";
+        write_endpoint_text(
+            &mut cells,
+            rect,
+            footer_row,
+            x,
+            separator,
+            StyleSpec {
+                fg: divider,
+                bg: None,
+                bold: false,
+            },
+        );
+        x = x.saturating_add(display_columns(separator));
+        let decline = format!("n/↵/esc {}", dock.cancel_label);
+        write_endpoint_text(
+            &mut cells,
+            rect,
+            footer_row,
+            x,
+            &decline,
+            StyleSpec {
+                fg: subtext1,
+                bg: None,
+                bold: false,
+            },
+        );
+        dock.machine_form_hits.push((
+            MachineFormHit::DeclineInstall,
+            Rect::new(
+                rect.x + x,
+                rect.y + footer_row,
+                display_columns(&decline),
+                1,
+            ),
+        ));
+    } else if form.submitting {
         write_endpoint_text(
             &mut cells,
             rect,
@@ -4903,7 +5191,14 @@ fn paint_machine_form(
     }
     dock.machine_form_hits.push((MachineFormHit::Modal, rect));
     super::client::sync_begin();
-    super::client::paint(terminal, &cells, *cursor, false, false, cursor)?;
+    super::client::paint(
+        terminal,
+        &cells,
+        input_cursor.or(*cursor),
+        input_cursor.is_some(),
+        false,
+        cursor,
+    )?;
     super::client::sync_end();
     dock.dirty = false;
     Ok(())
@@ -4949,6 +5244,41 @@ fn truncate_form_tail(text: &str, max: usize) -> String {
         tail.push(character);
     }
     format!("…{}", tail.into_iter().rev().collect::<String>())
+}
+
+fn machine_form_value_window(text: &str, cursor: usize, max_width: usize) -> (String, u16) {
+    if max_width == 0 {
+        return (String::new(), 0);
+    }
+    let chars = text.chars().collect::<Vec<_>>();
+    let cursor = cursor.min(chars.len());
+    let widths = chars
+        .iter()
+        .map(|character| unicode_width::UnicodeWidthChar::width(*character).unwrap_or(0))
+        .collect::<Vec<_>>();
+    let prefix_width = widths[..cursor].iter().sum::<usize>();
+    let start = if prefix_width <= max_width {
+        0
+    } else {
+        let mut start = cursor;
+        let mut width = 0;
+        while start > 0 && width + widths[start - 1] <= max_width {
+            start -= 1;
+            width += widths[start];
+        }
+        start
+    };
+    let caret_offset = widths[start..cursor].iter().sum::<usize>();
+    let mut end = cursor;
+    let mut visible_width = caret_offset;
+    while end < chars.len() && visible_width + widths[end] <= max_width {
+        visible_width += widths[end];
+        end += 1;
+    }
+    (
+        chars[start..end].iter().collect(),
+        u16::try_from(caret_offset).unwrap_or(u16::MAX),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -5323,7 +5653,7 @@ mod tests {
             ..DockState::default()
         };
         append_machine_form_text(&mut dock, "unfinished name");
-        move_machine_form_cursor(&mut dock, 4);
+        move_machine_form_cursor(&mut dock, 3);
         assert_eq!(
             dock.machine_form
                 .as_ref()
@@ -5346,12 +5676,28 @@ mod tests {
                 .as_deref(),
             Some("second")
         );
-        move_machine_form_cursor(&mut dock, -5);
+        move_machine_form_cursor(&mut dock, -4);
         assert!(dock.machine_form.as_ref().unwrap().selected_saved.is_none());
         assert_eq!(
             dock.machine_form.as_ref().unwrap().fields[0],
             "unfinished name"
         );
+    }
+
+    #[test]
+    fn machine_install_prompt_is_explicit_and_defaults_to_cancel() {
+        for code in [KeyCode::Char('y'), KeyCode::Char('Y')] {
+            assert_eq!(install_prompt_choice(&code), Some(true));
+        }
+        for code in [
+            KeyCode::Char('n'),
+            KeyCode::Char('N'),
+            KeyCode::Enter,
+            KeyCode::Esc,
+        ] {
+            assert_eq!(install_prompt_choice(&code), Some(false));
+        }
+        assert_eq!(install_prompt_choice(&KeyCode::Tab), None);
     }
 
     #[test]
@@ -5367,7 +5713,7 @@ mod tests {
         let mut machines = HashMap::from([("box".into(), machine)]);
         let (tx, _rx) = mpsc::sync_channel(1);
         let mut pending = None;
-        activate_machine_form(&mut dock, &tx, &mut pending, &mut machines).unwrap();
+        activate_machine_form(&mut dock, &tx, &mut pending, &mut machines, false).unwrap();
         assert_eq!(machines.len(), 1);
         assert_eq!(
             pending,
@@ -5378,7 +5724,7 @@ mod tests {
         );
         assert!(dock.machine_form.as_ref().unwrap().submitting);
         machines.clear();
-        activate_machine_form(&mut dock, &tx, &mut pending, &mut machines).unwrap();
+        activate_machine_form(&mut dock, &tx, &mut pending, &mut machines, false).unwrap();
         assert!(dock.machine_form.as_ref().unwrap().error.is_some());
     }
 
@@ -5670,6 +6016,70 @@ mod tests {
                 .chars()
                 .count(),
             255
+        );
+    }
+
+    #[test]
+    fn machine_form_edits_at_unicode_cursor_and_supports_navigation() {
+        let mut dock = DockState {
+            machine_form: Some(MachineForm::default()),
+            ..DockState::default()
+        };
+        append_machine_form_text(&mut dock, "ab界d");
+        move_machine_form_edit_cursor(&mut dock, -2, KeyModifiers::NONE);
+        append_machine_form_text(&mut dock, "X");
+        assert_eq!(dock.machine_form.as_ref().unwrap().fields[0], "abX界d");
+
+        delete_machine_form_text(&mut dock, false, KeyModifiers::NONE);
+        assert_eq!(dock.machine_form.as_ref().unwrap().fields[0], "ab界d");
+        delete_machine_form_text(&mut dock, true, KeyModifiers::NONE);
+        assert_eq!(dock.machine_form.as_ref().unwrap().fields[0], "abd");
+
+        move_machine_form_edit_cursor_to_edge(&mut dock, false);
+        append_machine_form_text(&mut dock, "界");
+        assert_eq!(dock.machine_form.as_ref().unwrap().fields[0], "界abd");
+        move_machine_form_edit_cursor_to_edge(&mut dock, true);
+        assert_eq!(dock.machine_form.as_ref().unwrap().edit_cursors[0], 4);
+    }
+
+    #[test]
+    fn machine_form_modified_delete_uses_word_and_line_boundaries() {
+        let mut dock = DockState {
+            machine_form: Some(MachineForm::default()),
+            ..DockState::default()
+        };
+        append_machine_form_text(&mut dock, "Build server alpha");
+        delete_machine_form_text(&mut dock, false, KeyModifiers::ALT);
+        assert_eq!(
+            dock.machine_form.as_ref().unwrap().fields[0],
+            "Build server "
+        );
+        delete_machine_form_text(&mut dock, false, KeyModifiers::CONTROL);
+        assert_eq!(dock.machine_form.as_ref().unwrap().fields[0], "Build ");
+        delete_machine_form_text(&mut dock, false, KeyModifiers::SUPER);
+        assert_eq!(dock.machine_form.as_ref().unwrap().fields[0], "");
+
+        append_machine_form_text(&mut dock, "one two three");
+        move_machine_form_edit_cursor_to_edge(&mut dock, false);
+        delete_machine_form_text(&mut dock, true, KeyModifiers::CONTROL);
+        assert_eq!(dock.machine_form.as_ref().unwrap().fields[0], " two three");
+        delete_machine_form_text(&mut dock, true, KeyModifiers::SUPER);
+        assert_eq!(dock.machine_form.as_ref().unwrap().fields[0], "");
+    }
+
+    #[test]
+    fn machine_form_value_window_keeps_cursor_visible_on_long_wide_text() {
+        assert_eq!(
+            machine_form_value_window("alpha界beta", 0, 5),
+            ("alpha".into(), 0)
+        );
+        assert_eq!(
+            machine_form_value_window("alpha界beta", 6, 5),
+            ("pha界".into(), 5)
+        );
+        assert_eq!(
+            machine_form_value_window("alpha界beta", 10, 5),
+            ("beta".into(), 4)
         );
     }
 

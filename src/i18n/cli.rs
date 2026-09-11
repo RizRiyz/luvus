@@ -33,6 +33,20 @@ pub(crate) fn machine_install_label(language: Language) -> &'static str {
     }
 }
 
+pub(crate) fn machine_install_action_label(language: Language) -> &'static str {
+    match language {
+        Language::En => "install",
+        Language::Es => "instalar",
+        Language::Pt => "instalar",
+        Language::Fr => "installer",
+        Language::De => "installieren",
+        Language::Id => "instal",
+        Language::Zh => "安装",
+        Language::Ja => "インストール",
+        Language::Ko => "설치",
+    }
+}
+
 pub(crate) fn machine_saved_labels(
     language: Language,
 ) -> (&'static str, &'static str, &'static str) {
