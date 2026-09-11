@@ -3518,16 +3518,22 @@ impl App {
                     // PowerShell can start directly on the resume command.
                     // POSIX and unrecognised shells start normally and receive
                     // it through the PTY after interactive profile setup.
-                    // Re-apply the launch flags captured at save time (docs/62),
-                    // unless Settings → General turns that off.
-                    let resume = ps.agent_session.as_ref().and_then(|(agent, sid)| {
-                        crate::agent::resume_for(
-                            agent,
-                            sid,
-                            ps.agent_launch.as_deref(),
-                            config.resume_launch_flags,
-                        )
-                    });
+                    // Settings → General can restore this as a genuine plain
+                    // shell instead. In that mode no stale live agent identity
+                    // is rebound to the replacement terminal.
+                    let auto_resume = config.resume_agent_sessions;
+                    let resume = if auto_resume {
+                        ps.agent_session.as_ref().and_then(|(agent, sid)| {
+                            crate::agent::resume_for(
+                                agent,
+                                sid,
+                                ps.agent_launch.as_deref(),
+                                config.resume_launch_flags,
+                            )
+                        })
+                    } else {
+                        None
+                    };
                     let resume_argv = resume.as_deref().and_then(|r| {
                         crate::platform::shell_run_then_interactive(&shell, r.trim())
                     });
@@ -3602,7 +3608,7 @@ impl App {
                     }
                     let cmd = pane.command.clone();
                     let mut st = PaneStatus::new(cmd);
-                    if let Some((agent, sid)) = &ps.agent_session {
+                    if let Some((agent, sid)) = ps.agent_session.as_ref().filter(|_| auto_resume) {
                         st.agent = agent.clone();
                         st.agent_session = Some(AgentSession {
                             agent: agent.clone(),
@@ -8515,6 +8521,52 @@ mod tests {
         assert_eq!(restored.layout().len(), 2);
         assert_eq!(restored.workspaces[0].name, "Luvus website");
         assert!(restored.workspaces[0].pinned);
+    }
+
+    #[test]
+    fn disabled_agent_resume_restores_a_plain_shell_without_stale_identity() {
+        let _env = crate::persist::test_env("agent-resume-disabled");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let status = app.status.get_mut(&pane).unwrap();
+        status.agent = "codex".into();
+        status.agent_session = Some(AgentSession {
+            agent: "codex".into(),
+            session_id: "saved-session".into(),
+        });
+
+        let snapshot = persist::snapshot(&app);
+        assert_eq!(
+            snapshot.workspaces[0].tabs[0].panes[0]
+                .1
+                .agent_session
+                .as_ref()
+                .map(|(agent, session)| (agent.as_str(), session.as_str())),
+            Some(("codex", "saved-session")),
+            "disabling restore must not make snapshot capture destructive"
+        );
+
+        let mut config = crate::config::load();
+        config.resume_agent_sessions = false;
+        crate::config::save(&config);
+
+        let (restore_tx, _restore_rx) = std::sync::mpsc::channel();
+        let restored = App::from_snapshot(snapshot, restore_tx).expect("snapshot restores");
+        assert!(
+            restored
+                .status
+                .values()
+                .all(|status| status.agent_session.is_none()),
+            "the plain shell must not retain the old live agent binding"
+        );
+        assert!(
+            restored
+                .status
+                .values()
+                .all(|status| status.agent != "codex"),
+            "the sidebar must not present the replacement shell as the old agent"
+        );
     }
 
     #[test]

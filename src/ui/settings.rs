@@ -868,6 +868,16 @@ fn draw_content(
                         toggle(app.config.check_updates, t),
                         t,
                     )),
+                    GeneralRow::ResumeAgentSessions => ctls.push(ctl_row(
+                        f,
+                        area,
+                        y,
+                        i,
+                        cursor,
+                        cat.set_resume_agent_sessions,
+                        toggle(app.config.resume_agent_sessions, t),
+                        t,
+                    )),
                     GeneralRow::ResumeFlags => ctls.push(ctl_row(
                         f,
                         area,
