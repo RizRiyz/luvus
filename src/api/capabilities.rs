@@ -168,6 +168,8 @@ pub const METHODS: &[&str] = &[
     "theme.reload",
     "manifest.reload",
     "ui.sidebar",
+    "ui.agent_title.push",
+    "ui.agent_title.clear",
     "ui.dock.push",
     "ui.dock.list",
     "ui.dock.move",
@@ -401,6 +403,9 @@ pub fn capabilities(event_sequence: u64) -> Value {
             "workspace_move_block":super::topology::MAX_WORKSPACE_MOVE_BLOCK,
             "task_title_bytes":crate::orch::MAX_TASK_TITLE_BYTES,
             "task_prompt_bytes":crate::orch::MAX_TASK_PROMPT_BYTES,
+            "agent_row_titles":crate::app::MAX_AGENT_ROW_TITLES,
+            "agent_row_title_bytes":crate::app::MAX_AGENT_ROW_TITLE_BYTES,
+            "agent_row_title_agent_bytes":crate::app::MAX_AGENT_ROW_TITLE_AGENT_BYTES,
             "automations":crate::automation::MAX_AUTOMATIONS,
             "automation_runs":crate::automation::MAX_RUNS,
             "automation_prompt_bytes":crate::automation::MAX_PROMPT_BYTES,
@@ -469,6 +474,9 @@ mod tests {
             capabilities["limits"]["task_prompt_bytes"],
             crate::orch::MAX_TASK_PROMPT_BYTES
         );
+        assert_eq!(capabilities["limits"]["agent_row_titles"], 256);
+        assert_eq!(capabilities["limits"]["agent_row_title_bytes"], 256);
+        assert_eq!(capabilities["limits"]["agent_row_title_agent_bytes"], 64);
         assert!(is_idempotent("pane.list"));
         assert!(!is_read_only("mission.open"));
         assert_eq!(required_scope("mission.open"), "workspace");

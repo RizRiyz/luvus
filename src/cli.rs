@@ -213,6 +213,10 @@ appearance:
   ui dock push --id <id> [--title <t>] [--side left|right] [--rows <json>]
                              feed a module's sidebar dock its rows (JSON array,
                              or piped on stdin). See docs/29 + the website
+  ui agent-title push [--titles <json>]
+                             set AGENTS sidebar titles for live and resumable rows
+  ui agent-title clear [--pane <id>|--agent <id> --session-id <id>]
+                             clear module-provided AGENTS sidebar titles
   ui notification push --text <text> [--level info|success|warning|error]
   ui notification clear [--dedupe-key <key>]
   ui toast <text>            flash a one-line message in the UI
@@ -749,7 +753,7 @@ fn write_topic_help_english(
             detailed_section("bars:\n", "\nappearance:\n"),
         ),
         "ui" => (
-            "luvus ui <sidebar|dock|notification|toast> [args]",
+            "luvus ui <sidebar|dock|agent-title|notification|toast> [args]",
             detailed_section("appearance:\n", "\nmodules (extensions):\n"),
         ),
         "module" => (
@@ -2873,6 +2877,53 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
                     ("ui.dock.move".into(), Value::Object(obj))
                 }
                 _ => ("ui.dock.list".into(), json!({})),
+            }
+        }
+        ("ui", "agent-title") => {
+            let sub = rest.first().map(String::as_str).unwrap_or("");
+            let mut obj = serde_json::Map::new();
+            if let Ok(owner) = std::env::var("LUVUS_MODULE_ID") {
+                obj.insert("owner".into(), json!(owner));
+            }
+            if let Ok(token) = std::env::var(crate::module::runtime::MODULE_TOKEN_ENV) {
+                obj.insert("module_token".into(), json!(token));
+            }
+            match sub {
+                "push" => {
+                    let titles_str = match flag(args, "--titles") {
+                        Some(s) => s,
+                        None => {
+                            use std::io::Read;
+                            let mut s = String::new();
+                            let _ = std::io::stdin().read_to_string(&mut s);
+                            s
+                        }
+                    };
+                    let titles: Value = if titles_str.trim().is_empty() {
+                        json!([])
+                    } else {
+                        serde_json::from_str(&titles_str)
+                            .map_err(|e| anyhow!("--titles must be a JSON array: {e}"))?
+                    };
+                    if !titles.is_array() {
+                        return Err(anyhow!("--titles must be a JSON array"));
+                    }
+                    obj.insert("titles".into(), titles);
+                    ("ui.agent_title.push".into(), Value::Object(obj))
+                }
+                "clear" => {
+                    if let Some(pane) = flag(args, "--pane") {
+                        obj.insert("pane".into(), json!(pane));
+                    }
+                    if let Some(agent) = flag(args, "--agent") {
+                        obj.insert("agent".into(), json!(agent));
+                    }
+                    if let Some(session_id) = flag(args, "--session-id") {
+                        obj.insert("session_id".into(), json!(session_id));
+                    }
+                    ("ui.agent_title.clear".into(), Value::Object(obj))
+                }
+                _ => return Err(anyhow!("usage: luvus ui agent-title push|clear")),
             }
         }
         ("bar", sub) => {
@@ -5049,6 +5100,25 @@ mod tests {
         let (m, _) = parse(&argv("luvus ui dock list")).unwrap();
         assert_eq!(m, "ui.dock.list");
 
+        let titles_argv: Vec<String> = vec![
+            "luvus".into(),
+            "ui".into(),
+            "agent-title".into(),
+            "push".into(),
+            "--titles".into(),
+            r#"[{"pane":"3","title":"Ship desktop"}]"#.into(),
+        ];
+        let (m, p) = parse(&titles_argv).unwrap();
+        assert_eq!(m, "ui.agent_title.push");
+        assert_eq!(p["titles"][0]["title"].as_str(), Some("Ship desktop"));
+        let (m, p) = parse(&argv(
+            "luvus ui agent-title clear --agent pi --session-id sess-1",
+        ))
+        .unwrap();
+        assert_eq!(m, "ui.agent_title.clear");
+        assert_eq!(p.get("agent").and_then(|v| v.as_str()), Some("pi"));
+        assert!(parse(&argv("luvus ui agent-title")).is_err());
+
         // `ui sidebar` now takes an optional side.
         let (m, p) = parse(&argv("luvus ui sidebar --side right --width 30")).unwrap();
         assert_eq!(m, "ui.sidebar");
@@ -5059,6 +5129,7 @@ mod tests {
     fn maps_luvus_bar_and_notification_commands() {
         let _env = crate::persist::test_env("cli-bar");
         std::env::set_var("LUVUS_MODULE_ID", "you.ci");
+        std::env::set_var(crate::module::runtime::MODULE_TOKEN_ENV, "module-token");
         let args = vec![
             "luvus".into(),
             "bar".into(),
@@ -5075,6 +5146,18 @@ mod tests {
         assert_eq!(params["owner"], "you.ci");
         assert_eq!(params["content"].as_array().unwrap().len(), 2);
 
+        let (method, params) = parse(&argv(
+            r#"luvus ui agent-title push --titles [{"agent":"pi","session_id":"s1","title":"Title"}]"#,
+        ))
+        .unwrap();
+        assert_eq!(method, "ui.agent_title.push");
+        assert_eq!(params["owner"], "you.ci");
+        assert_eq!(params["module_token"], "module-token");
+        let (method, params) = parse(&argv("luvus ui agent-title clear")).unwrap();
+        assert_eq!(method, "ui.agent_title.clear");
+        assert_eq!(params["owner"], "you.ci");
+        assert_eq!(params["module_token"], "module-token");
+
         let (method, params) =
             parse(&argv("luvus bar move --id status --region bottom-right")).unwrap();
         assert_eq!(method, "ui.bar.move");
@@ -5088,6 +5171,7 @@ mod tests {
         assert_eq!(params["ttl_ms"], 6000);
         assert_eq!(params["owner"], "you.ci");
         std::env::remove_var("LUVUS_MODULE_ID");
+        std::env::remove_var(crate::module::runtime::MODULE_TOKEN_ENV);
 
         for bad in [
             "luvus bar push --id status",

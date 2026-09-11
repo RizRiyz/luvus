@@ -258,6 +258,92 @@ pub struct ModuleDock {
     pub rows: Vec<DockRow>,
 }
 
+/// One volatile AGENTS-row title and its authenticated publishing module.
+/// `None` is reserved for direct local control-API calls.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct AgentRowTitle {
+    pub(crate) owner: Option<String>,
+    pub(crate) text: String,
+}
+
+pub(crate) const MAX_AGENT_ROW_TITLE_BYTES: usize = 256;
+pub(crate) const MAX_AGENT_ROW_TITLES: usize = 256;
+pub(crate) const MAX_AGENT_ROW_TITLE_AGENT_BYTES: usize = 64;
+
+pub(crate) fn agent_session_title_count(
+    titles: &HashMap<String, HashMap<String, AgentRowTitle>>,
+) -> usize {
+    titles.values().map(HashMap::len).sum()
+}
+
+pub(crate) fn set_owned_agent_row_title(
+    titles: &mut HashMap<PaneId, AgentRowTitle>,
+    pane: PaneId,
+    text: Option<String>,
+    owner: Option<&str>,
+) -> Result<bool, String> {
+    if let Some(existing) = titles.get(&pane) {
+        if existing.owner.as_deref() != owner {
+            return Err("agent row title belongs to another publisher".into());
+        }
+    }
+    match text {
+        Some(text) => {
+            let title = AgentRowTitle {
+                owner: owner.map(String::from),
+                text,
+            };
+            if titles.get(&pane) == Some(&title) {
+                Ok(false)
+            } else {
+                titles.insert(pane, title);
+                Ok(true)
+            }
+        }
+        None => Ok(titles.remove(&pane).is_some()),
+    }
+}
+
+pub(crate) fn set_owned_agent_session_title(
+    titles: &mut HashMap<String, HashMap<String, AgentRowTitle>>,
+    agent: String,
+    session_id: String,
+    text: Option<String>,
+    owner: Option<&str>,
+) -> Result<bool, String> {
+    let existing = titles
+        .get(&agent)
+        .and_then(|sessions| sessions.get(&session_id));
+    if let Some(existing) = existing {
+        if existing.owner.as_deref() != owner {
+            return Err("agent row title belongs to another publisher".into());
+        }
+    }
+    match text {
+        Some(text) => {
+            let title = AgentRowTitle {
+                owner: owner.map(String::from),
+                text,
+            };
+            if existing == Some(&title) {
+                return Ok(false);
+            }
+            titles.entry(agent).or_default().insert(session_id, title);
+            Ok(true)
+        }
+        None => {
+            let Some(sessions) = titles.get_mut(&agent) else {
+                return Ok(false);
+            };
+            let changed = sessions.remove(&session_id).is_some();
+            if sessions.is_empty() {
+                titles.remove(&agent);
+            }
+            Ok(changed)
+        }
+    }
+}
+
 /// One sidebar's live state: shown/hidden, width, and its ordered docks.
 #[derive(Clone)]
 pub struct SideState {
@@ -2496,6 +2582,11 @@ pub struct App {
     cwd_git_hits: HashMap<PaneId, (PathBuf, u8)>,
     /// Resumable agent sessions discovered on disk (for the AGENTS sidebar).
     pub resumable: Vec<crate::agent::SessionInfo>,
+    /// Module-provided AGENTS sidebar titles for live panes. OSC still wins.
+    pub(crate) agent_title_panes: HashMap<PaneId, AgentRowTitle>,
+    /// Module-provided titles for native sessions (live idle fallback and All/history).
+    /// The nested shape permits borrowed, allocation-free lookups while rendering.
+    pub(crate) agent_title_sessions: HashMap<String, HashMap<String, AgentRowTitle>>,
     /// A resumable-session disk scan is running on a worker thread; don't start
     /// another until its `SessionsScanned` result arrives.
     sessions_scan_inflight: bool,
@@ -2817,6 +2908,9 @@ pub struct App {
     pub settings_arrow_rects: Vec<(usize, i32, Rect)>,
     /// Installed modules (docs/13) and the ring buffer of their command logs.
     pub modules: crate::module::ModuleRegistry,
+    /// Per-server credentials injected only into processes Luvus starts for each
+    /// module. Public API owner fields are accepted only with the matching token.
+    pub(crate) module_tokens: HashMap<String, String>,
     pub module_logs: Vec<crate::module::ModuleCommandLog>,
     /// Live module panes by pane id, untracked automatically on close (MOD-2).
     pub module_panes: HashMap<PaneId, crate::module::ModulePaneRecord>,
@@ -2835,6 +2929,20 @@ pub struct ModuleSettingEdit {
     pub title: String,
     pub buffer: String,
     pub secret: bool,
+}
+
+/// One publisher credential per registered module, valid for this server's
+/// lifetime. Every registered module gets one regardless of its enabled state,
+/// so toggling a module cannot strand a still-running module process with a
+/// stale token. Authorization is enforced per request against `is_runnable()`.
+fn module_tokens_for(
+    modules: &crate::module::ModuleRegistry,
+) -> Result<HashMap<String, String>, String> {
+    modules
+        .modules
+        .iter()
+        .map(|module| crate::terminal::backend::random_id().map(|token| (module.id.clone(), token)))
+        .collect()
 }
 
 fn child_appearance(
@@ -2871,6 +2979,7 @@ impl App {
         let direct_keymap = keys::build_direct_keymap(&config.direct_keybindings);
         let prefix = keys::PrefixSpec::parse(&config.prefix).unwrap_or_default();
         let modules = crate::module::registry::load();
+        let module_tokens = module_tokens_for(&modules).map_err(anyhow::Error::msg)?;
         let mut bar = crate::bar::BarState::default();
         bar.sync_modules(&modules);
 
@@ -3048,6 +3157,8 @@ impl App {
             cwd_scan_inflight: false,
             cwd_git_hits: HashMap::new(),
             resumable: Vec::new(),
+            agent_title_panes: HashMap::new(),
+            agent_title_sessions: HashMap::new(),
             sessions_scan_inflight: false,
             proc_commands: HashMap::new(),
             proc_scan_inflight: false,
@@ -3200,6 +3311,7 @@ impl App {
             theme_selection_revision: 0,
             settings_arrow_rects: Vec::new(),
             modules,
+            module_tokens,
             module_logs: Vec::new(),
             module_panes: HashMap::new(),
             module_startup_done: std::collections::HashSet::new(),
@@ -3241,6 +3353,7 @@ impl App {
         let shell = crate::platform::resolve_shell(&config.shell);
         let history_budget_bytes = config.scrollback_bytes();
         let modules = crate::module::registry::load();
+        let module_tokens = module_tokens_for(&modules).ok()?;
         let mut panes = HashMap::new();
         let mut status = HashMap::new();
         let mut module_panes: HashMap<PaneId, crate::module::ModulePaneRecord> = HashMap::new();
@@ -3422,7 +3535,7 @@ impl App {
                     // installed + runnable; otherwise it falls back to a shell.
                     let restored = ps.module.as_ref().and_then(|(mid, ep)| {
                         restore_module_pane(
-                            &modules,
+                            (&modules, &module_tokens),
                             mid,
                             ep,
                             id,
@@ -3707,6 +3820,8 @@ impl App {
             cwd_scan_inflight: false,
             cwd_git_hits: HashMap::new(),
             resumable: Vec::new(),
+            agent_title_panes: HashMap::new(),
+            agent_title_sessions: HashMap::new(),
             sessions_scan_inflight: false,
             proc_commands: HashMap::new(),
             proc_scan_inflight: false,
@@ -3859,6 +3974,7 @@ impl App {
             theme_selection_revision: 0,
             settings_arrow_rects: Vec::new(),
             modules,
+            module_tokens,
             module_logs: Vec::new(),
             module_panes,
             module_startup_done: std::collections::HashSet::new(),
@@ -7106,6 +7222,49 @@ impl App {
         changed
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_agent_row_title_for_session(
+        &mut self,
+        agent: String,
+        session_id: String,
+        title: Option<String>,
+    ) -> bool {
+        set_owned_agent_session_title(
+            &mut self.agent_title_sessions,
+            agent,
+            session_id,
+            title,
+            None,
+        )
+        .expect("the test helper writes only unowned title keys")
+    }
+
+    pub(crate) fn clear_agent_row_titles_for_owner(&mut self, owner: &str) -> bool {
+        let pane_count = self.agent_title_panes.len();
+        self.agent_title_panes
+            .retain(|_, title| title.owner.as_deref() != Some(owner));
+        let session_count = agent_session_title_count(&self.agent_title_sessions);
+        self.agent_title_sessions.retain(|_, sessions| {
+            sessions.retain(|_, title| title.owner.as_deref() != Some(owner));
+            !sessions.is_empty()
+        });
+        pane_count != self.agent_title_panes.len()
+            || session_count != agent_session_title_count(&self.agent_title_sessions)
+    }
+
+    pub(crate) fn agent_row_title_for_session(
+        &self,
+        agent: &str,
+        session_id: &str,
+    ) -> Option<&str> {
+        let agent = crate::agent::canonical_builtin(agent)?;
+        self.agent_title_sessions
+            .get(agent)?
+            .get(session_id)
+            .map(|title| title.text.as_str())
+            .filter(|title| !title.is_empty())
+    }
+
     /// Remove a resumable session from the sidebar list. Hides it for the rest of
     /// the run (so the periodic rescan doesn't bring it back) — it does NOT touch
     /// the agent's stored session on disk.
@@ -7580,6 +7739,7 @@ impl App {
         self.emit_backend_terminal_event(id, "terminal.closed", serde_json::json!({}));
         self.backend_terminal_index.retain(|_, pane| *pane != id);
         self.backend_labels.remove(&id);
+        self.agent_title_panes.remove(&id);
         self.cancel_backend_revision_waits(id);
         let reported = self
             .reported_usage
@@ -8002,7 +8162,7 @@ pub(crate) fn worktree_membership(cwd: &std::path::Path) -> Option<crate::git::W
 /// Re-spawn a saved module pane if its module is still installed + runnable;
 /// returns the pane + its tracking record, or `None` to fall back to a shell.
 fn restore_module_pane(
-    modules: &crate::module::ModuleRegistry,
+    module_runtime: (&crate::module::ModuleRegistry, &HashMap<String, String>),
     mid: &str,
     ep: &str,
     id: PaneId,
@@ -8010,6 +8170,7 @@ fn restore_module_pane(
     history_budget_bytes: usize,
     appearance: crate::terminal::appearance::PaneAppearance,
 ) -> Option<(Pane, crate::module::ModulePaneRecord)> {
+    let (modules, module_tokens) = module_runtime;
     let m = modules.find(mid).filter(|m| m.is_runnable())?;
     let argv = m
         .manifest
@@ -8020,6 +8181,9 @@ fn restore_module_pane(
     let ctx = serde_json::json!({ "invocation_source": "restore" });
     let env = crate::module::runtime::env(
         m,
+        // A snapshot may name the module by its install shorthand, which
+        // `find` accepts but the token map (keyed by manifest id) does not.
+        module_tokens.get(m.id.as_str())?,
         &ctx,
         vec![("LUVUS_MODULE_ENTRYPOINT_ID".to_string(), ep.to_string())],
     );
@@ -8038,7 +8202,7 @@ fn restore_module_pane(
     Some((
         pane,
         crate::module::ModulePaneRecord {
-            module_id: mid.to_string(),
+            module_id: m.id.clone(),
             entrypoint: ep.to_string(),
         },
     ))
@@ -13245,6 +13409,78 @@ mod tests {
 
         drop(restored);
         let _ = std::fs::remove_dir_all(other);
+    }
+
+    #[test]
+    fn module_agent_title_owners_cannot_overwrite_or_clear_each_other() {
+        let _env = crate::persist::test_env("module-agent-title-owners");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        set_owned_agent_session_title(
+            &mut app.agent_title_sessions,
+            "pi".into(),
+            "shared".into(),
+            Some("Alpha".into()),
+            Some("module.alpha"),
+        )
+        .unwrap();
+        assert!(set_owned_agent_session_title(
+            &mut app.agent_title_sessions,
+            "pi".into(),
+            "shared".into(),
+            Some("Beta".into()),
+            Some("module.beta"),
+        )
+        .is_err());
+        set_owned_agent_session_title(
+            &mut app.agent_title_sessions,
+            "pi".into(),
+            "beta-only".into(),
+            Some("Beta".into()),
+            Some("module.beta"),
+        )
+        .unwrap();
+        assert!(app.clear_agent_row_titles_for_owner("module.alpha"));
+        assert!(app.agent_row_title_for_session("pi", "shared").is_none());
+        assert_eq!(
+            app.agent_row_title_for_session("pi", "beta-only"),
+            Some("Beta")
+        );
+    }
+
+    #[test]
+    fn module_agent_titles_apply_to_live_and_resumable_without_using_alias() {
+        let _env = crate::persist::test_env("module-agent-titles");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        {
+            let status = app.status.get_mut(&pane).unwrap();
+            status.agent = "pi".into();
+            status.agent_session = Some(AgentSession {
+                agent: "pi".into(),
+                session_id: "live-1".into(),
+            });
+        }
+        app.agent_names.insert("chezmoi".into(), pane);
+        assert!(app.set_agent_row_title_for_session(
+            "pi".into(),
+            "live-1".into(),
+            Some("Live module title".into()),
+        ));
+        assert!(app.set_agent_row_title_for_session(
+            "pi".into(),
+            "old-1".into(),
+            Some("History title".into()),
+        ));
+        assert_eq!(app.pane_title(pane).as_deref(), Some("Live module title"));
+        assert_eq!(app.agent_name_for(pane), Some("chezmoi"));
+        assert_eq!(
+            app.agent_row_title_for_session("pi", "old-1"),
+            Some("History title")
+        );
+        assert!(app.set_agent_row_title_for_session("pi".into(), "live-1".into(), None));
+        assert!(app.pane_title(pane).is_none());
     }
 
     #[test]

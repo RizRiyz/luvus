@@ -153,6 +153,10 @@ appearance:
   ui dock push --id <id> [--title <t>] [--side left|right] [--rows <json>]
                              feed a module's sidebar dock its rows (JSON array,
                              or piped on stdin). See docs/29 + the website
+  ui agent-title push [--titles <json>]
+                             set AGENTS sidebar titles for live and resumable rows
+  ui agent-title clear [--pane <id>|--agent <id> --session-id <id>]
+                             clear module-provided AGENTS sidebar titles
   ui notification push --text <text> [--level info|success|warning|error]
   ui notification clear [--dedupe-key <key>]
   ui toast <text>            flash a one-line message in the UI

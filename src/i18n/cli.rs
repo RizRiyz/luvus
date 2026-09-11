@@ -1795,6 +1795,28 @@ static HELP: &[Translation] = &[
         "모듈의 사이드바 도킹에 행 전달 (JSON 배열,"
     ),
     tr!(
+        "set AGENTS sidebar titles for live and resumable rows",
+        "definir títulos de la barra AGENTS para filas vivas y reanudables",
+        "definir títulos da barra AGENTS para linhas ativas e retomáveis",
+        "définir les titres de la barre AGENTS pour les lignes actives et reprises",
+        "AGENTS-Seitenleistentitel für Live- und fortsetzbare Zeilen setzen",
+        "atur judul bilah sisi AGENTS untuk baris live dan yang dapat dilanjutkan",
+        "设置 AGENTS 侧栏标题（活动与可恢复行）",
+        "AGENTS サイドバーのライブ行と履歴行のタイトルを設定",
+        "AGENTS 사이드바 타이틀을 실행 및 재개 행에 설정"
+    ),
+    tr!(
+        "clear module-provided AGENTS sidebar titles",
+        "borrar títulos de AGENTS aportados por un módulo",
+        "limpar títulos de AGENTS fornecidos por um módulo",
+        "effacer les titres AGENTS fournis par un module",
+        "von einem Modul gesetzte AGENTS-Titel löschen",
+        "hapus judul bilah sisi AGENTS dari modul",
+        "清除模块提供的 AGENTS 侧栏标题",
+        "モジュールが提供した AGENTS サイドバータイトルを消去",
+        "모듈이 제공한 AGENTS 사이드바 타이틀 지우기"
+    ),
+    tr!(
         "or piped on stdin). See docs/29 + the website",
         "o por stdin). Consulta docs/29 y el sitio web",
         "ou via stdin). Veja docs/29 e o site",

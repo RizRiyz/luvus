@@ -100,7 +100,7 @@ Luvus release number.
 | agent automation | `automation.create` · `automation.list` · `automation.get` · `automation.update` · `automation.enable` · `automation.disable` · `automation.rebind` · `automation.delete` · `automation.run` · `automation.history` · `automation.preview` · `automation.health` |
 | modules | `module.list` · `module.info` · `module.link` · `module.unlink` · `module.enable` · `module.disable` · `module.action.list` · `module.action.invoke` · `module.pane.open` · `module.pane.focus` · `module.pane.close` · `module.config_dir` · `module.settings.list` · `module.settings.get` · `module.settings.set` · `module.log.list` |
 | themes | `theme.list` · `theme.path` · `theme.use` · `theme.reload` |
-| ui / server | `ui.sidebar` · `ui.dock.push` · `ui.dock.list` · `ui.dock.move` · `ui.bar.push` · `ui.bar.list` · `ui.bar.move` · `ui.bar.remove` · `ui.notification.push` · `ui.notification.clear` · `ui.toast` · `ping` · `server.stop` · `events.subscribe` · `events.wait` |
+| ui / server | `ui.sidebar` · `ui.agent_title.push` · `ui.agent_title.clear` · `ui.dock.push` · `ui.dock.list` · `ui.dock.move` · `ui.bar.push` · `ui.bar.list` · `ui.bar.move` · `ui.bar.remove` · `ui.notification.push` · `ui.notification.clear` · `ui.toast` · `ping` · `server.stop` · `events.subscribe` · `events.wait` |
 
 Parameter shapes mirror the CLI flags (`luvus task add --paths x` →
 `{"paths": ["x"]}`). For CLI commands, an omitted pane uses
@@ -939,9 +939,36 @@ rendering.
 | Method | Params | Result |
 |---|---|---|
 | `ui.sidebar` | `{side?: "left"\|"right", width?: int, visible?: bool}` | `{width, visible}` for that side |
+| `ui.agent_title.push` | `{owner?, module_token?, titles: Title[]}` | `{type:"ok", changed}` |
+| `ui.agent_title.clear` | `{owner?, module_token?, pane?, agent?, session_id?}` | `{type:"ok", changed}` |
 | `ui.dock.push` | `{id, title?, placement?: "left"\|"right", rows: Row[]}` | `{type:"ok"}` |
 | `ui.dock.list` | `{}` | `{docks: [{id, side}]}` |
 | `ui.dock.move` | `{id, side: "left"\|"right"}` | `{type:"ok"}` |
+
+`ui.agent_title.push` lets a module supply AGENTS sidebar session titles without
+Luvus parsing any agent's native store. Each `Title` is:
+
+```json
+{ "pane": "3", "agent": "pi", "session_id": "01a0…", "title": "Ship desktop" }
+```
+
+A row needs `pane` and/or `agent`+`session_id`. `agent` must name a built-in
+Luvus adapter. Empty `title` clears that key. Live rows still prefer an OSC title; otherwise they use a pane title, then a
+session title. Resumable All/history rows use the session title. Luvus pane
+aliases (`=name`) are never used as titles. Module commands include their owner
+and per-server `module_token` automatically. Luvus accepts a module owner only
+with that token, so one module cannot publish or clear another module's titles.
+`clear` with no filters drops every title owned by the authenticated module.
+Direct local control-API calls may omit both fields; those calls can mutate only
+unowned titles, and an unfiltered clear is a no-op. Luvus clears an owner's
+titles when that module is disabled, unlinked, or uninstalled, and a disabled
+module cannot publish. A module's token stays valid for as long as it remains
+registered on that server, so toggling a module does not strand a module process
+that is still running; the token is dropped on unlink or uninstall. The CLI
+wrappers are `luvus ui agent-title push|clear` (`push` also
+reads `--titles` from stdin). Raw local API clients acting for a module must pass
+the injected `LUVUS_MODULE_TOKEN` as `module_token`; module scripts calling the
+CLI do not handle it themselves.
 
 A `Row` is:
 
