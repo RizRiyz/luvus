@@ -6,7 +6,7 @@
 //! appended to Workspaces, direct native-protocol SSH endpoints, and
 //! generation-fenced surface switching.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender as Sender};
 use std::sync::{Arc, Mutex};
@@ -17,7 +17,7 @@ use anyhow::{anyhow, Result};
 use ratatui::buffer::Cell;
 use ratatui::crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
+    EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton,
     MouseEventKind,
 };
 use ratatui::crossterm::execute;
@@ -33,6 +33,8 @@ use crate::machine::catalog::MachineProfile;
 use crate::machine::link::{self, LinkControl, LinkEvent, LinkTask};
 
 const LINK_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+const LINK_HEALTH_IDLE: Duration = Duration::from_secs(5);
+const LINK_HEALTH_TIMEOUT: Duration = Duration::from_secs(10);
 const SURFACE_PREPARE_TIMEOUT: Duration = Duration::from_secs(15);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
@@ -46,18 +48,10 @@ enum ShellEvent {
     Input(ClientMessage),
     Local(u64, ServerMessage),
     LocalClosed(u64),
-    LocalConnected {
-        generation: u64,
-        name: String,
-        result: std::result::Result<super::local_switch::PreparedLocal, String>,
-    },
     Link(LinkEvent),
     MachineCreated(std::result::Result<MachineProfile, String>),
     MachineRemoved {
         machine_id: String,
-        result: std::result::Result<(), String>,
-    },
-    SessionRemembered {
         result: std::result::Result<(), String>,
     },
 }
@@ -90,6 +84,11 @@ struct SessionRuntime {
     reader: Option<JoinHandle<()>>,
     backoff: Duration,
     handshake_failures: u8,
+    last_evidence: Instant,
+    health_probe: Option<(u64, Instant)>,
+    welcomed: bool,
+    ready: bool,
+    boot_id: Option<u64>,
 }
 
 impl MachineRuntime {
@@ -148,6 +147,11 @@ fn new_session_runtime(enabled: bool, generation: u64) -> SessionRuntime {
         reader: None,
         backoff: Duration::from_secs(1),
         handshake_failures: 0,
+        last_evidence: Instant::now(),
+        health_probe: None,
+        welcomed: false,
+        ready: false,
+        boot_id: None,
     }
 }
 
@@ -184,6 +188,7 @@ struct SurfaceCandidate {
     welcomed: bool,
     ready: bool,
     shell_dock: Option<Option<ShellDockRect>>,
+    boot_id: Option<u64>,
     deadline: Instant,
 }
 
@@ -235,6 +240,10 @@ struct DockState {
     rect: Option<ShellDockRect>,
     workspace_width: Option<u16>,
     sidebars: Option<protocol::ShellSidebars>,
+    /// At most one client-owned sidebar revision waits for an endpoint echo.
+    /// New drag positions replace the retained state instead of filling the
+    /// SSH writer queue with obsolete mouse coordinates.
+    sidebar_sync: Option<(Endpoint, u64)>,
     install_label: &'static str,
     saved_labels: (&'static str, &'static str, &'static str),
     width_drag: Option<protocol::ShellResize>,
@@ -242,6 +251,7 @@ struct DockState {
     selector_open: bool,
     selector_cursor: usize,
     refresh_catalog: bool,
+    catalog_revision: u64,
     warning: Option<String>,
     heading: &'static str,
     close_label: &'static str,
@@ -258,6 +268,10 @@ struct DockState {
     base: Cell,
     owner_style: Option<ShellDockRect>,
     owner_base: Option<Cell>,
+    owner_session_slot: Option<Rect>,
+    owner_session_button: Option<Rect>,
+    owner_session_hovered: bool,
+    pending_local_session_click: Option<ratatui::crossterm::event::MouseEvent>,
     local_workspaces: Vec<protocol::ShellWorkspace>,
     local_collapsed: bool,
     collapsed_machines: HashSet<String>,
@@ -267,6 +281,7 @@ struct DockState {
     navigation_reveal: bool,
     focus_seen: bool,
     workspace_buffer: ratatui::buffer::Buffer,
+    pending_rect: Option<Option<ShellDockRect>>,
     revealed_workspace: Option<(Endpoint, String, bool)>,
     pending_workspace_menu: Option<(Endpoint, String, u16, u16)>,
     machine_form: Option<MachineForm>,
@@ -274,8 +289,8 @@ struct DockState {
     saved_ids: Vec<String>,
     machine_form_rect: Option<Rect>,
     machine_form_hits: Vec<(MachineFormHit, Rect)>,
+    machine_form_backdrop_pending: bool,
     machine_popup: Option<MachinePopup>,
-    occluded: HashSet<(u16, u16)>,
     dirty: bool,
 }
 
@@ -287,6 +302,7 @@ impl Default for DockState {
             rect: None,
             workspace_width: None,
             sidebars: None,
+            sidebar_sync: None,
             install_label: crate::i18n::cli::machine_install_label(
                 crate::i18n::cli::Context::configured().language(),
             ),
@@ -298,6 +314,7 @@ impl Default for DockState {
             selector_open: false,
             selector_cursor: 0,
             refresh_catalog: false,
+            catalog_revision: 0,
             warning: None,
             heading: crate::i18n::EN.machines,
             close_label: crate::i18n::EN.act_close,
@@ -325,6 +342,10 @@ impl Default for DockState {
             base: Cell::default(),
             owner_style: None,
             owner_base: None,
+            owner_session_slot: None,
+            owner_session_button: None,
+            owner_session_hovered: false,
+            pending_local_session_click: None,
             local_workspaces: Vec::new(),
             local_collapsed: false,
             collapsed_machines: HashSet::new(),
@@ -334,6 +355,7 @@ impl Default for DockState {
             navigation_reveal: false,
             focus_seen: false,
             workspace_buffer: ratatui::buffer::Buffer::empty(Rect::default()),
+            pending_rect: None,
             revealed_workspace: None,
             pending_workspace_menu: None,
             machine_form: None,
@@ -341,8 +363,8 @@ impl Default for DockState {
             saved_ids: Vec::new(),
             machine_form_rect: None,
             machine_form_hits: Vec::new(),
+            machine_form_backdrop_pending: false,
             machine_popup: None,
-            occluded: HashSet::new(),
             dirty: true,
         }
     }
@@ -354,28 +376,38 @@ impl DockState {
     }
 }
 
-fn shell_header_rect(rect: ShellDockRect) -> (Rect, bool) {
-    // The left Workspaces body starts at column zero. The right sidebar keeps
-    // its seam in the preceding column, so its side-agnostic dock body begins
-    // one cell after the chrome row.
-    let left = rect.x == 0;
-    (
-        Rect::new(
-            if left {
-                rect.x
-            } else {
-                rect.x.saturating_sub(1)
-            },
-            0,
-            if left {
-                rect.width
-            } else {
-                rect.width.saturating_add(1)
-            },
-            1,
-        ),
-        left,
-    )
+fn shell_block_contains(block: protocol::ShellDockBlock, x: u16, y: u16) -> bool {
+    x >= block.x
+        && x < block.x.saturating_add(block.width)
+        && y >= block.y
+        && y < block.y.saturating_add(block.height)
+}
+
+fn frame_diff_intersects_rect(diff: &protocol::FrameDiff, rect: Rect) -> bool {
+    let width = u32::from(diff.width);
+    if width == 0 || rect.is_empty() {
+        return false;
+    }
+    diff.runs.iter().any(|run| {
+        let run_start = run.start;
+        let run_end = run_start.saturating_add(run.symbols.len() as u32);
+        let first_row = u32::from(rect.y).max(run_start / width);
+        let last_row = u32::from(rect.bottom()).min(run_end.saturating_add(width - 1) / width);
+        (first_row..last_row).any(|row| {
+            let rect_start = row.saturating_mul(width).saturating_add(u32::from(rect.x));
+            let rect_end = rect_start.saturating_add(u32::from(rect.width));
+            run_start < rect_end && run_end > rect_start
+        })
+    })
+}
+
+fn note_catalog_revision(dock: &mut DockState, revision: u64) -> bool {
+    if revision <= dock.catalog_revision {
+        return false;
+    }
+    dock.catalog_revision = revision;
+    dock.refresh_catalog = true;
+    true
 }
 
 pub(super) fn run(
@@ -450,7 +482,6 @@ fn run_inner(
         ServerMessage::Ready { probe_terminal } => probe_terminal,
         _ => return Err(anyhow!("unexpected local server negotiation")),
     };
-    protocol::write_message(&mut writer, &super::client::cell_pixels_message())?;
     let probe = if probe_terminal {
         crate::terminal::theme_probe::probe()
     } else {
@@ -465,6 +496,7 @@ fn run_inner(
             &ClientMessage::TerminalColors(probe.colors.clone()),
         )?;
     }
+    protocol::write_message(&mut writer, &super::client::cell_pixels_message())?;
 
     let mut machines = profiles
         .into_iter()
@@ -483,9 +515,7 @@ fn run_inner(
 
     let writer = Arc::new(Mutex::new(writer));
     let (events_tx, events_rx) = mpsc::sync_channel(8);
-    let mut local_generation = 0u64;
-    let mut local_switch_pending = false;
-    let mut prepared_events = VecDeque::new();
+    let local_generation = 0u64;
     start_local_reader(reader, events_tx.clone(), local_generation)?;
 
     let _ = execute!(
@@ -536,9 +566,28 @@ fn run_inner(
             let size = terminal.size()?;
             start_due_links(&mut machines, &events_tx, size.width, size.height);
         }
+        let unhealthy = service_endpoint_health(&mut machines);
+        if unhealthy
+            .iter()
+            .any(|endpoint| same_selection(endpoint, &active))
+        {
+            prepare_local_failover(&mut candidate, &writer, terminal)?;
+            dock.warning = Some("active machine connection timed out".to_string());
+            dock.dirty = true;
+        } else if candidate.as_ref().is_some_and(|candidate| {
+            unhealthy
+                .iter()
+                .any(|endpoint| same_selection(endpoint, &candidate.endpoint))
+        }) {
+            candidate = None;
+            dock.pending_local_session_click = None;
+            dock.warning = Some("machine connection timed out while switching".to_string());
+            dock.dirty = true;
+        }
         expire_connecting(&mut machines);
         if expire_candidate(&mut candidate, &machines, &writer) {
             dock.pending_workspace_menu = None;
+            dock.pending_local_session_click = None;
             set_machine_form_error(&mut dock, "Remote session preparation timed out.");
             dock.warning = Some("surface preparation timed out".to_string());
             dock.dirty = true;
@@ -593,20 +642,16 @@ fn run_inner(
         }
         let timeout = next_deadline(&machines, candidate.as_ref())
             .map(|deadline| deadline.saturating_duration_since(Instant::now()));
-        let event = if let Some(event) = prepared_events.pop_front() {
-            Some(event)
-        } else {
-            match timeout {
-                Some(timeout) => match events_rx.recv_timeout(timeout) {
-                    Ok(event) => Some(event),
-                    Err(RecvTimeoutError::Timeout) => None,
-                    Err(RecvTimeoutError::Disconnected) => break,
-                },
-                None => match events_rx.recv() {
-                    Ok(event) => Some(event),
-                    Err(_) => break,
-                },
-            }
+        let event = match timeout {
+            Some(timeout) => match events_rx.recv_timeout(timeout) {
+                Ok(event) => Some(event),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => break,
+            },
+            None => match events_rx.recv() {
+                Ok(event) => Some(event),
+                Err(_) => break,
+            },
         };
         let Some(event) = event else {
             continue;
@@ -661,15 +706,6 @@ fn run_inner(
                 dock.dirty = true;
             }
             ShellEvent::Input(message) => {
-                if local_switch_pending && active == Endpoint::Local {
-                    if matches!(message, ClientMessage::Detach) {
-                        exit = super::client::ClientExit::Detached;
-                        break;
-                    }
-                    // Never send buffered keystrokes to the previous session
-                    // or replay them into a new, not-yet-visible terminal.
-                    continue;
-                }
                 if handle_dock_input(
                     &message,
                     &mut dock,
@@ -699,66 +735,9 @@ fn run_inner(
                         &mut candidate,
                         &machines,
                         dock.local_workspaces.len(),
+                        dock.sidebars.as_ref(),
                         &writer,
                     )?;
-                }
-            }
-            ShellEvent::LocalConnected {
-                generation,
-                name,
-                result,
-            } => {
-                if generation != local_generation.wrapping_add(1) || !local_switch_pending {
-                    continue;
-                }
-                local_switch_pending = false;
-                match result {
-                    Ok(prepared)
-                        if prepared.size == {
-                            let size = terminal.size()?;
-                            (size.width, size.height)
-                        } =>
-                    {
-                        let mut stream = prepared.stream;
-                        // Commit only after compatibility and a complete matching
-                        // frame are proven. Until here the source remains usable.
-                        if let Err(error) = protocol::write_message(
-                            &mut stream,
-                            &ClientMessage::SurfaceInterest(SurfaceInterest::Active),
-                        ) {
-                            dock.warning = Some(format!("Cannot switch to {name}: {error}"));
-                            dock.selector_open = true;
-                            dock.dirty = true;
-                            continue;
-                        }
-                        let _ = send_local(&writer, &ClientMessage::Detach);
-                        local_generation = generation;
-                        *writer.lock().unwrap_or_else(|error| error.into_inner()) = stream.clone();
-                        dock.local_session = name;
-                        dock.local_workspaces.clear();
-                        candidate = None;
-                        dock.warning = None;
-                        dock.selector_open = false;
-                        prepared_events.extend(
-                            prepared
-                                .messages
-                                .into_iter()
-                                .map(|message| ShellEvent::Local(generation, message)),
-                        );
-                        start_local_reader(BufReader::new(stream), events_tx.clone(), generation)?;
-                    }
-                    Ok(_) => {
-                        dock.warning = Some(
-                            "Terminal resized during switching. Select the session again.".into(),
-                        );
-                        dock.selector_open = true;
-                        dock.dirty = true;
-                    }
-                    Err(error) => {
-                        dock.warning = Some(format!("Cannot switch to {name}: {error}"));
-                        dock.selector_open = true;
-                        dock.dirty = true;
-                    }
                 }
             }
             ShellEvent::LocalClosed(generation) => {
@@ -776,47 +755,6 @@ fn run_inner(
                 if generation != local_generation {
                     continue;
                 }
-                if let ServerMessage::SwitchSession { name } = &message {
-                    if active == Endpoint::Local {
-                        let target =
-                            crate::session::parse_target_name(name).map_err(anyhow::Error::msg)?;
-                        let name = target
-                            .clone()
-                            .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.into());
-                        let socket = crate::session::client_socket_path_for(target.as_deref());
-                        if local_switch_pending {
-                            continue;
-                        }
-                        local_switch_pending = true;
-                        let generation = local_generation.wrapping_add(1);
-                        let events = events_tx.clone();
-                        let size = terminal.size()?;
-                        let layout = ShellDockLayout {
-                            workspace_width: dock.workspace_width,
-                            ..dock_layout(&Endpoint::Local, &machines, 0)
-                        };
-                        let sidebars = dock.sidebars.clone();
-                        std::thread::Builder::new()
-                            .name("machine-local-switch".into())
-                            .stack_size(256 * 1024)
-                            .spawn(move || {
-                                let result = super::local_switch::prepare(
-                                    &socket,
-                                    (size.width, size.height),
-                                    layout,
-                                    sidebars,
-                                    generation,
-                                )
-                                .map_err(|error| error.to_string());
-                                let _ = events.send(ShellEvent::LocalConnected {
-                                    generation,
-                                    name,
-                                    result,
-                                });
-                            })?;
-                        continue;
-                    }
-                }
                 let paints_initial_local_frame = matches!(
                     &message,
                     ServerMessage::Frame(_) | ServerMessage::PreparedFrame { .. }
@@ -826,7 +764,6 @@ fn run_inner(
                     message,
                     &mut active,
                     &mut candidate,
-                    &mut pending_endpoint,
                     &mut machines,
                     &writer,
                     terminal,
@@ -834,7 +771,6 @@ fn run_inner(
                     &mut dock,
                     &mut last_cursor,
                     &mut cursor_visible,
-                    &events_tx,
                 )? {
                     exit = reason;
                     running = false;
@@ -847,14 +783,12 @@ fn run_inner(
                     &mut machines,
                     &mut active,
                     &mut candidate,
-                    &mut pending_endpoint,
                     &writer,
                     terminal,
                     truecolor,
                     &mut dock,
                     &mut last_cursor,
                     &mut cursor_visible,
-                    &events_tx,
                 )? {
                     exit = reason;
                     running = false;
@@ -910,12 +844,6 @@ fn run_inner(
                     }
                 }
             },
-            ShellEvent::SessionRemembered { result } => {
-                if let Err(error) = result {
-                    dock.warning = Some(error);
-                    dock.dirty = true;
-                }
-            }
         }
     }
 
@@ -948,7 +876,7 @@ fn projected_local_workspace_count(machine_count: usize, local_workspace_count: 
 }
 
 fn dock_layout(
-    _endpoint: &Endpoint,
+    endpoint: &Endpoint,
     machines: &HashMap<String, MachineRuntime>,
     _local_workspace_count: usize,
 ) -> ShellDockLayout {
@@ -959,6 +887,7 @@ fn dock_layout(
     // the capability and return the complete Workspaces geometry.
     ShellDockLayout {
         owns_workspaces: !machines.is_empty(),
+        owns_session_chrome: matches!(endpoint, Endpoint::Remote { .. }),
         ..ShellDockLayout::default()
     }
 }
@@ -1143,6 +1072,59 @@ fn expire_connecting(machines: &mut HashMap<String, MachineRuntime>) {
     }
 }
 
+fn service_endpoint_health(machines: &mut HashMap<String, MachineRuntime>) -> Vec<Endpoint> {
+    let now = Instant::now();
+    let mut unhealthy = Vec::new();
+    for machine in machines.values_mut() {
+        let machine_id = machine.profile.id.clone();
+        let session = machine.selected_session.clone();
+        let runtime = &mut machine.runtime;
+        if !matches!(runtime.state, MachineState::Online) {
+            continue;
+        }
+        let timed_out = runtime
+            .health_probe
+            .is_some_and(|(_, deadline)| deadline <= now);
+        let mut send_failed = false;
+        if timed_out {
+            send_failed = true;
+        } else if runtime.health_probe.is_none()
+            && now.saturating_duration_since(runtime.last_evidence) >= LINK_HEALTH_IDLE
+        {
+            let nonce = next_connection_generation();
+            match runtime
+                .control
+                .as_ref()
+                .ok_or_else(|| anyhow!("remote session connection is unavailable"))
+                .and_then(|control| control.send(&ClientMessage::HealthCheck { nonce }))
+            {
+                Ok(()) => runtime.health_probe = Some((nonce, now + LINK_HEALTH_TIMEOUT)),
+                Err(_) => send_failed = true,
+            }
+        }
+        if !send_failed {
+            continue;
+        }
+        runtime.generation = next_connection_generation();
+        stop_link(runtime);
+        runtime.health_probe = None;
+        runtime.state = MachineState::Reconnecting {
+            at: now
+                + reconnect_delay(
+                    &format!("{machine_id}:{session}"),
+                    runtime.generation,
+                    runtime.backoff,
+                ),
+        };
+        runtime.backoff = (runtime.backoff * 2).min(RECONNECT_MAX);
+        unhealthy.push(Endpoint::Remote {
+            machine_id,
+            session,
+        });
+    }
+    unhealthy
+}
+
 fn next_deadline(
     machines: &HashMap<String, MachineRuntime>,
     candidate: Option<&SurfaceCandidate>,
@@ -1159,6 +1141,10 @@ fn next_deadline(
         .filter_map(|endpoint| match endpoint.state {
             MachineState::Connecting { deadline } => Some(deadline),
             MachineState::Reconnecting { at } if launch_capacity => Some(at),
+            MachineState::Online => endpoint
+                .health_probe
+                .map(|(_, deadline)| deadline)
+                .or_else(|| endpoint.last_evidence.checked_add(LINK_HEALTH_IDLE)),
             _ => None,
         })
         .chain(candidate.map(|candidate| candidate.deadline))
@@ -1197,20 +1183,55 @@ fn reconnect_delay(id: &str, generation: u64, base: Duration) -> Duration {
     Duration::from_millis((base.as_millis() as u64).saturating_mul(percent) / 100)
 }
 
+fn transition_disconnected_endpoint(
+    machine_id: &str,
+    session: &str,
+    endpoint: &mut SessionRuntime,
+    machine_enabled: bool,
+    reason: String,
+    now: Instant,
+) {
+    let failed_during_handshake = matches!(endpoint.state, MachineState::Connecting { .. });
+    if !machine_enabled {
+        endpoint.state = MachineState::Disabled;
+        return;
+    }
+    if reason != "SSH connection closed" {
+        endpoint.state = MachineState::Attention(reason);
+        return;
+    }
+    if failed_during_handshake {
+        endpoint.handshake_failures = endpoint.handshake_failures.saturating_add(1);
+        if endpoint.handshake_failures >= 3 {
+            endpoint.state = MachineState::Attention(format!(
+                "connection failed repeatedly; run `luvus machine status {machine_id}`"
+            ));
+            return;
+        }
+    }
+    endpoint.state = MachineState::Reconnecting {
+        at: now
+            + reconnect_delay(
+                &format!("{machine_id}:{session}"),
+                endpoint.generation,
+                endpoint.backoff,
+            ),
+    };
+    endpoint.backoff = (endpoint.backoff * 2).min(RECONNECT_MAX);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_link_event(
     event: LinkEvent,
     machines: &mut HashMap<String, MachineRuntime>,
     active: &mut Endpoint,
     candidate: &mut Option<SurfaceCandidate>,
-    pending_endpoint: &mut Option<Endpoint>,
     local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
     terminal: &mut DefaultTerminal,
     truecolor: bool,
     dock: &mut DockState,
     last_cursor: &mut Option<(u16, u16)>,
     cursor_visible: &mut bool,
-    events: &Sender<ShellEvent>,
 ) -> Result<Option<super::client::ClientExit>> {
     match event {
         LinkEvent::Message {
@@ -1228,6 +1249,8 @@ fn handle_link_event(
             if endpoint_runtime.generation != generation {
                 return Ok(None);
             }
+            endpoint_runtime.last_evidence = Instant::now();
+            endpoint_runtime.health_probe = None;
             if matches!(message, ServerMessage::ServerShutdown { .. }) {
                 // An explicit server stop is not a network outage. Fence the
                 // ensuing EOF and require a user action to start this session.
@@ -1244,7 +1267,6 @@ fn handle_link_event(
                 message,
                 active,
                 candidate,
-                pending_endpoint,
                 machines,
                 local_writer,
                 terminal,
@@ -1252,7 +1274,6 @@ fn handle_link_event(
                 dock,
                 last_cursor,
                 cursor_visible,
-                events,
             )? {
                 return Ok(Some(exit));
             }
@@ -1272,8 +1293,6 @@ fn handle_link_event(
             if endpoint_runtime.generation != generation {
                 return Ok(None);
             }
-            let failed_during_handshake =
-                matches!(endpoint_runtime.state, MachineState::Connecting { .. });
             stop_link(endpoint_runtime);
             let machine_enabled = machines
                 .get(&machine_id)
@@ -1282,28 +1301,14 @@ fn handle_link_event(
                 .get_mut(&machine_id)
                 .and_then(|machine| machine.endpoint_mut(&session))
                 .expect("remote endpoint remains present");
-            if !machine_enabled {
-                endpoint_runtime.state = MachineState::Disabled;
-            } else if failed_during_handshake || reason != "SSH connection closed" {
-                endpoint_runtime.state = MachineState::Attention(if failed_during_handshake {
-                    format!(
-                        "connection failed; run `luvus machine status {}`",
-                        machine_id
-                    )
-                } else {
-                    reason
-                });
-            } else {
-                endpoint_runtime.state = MachineState::Reconnecting {
-                    at: Instant::now()
-                        + reconnect_delay(
-                            &format!("{machine_id}:{session}"),
-                            generation,
-                            endpoint_runtime.backoff,
-                        ),
-                };
-                endpoint_runtime.backoff = (endpoint_runtime.backoff * 2).min(RECONNECT_MAX);
-            }
+            transition_disconnected_endpoint(
+                &machine_id,
+                &session,
+                endpoint_runtime,
+                machine_enabled,
+                reason,
+                Instant::now(),
+            );
             let disconnected = Endpoint::Remote {
                 machine_id,
                 session,
@@ -1331,6 +1336,7 @@ fn replace_candidate_with_local(candidate: &mut Option<SurfaceCandidate>) {
         welcomed: true,
         ready: true,
         shell_dock: None,
+        boot_id: None,
         deadline: Instant::now() + SURFACE_PREPARE_TIMEOUT,
     });
 }
@@ -1364,7 +1370,6 @@ fn handle_surface_message(
     message: ServerMessage,
     active: &mut Endpoint,
     candidate: &mut Option<SurfaceCandidate>,
-    pending_endpoint: &mut Option<Endpoint>,
     machines: &mut HashMap<String, MachineRuntime>,
     local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
     terminal: &mut DefaultTerminal,
@@ -1372,14 +1377,24 @@ fn handle_surface_message(
     dock: &mut DockState,
     last_cursor: &mut Option<(u16, u16)>,
     cursor_visible: &mut bool,
-    events: &Sender<ShellEvent>,
 ) -> Result<Option<super::client::ClientExit>> {
     let (message, prepared) = match message {
         ServerMessage::PreparedFrame { ticket, frame } => {
             let size = terminal.size()?;
+            let boot_id = match &endpoint {
+                Endpoint::Local => None,
+                Endpoint::Remote {
+                    machine_id,
+                    session,
+                } => machines
+                    .get(machine_id)
+                    .and_then(|machine| machine.endpoint(session))
+                    .and_then(|runtime| runtime.boot_id),
+            };
             if !candidate.as_ref().is_some_and(|candidate| {
                 candidate.endpoint == endpoint
                     && candidate.ticket == ticket
+                    && candidate.boot_id == boot_id
                     && frame.width == size.width
                     && frame.height == size.height
             }) {
@@ -1429,14 +1444,20 @@ fn handle_surface_message(
             {
                 candidate.welcomed = true;
             }
+            if let Endpoint::Remote {
+                machine_id,
+                session,
+            } = &endpoint
+            {
+                if let Some(runtime) = machines
+                    .get_mut(machine_id)
+                    .and_then(|machine| machine.endpoint_mut(session))
+                {
+                    runtime.welcomed = true;
+                }
+            }
         }
         ServerMessage::Ready { probe_terminal } => {
-            send_surface(
-                &endpoint,
-                &super::client::cell_pixels_message(),
-                machines,
-                local_writer,
-            )?;
             let is_candidate = candidate
                 .as_ref()
                 .is_some_and(|candidate| candidate.endpoint == endpoint);
@@ -1456,9 +1477,7 @@ fn handle_surface_message(
                         .get_mut(machine_id)
                         .and_then(|machine| machine.endpoint_mut(session))
                         .ok_or_else(|| anyhow!("remote session disappeared during negotiation"))?;
-                    runtime.state = MachineState::Online;
-                    runtime.backoff = Duration::from_secs(1);
-                    runtime.handshake_failures = 0;
+                    runtime.ready = runtime.welcomed;
                     let control = runtime
                         .control
                         .as_ref()
@@ -1468,6 +1487,7 @@ fn handle_surface_message(
                         // here would race keyboard input and block switching.
                         control.send(&ClientMessage::TerminalColors(None))?;
                     }
+                    control.send(&super::client::cell_pixels_message())?;
                     control.send(&ClientMessage::ShellDockLayout(layout))?;
                     if let Some(state) = &dock.sidebars {
                         control.send(&ClientMessage::ShellSidebars(state.clone()))?;
@@ -1500,7 +1520,43 @@ fn handle_surface_message(
                 dock.dirty = true;
             }
         }
+        ServerMessage::EndpointIdentity {
+            boot_id,
+            session: reported_session,
+        } => {
+            if let Endpoint::Remote {
+                machine_id,
+                session,
+            } = &endpoint
+            {
+                let Some(runtime) = machines
+                    .get_mut(machine_id)
+                    .and_then(|machine| machine.endpoint_mut(session))
+                else {
+                    return Ok(None);
+                };
+                if &reported_session != session {
+                    stop_link(runtime);
+                    runtime.state = MachineState::Attention(format!(
+                        "remote endpoint selected session `{reported_session}` instead of `{session}`"
+                    ));
+                } else {
+                    runtime.boot_id = Some(boot_id);
+                }
+                dock.dirty = true;
+            }
+        }
         ServerMessage::ShellSidebars(mut state) => {
+            let acknowledged_revision =
+                dock.sidebar_sync
+                    .as_ref()
+                    .and_then(|(pending_endpoint, revision)| {
+                        (same_selection(pending_endpoint, &endpoint) && state.revision >= *revision)
+                            .then_some(*revision)
+                    });
+            if acknowledged_revision.is_some() {
+                dock.sidebar_sync = None;
+            }
             // Only the active surface can change preferences. Initial seeding
             // comes from Local; warm endpoints and late replies cannot reset it.
             if !machines.is_empty() && endpoint == *active {
@@ -1513,7 +1569,16 @@ fn handle_surface_message(
                         state.revision = state.revision.saturating_add(1);
                     }
                     dock.sidebars = Some(state);
-                    broadcast_sidebars(dock, machines, local_writer)?;
+                    // The shell client owns this projection. Keep the newest
+                    // revision locally and seed only the endpoint selected by
+                    // the user; fanning every drag update out to every warm
+                    // machine made remote sidebar resizing unnecessarily
+                    // expensive and could fill SSH writer queues.
+                }
+                if acknowledged_revision
+                    .is_some_and(|revision| has_newer_sidebar_revision(dock, revision))
+                {
+                    send_latest_sidebar_state(dock, active, machines, local_writer);
                 }
             }
         }
@@ -1526,33 +1591,39 @@ fn handle_surface_message(
                 }
             }
             if endpoint == Endpoint::Local {
+                dock.owner_session_slot = rect.and_then(|rect| {
+                    rect.session_slot
+                        .map(|slot| Rect::new(slot.x, slot.y, slot.width, slot.height))
+                });
+                dock.owner_session_button = rect.and_then(|rect| {
+                    rect.session_button
+                        .map(|button| Rect::new(button.x, button.y, button.width, button.height))
+                });
                 dock.owner_style = rect;
                 if let Some(owner) = rect {
                     dock.form_theme = owner.chrome;
                 }
             }
             if endpoint == *active {
-                // The owner-local dock is the stable navigation shell. A
-                // remote endpoint may report its dock metadata after its first
-                // full frame (control and frame queues are independent), or
-                // report no dock while changing layouts. Neither event may
-                // erase the shell that is already visible.
-                let rect = active_shell_rect(&endpoint, rect, dock.rect, dock.owner_style);
-                if dock.rect != rect {
-                    dock.occluded.clear();
+                let geometry_acknowledged =
+                    dock.sidebar_sync
+                        .as_ref()
+                        .is_some_and(|(pending_endpoint, _)| {
+                            same_selection(pending_endpoint, &endpoint)
+                                && rect.is_some_and(|rect| {
+                                    dock.sidebars.as_ref().is_some_and(|state| {
+                                        shell_rect_matches_sidebar_state(rect, state)
+                                    })
+                                })
+                        });
+                if geometry_acknowledged {
+                    dock.sidebar_sync = None;
                 }
-                if let Some(rect) = rect.filter(|_| dock.owner_style.is_none()) {
-                    dock.form_theme = rect.chrome;
-                }
-                dock.rect = rect;
-                if let Some(rect) = rect {
-                    if rect.workspace_focused && !rect.workspace_modal && !dock.focus_seen {
-                        dock.navigation = Some(0);
-                        dock.navigation_reveal = true;
-                    }
-                    dock.focus_seen = rect.workspace_focused && !rect.workspace_modal;
-                }
-                dock.dirty = true;
+                // Geometry and frame bytes describe one surface revision. Keep
+                // the current dock intact until the matching frame arrives so
+                // a high-latency endpoint cannot paint a wider Workspaces tree
+                // over panes that are still using the previous boundary.
+                dock.pending_rect = Some(rect);
             } else if let Some(candidate) = candidate
                 .as_mut()
                 .filter(|candidate| candidate.endpoint == endpoint)
@@ -1563,12 +1634,13 @@ fn handle_surface_message(
         ServerMessage::OpenMachineSelector if endpoint == *active => {
             open_selector(dock, active, machines);
         }
-        ServerMessage::OpenMachineCreate { theme } if endpoint == *active => {
+        ServerMessage::OpenMachineCreate { theme, modal } if endpoint == *active => {
             dock.selector_open = false;
             dock.machine_popup = None;
             dock.machine_form = Some(dock.machine_draft.take().unwrap_or_default());
             dock.form_theme = theme;
-            dock.machine_form_rect = None;
+            dock.machine_form_rect = Some(Rect::new(modal.x, modal.y, modal.width, modal.height));
+            dock.machine_form_backdrop_pending = false;
             dock.warning = None;
             dock.dirty = true;
         }
@@ -1591,6 +1663,9 @@ fn handle_surface_message(
                 dock.dirty = true;
             }
         }
+        ServerMessage::MachineCatalogChanged { revision } if endpoint == Endpoint::Local => {
+            note_catalog_revision(dock, revision);
+        }
         ServerMessage::ShellWorkspaces(mut workspaces) => {
             if let Endpoint::Remote {
                 machine_id,
@@ -1606,6 +1681,14 @@ fn handle_surface_message(
                         runtime.workspaces = workspaces;
                         dock.dirty = true;
                     }
+                    if runtime.welcomed && runtime.ready && runtime.boot_id.is_some() {
+                        runtime.state = MachineState::Online;
+                        runtime.backoff = Duration::from_secs(1);
+                        runtime.handshake_failures = 0;
+                        runtime.last_evidence = Instant::now();
+                        runtime.health_probe = None;
+                        dock.dirty = true;
+                    }
                 }
             }
         }
@@ -1614,12 +1697,15 @@ fn handle_surface_message(
                 candidate.endpoint == endpoint && candidate.welcomed && candidate.ready && prepared
             });
             if (endpoint == *active
-                && !dock.overlay_open()
+                && (!dock.overlay_open() || dock.machine_form_backdrop_pending)
                 && candidate
                     .as_ref()
                     .is_none_or(|candidate| candidate.endpoint != endpoint))
                 || is_candidate
             {
+                if endpoint == *active {
+                    apply_pending_shell_rect(dock);
+                }
                 if is_candidate {
                     let reported = candidate
                         .as_ref()
@@ -1640,20 +1726,57 @@ fn handle_surface_message(
                 )?;
                 super::client::sync_end();
                 *cursor_visible = frame.cursor_visible;
+                dock.machine_form_backdrop_pending = false;
                 dock.dirty = true;
                 if is_candidate {
+                    let committed_local = matches!(endpoint, Endpoint::Local);
+                    if dock.machine_form.is_some() {
+                        // The source picker stays alive beneath the
+                        // client-owned tab. Close it only after the target is
+                        // proven ready so a failed switch preserves the form.
+                        let _ = send_surface(
+                            active,
+                            &ClientMessage::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                            machines,
+                            local_writer,
+                        );
+                    }
                     commit_candidate(endpoint, active, candidate, machines, local_writer)?;
+                    dock.sidebar_sync = None;
+                    dock.pending_rect = None;
                     dock.selector_open = false;
                     dock.selector_rect = None;
                     dock.machine_form = None;
                     dock.machine_form_rect = None;
                     dock.machine_form_hits.clear();
+                    dock.machine_form_backdrop_pending = false;
                     dock.warning = None;
+                    if committed_local {
+                        if let Some(click) = dock.pending_local_session_click.take() {
+                            send_local(local_writer, &ClientMessage::Mouse(click))?;
+                        }
+                    } else {
+                        dock.pending_local_session_click = None;
+                    }
                 }
             }
         }
-        ServerMessage::FrameDiff(diff) if endpoint == *active && !dock.overlay_open() => {
-            update_dock_occlusion_from_diff(dock, &diff, truecolor);
+        ServerMessage::FrameDiff(diff)
+            if endpoint == *active
+                && (!dock.overlay_open() || dock.machine_form_backdrop_pending) =>
+        {
+            apply_pending_shell_rect(dock);
+            let dock_changed = dock.rect.is_some_and(|rect| {
+                frame_diff_intersects_rect(
+                    &diff,
+                    Rect::new(rect.x, rect.y, rect.width, rect.height),
+                )
+            }) || dock
+                .owner_session_slot
+                .is_some_and(|rect| frame_diff_intersects_rect(&diff, rect))
+                || dock
+                    .owner_session_button
+                    .is_some_and(|rect| frame_diff_intersects_rect(&diff, rect));
             super::client::sync_begin();
             super::client::paint(
                 terminal,
@@ -1665,49 +1788,24 @@ fn handle_surface_message(
             )?;
             super::client::sync_end();
             *cursor_visible = diff.cursor_visible;
+            dock.machine_form_backdrop_pending = false;
+            // A native modal dims the complete server frame, including the
+            // reserved client-owned Workspaces slot. Restore semantic rows
+            // only when a diff actually touched that slot; ordinary pane
+            // output keeps the fast sparse path.
+            if dock_changed {
+                dock.dirty = true;
+            }
         }
         ServerMessage::Notify(message) if endpoint == *active => crate::emit_notification(&message),
         ServerMessage::Sound(signal) if endpoint == *active => crate::emit_sound(signal),
         ServerMessage::Clipboard(text) if endpoint == *active => crate::emit_clipboard(&text),
         ServerMessage::OpenUrl(url) if endpoint == *active => crate::platform::open_url(&url),
-        ServerMessage::SwitchSession { name } if endpoint == *active => match &endpoint {
-            Endpoint::Local => {
-                return Ok(Some(super::client::ClientExit::SwitchSession(name)));
+        ServerMessage::SwitchSession { name } if endpoint == *active => {
+            if let Some(exit) = owner_local_session_switch(&endpoint, name) {
+                return Ok(Some(exit));
             }
-            Endpoint::Remote { machine_id, .. } => {
-                remember_remote_session(machine_id, &name, machines, events)?;
-                // Explicit session selection replaces one endpoint, never adds
-                // a permanent connection. Keep Local usable during replacement.
-                prepare_local_failover(candidate, local_writer, terminal)?;
-                let target = Endpoint::Remote {
-                    machine_id: machine_id.clone(),
-                    session: name,
-                };
-                let ready = match &target {
-                    Endpoint::Remote {
-                        machine_id,
-                        session,
-                    } => machines
-                        .get(machine_id)
-                        .and_then(|machine| machine.endpoint(session))
-                        .is_some_and(|runtime| matches!(runtime.state, MachineState::Online)),
-                    Endpoint::Local => false,
-                };
-                if ready {
-                    request_switch(
-                        target,
-                        candidate,
-                        machines,
-                        dock.local_workspaces.len(),
-                        local_writer,
-                    )?;
-                } else {
-                    *pending_endpoint = Some(target);
-                    dock.warning = Some("Connecting to the remote session".to_string());
-                    dock.dirty = true;
-                }
-            }
-        },
+        }
         ServerMessage::Detach if endpoint == *active => {
             return Ok(Some(super::client::ClientExit::Detached));
         }
@@ -1728,20 +1826,47 @@ fn handle_surface_message(
     Ok(None)
 }
 
-fn active_shell_rect(
-    endpoint: &Endpoint,
-    reported: Option<ShellDockRect>,
-    current: Option<ShellDockRect>,
-    owner: Option<ShellDockRect>,
-) -> Option<ShellDockRect> {
-    if matches!(endpoint, Endpoint::Local) {
-        reported
-    } else {
-        // The server renders the surrounding native layout. Paint inside its
-        // actual dock, not stale Local bounds (especially after a resize).
-        // Retain a baseline only while its control message is in flight.
-        reported.or(current).or(owner)
+fn active_shell_rect(reported: Option<ShellDockRect>) -> Option<ShellDockRect> {
+    // An explicit ShellDock control message is authoritative for the active
+    // viewport. In particular, `None` means compact/mobile layout has no dock
+    // slot; retaining desktop geometry would paint stale rows through a modal.
+    reported
+}
+
+fn apply_pending_shell_rect(dock: &mut DockState) {
+    let Some(reported) = dock.pending_rect.take() else {
+        return;
+    };
+    let rect = active_shell_rect(reported);
+    if let Some(rect) = rect.filter(|_| dock.owner_style.is_none()) {
+        dock.form_theme = rect.chrome;
     }
+    dock.rect = rect;
+    if let Some(rect) = rect {
+        if dock.machine_form.is_some() && rect.workspace_modal {
+            dock.machine_form_rect = rect
+                .overlay
+                .map(|overlay| Rect::new(overlay.x, overlay.y, overlay.width, overlay.height));
+        }
+        if rect.workspace_focused && !rect.workspace_modal && !dock.focus_seen {
+            dock.navigation = Some(0);
+            dock.navigation_reveal = true;
+        }
+        dock.focus_seen = rect.workspace_focused && !rect.workspace_modal;
+    }
+    dock.dirty = true;
+}
+
+fn shell_rect_matches_sidebar_state(rect: ShellDockRect, state: &protocol::ShellSidebars) -> bool {
+    let Some(resize) = rect.resize else {
+        return false;
+    };
+    let side = if resize.left {
+        &state.layout.left
+    } else {
+        &state.layout.right
+    };
+    side.docks.iter().any(|dock| dock == "workspaces") && side.width == rect.width
 }
 
 fn candidate_shell_rect(
@@ -1757,7 +1882,7 @@ fn candidate_shell_rect(
         // shell during a remote-to-local switch.
         reported.or(owner).or(current)
     } else {
-        active_shell_rect(endpoint, reported, current, owner)
+        reported.or(current).or(owner)
     }
 }
 
@@ -1775,27 +1900,6 @@ fn cache_dock_projection(
         dock.base = super::client::make_cell(&cell.symbol, cell.fg, cell.bg, cell.mods, truecolor);
         if owner_local {
             dock.owner_base = Some(dock.base.clone());
-        }
-    }
-    dock.occluded.clear();
-    let Some(rect) = dock.rect else {
-        return;
-    };
-    let mut expected = dock.base.clone();
-    expected.set_symbol(" ");
-    for y in rect.y..rect.y.saturating_add(rect.height) {
-        for x in rect.x..rect.x.saturating_add(rect.width.saturating_sub(1)) {
-            let index = usize::from(y)
-                .saturating_mul(usize::from(frame.width))
-                .saturating_add(usize::from(x));
-            let Some(cell) = frame.cells.get(index) else {
-                continue;
-            };
-            let cell =
-                super::client::make_cell(&cell.symbol, cell.fg, cell.bg, cell.mods, truecolor);
-            if cell != expected {
-                dock.occluded.insert((x, y));
-            }
         }
     }
 }
@@ -1820,6 +1924,15 @@ fn handle_dock_input(
                     MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
                 )
             {
+                if matches!(active, Endpoint::Remote { .. }) {
+                    if update_client_sidebar_drag(dock, mouse.column) {
+                        send_latest_sidebar_state(dock, active, machines, local_writer);
+                    }
+                    if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
+                        dock.width_drag = None;
+                    }
+                    return Ok(true);
+                }
                 if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
                     dock.width_drag = None;
                 }
@@ -1836,10 +1949,12 @@ fn handle_dock_input(
                             && mouse.row < seam.bottom
                     })
                 {
-                    // Let native resizing mutate the client-scoped layout;
-                    // do not interpret its seam as a workspace-row click.
+                    // Remote chrome is client-owned: claim its resize gesture
+                    // locally so the visible seam follows the pointer without
+                    // waiting for an SSH round trip. Local keeps the native
+                    // server path that was already immediate.
                     dock.width_drag = Some(seam);
-                    return Ok(false);
+                    return Ok(matches!(active, Endpoint::Remote { .. }));
                 }
             }
         }
@@ -1889,14 +2004,13 @@ fn handle_dock_input(
         {
             let mut activate_connection = false;
             match message {
-                ClientMessage::Key(key) => match key.code {
-                    KeyCode::Up | KeyCode::Down | KeyCode::Tab => {
-                        *selected = 1 - *selected;
+                ClientMessage::Key(key) => {
+                    if move_machine_popup_selection(selected, &key.code) {
                         dock.dirty = true;
+                    } else if key.code == KeyCode::Enter && *selected == 0 {
+                        activate_connection = true;
                     }
-                    KeyCode::Enter if *selected == 0 => activate_connection = true,
-                    _ => {}
-                },
+                }
                 ClientMessage::Mouse(mouse)
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left) =>
                 {
@@ -1925,11 +2039,6 @@ fn handle_dock_input(
                         {
                             prepare_local_failover(candidate, local_writer, terminal)?;
                         }
-                    } else if machine.profile.enabled {
-                        disconnect_machine_runtime(&mut machine.runtime);
-                        machine.runtime.state = MachineState::Reconnecting { at: Instant::now() };
-                        machine.runtime.backoff = Duration::from_secs(1);
-                        machine.runtime.handshake_failures = 0;
                     } else {
                         let events = events.clone();
                         std::thread::Builder::new()
@@ -2011,7 +2120,7 @@ fn handle_dock_input(
         match message {
             ClientMessage::Key(key) => match key.code {
                 KeyCode::Esc if !machine_form_submitting(dock) => {
-                    close_selector(dock, active, candidate, machines, local_writer)?
+                    cancel_machine_form(dock, active, candidate, machines, local_writer)?
                 }
                 KeyCode::Tab | KeyCode::BackTab if !machine_form_submitting(dock) => {
                     switch_to_workspace_tab(dock, active, candidate, machines, local_writer)?;
@@ -2109,17 +2218,22 @@ fn handle_dock_input(
                         }
                     }
                     Some(MachineFormHit::Cancel) if !machine_form_submitting(dock) => {
-                        close_selector(dock, active, candidate, machines, local_writer)?;
+                        cancel_machine_form(dock, active, candidate, machines, local_writer)?;
                     }
                     Some(_) => {}
                     None if !machine_form_submitting(dock) => {
-                        close_selector(dock, active, candidate, machines, local_writer)?
+                        cancel_machine_form(dock, active, candidate, machines, local_writer)?
                     }
                     None => {}
                 }
             }
             ClientMessage::Resize { .. } => {
-                dock.dirty = true;
+                dock.machine_form_rect = None;
+                dock.machine_form_backdrop_pending = true;
+                // Wait for the selected server's resized native picker frame
+                // to clear the old client-owned form before painting the form
+                // again at its new rectangle.
+                dock.dirty = false;
                 return Ok(false);
             }
             _ => {}
@@ -2230,6 +2344,37 @@ fn handle_dock_input(
             paint_dock(terminal, dock, machines, active, &mut None, false)?;
         }
         return Ok(true);
+    }
+    if let ClientMessage::Mouse(mouse) = message {
+        let over_local_session = owner_session_projection(dock)
+            .is_some_and(|(_, rect, _)| rect.contains((mouse.column, mouse.row).into()));
+        if mouse.kind == MouseEventKind::Moved && dock.owner_session_hovered != over_local_session {
+            dock.owner_session_hovered = over_local_session;
+            dock.dirty = true;
+            if !matches!(active, Endpoint::Local) {
+                paint_dock(terminal, dock, machines, active, &mut None, false)?;
+            }
+        }
+        if over_local_session
+            && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && !matches!(active, Endpoint::Local)
+        {
+            // The named-session selector belongs to the owner-local server.
+            // First prepare that complete surface, then replay this exact click
+            // after it is visible. A machine endpoint never receives or
+            // interprets the session control.
+            dock.pending_local_session_click = Some(*mouse);
+            request_user_switch(
+                Endpoint::Local,
+                dock,
+                active,
+                candidate,
+                pending_endpoint,
+                machines,
+                local_writer,
+            )?;
+            return Ok(true);
+        }
     }
     if machines.is_empty() {
         return Ok(false);
@@ -2429,7 +2574,10 @@ fn handle_dock_input(
     // A server-owned popup may overlap the appended endpoint rows. Its pixels
     // and input remain authoritative; only unobscured endpoint cells belong to
     // this client-side hit layer.
-    if dock_area.contains(point) && dock.occluded.contains(&(mouse.column, mouse.row)) {
+    if rect
+        .overlay
+        .is_some_and(|overlay| shell_block_contains(overlay, mouse.column, mouse.row))
+    {
         return Ok(false);
     }
     let hit = dock
@@ -2437,6 +2585,22 @@ fn handle_dock_input(
         .iter()
         .find(|(_, hit)| hit.contains((mouse.column, mouse.row).into()))
         .cloned();
+    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+        let release_server_focus =
+            claim_pointer_navigation(dock, hit.as_ref().map(|(target, _)| target));
+        if release_server_focus {
+            // Match the native Workspaces click path: pointer activation ends
+            // keyboard-list ownership before it changes workspace or endpoint.
+            // Without this, the old row kept its full selection background
+            // while a remote workspace was already active.
+            send_surface(
+                active,
+                &ClientMessage::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                machines,
+                local_writer,
+            )?;
+        }
+    }
     if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
         let target = hit
             .as_ref()
@@ -2672,6 +2836,23 @@ fn disconnect_machine_runtime(runtime: &mut SessionRuntime) {
     stop_link(runtime);
 }
 
+fn move_machine_popup_selection(selected: &mut usize, code: &KeyCode) -> bool {
+    if matches!(
+        code,
+        KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Tab
+            | KeyCode::BackTab
+            | KeyCode::Char('j')
+            | KeyCode::Char('k')
+    ) {
+        *selected = 1 - *selected;
+        true
+    } else {
+        false
+    }
+}
+
 fn advance_machine_popup(dock: &mut DockState, events: &Sender<ShellEvent>) -> Result<()> {
     match dock.machine_popup.take() {
         Some(MachinePopup::Menu {
@@ -2745,50 +2926,6 @@ fn machine_popup_removing(dock: &DockState) -> bool {
     )
 }
 
-fn update_dock_occlusion_from_diff(
-    dock: &mut DockState,
-    diff: &protocol::FrameDiff,
-    truecolor: bool,
-) {
-    let Some(rect) = dock.rect else {
-        return;
-    };
-    let frame_width = u32::from(diff.width);
-    if frame_width == 0 {
-        return;
-    }
-    let mut touched = false;
-    let mut expected = dock.base.clone();
-    expected.set_symbol(" ");
-    for run in &diff.runs {
-        for (offset, symbol) in run.symbols.iter().enumerate() {
-            let index = run.start.saturating_add(offset as u32);
-            let x = (index % frame_width) as u16;
-            let y = (index / frame_width) as u16;
-            let in_dock = x >= rect.x
-                && x < rect.x.saturating_add(rect.width.saturating_sub(1))
-                && y >= rect.y
-                && y < rect.y.saturating_add(rect.height);
-            let (header, _) = shell_header_rect(rect);
-            let in_header = header.contains((x, y).into());
-            if !in_dock && !in_header {
-                continue;
-            }
-            touched = true;
-            if in_header {
-                continue;
-            }
-            let cell = super::client::make_cell(symbol, run.fg, run.bg, run.mods, truecolor);
-            if cell == expected {
-                dock.occluded.remove(&(x, y));
-            } else {
-                dock.occluded.insert((x, y));
-            }
-        }
-    }
-    dock.dirty |= touched;
-}
-
 fn machine_form_submitting(dock: &DockState) -> bool {
     dock.machine_form
         .as_ref()
@@ -2848,12 +2985,27 @@ fn switch_to_workspace_tab(
     }
     close_selector(dock, active, candidate, machines, writer)?;
     dock.machine_draft = draft;
+    Ok(())
+}
+
+fn cancel_machine_form(
+    dock: &mut DockState,
+    active: &Endpoint,
+    candidate: &mut Option<SurfaceCandidate>,
+    machines: &HashMap<String, MachineRuntime>,
+    writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
+) -> Result<()> {
+    // The selected server still owns the native picker underneath this form.
+    // Close that layer first so cancelling dismisses the complete creation
+    // surface instead of revealing a stale picker on the next full frame.
     send_surface(
         active,
-        &ClientMessage::OpenWorkspacePicker,
+        &ClientMessage::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
         machines,
         writer,
-    )
+    )?;
+    dock.machine_draft = None;
+    close_selector(dock, active, candidate, machines, writer)
 }
 
 fn activate_machine_form(
@@ -2873,16 +3025,7 @@ fn activate_machine_form(
         set_machine_form_error(dock, "This saved machine was removed.");
         return Ok(());
     };
-    if machine.profile.enabled {
-        if matches!(
-            machine.runtime.state,
-            MachineState::Attention(_) | MachineState::Disabled
-        ) {
-            stop_link(&mut machine.runtime);
-            machine.runtime.state = MachineState::Reconnecting { at: Instant::now() };
-            machine.runtime.backoff = Duration::from_secs(1);
-            machine.runtime.handshake_failures = 0;
-        }
+    if machine.profile.enabled && matches!(machine.runtime.state, MachineState::Online) {
         *pending = Some(Endpoint::Remote {
             machine_id: id,
             session: machine.session(),
@@ -3035,6 +3178,70 @@ fn dock_row_hit(row: &MachineDockRow) -> DockHit {
     }
 }
 
+fn claim_pointer_navigation(dock: &mut DockState, hover: Option<&DockHit>) -> bool {
+    let next_hover = hover.cloned();
+    let changed = dock.hover != next_hover;
+    let release_server_focus = dock.navigation.take().is_some();
+    if changed {
+        dock.hover = next_hover;
+    }
+    if changed || release_server_focus {
+        dock.dirty = true;
+    }
+    release_server_focus
+}
+
+fn update_client_sidebar_drag(dock: &mut DockState, column: u16) -> bool {
+    let Some(drag) = dock.width_drag else {
+        return false;
+    };
+    let width = resized_workspace_width(drag, column);
+    let Some(state) = dock.sidebars.as_mut() else {
+        return false;
+    };
+    let side = if drag.left {
+        &mut state.layout.left
+    } else {
+        &mut state.layout.right
+    };
+    if side.width == width {
+        return false;
+    }
+    side.width = width;
+    state.revision = state.revision.saturating_add(1);
+    true
+}
+
+fn send_latest_sidebar_state(
+    dock: &mut DockState,
+    active: &Endpoint,
+    machines: &HashMap<String, MachineRuntime>,
+    local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
+) {
+    if !matches!(active, Endpoint::Remote { .. }) || dock.sidebar_sync.is_some() {
+        return;
+    }
+    let Some(state) = dock.sidebars.clone() else {
+        return;
+    };
+    if send_surface(
+        active,
+        &ClientMessage::ShellSidebars(state.clone()),
+        machines,
+        local_writer,
+    )
+    .is_ok()
+    {
+        dock.sidebar_sync = Some((active.clone(), state.revision));
+    }
+}
+
+fn has_newer_sidebar_revision(dock: &DockState, acknowledged: u64) -> bool {
+    dock.sidebars
+        .as_ref()
+        .is_some_and(|current| current.revision > acknowledged)
+}
+
 fn reveal_workspace(
     rows: &[MachineDockRow],
     active: &Endpoint,
@@ -3121,6 +3328,7 @@ fn open_selector(
     dock.machine_form = None;
     dock.machine_form_rect = None;
     dock.machine_form_hits.clear();
+    dock.machine_form_backdrop_pending = false;
     dock.machine_popup = None;
     dock.refresh_catalog = true;
     dock.dirty = true;
@@ -3143,6 +3351,7 @@ fn refresh_catalog(
             return Ok(());
         }
     };
+    dock.catalog_revision = dock.catalog_revision.max(loaded.catalog.revision);
     dock.warning = (!loaded.warnings.is_empty()).then(|| loaded.warnings.join("; "));
     let next = loaded
         .catalog
@@ -3184,6 +3393,7 @@ fn refresh_catalog(
             candidate,
             machines,
             dock.local_workspaces.len(),
+            dock.sidebars.as_ref(),
             local_writer,
         )?;
     }
@@ -3243,6 +3453,7 @@ fn try_open_pending_endpoint(
                 candidate,
                 machines,
                 dock.local_workspaces.len(),
+                dock.sidebars.as_ref(),
                 local_writer,
             )?;
             *pending = None;
@@ -3281,6 +3492,7 @@ fn close_selector(
     dock.machine_form = None;
     dock.machine_form_rect = None;
     dock.machine_form_hits.clear();
+    dock.machine_form_backdrop_pending = false;
     dock.machine_popup = None;
     dock.dirty = true;
     // Frames received beneath the client-owned selector were intentionally not
@@ -3308,6 +3520,7 @@ fn close_selector(
             candidate,
             machines,
             dock.local_workspaces.len(),
+            dock.sidebars.as_ref(),
             local_writer,
         )?;
     }
@@ -3333,11 +3546,21 @@ fn same_selection(left: &Endpoint, right: &Endpoint) -> bool {
     }
 }
 
+fn owner_local_session_switch(
+    endpoint: &Endpoint,
+    name: String,
+) -> Option<super::client::ClientExit> {
+    // Named sessions remain the owner-local namespace. A machine contributes
+    // remote workspaces to it; a remote server cannot replace the machine's
+    // internal backing endpoint by emitting its own SwitchSession message.
+    matches!(endpoint, Endpoint::Local).then_some(super::client::ClientExit::SwitchSession(name))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn request_user_switch(
     endpoint: Endpoint,
     dock: &mut DockState,
-    active: &Endpoint,
+    _active: &Endpoint,
     candidate: &mut Option<SurfaceCandidate>,
     pending_endpoint: &mut Option<Endpoint>,
     machines: &mut HashMap<String, MachineRuntime>,
@@ -3363,7 +3586,6 @@ fn request_user_switch(
             match runtime.state {
                 MachineState::Disabled => {
                     dock.warning = Some(format!("{label} is disabled"));
-                    open_selector(dock, active, machines);
                     return Ok(false);
                 }
                 MachineState::Connecting { .. } => {}
@@ -3396,6 +3618,7 @@ fn request_user_switch(
         candidate,
         machines,
         dock.local_workspaces.len(),
+        dock.sidebars.as_ref(),
         local_writer,
     )?;
     Ok(true)
@@ -3406,6 +3629,7 @@ fn request_switch(
     candidate: &mut Option<SurfaceCandidate>,
     machines: &HashMap<String, MachineRuntime>,
     local_workspace_count: usize,
+    sidebars: Option<&protocol::ShellSidebars>,
     local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
 ) -> Result<()> {
     if let Some(previous) = candidate.take() {
@@ -3418,6 +3642,9 @@ fn request_switch(
     }
     match &endpoint {
         Endpoint::Local => {
+            if let Some(state) = sidebars {
+                send_local(local_writer, &ClientMessage::ShellSidebars(state.clone()))?;
+            }
             send_local(
                 local_writer,
                 &ClientMessage::ShellDockLayout(dock_layout(&endpoint, machines, 0)),
@@ -3435,6 +3662,7 @@ fn request_switch(
                 welcomed: true,
                 ready: true,
                 shell_dock: None,
+                boot_id: None,
                 deadline: Instant::now() + SURFACE_PREPARE_TIMEOUT,
             });
         }
@@ -3453,6 +3681,9 @@ fn request_switch(
                 .control
                 .as_ref()
                 .ok_or_else(|| anyhow!("remote session connection is not ready"))?;
+            if let Some(state) = sidebars {
+                control.send(&ClientMessage::ShellSidebars(state.clone()))?;
+            }
             control.send(&ClientMessage::ShellDockLayout(dock_layout(
                 &endpoint,
                 machines,
@@ -3468,6 +3699,7 @@ fn request_switch(
                 welcomed: true,
                 ready: true,
                 shell_dock: None,
+                boot_id: runtime.boot_id,
                 deadline: Instant::now() + SURFACE_PREPARE_TIMEOUT,
             });
         }
@@ -3560,37 +3792,6 @@ fn stop_link(endpoint: &mut SessionRuntime) {
     }
 }
 
-fn remember_remote_session(
-    machine_id: &str,
-    session: &str,
-    machines: &mut HashMap<String, MachineRuntime>,
-    events: &Sender<ShellEvent>,
-) -> Result<()> {
-    crate::session::validate_name(session).map_err(anyhow::Error::msg)?;
-    let machine = machines
-        .get_mut(machine_id)
-        .ok_or_else(|| anyhow!("unknown machine"))?;
-    if machine.selected_session != session {
-        stop_link(&mut machine.runtime);
-        machine.selected_session = session.to_string();
-        machine.profile.preferred_session = Some(session.to_string());
-        machine.runtime =
-            new_session_runtime(machine.profile.enabled, next_connection_generation());
-    }
-    let machine_id = machine_id.to_string();
-    let session = session.to_string();
-    let events = events.clone();
-    std::thread::Builder::new()
-        .name("machine-session-save".to_string())
-        .stack_size(256 * 1024)
-        .spawn(move || {
-            let result = crate::machine::remember_session(&machine_id, &session)
-                .map_err(|error| error.to_string());
-            let _ = events.send(ShellEvent::SessionRemembered { result });
-        })?;
-    Ok(())
-}
-
 fn paint_dock(
     terminal: &mut DefaultTerminal,
     dock: &mut DockState,
@@ -3599,13 +3800,23 @@ fn paint_dock(
     cursor: &mut Option<(u16, u16)>,
     cursor_visible: bool,
 ) -> Result<()> {
-    if dock.machine_form.is_some() {
-        return paint_machine_form(terminal, dock, machines, cursor);
-    }
-    if dock.selector_open {
+    paint_dock_content(terminal, dock, machines, active, cursor, cursor_visible)?;
+    paint_owner_session_button(terminal, dock, active, cursor, cursor_visible)
+}
+
+fn paint_dock_content(
+    terminal: &mut DefaultTerminal,
+    dock: &mut DockState,
+    machines: &HashMap<String, MachineRuntime>,
+    active: &Endpoint,
+    cursor: &mut Option<(u16, u16)>,
+    cursor_visible: bool,
+) -> Result<()> {
+    let machine_form_open = dock.machine_form.is_some();
+    if !machine_form_open && dock.selector_open {
         return paint_selector(terminal, dock, machines, active, cursor);
     }
-    if dock.machine_popup.is_some() {
+    if !machine_form_open && dock.machine_popup.is_some() {
         return paint_machine_popup(terminal, dock, machines, cursor);
     }
     if machines.is_empty() {
@@ -3613,11 +3824,19 @@ fn paint_dock(
         // remains pixel-for-pixel authoritative, including its hit targets.
         dock.hits.clear();
         dock.dirty = false;
-        return Ok(());
+        return if machine_form_open {
+            paint_machine_form(terminal, dock, machines, cursor)
+        } else {
+            Ok(())
+        };
     }
     let Some(rect) = dock.rect else {
         dock.dirty = false;
-        return Ok(());
+        return if machine_form_open {
+            paint_machine_form(terminal, dock, machines, cursor)
+        } else {
+            Ok(())
+        };
     };
     let style = dock.owner_style.unwrap_or(rect);
     let paint_base = dock.owner_base.as_ref().unwrap_or(&dock.base).clone();
@@ -3877,36 +4096,116 @@ fn paint_dock(
     // When those cells are restored to the Workspaces background by a later
     // frame diff, the occlusion map clears them and this painter fills the
     // endpoint text back in without a full-frame request.
-    cells.retain(|(x, y, _)| !dock.occluded.contains(&(*x, *y)));
+    if let Some(overlay) = rect.overlay {
+        if rect.overlay_dims_background {
+            let dim_fg = protocol::unpack(style.chrome.divider);
+            let dim_bg = protocol::unpack(style.chrome.accent_text);
+            for (_, _, cell) in &mut cells {
+                cell.set_fg(dim_fg);
+                cell.set_bg(dim_bg);
+            }
+        }
+        cells.retain(|(x, y, _)| !shell_block_contains(overlay, *x, *y));
+    }
     super::client::sync_begin();
     super::client::paint(terminal, &cells, *cursor, cursor_visible, false, cursor)?;
     super::client::sync_end();
-    dock.dirty = false;
+    if machine_form_open {
+        paint_machine_form(terminal, dock, machines, cursor)
+    } else {
+        dock.dirty = false;
+        Ok(())
+    }
+}
+
+fn paint_owner_session_button(
+    terminal: &mut DefaultTerminal,
+    dock: &DockState,
+    active: &Endpoint,
+    cursor: &mut Option<(u16, u16)>,
+    cursor_visible: bool,
+) -> Result<()> {
+    if matches!(active, Endpoint::Local) {
+        return Ok(());
+    }
+    let Some((slot, button, label)) = owner_session_projection(dock) else {
+        return Ok(());
+    };
+    let size = terminal.size()?;
+    if slot.width == 0
+        || slot.height == 0
+        || slot.right() > size.width
+        || slot.bottom() > size.height
+        || !slot.contains((button.x, button.y).into())
+        || button.right() > slot.right()
+        || button.bottom() > slot.bottom()
+    {
+        return Ok(());
+    }
+    let Some(style) = dock.owner_style else {
+        return Ok(());
+    };
+    let owner_background = dock.owner_base.as_ref().unwrap_or(&dock.base).bg;
+    let mut cells = Vec::with_capacity(usize::from(slot.width) * usize::from(slot.height));
+    for y in slot.y..slot.bottom() {
+        for x in slot.x..slot.right() {
+            let mut cell = dock.owner_base.as_ref().unwrap_or(&dock.base).clone();
+            cell.set_symbol(" ");
+            cell.set_fg(protocol::unpack(style.chrome.text));
+            cell.modifier = Modifier::empty();
+            cells.push((x, y, cell));
+        }
+    }
+    write_endpoint_text(
+        &mut cells,
+        button,
+        0,
+        0,
+        &label,
+        StyleSpec {
+            fg: protocol::unpack(if dock.owner_session_hovered {
+                style.chrome.accent_text
+            } else {
+                style.chrome.text
+            }),
+            bg: Some(if dock.owner_session_hovered {
+                protocol::unpack(style.chrome.accent)
+            } else {
+                owner_background
+            }),
+            bold: true,
+        },
+    );
+    super::client::sync_begin();
+    super::client::paint(terminal, &cells, *cursor, cursor_visible, false, cursor)?;
+    super::client::sync_end();
     Ok(())
+}
+
+fn owner_session_projection(dock: &DockState) -> Option<(Rect, Rect, String)> {
+    // Presence of the owner-local button is the authority to expose session
+    // switching. Its geometry is not authoritative while a remote endpoint is
+    // active because that endpoint may have a different client-owned sidebar
+    // width. Clip and truncate against the active frame's reserved slot so the
+    // repaint can never erase the adjacent Menu control.
+    dock.owner_session_button?;
+    let slot = dock
+        .rect
+        .and_then(|rect| rect.session_slot)
+        .map(|slot| Rect::new(slot.x, slot.y, slot.width, slot.height))
+        .or(dock.owner_session_slot)?;
+    if slot.width == 0 || slot.height == 0 {
+        return None;
+    }
+    let name = crate::ui::truncate(&dock.local_session, slot.width.saturating_sub(2) as usize);
+    let label = format!(" {name} ");
+    let width = (crate::ui::display_width(&label) as u16).min(slot.width);
+    let button = Rect::new(slot.x, slot.y, width, 1.min(slot.height));
+    Some((slot, button, label))
 }
 
 fn machine_header_active(endpoint_active: bool, collapsed: bool) -> bool {
     endpoint_active && collapsed
-}
-
-fn broadcast_sidebars(
-    dock: &DockState,
-    machines: &HashMap<String, MachineRuntime>,
-    local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
-) -> Result<()> {
-    let Some(state) = &dock.sidebars else {
-        return Ok(());
-    };
-    let message = ClientMessage::ShellSidebars(state.clone());
-    send_local(local_writer, &message)?;
-    for machine in machines.values() {
-        if matches!(machine.runtime.state, MachineState::Online) {
-            if let Some(control) = &machine.runtime.control {
-                let _ = control.send(&message);
-            }
-        }
-    }
-    Ok(())
 }
 
 fn broadcast_workspace_width(
@@ -3914,12 +4213,18 @@ fn broadcast_workspace_width(
     machines: &HashMap<String, MachineRuntime>,
     local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
 ) -> Result<()> {
-    let message = ClientMessage::ShellDockLayout(ShellDockLayout {
+    let local_message = ClientMessage::ShellDockLayout(ShellDockLayout {
         workspace_width: dock.workspace_width,
         owns_workspaces: !machines.is_empty(),
         ..ShellDockLayout::default()
     });
-    send_local(local_writer, &message)?;
+    send_local(local_writer, &local_message)?;
+    let remote_message = ClientMessage::ShellDockLayout(ShellDockLayout {
+        workspace_width: dock.workspace_width,
+        owns_workspaces: !machines.is_empty(),
+        owns_session_chrome: true,
+        ..ShellDockLayout::default()
+    });
     for machine in machines.values() {
         if !matches!(machine.runtime.state, MachineState::Online) {
             continue;
@@ -3927,7 +4232,7 @@ fn broadcast_workspace_width(
         if let Some(control) = machine.runtime.control.as_ref() {
             // A disconnected sibling must not interrupt a drag on the active
             // surface. Its next Ready applies the retained client width.
-            let _ = control.send(&message);
+            let _ = control.send(&remote_message);
         }
     }
     Ok(())
@@ -4174,6 +4479,10 @@ fn draw_popup_border(cells: &mut [(u16, u16, Cell)], rect: Rect, color: Color) {
     );
 }
 
+fn machine_form_label_x(label: &str, label_width: u16) -> u16 {
+    2u16.saturating_add(label_width.saturating_sub(display_columns(label)))
+}
+
 fn paint_machine_form(
     terminal: &mut DefaultTerminal,
     dock: &mut DockState,
@@ -4182,26 +4491,16 @@ fn paint_machine_form(
 ) -> Result<()> {
     let size = terminal.size()?;
     let mobile = size.width <= crate::app::MOBILE_WIDTH;
-    let width = if mobile {
-        size.width
-    } else {
-        size.width.saturating_sub(6).clamp(46, 76).min(size.width)
-    };
-    let height = if mobile {
-        size.height
-    } else {
-        size.height.saturating_sub(4).clamp(14, 26).min(size.height)
-    };
-    let rect = if mobile {
-        Rect::new(0, 0, width, height)
-    } else {
-        Rect::new(
-            size.width.saturating_sub(width) / 2,
-            size.height.saturating_sub(height) / 2,
-            width,
-            height,
-        )
-    };
+    let area = Rect::new(0, 0, size.width, size.height);
+    let rect = dock
+        .machine_form_rect
+        .filter(|rect| {
+            rect.width >= 2
+                && rect.height >= 2
+                && rect.right() <= area.right()
+                && rect.bottom() <= area.bottom()
+        })
+        .unwrap_or_else(|| crate::ui::workspace_picker_modal_rect(area, mobile));
     dock.machine_form_rect = Some(rect);
     dock.machine_form_hits.clear();
     let theme = dock.form_theme;
@@ -4263,7 +4562,7 @@ fn paint_machine_form(
         &mut cells,
         rect,
         1,
-        2,
+        1,
         &workspace,
         StyleSpec {
             fg: subtext0,
@@ -4271,7 +4570,7 @@ fn paint_machine_form(
             bold: false,
         },
     );
-    let remote_x = 3u16.saturating_add(display_columns(&workspace));
+    let remote_x = 2u16.saturating_add(display_columns(&workspace));
     write_endpoint_text(
         &mut cells,
         rect,
@@ -4286,7 +4585,7 @@ fn paint_machine_form(
     );
     dock.machine_form_hits.push((
         MachineFormHit::OpenWorkspaceTab,
-        Rect::new(rect.x + 2, rect.y + 1, display_columns(&workspace), 1),
+        Rect::new(rect.x + 1, rect.y + 1, display_columns(&workspace), 1),
     ));
     dock.machine_form_hits.push((
         MachineFormHit::RemoteMachineTab,
@@ -4338,11 +4637,12 @@ fn paint_machine_form(
         .unwrap_or(0);
     for (field, (label, value)) in labels.iter().zip(form.fields.iter()).enumerate() {
         let row = 4 + field as u16 * 2;
+        let label_x = machine_form_label_x(label, label_width);
         write_endpoint_text(
             &mut cells,
             rect,
             row,
-            2,
+            label_x,
             label,
             StyleSpec {
                 fg: subtext0,
@@ -4910,6 +5210,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn frame_diff_repaints_only_when_it_touches_the_client_dock() {
+        let dock = Rect::new(0, 2, 24, 12);
+        let diff = |start, cells| protocol::FrameDiff {
+            width: 100,
+            height: 30,
+            runs: vec![protocol::DiffRun {
+                start,
+                fg: 0,
+                bg: 0,
+                mods: 0,
+                symbols: vec![" ".to_string(); cells],
+            }],
+            cursor: None,
+            cursor_visible: false,
+        };
+        assert!(frame_diff_intersects_rect(&diff(205, 4), dock));
+        assert!(frame_diff_intersects_rect(&diff(195, 10), dock));
+        assert!(!frame_diff_intersects_rect(&diff(250, 20), dock));
+        assert!(!frame_diff_intersects_rect(&diff(1_500, 20), dock));
+    }
+
+    #[test]
+    fn machine_form_labels_align_their_colons() {
+        let labels = ["Machine name:", "SSH host:", "Session name:"];
+        let width = labels
+            .iter()
+            .map(|label| display_columns(label))
+            .max()
+            .unwrap();
+        let colon_columns = labels.map(|label| {
+            machine_form_label_x(label, width)
+                .saturating_add(display_columns(label))
+                .saturating_sub(1)
+        });
+        assert!(colon_columns
+            .windows(2)
+            .all(|columns| columns[0] == columns[1]));
+    }
+
+    #[test]
+    fn machine_catalog_notifications_are_revision_fenced() {
+        let mut dock = DockState::default();
+        assert!(note_catalog_revision(&mut dock, 5));
+        assert_eq!(dock.catalog_revision, 5);
+        assert!(dock.refresh_catalog);
+
+        dock.refresh_catalog = false;
+        assert!(!note_catalog_revision(&mut dock, 5));
+        assert!(!note_catalog_revision(&mut dock, 4));
+        assert!(!dock.refresh_catalog);
+        assert!(note_catalog_revision(&mut dock, 6));
+        assert!(dock.refresh_catalog);
+    }
+
+    #[test]
     fn machine_connection_menu_tracks_runtime_not_saved_enabled_flag() {
         assert!(!machine_can_disconnect(&MachineState::Disabled));
         assert!(!machine_can_disconnect(&MachineState::Attention(
@@ -4922,6 +5277,31 @@ mod tests {
         assert!(machine_can_disconnect(&MachineState::Reconnecting {
             at: Instant::now()
         }));
+    }
+
+    #[test]
+    fn machine_menu_accepts_native_keyboard_navigation() {
+        for code in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+        ] {
+            let mut selected = 0;
+            assert!(move_machine_popup_selection(&mut selected, &code));
+            assert_eq!(selected, 1);
+            assert!(move_machine_popup_selection(&mut selected, &code));
+            assert_eq!(selected, 0);
+        }
+
+        let mut selected = 0;
+        assert!(!move_machine_popup_selection(
+            &mut selected,
+            &KeyCode::Enter
+        ));
+        assert_eq!(selected, 0);
     }
 
     #[test]
@@ -5024,11 +5404,243 @@ mod tests {
     }
 
     #[test]
+    fn remote_sidebar_drag_does_not_paint_ahead_of_the_endpoint_frame() {
+        let mut dock = DockState::default();
+        let theme = dock.form_theme;
+        let resize = protocol::ShellResize {
+            left: true,
+            column: 25,
+            top: 2,
+            bottom: 29,
+            origin: 0,
+            maximum: 44,
+        };
+        dock.width_drag = Some(resize);
+        dock.sidebars = Some(protocol::ShellSidebars {
+            revision: 7,
+            layout: crate::config::Config::default().sidebars(),
+            workspace_paths: true,
+        });
+        dock.rect = Some(ShellDockRect {
+            resize: Some(resize),
+            session_slot: None,
+            session_button: None,
+            overlay: None,
+            overlay_dims_background: false,
+            workspace_focused: false,
+            workspace_modal: false,
+            x: 0,
+            y: 2,
+            width: 26,
+            height: 27,
+            show_paths: true,
+            normal_fg: 0,
+            secondary_fg: 0,
+            active_fg: 0,
+            active_secondary_fg: 0,
+            active_bg: 0,
+            branch_fg: 0,
+            chrome: theme,
+        });
+        dock.dirty = false;
+
+        assert!(update_client_sidebar_drag(&mut dock, 35));
+        let state = dock.sidebars.as_ref().unwrap();
+        assert_eq!(state.revision, 8);
+        assert_eq!(state.layout.left.width, 36);
+        assert_eq!(dock.workspace_width, None);
+        let rect = dock.rect.unwrap();
+        assert_eq!((rect.x, rect.width), (0, 26));
+        assert_eq!(rect.resize.unwrap().column, 25);
+        assert!(!dock.dirty);
+    }
+
+    #[test]
+    fn rendered_sidebar_geometry_acknowledges_only_the_matching_width() {
+        let mut state = protocol::ShellSidebars {
+            revision: 8,
+            layout: crate::config::Config::default().sidebars(),
+            workspace_paths: true,
+        };
+        state.layout.left.width = 36;
+        let resize = protocol::ShellResize {
+            left: true,
+            column: 35,
+            top: 2,
+            bottom: 29,
+            origin: 0,
+            maximum: 44,
+        };
+        let rect = ShellDockRect {
+            resize: Some(resize),
+            session_slot: None,
+            session_button: None,
+            overlay: None,
+            overlay_dims_background: false,
+            workspace_focused: false,
+            workspace_modal: false,
+            x: 0,
+            y: 2,
+            width: 36,
+            height: 27,
+            show_paths: true,
+            normal_fg: 0,
+            secondary_fg: 0,
+            active_fg: 0,
+            active_secondary_fg: 0,
+            active_bg: 0,
+            branch_fg: 0,
+            chrome: DockState::default().form_theme,
+        };
+
+        assert!(shell_rect_matches_sidebar_state(rect, &state));
+        state.layout.left.width = 26;
+        assert!(!shell_rect_matches_sidebar_state(rect, &state));
+    }
+
+    #[test]
+    fn acknowledged_sidebar_revision_is_not_resent() {
+        let mut dock = DockState {
+            sidebars: Some(protocol::ShellSidebars {
+                revision: 8,
+                layout: crate::config::Config::default().sidebars(),
+                workspace_paths: true,
+            }),
+            ..DockState::default()
+        };
+
+        assert!(!has_newer_sidebar_revision(&dock, 8));
+        dock.sidebars.as_mut().unwrap().revision = 9;
+        assert!(has_newer_sidebar_revision(&dock, 8));
+    }
+
+    #[test]
+    fn owner_session_chrome_uses_the_active_minimum_width_slot() {
+        let active_slot = protocol::ShellDockBlock {
+            x: 5,
+            y: 0,
+            width: 14,
+            height: 1,
+        };
+        let dock = DockState {
+            local_session: "uxfix".into(),
+            owner_session_slot: Some(Rect::new(5, 0, 24, 1)),
+            owner_session_button: Some(Rect::new(5, 0, 7, 1)),
+            rect: Some(ShellDockRect {
+                resize: None,
+                session_slot: Some(active_slot),
+                session_button: None,
+                overlay: None,
+                overlay_dims_background: false,
+                workspace_focused: false,
+                workspace_modal: false,
+                x: 0,
+                y: 2,
+                width: 26,
+                height: 27,
+                show_paths: true,
+                normal_fg: 0,
+                secondary_fg: 0,
+                active_fg: 0,
+                active_secondary_fg: 0,
+                active_bg: 0,
+                branch_fg: 0,
+                chrome: DockState::default().form_theme,
+            }),
+            ..DockState::default()
+        };
+
+        let (slot, button, label) = owner_session_projection(&dock).unwrap();
+        assert_eq!(slot, Rect::new(5, 0, 14, 1));
+        assert_eq!(button, Rect::new(5, 0, 7, 1));
+        assert_eq!(label, " uxfix ");
+        assert_eq!(slot.right(), 19, "the adjacent Menu starts at column 19");
+        assert!(button.right() <= slot.right());
+    }
+
+    #[test]
+    fn shell_geometry_commits_atomically_with_the_next_frame() {
+        let theme = DockState::default().form_theme;
+        let resize = protocol::ShellResize {
+            left: false,
+            column: 84,
+            top: 2,
+            bottom: 29,
+            origin: 120,
+            maximum: 44,
+        };
+        let current = ShellDockRect {
+            resize: Some(resize),
+            session_slot: None,
+            session_button: None,
+            overlay: None,
+            overlay_dims_background: false,
+            workspace_focused: false,
+            workspace_modal: false,
+            x: 84,
+            y: 2,
+            width: 36,
+            height: 27,
+            show_paths: true,
+            normal_fg: 0,
+            secondary_fg: 0,
+            active_fg: 0,
+            active_secondary_fg: 0,
+            active_bg: 0,
+            branch_fg: 0,
+            chrome: theme,
+        };
+        let next = ShellDockRect {
+            x: 94,
+            width: 26,
+            resize: Some(protocol::ShellResize {
+                column: 94,
+                ..resize
+            }),
+            ..current
+        };
+        let mut dock = DockState {
+            rect: Some(current),
+            pending_rect: Some(Some(next)),
+            dirty: false,
+            ..DockState::default()
+        };
+        assert_eq!(dock.rect, Some(current));
+
+        apply_pending_shell_rect(&mut dock);
+        assert_eq!(dock.rect, Some(next));
+        assert!(dock.pending_rect.is_none());
+        assert!(dock.dirty);
+    }
+
+    #[test]
     fn active_highlight_moves_to_machine_only_when_collapsed() {
         assert!(!machine_header_active(true, false));
         assert!(machine_header_active(true, true));
         assert!(!machine_header_active(false, true));
         assert!(!machine_header_active(false, false));
+    }
+
+    #[test]
+    fn pointer_activation_releases_stale_keyboard_selection() {
+        let mut dock = DockState {
+            navigation: Some(2),
+            hover: Some(DockHit::LocalWorkspace(0)),
+            dirty: false,
+            ..DockState::default()
+        };
+        let remote = DockHit::RemoteWorkspace(
+            Endpoint::Remote {
+                machine_id: "box".into(),
+                session: "default".into(),
+            },
+            0,
+        );
+
+        assert!(claim_pointer_navigation(&mut dock, Some(&remote)));
+        assert!(dock.navigation.is_none());
+        assert_eq!(dock.hover, Some(remote));
+        assert!(dock.dirty);
     }
 
     fn machine_with_sessions(id: &str, sessions: &[&str], state: MachineState) -> MachineRuntime {
@@ -5085,6 +5697,16 @@ mod tests {
     }
 
     #[test]
+    fn quiet_online_endpoint_schedules_one_health_deadline() {
+        let mut machine = machine_with_sessions("box", &["default"], MachineState::Online);
+        let evidence = Instant::now();
+        machine.runtime.last_evidence = evidence;
+        let machines = HashMap::from([("box".to_string(), machine)]);
+        let deadline = next_deadline(&machines, None).expect("online health deadline");
+        assert_eq!(deadline, evidence + LINK_HEALTH_IDLE);
+    }
+
+    #[test]
     fn handshake_timeouts_exhaust_budget_without_idle_retries() {
         let machine = machine_with_sessions("box", &["default"], MachineState::Disabled);
         let mut machines = HashMap::from([("box".to_string(), machine)]);
@@ -5106,21 +5728,86 @@ mod tests {
         }
         expire_connecting(&mut machines);
         assert_eq!(machines["box"].runtime.handshake_failures, 3);
-        let mut dock = DockState {
-            machine_form: Some(MachineForm {
-                selected_saved: Some("box".into()),
-                ..MachineForm::default()
-            }),
-            ..DockState::default()
-        };
-        let (events, _receiver) = mpsc::sync_channel(1);
-        let mut pending = None;
-        activate_machine_form(&mut dock, &events, &mut pending, &mut machines).unwrap();
-        assert_eq!(machines["box"].runtime.handshake_failures, 0);
         assert!(matches!(
             machines["box"].runtime.state,
-            MachineState::Reconnecting { .. }
+            MachineState::Attention(_)
         ));
+    }
+
+    #[test]
+    fn handshake_eof_uses_the_same_bounded_retry_budget_as_timeout() {
+        let mut runtime = new_session_runtime(true, next_connection_generation());
+        for attempt in 1..=3 {
+            runtime.state = MachineState::Connecting {
+                deadline: Instant::now() + Duration::from_secs(10),
+            };
+            transition_disconnected_endpoint(
+                "box",
+                "default",
+                &mut runtime,
+                true,
+                "SSH connection closed".into(),
+                Instant::now(),
+            );
+            assert_eq!(runtime.handshake_failures, attempt);
+            if attempt < 3 {
+                assert!(matches!(runtime.state, MachineState::Reconnecting { .. }));
+            } else {
+                assert!(matches!(runtime.state, MachineState::Attention(_)));
+            }
+        }
+    }
+
+    #[test]
+    fn protocol_failure_and_disabled_machine_never_enter_retry_loop() {
+        let mut corrupt = new_session_runtime(true, next_connection_generation());
+        corrupt.state = MachineState::Online;
+        transition_disconnected_endpoint(
+            "box",
+            "default",
+            &mut corrupt,
+            true,
+            "remote session protocol failed".into(),
+            Instant::now(),
+        );
+        assert!(matches!(corrupt.state, MachineState::Attention(_)));
+
+        let mut disabled = new_session_runtime(true, next_connection_generation());
+        disabled.state = MachineState::Online;
+        transition_disconnected_endpoint(
+            "box",
+            "default",
+            &mut disabled,
+            false,
+            "SSH connection closed".into(),
+            Instant::now(),
+        );
+        assert!(matches!(disabled.state, MachineState::Disabled));
+    }
+
+    #[test]
+    fn one_endpoint_disconnect_does_not_mutate_a_sibling_runtime() {
+        let now = Instant::now();
+        let mut failed = new_session_runtime(true, next_connection_generation());
+        failed.state = MachineState::Online;
+        let mut sibling = new_session_runtime(true, next_connection_generation());
+        sibling.state = MachineState::Online;
+        sibling.boot_id = Some(42);
+        sibling.last_evidence = now;
+
+        transition_disconnected_endpoint(
+            "alpha",
+            "default",
+            &mut failed,
+            true,
+            "SSH connection closed".into(),
+            now,
+        );
+
+        assert!(matches!(failed.state, MachineState::Reconnecting { .. }));
+        assert!(matches!(sibling.state, MachineState::Online));
+        assert_eq!(sibling.boot_id, Some(42));
+        assert_eq!(sibling.last_evidence, now);
     }
 
     #[test]
@@ -5217,6 +5904,22 @@ mod tests {
         );
         assert_eq!(machines["box"].runtime.workspaces.len(), 11);
         assert!(!dock_layout(&Endpoint::Local, &HashMap::new(), 0).owns_workspaces);
+        assert!(
+            !dock_layout(&Endpoint::Local, &machines, 0).owns_session_chrome,
+            "the local server keeps its native named-session control"
+        );
+        assert!(
+            dock_layout(
+                &Endpoint::Remote {
+                    machine_id: "box".into(),
+                    session: "default".into(),
+                },
+                &machines,
+                0,
+            )
+            .owns_session_chrome,
+            "remote servers leave session chrome to the owner-local client"
+        );
     }
 
     #[test]
@@ -5264,9 +5967,32 @@ mod tests {
     }
 
     #[test]
+    fn only_the_owner_local_endpoint_can_switch_named_sessions() {
+        assert!(matches!(
+            owner_local_session_switch(&Endpoint::Local, "review".into()),
+            Some(super::super::client::ClientExit::SwitchSession(name)) if name == "review"
+        ));
+        assert!(
+            owner_local_session_switch(
+                &Endpoint::Remote {
+                    machine_id: "box".into(),
+                    session: "default".into(),
+                },
+                "remote-review".into(),
+            )
+            .is_none(),
+            "a remote server cannot reinterpret its session menu as local navigation"
+        );
+    }
+
+    #[test]
     fn endpoint_switches_use_active_native_geometry_over_stale_local_bounds() {
         let rect = |width, height| ShellDockRect {
             resize: None,
+            session_slot: None,
+            session_button: None,
+            overlay: None,
+            overlay_dims_background: false,
             workspace_focused: false,
             branch_fg: 0,
             workspace_modal: false,
@@ -5301,15 +6027,17 @@ mod tests {
             session: "default".into(),
         };
 
-        assert_eq!(
-            active_shell_rect(&endpoint, Some(remote), None, Some(owner)),
-            Some(remote)
-        );
+        assert_eq!(active_shell_rect(Some(remote)), Some(remote));
         remote.show_paths = false;
         assert_eq!(
-            active_shell_rect(&endpoint, Some(remote), Some(owner), Some(owner)),
+            active_shell_rect(Some(remote)),
             Some(remote),
             "remote Hide Path must not inherit Local settings"
+        );
+        assert_eq!(
+            active_shell_rect(None),
+            None,
+            "an active compact endpoint must clear stale desktop dock geometry"
         );
         assert_eq!(
             candidate_shell_rect(&endpoint, None, Some(owner), Some(owner)),
@@ -5319,10 +6047,7 @@ mod tests {
             candidate_shell_rect(&Endpoint::Local, None, Some(owner), Some(owner)),
             Some(owner)
         );
-        assert_eq!(
-            active_shell_rect(&Endpoint::Local, None, Some(owner), Some(owner)),
-            None
-        );
+        assert_eq!(active_shell_rect(None), None);
     }
 
     #[test]
@@ -5336,6 +6061,7 @@ mod tests {
             welcomed: true,
             ready: false,
             shell_dock: None,
+            boot_id: Some(7),
             deadline: Instant::now() + Duration::from_secs(1),
         });
         replace_candidate_with_local(&mut candidate);

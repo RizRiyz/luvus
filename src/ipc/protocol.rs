@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::sound::SoundSignal;
 use crate::terminal::theme_probe::TerminalColors;
 
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 17;
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 /// Local display cell size in pixels, or `(0, 0)` when the host does not report it.
@@ -86,6 +86,10 @@ pub enum ClientMessage {
         col: u16,
         row: u16,
     },
+    /// Lightweight liveness check for a quiet persistent machine endpoint.
+    HealthCheck {
+        nonce: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,6 +103,9 @@ pub enum SurfaceInterest {
 pub struct ShellDockLayout {
     pub workspace_width: Option<u16>,
     pub owns_workspaces: bool,
+    /// The machine-aware client composes the owner-local named-session chrome.
+    /// Endpoint servers leave the complete slot blank and expose no hit target.
+    pub owns_session_chrome: bool,
     pub rows: u16,
     pub leading: bool,
     pub indent_workspaces: bool,
@@ -110,6 +117,10 @@ pub struct ShellDockLayout {
 pub struct ShellSidebars {
     pub revision: u64,
     pub layout: crate::config::SidebarsConfig,
+    /// Client-owned visibility for workspace paths in the combined Local and
+    /// Machines tree. Keeping this beside sidebar geometry prevents endpoint
+    /// configuration from making the same dock change shape after a switch.
+    pub workspace_paths: bool,
 }
 
 fn deserialize_clipboard_image<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
@@ -208,10 +219,27 @@ pub enum ServerMessage {
     /// SSH destinations and profile data never enter the selected server.
     OpenMachineCreate {
         theme: MachineFormTheme,
+        modal: ShellDockBlock,
     },
     PreparedFrame {
         ticket: u64,
         frame: FrameData,
+    },
+    /// Response to a client liveness check. It carries no application state.
+    HealthCheck {
+        nonce: u64,
+    },
+    /// Opaque identity for one running server process and selected session.
+    /// Sent only after the version-checked handshake.
+    EndpointIdentity {
+        boot_id: u64,
+        session: String,
+    },
+    /// The owner-local machine catalog committed a newer revision. This carries
+    /// no profile data: machine-aware clients reload their own private catalog,
+    /// while ordinary and remote endpoint clients never receive the message.
+    MachineCatalogChanged {
+        revision: u64,
     },
 }
 
@@ -235,6 +263,18 @@ pub struct MachineFormTheme {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ShellDockRect {
     pub resize: Option<ShellResize>,
+    /// Complete chrome interval reserved for the owner-local session control.
+    /// Unlike the button itself, this does not shrink with a short label.
+    pub session_slot: Option<ShellDockBlock>,
+    /// Exact owner-server named-session button. A machine-aware client keeps
+    /// this local control visible while a remote workspace owns pane content.
+    pub session_button: Option<ShellDockBlock>,
+    /// Exact server-owned popup rectangle overlapping the client-owned shell.
+    /// The client neither paints nor accepts input inside this rectangle.
+    pub overlay: Option<ShellDockBlock>,
+    /// Whether the server's native overlay dims the content behind it. This is
+    /// semantic state; the client must not infer modal treatment from pixels.
+    pub overlay_dims_background: bool,
     pub workspace_focused: bool,
     pub workspace_modal: bool,
     pub x: u16,
@@ -249,6 +289,14 @@ pub struct ShellDockRect {
     pub active_bg: u32,
     pub branch_fg: u32,
     pub chrome: MachineFormTheme,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShellDockBlock {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
@@ -709,6 +757,142 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn machine_health_identity_and_overlay_roundtrip() {
+        let mut bytes = Vec::new();
+        write_message(&mut bytes, &ClientMessage::HealthCheck { nonce: 41 }).unwrap();
+        assert!(matches!(
+            read_message::<_, ClientMessage>(&mut &bytes[..]).unwrap(),
+            ClientMessage::HealthCheck { nonce: 41 }
+        ));
+
+        bytes.clear();
+        write_message(
+            &mut bytes,
+            &ServerMessage::EndpointIdentity {
+                boot_id: 9,
+                session: "review".into(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            read_message::<_, ServerMessage>(&mut &bytes[..]).unwrap(),
+            ServerMessage::EndpointIdentity { boot_id: 9, session } if session == "review"
+        ));
+
+        bytes.clear();
+        write_message(
+            &mut bytes,
+            &ServerMessage::MachineCatalogChanged { revision: 12 },
+        )
+        .unwrap();
+        assert!(matches!(
+            read_message::<_, ServerMessage>(&mut &bytes[..]).unwrap(),
+            ServerMessage::MachineCatalogChanged { revision: 12 }
+        ));
+
+        bytes.clear();
+        let modal = ShellDockBlock {
+            x: 12,
+            y: 4,
+            width: 76,
+            height: 26,
+        };
+        write_message(
+            &mut bytes,
+            &ServerMessage::OpenMachineCreate {
+                theme: MachineFormTheme {
+                    surface: 0,
+                    border: 1,
+                    text: 2,
+                    subtext0: 3,
+                    subtext1: 4,
+                    accent: 5,
+                    accent_text: 6,
+                    divider: 7,
+                    rule: 8,
+                    error: 9,
+                },
+                modal,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            read_message::<_, ServerMessage>(&mut &bytes[..]).unwrap(),
+            ServerMessage::OpenMachineCreate { modal: decoded, .. } if decoded == modal
+        ));
+
+        bytes.clear();
+        let mut shell_layout = crate::config::SidebarsConfig::default_layout();
+        // The wire projection is produced by `Sidebars::to_config`, which
+        // always preserves the last concrete Files side.
+        shell_layout.files_side = Some(crate::app::Side::Left);
+        let shell = ShellSidebars {
+            revision: 4,
+            layout: shell_layout,
+            workspace_paths: false,
+        };
+        write_message(&mut bytes, &ClientMessage::ShellSidebars(shell.clone())).unwrap();
+        assert!(matches!(
+            read_message::<_, ClientMessage>(&mut &bytes[..]).unwrap(),
+            ClientMessage::ShellSidebars(decoded) if decoded == shell
+        ));
+
+        let dock = ShellDockRect {
+            resize: None,
+            session_slot: Some(ShellDockBlock {
+                x: 5,
+                y: 0,
+                width: 24,
+                height: 1,
+            }),
+            session_button: Some(ShellDockBlock {
+                x: 5,
+                y: 0,
+                width: 10,
+                height: 1,
+            }),
+            overlay: Some(ShellDockBlock {
+                x: 4,
+                y: 3,
+                width: 20,
+                height: 8,
+            }),
+            overlay_dims_background: true,
+            workspace_focused: false,
+            workspace_modal: true,
+            x: 0,
+            y: 1,
+            width: 30,
+            height: 20,
+            show_paths: false,
+            normal_fg: 0,
+            secondary_fg: 0,
+            branch_fg: 0,
+            active_fg: 0,
+            active_secondary_fg: 0,
+            active_bg: 0,
+            chrome: MachineFormTheme {
+                surface: 0,
+                border: 0,
+                text: 0,
+                subtext0: 0,
+                subtext1: 0,
+                accent: 0,
+                accent_text: 0,
+                divider: 0,
+                rule: 0,
+                error: 0,
+            },
+        };
+        bytes.clear();
+        write_message(&mut bytes, &ServerMessage::ShellDock(Some(dock))).unwrap();
+        assert!(matches!(
+            read_message::<_, ServerMessage>(&mut &bytes[..]).unwrap(),
+            ServerMessage::ShellDock(Some(decoded)) if decoded == dock
+        ));
     }
 
     #[test]

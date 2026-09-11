@@ -2325,6 +2325,9 @@ pub struct App {
     /// first machine can be added through the workspace picker.
     pub client_machine_capable: bool,
     pub client_shell_owns_workspaces: bool,
+    /// Remote endpoint frames leave this client-owned top-row slot blank and
+    /// inert. The owner-local client composes the named-session control there.
+    pub client_shell_owns_session_chrome: bool,
     pub client_sidebar_input: bool,
     pub client_files_visible: bool,
     /// Exact complete Workspaces dock owned by the machine-aware thin client.
@@ -2439,6 +2442,10 @@ pub struct App {
     /// One-shot request for the attached machine-aware client to open the
     /// owner-local profile form selected from the workspace picker.
     pub pending_machine_create: bool,
+    /// Highest owner-local machine catalog revision waiting to be announced to
+    /// attached machine-aware clients. External mutations wake the app through
+    /// the selected session's owner-only control socket; no polling is needed.
+    pub pending_machine_catalog_revision: Option<u64>,
     /// On-demand named-session menu. Its filesystem/process discovery runs only
     /// while opening or activating this surface, never on an idle timer.
     pub named_session_menu: Option<session_menu::NamedSessionMenu>,
@@ -2447,6 +2454,8 @@ pub struct App {
     pub(crate) named_session_cache: Vec<session_menu::NamedSessionRow>,
     /// Lifecycle work already running off-loop, keyed by validated session name.
     pub(crate) pending_named_session_actions: HashMap<String, session_menu::NamedSessionAction>,
+    /// Complete top-row interval reserved for the named-session control.
+    pub named_session_slot_rect: Option<Rect>,
     pub named_session_button_rect: Option<Rect>,
     pub named_session_menu_rect: Option<Rect>,
     pub named_session_close_rect: Option<Rect>,
@@ -3004,6 +3013,7 @@ impl App {
             client_shell_dock_indent_workspaces: false,
             client_machine_capable: false,
             client_shell_owns_workspaces: false,
+            client_shell_owns_session_chrome: false,
             client_sidebar_input: false,
             client_files_visible: false,
             client_shell_dock_rect: None,
@@ -3053,9 +3063,11 @@ impl App {
             pending_session_switch: None,
             pending_machine_selector: false,
             pending_machine_create: false,
+            pending_machine_catalog_revision: None,
             named_session_menu: None,
             named_session_cache: Vec::new(),
             pending_named_session_actions: HashMap::new(),
+            named_session_slot_rect: None,
             named_session_button_rect: None,
             named_session_menu_rect: None,
             named_session_close_rect: None,
@@ -3673,6 +3685,7 @@ impl App {
             client_shell_dock_indent_workspaces: false,
             client_machine_capable: false,
             client_shell_owns_workspaces: false,
+            client_shell_owns_session_chrome: false,
             client_sidebar_input: false,
             client_files_visible: false,
             client_shell_dock_rect: None,
@@ -3722,9 +3735,11 @@ impl App {
             pending_session_switch: None,
             pending_machine_selector: false,
             pending_machine_create: false,
+            pending_machine_catalog_revision: None,
             named_session_menu: None,
             named_session_cache: Vec::new(),
             pending_named_session_actions: HashMap::new(),
+            named_session_slot_rect: None,
             named_session_button_rect: None,
             named_session_menu_rect: None,
             named_session_close_rect: None,
@@ -5756,7 +5771,14 @@ impl App {
             }
             WsMenuItem::TogglePath => {
                 self.config.layout.workspace_paths = !self.config.layout.workspace_paths;
-                self.persist_config();
+                // A machine-aware client owns one combined Local/Machines
+                // Workspaces shell. Its per-client state is captured by the
+                // server after input dispatch and broadcast to every endpoint;
+                // do not leak that display preference into one server's
+                // persistent configuration.
+                if !self.client_sidebar_input {
+                    self.persist_config();
+                }
             }
             // The right-clicked node, which needn't be the focused one.
             WsMenuItem::Module(i) => {

@@ -73,9 +73,11 @@ Approval is optional and off by default. Switching dialog tabs clears it.
 Luvus never treats a previous approval as permission for a future install.
 It also never restarts an already-running remote server automatically.
 
-Luvus prepares the connection in the background and saves the profile after
-validation succeeds. It opens the remote surface when a complete frame is
-ready; a failed connection does not replace your current usable surface.
+Luvus prepares the connection on a bounded worker and saves the profile only
+after the selected server returns its identity and a complete workspace
+projection through the native client protocol. It opens the remote surface
+when a complete frame is ready; a failed connection does not replace your
+current usable surface.
 
 ### 4. Open a remote workspace
 
@@ -106,6 +108,9 @@ luvus machine list
 luvus machine status build
 ```
 
+Add `--session review` when the profile should verify and remember a remote
+named session other than `default`.
+
 `build` is the stable profile ID used by later commands; `Build box` is its
 display label. Interactive setup asks before installing a missing compatible
 binary, with No as the default. To approve installation explicitly:
@@ -117,9 +122,11 @@ luvus machine add build --host dev@buildbox --label "Build box" --install
 Use one of these add commands, not both. To repair or re-enable an existing
 profile, use `luvus machine enable build` instead of adding it again.
 
-Start Luvus normally to find the saved entry in Workspaces. If a client was
-already open while you changed the catalog through the CLI, open
-**Menu → Machines** and press `r` to refresh it.
+Start Luvus normally to find the saved entry in Workspaces. Clients already
+attached to the same local named session receive successful CLI, TUI, and UHP
+catalog changes immediately. The notification contains only the new revision;
+each client reloads its private owner-local catalog. Use **Menu → Machines**
+and press `r` only as an explicit repair refresh after an external file edit.
 
 ## Reopen a saved machine
 
@@ -135,38 +142,42 @@ a separate history list. On short terminals the list may not fit; use
 
 ## Use machines across named sessions
 
-**Saved profiles are shared across your local named sessions**, provided they
-use the same Luvus home. For example, a machine added while using local
-`default` is also available when you launch `luvus --session work`.
+**Each local named session has its own saved-machine catalog.** A machine added
+while using local `default` is not automatically available when you launch
+`luvus --session work`. Add or configure the machine separately in every local
+session where you want it to appear.
 
-The catalog lives at `machines.json` in the Luvus configuration directory,
-not inside an individual session directory. Release builds normally use
-`~/.luvus`; debug builds use `~/.luvus-dev`. A custom `LUVUS_HOME` selects a
-separate catalog. Profiles are not automatically copied to another computer
-or another operating-system account.
+The default session keeps its catalog at `machines.json` in the Luvus
+configuration directory. Other named sessions keep it under
+`sessions/<name>/machines.json`. Release builds normally use `~/.luvus`; debug
+builds use `~/.luvus-dev`. A custom `LUVUS_HOME` selects a separate root.
 
 Keep these three things separate:
 
 | Item | What it owns |
 |---|---|
 | Saved machine | SSH destination, enabled state, and preferred remote session |
-| Named session | An independent server with its own workspaces, panes, and agents |
+| Local named session | A top-level local server namespace with its own workspaces, panes, agents, and saved machines |
 | Workspace | A project directory and its tabs inside that server |
 
-Each client window owns its connections. Sharing a saved profile does not
-mean two client windows share one SSH process. A machine uses one selected
-remote session at a time in each client, defaulting to `default`.
+Each client window owns its connections. Two clients attached to the same local
+named session load the same saved profiles but do not share one SSH process. A
+machine uses one selected remote session at a time in each client, defaulting
+to `default`.
 
-To change the remote session, first select that machine, then use the normal
-session dropdown at the top of the interface. The selected session is saved
-as the profile's preference. Switching does not stop the previous session's
-server or move its panes into the new session. Selecting a Local workspace
-returns to your local session; the machine list is not a replacement for the
-named-session dropdown.
+The session dropdown at the top of the interface always belongs to the local
+client session, including while a machine workspace is active. Opening it
+returns to the prepared Local surface and uses the unchanged local session UI.
+Creating, starting, stopping, deleting, or switching there never changes a
+machine's configured remote session and never moves workspaces between local
+session namespaces. Select a Local workspace to return without opening the
+session dropdown.
 
 Profiles survive closing and reopening Luvus. Client-only sidebar layout and
-group expansion last for that client lifetime. If a profile is changed from
-another client or the CLI, refresh the machine selector to load the change.
+group expansion last for that client lifetime. Profile changes from another
+client, the CLI, or UHP appear in every open client attached to that local
+named session. A different local named session has its own catalog and receives
+no notification.
 
 ## Navigate the workspace dock
 
@@ -192,6 +203,8 @@ and Escape exits navigation. The selected row is revealed automatically without
 resetting manual wheel scrolling. Local and remote rows use the same native
 workspace renderer, including branch fitting, state indicators, shortened paths,
 selection styling, and scrollbar. Machine grouping remains client-owned.
+The machine menu also accepts arrows, `j/k`, Tab, and Shift+Tab, and shows only
+the connection action valid for its current state.
 
 Right-click a workspace
 to open its native workspace menu, including rename, pin, worktree and native
@@ -207,16 +220,18 @@ An incompatible target is reported rather than automatically restarted.
 
 ## Installation and compatibility details
 
-For an enabled profile, Luvus first looks for an exact compatible remote
-binary. If none is available, interactive CLI setup asks for installation
+For an enabled profile, Luvus first looks for a capability-compatible remote
+binary. Package versions may differ when the native display protocol and saved
+machine endpoint capability match. If none is available, interactive CLI setup asks for installation
 permission with No as the default. Non-interactive setup requires `--install`.
 Use `--install` only after deciding to permit a user-local installation
 on that host. With that permission, a compatible local build is transferred directly and
 installed in a content-addressed remote-client directory. This includes the running
 binary when both machines have the same target and sibling Cargo artifacts at
 `target/<triple>/debug/luvus` or `target/<triple>/release/luvus` during
-cross-platform development. Luvus verifies the transfer checksum, version, and
-native client protocol on the remote host before saving it.
+cross-platform development. Luvus verifies the transfer checksum and native
+client capability on the remote host, then starts an absent selected session
+and completes a real endpoint handshake before saving it.
 
 When no compatible local artifact exists, Luvus downloads the matching
 published release on the remote host, verifies its published SHA-256 digest
@@ -225,8 +240,9 @@ Linux release installs use `~/.local/share/luvus/remote/v<version>-p<protocol>/l
 Windows uses a versioned
 `%LOCALAPPDATA%\luvus\remote\v<version>-p<protocol>\luvus.exe` path so a running executable
 never needs to be replaced. Provisioning never requests administrator access,
-changes `PATH`, or executes a downloaded installer script. The profile is
-saved only after a fresh `BatchMode=yes` capability probe succeeds.
+changes `PATH`, or executes a downloaded installer script. The profile is saved
+only after a fresh `BatchMode=yes` capability probe, `Welcome`/`Ready`
+negotiation, server identity check, and complete workspace projection succeed.
 
 On macOS and Linux, automatic provisioning requires `curl` or `wget`, `tar`,
 and one of `sha256sum`, `shasum`, or `openssl`. Windows x86-64 provisioning uses
@@ -350,11 +366,12 @@ replace the outer sidebar, or hide the local workspace rows:
 
 Clicking `sudos` focuses that exact local workspace and returns to the local
 surface in one handoff. Other saved machines remain sibling rows and can be
-opened directly. The top session dropdown remains the native named-session
-selector for the active machine; it is not the machine selector. Creating a
-workspace does not create a named session. The workspace `+` opens the picker
-on the active machine. Explicitly selecting another named session changes the
-machine's one connected endpoint without stopping its previous server.
+opened directly. The top session dropdown remains the owner-local
+named-session selector; it is neither the machine selector nor a control for
+the remote server. The configured remote backing-session name is private
+connection configuration: it never replaces, extends, or adds a hit target to
+the local session header. Creating a workspace does not create a named session.
+The workspace `+` opens the picker on the active machine.
 
 Legacy catalogs containing several saved session names do not automatically
 connect or start those sessions. Their preferred session (or `default`) is used;
@@ -364,7 +381,7 @@ The keyboard selector remains available from **Menu**:
 
 - `Up` / `Down` or `k` / `j` moves
 - `Home` / `End` jumps
-- `r` refreshes profiles after a CLI or UHP catalog change
+- `r` explicitly reloads profiles after an external file edit or repair
 - `Enter` selects
 - `Esc` or `q` closes
 
@@ -376,29 +393,26 @@ surface.
 
 The **Machines** selector also contains **Local**, which returns to the local
 server after a remote machine is selected. Right-click a saved machine in
-**Workspaces** and choose **Delete** to remove its owner-local profile after
-confirmation.
+**Workspaces** and choose **Delete** to remove it from the current local named
+session after confirmation.
 
-Tabs, panes, agents, files, DIFF, ORCH, and Mission Control belong to the selected
-machine's current named session. Its workspace rows share that server and
-bridge; they are not independent named sessions.
+Tabs, panes, agents, files, DIFF, ORCH, and Mission Control belong to the
+selected machine's configured backing server. Its workspace rows share that
+server and bridge; they are not independent named sessions.
 
-The local named session and every remote machine session are independent server
-namespaces. Switching machines suspends the old surface while keeping its
-connection alive. Switching named sessions on one machine replaces that
-connection but leaves its previous server and panes alive. Neither operation
-merges, renames, or transfers session state.
-
-Use the normal session selector after switching to a machine to create multiple
-named sessions on that host when independent isolation is needed. The selected
-session replaces the machine's saved preference and workspace projection.
-During that replacement, Local is the fallback surface if the new connection
-fails. Ordinary workspace creation does not use this path.
+Local named sessions remain independent top-level server namespaces. Switching
+one reattaches the client normally and reloads that session's Local workspace
+tree and saved-machine catalog. Switching machines within a local session
+suspends the old surface while keeping its connection alive. Neither operation
+merges, renames, copies, or transfers workspace, machine, or session state. The
+remote server's own session-switch message is not treated as local navigation
+and cannot rewrite the saved machine profile.
 
 Machine rows use the same active and inactive selection dots as ordinary
 workspace rows rather than displaying connection status text. Selecting a
-connecting target queues that exact named session, and selecting a failed
-target explicitly retries it. Luvus keeps the current usable surface until the
+connecting target queues that exact named session. A failed or manually
+disconnected target is repaired through its **Connect** action, which keeps
+foreground start authority separate from background reconnects. Luvus keeps the current usable surface until the
 requested remote session has produced a complete frame, so a failed machine
 does not blank or exit another local or remote session.
 
@@ -483,16 +497,17 @@ Connecting means the initial connection is being prepared; reconnecting means
 Luvus is retrying a lost connection with backoff. Attention means the endpoint
 needs intervention, such as correcting authentication or binary compatibility.
 Three consecutive handshake timeouts also enter Attention and stop automatic
-attempts. Selecting the machine again explicitly resets that retry budget;
-a successful connection resets it too.
+attempts. Use the machine's **Connect** action for an explicit foreground retry;
+a successful connection resets the retry budget.
 Inspect the failure with:
 
 ```sh
 luvus machine status build
 ```
 
-This runs one bounded probe; it does not install software. Fix the reported
-SSH or compatibility problem, then select the machine again or run
+This runs one bounded probe plus a read-only handshake against the already
+running selected server; it does not install or start software. Fix the reported
+SSH or compatibility problem, then use **Connect** or run
 `luvus machine enable build`. Disabled means the profile is saved but no
 connection is started; online means its connection is available.
 
@@ -523,6 +538,8 @@ work. Removing a profile does not delete remote files or named-session data.
 - Disabled profiles create no SSH process, reader, timer, or render work.
 - Each enabled machine uses one OpenSSH process and one blocking reader with a
   small fixed stack; there is no polling loop or machine-specific multiplexer.
+  A quiet Online endpoint receives one lightweight protocol health check after
+  five seconds without another valid message and times out after ten seconds.
 - Every SSH bridge carries the existing native Luvus client messages directly.
   Inactive endpoints are suspended, so they produce no frame stream.
 - Reconnect uses bounded exponential backoff with jitter. Authentication,

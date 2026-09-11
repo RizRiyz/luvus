@@ -61,8 +61,12 @@ umask 077
 fail() { printf 'error: %s\n' "$1" >&2; exit 1; }
 version=${1:-}
 expected=${2:-}
+protocol=${3:-}
+endpoint=${4:-}
 case "$version" in ''|*[!0-9A-Za-z.+-]*) fail 'invalid build version' ;; esac
 case "$expected" in ''|*[!0-9A-Fa-f]*) fail 'invalid build checksum' ;; esac
+case "$protocol" in ''|*[!0-9]*) fail 'invalid client protocol' ;; esac
+case "$endpoint" in ''|*[!0-9]*) fail 'invalid machine endpoint version' ;; esac
 [ "${#expected}" -eq 64 ] || fail 'invalid build checksum'
 dir=$HOME/.local/share/luvus/remote/v$version/$expected
 mkdir -p "$dir" || fail 'could not create remote install directory'
@@ -85,6 +89,9 @@ fi
 chmod 755 "$stage"
 probe=$("$stage" remote-client-info --json) || fail 'transferred binary cannot provide remote client information'
 printf '%s' "$probe" | grep -F "\"version\":\"$version\"" >/dev/null || fail 'transferred binary version mismatch'
+printf '%s' "$probe" | grep -E "\"protocol_version\":$protocol([,}])" >/dev/null || fail 'transferred binary protocol mismatch'
+printf '%s' "$probe" | grep -E "\"machine_endpoint_version\":$endpoint([,}])" >/dev/null || fail 'transferred binary machine endpoint version mismatch'
+printf '%s' "$probe" | grep -F '"machine_endpoint_v1"' >/dev/null || fail 'transferred binary lacks saved-machine endpoint capability'
 destination=$dir/luvus
 mv -f "$stage" "$destination" || fail 'could not install remote client binary'
 trap - EXIT HUP INT TERM
@@ -100,8 +107,10 @@ umask 077
 fail() { printf 'error: %s\n' "$1" >&2; exit 1; }
 version=${1:-}
 protocol=${2:-}
+endpoint=${3:-}
 case "$version" in ''|*[!0-9A-Za-z.+-]*) fail 'invalid release version' ;; esac
 case "$protocol" in ''|*[!0-9]*) fail 'invalid client protocol' ;; esac
+case "$endpoint" in ''|*[!0-9]*) fail 'invalid machine endpoint version' ;; esac
 case "$(uname -s):$(uname -m)" in
   Darwin:x86_64) target=x86_64-apple-darwin ;;
   Darwin:arm64|Darwin:aarch64) target=aarch64-apple-darwin ;;
@@ -148,6 +157,8 @@ chmod 755 "$tmp/luvus"
 probe=$("$tmp/luvus" remote-client-info --json) || fail 'downloaded binary cannot provide remote client information'
 printf '%s' "$probe" | grep -F "\"version\":\"$version\"" >/dev/null || fail 'downloaded binary version mismatch'
 printf '%s' "$probe" | grep -E "\"protocol_version\":$protocol([,}])" >/dev/null || fail 'downloaded binary protocol mismatch'
+printf '%s' "$probe" | grep -E "\"machine_endpoint_version\":$endpoint([,}])" >/dev/null || fail 'downloaded binary machine endpoint version mismatch'
+printf '%s' "$probe" | grep -F '"machine_endpoint_v1"' >/dev/null || fail 'downloaded binary lacks saved-machine endpoint capability'
 dir=$HOME/.local/share/luvus/remote/$tag-p$protocol
 mkdir -p "$dir" || fail 'could not create remote install directory'
 stage=$(mktemp "$dir/.luvus-machine.XXXXXX") || fail 'could not reserve remote install file'
@@ -166,6 +177,7 @@ const INSTALL_WINDOWS: &str = r#"$ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $Version = '__LUVUS_VERSION__'
 $Protocol = __LUVUS_PROTOCOL__
+$EndpointVersion = __LUVUS_ENDPOINT_VERSION__
 $Temp = $null
 try {
     if ($Version -notmatch '^[0-9A-Za-z.+-]+$') { throw 'invalid release version' }
@@ -227,7 +239,7 @@ try {
     $ProbeText = (& $Candidate remote-client-info --json | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) { throw 'downloaded binary cannot provide remote client information' }
     try { $Probe = $ProbeText | ConvertFrom-Json } catch { throw 'downloaded binary returned invalid client information' }
-    if ($Probe.version -ne $Version -or $Probe.os -ne 'windows' -or $Probe.protocol_version -ne $Protocol) {
+    if ($Probe.version -ne $Version -or $Probe.os -ne 'windows' -or $Probe.protocol_version -ne $Protocol -or $Probe.machine_endpoint_version -ne $EndpointVersion -or -not ($Probe.capabilities -contains 'machine_endpoint_v1')) {
         throw 'downloaded binary identity mismatch'
     }
 
@@ -236,7 +248,7 @@ try {
         $ExistingText = (& $Destination remote-client-info --json | Out-String).Trim()
         if ($LASTEXITCODE -eq 0) {
             try { $Existing = $ExistingText | ConvertFrom-Json } catch { $Existing = $null }
-            if ($null -ne $Existing -and $Existing.version -eq $Version -and $Existing.os -eq 'windows' -and $Existing.protocol_version -eq $Protocol) {
+            if ($null -ne $Existing -and $Existing.version -eq $Version -and $Existing.os -eq 'windows' -and $Existing.protocol_version -eq $Protocol -and $Existing.machine_endpoint_version -eq $EndpointVersion -and ($Existing.capabilities -contains 'machine_endpoint_v1')) {
                 [Console]::Out.WriteLine($Destination)
                 exit 0
             }
@@ -449,10 +461,12 @@ fn install_local(destination: &str, target: RemoteTarget, binary: &Path) -> Resu
     }
     let checksum = format!("{:x}", Sha256::digest(&bytes));
     let remote_command = format!(
-        "sh -c {} -- {} {}",
+        "sh -c {} -- {} {} {} {}",
         quote_posix(INSTALL_LOCAL_POSIX),
         env!("CARGO_PKG_VERSION"),
-        checksum
+        checksum,
+        crate::ipc::protocol::PROTOCOL_VERSION,
+        super::MACHINE_ENDPOINT_VERSION,
     );
     let mut command = super::ssh::ssh_command(destination, true);
     command.arg(remote_command);
@@ -481,7 +495,8 @@ fn install_posix(destination: &str) -> Result<String> {
         .arg("-s")
         .arg("--")
         .arg(env!("CARGO_PKG_VERSION"))
-        .arg(crate::ipc::protocol::PROTOCOL_VERSION.to_string());
+        .arg(crate::ipc::protocol::PROTOCOL_VERSION.to_string())
+        .arg(super::MACHINE_ENDPOINT_VERSION.to_string());
     let output = super::ssh::run_bounded_with_input(
         command,
         PROVISION_TIMEOUT,
@@ -506,6 +521,10 @@ fn install_windows(destination: &str) -> Result<String> {
         .replace(
             "__LUVUS_PROTOCOL__",
             &crate::ipc::protocol::PROTOCOL_VERSION.to_string(),
+        )
+        .replace(
+            "__LUVUS_ENDPOINT_VERSION__",
+            &super::MACHINE_ENDPOINT_VERSION.to_string(),
         );
     let mut command = super::ssh::ssh_command(destination, true);
     command
@@ -572,6 +591,8 @@ mod tests {
     fn provisioner_is_fixed_verified_and_user_scoped() {
         assert!(INSTALL_POSIX.contains("$HOME/.local/share/luvus/remote/$tag-p$protocol"));
         assert!(INSTALL_POSIX.contains("downloaded binary protocol mismatch"));
+        assert!(INSTALL_POSIX.contains("downloaded binary machine endpoint version mismatch"));
+        assert!(INSTALL_POSIX.contains("machine_endpoint_v1"));
         assert!(INSTALL_POSIX.contains("sha256sum"));
         assert!(INSTALL_POSIX.contains("shasum -a 256"));
         assert!(INSTALL_POSIX.contains("openssl dgst -sha256"));
@@ -587,6 +608,8 @@ mod tests {
         assert!(INSTALL_LOCAL_POSIX.contains(".local/share/luvus/remote"));
         assert!(INSTALL_LOCAL_POSIX.contains("transferred binary checksum mismatch"));
         assert!(INSTALL_LOCAL_POSIX.contains("remote-client-info --json"));
+        assert!(INSTALL_LOCAL_POSIX.contains("transferred binary protocol mismatch"));
+        assert!(INSTALL_LOCAL_POSIX.contains("machine_endpoint_v1"));
         assert!(INSTALL_LOCAL_POSIX.contains("ulimit -f 131072"));
         assert!(!INSTALL_LOCAL_POSIX.contains("sudo"));
         assert!(!INSTALL_LOCAL_POSIX.contains("curl"));
@@ -643,17 +666,20 @@ mod tests {
         let home = crate::persist::config_dir().join("home");
         std::fs::create_dir_all(&home).unwrap();
         let fixture = format!(
-            "#!/bin/sh\nprintf '%s\\n' '{{\"protocol_version\":{},\"version\":\"{}\",\"os\":\"macos\",\"arch\":\"aarch64\",\"binary\":\"/fixture/luvus\"}}'\n",
+            "#!/bin/sh\nprintf '%s\\n' '{{\"protocol_version\":{},\"machine_endpoint_version\":{},\"capabilities\":[\"machine_endpoint_v1\"],\"version\":\"{}\",\"os\":\"macos\",\"arch\":\"aarch64\",\"binary\":\"/fixture/luvus\"}}'\n",
             crate::ipc::protocol::PROTOCOL_VERSION,
+            crate::machine::MACHINE_ENDPOINT_VERSION,
             env!("CARGO_PKG_VERSION")
         )
         .into_bytes();
         let checksum = format!("{:x}", Sha256::digest(&fixture));
         let remote_command = format!(
-            "sh -c {} -- {} {}",
+            "sh -c {} -- {} {} {} {}",
             quote_posix(INSTALL_LOCAL_POSIX),
             env!("CARGO_PKG_VERSION"),
-            checksum
+            checksum,
+            crate::ipc::protocol::PROTOCOL_VERSION,
+            crate::machine::MACHINE_ENDPOINT_VERSION,
         );
         let mut command = std::process::Command::new("sh");
         command.arg("-c").arg(remote_command).env("HOME", &home);
@@ -677,6 +703,8 @@ mod tests {
         assert!(INSTALL_WINDOWS.contains("Get-FileHash"));
         assert!(INSTALL_WINDOWS.contains("Expand-Archive"));
         assert!(INSTALL_WINDOWS.contains("remote-client-info --json"));
+        assert!(INSTALL_WINDOWS.contains("machine_endpoint_v1"));
+        assert!(INSTALL_WINDOWS.contains("machine_endpoint_version"));
         assert!(INSTALL_WINDOWS.contains("luvus\\remote\\$Tag"));
         assert!(INSTALL_WINDOWS.contains("Move-Item -LiteralPath $Stage -Destination $Destination"));
         assert!(INSTALL_WINDOWS.contains("67108864"));
@@ -715,6 +743,10 @@ mod tests {
             .replace(
                 "__LUVUS_PROTOCOL__",
                 &crate::ipc::protocol::PROTOCOL_VERSION.to_string(),
+            )
+            .replace(
+                "__LUVUS_ENDPOINT_VERSION__",
+                &crate::machine::MACHINE_ENDPOINT_VERSION.to_string(),
             );
         let mut command = std::process::Command::new("powershell.exe");
         command
@@ -744,17 +776,20 @@ mod tests {
                 .arg("sh")
                 .arg("-s")
                 .arg("--")
-                .arg(env!("CARGO_PKG_VERSION"));
+                .arg(env!("CARGO_PKG_VERSION"))
+                .arg(crate::ipc::protocol::PROTOCOL_VERSION.to_string())
+                .arg(crate::machine::MACHINE_ENDPOINT_VERSION.to_string());
             command
         };
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert_eq!(
-            args.last().map(String::as_str),
-            Some(env!("CARGO_PKG_VERSION"))
-        );
+        assert!(args.ends_with(&[
+            env!("CARGO_PKG_VERSION").to_string(),
+            crate::ipc::protocol::PROTOCOL_VERSION.to_string(),
+            crate::machine::MACHINE_ENDPOINT_VERSION.to_string(),
+        ]));
         assert_eq!(args.iter().filter(|arg| *arg == "dev@buildbox").count(), 1);
         assert!(args.windows(2).any(|pair| pair == ["-o", "BatchMode=yes"]));
     }
@@ -798,11 +833,12 @@ while [ "$#" -gt 0 ]; do
 done
 cat > "$dir/luvus" <<'LUVUS'
 #!/bin/sh
-printf '%s\n' '{{"protocol_version":{},"version":"{}","os":"linux","arch":"x86_64","binary":"/fixture/luvus"}}'
+printf '%s\n' '{{"protocol_version":{},"machine_endpoint_version":{},"capabilities":["machine_endpoint_v1"],"version":"{}","os":"linux","arch":"x86_64","binary":"/fixture/luvus"}}'
 LUVUS
 chmod 755 "$dir/luvus"
 "#,
                 crate::ipc::protocol::PROTOCOL_VERSION,
+                crate::machine::MACHINE_ENDPOINT_VERSION,
                 env!("CARGO_PKG_VERSION")
             ),
         );
@@ -817,6 +853,7 @@ chmod 755 "$dir/luvus"
             .arg("--")
             .arg(env!("CARGO_PKG_VERSION"))
             .arg(crate::ipc::protocol::PROTOCOL_VERSION.to_string())
+            .arg(crate::machine::MACHINE_ENDPOINT_VERSION.to_string())
             .env("HOME", &home)
             .env("PATH", joined);
         let output = super::super::ssh::run_bounded_with_input(

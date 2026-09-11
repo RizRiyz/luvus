@@ -251,6 +251,10 @@ Target a named session without attaching its TUI:
 luvus --session <name> pane list
 ```
 
+Each named session owns an independent workspace tree and saved-machine
+catalog. A session switch must not copy workspaces or machine profiles from the
+previous session.
+
 ## Panes and agents
 
 Discover the exact target first:
@@ -448,12 +452,20 @@ write; reconnect for a fresh frame after EOF or `terminal.resync_required`.
 ```sh
 ssh <host>             # run Luvus on that machine
 luvus --remote <host>  # local thin client, remote Luvus server
+luvus machine list     # inspect saved SSH machines
 ```
 
-Both require Luvus on the remote machine. `--remote` uses the user's existing
-SSH transport. It does not create a Luvus network daemon. For diagnosis,
-identify the server host, selected session, remote binary, noninteractive PATH,
-and inherited endpoint.
+`--remote` requires Luvus on the remote machine and uses the user's existing
+SSH transport. Saved-machine onboarding can install a compatible user-local
+binary only after explicit foreground approval. `machine status` and background
+reconnects never install, update, or start a server. Neither mode creates a
+Luvus network daemon. For diagnosis, identify the server host, selected session,
+verified remote binary, noninteractive PATH, and inherited endpoint.
+
+In the saved-machine TUI, the header session control always owns the local
+named-session namespace. It remains local while remote workspace content is
+active and never rewrites the machine's configured remote session. Switching
+that local session reloads its independent workspace tree and machine catalog.
 
 After pairing through Access, `uhp.capabilities` retains owner `methods` and
 adds `access.mode`, `access.allowed_methods`, and gateway-specific

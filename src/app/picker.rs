@@ -134,10 +134,11 @@ impl App {
     }
 
     /// Hand the remote tab to the owner-local thin client. The selected server
-    /// deliberately receives no profile fields or SSH destination.
+    /// deliberately receives no profile fields or SSH destination. Keep the
+    /// picker alive underneath the client-owned tab so both tabs share one
+    /// modal backdrop, rectangle, resize lifecycle, and filesystem position.
     pub fn picker_open_remote_machine(&mut self) {
         if self.client_machine_capable {
-            self.picker = None;
             self.pending_machine_create = true;
         }
     }
@@ -534,12 +535,11 @@ mod tests {
 
         app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
-        assert!(app.picker.is_none());
+        assert!(app.picker.is_some());
         assert!(app.pending_machine_create);
         app.pending_machine_create = false;
-        app.open_folder_picker();
         app.handle_picker_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-        assert!(app.picker.is_none());
+        assert!(app.picker.is_some());
         assert!(app.pending_machine_create);
     }
 

@@ -333,7 +333,7 @@ sessions:
   session delete <name> [--json]  delete a stopped named session
 
 machines:
-  machine add <id> --host <ssh-alias> [--label <label>] [--remote-binary <path>] [--install] [--disabled]
+  machine add <id> --host <ssh-alias> [--label <label>] [--session <name>] [--remote-binary <path>] [--install] [--disabled]
                              provision and validate one SSH machine
   machine list               list saved machine profiles and catalog revision
   machine show <id>          show one saved profile
@@ -344,7 +344,7 @@ machines:
                              provision and enable after a bounded SSH probe, or disable locally
   machine remove <id> [--revision <n>]
                              remove only the local profile; remote panes stay alive
-  machine status <id>        run one bounded non-interactive capability probe
+  machine status <id>        verify the running selected server and workspace projection
   machine sessions <id>      list named sessions through bounded SSH
   machine open <id> [--session <name>]
                              attach using the verified absolute remote binary

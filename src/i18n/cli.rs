@@ -549,15 +549,15 @@ static HELP: &[Translation] = &[
         "로컬 프로필만 제거하며 원격 창은 계속 실행"
     ),
     tr!(
-        "run one bounded non-interactive capability probe",
-        "ejecutar una prueba de capacidades no interactiva y acotada",
-        "executar uma sondagem de recursos não interativa e limitada",
-        "exécuter une vérification de capacité non interactive et bornée",
-        "eine begrenzte nicht interaktive Funktionsprüfung ausführen",
-        "jalankan satu pemeriksaan kemampuan noninteraktif terbatas",
-        "运行一次有限的非交互式能力探测",
-        "制限付きの非対話型機能プローブを実行",
-        "제한된 비대화형 기능 검사 실행"
+        "verify the running selected server and workspace projection",
+        "verificar el servidor seleccionado en ejecución y su proyección de espacios de trabajo",
+        "verificar o servidor selecionado em execução e sua projeção de espaços de trabalho",
+        "vérifier le serveur sélectionné en cours d'exécution et sa projection des espaces de travail",
+        "den laufenden ausgewählten Server und seine Workspace-Projektion prüfen",
+        "verifikasi server terpilih yang sedang berjalan dan proyeksi ruang kerjanya",
+        "验证正在运行的所选服务器及其工作区投影",
+        "実行中の選択済みサーバーとワークスペース投影を検証",
+        "실행 중인 선택 서버와 작업 공간 프로젝션 검증"
     ),
     tr!(
         "list named sessions through bounded SSH",

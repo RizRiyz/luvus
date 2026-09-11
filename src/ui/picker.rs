@@ -20,13 +20,7 @@ pub(super) fn draw_picker(
 ) -> Vec<(PickerHit, Rect)> {
     dim_backdrop(f, area, t);
 
-    let w = area.width.saturating_sub(6).clamp(46, 76).min(area.width);
-    let h = area.height.saturating_sub(4).clamp(14, 26).min(area.height);
-    let modal = if mobile {
-        super::mobile::sheets::full_screen(area)
-    } else {
-        centered_rect(area, w, h)
-    };
+    let modal = workspace_picker_modal_rect(area, mobile);
     f.render_widget(Clear, modal);
     let block = Block::new()
         .borders(Borders::ALL)
@@ -214,6 +208,19 @@ pub(super) fn draw_picker(
     }
     rects.push((PickerHit::Modal, modal));
     rects
+}
+
+/// One geometry contract for both tabs of the workspace creation surface.
+/// The owner-local Remote Machine tab receives this exact rectangle from the
+/// selected server instead of independently approximating the native picker.
+pub(super) fn workspace_picker_modal_rect(area: Rect, mobile: bool) -> Rect {
+    let w = area.width.saturating_sub(6).clamp(46, 76).min(area.width);
+    let h = area.height.saturating_sub(4).clamp(14, 26).min(area.height);
+    if mobile {
+        super::mobile::sheets::full_screen(area)
+    } else {
+        centered_rect(area, w, h)
+    }
 }
 
 /// Truncate a string to `max` display columns, keeping the **tail** (the useful

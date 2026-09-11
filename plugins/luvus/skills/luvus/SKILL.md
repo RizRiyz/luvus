@@ -1,6 +1,6 @@
 ---
 name: luvus
-description: "Control Luvus through its local CLI and UHP. Use only for a line beginning with `=target message`, an explicit request naming Luvus, a request to delegate to a named live Luvus agent or pane, or an explicit Luvus operation involving sessions, workspaces, tabs, panes, agents, files, Git, DIFF, worktrees, tasks, leases, modules, themes, Luvus Bar, configuration, UI, integrations, or Luvus UHP. Do not use for ordinary coding, file edits, Git operations, tests, task planning, generic agent work, or parallelization unless the user explicitly connects the request to Luvus. Being inside Luvus does not trigger this skill by itself. Inside Luvus use the inherited session; outside use the installed production Luvus command and configured session."
+description: "Control Luvus through its local CLI and UHP. Use only for a line beginning with `=target message`, an explicit request naming Luvus, a request to delegate to a named live Luvus agent or pane, or an explicit Luvus operation involving sessions, machines, workspaces, tabs, panes, agents, files, Git, DIFF, worktrees, tasks, leases, modules, themes, Luvus Bar, configuration, UI, integrations, or Luvus UHP. Do not use for ordinary coding, file edits, Git operations, tests, task planning, generic agent work, or parallelization unless the user explicitly connects the request to Luvus. Being inside Luvus does not trigger this skill by itself. Inside Luvus use the inherited session; outside use the installed production Luvus command and configured session."
 ---
 
 # Luvus
@@ -110,6 +110,39 @@ whether a session exists. `session stop` ends every pane in that named server.
 Before deletion, list sessions once, require the exact stopped name, and obtain
 clear authorization. Never delete `default` and never substitute workspace
 commands for server-session commands.
+
+### Manage saved SSH machines
+
+A saved machine is an SSH profile owned by the selected local named session and
+selecting one remote named session. It is not a workspace, and opening remote
+workspaces must not create more profiles or sessions. Switching local named
+sessions reloads that session's independent workspace tree and machine catalog.
+
+The session control in the TUI header always manages the owner-local named
+session, even while a remote machine workspace is active. Do not interpret it
+as a machine-session selector or claim that local session switching changes a
+saved machine's remote-session preference.
+
+Use read-only inspection before proposing a change:
+
+```sh
+luvus machine list
+luvus machine show <id>
+luvus machine status <id>
+luvus machine sessions <id>
+```
+
+`machine status` verifies the already-running selected server and its workspace
+projection; it does not install or start anything. `machine add` and `machine
+enable` are foreground mutations that may contact the host and start an absent
+selected server. Never pass passwords or keys as CLI data. Use the user's
+OpenSSH destination or config alias, and use `--install` only when the user
+explicitly authorizes that operation. Select a non-default remote session with
+`machine add ... --session <name>`.
+
+Machine UHP methods are absent unless the user explicitly starts `uhp access
+--machines`; mutations additionally require `--control`. Do not infer machine
+authority from ordinary session UHP access.
 
 ## Use the fast command path
 

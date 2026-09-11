@@ -60,7 +60,7 @@ fn show(id: &str) -> Result<i32> {
 }
 
 fn add(args: &[String]) -> Result<i32> {
-    let usage = "usage: luvus machine add <id> --host <ssh-alias> [--label <label>] [--remote-binary <absolute-path>] [--install] [--disabled] [--revision <n>]";
+    let usage = "usage: luvus machine add <id> --host <ssh-alias> [--label <label>] [--session <name>] [--remote-binary <absolute-path>] [--install] [--disabled] [--revision <n>]";
     let id = required(args, 1, usage)?.to_string();
     catalog::validate_id(&id)?;
     let host = option(args, "--host")
@@ -75,6 +75,10 @@ fn add(args: &[String]) -> Result<i32> {
     }
     if let Some(label) = option(args, "--label") {
         profile.label = label.to_string();
+    }
+    if let Some(session) = option(args, "--session") {
+        crate::session::validate_name(session).map_err(anyhow::Error::msg)?;
+        profile.preferred_session = Some(session.to_string());
     }
     if let Some(binary) = option(args, "--remote-binary") {
         profile.remote_binary = Some(binary.to_string());
@@ -115,6 +119,7 @@ fn add(args: &[String]) -> Result<i32> {
     if let Some(probe) = &probe {
         probe.committed();
     }
+    super::notify_catalog_changed(catalog.revision);
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
@@ -137,6 +142,7 @@ fn rename(args: &[String]) -> Result<i32> {
         find_mut(catalog, id)?.label = label.to_string();
         Ok(())
     })?;
+    super::notify_catalog_changed(catalog.revision);
     print_mutation(&catalog, id)
 }
 
@@ -187,6 +193,7 @@ fn set_enabled(args: &[String], enabled: bool) -> Result<i32> {
     if let Some(probe) = preparation {
         probe.committed();
     }
+    super::notify_catalog_changed(catalog.revision);
     print_mutation(&catalog, id)
 }
 
@@ -194,7 +201,7 @@ fn prepare_foreground(
     profile: &mut MachineProfile,
     approved: bool,
 ) -> Result<super::ssh::ProbeResult> {
-    match super::ssh::prepare(profile) {
+    let probe = match super::ssh::prepare(profile) {
         Ok(probe) => Ok(probe),
         Err(_) if approved => super::ssh::prepare_or_provision(profile, true),
         Err(initial) => {
@@ -222,7 +229,10 @@ fn prepare_foreground(
             profile.automatic_provisioning = true;
             super::ssh::prepare_or_provision(profile, true)
         }
-    }
+    }?;
+    profile.remote_binary = Some(probe.remote_binary.clone());
+    super::verify_prepared_endpoint(profile, &probe)?;
+    Ok(probe)
 }
 
 fn remove(args: &[String]) -> Result<i32> {
@@ -238,6 +248,7 @@ fn remove(args: &[String]) -> Result<i32> {
             .ok_or_else(|| anyhow!("machine `{id}` was not found"))?;
         Ok(catalog.machines.remove(index))
     })?;
+    super::notify_catalog_changed(catalog.revision);
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
@@ -253,14 +264,16 @@ fn status(args: &[String]) -> Result<i32> {
     let id = required(args, 1, usage)?;
     let loaded = catalog::load()?;
     let profile = find(&loaded.catalog, id)?;
-    match super::ssh::prepare(profile) {
-        Ok(probe) => {
+    match super::inspect_profile(profile) {
+        Ok((probe, endpoint)) => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&json!({
                     "machine": id,
                     "state": "online",
                     "probe": probe,
+                    "session": endpoint.session,
+                    "workspaces": endpoint.workspace_count,
                 }))?
             );
             Ok(0)
@@ -371,7 +384,7 @@ fn machine_help() -> &'static str {
     r#"luvus machine <command> [args]
 
 Saved SSH machines:
-  machine add <id> --host <ssh-alias> [--label <label>] [--remote-binary <path>] [--install] [--disabled]
+  machine add <id> --host <ssh-alias> [--label <label>] [--session <name>] [--remote-binary <path>] [--install] [--disabled]
       validate one SSH machine; --install permits user-local installation
   machine list
       List saved profiles and the current catalog revision.
@@ -386,7 +399,7 @@ Saved SSH machines:
   machine remove <id> [--revision <n>]
       Remove only the local profile. Remote sessions and panes stay alive.
   machine status <id>
-      Run one bounded, non-interactive SSH and native-client capability probe.
+      Verify the running selected server and its workspace projection.
   machine sessions <id>
       List named Luvus sessions through a bounded SSH request.
   machine open <id> [--session <name>]
@@ -419,6 +432,8 @@ mod tests {
             "buildbox".into(),
             "--host".into(),
             "dev@buildbox".into(),
+            "--session".into(),
+            "review".into(),
             "--disabled".into(),
         ];
         assert_eq!(
@@ -432,6 +447,10 @@ mod tests {
         let loaded = catalog::load().unwrap();
         assert_eq!(loaded.catalog.machines[0].id, "buildbox");
         assert!(!loaded.catalog.machines[0].enabled);
+        assert_eq!(
+            loaded.catalog.machines[0].preferred_session.as_deref(),
+            Some("review")
+        );
         assert!(loaded.catalog.machines[0].remote_binary.is_none());
         assert!(!loaded.catalog.machines[0].automatic_provisioning);
     }

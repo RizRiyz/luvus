@@ -6,7 +6,6 @@
 pub mod api;
 pub mod client;
 mod federated;
-mod local_switch;
 pub mod protocol;
 pub mod server;
 pub mod transport;

@@ -13,6 +13,10 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 #[derive(Debug, Deserialize)]
 struct ProbeResponse {
     protocol_version: Option<u32>,
+    #[serde(default)]
+    machine_endpoint_version: Option<u32>,
+    #[serde(default)]
+    capabilities: Vec<String>,
     version: String,
     os: String,
     arch: String,
@@ -68,6 +72,13 @@ fn verified_probe(
     expected_binary: Option<&str>,
 ) -> Result<ProbeResult> {
     let response = probe(destination, invocation, true)?;
+    validate_probe_response(response, expected_binary)
+}
+
+fn validate_probe_response(
+    response: ProbeResponse,
+    expected_binary: Option<&str>,
+) -> Result<ProbeResult> {
     let protocol_version = response.protocol_version.ok_or_else(|| {
         anyhow!(
             "remote Luvus is older than this machine client; enable the machine again to update it"
@@ -80,11 +91,14 @@ fn verified_probe(
             crate::ipc::protocol::PROTOCOL_VERSION
         ));
     }
-    if response.version != env!("CARGO_PKG_VERSION") {
+    if response.machine_endpoint_version != Some(super::MACHINE_ENDPOINT_VERSION)
+        || !response
+            .capabilities
+            .iter()
+            .any(|capability| capability == super::MACHINE_ENDPOINT_CAPABILITY)
+    {
         return Err(anyhow!(
-            "remote Luvus {} does not match local {}",
-            response.version,
-            env!("CARGO_PKG_VERSION")
+            "remote Luvus does not support the required saved-machine endpoint capability"
         ));
     }
     if !matches!(response.os.as_str(), "linux" | "macos" | "windows") {
@@ -154,8 +168,9 @@ fn discover_binary(destination: &str) -> Result<String> {
     const DISCOVER: &str = r#"for p in "$HOME/.local/share/luvus/remote/v__VERSION__-p__PROTOCOL__/luvus" "$HOME/.local/bin/luvus" "$HOME/.cargo/bin/luvus" "$HOME/.nix-profile/bin/luvus" /usr/local/bin/luvus /opt/homebrew/bin/luvus /home/linuxbrew/.linuxbrew/bin/luvus; do
 if [ -x "$p" ]; then
  info=$("$p" remote-client-info --json 2>/dev/null) || continue
- printf '%s' "$info" | grep -F '"version":"__VERSION__"' >/dev/null || continue
  printf '%s' "$info" | grep -E '"protocol_version":__PROTOCOL__([,}])' >/dev/null || continue
+ printf '%s' "$info" | grep -E '"machine_endpoint_version":__ENDPOINT__([,}])' >/dev/null || continue
+ printf '%s' "$info" | grep -F '"machine_endpoint_v1"' >/dev/null || continue
  printf '%s\n' "$p"; exit 0
 fi
 done
@@ -170,7 +185,8 @@ exit 127"#;
             .replace(
                 "__PROTOCOL__",
                 &crate::ipc::protocol::PROTOCOL_VERSION.to_string(),
-            ),
+            )
+            .replace("__ENDPOINT__", &super::MACHINE_ENDPOINT_VERSION.to_string()),
     );
     let output = run_bounded(command, PROBE_TIMEOUT)?;
     if !output.status.success() {
@@ -221,13 +237,14 @@ foreach ($p in $paths) {
  if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { continue }
  try {
   $info = (& $p remote-client-info --json | Out-String) | ConvertFrom-Json
-  if ($LASTEXITCODE -eq 0 -and $info.version -eq '__VERSION__' -and $info.protocol_version -eq __PROTOCOL__ -and $info.os -eq 'windows') {
+  if ($LASTEXITCODE -eq 0 -and $info.protocol_version -eq __PROTOCOL__ -and $info.machine_endpoint_version -eq __ENDPOINT__ -and $info.capabilities -contains 'machine_endpoint_v1' -and $info.os -eq 'windows') {
    [Console]::Out.WriteLine($p); exit 0
   }
  } catch { }
 }
 exit 127"#.replace("__VERSION__", env!("CARGO_PKG_VERSION"))
         .replace("__PROTOCOL__", &crate::ipc::protocol::PROTOCOL_VERSION.to_string())
+        .replace("__ENDPOINT__", &super::MACHINE_ENDPOINT_VERSION.to_string())
 }
 
 fn probe(destination: &str, binary: &str, batch: bool) -> Result<ProbeResponse> {
@@ -529,6 +546,32 @@ pub(super) fn run_bounded_with_owned_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn compatible_response(version: &str) -> ProbeResponse {
+        ProbeResponse {
+            protocol_version: Some(crate::ipc::protocol::PROTOCOL_VERSION),
+            machine_endpoint_version: Some(super::super::MACHINE_ENDPOINT_VERSION),
+            capabilities: vec![super::super::MACHINE_ENDPOINT_CAPABILITY.to_string()],
+            version: version.to_string(),
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            binary: "/home/dev/.local/bin/luvus".to_string(),
+        }
+    }
+
+    #[test]
+    fn compatibility_uses_protocol_capability_not_package_version() {
+        let probe = validate_probe_response(compatible_response("99.0.0"), None).unwrap();
+        assert_eq!(probe.version, "99.0.0");
+
+        let mut missing = compatible_response(env!("CARGO_PKG_VERSION"));
+        missing.capabilities.clear();
+        assert!(validate_probe_response(missing, None).is_err());
+
+        let mut wrong_protocol = compatible_response(env!("CARGO_PKG_VERSION"));
+        wrong_protocol.protocol_version = Some(crate::ipc::protocol::PROTOCOL_VERSION + 1);
+        assert!(validate_probe_response(wrong_protocol, None).is_err());
+    }
 
     #[cfg(unix)]
     #[test]

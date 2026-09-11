@@ -115,7 +115,9 @@ integer or its decimal string form.
 Machine methods are an opt-in access-gateway surface, not methods of the
 selected session server. `machine.list` takes `{}`. `machine.get`,
 `machine.status`, and `machine.sessions` take `{id}`. `machine.add` takes
-`{id, host, if_revision, label?, remote_binary?, enabled?}`. Rename takes
+`{id, host, if_revision, label?, preferred_session?, remote_binary?, enabled?}`.
+`preferred_session` selects the remote named session and defaults to `default`.
+Rename takes
 `{id, label, if_revision}`; enable, disable, and remove take
 `{id, if_revision}`. Read projections omit SSH destinations and executable
 paths, but include `automatic_provisioning` so a client can distinguish a

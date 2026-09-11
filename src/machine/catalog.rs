@@ -145,11 +145,15 @@ pub(super) struct CatalogLock {
 }
 
 pub(crate) fn path() -> PathBuf {
-    crate::persist::config_dir().join("machines.json")
+    crate::persist::session_dir().join("machines.json")
 }
 
 pub(super) fn acquire_lock() -> Result<CatalogLock> {
-    let root = crate::persist::ensure_config_dir();
+    // A machine catalog belongs to the selected local named-session namespace,
+    // just like its workspace snapshot and control sockets. Validate the
+    // private session directory before creating the mutation lock.
+    let root = crate::persist::ensure_server_session_dir()
+        .context("cannot prepare the selected session machine catalog")?;
     let path = root.join("machines.lock");
     let file = OpenOptions::new()
         .read(true)
@@ -545,6 +549,32 @@ mod tests {
         let error = mutate(Some(0), |_| Ok(())).unwrap_err().to_string();
         assert!(error.contains("revision conflict"));
         assert_eq!(load().unwrap().catalog, first);
+    }
+
+    #[test]
+    fn named_sessions_have_independent_machine_catalogs() {
+        let _env = crate::persist::test_env("machine-catalog-session-scope");
+        let root = crate::persist::config_dir();
+        assert_eq!(path(), root.join("machines.json"));
+
+        std::env::set_var(crate::session::SESSION_ENV_VAR, "alpha");
+        let (_, alpha) = mutate(Some(0), |catalog| {
+            catalog.machines.push(MachineProfile::new(
+                "alpha-box".into(),
+                "alpha.example".into(),
+            ));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(path(), root.join("sessions/alpha/machines.json"));
+        assert_eq!(alpha.machines.len(), 1);
+
+        std::env::set_var(crate::session::SESSION_ENV_VAR, "beta");
+        assert_eq!(path(), root.join("sessions/beta/machines.json"));
+        assert!(load().unwrap().catalog.machines.is_empty());
+
+        std::env::set_var(crate::session::SESSION_ENV_VAR, "alpha");
+        assert_eq!(load().unwrap().catalog.machines[0].id, "alpha-box");
     }
 
     #[test]

@@ -15,6 +15,48 @@ mod ssh;
 
 pub(crate) use cli::run as run_cli;
 
+/// Stable capability advertised by binaries that support saved-machine
+/// endpoint preparation and the non-destructive persistent bridge contract.
+pub(crate) const MACHINE_ENDPOINT_CAPABILITY: &str = "machine_endpoint_v1";
+pub(crate) const MACHINE_ENDPOINT_VERSION: u32 = 1;
+
+/// Wake machine-aware clients attached to the selected owner-local session.
+/// Notification is best-effort: committing the owner-local catalog remains
+/// valid when no server or display client is currently running.
+pub(crate) fn notify_catalog_changed(revision: u64) {
+    let _ = crate::cli::send_request(
+        "__machine.catalog_changed",
+        serde_json::json!({"revision": revision}),
+    );
+}
+
+fn verify_prepared_endpoint(
+    profile: &catalog::MachineProfile,
+    prepared: &ssh::ProbeResult,
+) -> anyhow::Result<link::EndpointProof> {
+    let mut verified = profile.clone();
+    verified.remote_binary = Some(prepared.remote_binary.clone());
+    let session = verified
+        .preferred_session
+        .as_deref()
+        .unwrap_or(crate::session::DEFAULT_SESSION_NAME);
+    link::verify_endpoint(&verified, session)
+}
+
+fn inspect_profile(
+    profile: &catalog::MachineProfile,
+) -> anyhow::Result<(ssh::ProbeResult, link::EndpointProof)> {
+    let probe = ssh::prepare(profile)?;
+    let mut verified = profile.clone();
+    verified.remote_binary = Some(probe.remote_binary.clone());
+    let session = verified
+        .preferred_session
+        .as_deref()
+        .unwrap_or(crate::session::DEFAULT_SESSION_NAME);
+    let endpoint = link::verify_existing_endpoint(&verified, session)?;
+    Ok((probe, endpoint))
+}
+
 /// Create one enabled owner-local profile from the TUI form. Preparation stays
 /// outside the catalog lock because SSH and optional provisioning may take
 /// seconds; the revision fence prevents that delay from overwriting another
@@ -39,6 +81,7 @@ pub(crate) fn add_profile(
     catalog::preflight_profile(&current, &profile)?;
     let prepared = ssh::prepare_or_provision(&profile, allow_install)?;
     profile.remote_binary = Some(prepared.remote_binary.clone());
+    verify_prepared_endpoint(&profile, &prepared)?;
     let expected_revision = current.revision;
     let (_, catalog) = catalog::mutate(Some(expected_revision), |catalog| {
         if catalog.machines.iter().any(|machine| machine.id == id) {
@@ -51,6 +94,7 @@ pub(crate) fn add_profile(
         catalog::prepared_commit_error(error, profile.remote_binary.as_deref().unwrap_or_default())
     })?;
     prepared.committed();
+    notify_catalog_changed(catalog.revision);
     catalog
         .machines
         .into_iter()
@@ -76,9 +120,10 @@ pub(crate) fn enable_profile(id: &str, approved: bool) -> anyhow::Result<catalog
         profile.automatic_provisioning = true;
     }
     profile.remote_binary = Some(probe.remote_binary.clone());
+    verify_prepared_endpoint(&profile, &probe)?;
     profile.enabled = true;
     profile.connection_policy = catalog::ConnectionPolicy::PersistentWhileOpen;
-    catalog::mutate(Some(current.revision), |catalog| {
+    let (_, saved) = catalog::mutate(Some(current.revision), |catalog| {
         let saved = catalog
             .machines
             .iter_mut()
@@ -91,35 +136,8 @@ pub(crate) fn enable_profile(id: &str, approved: bool) -> anyhow::Result<catalog
         catalog::prepared_commit_error(error, profile.remote_binary.as_deref().unwrap_or_default())
     })?;
     probe.committed();
+    notify_catalog_changed(saved.revision);
     Ok(profile)
-}
-
-/// Remember a session selected through a remote server's native session menu.
-/// The catalog lock and revision retry keep concurrent CLI/UHP changes intact.
-pub(crate) fn remember_session(machine_id: &str, session: &str) -> anyhow::Result<()> {
-    catalog::validate_id(machine_id)?;
-    crate::session::validate_name(session).map_err(anyhow::Error::msg)?;
-    for _ in 0..3 {
-        let current = catalog::preflight_mutation(None)?;
-        let revision = current.revision;
-        let result = catalog::mutate(Some(revision), |catalog| {
-            let profile = catalog
-                .machines
-                .iter_mut()
-                .find(|profile| profile.id == machine_id)
-                .ok_or_else(|| anyhow::anyhow!("machine `{machine_id}` was not found"))?;
-            profile.preferred_session = Some(session.to_string());
-            Ok(())
-        });
-        match result {
-            Ok(_) => return Ok(()),
-            Err(error) if error.to_string().contains("revision conflict") => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Err(anyhow::anyhow!(
-        "machine catalog changed repeatedly while saving session `{session}`"
-    ))
 }
 
 /// Remove one owner-local profile without contacting or mutating the remote
@@ -129,7 +147,7 @@ pub(crate) fn remove_profile(id: &str) -> anyhow::Result<()> {
     catalog::validate_id(id)?;
     let current = catalog::preflight_mutation(None)?;
     let expected_revision = current.revision;
-    catalog::mutate(Some(expected_revision), |catalog| {
+    let (_, saved) = catalog::mutate(Some(expected_revision), |catalog| {
         let index = catalog
             .machines
             .iter()
@@ -138,6 +156,7 @@ pub(crate) fn remove_profile(id: &str) -> anyhow::Result<()> {
         catalog.machines.remove(index);
         Ok(())
     })?;
+    notify_catalog_changed(saved.revision);
     Ok(())
 }
 
@@ -216,28 +235,5 @@ mod profile_tests {
         let loaded = catalog::load().unwrap();
         assert_eq!(loaded.catalog.machines.len(), 1);
         assert_eq!(loaded.catalog.machines[0].id, "review");
-    }
-
-    #[test]
-    fn remember_session_is_idempotent_and_preserves_existing_profile_data() {
-        let _env = crate::persist::test_env("machine-profile-session");
-        let mut profile = catalog::MachineProfile::new("build".into(), "root@host".into());
-        profile.label = "Build Server".into();
-        profile.preferred_session = Some("default".into());
-        catalog::mutate(None, |catalog| {
-            catalog.machines.push(profile);
-            Ok(())
-        })
-        .unwrap();
-
-        remember_session("build", "review").unwrap();
-        remember_session("build", "review").unwrap();
-
-        let loaded = catalog::load().unwrap();
-        let profile = &loaded.catalog.machines[0];
-        assert_eq!(profile.label, "Build Server");
-        assert_eq!(profile.destination, "root@host");
-        assert!(profile.sessions.is_empty());
-        assert_eq!(profile.session_names(), vec!["review"]);
     }
 }

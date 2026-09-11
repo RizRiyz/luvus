@@ -130,6 +130,113 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
 pub(crate) struct ClientProjection {
     pub pane_content: Vec<(PaneId, Rect)>,
     pub shell_dock: Option<Rect>,
+    pub left_seam: Option<Rect>,
+    pub right_seam: Option<Rect>,
+    pub main_area: Rect,
+    pub pane_area: Rect,
+    pub shell_overlay: Option<Rect>,
+    pub session_slot: Option<Rect>,
+    pub session_button: Option<Rect>,
+}
+
+/// Semantic server-owned overlay bounds for a machine-aware thin client.
+/// These bounds come from render geometry, never inferred from cell colors.
+pub(crate) fn shell_overlay_rect(app: &App, area: Rect) -> Option<Rect> {
+    // The machine-aware client owns the Workspaces rows outside this modal.
+    // Publish the picker's exact bounds so those rows remain visible instead
+    // of treating its dimmed backdrop as an opaque full-screen surface.
+    if app.picker.is_some() {
+        if let Some((_, rect)) = app
+            .picker_rects
+            .iter()
+            .find(|(hit, _)| matches!(hit, crate::app::PickerHit::Modal))
+        {
+            return Some(*rect);
+        }
+    }
+    if let Some(rect) = app
+        .settings_modal_rect
+        .or(app.changelog_modal_rect)
+        .or(app.named_session_menu_rect)
+    {
+        return Some(rect);
+    }
+
+    let mut popup: Option<Rect> = None;
+    let mut include = |rect: Rect| {
+        popup = Some(match popup {
+            None => rect,
+            Some(current) => current.union(rect),
+        });
+    };
+    if let Some(menu) = &app.ws_menu {
+        menu.items.iter().for_each(|(_, rect)| include(*rect));
+    }
+    if let Some(menu) = &app.tab_menu {
+        menu.items.iter().for_each(|(_, rect)| include(*rect));
+        menu.swap_rects.iter().for_each(|(_, rect)| include(*rect));
+    }
+    if let Some(menu) = &app.pane_menu {
+        menu.items.iter().for_each(|(_, rect)| include(*rect));
+        menu.tab_rects.iter().for_each(|(_, rect)| include(*rect));
+    }
+    if let Some(menu) = &app.agent_menu {
+        menu.items.iter().for_each(|(_, rect)| include(*rect));
+    }
+    if let Some(menu) = &app.file_menu {
+        menu.items.iter().for_each(|(_, rect)| include(*rect));
+    }
+    if let Some(menu) = &app.diff_menu {
+        menu.items.iter().for_each(|(_, rect)| include(*rect));
+    }
+    if let Some(menu) = &app.orch_menu {
+        menu.items.iter().for_each(|(_, rect)| include(*rect));
+    }
+    if let Some(menu) = &app.session_menu {
+        menu.items.iter().for_each(|(_, rect)| include(*rect));
+    }
+    if let Some(menu) = &app.dock_menu {
+        menu.rects.iter().for_each(|rect| include(*rect));
+    }
+    if let Some(rect) = popup {
+        let left = rect.x.saturating_sub(1).max(area.x);
+        let top = rect.y.saturating_sub(1).max(area.y);
+        let right = rect.right().saturating_add(1).min(area.right());
+        let bottom = rect.bottom().saturating_add(1).min(area.bottom());
+        return Some(Rect::new(
+            left,
+            top,
+            right.saturating_sub(left),
+            bottom.saturating_sub(top),
+        ));
+    }
+
+    let unbounded_overlay = app.settings.is_some()
+        || app.picker.is_some()
+        || app.help_open
+        || app.changelog_open
+        || app.cmd_inspect.is_some()
+        || app.worktree_prompt.is_some()
+        || app.worktree_open.is_some()
+        || app.tab_rename.is_some()
+        || app.ws_rename.is_some()
+        || app.pane_rename.is_some()
+        || app.file_prompt.is_some()
+        || app.file_delete.is_some()
+        || app.worktree_delete.is_some()
+        || app.switcher
+        || app.search.is_some()
+        || app.orch_form.is_some()
+        || app.orch_start.is_some()
+        || app.orch_detail.is_some()
+        || app.mission_detail.is_some()
+        || app.mission_answer.is_some()
+        || app.bar.overflow.is_some();
+    unbounded_overlay.then_some(area)
+}
+
+pub(crate) fn workspace_picker_modal_rect(area: Rect, mobile: bool) -> Rect {
+    picker::workspace_picker_modal_rect(area, mobile)
 }
 
 pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientProjection {
@@ -258,6 +365,7 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     let mobile_pane_prev_rect = app.mobile_pane_prev_rect;
     let mobile_pane_next_rect = app.mobile_pane_next_rect;
     let switcher_close_rect = app.switcher_close_rect;
+    let named_session_slot_rect = app.named_session_slot_rect;
     let named_session_button_rect = app.named_session_button_rect;
     let named_session_menu_rect = app.named_session_menu_rect;
     let named_session_close_rect = app.named_session_close_rect;
@@ -282,6 +390,13 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     render_into_mode(f, app, false);
 
     let projected_shell_dock = app.client_shell_dock_rect;
+    let projected_left_seam = app.left_seam;
+    let projected_right_seam = app.right_seam;
+    let projected_main_area = app.last_main_area;
+    let projected_pane_area = app.last_pane_area;
+    let projected_shell_overlay = shell_overlay_rect(app, f.area());
+    let projected_session_slot = app.named_session_slot_rect;
+    let projected_session_button = app.named_session_button_rect;
 
     app.compact = compact;
     app.last_main_area = last_main_area;
@@ -345,6 +460,7 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     app.bar.hits = bar_hits;
     app.bar.overflow_hits = bar_overflow_hits;
     app.bar.overflow = bar_overflow;
+    app.named_session_slot_rect = named_session_slot_rect;
     app.named_session_button_rect = named_session_button_rect;
     app.named_session_menu_rect = named_session_menu_rect;
     app.named_session_close_rect = named_session_close_rect;
@@ -417,6 +533,13 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     ClientProjection {
         pane_content: projected_content,
         shell_dock: projected_shell_dock,
+        left_seam: projected_left_seam,
+        right_seam: projected_right_seam,
+        main_area: projected_main_area,
+        pane_area: projected_pane_area,
+        shell_overlay: projected_shell_overlay,
+        session_slot: projected_session_slot,
+        session_button: projected_session_button,
     }
 }
 
@@ -643,6 +766,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // set its own. A dock mounted nowhere (or a hidden sidebar) leaves its rects
     // zeroed, so nothing fires from under a widened pane area (docs/29).
     app.settings_icon_rect = None;
+    app.named_session_slot_rect = None;
     app.named_session_button_rect = None;
     app.sidebar_toggle_rect = None;
     app.right_sidebar_toggle_rect = None;
@@ -1658,6 +1782,79 @@ mod dock_projection_tests {
     }
 
     #[test]
+    fn passive_projection_reports_session_button_without_moving_active_hit_target() {
+        let _env = crate::persist::test_env("machine-session-button-projection");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(140, 40, tx).unwrap();
+        app.server_mode = true;
+        app.client_machine_capable = true;
+        app.client_shell_owns_workspaces = true;
+
+        let desktop = Rect::new(0, 0, 140, 40);
+        let mut desktop_buffer = Buffer::empty(desktop);
+        render_into(
+            &mut RenderTarget::new(&mut desktop_buffer, desktop),
+            &mut app,
+        );
+        let active = app
+            .named_session_button_rect
+            .expect("active server publishes its named-session control");
+        let active_slot = app
+            .named_session_slot_rect
+            .expect("active server publishes the complete session slot");
+
+        let secondary = Rect::new(0, 0, 100, 30);
+        let mut secondary_buffer = Buffer::empty(secondary);
+        let projection = render_projection(
+            &mut RenderTarget::new(&mut secondary_buffer, secondary),
+            &mut app,
+        );
+
+        assert!(
+            projection.session_button.is_some(),
+            "machine shell receives the owner-local named-session control"
+        );
+        assert!(
+            projection.session_slot.is_some(),
+            "machine shell receives the complete owner-local session slot"
+        );
+        assert_eq!(
+            app.named_session_button_rect,
+            Some(active),
+            "a passive machine projection cannot replace active-client input geometry"
+        );
+        assert_eq!(
+            app.named_session_slot_rect,
+            Some(active_slot),
+            "a passive machine projection cannot replace the active session slot"
+        );
+    }
+
+    #[test]
+    fn endpoint_projection_leaves_session_chrome_blank_and_inert() {
+        let _env = crate::persist::test_env("machine-session-chrome-owner");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.server_mode = true;
+        app.client_machine_capable = true;
+        app.client_shell_owns_workspaces = true;
+        app.client_shell_owns_session_chrome = true;
+
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buffer = Buffer::empty(area);
+        let projection = render_projection(&mut RenderTarget::new(&mut buffer, area), &mut app);
+
+        let slot = projection
+            .session_slot
+            .expect("remote endpoint reserves the local session slot");
+        assert_eq!(projection.session_button, None);
+        assert!(
+            (slot.x..slot.right()).all(|x| buffer[(x, slot.y)].symbol() == " "),
+            "remote endpoint pixels must not leak a backing-session label into the slot"
+        );
+    }
+
+    #[test]
     fn machine_rows_follow_the_workspace_dock_without_mutating_active_geometry() {
         let _env = crate::persist::test_env("machine-slot-projection");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -1703,5 +1900,46 @@ mod dock_projection_tests {
         assert_eq!(dock.height, 37);
         assert_eq!(remote[(dock.x + 2, dock.y)].symbol(), " ");
         assert_eq!(app.panes[&pane].size(), pty_size);
+    }
+
+    #[test]
+    fn machine_projection_reports_modal_bounds_semantically() {
+        let _env = crate::persist::test_env("machine-overlay-projection");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.client_machine_capable = true;
+        app.client_shell_owns_workspaces = true;
+        app.open_settings();
+
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buffer = Buffer::empty(area);
+        let projection = render_projection(&mut RenderTarget::new(&mut buffer, area), &mut app);
+        let overlay = projection
+            .shell_overlay
+            .expect("open settings publishes an overlay rectangle");
+        assert!(overlay.width > 0 && overlay.height > 0);
+        assert!(area.contains(overlay.as_position()));
+        assert!(overlay.right() <= area.right());
+        assert!(overlay.bottom() <= area.bottom());
+    }
+
+    #[test]
+    fn machine_picker_projects_only_its_native_modal_rectangle() {
+        let _env = crate::persist::test_env("machine-picker-overlay-projection");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.client_machine_capable = true;
+        app.client_shell_owns_workspaces = true;
+        app.open_folder_picker();
+
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buffer = Buffer::empty(area);
+        let projection = render_projection(&mut RenderTarget::new(&mut buffer, area), &mut app);
+        assert_eq!(
+            projection.shell_overlay,
+            Some(workspace_picker_modal_rect(area, false)),
+            "the owner-local dock remains visible outside the picker"
+        );
+        assert_ne!(projection.shell_overlay, Some(area));
     }
 }

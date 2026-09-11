@@ -47,7 +47,7 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 #[cfg(not(windows))]
 use ratatui::crossterm::event::read as read_event;
 use ratatui::crossterm::event::{
@@ -115,7 +115,7 @@ fn main() -> Result<()> {
         Some("client") => return ipc::client::run(&persist::client_socket_path()),
         // Remote attach (docs/18 RA): the bridge runs on the remote host (via
         // ssh); `--remote <host>` launches it from the local side.
-        Some("remote-client-bridge") => return remote_client_bridge(),
+        Some("remote-client-bridge") => return remote_client_bridge(&args[2..]),
         Some("--remote") => return remote_attach(&args),
         // `attach <id>` (docs/18 WA-2): focus + zoom the pane, then open the TUI
         // straight into that fullscreen terminal.
@@ -638,10 +638,61 @@ fn open_cwd_workspace() {
 /// Remote bridge role (docs/18 RA-1), run *on the remote host* by ssh. Ensure a
 /// server is up, then pump this process's stdin/stdout to/from the local socket
 /// so the `luvus --remote` client on the other end of the ssh pipe drives it.
-fn remote_client_bridge() -> Result<()> {
+fn remote_client_bridge(args: &[String]) -> Result<()> {
     let sock = persist::client_socket_path();
-    ensure_server_ready(&sock)?;
+    match args {
+        [] => ensure_server_ready(&sock)?,
+        [mode] if mode == "--existing-only" => ensure_server_existing(&sock)?,
+        [mode] if mode == "--start-if-missing" => ensure_server_start_if_missing(&sock)?,
+        _ => return Err(anyhow!("invalid remote client bridge mode")),
+    }
     ipc::client::remote_bridge(&sock)
+}
+
+/// Validate an already-running selected server without starting, stopping, or
+/// recycling it. Persistent saved-machine links use this path so a reconnect
+/// never gains foreground repair authority.
+fn ensure_server_existing(_sock: &Path) -> Result<()> {
+    let _running = retry_control_probe(
+        SERVER_CONTROL_TIMEOUT,
+        SERVER_RECOVERY_TIMEOUT,
+        server_version_with_timeout,
+    )
+    .context("selected remote Luvus session is not responding")?;
+    Ok(())
+}
+
+/// Start an absent selected server, but never recycle an existing one. This is
+/// reserved for an explicit foreground onboarding/enable operation.
+fn ensure_server_start_if_missing(sock: &Path) -> Result<()> {
+    if retry_control_probe(
+        SERVER_CONTROL_TIMEOUT,
+        SERVER_RECOVERY_TIMEOUT,
+        server_version_with_timeout,
+    )
+    .is_ok()
+    {
+        return Ok(());
+    }
+    match ipc::transport::connect_timeout(sock, SERVER_RECOVERY_TIMEOUT) {
+        Ok(_) => Err(anyhow!(
+            "selected remote Luvus session is present but not responding; no restart was attempted"
+        )),
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => Err(anyhow!(
+            "selected remote Luvus session endpoint is busy; no restart was attempted"
+        )),
+        Err(_) => {
+            spawn_server()?;
+            wait_for_socket(sock)?;
+            let _running = retry_control_probe(
+                SERVER_CONTROL_TIMEOUT,
+                SERVER_RECOVERY_TIMEOUT,
+                server_version_with_timeout,
+            )
+            .context("new remote Luvus session did not become responsive")?;
+            Ok(())
+        }
+    }
 }
 
 /// Read-only capability probe used before a saved machine is enabled. It does
@@ -661,6 +712,8 @@ fn remote_client_info(args: &[String]) -> Result<()> {
         "{}",
         serde_json::json!({
             "protocol_version": ipc::protocol::PROTOCOL_VERSION,
+            "machine_endpoint_version": machine::MACHINE_ENDPOINT_VERSION,
+            "capabilities": [machine::MACHINE_ENDPOINT_CAPABILITY],
             "version": env!("CARGO_PKG_VERSION"),
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,

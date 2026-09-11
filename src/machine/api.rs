@@ -80,9 +80,10 @@ fn status(params: &Value) -> Result<Value> {
     let id = string(params, "id")?;
     catalog::validate_id(id)?;
     let loaded = catalog::load()?;
-    match super::ssh::prepare(find(&loaded.catalog, id)?) {
-        Ok(probe) => Ok(json!({"type":"machine_status","machine":id,
-            "state":"online","probe":project_probe(&probe)})),
+    match super::inspect_profile(find(&loaded.catalog, id)?) {
+        Ok((probe, endpoint)) => Ok(json!({"type":"machine_status","machine":id,
+            "state":"online","probe":project_probe(&probe),
+            "session":endpoint.session,"workspaces":endpoint.workspace_count})),
         Err(_) => Ok(json!({"type":"machine_status","machine":id,
             "state":"attention","error":"machine probe failed"})),
     }
@@ -104,6 +105,7 @@ fn add(params: &Value) -> Result<Value> {
             "id",
             "host",
             "label",
+            "preferred_session",
             "remote_binary",
             "enabled",
             "if_revision",
@@ -113,6 +115,10 @@ fn add(params: &Value) -> Result<Value> {
     let mut profile = MachineProfile::new(id.clone(), string(params, "host")?.to_string());
     if let Some(label) = optional_string(params, "label")? {
         profile.label = label.to_string();
+    }
+    if let Some(session) = optional_string(params, "preferred_session")? {
+        crate::session::validate_name(session).map_err(anyhow::Error::msg)?;
+        profile.preferred_session = Some(session.to_string());
     }
     if let Some(binary) = optional_string(params, "remote_binary")? {
         profile.remote_binary = Some(binary.to_string());
@@ -134,6 +140,7 @@ fn add(params: &Value) -> Result<Value> {
     let probe = if profile.enabled {
         let probe = super::ssh::prepare_or_provision(&profile, false)?;
         profile.remote_binary = Some(probe.remote_binary.clone());
+        super::verify_prepared_endpoint(&profile, &probe)?;
         Some(probe)
     } else {
         None
@@ -145,6 +152,7 @@ fn add(params: &Value) -> Result<Value> {
         catalog.machines.push(profile.clone());
         Ok(())
     })?;
+    super::notify_catalog_changed(saved.revision);
     Ok(json!({"type":"machine","revision":saved.revision,
         "machine":project(&profile),"probe":probe.as_ref().map(project_probe)}))
 }
@@ -159,6 +167,7 @@ fn rename(params: &Value) -> Result<Value> {
         find_mut(catalog, id)?.label = label.to_string();
         Ok(())
     })?;
+    super::notify_catalog_changed(saved.revision);
     mutation_result(&saved, id)
 }
 
@@ -172,7 +181,10 @@ fn set_enabled(params: &Value, enabled: bool) -> Result<Value> {
         let mut profile = find(&current, id)?.clone();
         profile.enabled = true;
         catalog::preflight_profile(&current, &profile)?;
-        Some(super::ssh::prepare_or_provision(&profile, false)?.remote_binary)
+        let probe = super::ssh::prepare_or_provision(&profile, false)?;
+        profile.remote_binary = Some(probe.remote_binary.clone());
+        super::verify_prepared_endpoint(&profile, &probe)?;
+        Some(probe.remote_binary)
     } else {
         None
     };
@@ -189,6 +201,7 @@ fn set_enabled(params: &Value, enabled: bool) -> Result<Value> {
         }
         Ok(())
     })?;
+    super::notify_catalog_changed(saved.revision);
     mutation_result(&saved, id)
 }
 
@@ -204,6 +217,7 @@ fn remove(params: &Value) -> Result<Value> {
             .ok_or_else(|| anyhow!("machine `{id}` was not found"))?;
         Ok(catalog.machines.remove(index))
     })?;
+    super::notify_catalog_changed(saved.revision);
     Ok(json!({"type":"machine_removed","revision":saved.revision,
         "machine":project(&removed)}))
 }
@@ -308,12 +322,14 @@ mod tests {
         let added = dispatch(
             "machine.add",
             &json!({
-                "id":"build","host":"dev@build","enabled":false,"if_revision":0
+                "id":"build","host":"dev@build","preferred_session":"review",
+                "enabled":false,"if_revision":0
             }),
         )
         .unwrap();
         assert_eq!(added["revision"], 1);
         assert_eq!(added["machine"]["automatic_provisioning"], false);
+        assert_eq!(added["machine"]["preferred_session"], "review");
         assert_eq!(
             dispatch("machine.list", &json!({})).unwrap()["machines"][0]["id"],
             "build"

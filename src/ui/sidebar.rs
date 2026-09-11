@@ -367,6 +367,15 @@ fn draw_named_session_button(
     t: &Theme,
 ) {
     let available = right.saturating_sub(x);
+    let slot = Rect::new(x, y, available, 1);
+    app.named_session_slot_rect = (app.server_mode && slot.width > 0).then_some(slot);
+    if app.client_shell_owns_session_chrome {
+        // The machine-aware client owns this complete interval. A remote
+        // endpoint must contribute neither session pixels nor a live hit
+        // target, regardless of the length of its backing session name.
+        app.named_session_button_rect = None;
+        return;
+    }
     let name = crate::ui::truncate(
         &crate::session::display_name(),
         available.saturating_sub(2) as usize,
