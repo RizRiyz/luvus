@@ -141,6 +141,13 @@ impl App {
     /// presentation-oriented list methods this spans every workspace and tab,
     /// includes non-terminal views explicitly, and never reads terminal text.
     pub(crate) fn runtime_snapshot(&self) -> Value {
+        // Invert once per snapshot rather than scanning every alias per pane.
+        // Backend titles intentionally do not override operator-assigned names.
+        let agent_names: HashMap<_, _> = self
+            .agent_names
+            .iter()
+            .map(|(name, pane)| (*pane, name))
+            .collect();
         let mut workspaces = Vec::with_capacity(self.workspaces.len());
         for (workspace_index, workspace) in self.workspaces.iter().enumerate() {
             let mut tabs = Vec::with_capacity(workspace.tabs.len());
@@ -175,6 +182,7 @@ impl App {
                                     "start_marker":runtime.start_marker,
                                 })),
                                 "content_revision":pane.content_revision(),
+                                "agent_name":agent_names.get(&pane_id).copied(),
                                 "agent":status.map(|status| status.agent.clone()),
                                 "agent_status":status.map(|status| state_str(status.state)),
                                 "agent_authority":status.map(|status| status.identity_source),

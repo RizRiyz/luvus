@@ -1,5 +1,5 @@
 {
-  "$comment": "Effective Access permissions are returned by uhp.capabilities on the Access endpoint only; no new event or event-sequence semantics.",
+  "$comment": "Effective Access permissions are returned by uhp.capabilities on the Access endpoint only; no new event or event-sequence semantics. session.snapshot terminal agent_name is a read projection of operator aliases. agent.name changes aliases without emitting an event or advancing event_sequence. pane.rename updates the same map, emits pane.renamed, and advances event_sequence, including when clearing a name. Consumers refresh snapshots to observe aliases; the sequence is not an alias ETag because agent.name is silent.",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://luvus.dev/protocol/uhp/v1/event-catalog.schema.json",
   "title": "Luvus Universal Harness Protocol general event payload catalog",

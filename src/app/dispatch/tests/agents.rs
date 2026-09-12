@@ -1182,6 +1182,157 @@ fn integration_report_is_explainable_exclusive_and_resolves_waits() {
 }
 
 #[test]
+/// Preserve operator aliases independently of backend titles and focus.
+fn snapshot_preserves_agent_alias_across_inactive_tabs() {
+    let _env = crate::persist::test_env("snapshot-aliases");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let first = app.layout().focus;
+    app.set_agent_name(first, Some("reviewer"));
+    app.backend_labels.insert(first, "backend-title".into());
+    app.dispatch("tab.new", &json!({})).unwrap();
+    let second = app.layout().focus;
+    app.set_agent_name(second, Some("worker"));
+    assert!(app.create_workspace_at(crate::persist::ensure_config_dir()));
+    let third = app.layout().focus;
+    let active_ws = app.active_ws;
+    let pane_count = app.panes.len();
+    let engine = std::sync::Arc::clone(&app.panes[&first].engine);
+    let guard = engine.lock().unwrap();
+    let snapshot = app.dispatch("session.snapshot", &json!({})).unwrap();
+    drop(guard); // Snapshot must not need the terminal-engine lock.
+    let row = |snapshot: &Value, pane: PaneId| -> Value {
+        let pane_id = pane.0.to_string();
+        snapshot["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|w| w["tabs"].as_array().unwrap())
+            .flat_map(|t| t["panes"].as_array().unwrap())
+            .find(|r| r["pane_id"].as_str() == Some(pane_id.as_str()))
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row(&snapshot, first)["agent_name"], "reviewer");
+    assert_eq!(row(&snapshot, second)["agent_name"], "worker");
+    assert_eq!(row(&snapshot, third).get("agent_name"), Some(&Value::Null));
+    assert_eq!(app.agent_name_for(first), Some("backend-title"));
+    assert_eq!(app.active_ws, active_ws);
+    assert_eq!(app.layout().focus, third);
+    assert_eq!(app.panes.len(), pane_count);
+    assert_eq!(snapshot["workspaces"][0]["index"], 1);
+    assert_eq!(snapshot["workspaces"][0]["tabs"][1]["index"], 2);
+
+    let sequence = snapshot["event_sequence"].clone();
+    app.set_agent_name(first, Some("renamed"));
+    let renamed = app.runtime_snapshot();
+    assert_eq!(row(&renamed, first)["agent_name"], "renamed");
+    assert_eq!(renamed["event_sequence"], sequence);
+    app.set_agent_name(second, Some("renamed"));
+    let reassigned = app.runtime_snapshot();
+    assert_eq!(
+        row(&reassigned, first).get("agent_name"),
+        Some(&Value::Null)
+    );
+    assert_eq!(row(&reassigned, second)["agent_name"], "renamed");
+    app.workspaces[0].tabs.swap(0, 1);
+    assert_eq!(
+        row(&app.runtime_snapshot(), second)["agent_name"],
+        "renamed"
+    );
+    app.set_agent_name(second, None);
+    assert_eq!(
+        row(&app.runtime_snapshot(), second).get("agent_name"),
+        Some(&Value::Null)
+    );
+    assert_eq!(app.runtime_snapshot()["event_sequence"], sequence);
+}
+
+#[test]
+fn snapshot_alias_events_follow_the_naming_mutator() {
+    let _env = crate::persist::test_env("snapshot-alias-mutators");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus.0.to_string();
+    for (method, params, alias, emits_event) in [
+        (
+            "agent.name",
+            json!({"pane":pane,"name":"agent-alias"}),
+            json!("agent-alias"),
+            false,
+        ),
+        (
+            "agent.name",
+            json!({"pane":pane,"clear":true}),
+            Value::Null,
+            false,
+        ),
+        (
+            "pane.rename",
+            json!({"pane":pane,"name":"pane-alias"}),
+            json!("pane-alias"),
+            true,
+        ),
+        (
+            "pane.rename",
+            json!({"pane":pane,"name":""}),
+            Value::Null,
+            true,
+        ),
+    ] {
+        let before = app.runtime_snapshot()["event_sequence"].as_u64().unwrap();
+        app.dispatch(method, &params).unwrap();
+        let snapshot = app.dispatch("session.snapshot", &json!({})).unwrap();
+        let row = &snapshot["workspaces"][0]["tabs"][0]["panes"][0];
+        assert_eq!(row["pane_id"], pane);
+        assert_eq!(row.get("agent_name"), Some(&alias), "{method}: {params}");
+        let events = crate::ipc::api::replayed_events_after(&app.events, before);
+        if emits_event {
+            assert_eq!(snapshot["event_sequence"], before + 1);
+            assert_eq!(
+                events,
+                vec![json!({
+                    "event":"pane.renamed", "sequence":before + 1,
+                    "data":{"pane":pane,"name":alias}
+                })]
+            );
+        } else {
+            assert_eq!(snapshot["event_sequence"], before);
+            assert!(events.is_empty(), "{method}: {params}");
+        }
+    }
+}
+
+#[test]
+/// Names belong only to terminal rows; empty sessions stay valid.
+fn snapshot_alias_excludes_native_views_and_handles_no_workspace() {
+    let _env = crate::persist::test_env("snapshot-alias-views");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let terminal = app.layout().focus;
+    app.open_document_preview_tab(
+        crate::persist::ensure_config_dir().join("preview.md"),
+        crate::files::preview::PreviewKind::Markdown,
+    );
+    let view = app.layout().focus;
+    assert_ne!(terminal, view);
+    app.set_agent_name(view, Some("view-alias"));
+    let snapshot = app.runtime_snapshot();
+    let panes = &snapshot["workspaces"][0]["tabs"][1]["panes"];
+    assert_eq!(panes[0]["kind"], "view");
+    assert!(panes[0].get("agent_name").is_none());
+    assert_eq!(
+        snapshot["workspaces"][0]["tabs"][0]["panes"][0].get("agent_name"),
+        Some(&Value::Null)
+    );
+    app.workspaces.clear();
+    assert_eq!(
+        app.dispatch("session.snapshot", &json!({})).unwrap()["workspaces"],
+        json!([])
+    );
+}
+
+#[test]
 fn runtime_snapshot_is_global_fenced_and_processes_hide_arguments() {
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
