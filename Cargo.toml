@@ -1,6 +1,6 @@
 [package]
 name = "luvus"
-version = "0.14.0"
+version = "0.14.1"
 edition = "2021"
 # ratatui 0.30 (and ratatui-core) use Rust edition 2024, so the dependency tree
 # needs rustc 1.88+. Keep this honest — a lower value makes `cargo install` fail
