@@ -1163,6 +1163,14 @@ fn apply_pane_env(
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
+    // A persistent Luvus server may have been started through an SSH bridge.
+    // Its panes own fresh local PTYs, so inheriting the bridge's connection
+    // identity makes terminal applications misclassify those PTYs as SSH
+    // terminals long after the originating connection is gone. Keep
+    // SSH_AUTH_SOCK: forwarded agent access is still useful inside panes.
+    for key in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"] {
+        cmd.env_remove(key);
+    }
     cmd.env("TERM", "xterm-256color");
     cmd.env("LUVUS_ENV", "1");
     cmd.env("LUVUS_PANE_ID", id.0.to_string());
@@ -1661,8 +1669,10 @@ mod reap_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        child_poll_finished, path_with_server_binary, wrap_paste, write_input_action, InputAction,
+        apply_pane_env, child_poll_finished, path_with_server_binary, wrap_paste,
+        write_input_action, CommandBuilder, InputAction, PaneId,
     };
+    use std::ffi::OsStr;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -1719,6 +1729,36 @@ mod tests {
         assert!(child_poll_finished(Ok(Some(
             portable_pty::ExitStatus::with_exit_code(0)
         ))));
+    }
+
+    #[test]
+    fn pane_env_drops_ssh_terminal_identity_but_keeps_agent_forwarding() {
+        let mut command = CommandBuilder::new("shell");
+        let extra_env = [
+            (
+                "SSH_CONNECTION".to_string(),
+                "client connection".to_string(),
+            ),
+            ("SSH_CLIENT".to_string(), "client identity".to_string()),
+            ("SSH_TTY".to_string(), "windows-pty".to_string()),
+            ("SSH_AUTH_SOCK".to_string(), "forwarded-agent".to_string()),
+        ];
+
+        apply_pane_env(
+            &mut command,
+            PaneId(1),
+            std::path::Path::new("."),
+            &extra_env,
+        );
+
+        for key in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"] {
+            assert_eq!(command.get_env(key), None, "{key} must not reach panes");
+        }
+        assert_eq!(
+            command.get_env("SSH_AUTH_SOCK"),
+            Some(OsStr::new("forwarded-agent")),
+            "SSH agent forwarding remains available"
+        );
     }
 
     #[test]
