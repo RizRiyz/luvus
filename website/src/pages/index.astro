@@ -15,41 +15,9 @@ import '@fontsource/ibm-plex-mono/700.css';
 import '@fontsource/orbit/400.css'; // the wordmark face
 import Logo from '../components/Logo.astro';
 import XLogo from '../components/XLogo.astro';
-// The surviving Luvus mark. Imported raw and retinted at build time so it can be a
-// theme-aware line drawing rather than a flat image:
-//   * the white backing rect goes, or it would be a white square on a dark page;
-//   * `#272727` becomes `currentColor`, so CSS decides the ink;
-//   * the `white` knockout fills (they hide the antennae behind the circles)
-//     become `var(--bg)`, so they still occlude but match whatever the page is.
+// The canonical fixed-colour pixel mark used by the hero and final CTA.
 import luvusRaw from '../assets/luvus-logo.svg?raw';
-const luvusTinted = luvusRaw
-  .replace(/<rect width="1000" height="1000" fill="white"\/>/, '')
-  .replace(/#272727/g, 'currentColor')
-  .replace(/fill="white"/g, 'fill="var(--bg)"');
-// Split the puppet into the three parts that hang, so each can swing on its own
-// string instead of the whole mark moving as one rigid piece. The artwork is a
-// flat list of 16 shapes in a fixed order:
-//   0-1 crossbar · 2 neck · 3-4 strings · 5 head + 6-7 eyes ·
-//   8 left ball + 9-11 its marks · 12 right ball + 13-15 its marks
-// Guarded on that count: if the artwork is re-exported differently the grouping
-// is skipped and the mark still renders, just swinging as a whole.
-const luvusParts = luvusTinted.match(/<(?:rect|circle)[^>]*\/>/g) ?? [];
-// Rebuilt between the <svg> tags rather than by substituting the joined shapes:
-// the source keeps one element per line, so a join with no separator matches
-// nothing and the grouping silently does not happen.
-const luvusSvg =
-  luvusParts.length === 16
-    ? luvusTinted.replace(
-        /(<svg[^>]*>)[\s\S]*(<\/svg>)/,
-        (_m: string, open: string, close: string) =>
-          open +
-          luvusParts.slice(0, 5).join('') +
-          `<g class="p-head">${luvusParts.slice(5, 8).join('')}</g>` +
-          `<g class="p-left">${luvusParts.slice(8, 12).join('')}</g>` +
-          `<g class="p-right">${luvusParts.slice(12, 16).join('')}</g>` +
-          close
-      )
-    : luvusTinted;
+const luvusSvg = luvusRaw;
 import { NAV_MARK } from '../lib/mark';
 import FeatureIcon from '../components/FeatureIcon.astro';
 // Authentic brand marks (24×24 SVGs) for the "works with" grid. The `-color`
@@ -160,7 +128,7 @@ const ogImage = 'https://luvus.dev/og.png';
     <nav>
       <div class="nav-inner">
       <a class="brand" href="/">
-        <!-- Canonical Luvus mark, retinted with the active theme. -->
+        <!-- Canonical Luvus pixel mark in its fixed brand colour. -->
         <span class="mark mark-luvus" aria-hidden="true" set:html={NAV_MARK}></span>
         <span>Luvus</span>
       </a>
@@ -742,7 +710,7 @@ const ogImage = 'https://luvus.dev/og.png';
 
     <section class="cta-repo">
       <div class="cta-card" aria-labelledby="name-note-title">
-        <div class="cta-art" aria-hidden="true" set:html={luvusTinted}></div>
+        <div class="cta-art" aria-hidden="true" set:html={luvusSvg}></div>
 
         <div class="cta-copy">
         <div class="name-dictionary">
@@ -1423,8 +1391,7 @@ const ogImage = 'https://luvus.dev/og.png';
       }
       /* Inline SVG logo mark · crisp at any size, sits flush with the wordmark. */
       .mark { display: block; flex-shrink: 0; }
-      /* The nav mark is inline line art. Ink follows the wordmark, so it
-         reads as one lockup rather than an image sat beside text. */
+      /* The compact viewBox keeps the pixel mark legible at navigation size. */
       .mark-luvus { width: 42px; height: 42px; }
       .mark-luvus svg { width: 100%; height: 100%; display: block; }
       .nav-links {
@@ -1476,73 +1443,24 @@ const ogImage = 'https://luvus.dev/og.png';
         -webkit-mask: var(--art) center / contain no-repeat;
         mask: var(--art) center / contain no-repeat;
       }
-      /* The inline Luvus mark uses real SVG rather than a masked image, so the
-         knockout fills can sit at `--bg` and read as line art. `color` is the ink,
-         the same `--overlay1` the masked mark used, so the weight is comparable.
-         Not mirrored: the mark is near-symmetric, so flipping it does nothing. */
+      /* The fixed-colour pixel mark remains crisp and recognizable across all
+         palettes instead of being retinted as generic theme artwork. */
       .hero-art-svg {
         background: none; -webkit-mask: none; mask: none;
         transform: none;
-        color: var(--overlay1);
         display: flex; align-items: flex-end; justify-content: center;
       }
-      /* The mark is a marionette: a control bar up top, two strings, and a
-         puppet hanging off them. So it hangs. The pivot is the crossbar rather
-         than the middle of the box, which is what makes it read as swinging from
-         its strings instead of spinning about its waist.
-         Two cycles again, unequal, so the sway and the bob drift against each
-         other and it never ticks like a metronome. A couple of degrees is
-         plenty; more reads as a pendulum, not a puppet at rest. */
       .hero-art-svg svg {
         width: 100%; height: 100%; display: block;
-        transform-origin: 50% 9%;
-        animation:
-          bh-puppet-sway 6.5s cubic-bezier(0.45, 0, 0.55, 1) infinite,
-          bh-puppet-bob 4.3s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+        filter: drop-shadow(0 0 24px rgb(219 198 111 / 0.18));
+        animation: bh-logo-float 5.2s cubic-bezier(0.45, 0, 0.55, 1) infinite;
       }
-      @keyframes bh-puppet-sway {
-        0%, 100% { rotate: -2.1deg; }
-        50%      { rotate: 2.1deg; }
-      }
-      @keyframes bh-puppet-bob {
-        0%, 100% { translate: 0 0; }
-        50%      { translate: 0 1.1%; }
-      }
-      /* Each ball swings from the point its own string ends, in viewBox units:
-         the head off the neck, the two hands off the strings either side. That
-         pivot is the whole trick — rotate about a ball's centre and it spins,
-         rotate about where it hangs and it dangles.
-         Four periods across the mark, none a multiple of another, so the parts
-         drift in and out of step and it never settles into a pattern. */
-      .hero-art-svg :is(.p-head, .p-left, .p-right) { transform-box: view-box; }
-      .hero-art-svg .p-head {
-        transform-origin: 500px 407px;
-        animation: bh-hang-head 5.1s cubic-bezier(0.45, 0, 0.55, 1) infinite;
-      }
-      .hero-art-svg .p-left {
-        transform-origin: 232px 643px;
-        animation: bh-hang-left 3.7s cubic-bezier(0.45, 0, 0.55, 1) infinite;
-      }
-      .hero-art-svg .p-right {
-        transform-origin: 782px 643px;
-        animation: bh-hang-right 4.9s cubic-bezier(0.45, 0, 0.55, 1) infinite;
-      }
-      /* The hands swing wider than the head: less mass on the end of the string. */
-      @keyframes bh-hang-head {
-        0%, 100% { rotate: 2.4deg; }
-        50%      { rotate: -2.4deg; }
-      }
-      @keyframes bh-hang-left {
-        0%, 100% { rotate: -6deg; }
-        50%      { rotate: 5deg; }
-      }
-      @keyframes bh-hang-right {
-        0%, 100% { rotate: 5.5deg; }
-        50%      { rotate: -6.5deg; }
+      @keyframes bh-logo-float {
+        0%, 100% { transform: translateY(0); }
+        50%      { transform: translateY(-1.2%); }
       }
       @media (prefers-reduced-motion: reduce) {
-        .hero-art-svg svg,
-        .hero-art-svg :is(.p-head, .p-left, .p-right) { animation: none; }
+        .hero-art-svg svg { animation: none; }
       }
       .install {
         display: inline-flex; align-items: center; gap: 0.85rem; margin-top: 2.2rem;
