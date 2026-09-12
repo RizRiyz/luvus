@@ -18,6 +18,25 @@ fn task_update_rejects_an_unknown_task_without_emitting_null_success() {
 }
 
 #[test]
+fn task_retry_api_queues_a_new_attempt_and_projects_history() {
+    let (_env, mut app) = app("socket-task-retry");
+    app.orch
+        .add_task("retry".into(), vec![], vec![], None)
+        .unwrap();
+    app.orch
+        .set_status("t1", crate::orch::TaskStatus::Failed)
+        .unwrap();
+
+    let result = app.dispatch("task.retry", &json!({"id":"t1"})).unwrap();
+    assert_eq!(result["task"]["status"], "queued");
+    assert_eq!(result["task"]["attempt"], 2);
+    assert_eq!(
+        result["task"]["previous_attempts"][0]["final_status"],
+        "failed"
+    );
+}
+
+#[test]
 fn task_start_api_supports_explicit_workspace_mode() {
     let (_env, mut app) = app("socket-task-workspace");
     let workspace_id = app.workspaces[0].id.clone();

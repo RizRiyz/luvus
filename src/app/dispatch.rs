@@ -344,6 +344,7 @@ impl App {
             "task.start" => self.api_task_start(method, p),
             "task.update" => self.api_task_update(method, p),
             "task.done" => self.api_task_done(method, p),
+            "task.retry" => self.api_task_retry(method, p),
             "task.merge" => self.api_task_merge(method, p),
             "task.next" => self.api_task_next(method, p),
             "task.heartbeat" => self.api_task_heartbeat(method, p),

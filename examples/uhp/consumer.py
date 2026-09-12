@@ -625,6 +625,12 @@ def valid_global_request(value, methods):
             return False
         if mode == "workspace" and "branch" in params:
             return False
+    if value["method"] == "task.retry":
+        params = value["params"]
+        return (
+            set(params) == {"id"}
+            and bounded_string(params["id"], 128, allow_empty=False)
+        )
     if value["method"] == "task.heartbeat":
         params = value["params"]
         context = params.get("context")

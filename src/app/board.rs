@@ -6,7 +6,7 @@
 //! whole flow is drivable from the UI, not only the `luvus task …` CLI.
 
 use super::*;
-use crate::orch::{TaskStatus, TaskWorkerMode, WorkspaceWorkerBinding};
+use crate::orch::{TaskCompletionSource, TaskStatus, TaskWorkerMode, WorkspaceWorkerBinding};
 
 #[derive(Debug)]
 pub struct TaskStartResult {
@@ -19,7 +19,60 @@ pub struct TaskStartResult {
     pub branch: Option<String>,
 }
 
+pub enum TaskRetryResult {
+    Task(crate::orch::Task),
+    AutomationRun(crate::automation::AutomationRun),
+}
+
 impl App {
+    /// Retry a terminal task without rewriting its previous work. Manual tasks
+    /// are atomically returned to the queue. Automation-owned tasks create a
+    /// new immutable run from the original run's captured contract.
+    pub fn retry_task(&mut self, id: &str) -> Result<TaskRetryResult, (String, String)> {
+        let task = self
+            .orch
+            .validate_retry(id)
+            .map_err(|reject| (reject.code.to_string(), reject.message))?
+            .clone();
+        if let Some(provenance) = task.automation {
+            if self.workspaces.is_empty() {
+                return Err(("no_session".into(), "no active session".into()));
+            }
+            let now = crate::automation::unix_now();
+            let run = self
+                .automation
+                .request_retry(&provenance.run_id, now)
+                .map_err(|reject| (reject.code.to_string(), reject.message))?;
+            self.persist_automation();
+            self.emit_event(
+                "automation.run_queued",
+                serde_json::json!({
+                    "automation_id": run.automation_id,
+                    "run_id": run.id,
+                    "scheduled_at": run.scheduled_at,
+                    "retry_of": run.retry_of,
+                }),
+            );
+            self.start_automation_run(&run.id, now);
+            let run = self.automation.run(&run.id).cloned().unwrap_or(run);
+            return Ok(TaskRetryResult::AutomationRun(run));
+        }
+
+        let mut candidate = self.orch.clone();
+        let task = candidate
+            .retry_task(id)
+            .map_err(|reject| (reject.code.to_string(), reject.message))?;
+        candidate
+            .try_save()
+            .map_err(|error| ("persist_failed".to_string(), error.to_string()))?;
+        self.orch = candidate;
+        self.emit_event(
+            "task.retried",
+            serde_json::json!({"id": task.id, "attempt": task.attempt}),
+        );
+        Ok(TaskRetryResult::Task(task))
+    }
+
     /// Open (or focus, if already open) the orchestration board in the active
     /// workspace. There's one board per workspace; the ledger behind it is global.
     pub fn open_orch_board(&mut self) {
@@ -235,11 +288,7 @@ impl App {
                     )
                 })?;
         }
-        let branch = branch
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .or_else(|| task.branch.clone())
-            .unwrap_or_else(|| format!("luvus/{}", task.id));
+        let branch = task_branch_name(task, branch);
         let persisted = task
             .worktree
             .as_ref()
@@ -864,7 +913,7 @@ impl App {
             }
         }
         let Some(gate) = task.gate.clone().filter(|g| !g.trim().is_empty()) else {
-            self.finalize_task_done(id); // no gate → done immediately
+            self.finalize_task_done(id, TaskCompletionSource::Command); // no gate → done immediately
             return Ok(false);
         };
         // Run the gate where the work is: the task's worktree, else its worker
@@ -897,7 +946,7 @@ impl App {
     /// non-zero → held at `Review` with the tail of the output captured.
     pub fn task_gate_finished(&mut self, id: &str, code: Option<i32>, out: String) {
         if code == Some(0) {
-            self.finalize_task_done(id);
+            self.finalize_task_done(id, TaskCompletionSource::Gate);
             self.emit_event("task.gate_passed", serde_json::json!({ "id": id }));
         } else {
             let _ = self.orch.set_status(id, crate::orch::TaskStatus::Review);
@@ -919,7 +968,17 @@ impl App {
 
     /// Mark a task Done, release its leases, and announce any dependents that just
     /// became ready (ORCH-4). Shared by the no-gate path and a passing gate.
-    fn finalize_task_done(&mut self, id: &str) {
+    fn finalize_task_done(&mut self, id: &str, source: TaskCompletionSource) {
+        let source = if self
+            .orch
+            .task(id)
+            .is_some_and(|task| task.automation.is_some())
+        {
+            TaskCompletionSource::Automation
+        } else {
+            source
+        };
+        let _ = self.orch.set_completion_source(id, source);
         let _ = self.orch.set_status(id, crate::orch::TaskStatus::Done);
         self.orch.release_task_leases(id);
         let ready = self.orch.newly_ready(id);
@@ -1005,6 +1064,7 @@ impl App {
             KeyCode::Char('a') | KeyCode::Char('n') => self.open_orch_form(),
             KeyCode::Char('s') => self.orch_action_start(),
             KeyCode::Char('d') => self.orch_action_done(),
+            KeyCode::Char('r') => self.orch_action_retry(),
             KeyCode::Char('m') => self.orch_action_merge(),
             KeyCode::Char('x') => self.orch_action_release(),
             KeyCode::Char('o') => self.orch_action_detail(),
@@ -1656,6 +1716,12 @@ impl App {
             TaskStatus::Done => {}
             TaskStatus::Merging | TaskStatus::Merged => {}
         }
+        if matches!(
+            task.status,
+            TaskStatus::Done | TaskStatus::Failed | TaskStatus::Review | TaskStatus::Blocked
+        ) {
+            items.push(Item::Retry);
+        }
         items.extend([Item::Divider, Item::CopyId]);
         if task.worktree.is_some() {
             items.push(Item::CopyWorktree);
@@ -1703,6 +1769,7 @@ impl App {
             Item::Jump => self.orch_action_jump(),
             Item::Details => self.orch_action_detail(),
             Item::Done => self.orch_action_done(),
+            Item::Retry => self.orch_action_retry(),
             Item::Merge => self.orch_action_merge(),
             Item::Release => self.orch_action_release(),
             Item::CopyId => {
@@ -1936,6 +2003,22 @@ impl App {
         }
     }
 
+    fn orch_action_retry(&mut self) {
+        let Some(id) = self.orch_selected_id() else {
+            return;
+        };
+        match self.retry_task(&id) {
+            Ok(TaskRetryResult::Task(task)) => {
+                self.show_toast(format!("{id}: attempt {} queued", task.attempt));
+                self.orch_action_start();
+            }
+            Ok(TaskRetryResult::AutomationRun(run)) => {
+                self.show_toast(format!("{id}: retry queued as {}", run.id));
+            }
+            Err((_, message)) => self.show_toast(message),
+        }
+    }
+
     fn orch_action_merge(&mut self) {
         let Some(id) = self.orch_selected_id() else {
             return;
@@ -1999,6 +2082,20 @@ impl App {
             (*cursor + delta as usize).min(last)
         };
     }
+}
+
+fn task_branch_name(task: &crate::orch::Task, requested: Option<String>) -> String {
+    requested
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| task.branch.clone())
+        .unwrap_or_else(|| {
+            if task.attempt > 1 {
+                format!("luvus/{}-retry-{}", task.id, task.attempt)
+            } else {
+                format!("luvus/{}", task.id)
+            }
+        })
 }
 
 /// Agents offered by the board's start-worker picker: (label, canonical id).
@@ -4275,12 +4372,57 @@ mod tests {
         assert!(queued.contains(&crate::app::OrchMenuItem::Details));
         assert!(queued.contains(&crate::app::OrchMenuItem::Delete));
         assert!(!queued.contains(&crate::app::OrchMenuItem::Done));
+        assert!(!queued.contains(&crate::app::OrchMenuItem::Retry));
+
+        app.orch
+            .set_status("t1", crate::orch::TaskStatus::Failed)
+            .unwrap();
+        let failed = app.orch_menu_items("t1");
+        assert!(failed.contains(&crate::app::OrchMenuItem::Retry));
 
         app.open_orch_menu("t1", 4, 4);
         app.orch_cursor = 1;
         app.orch_menu_action(crate::app::OrchMenuItem::CopyId);
         assert_eq!(app.pending_clipboard.as_deref(), Some("t1"));
         assert_eq!(app.orch_cursor, 0, "the menu stayed bound to t1");
+    }
+
+    #[test]
+    fn retry_attempts_receive_a_fresh_default_branch() {
+        let mut state = crate::orch::OrchState::default();
+        let first = state
+            .add_task("branch".into(), vec![], vec![], None)
+            .unwrap();
+        assert_eq!(task_branch_name(&first, None), "luvus/t1");
+        state
+            .set_status("t1", crate::orch::TaskStatus::Failed)
+            .unwrap();
+        let retry = state.retry_task("t1").unwrap();
+        assert_eq!(task_branch_name(&retry, None), "luvus/t1-retry-2");
+        assert_eq!(
+            task_branch_name(&retry, Some("feat/custom".into())),
+            "feat/custom"
+        );
+    }
+
+    #[test]
+    fn retry_detaches_but_does_not_close_the_previous_worker_pane() {
+        let _env = crate::persist::test_env("orch-retry-keeps-pane");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.orch
+            .add_task("retry".into(), vec![], vec![], None)
+            .unwrap();
+        app.orch.claim("t1", pane.0).unwrap();
+        app.orch
+            .set_status("t1", crate::orch::TaskStatus::Failed)
+            .unwrap();
+
+        let result = app.retry_task("t1").unwrap();
+        assert!(matches!(result, TaskRetryResult::Task(_)));
+        assert!(app.panes.contains_key(&pane));
+        assert_eq!(app.orch.task("t1").unwrap().assignee, None);
     }
 
     #[test]

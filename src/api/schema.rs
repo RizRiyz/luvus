@@ -205,6 +205,7 @@ mod tests {
             "task.needs_compaction",
             "task.ready",
             "task.released",
+            "task.retried",
             "task.started",
             "task.updated",
             "terminal.closed",
@@ -337,6 +338,8 @@ mod tests {
         assert!(!task_required.contains("prompt"));
         assert!(!task_required.contains("mode"));
         assert!(!task_required.contains("workspace_worker"));
+        assert!(task_required.contains("attempt"));
+        assert!(task_required.contains("previous_attempts"));
         assert_eq!(
             task["properties"]["mode"]["enum"],
             json!(["worktree", "workspace"])
@@ -349,6 +352,15 @@ mod tests {
             task["properties"]["prompt"]["type"],
             json!(["string", "null"])
         );
+        assert_eq!(task["properties"]["attempt"]["minimum"], 1);
+        assert_eq!(
+            task["properties"]["previous_attempts"]["maxItems"],
+            crate::orch::MAX_TASK_ATTEMPTS
+        );
+
+        let task_retried = &definitions["task_retried"];
+        assert_eq!(task_retried["additionalProperties"], false);
+        assert_eq!(task_retried["properties"]["attempt"]["minimum"], 2);
 
         let workspace_worker = &definitions["workspace_worker"];
         let workspace_worker_required: std::collections::BTreeSet<_> = workspace_worker["required"]

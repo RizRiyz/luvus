@@ -200,6 +200,10 @@ luvus task heartbeat t1 --context-used 0.6 # 60% of the model context window is 
 luvus task done t1                          # runs the quality gate
 luvus task merge t1
 
+# retry without deleting the previous pane, branch, worktree, or result
+luvus task retry t1
+luvus task start t1 --agent "claude"        # worktree attempt 2 uses a new branch
+
 # leases (usually automatic via task start)
 luvus lease acquire "src/auth/**" --task t1
 
@@ -233,7 +237,7 @@ entries remain available after it.
 Events on the bus: `task.added` · `task.claimed` · `task.started` ·
 `task.ready` · `task.gate_running` · `task.gate_passed` · `task.gate_failed` ·
 `task.needs_compaction` · `task.done` · `task.merge_started` · `task.merged` ·
-`task.merge_conflict` · `task.merge_failed` · `task.released` ·
+`task.merge_conflict` · `task.merge_failed` · `task.released` · `task.retried` ·
 `lease.acquired` · `lease.released` · `automation.created` ·
 `automation.updated` · `automation.enabled` · `automation.disabled` ·
 `automation.rebound` ·
@@ -243,6 +247,16 @@ Events on the bus: `task.added` · `task.claimed` · `task.started` ·
 `automation.run_failed`.
 
 ## The safety model
+
+`task retry <id>` accepts terminal `done`, `failed`, `review`, and `blocked`
+tasks. It archives a bounded attempt summary, releases leases, detaches the old
+worker, and queues a fresh attempt without closing the pane or deleting its
+branch, worktree, output, or notes. A retry is rejected once a dependent task
+has started, and `merging` or `merged` tasks remain immutable. Worktree retries
+use `luvus/<task-id>-retry-<attempt>` by default. Retrying an automation-owned
+task creates a new automation run from the original run's captured contract
+while preserving the original records. Retrying from `review` or `blocked`
+finishes the superseded run as cancelled without closing its worker pane.
 
 - **Only armed agent automations spawn unattended.** Manual tasks still start
   only when you press `s` or run `task start`. Every automation stores one

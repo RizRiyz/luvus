@@ -34,3 +34,5 @@
 {"id":"bad-agent-keys-extra","method":"agent.keys","params":{"target":"reviewer","keys":["enter"],"extra":true}}
 {"id":"bad-keys-fence-revision-only","method":"agent.keys","params":{"target":"7","keys":["enter"],"if_content_revision":12}}
 {"id":"bad-keys-fence-terminal-only","method":"agent.keys","params":{"target":"7","keys":["enter"],"terminal_id":"0123456789abcdef0123456789abcdef"}}
+{"id":"bad-task-retry-missing-id","method":"task.retry","params":{}}
+{"id":"bad-task-retry-extra","method":"task.retry","params":{"id":"t1","extra":true}}

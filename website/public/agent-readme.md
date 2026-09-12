@@ -135,6 +135,11 @@ Branch-backed dependencies unblock only after they are merged into the shared
 integration history.
 `task release` requeues active work and releases its path leases, but it does
 not stop the worker pane or discard its worktree.
+`task retry <id>` queues a fresh attempt for terminal `done`, `failed`,
+`review`, or `blocked` work while preserving the old pane, branch, worktree,
+output, and notes. Inspect dependents first because retry is rejected after a
+dependent leaves the queue. Retrying an automation-owned task creates a new
+immutable run from the original run snapshot.
 Use `task add --prompt <text>` or `--prompt-file <path>` for the detailed worker
 briefing. A manual task's prompt can be replaced with `task update` only while
 the task is queued and unassigned; inspect it before starting the worker.

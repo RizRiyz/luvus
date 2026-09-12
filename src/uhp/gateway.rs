@@ -584,6 +584,7 @@ fn allowed_method_with_machines(mode: AccessMode, method: &str, machines: bool) 
                     | "automation.rebind"
                     | "automation.delete"
                     | "automation.run"
+                    | "task.retry"
                     | "terminal.backend.control"
             ))
 }
@@ -1106,6 +1107,7 @@ mod tests {
             "automation.rebind",
             "automation.delete",
             "automation.run",
+            "task.retry",
         ] {
             assert!(allowed_method(AccessMode::Control, method), "{method}");
         }

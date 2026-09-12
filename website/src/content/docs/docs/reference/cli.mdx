@@ -233,6 +233,7 @@ orchestration (multiple agents on one project, docs/22):
                              (>85% blocks done; --context remains accepted)
   task update <id> [--prompt <text>|--prompt-file <path>] [--status <s>] [--output <o>] [--note <n>]
   task done <id>             mark done + release its leases
+  task retry <id>            queue a fresh attempt without deleting previous work
   task merge <id>            integrate the task's branch into luvus/integration
                              (isolated worktree, conflicts block the task)
   task release <id>          return a claimed task to the queue

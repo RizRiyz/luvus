@@ -510,6 +510,21 @@ impl App {
         }
     }
 
+    pub(super) fn api_task_retry(&mut self, method: &str, p: &Value) -> DispatchResult {
+        let _ = method;
+        reject_api_fields(p, &["id"])?;
+        let id = req_str(p, "id")?.to_string();
+        match self.retry_task(&id)? {
+            crate::app::TaskRetryResult::Task(task) => {
+                Ok(json!({"type":"task", "task":task_json(&task)}))
+            }
+            crate::app::TaskRetryResult::AutomationRun(run) => Ok(json!({
+                "type":"automation_run",
+                "run":crate::automation::public_run(&run),
+            })),
+        }
+    }
+
     pub(super) fn api_task_merge(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = (method, p);
         {

@@ -459,6 +459,11 @@ surface:
   retrying. Leases coordinate declared paths but do not sandbox a shared
   checkout. `task release` requeues an
   active task and releases its path leases; it does not stop the worker pane.
+  `task retry <id>` is the explicit fresh-attempt operation for `done`,
+  `failed`, `review`, or `blocked` work. It preserves the old pane, worktree,
+  branch, output, and notes. Inspect dependents first because retry is rejected
+  after a dependent task leaves the queue. An automation-owned task creates a
+  new immutable run from the original run snapshot.
   `task add --prompt <text>` or `--prompt-file <path>` stores a detailed worker
   briefing; `task update` may replace it only while a manual task is still
   queued and unassigned. Inspect the stored prompt before starting the worker.

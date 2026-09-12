@@ -64,6 +64,8 @@ pub(crate) fn task_json(t: &crate::orch::Task) -> Value {
         "worktree": t.worktree,
         "branch": t.branch,
         "context": t.context,
+        "attempt": t.attempt,
+        "previous_attempts": t.previous_attempts,
         "created": t.created,
         "updated": t.updated,
     });

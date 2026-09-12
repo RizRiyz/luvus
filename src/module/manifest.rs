@@ -402,6 +402,7 @@ pub const KNOWN_EVENTS: &[&str] = &[
     "task.ready",
     "task.done",
     "task.released",
+    "task.retried",
     "task.deleted",
     "task.merged",
     "task.merge_started",
