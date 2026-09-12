@@ -185,8 +185,14 @@ fn common_name_prefix(names: &[String]) -> String {
     prefix.into_iter().collect()
 }
 
+/// Separators the Go to field splits on. `\` counts only where the OS agrees:
+/// on Unix it is an ordinary character in a directory name, so a folder literally
+/// called `lit\folder` stays one component — which is how [`resolve_go_to_path`]
+/// and Enter already treat it.
+const PATH_SEPS: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
+
 fn is_path_sep(c: char) -> bool {
-    c == '/' || c == '\\'
+    PATH_SEPS.contains(&c)
 }
 
 /// Delete the last path component, including a trailing separator.
@@ -217,8 +223,17 @@ fn is_word_delete_key(key: KeyEvent) -> bool {
 }
 
 fn split_go_to_stem(entered: &str) -> (String, String, char) {
-    match entered.rfind(['/', '\\']) {
-        Some(i) => {
+    // A leading `~/` (or `~\`, which Enter also accepts) is a stem, not a name:
+    // skip it so the tilde is never treated as something to complete, and so the
+    // remainder still resolves through `$HOME` on every platform.
+    let home = if entered.starts_with("~/") || entered.starts_with("~\\") {
+        2 // ASCII, so slicing here cannot split a character.
+    } else {
+        0
+    };
+    match entered[home..].rfind(PATH_SEPS) {
+        Some(offset) => {
+            let i = home + offset;
             let sep = entered[i..].chars().next().unwrap_or('/');
             (
                 entered[..=i].to_string(),
@@ -226,7 +241,11 @@ fn split_go_to_stem(entered: &str) -> (String, String, char) {
                 sep,
             )
         }
-        None => (String::new(), entered.to_string(), '/'),
+        None => (
+            entered[..home].to_string(),
+            entered[home..].to_string(),
+            '/',
+        ),
     }
 }
 
@@ -321,13 +340,21 @@ fn complete_go_to(
         1 => Some((format!("{}{}{sep}", parent, matches[0]), None)),
         _ => {
             let common = common_name_prefix(&matches);
+            // Arm the cycle at the name the field is about to show, when that
+            // text is itself one of the matches, so the next Tab steps past it
+            // instead of redrawing it (`foo` alongside `foobar`). Otherwise the
+            // shared prefix is not a directory of its own and cycling starts
+            // from the top, exactly as before.
+            let at = matches
+                .iter()
+                .position(|m| names_equal_ignore_case(m, &common));
             let next_cycle = GoToCycle {
-                parent,
+                parent: parent.clone(),
                 matches,
-                index: None,
+                index: at,
             };
             if !names_equal_ignore_case(&name, &common) {
-                Some((format!("{}{common}", next_cycle.parent), Some(next_cycle)))
+                Some((format!("{parent}{common}"), Some(next_cycle)))
             } else {
                 let (text, next) = cycle_go_to(&next_cycle, reverse)?;
                 Some((text, Some(next)))
@@ -385,6 +412,11 @@ impl App {
             _ => None,
         });
         if let Some(p) = self.picker.as_mut() {
+            // Any re-read means the browsed directory may have moved under an
+            // open Go to field (row click, `..`, Home, hidden toggle). Cycle
+            // candidates belong to the directory they were listed from, so drop
+            // them instead of letting the next Tab replay the old folder's names.
+            p.go_to_cycle = None;
             let mut entries: Vec<Entry> = std::fs::read_dir(&p.path)
                 .map(|rd| {
                     rd.filter_map(Result::ok)
@@ -1310,9 +1342,20 @@ mod tests {
         buf = String::from("foo/bar");
         delete_last_path_word(&mut buf);
         assert_eq!(buf, "foo/");
+
+        // `\` is a separator only where the OS agrees. On Unix it is part of the
+        // name, so the whole thing is one component.
         buf = String::from(r"foo\bar\");
         delete_last_path_word(&mut buf);
-        assert_eq!(buf, "foo\\");
+        if cfg!(windows) {
+            assert_eq!(buf, "foo\\");
+        } else {
+            assert_eq!(buf, "");
+        }
+
+        buf = String::from(r"keep/lit\folder");
+        delete_last_path_word(&mut buf);
+        assert_eq!(buf, "keep/", "the `/` component boundary always wins");
     }
 
     #[test]
@@ -1455,6 +1498,151 @@ mod tests {
             app.picker.as_ref().unwrap().going_to.as_deref(),
             Some("Documents/")
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn navigating_drops_stale_go_to_completions() {
+        let _env = crate::persist::test_env("picker-go-to-stale-cycle");
+        let tmp = complete_fixture("stale-cycle");
+        std::fs::create_dir_all(tmp.join("alpha")).unwrap();
+        std::fs::create_dir_all(tmp.join("alphabet")).unwrap();
+        std::fs::create_dir_all(tmp.join("zulu")).unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        // Arm a cycle, then navigate by click while Go to is still open. The
+        // candidates were listed from the previous directory, so they must go.
+        let arm = |app: &mut App| {
+            app.picker_start_go_to();
+            for c in "al".chars() {
+                app.handle_picker_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+            assert_eq!(
+                app.picker.as_ref().unwrap().going_to.as_deref(),
+                Some("alpha")
+            );
+            assert!(app.picker.as_ref().unwrap().go_to_cycle.is_some());
+        };
+
+        app.open_folder_picker_at(tmp.clone());
+        arm(&mut app);
+        let zulu_row = {
+            let p = app.picker.as_ref().unwrap();
+            let idx = p.entries.iter().position(|e| e.name == "zulu").unwrap();
+            p.leading() + idx
+        };
+        app.picker_click(zulu_row);
+        let p = app.picker.as_ref().unwrap();
+        assert_eq!(p.path, tmp.join("zulu"));
+        assert!(
+            p.go_to_cycle.is_none(),
+            "a row click must not leave the old folder's candidates armed"
+        );
+
+        // The `..` row is the same story (row 2 outside a repo: open, home, up).
+        app.open_folder_picker_at(tmp.clone());
+        assert!(
+            !app.picker.as_ref().unwrap().is_repo,
+            "fixture is not a repo"
+        );
+        arm(&mut app);
+        app.picker_click(2);
+        let p = app.picker.as_ref().unwrap();
+        assert_eq!(p.path, tmp.parent().unwrap());
+        assert!(p.go_to_cycle.is_none(), "`..` invalidates the candidates");
+
+        // So is re-listing the same folder under a different filter.
+        app.open_folder_picker_at(tmp.clone());
+        arm(&mut app);
+        app.picker_toggle_hidden();
+        assert!(
+            app.picker.as_ref().unwrap().go_to_cycle.is_none(),
+            "re-listing invalidates the candidates"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn go_to_treats_backslash_as_the_os_does() {
+        let tmp = complete_fixture("backslash");
+        let home = complete_fixture("backslash-home");
+        std::fs::create_dir_all(home.join("Documents")).unwrap();
+
+        // A `~/` stem is never a completion candidate itself, and `~\` — which
+        // Enter already accepts — resolves through $HOME the same way.
+        assert_eq!(
+            complete_go_to("~/Do", &tmp, Some(&home), false, None, false)
+                .unwrap()
+                .0,
+            "~/Documents/"
+        );
+        assert_eq!(
+            complete_go_to("~\\Do", &tmp, Some(&home), false, None, false)
+                .unwrap()
+                .0,
+            "~\\Documents/"
+        );
+
+        // On Unix `\` is a legal filename character, so a directory holding one
+        // is a single component that completes and deletes as a whole.
+        #[cfg(not(windows))]
+        {
+            std::fs::create_dir_all(tmp.join(r"lit\folder").join("inner")).unwrap();
+
+            assert_eq!(
+                complete_go_to("lit", &tmp, None, false, None, false)
+                    .unwrap()
+                    .0,
+                "lit\\folder/"
+            );
+            assert_eq!(
+                complete_go_to(r"lit\folder/in", &tmp, None, false, None, false)
+                    .unwrap()
+                    .0,
+                "lit\\folder/inner/",
+                "completion continues inside a backslash-named directory"
+            );
+
+            let mut buf = String::from(r"lit\folder");
+            delete_last_path_word(&mut buf);
+            assert_eq!(buf, "", "the backslash is part of the name, not a boundary");
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn complete_go_to_steps_past_an_exact_match() {
+        let tmp = complete_fixture("exact");
+        std::fs::create_dir_all(tmp.join("foo")).unwrap();
+        std::fs::create_dir_all(tmp.join("foobar")).unwrap();
+        std::fs::create_dir_all(tmp.join("foobaz")).unwrap();
+
+        // `foo` is both the shared prefix and a real match, so the first Tab has
+        // to move instead of redrawing the same text.
+        let (text, cycle) = complete_go_to("foo", &tmp, None, false, None, false).unwrap();
+        assert_eq!(text, "foobar");
+        let cycle = cycle.unwrap();
+        let (text, _) = complete_go_to(&text, &tmp, None, false, Some(&cycle), false).unwrap();
+        assert_eq!(text, "foobaz");
+
+        let (text, _) = complete_go_to("foo", &tmp, None, false, None, true).unwrap();
+        assert_eq!(text, "foobaz", "BackTab steps the other way");
+
+        // A shared prefix longer than the buffer still extends first — but since
+        // `foo` is a real directory, the cycle is armed there so the Tab after
+        // that steps on instead of redrawing `foo`.
+        let (text, cycle) = complete_go_to("f", &tmp, None, false, None, false).unwrap();
+        assert_eq!(text, "foo");
+        let cycle = cycle.unwrap();
+        let (text, _) = complete_go_to(&text, &tmp, None, false, Some(&cycle), false).unwrap();
+        assert_eq!(text, "foobar");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
