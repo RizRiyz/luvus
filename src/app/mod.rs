@@ -2352,6 +2352,9 @@ pub struct App {
     /// Bumped on every open and close of the open-worktree list, so a scan
     /// result carrying an older value is stale and ignored.
     worktree_open_generation: u64,
+    /// Bumped by every Go to edit, directory change, and picker close, so a
+    /// completion scan carrying an older value is stale and ignored.
+    picker_go_to_generation: u64,
     /// Clickable targets in the open-worktree list, set by the renderer each
     /// frame. Rows precede the modal body in hit-test order, so a click lands on
     /// the row under it and only a click on neither is "outside".
@@ -3066,6 +3069,7 @@ impl App {
             worktree_prompt_rect: None,
             worktree_open: None,
             worktree_open_generation: 0,
+            picker_go_to_generation: 0,
             worktree_open_rects: Vec::new(),
             tab_rename: None,
             tab_menu: None,
@@ -3729,6 +3733,7 @@ impl App {
             worktree_prompt_rect: None,
             worktree_open: None,
             worktree_open_generation: 0,
+            picker_go_to_generation: 0,
             worktree_open_rects: Vec::new(),
             tab_rename: None,
             tab_menu: None,
@@ -8766,6 +8771,8 @@ mod tests {
             creating: None,
             going_to: None,
             go_to_cycle: None,
+            go_to_generation: 0,
+            go_to_scanning: None,
             error: None,
             is_repo,
             show_hidden: false,

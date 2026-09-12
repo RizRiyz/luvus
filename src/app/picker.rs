@@ -31,6 +31,15 @@ pub struct FolderPicker {
     pub going_to: Option<String>,
     /// Tab-completion cycle for [`FolderPicker::going_to`]. Cleared on edit/paste.
     pub(crate) go_to_cycle: Option<GoToCycle>,
+    /// Generation the Go to field currently accepts completion scans for. Every
+    /// edit and every directory change bumps it, so a scan still in flight is
+    /// discarded on arrival instead of completing against text or a folder it
+    /// was never listed for.
+    pub(crate) go_to_generation: u64,
+    /// Generation of the completion scan currently queued on the filesystem
+    /// worker, if any. Keeps Tab to one bounded job, and carrying the generation
+    /// means a late scan releases only its own slot, never a newer scan's.
+    pub(crate) go_to_scanning: Option<u64>,
     /// Last filesystem error (e.g. permission denied), shown in the modal.
     pub error: Option<String>,
     /// Whether the browsed folder is a git repo — adds the "Open with new
@@ -195,14 +204,29 @@ fn is_path_sep(c: char) -> bool {
     PATH_SEPS.contains(&c)
 }
 
+/// Length of a leading `~/` or `~\` home stem. Enter accepts both spellings on
+/// every platform, so both are a component boundary here even where `\` is not
+/// a separator.
+fn home_stem_len(text: &str) -> usize {
+    // Both spellings are ASCII, so this is always a character boundary.
+    usize::from(text.starts_with("~/") || text.starts_with("~\\")) * 2
+}
+
 /// Delete the last path component, including a trailing separator.
 /// `foo/bar/` and `foo/bar` both become `foo/`.
 fn delete_last_path_word(buf: &mut String) {
     let mut chars: Vec<char> = buf.chars().collect();
-    while chars.last().copied().is_some_and(is_path_sep) {
+    // Stop at a `~/` or `~\` stem while something still follows it, so deleting
+    // a name does not silently turn a home path into a relative one. Once only
+    // the stem is left it deletes like any other component (`~/` clears).
+    let floor = match home_stem_len(buf) {
+        stem if stem > 0 && chars.len() > stem => stem,
+        _ => 0,
+    };
+    while chars.len() > floor && chars.last().copied().is_some_and(is_path_sep) {
         chars.pop();
     }
-    while chars.last().copied().is_some_and(|c| !is_path_sep(c)) {
+    while chars.len() > floor && chars.last().copied().is_some_and(|c| !is_path_sep(c)) {
         chars.pop();
     }
     *buf = chars.into_iter().collect();
@@ -226,11 +250,7 @@ fn split_go_to_stem(entered: &str) -> (String, String, char) {
     // A leading `~/` (or `~\`, which Enter also accepts) is a stem, not a name:
     // skip it so the tilde is never treated as something to complete, and so the
     // remainder still resolves through `$HOME` on every platform.
-    let home = if entered.starts_with("~/") || entered.starts_with("~\\") {
-        2 // ASCII, so slicing here cannot split a character.
-    } else {
-        0
-    };
+    let home = home_stem_len(entered);
     match entered[home..].rfind(PATH_SEPS) {
         Some(offset) => {
             let i = home + offset;
@@ -249,36 +269,67 @@ fn split_go_to_stem(entered: &str) -> (String, String, char) {
     }
 }
 
-fn list_go_to_dirs(dir: &Path, typed_name: &str, show_hidden: bool) -> Vec<String> {
+/// Candidate names carried back to the app loop for cycling. Stepping through
+/// more than this is not useful, and the list must stay bounded because a
+/// pathological directory would otherwise hand the loop an unbounded `Vec`.
+const MAX_GO_TO_MATCHES: usize = 512;
+
+/// One bounded directory listing: the names kept for cycling, plus the prefix
+/// shared by *every* match. The prefix is folded over all of them, including any
+/// dropped past [`MAX_GO_TO_MATCHES`], so a truncated listing can still only
+/// complete text the whole set agrees on.
+struct GoToMatches {
+    names: Vec<String>,
+    common: String,
+}
+
+fn list_go_to_dirs(dir: &Path, typed_name: &str, show_hidden: bool) -> GoToMatches {
     let include_hidden = show_hidden || typed_name.starts_with('.');
-    let mut names: Vec<String> = match std::fs::read_dir(dir) {
-        Ok(rd) => rd
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let name = entry.file_name().into_string().ok()?;
-                if name == "." || name == ".." {
-                    return None;
-                }
-                if !include_hidden && name.starts_with('.') {
-                    return None;
-                }
-                if !entry.file_type().map(|ty| ty.is_dir()).unwrap_or(false) {
-                    return None;
-                }
-                if !name_has_prefix_ignore_case(&name, typed_name) {
-                    return None;
-                }
-                Some(name)
-            })
-            .collect(),
-        Err(_) => return Vec::new(),
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return GoToMatches {
+            names: Vec::new(),
+            common: String::new(),
+        };
     };
+    let mut names: Vec<String> = Vec::new();
+    let mut extra: Option<String> = None;
+    for entry in read_dir.filter_map(Result::ok) {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if name == "." || name == ".." {
+            continue;
+        }
+        if !include_hidden && name.starts_with('.') {
+            continue;
+        }
+        if !entry.file_type().map(|ty| ty.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        if !name_has_prefix_ignore_case(&name, typed_name) {
+            continue;
+        }
+        if names.len() < MAX_GO_TO_MATCHES {
+            names.push(name);
+            continue;
+        }
+        // Past the cap the name is no longer offered, but it still constrains
+        // what the shared prefix may claim.
+        extra = Some(match extra {
+            Some(prefix) => common_name_prefix(&[prefix, name]),
+            None => name,
+        });
+    }
     names.sort_by(|a, b| {
         a.to_lowercase()
             .cmp(&b.to_lowercase())
             .then_with(|| a.cmp(b))
     });
-    names
+    let mut common = common_name_prefix(&names);
+    if let Some(extra) = extra {
+        common = common_name_prefix(&[common, extra]);
+    }
+    GoToMatches { names, common }
 }
 
 fn cycle_go_to(cycle: &GoToCycle, reverse: bool) -> Option<(String, GoToCycle)> {
@@ -302,19 +353,40 @@ fn cycle_go_to(cycle: &GoToCycle, reverse: bool) -> Option<(String, GoToCycle)> 
     ))
 }
 
-fn complete_go_to(
+/// Immutable inputs for one Go to completion scan. Owned by the job so the
+/// filesystem work borrows nothing from `App`.
+pub(crate) struct GoToScan {
+    input: String,
+    current: PathBuf,
+    home: Option<PathBuf>,
+    show_hidden: bool,
+    reverse: bool,
+}
+
+impl GoToScan {
+    /// Runs on the filesystem worker: one `read_dir` of one directory, bounded by
+    /// [`MAX_GO_TO_MATCHES`]. Touches nothing owned by the app loop.
+    pub(crate) fn run(&self) -> Option<(String, Option<GoToCycle>)> {
+        scan_go_to(
+            &self.input,
+            &self.current,
+            self.home.as_deref(),
+            self.show_hidden,
+            self.reverse,
+        )
+    }
+}
+
+/// The filesystem half of completion: resolve the typed stem, list the one
+/// directory it names, and decide what the field should show. Pure with respect
+/// to `App`, so it is safe to run off the loop.
+fn scan_go_to(
     input: &str,
     current: &Path,
     home: Option<&Path>,
     show_hidden: bool,
-    cycle: Option<&GoToCycle>,
     reverse: bool,
 ) -> Option<(String, Option<GoToCycle>)> {
-    if let Some(cycle) = cycle {
-        let (text, next) = cycle_go_to(cycle, reverse)?;
-        return Some((text, Some(next)));
-    }
-
     let entered = unquote_go_to(input);
     if entered == "~" {
         return Some(("~/".to_string(), None));
@@ -334,23 +406,22 @@ fn complete_go_to(
         return None;
     }
 
-    let matches = list_go_to_dirs(&list_dir, &name, show_hidden);
-    match matches.len() {
+    let GoToMatches { names, common } = list_go_to_dirs(&list_dir, &name, show_hidden);
+    match names.len() {
         0 => None,
-        1 => Some((format!("{}{}{sep}", parent, matches[0]), None)),
+        1 => Some((format!("{}{}{sep}", parent, names[0]), None)),
         _ => {
-            let common = common_name_prefix(&matches);
             // Arm the cycle at the name the field is about to show, when that
             // text is itself one of the matches, so the next Tab steps past it
             // instead of redrawing it (`foo` alongside `foobar`). Otherwise the
             // shared prefix is not a directory of its own and cycling starts
-            // from the top, exactly as before.
-            let at = matches
+            // from the top.
+            let at = names
                 .iter()
                 .position(|m| names_equal_ignore_case(m, &common));
             let next_cycle = GoToCycle {
                 parent: parent.clone(),
-                matches,
+                matches: names,
                 index: at,
             };
             if !names_equal_ignore_case(&name, &common) {
@@ -360,6 +431,26 @@ fn complete_go_to(
                 Some((text, Some(next)))
             }
         }
+    }
+}
+
+/// Whole-completion composition, kept for focused tests. Production splits the
+/// two halves: cycling steps on the app loop, scanning runs on the worker.
+#[cfg(test)]
+fn complete_go_to(
+    input: &str,
+    current: &Path,
+    home: Option<&Path>,
+    show_hidden: bool,
+    cycle: Option<&GoToCycle>,
+    reverse: bool,
+) -> Option<(String, Option<GoToCycle>)> {
+    match cycle {
+        Some(cycle) => {
+            let (text, next) = cycle_go_to(cycle, reverse)?;
+            Some((text, Some(next)))
+        }
+        None => scan_go_to(input, current, home, show_hidden, reverse),
     }
 }
 
@@ -391,6 +482,8 @@ impl App {
             creating: None,
             going_to: None,
             go_to_cycle: None,
+            go_to_generation: 0,
+            go_to_scanning: None,
             error: None,
             is_repo: false,
             show_hidden: false,
@@ -399,11 +492,19 @@ impl App {
     }
 
     pub fn close_folder_picker(&mut self) {
+        // Retire the generation so a scan in flight cannot apply to a picker the
+        // user reopens later.
+        self.picker_go_to_generation = self.picker_go_to_generation.wrapping_add(1);
         self.picker = None;
     }
 
     /// Re-read the browsed path's entries (folders + files), dirs first.
     fn picker_refresh(&mut self) {
+        // Any re-read means the browsed directory may have moved under an open Go
+        // to field (row click, `..`, Home, hidden toggle). Completion candidates
+        // describe the directory they were listed from, so retire them here — the
+        // one choke point every navigation path already passes through.
+        self.invalidate_go_to_completion();
         // Remember which entry the cursor highlights so filter changes (e.g.
         // `.` hiding dotfiles) re-anchor the selection by identity instead of
         // leaving it at a numeric index that may now point elsewhere.
@@ -412,11 +513,6 @@ impl App {
             _ => None,
         });
         if let Some(p) = self.picker.as_mut() {
-            // Any re-read means the browsed directory may have moved under an
-            // open Go to field (row click, `..`, Home, hidden toggle). Cycle
-            // candidates belong to the directory they were listed from, so drop
-            // them instead of letting the next Tab replay the old folder's names.
-            p.go_to_cycle = None;
             let mut entries: Vec<Entry> = std::fs::read_dir(&p.path)
                 .map(|rd| {
                     rd.filter_map(Result::ok)
@@ -491,8 +587,8 @@ impl App {
             }
             if let Some(buffer) = picker.going_to.as_mut() {
                 buffer.push_str(&text);
-                picker.go_to_cycle = None;
                 picker.error = None;
+                self.invalidate_go_to_completion();
                 return;
             }
         }
@@ -528,9 +624,9 @@ impl App {
         if self.picker.as_ref().is_some_and(|p| p.going_to.is_some()) {
             match key.code {
                 KeyCode::Esc => {
+                    self.invalidate_go_to_completion();
                     if let Some(p) = self.picker.as_mut() {
                         p.going_to = None;
-                        p.go_to_cycle = None;
                         p.error = None;
                     }
                 }
@@ -552,27 +648,27 @@ impl App {
                         if let Some(buf) = p.going_to.as_mut() {
                             delete_last_path_word(buf);
                         }
-                        p.go_to_cycle = None;
                         p.error = None;
                     }
+                    self.invalidate_go_to_completion();
                 }
                 KeyCode::Backspace => {
                     if let Some(p) = self.picker.as_mut() {
                         if let Some(buf) = p.going_to.as_mut() {
                             buf.pop();
                         }
-                        p.go_to_cycle = None;
                         p.error = None;
                     }
+                    self.invalidate_go_to_completion();
                 }
                 KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if let Some(p) = self.picker.as_mut() {
                         if let Some(buf) = p.going_to.as_mut() {
                             buf.push(c);
                         }
-                        p.go_to_cycle = None;
                         p.error = None;
                     }
+                    self.invalidate_go_to_completion();
                 }
                 _ => {}
             }
@@ -585,10 +681,10 @@ impl App {
             KeyCode::Right | KeyCode::Char('l') => self.picker_descend(),
             KeyCode::Enter => self.picker_activate(),
             KeyCode::Char('n') => {
+                self.invalidate_go_to_completion();
                 if let Some(p) = self.picker.as_mut() {
                     p.creating = Some(String::new());
                     p.going_to = None;
-                    p.go_to_cycle = None;
                     p.error = None;
                 }
             }
@@ -644,15 +740,20 @@ impl App {
     /// Start the in-modal path navigator. It is intentionally separate from
     /// opening a workspace so Enter cannot accidentally confirm a folder.
     pub fn picker_start_go_to(&mut self) {
+        self.invalidate_go_to_completion();
         if let Some(p) = self.picker.as_mut() {
             p.creating = None;
             p.going_to = Some(String::new());
-            p.go_to_cycle = None;
             p.error = None;
         }
     }
 
     /// Tab-complete the Go to buffer. Failed completion leaves the field unchanged.
+    ///
+    /// Stepping an already-listed cycle is pure in-memory work and stays on the
+    /// loop, so held Tab never queues filesystem jobs. The first Tab for a stem
+    /// needs a directory listing, which goes to the bounded worker instead of
+    /// stalling the loop on a large or network-backed folder.
     fn picker_complete_go_to(&mut self, reverse: bool) {
         let Some(picker) = self.picker.as_ref() else {
             return;
@@ -660,25 +761,97 @@ impl App {
         let Some(input) = picker.going_to.as_deref() else {
             return;
         };
-        let current = picker.path.clone();
-        let show_hidden = picker.show_hidden;
-        let cycle = picker.go_to_cycle.clone();
-        let home = crate::platform::home_dir();
-        let Some((next, next_cycle)) = complete_go_to(
-            input,
-            &current,
-            home.as_deref(),
-            show_hidden,
-            cycle.as_ref(),
-            reverse,
-        ) else {
+        if let Some(cycle) = picker.go_to_cycle.as_ref() {
+            let stepped = cycle_go_to(cycle, reverse);
+            if let Some((text, next)) = stepped {
+                if let Some(p) = self.picker.as_mut() {
+                    p.going_to = Some(text);
+                    p.go_to_cycle = Some(next);
+                    p.error = None;
+                }
+            }
             return;
-        };
-        if let Some(p) = self.picker.as_mut() {
-            p.going_to = Some(next);
-            p.go_to_cycle = next_cycle;
-            p.error = None;
         }
+        // One scan at a time. A superseded scan still releases its own slot on
+        // arrival, so this cannot wedge Tab.
+        if picker.go_to_scanning.is_some() {
+            return;
+        }
+        let scan = GoToScan {
+            input: input.to_string(),
+            current: picker.path.clone(),
+            home: crate::platform::home_dir(),
+            show_hidden: picker.show_hidden,
+            reverse,
+        };
+        let generation = self.begin_go_to_completion();
+        let accepted = self.io_jobs.submit(self.app_tx.clone(), move || {
+            let result = scan.run();
+            Box::new(move |app| app.apply_go_to_completion(generation, result))
+        });
+        if accepted.is_err() {
+            // A completion that cannot even be queued stays a no-op, like one
+            // that finds nothing. Just free the slot for the next Tab.
+            if let Some(p) = self.picker.as_mut() {
+                p.go_to_scanning = None;
+            }
+        }
+    }
+
+    /// Claim the next completion generation and mark the scan pending. Separate
+    /// from worker admission so focused tests can apply a deterministic result
+    /// without scheduling a duplicate filesystem job.
+    fn begin_go_to_completion(&mut self) -> u64 {
+        self.picker_go_to_generation = self.picker_go_to_generation.wrapping_add(1);
+        let generation = self.picker_go_to_generation;
+        if let Some(p) = self.picker.as_mut() {
+            p.go_to_generation = generation;
+            p.go_to_scanning = Some(generation);
+        }
+        generation
+    }
+
+    /// Retire whatever completion the Go to field currently accepts: drops an
+    /// armed cycle and fences any scan still in flight. Every edit and every
+    /// directory change routes through here.
+    fn invalidate_go_to_completion(&mut self) {
+        self.picker_go_to_generation = self.picker_go_to_generation.wrapping_add(1);
+        let generation = self.picker_go_to_generation;
+        if let Some(p) = self.picker.as_mut() {
+            p.go_to_generation = generation;
+            p.go_to_cycle = None;
+        }
+    }
+
+    /// Apply a completion scan started by [`App::picker_complete_go_to`]. A
+    /// result whose `generation` is not the one the field still waits on — closed,
+    /// reopened, edited, or navigated since — is dropped, because its candidates
+    /// describe text or a folder that is no longer on screen. Nothing here
+    /// touches the filesystem.
+    pub(crate) fn apply_go_to_completion(
+        &mut self,
+        generation: u64,
+        result: Option<(String, Option<GoToCycle>)>,
+    ) -> bool {
+        let Some(p) = self.picker.as_mut() else {
+            return false;
+        };
+        // Release the slot before validating, so a discarded result still lets
+        // the next Tab start a scan. Only this scan's own slot is freed: a newer
+        // one may already be queued against a later generation.
+        if p.go_to_scanning == Some(generation) {
+            p.go_to_scanning = None;
+        }
+        if p.go_to_generation != generation || p.going_to.is_none() {
+            return false;
+        }
+        let Some((text, cycle)) = result else {
+            return false;
+        };
+        p.going_to = Some(text);
+        p.go_to_cycle = cycle;
+        p.error = None;
+        true
     }
 
     /// Resolve an entered path and browse to it. Absolute paths, paths relative
@@ -719,9 +892,9 @@ impl App {
             p.path = target;
             p.cursor = 0;
             p.going_to = None;
-            p.go_to_cycle = None;
             p.error = None;
         }
+        // Retires the completion generation along with the re-listing.
         self.picker_refresh();
     }
 
@@ -810,6 +983,8 @@ mod tests {
             creating: None,
             going_to: None,
             go_to_cycle: None,
+            go_to_generation: 0,
+            go_to_scanning: None,
             error: None,
             is_repo: false,
             show_hidden: false,
@@ -842,6 +1017,8 @@ mod tests {
             creating: None,
             going_to: None,
             go_to_cycle: None,
+            go_to_generation: 0,
+            go_to_scanning: None,
             error: None,
             is_repo: true,
             show_hidden: false,
@@ -1182,6 +1359,35 @@ mod tests {
         tmp
     }
 
+    /// Take the next queued completion off the channel without applying it, so a
+    /// test can change state first and prove the result is discarded.
+    fn take_completion(rx: &std::sync::mpsc::Receiver<AppEvent>) -> io_jobs::Completion {
+        loop {
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(AppEvent::IoCompleted(completion)) => return completion,
+                Ok(_) => continue,
+                Err(error) => panic!("completion never arrived: {error}"),
+            }
+        }
+    }
+
+    /// Drive one Tab the way the event loop does: the keypress queues a scan on
+    /// the filesystem worker, and its completion applies on a later turn.
+    fn press_tab(app: &mut App, rx: &std::sync::mpsc::Receiver<AppEvent>, key: KeyEvent) {
+        let pending_before = app
+            .picker
+            .as_ref()
+            .is_some_and(|p| p.go_to_scanning.is_some());
+        app.handle_picker_key(key);
+        let queued = app
+            .picker
+            .as_ref()
+            .is_some_and(|p| p.go_to_scanning.is_some());
+        if queued && !pending_before {
+            take_completion(rx).apply(app);
+        }
+    }
+
     #[test]
     fn complete_go_to_unique_match_appends_separator_and_skips_files() {
         let tmp = complete_fixture("unique");
@@ -1355,7 +1561,22 @@ mod tests {
 
         buf = String::from(r"keep/lit\folder");
         delete_last_path_word(&mut buf);
-        assert_eq!(buf, "keep/", "the `/` component boundary always wins");
+        if cfg!(windows) {
+            assert_eq!(buf, "keep/lit\\", "`\\` is a boundary on Windows");
+        } else {
+            assert_eq!(buf, "keep/", "only `/` bounds a component on Unix");
+        }
+
+        // A `~\` stem is a boundary on either platform, because Enter accepts
+        // that spelling everywhere. Deleting a name must not strand the user
+        // without the home prefix they typed.
+        buf = String::from(r"~\Documents");
+        delete_last_path_word(&mut buf);
+        assert_eq!(buf, "~\\");
+        // The stem itself is still deletable once nothing follows it, exactly
+        // like `~/`.
+        delete_last_path_word(&mut buf);
+        assert_eq!(buf, "");
     }
 
     #[test]
@@ -1394,7 +1615,7 @@ mod tests {
         std::fs::create_dir_all(tmp.join("Documents")).unwrap();
         std::fs::create_dir_all(tmp.join("Downloads")).unwrap();
 
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let workspaces_before = app.workspaces.len();
         app.open_folder_picker_at(tmp.clone());
@@ -1404,14 +1625,28 @@ mod tests {
             app.picker.as_ref().unwrap().going_to.is_none(),
             "Tab is inert while browsing"
         );
+        assert!(
+            app.picker.as_ref().unwrap().go_to_scanning.is_none(),
+            "browsing queues no scan"
+        );
 
         app.picker_start_go_to();
         app.handle_picker_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
-        app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        press_tab(
+            &mut app,
+            &rx,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        );
         assert_eq!(app.picker.as_ref().unwrap().going_to.as_deref(), Some("Do"));
         assert!(app.picker.as_ref().unwrap().go_to_cycle.is_some());
 
+        // Stepping an armed cycle is in-memory only: no scan is queued, so these
+        // presses need no completion pumped.
         app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(
+            app.picker.as_ref().unwrap().go_to_scanning.is_none(),
+            "cycling stays off the worker"
+        );
         assert_eq!(
             app.picker.as_ref().unwrap().going_to.as_deref(),
             Some("Documents")
@@ -1432,7 +1667,11 @@ mod tests {
         assert!(app.picker.as_ref().unwrap().go_to_cycle.is_none());
 
         let before = app.picker.as_ref().unwrap().going_to.clone();
-        app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        press_tab(
+            &mut app,
+            &rx,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        );
         assert_eq!(
             app.picker.as_ref().unwrap().going_to,
             before,
@@ -1443,7 +1682,11 @@ mod tests {
             buf.clear();
             buf.push_str("Documents");
         }
-        app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        press_tab(
+            &mut app,
+            &rx,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        );
         assert_eq!(
             app.picker.as_ref().unwrap().going_to.as_deref(),
             Some("Documents/")
@@ -1452,6 +1695,7 @@ mod tests {
         assert_eq!(app.picker.as_ref().unwrap().path, tmp.join("Documents"));
         assert_eq!(app.workspaces.len(), workspaces_before);
 
+        app.drain_io_jobs();
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1465,7 +1709,7 @@ mod tests {
         let tmp = complete_fixture("footer");
         std::fs::create_dir_all(tmp.join("Documents")).unwrap();
 
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         app.open_folder_picker_at(tmp.clone());
         app.picker_start_go_to();
@@ -1494,11 +1738,14 @@ mod tests {
             row: tab.y,
             modifiers: KeyModifiers::NONE,
         }));
+        // A clicked hint replays the key, so it queues the same scan Tab does.
+        take_completion(&rx).apply(&mut app);
         assert_eq!(
             app.picker.as_ref().unwrap().going_to.as_deref(),
             Some("Documents/")
         );
 
+        app.drain_io_jobs();
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1510,17 +1757,17 @@ mod tests {
         std::fs::create_dir_all(tmp.join("alphabet")).unwrap();
         std::fs::create_dir_all(tmp.join("zulu")).unwrap();
 
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
 
         // Arm a cycle, then navigate by click while Go to is still open. The
         // candidates were listed from the previous directory, so they must go.
-        let arm = |app: &mut App| {
+        let arm = |app: &mut App, rx: &std::sync::mpsc::Receiver<AppEvent>| {
             app.picker_start_go_to();
             for c in "al".chars() {
                 app.handle_picker_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
             }
-            app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+            press_tab(app, rx, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
             assert_eq!(
                 app.picker.as_ref().unwrap().going_to.as_deref(),
                 Some("alpha")
@@ -1529,7 +1776,7 @@ mod tests {
         };
 
         app.open_folder_picker_at(tmp.clone());
-        arm(&mut app);
+        arm(&mut app, &rx);
         let zulu_row = {
             let p = app.picker.as_ref().unwrap();
             let idx = p.entries.iter().position(|e| e.name == "zulu").unwrap();
@@ -1549,7 +1796,7 @@ mod tests {
             !app.picker.as_ref().unwrap().is_repo,
             "fixture is not a repo"
         );
-        arm(&mut app);
+        arm(&mut app, &rx);
         app.picker_click(2);
         let p = app.picker.as_ref().unwrap();
         assert_eq!(p.path, tmp.parent().unwrap());
@@ -1557,13 +1804,14 @@ mod tests {
 
         // So is re-listing the same folder under a different filter.
         app.open_folder_picker_at(tmp.clone());
-        arm(&mut app);
+        arm(&mut app, &rx);
         app.picker_toggle_hidden();
         assert!(
             app.picker.as_ref().unwrap().go_to_cycle.is_none(),
             "re-listing invalidates the candidates"
         );
 
+        app.drain_io_jobs();
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1644,6 +1892,225 @@ mod tests {
         let (text, _) = complete_go_to(&text, &tmp, None, false, Some(&cycle), false).unwrap();
         assert_eq!(text, "foobar");
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn go_to_completion_runs_off_the_app_loop() {
+        let _env = crate::persist::test_env("picker-go-to-offloop");
+        let tmp = complete_fixture("offloop");
+        std::fs::create_dir_all(tmp.join("Documents")).unwrap();
+        std::fs::create_dir_all(tmp.join("Downloads")).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_folder_picker_at(tmp.clone());
+        app.picker_start_go_to();
+        app.handle_picker_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
+
+        // Tab returns before any directory is read: the keypress only queues the
+        // scan, so the field is still exactly what the user typed.
+        app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let p = app.picker.as_ref().unwrap();
+        assert_eq!(p.going_to.as_deref(), Some("D"));
+        assert!(
+            p.go_to_scanning.is_some(),
+            "the scan is queued, not run inline"
+        );
+        assert!(p.go_to_cycle.is_none());
+
+        // A second Tab while one scan is outstanding must not queue another.
+        let generation = app.picker.as_ref().unwrap().go_to_generation;
+        app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.picker.as_ref().unwrap().go_to_generation,
+            generation,
+            "one scan at a time"
+        );
+
+        take_completion(&rx).apply(&mut app);
+        let p = app.picker.as_ref().unwrap();
+        assert_eq!(p.going_to.as_deref(), Some("Do"));
+        assert!(
+            p.go_to_scanning.is_none(),
+            "the slot is released on completion"
+        );
+        assert!(p.go_to_cycle.is_some());
+
+        app.drain_io_jobs();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn stale_go_to_scans_are_discarded() {
+        let _env = crate::persist::test_env("picker-go-to-stale-scan");
+        let tmp = complete_fixture("stale-scan");
+        std::fs::create_dir_all(tmp.join("Documents")).unwrap();
+        let other = tmp.join("other");
+        std::fs::create_dir_all(other.join("Different")).unwrap();
+
+        // Every one of these happens between the keypress and the completion, and
+        // each must make the in-flight result inapplicable.
+        for scenario in ["typed", "deleted", "navigated", "cancelled", "closed"] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut app = App::new(80, 24, tx).unwrap();
+            app.open_folder_picker_at(tmp.clone());
+            app.picker_start_go_to();
+            app.handle_picker_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
+            app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+            assert!(app.picker.as_ref().unwrap().go_to_scanning.is_some());
+            let completion = take_completion(&rx);
+
+            match scenario {
+                "typed" => {
+                    app.handle_picker_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+                }
+                "deleted" => {
+                    app.handle_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+                }
+                // Row 3 outside a repo is the first entry: `other`.
+                "navigated" => {
+                    let row = {
+                        let p = app.picker.as_ref().unwrap();
+                        let idx = p.entries.iter().position(|e| e.name == "other").unwrap();
+                        p.leading() + idx
+                    };
+                    app.picker_click(row);
+                }
+                "cancelled" => {
+                    app.handle_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                }
+                "closed" => app.close_folder_picker(),
+                _ => unreachable!(),
+            }
+            let before = app.picker.as_ref().and_then(|p| p.going_to.clone());
+
+            assert!(
+                !completion.apply(&mut app),
+                "{scenario}: a superseded scan must not redraw the field"
+            );
+            match app.picker.as_ref() {
+                Some(p) => {
+                    assert_eq!(
+                        p.going_to, before,
+                        "{scenario}: field left as the user left it"
+                    );
+                    assert!(p.go_to_cycle.is_none(), "{scenario}: no candidates armed");
+                    assert!(
+                        p.go_to_scanning.is_none(),
+                        "{scenario}: the slot is released anyway"
+                    );
+                }
+                None => assert_eq!(scenario, "closed"),
+            }
+
+            // The released slot means the next Tab still works.
+            if app.picker.is_some() {
+                app.picker_start_go_to();
+                app.handle_picker_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
+                press_tab(
+                    &mut app,
+                    &rx,
+                    KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+                );
+                let expected = match scenario {
+                    "navigated" => "Different/",
+                    _ => "Documents/",
+                };
+                assert_eq!(
+                    app.picker.as_ref().unwrap().going_to.as_deref(),
+                    Some(expected),
+                    "{scenario}: completion recovers against the live folder"
+                );
+            }
+            app.drain_io_jobs();
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn go_to_candidates_stay_bounded_without_overclaiming() {
+        let tmp = complete_fixture("bounded");
+        // More matches than the cap, all sharing `dir-`, so the shared prefix the
+        // field may claim is decided by the whole set and not just the retained
+        // slice. Two names below keep it from growing past `dir-`.
+        for i in 0..(MAX_GO_TO_MATCHES + 64) {
+            std::fs::create_dir_all(tmp.join(format!("dir-{i:04}"))).unwrap();
+        }
+        let listed = list_go_to_dirs(&tmp, "dir-", false);
+        assert_eq!(
+            listed.names.len(),
+            MAX_GO_TO_MATCHES,
+            "the list handed back to the loop is capped"
+        );
+        assert_eq!(
+            listed.common, "dir-0",
+            "names dropped past the cap still constrain the shared prefix"
+        );
+
+        // Completing must not invent text beyond what every match agrees on.
+        let (text, cycle) = scan_go_to("dir-", &tmp, None, false, false).unwrap();
+        assert_eq!(text, "dir-0");
+        assert_eq!(cycle.unwrap().matches.len(), MAX_GO_TO_MATCHES);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_late_scan_does_not_release_a_newer_scans_slot() {
+        let _env = crate::persist::test_env("picker-go-to-late-scan");
+        let tmp = complete_fixture("late-scan");
+        std::fs::create_dir_all(tmp.join("Documents")).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_folder_picker_at(tmp.clone());
+        app.picker_start_go_to();
+        app.handle_picker_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
+
+        // Queue one scan, then invalidate it by editing so it can never apply.
+        app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let first = take_completion(&rx);
+        let first_slot = app.picker.as_ref().unwrap().go_to_scanning;
+        app.handle_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(
+            app.picker.as_ref().unwrap().go_to_scanning,
+            first_slot,
+            "editing does not pretend the queued scan finished"
+        );
+
+        // The superseded scan releases its own slot and changes nothing else.
+        assert!(!first.apply(&mut app));
+        let p = app.picker.as_ref().unwrap();
+        assert!(p.go_to_scanning.is_none(), "its own slot is freed");
+        assert_eq!(p.going_to.as_deref(), Some(""));
+
+        // Queue a second scan, then deliver a stale result carrying the first
+        // scan's generation: it must not free the newer scan's slot.
+        app.handle_picker_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
+        app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let second_slot = app.picker.as_ref().unwrap().go_to_scanning;
+        assert!(second_slot.is_some());
+        let stale = first_slot.expect("the first scan had a generation");
+        assert!(!app.apply_go_to_completion(stale, Some(("bogus".into(), None))));
+        assert_eq!(
+            app.picker.as_ref().unwrap().go_to_scanning,
+            second_slot,
+            "a late scan must not release the queued scan's slot"
+        );
+        assert_eq!(
+            app.picker.as_ref().unwrap().going_to.as_deref(),
+            Some("D"),
+            "and must not write the field"
+        );
+
+        take_completion(&rx).apply(&mut app);
+        let p = app.picker.as_ref().unwrap();
+        assert_eq!(p.going_to.as_deref(), Some("Documents/"));
+        assert!(p.go_to_scanning.is_none());
+
+        app.drain_io_jobs();
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
