@@ -161,6 +161,31 @@ jobs:
             --binary target/x86_64-apple-darwin/release/luvus \
             --archive target/luvus-x86_64-size.tar.gz
 
+  binary-size-windows:
+    name: windows binary size
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - id: package
+        uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: luvus
+          target: x86_64-pc-windows-msvc
+          archive: luvus-size-$target
+          checksum: sha256
+          locked: true
+          dry-run: true
+          dry-run-intended: true
+      - name: Check reviewed baseline
+        shell: bash
+        run: |
+          python3 scripts/check-binary-size.py \
+            --target x86_64-pc-windows-msvc \
+            --binary target/x86_64-pc-windows-msvc/release/luvus.exe \
+            --archive "${{ steps.package.outputs.zip }}"
+
   windows:
     name: windows protocol · ConPTY
     runs-on: windows-latest

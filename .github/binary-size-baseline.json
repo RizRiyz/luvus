@@ -22,8 +22,8 @@
       "archive_bytes": 5157914
     },
     "x86_64-pc-windows-msvc": {
-      "executable_bytes": 13441536,
-      "archive_bytes": 4915845
+      "executable_bytes": 15283200,
+      "archive_bytes": 5266491
     }
   }
 }
