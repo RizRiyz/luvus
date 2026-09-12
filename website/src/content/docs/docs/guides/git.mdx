@@ -27,10 +27,18 @@ layers with local notes, use the FILES dock's [DIFF surface](/docs/guides/diff/)
 ## Actions
 
 - `⏎` on a branch **checks it out**. On a PR it opens the **detail panel**
-  (checks, reviews, mergeability) where you can approve, merge, or check out
-  the PR branch.
-- `d` shows a **diff/log** for the selection in your terminal pane.
-- `o` opens the selection on GitHub, and `c` starts `gh pr create`.
+  where you can read the description and discussion, then approve or check out
+  the PR branch. On wide terminals, the discussion uses the left
+  two-thirds while branches, checks, reviews, labels, mergeability, and stats
+  stay visible in a right-hand information rail. Narrow terminals stack the
+  same content into one scrollable view.
+- `⏎` on an issue opens its description and recent comments in the same reader,
+  with state, labels, assignees, and comment count in the information rail.
+- `d` shows a **diff/log** for branches and changed Status files. PR details do
+  not launch merge, ready, or terminal diff commands.
+- In the PR list, `c` starts `gh pr create`. Inside PR detail, `c` or `Enter`
+  checks out the selected branch, `a` approves it, `o` opens it on GitHub, and
+  `r` refreshes the panel. Use `q` or `Esc` to return to the list.
 - `m` toggles scope between *this repo* and *my work* (everything involving you).
 
 ## GitHub without GitHub

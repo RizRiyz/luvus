@@ -14,7 +14,8 @@ const DEFAULT_ACCESS_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const PAIRING_TTL: Duration = Duration::from_secs(5 * 60);
 const TOKEN_REFRESH_WINDOW: u64 = 5 * 60;
 const MAX_ACCESS_TTL_SECS: u64 = 24 * 60 * 60;
-const ACCESS_USAGE: &str = "usage: luvus uhp access [--control] [--ttl <seconds> | --no-expiry]";
+const ACCESS_USAGE: &str =
+    "usage: luvus uhp access [--machines] [--control] [--ttl <seconds> | --no-expiry]";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum AccessMode {
@@ -26,15 +27,24 @@ impl AccessMode {
     pub(super) fn scopes(self) -> &'static [&'static str] {
         match self {
             Self::ReadOnly => &["read"],
-            Self::Control => &["read", "workspace", "agent", "terminal"],
+            Self::Control => &["read", "workspace", "agent", "terminal", "orchestration"],
         }
     }
+}
+
+fn access_scopes(mode: AccessMode, machines: bool) -> Vec<&'static str> {
+    let mut scopes = mode.scopes().to_vec();
+    if machines && mode == AccessMode::Control {
+        scopes.push("machine");
+    }
+    scopes
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct AccessOptions {
     mode: AccessMode,
     lifetime: AccessLifetime,
+    machines: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -57,6 +67,7 @@ impl AccessSession {
     fn start(
         mode: AccessMode,
         lifetime: AccessLifetime,
+        machines: bool,
         context: crate::i18n::cli::Context,
     ) -> Result<Self> {
         probe_server(context)?;
@@ -79,13 +90,14 @@ impl AccessSession {
             "luv_access_{}",
             crate::terminal::backend::random_id().map_err(anyhow::Error::msg)?
         );
-        let gateway = Gateway::start(
+        let gateway = Gateway::start_with_machines(
             crate::persist::cli_socket_path(),
             client_token,
             authority_expires_at,
             delegated.secret.clone(),
             pairing,
             mode,
+            machines,
         )
         .map_err(|_| anyhow!(context.text("Could not start the private UHP access gateway.")))?;
         Ok(Self {
@@ -110,6 +122,7 @@ impl AccessSession {
             &self.pairing_code,
             self.pairing_expires_at,
             self.authority_expires_at,
+            self.gateway.machine_access(),
         )
     }
 
@@ -149,7 +162,8 @@ impl Drop for AccessSession {
 /// the descriptor to any compatible client without knowing Luvus internals.
 pub(crate) fn run_cli(args: &[String], context: crate::i18n::cli::Context) -> Result<i32> {
     let options = parse_options(args, context)?;
-    let mut access = AccessSession::start(options.mode, options.lifetime, context)?;
+    let mut access =
+        AccessSession::start(options.mode, options.lifetime, options.machines, context)?;
     shutdown::install();
     println!("{}", serde_json::to_string(&access.descriptor())?);
     std::io::stdout().flush()?;
@@ -171,11 +185,16 @@ pub(crate) fn run_cli(args: &[String], context: crate::i18n::cli::Context) -> Re
 fn parse_options(args: &[String], context: crate::i18n::cli::Context) -> Result<AccessOptions> {
     let mut mode = AccessMode::ReadOnly;
     let mut lifetime = None;
+    let mut machines = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
             "--control" if mode == AccessMode::ReadOnly => {
                 mode = AccessMode::Control;
+                index += 1;
+            }
+            "--machines" if !machines => {
+                machines = true;
                 index += 1;
             }
             "--ttl" if lifetime.is_none() => {
@@ -204,6 +223,7 @@ fn parse_options(args: &[String], context: crate::i18n::cli::Context) -> Result<
     Ok(AccessOptions {
         mode,
         lifetime: lifetime.unwrap_or(AccessLifetime::Finite(DEFAULT_ACCESS_TTL)),
+        machines,
     })
 }
 
@@ -220,6 +240,7 @@ fn access_descriptor(
     pairing_code: &str,
     pairing_expires_at: u64,
     authority_expires_at: Option<u64>,
+    machines: bool,
 ) -> Value {
     let mut descriptor = json!({
         "$schema":"https://luvus.dev/protocol/uhp/v1/schema/access/descriptor.schema.json",
@@ -246,13 +267,16 @@ fn access_descriptor(
                 AccessMode::ReadOnly => "read_only",
                 AccessMode::Control => "control",
             },
-            "scopes":mode.scopes(),
+            "scopes":access_scopes(mode, machines),
         },
     });
     if let Some(expires_at) = authority_expires_at {
         descriptor["authority"]["expires_at"] = json!(expires_at);
     } else {
         descriptor["authority"]["expires_on_close"] = json!(true);
+    }
+    if machines {
+        descriptor["features"] = json!({"machines":true});
     }
     descriptor
 }
@@ -428,6 +452,7 @@ mod tests {
             AccessOptions {
                 mode: AccessMode::ReadOnly,
                 lifetime: AccessLifetime::Finite(DEFAULT_ACCESS_TTL),
+                machines: false,
             }
         );
         assert_eq!(
@@ -435,6 +460,7 @@ mod tests {
             AccessOptions {
                 mode: AccessMode::Control,
                 lifetime: AccessLifetime::Finite(DEFAULT_ACCESS_TTL),
+                machines: false,
             }
         );
         assert_eq!(
@@ -446,6 +472,7 @@ mod tests {
             AccessOptions {
                 mode: AccessMode::Control,
                 lifetime: AccessLifetime::Finite(Duration::from_secs(7200)),
+                machines: false,
             }
         );
         assert_eq!(
@@ -453,6 +480,15 @@ mod tests {
             AccessOptions {
                 mode: AccessMode::ReadOnly,
                 lifetime: AccessLifetime::Process,
+                machines: false,
+            }
+        );
+        assert_eq!(
+            parse_options(&["--machines".into(), "--control".into()], context).unwrap(),
+            AccessOptions {
+                mode: AccessMode::Control,
+                lifetime: AccessLifetime::Finite(DEFAULT_ACCESS_TTL),
+                machines: true,
             }
         );
     }
@@ -478,7 +514,7 @@ mod tests {
         assert_eq!(AccessMode::ReadOnly.scopes(), &["read"]);
         assert_eq!(
             AccessMode::Control.scopes(),
-            &["read", "workspace", "agent", "terminal"]
+            &["read", "workspace", "agent", "terminal", "orchestration"]
         );
     }
 
@@ -490,6 +526,7 @@ mod tests {
             "ABCD-EFGH-JKLM",
             1_700_000_300,
             Some(1_700_000_900),
+            false,
         );
         assert_eq!(descriptor["type"], "luvus_uhp_access");
         assert_eq!(descriptor["protocol"]["major"], 1);
@@ -501,12 +538,28 @@ mod tests {
         assert!(descriptor.get("token").is_none());
         assert!(descriptor["authority"].get("token").is_none());
 
+        let machines = access_descriptor(
+            AccessMode::Control,
+            43123,
+            "ABCD-EFGH-JKLM",
+            1_700_000_300,
+            Some(1_700_000_900),
+            true,
+        );
+        assert_eq!(machines["features"]["machines"], true);
+        assert!(machines["authority"]["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scope| scope == "machine"));
+
         let process_bound = access_descriptor(
             AccessMode::ReadOnly,
             43123,
             "ABCD-EFGH-JKLM",
             1_700_000_300,
             None,
+            false,
         );
         assert_eq!(process_bound["authority"]["expires_on_close"], true);
         assert!(process_bound["authority"].get("expires_at").is_none());

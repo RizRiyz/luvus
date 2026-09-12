@@ -1,3 +1,10 @@
 {
-  "files": ["claude.toml"]
+  "files": [
+    "antigravity.toml",
+    "claude.toml",
+    "devin.toml",
+    "gemini.toml",
+    "kilo.toml",
+    "opencode2.toml"
+  ]
 }

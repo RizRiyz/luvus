@@ -164,6 +164,10 @@ enum Cond {
     /// (U+2800..=U+28FF, what most CLIs animate) or a moon phase (U+1F311..=
     /// U+1F318, Kimi's background-agent spinner). A running spinner means work.
     Spinner,
+    /// A line starts with one of these branded prefixes and the next character
+    /// is a spinner. Some agents keep their brand before the live state glyph
+    /// in the OSC title, so the generic start-of-line spinner rule cannot see it.
+    SpinnerAfterPrefix(Vec<String>),
 }
 
 impl Cond {
@@ -176,6 +180,14 @@ impl Cond {
             Cond::Spinner => low
                 .lines()
                 .any(|l| l.trim_start().chars().next().is_some_and(is_spinner_glyph)),
+            Cond::SpinnerAfterPrefix(prefixes) => low.lines().any(|line| {
+                let line = line.trim_start();
+                prefixes.iter().any(|prefix| {
+                    line.strip_prefix(prefix)
+                        .and_then(|rest| rest.chars().next())
+                        .is_some_and(is_spinner_glyph)
+                })
+            }),
         }
     }
 }
@@ -308,6 +320,9 @@ fn all(subs: &[&str]) -> Cond {
 fn starts_with(prefixes: &[&str]) -> Cond {
     Cond::StartsWith(prefixes.iter().map(|value| value.to_lowercase()).collect())
 }
+fn spinner_after_prefix(prefixes: &[&str]) -> Cond {
+    Cond::SpinnerAfterPrefix(prefixes.iter().map(|value| value.to_lowercase()).collect())
+}
 
 /// How much of the live terminal grid must reach the rule engine. Most agents
 /// keep state beside their bottom prompt, but fx can pin its transient activity
@@ -321,8 +336,11 @@ pub(crate) fn screen_rows(known_agent: &str, running: &[String], manifests: &Man
     }
 }
 
-/// Claude and Hermes can place a live approval panel above a tall blank footer.
-/// Keep their most recent non-empty live rows without pulling in scrollback.
+/// Claude, Codex, Hermes, and Devin can place a live interaction panel above a
+/// tall blank footer. Keep their most recent non-empty live rows without pulling
+/// in scrollback. For Codex this also keeps the first-run sign-in chooser
+/// visible to prompt admission instead of mistaking its blank footer for a
+/// composer; for Devin, the first-run workspace-trust menu.
 pub(crate) fn screen_uses_non_empty_rows(
     known_agent: &str,
     running: &[String],
@@ -330,8 +348,12 @@ pub(crate) fn screen_uses_non_empty_rows(
 ) -> bool {
     known_agent.eq_ignore_ascii_case("claude")
         || manifests.process_has_agent(running, "claude")
+        || known_agent.eq_ignore_ascii_case("codex")
+        || manifests.process_has_agent(running, "codex")
         || known_agent.eq_ignore_ascii_case("hermes")
         || manifests.process_has_agent(running, "hermes")
+        || known_agent.eq_ignore_ascii_case("devin")
+        || manifests.process_has_agent(running, "devin")
 }
 
 /// The compiled-in default rules (generic first, then per-agent).
@@ -412,6 +434,47 @@ fn builtin_rules() -> Vec<Rule> {
             105,
             Region::Screen,
             vec![any(&["ctrl+c to stop"])],
+        ),
+        // OMP publishes its state in the OSC title as `π <state> label`.
+        // Current builds use `:` while working, `!` for attention, and `>` for
+        // the user's turn. Older builds animated a braille spinner after `π `
+        // instead of `:`; keep that form so both contracts classify.
+        //
+        // On some Windows ConPTY paths the brand glyph arrives as U+87FA
+        // (UTF-8 E8 9F BA) instead of Greek pi U+03C0. Live inventory on this
+        // host shows that consistently while ASCII state markers stay intact,
+        // so match both brand codepoints until the title encoding path is fixed.
+        // Scope the rules to OMP: the generic spinner rule requires a
+        // line-leading spinner, and weakening it would create false positives
+        // for ordinary branded titles. The explicit idle title outranks
+        // retained screen activity but not a live confirmation panel.
+        per(
+            "omp",
+            State::Blocked,
+            325,
+            Region::Title,
+            vec![starts_with(&["π !", "\u{87FA} !"])],
+        ),
+        per(
+            "omp",
+            State::Working,
+            125,
+            Region::Title,
+            vec![starts_with(&["π :", "\u{87FA} :"])],
+        ),
+        per(
+            "omp",
+            State::Working,
+            124,
+            Region::Title,
+            vec![spinner_after_prefix(&["π ", "\u{87FA} "])],
+        ),
+        per(
+            "omp",
+            State::Idle,
+            210,
+            Region::Title,
+            vec![starts_with(&["π >", "\u{87FA} >"])],
         ),
         // fx suppresses its activity row while it needs user input. Its
         // narrowest approval and question hints retain these paired controls,
@@ -699,6 +762,28 @@ fn builtin_rules() -> Vec<Rule> {
             Region::Screen,
             vec![all(&["yes, proceed", "yes, don't ask again this session"])],
         ),
+        // Devin's first-run workspace-trust screen is a numbered menu without
+        // the generic paired enter/esc controls, worded both "…authors of this
+        // directory?" and "…authors of <dir>?". Match the shared stem together
+        // with its exit label, so transcript prose cannot fake it.
+        per(
+            "devin",
+            State::Blocked,
+            310,
+            Region::Screen,
+            vec![all(&["trust the authors of", "no, exit"])],
+        ),
+        // Devin says "esc again to interrupt" (or "esc twice…") while it
+        // generates. Neither phrase contains a generic WORKING_HINT, so without
+        // this rule the pane reads as working only while a spinner frame
+        // happens to lead a line.
+        per(
+            "devin",
+            State::Working,
+            105,
+            Region::Screen,
+            vec![any(&["esc again to interrupt", "esc twice to interrupt"])],
+        ),
     ]
 }
 
@@ -900,9 +985,18 @@ impl RuleSpec {
 // ── public API ──────────────────────────────────────────────────────────────
 
 /// Result of classifying a pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PromptEvidence {
+    Unknown,
+    Ready,
+    Blocked,
+}
+
 pub struct Detection {
     pub state: State,
     pub agent: String,
+    /// Raw, non-debounced prompt-surface evidence from this screen.
+    pub(crate) prompt_evidence: PromptEvidence,
     /// Where identity came from. Stable, machine-readable values are exposed by
     /// `agent.explain`; no consumer needs to reverse-engineer detection order.
     pub identity_source: &'static str,
@@ -991,7 +1085,7 @@ pub fn classify(
         State::Idle
     };
     let matched = manifests.evaluate(&agent, &regions);
-    let (state, state_source, rule_priority, rule_region) = match matched {
+    let (state, state_source, rule_priority, rule_region, prompt_blocked) = match matched {
         Some(rule) => (
             rule.state,
             "manifest_rule",
@@ -1000,18 +1094,63 @@ pub fn classify(
                 Region::Title => "title",
                 Region::Screen => "screen",
             }),
+            rule.state == State::Blocked,
         ),
-        None if fallback == State::Working => (fallback, "shell_activity", None, None),
-        None => (fallback, "no_positive_state_evidence", None, None),
+        None if fallback == State::Working => (fallback, "shell_activity", None, None, false),
+        None => (fallback, "no_positive_state_evidence", None, None, false),
     };
 
+    let prompt_evidence = if prompt_blocked {
+        PromptEvidence::Blocked
+    } else if agent.eq_ignore_ascii_case("codex") {
+        // Text alone cannot distinguish Codex's live composer from a prompt
+        // marker retained in the transcript. The app combines this raw state
+        // evidence with the VT engine's bounded composer geometry.
+        PromptEvidence::Unknown
+    } else {
+        PromptEvidence::Ready
+    };
     Detection {
         state,
         agent,
+        prompt_evidence,
         identity_source,
         state_source,
         rule_priority,
         rule_region,
+    }
+}
+
+/// Codex can be identified from its process/title before its startup chooser or
+/// composer exists. Server-owned launches keep prompt admission closed until
+/// the screen proves which surface won that race.
+pub(crate) fn prompt_requires_positive_evidence(agent: &str) -> bool {
+    agent.eq_ignore_ascii_case("codex")
+}
+
+/// Re-evaluate raw prompt readiness from the current bounded screen. This
+/// deliberately reuses manifest state rules instead of teaching API dispatch
+/// about individual agents, and runs only when output changed after the normal
+/// detection pass.
+pub(crate) fn prompt_evidence(
+    title: Option<&str>,
+    bottom: &str,
+    agent: &str,
+    manifests: &Manifests,
+) -> PromptEvidence {
+    let regions = Regions {
+        screen: bottom.to_lowercase(),
+        title: title.map(str::to_lowercase).unwrap_or_default(),
+    };
+    let blocked = manifests
+        .evaluate(&agent.to_lowercase(), &regions)
+        .is_some_and(|rule| rule.state == State::Blocked);
+    if blocked {
+        PromptEvidence::Blocked
+    } else if agent.eq_ignore_ascii_case("codex") {
+        PromptEvidence::Unknown
+    } else {
+        PromptEvidence::Ready
     }
 }
 
@@ -1622,6 +1761,58 @@ Would you like to proceed?
     }
 
     #[test]
+    fn omp_title_states_work_without_the_optional_integration() {
+        let manifests = Manifests::builtin();
+        let omp_process = vec!["bun /Users/me/.bun/bin/omp".to_string()];
+        let detect = |title: &str, screen: &str| {
+            classify(
+                Some(title),
+                screen,
+                false,
+                false,
+                "zsh",
+                "",
+                &omp_process,
+                &manifests,
+            )
+        };
+
+        let working = detect("π : sudos", "");
+        assert_eq!(working.agent, "omp");
+        assert_eq!(working.identity_source, "process_tree");
+        assert_eq!(working.state, State::Working);
+        assert_eq!(working.state_source, "manifest_rule");
+
+        assert_eq!(detect("π ⠋ sudos", "").state, State::Working);
+        assert_eq!(detect("π ! sudos", "").state, State::Blocked);
+        assert_eq!(detect("π > sudos", "esc to interrupt").state, State::Idle);
+        // Windows ConPTY-mangled brand observed in live inventory titles.
+        assert_eq!(detect("\u{87FA} : sudos", "").state, State::Working);
+        assert_eq!(detect("\u{87FA} ! sudos", "").state, State::Blocked);
+        assert_eq!(
+            detect("\u{87FA} > sudos", "esc to interrupt").state,
+            State::Idle
+        );
+
+        let pi = classify(
+            Some("π ⠙ sudos"),
+            "",
+            false,
+            false,
+            "zsh",
+            "",
+            &["/usr/local/bin/pi".to_string()],
+            &manifests,
+        );
+        assert_eq!(pi.agent, "pi");
+        assert_eq!(
+            pi.state,
+            State::Idle,
+            "OMP's branded title contract must not change Pi state"
+        );
+    }
+
+    #[test]
     fn muse_identity_replace_disables_the_versioned_binary_matcher() {
         let mut m = Manifests::builtin();
         toml::from_str::<ManifestFile>(
@@ -1838,6 +2029,97 @@ Would you like to proceed?
             ]),
             Some("pi".into())
         );
+        let antigravity_unix = "/Users/me/.local/bin/agy --conversation ec33ebf9-0cba-4100-8142-c61503f6c587 --sandbox";
+        assert_eq!(
+            m.agent_in_processes(&[antigravity_unix.into()]),
+            Some("antigravity".into())
+        );
+        assert_eq!(
+            m.launch_args_for(&[antigravity_unix.into()], "antigravity"),
+            Some(vec![
+                "--conversation".into(),
+                "ec33ebf9-0cba-4100-8142-c61503f6c587".into(),
+                "--sandbox".into(),
+            ])
+        );
+        let antigravity_windows = r#"C:\Users\me\AppData\Local\agy\bin\agy.exe -p "fix the tests""#;
+        assert_eq!(
+            m.agent_in_processes(&[antigravity_windows.into()]),
+            Some("antigravity".into())
+        );
+        assert_eq!(
+            m.launch_args_for(&[antigravity_windows.into()], "antigravity"),
+            Some(vec!["-p".into(), "fix the tests".into()])
+        );
+
+        let kilo_unix = "/opt/homebrew/bin/kilo --session ses_123 --model anthropic/claude";
+        assert_eq!(
+            m.agent_in_processes(&[kilo_unix.into()]),
+            Some("kilo".into())
+        );
+        assert_eq!(
+            m.launch_args_for(&[kilo_unix.into()], "kilo"),
+            Some(vec![
+                "--session".into(),
+                "ses_123".into(),
+                "--model".into(),
+                "anthropic/claude".into(),
+            ])
+        );
+        assert_eq!(
+            m.agent_in_processes(&[r#"C:\Users\me\bin\kilocode.exe --continue"#.into()]),
+            Some("kilo".into())
+        );
+        assert_eq!(
+            m.agent_in_processes(&[
+                r#"node C:\Users\me\AppData\Roaming\npm\node_modules\@kilocode\cli\bin\kilo --prompt "review""#.into()
+            ]),
+            Some("kilo".into()),
+            "the exact scoped npm package identifies Kilo on Windows"
+        );
+    }
+
+    #[test]
+    fn kilo_uses_process_identity_and_generic_state_rules() {
+        let manifests = Manifests::builtin();
+        let running = ["/usr/local/bin/kilo".to_string()];
+        let detect = |screen: &str| {
+            classify(
+                Some("zsh"),
+                screen,
+                false,
+                false,
+                "zsh",
+                "",
+                &running,
+                &manifests,
+            )
+        };
+
+        let blocked = detect("Run this command? [y/n]");
+        assert_eq!(blocked.agent, "kilo");
+        assert_eq!(blocked.identity_source, "process_tree");
+        assert_eq!(blocked.state, State::Blocked);
+        assert_eq!(
+            detect("⠹ Thinking… (esc to interrupt)").state,
+            State::Working
+        );
+        assert_eq!(detect("Ready").state, State::Idle);
+
+        let incidental = classify(
+            Some("zsh"),
+            "this archive weighs one kilo",
+            false,
+            false,
+            "zsh",
+            "",
+            &[],
+            &manifests,
+        );
+        assert_eq!(
+            incidental.agent, "zsh",
+            "the ordinary word kilo is never trusted from terminal prose"
+        );
     }
 
     #[test]
@@ -1951,7 +2233,7 @@ Would you like to proceed?
     }
 
     #[test]
-    fn claude_approval_panels_use_non_empty_screen_rows() {
+    fn tall_interaction_panels_use_non_empty_screen_rows() {
         let manifests = Manifests::builtin();
         assert!(screen_uses_non_empty_rows("claude", &[], &manifests));
         assert!(screen_uses_non_empty_rows(
@@ -1959,7 +2241,7 @@ Would you like to proceed?
             &["/usr/local/bin/claude".to_string()],
             &manifests
         ));
-        assert!(!screen_uses_non_empty_rows(
+        assert!(screen_uses_non_empty_rows(
             "codex",
             &["/usr/local/bin/codex".to_string()],
             &manifests
@@ -1970,8 +2252,68 @@ Would you like to proceed?
     fn claude_command_approval_screen_is_blocked() {
         let detection = detection_from_claude_screen(CLAUDE_COMMAND_APPROVAL_SCREEN);
         assert_eq!(detection.state, State::Blocked);
+        assert_eq!(detection.prompt_evidence, PromptEvidence::Blocked);
         assert_eq!(detection.state_source, "manifest_rule");
         assert_eq!(detection.rule_priority, Some(300));
+    }
+
+    #[test]
+    fn codex_sign_in_above_blank_footer_blocks_prompt_submission() {
+        let manifests = Manifests::builtin();
+        let screen = "Welcome to Codex, OpenAI's command-line coding agent\n\n\
+            Sign in with ChatGPT to use Codex as part of your paid plan\n\
+            or connect an API key for usage-based billing\n\n\
+            > 1. Sign in with ChatGPT\n\
+            2. Sign in with Device Code\n\
+            3. Provide your own API key\n\n\
+            Press enter to continue";
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(120, 32, tx, 1024 * 1024);
+        engine.advance(format!("\x1b[2J\x1b[H{}", screen.replace('\n', "\r\n")).as_bytes());
+
+        assert!(
+            engine.detection_text(14).trim().is_empty(),
+            "the normal bottom-row window misses the first-run chooser"
+        );
+        let bottom = engine.detection_text_non_empty(14);
+        let detection = classify(
+            Some("Codex"),
+            &bottom,
+            false,
+            false,
+            "codex",
+            "codex",
+            &["/usr/local/bin/codex".to_string()],
+            &manifests,
+        );
+        assert_eq!(detection.state, State::Blocked);
+        assert_eq!(detection.prompt_evidence, PromptEvidence::Blocked);
+        assert_eq!(
+            prompt_evidence(Some("Codex"), &bottom, "codex", &manifests),
+            PromptEvidence::Blocked
+        );
+    }
+
+    #[test]
+    fn codex_prompt_marker_text_alone_is_not_positive_prompt_evidence() {
+        let manifests = Manifests::builtin();
+        let bottom = "Ready to review.\n\n  › Write tests\n  100% context left";
+        let detection = classify(
+            Some("Codex"),
+            bottom,
+            false,
+            false,
+            "codex",
+            "codex",
+            &["/usr/local/bin/codex".to_string()],
+            &manifests,
+        );
+        assert_eq!(detection.state, State::Idle);
+        assert_eq!(detection.prompt_evidence, PromptEvidence::Unknown);
+        assert_eq!(
+            prompt_evidence(Some("Codex"), bottom, "codex", &manifests),
+            PromptEvidence::Unknown
+        );
     }
 
     #[test]
@@ -2587,6 +2929,47 @@ Would you like to proceed?
             "zsh"
         );
         assert_eq!(named("gemini is a constellation\n", &proc("-zsh")), "zsh");
+        assert_eq!(
+            named("read the Antigravity documentation\n", &proc("-zsh")),
+            "zsh"
+        );
+        assert_eq!(
+            named(
+                "",
+                &proc("/Applications/Antigravity.app/Contents/MacOS/Antigravity")
+            ),
+            "zsh",
+            "the desktop editor binary is not the Antigravity CLI"
+        );
+        assert_eq!(
+            named(
+                "Requesting permission for:\nDo you want to proceed?",
+                &proc("/Users/me/.local/bin/agy")
+            ),
+            "antigravity"
+        );
+        let blocked = classify(
+            Some("agy"),
+            "Requesting permission for:\nDo you want to proceed?",
+            true,
+            false,
+            "zsh",
+            "",
+            &proc("/Users/me/.local/bin/agy"),
+            &m,
+        );
+        assert_eq!(blocked.state, State::Blocked);
+        let working = classify(
+            Some("agy"),
+            "⠹ Working on the task",
+            true,
+            false,
+            "zsh",
+            "",
+            &proc("C:\\Users\\me\\AppData\\Local\\agy\\bin\\agy.exe"),
+            &m,
+        );
+        assert_eq!(working.state, State::Working);
 
         // Flags never count as the binary, and .exe is stripped.
         assert_eq!(named("", &proc("cargo test --example amp")), "zsh");
@@ -2595,5 +2978,171 @@ Would you like to proceed?
         // No scan available (Windows / remote / `ps` failed) → text heuristics,
         // which must keep working rather than reporting "no agents at all".
         assert_eq!(named("claude\n", &[]), "claude");
+    }
+
+    #[test]
+    fn opencode_versions_have_distinct_process_identity() {
+        let manifests = Manifests::builtin();
+
+        assert_eq!(
+            manifests.agent_in_processes(&["/Users/me/.opencode/bin/opencode2 --auto".into()]),
+            Some("opencode2".into())
+        );
+        assert_eq!(
+            manifests.agent_in_processes(&[
+                r#"C:\Users\me\.opencode\bin\opencode2.exe --session ses_123"#.into()
+            ]),
+            Some("opencode2".into())
+        );
+        assert_eq!(
+            manifests.agent_in_processes(&["/usr/local/bin/opencode --session ses_v1".into()]),
+            Some("opencode".into())
+        );
+        assert_eq!(
+            manifests.launch_args_for(
+                &["/Users/me/.opencode/bin/opencode2 --session ses_2".into()],
+                "opencode2"
+            ),
+            Some(vec!["--session".into(), "ses_2".into()])
+        );
+
+        let prose = classify(
+            Some("zsh"),
+            "OpenCode 2 is available in beta\n",
+            true,
+            false,
+            "zsh",
+            "",
+            &["-zsh".into()],
+            &manifests,
+        );
+        assert_eq!(prose.agent, "zsh");
+    }
+
+    #[test]
+    fn devin_identity_needs_deliberate_evidence() {
+        let manifests = Manifests::builtin();
+        for command in [
+            "/usr/local/bin/devin",
+            r"C:\Users\me\AppData\Local\devin\cli\bin\devin.exe --resume quiet-meadow",
+            // Windows delivers the PEB command line quoted, which is how
+            // an install path containing spaces stays one argv token.
+            "\"C:\\Users\\Ada Lovelace\\AppData\\Local\\devin\\cli\\bin\\devin.exe\"",
+        ] {
+            assert_eq!(
+                manifests.agent_in_processes(&[command.to_string()]),
+                Some("devin".to_string()),
+                "failed to recognize {command}"
+            );
+        }
+
+        // The bare launch command names the agent when no process scan is
+        // available (Windows, remote)...
+        let launched = classify(
+            Some("zsh"),
+            "",
+            false,
+            false,
+            "devin",
+            "devin",
+            &[],
+            &manifests,
+        );
+        assert_eq!(launched.agent, "devin");
+        assert_eq!(launched.identity_source, "launch_command");
+
+        // ...but `devin` is also a person's name, so prose must not claim it.
+        let prose = classify(
+            Some("zsh"),
+            "Devin reviewed our pull request yesterday\n",
+            true,
+            false,
+            "zsh",
+            "",
+            &[],
+            &manifests,
+        );
+        assert_eq!(prose.agent, "zsh");
+    }
+
+    #[test]
+    fn devin_state_reads_its_trust_and_interrupt_screens() {
+        let manifests = Manifests::builtin();
+        let detect = |screen: &str| {
+            classify(
+                Some("zsh"),
+                screen,
+                false,
+                false,
+                "zsh",
+                "devin",
+                &["/usr/local/bin/devin".to_string()],
+                &manifests,
+            )
+            .state
+        };
+
+        // Both wordings of the workspace-trust menu.
+        assert_eq!(
+            detect("Do you trust the authors of this directory?\n❭ 1 Yes, trust\n· 2 No, exit\n"),
+            State::Blocked
+        );
+        assert_eq!(
+            detect("Do you trust the authors of luvus?\n❭ 1 Yes, trust\n· 2 No, exit\n"),
+            State::Blocked
+        );
+        // Its interrupt hint is not a generic WORKING_HINT.
+        assert_eq!(detect("Thinking… esc again to interrupt\n"), State::Working);
+        assert_eq!(
+            detect("Running tests · esc twice to interrupt\n"),
+            State::Working
+        );
+        // Its permission menu already matches the generic prompt list.
+        assert_eq!(
+            detect("Run cargo test?\n❭ 1 Yes, allow once\n· 2 Yes, allow for this session\n"),
+            State::Blocked
+        );
+        assert_eq!(
+            detect("❭ Ask Devin to build features, fix bugs, or work on your code\n"),
+            State::Idle
+        );
+    }
+
+    // The live trust screen, transcribed from a captured pane: the CLI paints
+    // it on the first five rows of the grid and leaves everything below blank,
+    // so the ordinary bottom-row window sees only empty rows.
+    const DEVIN_WORKSPACE_TRUST_SCREEN: &str = r#"PS C:\luvus-devin-demo> devin
+Do you trust the authors of this directory?
+For security, devin.exe should not be run in directories with untrusted content.
+· 1 Yes, trust C:\luvus-devin-demo
+❭ 2 No, exit"#;
+
+    #[test]
+    fn devin_trust_screen_sits_above_the_bottom_rows() {
+        let manifests = Manifests::builtin();
+        let running = ["/usr/local/bin/devin".to_string()];
+        let rows = screen_rows("devin", &running, &manifests);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(80, 30, tx, 1024 * 1024);
+        let screen = DEVIN_WORKSPACE_TRUST_SCREEN.replace('\n', "\r\n");
+        engine.advance(format!("\x1b[2J\x1b[H{screen}").as_bytes());
+
+        assert!(
+            engine.detection_text(rows).trim().is_empty(),
+            "the trust menu is above the ordinary bottom-row window"
+        );
+        assert!(screen_uses_non_empty_rows("devin", &running, &manifests));
+        let detection = classify(
+            Some("devin"),
+            &engine.detection_text_non_empty(rows),
+            false,
+            false,
+            "devin",
+            "devin",
+            &running,
+            &manifests,
+        );
+        assert_eq!(detection.state, State::Blocked);
+        assert_eq!(detection.state_source, "manifest_rule");
     }
 }

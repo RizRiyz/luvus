@@ -1,6 +1,6 @@
 ---
 name: luvus
-description: "Control Luvus through its local CLI and UHP. Use only for a line beginning with `=target message`, an explicit request naming Luvus, a request to delegate to a named live Luvus agent or pane, or an explicit Luvus operation involving sessions, workspaces, tabs, panes, agents, files, Git, DIFF, worktrees, tasks, leases, modules, themes, Luvus Bar, configuration, UI, integrations, or Luvus UHP. Do not use for ordinary coding, file edits, Git operations, tests, task planning, generic agent work, or parallelization unless the user explicitly connects the request to Luvus. Being inside Luvus does not trigger this skill by itself. Inside Luvus use the inherited session; outside use the installed production Luvus command and configured session."
+description: "Control Luvus through its local CLI and UHP. Use only for a line beginning with `=target message`, an explicit request naming Luvus, a request to delegate to a named live Luvus agent or pane, or an explicit Luvus operation involving sessions, machines, workspaces, tabs, panes, agents, files, Git, DIFF, worktrees, tasks, leases, modules, themes, Luvus Bar, configuration, UI, integrations, or Luvus UHP. Do not use for ordinary coding, file edits, Git operations, tests, task planning, generic agent work, or parallelization unless the user explicitly connects the request to Luvus. Being inside Luvus does not trigger this skill by itself. Inside Luvus use the inherited session; outside use the installed production Luvus command and configured session."
 ---
 
 # Luvus
@@ -111,6 +111,39 @@ Before deletion, list sessions once, require the exact stopped name, and obtain
 clear authorization. Never delete `default` and never substitute workspace
 commands for server-session commands.
 
+### Manage saved SSH machines
+
+A saved machine is an SSH profile owned by the selected local named session and
+selecting one remote named session. It is not a workspace, and opening remote
+workspaces must not create more profiles or sessions. Switching local named
+sessions reloads that session's independent workspace tree and machine catalog.
+
+The session control in the TUI header always manages the owner-local named
+session, even while a remote machine workspace is active. Do not interpret it
+as a machine-session selector or claim that local session switching changes a
+saved machine's remote-session preference.
+
+Use read-only inspection before proposing a change:
+
+```sh
+luvus machine list
+luvus machine show <id>
+luvus machine status <id>
+luvus machine sessions <id>
+```
+
+`machine status` verifies the already-running selected server and its workspace
+projection; it does not install or start anything. `machine add` and `machine
+enable` are foreground mutations that may contact the host and start an absent
+selected server. Never pass passwords or keys as CLI data. Use the user's
+OpenSSH destination or config alias, and use `--install` only when the user
+explicitly authorizes that operation. Select a non-default remote session with
+`machine add ... --session <name>`.
+
+Machine UHP methods are absent unless the user explicitly starts `uhp access
+--machines`; mutations additionally require `--control`. Do not infer machine
+authority from ordinary session UHP access.
+
 ## Use the fast command path
 
 - Run the requested semantic command directly. Do not prepend routine `help`,
@@ -187,7 +220,7 @@ above remain sufficient when `luvus skill show` is the only available file.
 
 ## Delegate and manage agents
 
-Resolve existing agents with:
+Resolve active agents with:
 
 ```sh
 luvus agent list
@@ -218,8 +251,9 @@ luvus pane split <anchor-pane-id> --no-focus
 luvus agent start reviewer --kind codex --pane <new-pane-id> --timeout 30
 ```
 
-Omit `--down` for a right-side split and add it to the split or anchored start
-for a split below. Never combine `--anchor` and `--pane`.
+Omit direction flags to split along the longer side of the anchor pane. Pass
+`--right` or `--down` on the split or anchored start to force a direction.
+Never combine `--anchor` and `--pane`.
 
 Send work with `agent send`, not raw pane text and Enter:
 
@@ -239,6 +273,29 @@ luvus agent send reviewer "Review the diff. When done, run: luvus agent send lea
 After a no-wait handoff, end the turn. The report-back message starts a fresh
 turn. An external terminal has no caller pane, so do not invent one.
 
+With `--wait`, `agent prompt` (also `agent send`) requires a new `working` or
+`blocked` transition before the requested `--until` state can complete the wait.
+An unchanged status, title flicker, or quiet output alone cannot complete it.
+`observed_state` records the first active transition; `status` is the current state.
+The absolute `--timeout` covers both stages (default 300 seconds). Timeout returns
+`matched:false`, `evidence:"timeout"`, and a null `observed_state` if no transition
+was seen. Pane or terminal exit returns `agent_not_running` with `pane`, `queued`,
+`submitted`, `observed_state`, `reason:"pane_closed"`, `baseline_revision`, and
+`content_revision` under `error.data`. Timeout and pane exit during a wait use CLI
+exit code 2. Cancellation, timeout, and exit release pending wait ownership.
+Without `--wait`, the immediate `submitted:true`, `evidence:"queued"` response is
+unchanged and omits `observed_state`. Submission still means queue admission;
+state transitions do not confirm consumption of the prompt text. Do not resend
+automatically after a timeout or lost response because queued input may execute.
+For `agent.send` and `agent.prompt`, detected blocked prompt evidence—including
+in non-Codex panes—returns `agent_not_ready` and queues no input. Startup,
+sign-in, selection, and approval screens are examples, not an exhaustive list.
+A server-launched or restored Codex pane with an `agent_session` also returns
+`agent_not_ready` when prompt evidence is Unknown, unless live Codex composer
+geometry reports Ready. Existing Codex panes without that requirement retain the
+permissive Unknown-evidence fallback. Read the visible screen before deciding
+whether an explicit `agent keys` action is authorized.
+
 When waiting was requested, keep it bounded and read a bounded result:
 
 ```sh
@@ -251,6 +308,9 @@ identity is recognized. `unknown` is not proof of completion, but it does not
 undo a matching identity. When `agent start` returns `ready: true`, accept its
 name, pane, and kind without another status lookup. Use `wait agent-status` for
 a requested lifecycle transition after work is sent, not for startup identity.
+Repeat `--status` or pass a comma-separated set when any of several terminal
+states should unblock the workflow. Unknown options and positional arguments
+are rejected instead of being ignored.
 
 For a blocked agent:
 
@@ -258,6 +318,30 @@ For a blocked agent:
 2. Run `luvus agent read <target> --source visible --lines 120`.
 3. Identify the exact approval or question.
 4. Send `agent keys` only when the user's request authorizes that effect.
+
+`agent keys` accepts only a recognized agent pane and a non-empty list of known
+key names. It validates the entire list before queuing one ordered action; any
+invalid entry sends nothing, and a closed target returns `send_failed`.
+
+For UHP interactions that must match the inspected screen, use `agent.read`
+with `source:"visible"` and pass its `content_revision` as `if_content_revision`
+together with its `terminal_id` in `agent.keys` params. The revision is a
+non-negative integer; the terminal ID is exactly 32 lowercase hex characters.
+Both fields are optional as a pair; a one-sided or malformed pair is
+`invalid_request`. A deferred pane has `terminal_id:null` and cannot be fenced.
+An unavailable read snapshot has empty text and null coordinates.
+
+The server checks the pair and queues keys under the same engine lock used to
+capture the text. `content_revision_conflict` means no keys were queued: re-read
+and reassess the authorized action, never retry the same pair. Generic response
+`revision` / request `if_revision` are global event coordinates, not the pane's
+content counter. Without the pair, behavior is unchanged. Older servers omit the
+coordinates or reject the new fields; omit the pair only when legacy unfenced
+admission is acceptable. These are UHP params, not CLI flags.
+
+The fence covers queue admission only. Already queued input and child-side
+changes not yet observed remain outside it. Cursor/SGR output can make a pair
+stale even if the dialog text looks unchanged.
 
 ## Control panes, tabs, and workspaces
 
@@ -310,7 +394,7 @@ luvus agent get <target>
 luvus agent fork <target> [--name <alias>] [--no-focus]
 ```
 
-Native forks currently support Claude, Grok, Codex, Pi, and OMP. Report
+Native forks currently support Claude, Grok, Codex, Kilo Code, Pi, and OMP. Report
 `unsupported_agent`, `session_unknown`, or `spawn_failed` exactly when returned.
 Do not approximate a failed fork with `pane split`, `agent start`, or `resume`,
 because those paths do not guarantee an independent copy of the conversation.
@@ -375,6 +459,31 @@ surface:
   retrying. Leases coordinate declared paths but do not sandbox a shared
   checkout. `task release` requeues an
   active task and releases its path leases; it does not stop the worker pane.
+  `task add --prompt <text>` or `--prompt-file <path>` stores a detailed worker
+  briefing; `task update` may replace it only while a manual task is still
+  queued and unassigned. Inspect the stored prompt before starting the worker.
+  Report work progress only with `task update --note`. `task heartbeat
+  --context-used <0..1>` means the fraction of the model context window already
+  consumed, never task-completion progress; `0.6` means 60% consumed. Omit the
+  heartbeat when context-window usage is unknown.
+- Inspect `automation.list`, `automation.get`, and `automation.history` before
+  changing an agent schedule. Creating, updating, enabling, disabling,
+  deleting, or manually running an automation requires explicit authorization.
+  Preview calendar triggers first, retain the user's IANA timezone, use an
+  idempotency key for retryable create/run requests, and never turn an
+  automation into an arbitrary scheduled shell command. Disabling prevents
+  future occurrences; it does not stop a live ORCH task or pane.
+  Mutation success waits for the ledger checkpoint. After `persistence_failed`
+  or a lost response, inspect state and retry the same idempotency key; do not
+  assume the definition is absent or create a duplicate schedule. A failed
+  prelaunch occurrence is not automatically relaunched on storage recovery.
+  `target=new_worker` is the durable default. Use `active_agent` only with
+  the exact discovered pane, terminal lifetime, agent, and workspace identities;
+  treat `delivered` as input-queue evidence rather than completed work, and do
+  not reuse a process-bound target after pane closure or server restart. A
+  target advertised as `binding=durable` may recover only the same private
+  native conversation. When it reports `needs_rebind`, inspect the intended
+  pane first and use `automation.rebind`; never substitute another session.
 - Inspect module metadata, actions, settings, and logs before changing module
   state. Installation, uninstallation, and consequential setting changes need
   clear authorization.
@@ -395,8 +504,20 @@ surface:
   optional native session-resume hooks and must not be used merely to make an
   agent appear in the sidebar. Install or remove an integration only when the
   user explicitly requests that lifecycle integration.
+- For Antigravity CLI, `luvus integration install antigravity` adds exact
+  conversation identity for restore. It is session-only; native screen
+  detection remains authoritative for agent state.
+- For OpenCode, `luvus integration install opencode` adds exact TUI-local root
+  session ownership and structured usage. Without it, usage stays unavailable.
+- OpenCode 2 Preview is a separate `opencode2` agent. Do not install the
+  OpenCode V1 integration for it or infer session IDs from its live database.
+- Devin has native detection and exact-ID resume only. Do not infer session
+  IDs from its private database; `luvus agent resume <id>` cannot find Devin
+  sessions, so bind a pane with `luvus pane report --agent devin --session
+  <id>` when the exact id is known.
 - For Hermes, `luvus integration install hermes` adds exact per-pane session
-  ownership while native read-only session discovery remains the fallback.
+  ownership for restart resume. Detection remains native, but Luvus does not
+  scan Hermes's private history store.
 - Subscribe to events only for a live monitoring request. Stop when its
   condition is satisfied and never retain an unbounded stream.
 

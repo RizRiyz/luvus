@@ -19,6 +19,50 @@ pub enum Language {
     Ko,
 }
 
+pub(crate) fn machine_install_label(language: Language) -> &'static str {
+    match language {
+        Language::En => "Install compatible Luvus if needed",
+        Language::Es => "Instalar Luvus compatible si es necesario",
+        Language::Pt => "Instalar Luvus compatível se necessário",
+        Language::Fr => "Installer Luvus compatible si nécessaire",
+        Language::De => "Kompatibles Luvus bei Bedarf installieren",
+        Language::Id => "Instal Luvus yang kompatibel jika diperlukan",
+        Language::Zh => "需要时安装兼容的 Luvus",
+        Language::Ja => "必要に応じて互換性のある Luvus をインストール",
+        Language::Ko => "필요한 경우 호환되는 Luvus 설치",
+    }
+}
+
+pub(crate) fn machine_install_action_label(language: Language) -> &'static str {
+    match language {
+        Language::En => "install",
+        Language::Es => "instalar",
+        Language::Pt => "instalar",
+        Language::Fr => "installer",
+        Language::De => "installieren",
+        Language::Id => "instal",
+        Language::Zh => "安装",
+        Language::Ja => "インストール",
+        Language::Ko => "설치",
+    }
+}
+
+pub(crate) fn machine_saved_labels(
+    language: Language,
+) -> (&'static str, &'static str, &'static str) {
+    match language {
+        Language::En => ("Saved machines", "open", "enable"),
+        Language::Es => ("Máquinas guardadas", "abrir", "habilitar"),
+        Language::Pt => ("Máquinas salvas", "abrir", "ativar"),
+        Language::Fr => ("Machines enregistrées", "ouvrir", "activer"),
+        Language::De => ("Gespeicherte Maschinen", "öffnen", "aktivieren"),
+        Language::Id => ("Mesin tersimpan", "buka", "aktifkan"),
+        Language::Zh => ("已保存的机器", "打开", "启用"),
+        Language::Ja => ("保存済みのマシン", "開く", "有効化"),
+        Language::Ko => ("저장된 머신", "열기", "활성화"),
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Context {
     language: Language,
@@ -387,6 +431,17 @@ static HELP: &[Translation] = &[
         "오케스트레이션 (한 프로젝트에서 여러 에이전트 운용, docs/22):"
     ),
     tr!(
+        "agent automation (scheduled ORCH tasks):",
+        "automatización de agentes (tareas ORCH programadas):",
+        "automação de agentes (tarefas ORCH agendadas):",
+        "automatisation des agents (tâches ORCH planifiées) :",
+        "Agentenautomatisierung (geplante ORCH-Aufgaben):",
+        "otomatisasi agen (tugas ORCH terjadwal):",
+        "智能体自动化（计划的 ORCH 任务）：",
+        "エージェント自動化（スケジュール済み ORCH タスク）：",
+        "에이전트 자동화 (예약된 ORCH 작업):"
+    ),
+    tr!(
         "events:",
         "eventos:",
         "eventos:",
@@ -418,6 +473,127 @@ static HELP: &[Translation] = &[
         "会话：",
         "セッション：",
         "세션:"
+    ),
+    tr!(
+        "machines:",
+        "máquinas:",
+        "máquinas:",
+        "machines :",
+        "Maschinen:",
+        "mesin:",
+        "机器：",
+        "マシン：",
+        "머신:"
+    ),
+    tr!(
+        "Save, inspect, and open Luvus machines over SSH",
+        "Guardar, inspeccionar y abrir máquinas Luvus mediante SSH",
+        "Salvar, inspecionar e abrir máquinas Luvus por SSH",
+        "Enregistrer, inspecter et ouvrir des machines Luvus via SSH",
+        "Luvus-Maschinen über SSH speichern, prüfen und öffnen",
+        "Simpan, periksa, dan buka mesin Luvus melalui SSH",
+        "通过 SSH 保存、检查并打开 Luvus 机器",
+        "SSH 経由で Luvus マシンを保存、検査、接続",
+        "SSH로 Luvus 머신을 저장하고 검사하고 열기"
+    ),
+    tr!(
+        "provision and validate one SSH machine",
+        "aprovisionar y validar una máquina SSH",
+        "provisionar e validar uma máquina SSH",
+        "provisionner et valider une machine SSH",
+        "eine SSH-Maschine bereitstellen und prüfen",
+        "sediakan dan validasi satu mesin SSH",
+        "自动配置并验证一台 SSH 机器",
+        "SSH マシンをプロビジョニングして検証",
+        "SSH 머신 하나를 프로비저닝하고 검증"
+    ),
+    tr!(
+        "list saved machine profiles and catalog revision",
+        "listar perfiles de máquina guardados y la revisión del catálogo",
+        "listar perfis de máquina salvos e a revisão do catálogo",
+        "lister les profils de machine enregistrés et la révision du catalogue",
+        "gespeicherte Maschinenprofile und Katalogrevision auflisten",
+        "tampilkan profil mesin tersimpan dan revisi katalog",
+        "列出已保存的机器配置和目录修订版本",
+        "保存済みマシンプロファイルとカタログのリビジョンを一覧表示",
+        "저장된 머신 프로필과 카탈로그 리비전 나열"
+    ),
+    tr!(
+        "show one saved profile",
+        "mostrar un perfil guardado",
+        "mostrar um perfil salvo",
+        "afficher un profil enregistré",
+        "ein gespeichertes Profil anzeigen",
+        "tampilkan satu profil tersimpan",
+        "显示一个已保存的配置",
+        "保存済みプロファイルを表示",
+        "저장된 프로필 하나 표시"
+    ),
+    tr!(
+        "rename a profile with optional revision protection",
+        "renombrar un perfil con protección de revisión opcional",
+        "renomear um perfil com proteção de revisão opcional",
+        "renommer un profil avec une protection de révision facultative",
+        "ein Profil mit optionalem Revisionsschutz umbenennen",
+        "ganti nama profil dengan perlindungan revisi opsional",
+        "重命名配置，可选择启用修订版本保护",
+        "オプションのリビジョン保護付きでプロファイル名を変更",
+        "선택적 리비전 보호로 프로필 이름 변경"
+    ),
+    tr!(
+        "provision and enable after a bounded SSH probe, or disable locally",
+        "aprovisionar y habilitar tras una prueba SSH acotada o deshabilitar localmente",
+        "provisionar e habilitar após uma sondagem SSH limitada ou desabilitar localmente",
+        "provisionner et activer après une vérification SSH bornée ou désactiver localement",
+        "nach einer begrenzten SSH-Prüfung bereitstellen und aktivieren oder lokal deaktivieren",
+        "sediakan dan aktifkan setelah pemeriksaan SSH terbatas atau nonaktifkan secara lokal",
+        "在有限 SSH 探测后自动配置并启用，或在本地禁用",
+        "制限付き SSH プローブ後にプロビジョニングして有効化、またはローカルで無効化",
+        "제한된 SSH 검사 후 프로비저닝하고 활성화하거나 로컬에서 비활성화"
+    ),
+    tr!(
+        "remove only the local profile; remote panes stay alive",
+        "eliminar solo el perfil local; los paneles remotos siguen activos",
+        "remover apenas o perfil local; os painéis remotos continuam ativos",
+        "supprimer uniquement le profil local ; les volets distants restent actifs",
+        "nur das lokale Profil entfernen; entfernte Panes bleiben aktiv",
+        "hapus hanya profil lokal; pane jarak jauh tetap aktif",
+        "仅删除本地配置；远程窗格保持运行",
+        "ローカルプロファイルのみ削除し、リモートペインは稼働を継続",
+        "로컬 프로필만 제거하며 원격 창은 계속 실행"
+    ),
+    tr!(
+        "verify the running selected server and workspace projection",
+        "verificar el servidor seleccionado en ejecución y su proyección de espacios de trabajo",
+        "verificar o servidor selecionado em execução e sua projeção de espaços de trabalho",
+        "vérifier le serveur sélectionné en cours d'exécution et sa projection des espaces de travail",
+        "den laufenden ausgewählten Server und seine Workspace-Projektion prüfen",
+        "verifikasi server terpilih yang sedang berjalan dan proyeksi ruang kerjanya",
+        "验证正在运行的所选服务器及其工作区投影",
+        "実行中の選択済みサーバーとワークスペース投影を検証",
+        "실행 중인 선택 서버와 작업 공간 프로젝션 검증"
+    ),
+    tr!(
+        "list named sessions through bounded SSH",
+        "listar sesiones con nombre mediante SSH acotado",
+        "listar sessões nomeadas por SSH limitado",
+        "lister les sessions nommées via une connexion SSH bornée",
+        "benannte Sitzungen über begrenztes SSH auflisten",
+        "tampilkan sesi bernama melalui SSH terbatas",
+        "通过有限 SSH 列出命名会话",
+        "制限付き SSH 経由で名前付きセッションを一覧表示",
+        "제한된 SSH를 통해 이름 있는 세션 나열"
+    ),
+    tr!(
+        "attach using the verified absolute remote binary",
+        "conectar usando el binario remoto absoluto verificado",
+        "conectar usando o binário remoto absoluto verificado",
+        "se connecter avec le binaire distant absolu vérifié",
+        "mit der geprüften absoluten Remote-Binärdatei verbinden",
+        "sambungkan menggunakan biner jarak jauh absolut yang terverifikasi",
+        "使用已验证的远程二进制绝对路径连接",
+        "検証済みの絶対パスのリモートバイナリで接続",
+        "검증된 절대 경로의 원격 바이너리로 연결"
     ),
     tr!(
         "remote:",
@@ -605,6 +781,17 @@ static HELP: &[Translation] = &[
         "协调多个编程智能体的工作",
         "複数エージェントの作業を調整",
         "여러 코딩 에이전트 간 작업 조율"
+    ),
+    tr!(
+        "Schedule agents through the ORCH task engine",
+        "Programar agentes mediante el motor de tareas ORCH",
+        "Agendar agentes pelo mecanismo de tarefas ORCH",
+        "Planifier des agents via le moteur de tâches ORCH",
+        "Agenten über die ORCH-Aufgabenverwaltung planen",
+        "Jadwalkan agen melalui mesin tugas ORCH",
+        "通过 ORCH 任务引擎调度智能体",
+        "ORCH タスクエンジンでエージェントをスケジュール",
+        "ORCH 작업 엔진으로 에이전트 예약"
     ),
     tr!(
         "Reserve file paths for active tasks",
@@ -1212,15 +1399,15 @@ static HELP: &[Translation] = &[
         "현재 탭의 패널과 읽기 전용 기록 지표 나열"
     ),
     tr!(
-        "split a pane (default: side by side, creates a workspace if empty)",
-        "dividir un panel (predeterminado: lado a lado, crea un espacio de trabajo si está vacío)",
-        "dividir um painel (padrão: lado a lado, cria um espaço de trabalho se estiver vazio)",
-        "diviser un volet (par défaut : côte à côte, crée un espace de travail si vide)",
-        "Bereich teilen (Standard: nebeneinander, erstellt bei Leerstand einen Arbeitsbereich)",
-        "bagi panel (bawaan: berdampingan, membuat ruang kerja jika kosong)",
-        "拆分窗格（默认：左右并排，空状态时创建工作区）",
-        "ペインを分割（既定：横並び、空の場合はワークスペースを作成）",
-        "패널 분할 (기본값: 좌우 분할, 비어 있으면 작업 공간 생성)"
+        "split a pane (default: auto by size, creates a workspace if empty)",
+        "dividir un panel (predeterminado: automático según el tamaño, crea un espacio de trabajo si está vacío)",
+        "dividir um painel (padrão: automático pelo tamanho, cria um espaço de trabalho se estiver vazio)",
+        "diviser un volet (par défaut : automatique selon la taille, crée un espace de travail si vide)",
+        "Bereich teilen (Standard: automatisch nach Größe, erstellt bei Leerstand einen Arbeitsbereich)",
+        "bagi panel (bawaan: otomatis menurut ukuran, membuat ruang kerja jika kosong)",
+        "拆分窗格（默认：按长宽自动选择方向，空状态时创建工作区）",
+        "ペインを分割（既定：サイズに応じて自動、空の場合はワークスペースを作成）",
+        "패널 분할 (기본값: 크기에 따라 자동 분할, 비어 있으면 작업 공간 생성)"
     ),
     tr!(
         "focus a pane (jumps to its workspace/tab)",
@@ -1256,15 +1443,15 @@ static HELP: &[Translation] = &[
         "패널에서 명령어 실행"
     ),
     tr!(
-        "send raw text to a pane",
-        "enviar texto sin procesar a un panel",
-        "enviar texto bruto para um painel",
-        "envoyer du texte brut à un volet",
-        "Rohtext an einen Bereich senden",
-        "kirim teks mentah ke panel",
-        "向窗格发送原始文本",
-        "ペインへ生テキストを送信",
-        "패널에 원본 텍스트 전송"
+        "paste text into a pane",
+        "pegar texto en un panel",
+        "colar texto em um painel",
+        "coller du texte dans un volet",
+        "Text in einen Bereich einfügen",
+        "tempelkan teks ke panel",
+        "将文本粘贴到窗格",
+        "ペインにテキストを貼り付け",
+        "패널에 텍스트 붙여넣기"
     ),
     tr!(
         "print a pane's recent output",
@@ -1773,6 +1960,28 @@ static HELP: &[Translation] = &[
         "모듈의 사이드바 도킹에 행 전달 (JSON 배열,"
     ),
     tr!(
+        "set AGENTS sidebar titles for live and resumable rows",
+        "definir títulos de la barra AGENTS para filas vivas y reanudables",
+        "definir títulos da barra AGENTS para linhas ativas e retomáveis",
+        "définir les titres de la barre AGENTS pour les lignes actives et reprises",
+        "AGENTS-Seitenleistentitel für Live- und fortsetzbare Zeilen setzen",
+        "atur judul bilah sisi AGENTS untuk baris live dan yang dapat dilanjutkan",
+        "设置 AGENTS 侧栏标题（活动与可恢复行）",
+        "AGENTS サイドバーのライブ行と履歴行のタイトルを設定",
+        "AGENTS 사이드바 타이틀을 실행 및 재개 행에 설정"
+    ),
+    tr!(
+        "clear module-provided AGENTS sidebar titles",
+        "borrar títulos de AGENTS aportados por un módulo",
+        "limpar títulos de AGENTS fornecidos por um módulo",
+        "effacer les titres AGENTS fournis par un module",
+        "von einem Modul gesetzte AGENTS-Titel löschen",
+        "hapus judul bilah sisi AGENTS dari modul",
+        "清除模块提供的 AGENTS 侧栏标题",
+        "モジュールが提供した AGENTS サイドバータイトルを消去",
+        "모듈이 제공한 AGENTS 사이드바 타이틀 지우기"
+    ),
+    tr!(
         "or piped on stdin). See docs/29 + the website",
         "o por stdin). Consulta docs/29 y el sitio web",
         "ou via stdin). Veja docs/29 e o site",
@@ -2180,15 +2389,26 @@ static HELP: &[Translation] = &[
         "워커 시작 (기본값 worktree, workspace는 체크아웃 공유)"
     ),
     tr!(
-        "report context usage (blocks done at >85%)",
-        "informar uso de contexto (bloquea finalizar por encima del 85%)",
-        "informar uso de contexto (bloqueia conclusão acima de 85%)",
-        "signaler l'usage du contexte (bloque la fin au-delà de 85 %)",
-        "Kontextnutzung melden (blockiert Abschluss über 85 %)",
-        "laporkan penggunaan konteks (blokir selesai di atas 85%)",
-        "报告上下文使用率（超过 85% 时阻止完成）",
-        "コンテキスト使用率を報告（85%超で完了を拒否）",
-        "컨텍스트 사용량 보고 (85% 초과 시 완료 차단)"
+        "report model context-window use, not task progress",
+        "informar uso de la ventana de contexto del modelo, no progreso de la tarea",
+        "informar uso da janela de contexto do modelo, não o progresso da tarefa",
+        "signaler l'utilisation de la fenêtre de contexte du modèle, pas la progression de la tâche",
+        "Nutzung des Modell-Kontextfensters melden, nicht den Aufgabenfortschritt",
+        "laporkan pemakaian jendela konteks model, bukan progres tugas",
+        "报告模型上下文窗口用量，而非任务进度",
+        "タスク進捗ではなくモデルのコンテキストウィンドウ使用量を報告",
+        "작업 진행률이 아닌 모델 컨텍스트 창 사용량 보고"
+    ),
+    tr!(
+        "(>85% blocks done; --context remains accepted)",
+        "(>85% bloquea finalizar; --context sigue aceptado)",
+        "(>85% bloqueia conclusão; --context continua aceito)",
+        "(>85 % bloque la fin ; --context reste accepté)",
+        "(>85 % blockiert Abschluss; --context bleibt gültig)",
+        "(>85% memblokir penyelesaian; --context tetap diterima)",
+        "（超过 85% 时阻止完成；仍接受 --context）",
+        "（85%超で完了を拒否、--context も引き続き使用可能）",
+        "(85% 초과 시 완료 차단, --context도 계속 허용)"
     ),
     tr!(
         "mark done + release its leases",
@@ -2288,6 +2508,83 @@ static HELP: &[Translation] = &[
         "列出活动路径租约",
         "有効なパス予約を一覧表示",
         "활성 경로 임대 나열"
+    ),
+    tr!(
+        "list definitions and their next UTC deadlines",
+        "listar definiciones y sus próximos plazos UTC",
+        "listar definições e seus próximos prazos UTC",
+        "lister les définitions et leurs prochaines échéances UTC",
+        "Definitionen und ihre nächsten UTC-Termine auflisten",
+        "daftar definisi dan tenggat UTC berikutnya",
+        "列出定义及其下一个 UTC 截止时间",
+        "定義と次の UTC 実行時刻を一覧表示",
+        "정의와 다음 UTC 실행 시각 나열"
+    ),
+    tr!(
+        "show one definition",
+        "mostrar una definición",
+        "mostrar uma definição",
+        "afficher une définition",
+        "eine Definition anzeigen",
+        "tampilkan satu definisi",
+        "显示一个定义",
+        "1件の定義を表示",
+        "정의 하나 표시"
+    ),
+    tr!(
+        "run once without advancing its schedule",
+        "ejecutar una vez sin avanzar su programación",
+        "executar uma vez sem avançar o agendamento",
+        "exécuter une fois sans avancer la planification",
+        "einmal ausführen, ohne den Zeitplan vorzustellen",
+        "jalankan sekali tanpa memajukan jadwalnya",
+        "运行一次而不推进其计划",
+        "スケジュールを進めずに1回実行",
+        "일정을 진행하지 않고 한 번 실행"
+    ),
+    tr!(
+        "reattach the same native conversation",
+        "volver a adjuntar la misma conversación nativa",
+        "reanexar a mesma conversa nativa",
+        "rattacher la même conversation native",
+        "dieselbe native Konversation erneut verbinden",
+        "sambungkan kembali percakapan native yang sama",
+        "重新连接同一个原生对话",
+        "同じネイティブ会話に再接続",
+        "동일한 네이티브 대화에 다시 연결"
+    ),
+    tr!(
+        "show bounded run history",
+        "mostrar el historial limitado de ejecuciones",
+        "mostrar o histórico limitado de execuções",
+        "afficher l'historique borné des exécutions",
+        "begrenzten Ausführungsverlauf anzeigen",
+        "tampilkan riwayat proses terbatas",
+        "显示有界运行历史",
+        "上限付きの実行履歴を表示",
+        "제한된 실행 기록 표시"
+    ),
+    tr!(
+        "summarize armed, live, review, and failed runs",
+        "resumir ejecuciones programadas, activas, en revisión y fallidas",
+        "resumir execuções programadas, ativas, em revisão e com falha",
+        "résumer les exécutions planifiées, actives, en révision et échouées",
+        "geplante, aktive, zu prüfende und fehlgeschlagene Läufe zusammenfassen",
+        "ringkas proses terjadwal, aktif, ditinjau, dan gagal",
+        "汇总已计划、运行中、待审查和失败的执行",
+        "予定済み、実行中、レビュー中、失敗の実行を集計",
+        "예약됨, 실행 중, 검토 중, 실패 실행 요약"
+    ),
+    tr!(
+        "remove an idle definition",
+        "eliminar una definición inactiva",
+        "remover uma definição inativa",
+        "supprimer une définition inactive",
+        "eine inaktive Definition entfernen",
+        "hapus definisi yang tidak aktif",
+        "删除空闲定义",
+        "待機中の定義を削除",
+        "유휴 정의 제거"
     ),
     tr!(
         "stream live status changes",
@@ -2656,6 +2953,10 @@ static TEXT: &[Translation] = &[
         "서버 중지됨"),
     tr!("no luvus server running", "no hay ningún servidor luvus en ejecución", "nenhum servidor luvus em execução", "aucun serveur luvus en cours", "kein Luvus-Server läuft", "tidak ada server luvus berjalan", "没有正在运行的 luvus 服务器", "実行中の luvus サーバーはありません",
         "실행 중인 luvus 서버 없음"),
+    tr!("Luvus server access was denied", "se denegó el acceso al servidor Luvus", "o acesso ao servidor Luvus foi negado", "l’accès au serveur Luvus a été refusé", "Zugriff auf den Luvus-Server wurde verweigert", "akses ke server Luvus ditolak", "Luvus 服务器访问被拒绝", "Luvus サーバーへのアクセスが拒否されました",
+        "Luvus 서버 접근이 거부되었습니다"),
+    tr!("an agent or OS sandbox may be blocking the selected socket", "un agente o el entorno aislado del sistema operativo puede estar bloqueando el socket seleccionado", "um agente ou a sandbox do sistema operacional pode estar bloqueando o socket selecionado", "un agent ou le bac à sable du système peut bloquer le socket sélectionné", "Ein Agent oder die Betriebssystem-Sandbox blockiert möglicherweise den ausgewählten Socket", "agen atau sandbox sistem operasi mungkin memblokir socket yang dipilih", "智能体或操作系统沙箱可能阻止了所选套接字", "エージェントまたは OS のサンドボックスが選択したソケットをブロックしている可能性があります",
+        "에이전트 또는 OS 샌드박스가 선택한 소켓을 차단하고 있을 수 있습니다"),
     tr!("server restarted", "servidor reiniciado", "servidor reiniciado", "serveur redémarré", "Server neu gestartet", "server dimulai ulang", "服务器已重启", "サーバーを再起動しました",
         "서버 재시작됨"),
     tr!("not running", "no está en ejecución", "não está em execução", "arrêté", "läuft nicht", "tidak berjalan", "未运行", "停止中",
@@ -2694,6 +2995,8 @@ static TEXT: &[Translation] = &[
         "사용 중인 테마"),
     tr!("applies when Luvus starts", "se aplica cuando Luvus se inicia", "aplica quando o Luvus iniciar", "s'applique au démarrage de Luvus", "wird beim Start von Luvus angewendet", "berlaku saat Luvus dimulai", "将在 Luvus 启动时应用", "Luvus 起動時に適用されます",
         "Luvus 시작 시 적용됨"),
+    tr!("could not save the theme selection", "no se pudo guardar la selección del tema", "não foi possível salvar a seleção do tema", "impossible d’enregistrer la sélection du thème", "Theme-Auswahl konnte nicht gespeichert werden", "pilihan tema tidak dapat disimpan", "无法保存主题选择", "テーマの選択を保存できませんでした",
+        "테마 선택을 저장할 수 없습니다"),
     tr!("uninstalled", "desinstalado", "desinstalado", "désinstallé", "deinstalliert", "dihapus", "已卸载", "アンインストール済み",
         "제거됨"),
     tr!("reloaded", "recargados", "recarregados", "rechargés", "neu geladen", "dimuat ulang", "已重新加载", "再読み込みしました",
@@ -2778,6 +3081,8 @@ static TEXT: &[Translation] = &[
         "인자를 받지 않습니다"),
     tr!("unexpected", "inesperado", "inesperado", "inattendu", "unerwartet", "tidak diharapkan", "意外参数", "想定外",
         "예상치 못함"),
+    tr!("--context-used requires a finite number from 0 to 1", "--context-used requiere un número finito de 0 a 1", "--context-used requer um número finito de 0 a 1", "--context-used exige un nombre fini compris entre 0 et 1", "--context-used erfordert eine endliche Zahl von 0 bis 1", "--context-used memerlukan angka terbatas dari 0 hingga 1", "--context-used 需要一个 0 到 1 之间的有限数值", "--context-used には 0 から 1 までの有限数が必要です",
+        "--context-used에는 0에서 1 사이의 유한한 숫자가 필요합니다"),
 ];
 
 /// Translate a canonical help block without ever touching command syntax.

@@ -1,0 +1,14 @@
+# Official Luvus detection manifest for Gemini CLI.
+# Served by `luvus server update-manifest` and merged with built-in rules.
+agent = "gemini"
+
+[identity]
+distinct = ["gemini"]
+
+# Gemini's edit and command confirmation cards use these stable action labels.
+# Either label is sufficient because both are specific to an active approval UI.
+[[rule]]
+state = "blocked"
+priority = 310
+region = "screen"
+any = ["│ apply this change", "│ allow execution"]

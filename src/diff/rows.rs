@@ -14,15 +14,15 @@ pub fn stack_rows(diff: &FileDiff) -> Vec<DiffLine> {
                 kind: DiffLineKind::Header,
                 old_line: None,
                 new_line: None,
-                text: hunk.header.clone(),
+                text: hunk.header.clone().into(),
             })
             .chain(hunk.lines.iter().cloned())
         })
         .collect()
 }
 
-/// Derive a side-by-side projection from the normalized hunk stream. Runs when
-/// a diff result lands or a view is rendered, never by reparsing Git output.
+/// Derive a side-by-side projection from the normalized hunk stream. UI loads
+/// run this on their existing loader worker, never while rendering a frame.
 pub fn split_rows(diff: &FileDiff) -> Vec<SplitRow> {
     let mut out = Vec::new();
     for hunk in &diff.hunks {
@@ -30,7 +30,7 @@ pub fn split_rows(diff: &FileDiff) -> Vec<SplitRow> {
             kind: DiffLineKind::Header,
             old_line: None,
             new_line: None,
-            text: hunk.header.clone(),
+            text: hunk.header.clone().into(),
         };
         out.push(SplitRow {
             old: Some(header.clone()),
@@ -130,11 +130,20 @@ mod tests {
             }],
         };
 
-        let rows = split_rows(&diff);
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[1].old.as_ref().unwrap().text, "old one");
-        assert_eq!(rows[1].new.as_ref().unwrap().text, "new");
-        assert_eq!(rows[2].old.as_ref().unwrap().text, "old two");
-        assert!(rows[2].new.is_none());
+        let stack = stack_rows(&diff);
+        let split = split_rows(&diff);
+        assert_eq!(split.len(), 3);
+        assert_eq!(split[1].old.as_ref().unwrap().text.as_ref(), "old one");
+        assert_eq!(split[1].new.as_ref().unwrap().text.as_ref(), "new");
+        assert_eq!(split[2].old.as_ref().unwrap().text.as_ref(), "old two");
+        assert!(split[2].new.is_none());
+        assert!(std::sync::Arc::ptr_eq(
+            &diff.hunks[0].lines[0].text,
+            &stack[1].text,
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &stack[1].text,
+            &split[1].old.as_ref().unwrap().text,
+        ));
     }
 }

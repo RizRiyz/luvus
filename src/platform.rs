@@ -2,8 +2,95 @@
 
 use std::path::{Path, PathBuf};
 
+/// Atomically move a completed same-directory temporary file over `destination`.
+/// Windows needs replace-existing semantics that `std::fs::rename` does not
+/// provide consistently; Unix rename already has the required behavior.
+pub fn atomic_replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        windows::atomic_replace_file(source, destination)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(source, destination)
+    }
+}
+
 #[cfg(windows)]
 mod windows;
+
+#[cfg(target_os = "macos")]
+mod macos;
+
+/// Whether the physical Option modifier is currently held by the local user.
+///
+/// Some macOS terminal emulators consume Option while translating Backspace,
+/// leaving Crossterm with an indistinguishable plain Backspace event. Querying
+/// the combined session flags at that narrow boundary lets the client restore
+/// Option without changing terminal configuration or globally intercepting
+/// keyboard input. Other platforms already report Alt through their terminal
+/// or console event and deliberately return false here.
+#[cfg(target_os = "macos")]
+pub fn option_modifier_pressed() -> bool {
+    macos::option_modifier_pressed()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn option_modifier_pressed() -> bool {
+    false
+}
+
+/// Read and normalize a local Windows clipboard image after an explicit paste
+/// gesture. Other platforms preserve their existing terminal and agent-native
+/// clipboard behavior and never probe the clipboard here.
+#[cfg(windows)]
+pub fn clipboard_image() -> Option<Vec<u8>> {
+    windows::clipboard_image()
+}
+
+#[cfg(not(windows))]
+pub fn clipboard_image() -> Option<Vec<u8>> {
+    None
+}
+
+/// Pixel size of one terminal cell on the local display, when the host reports it.
+///
+/// Unix uses `TIOCGWINSZ` `ws_xpixel`/`ws_ypixel`. Windows uses the current
+/// console font. Many hosts leave these fields at zero; callers must fall back.
+#[cfg(unix)]
+pub fn terminal_cell_pixels() -> Option<(u16, u16)> {
+    unix_terminal_cell_pixels()
+}
+
+#[cfg(windows)]
+pub fn terminal_cell_pixels() -> Option<(u16, u16)> {
+    windows::terminal_cell_pixels()
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn terminal_cell_pixels() -> Option<(u16, u16)> {
+    None
+}
+
+#[cfg(unix)]
+fn unix_terminal_cell_pixels() -> Option<(u16, u16)> {
+    for fd in [libc::STDOUT_FILENO, libc::STDERR_FILENO, libc::STDIN_FILENO] {
+        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+        if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut size) } != 0 {
+            continue;
+        }
+        if size.ws_col == 0 || size.ws_row == 0 || size.ws_xpixel == 0 || size.ws_ypixel == 0 {
+            continue;
+        }
+        let width = size.ws_xpixel / size.ws_col;
+        let height = size.ws_ypixel / size.ws_row;
+        if width == 0 || height == 0 {
+            continue;
+        }
+        return Some((width, height));
+    }
+    None
+}
 
 /// Do two paths name the same folder? (docs/43 WIN-6.)
 ///
@@ -753,13 +840,28 @@ pub struct PaneCwdEvidence {
 /// Resolve CWD evidence and, optionally, process identities from one platform
 /// snapshot. The optional command projection is used only when the independent
 /// agent-detection deadline coincides with this CWD scan.
+#[cfg(test)]
 pub fn scan_pane_runtime(
     roots: &[u32],
     include_commands: bool,
 ) -> (Vec<PaneCwdEvidence>, Option<ProcessCommands>) {
+    scan_pane_runtime_scoped(roots, include_commands.then_some(roots))
+}
+
+/// One OS snapshot, with independent CWD and command-projection demands.
+pub fn scan_pane_runtime_scoped(
+    cwd_roots: &[u32],
+    command_roots: Option<&[u32]>,
+) -> (Vec<PaneCwdEvidence>, Option<ProcessCommands>) {
+    let mut roots = cwd_roots.to_vec();
+    if let Some(commands) = command_roots {
+        roots.extend_from_slice(commands);
+        roots.sort_unstable();
+        roots.dedup();
+    }
     let mut cache = std::collections::HashMap::new();
-    let (trees, commands) = pane_process_snapshot(roots, true, include_commands);
-    let evidence = roots
+    let (trees, commands) = pane_process_snapshot(&roots, true, command_roots.is_some());
+    let evidence = cwd_roots
         .iter()
         .map(|&root| {
             let nodes = trees.get(&root).map(Vec::as_slice).unwrap_or(&[]);
@@ -1130,6 +1232,15 @@ mod tests {
         let (cwd_only, commands) = super::scan_pane_runtime(&[pid], false);
         assert_eq!(cwd_only.len(), 1);
         assert!(commands.is_none(), "command projection is demand-driven");
+        let (no_cwds, commands) = super::scan_pane_runtime_scoped(&[], Some(&[pid]));
+        assert!(
+            no_cwds.is_empty(),
+            "unrequested CWDs do not receive Git probes"
+        );
+        assert!(
+            commands.unwrap().contains_key(&pid),
+            "independent process demand remains represented"
+        );
     }
 
     #[cfg(unix)]

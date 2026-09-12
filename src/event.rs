@@ -1,6 +1,7 @@
 //! Messages flowing into the main loop from input/PTY threads and (in server
 //! mode) from client connections.
 
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -9,6 +10,7 @@ use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 
 use crate::ids::PaneId;
 use crate::ipc::protocol::ServerMessage;
+use crate::ipc::protocol::SurfaceInterest;
 use crate::terminal::theme_probe::TerminalColors;
 
 /// Input originating from one attached display client. Keeping the source id at
@@ -18,18 +20,29 @@ pub enum ClientInput {
     Key(KeyEvent),
     Mouse(MouseEvent),
     Paste(String),
-    Resize(u16, u16),
+    PasteImage(PathBuf),
+    Resize {
+        cols: u16,
+        rows: u16,
+        cell_width_px: u16,
+        cell_height_px: u16,
+    },
 }
 
 pub enum AppEvent {
+    IoCompleted(crate::app::io_jobs::Completion),
     Key(KeyEvent),
     Mouse(MouseEvent),
     Paste(String),
+    /// A validated PNG staged in the selected server's private directory.
+    PasteImage(PathBuf),
     Resize,
     /// The given pane produced output; the screen changed.
     PtyData(PaneId),
     /// The given pane's child process exited.
     PtyExit(PaneId),
+    /// Coalesced overload notification for all input sources, including replies.
+    PtyInputRejected(PaneId),
     /// A deferred pane finished opening its PTY and now owns a root process and
     /// stable terminal-backend identity. Pending panes are deliberately absent
     /// from public inventory until this event is applied by the app loop.
@@ -74,6 +87,48 @@ pub enum AppEvent {
     /// A binary client detached.
     ClientDetach {
         id: u64,
+    },
+    /// Change one client's frame/input ownership without closing its transport.
+    ClientSurfaceInterest {
+        id: u64,
+        interest: SurfaceInterest,
+    },
+    ClientPrepareSurface {
+        id: u64,
+        ticket: u64,
+        cols: u16,
+        rows: u16,
+    },
+    ClientShellDockLayout {
+        id: u64,
+        layout: crate::ipc::protocol::ShellDockLayout,
+    },
+    ClientShellSidebars {
+        id: u64,
+        state: crate::ipc::protocol::ShellSidebars,
+    },
+    ClientShellWorkspaceFocus {
+        id: u64,
+        workspace_id: String,
+    },
+    ClientShellWorkspaceMenu {
+        id: u64,
+        workspace_id: String,
+        col: u16,
+        row: u16,
+    },
+    /// The owner-local client switched from its remote-machine form back to
+    /// the server-rendered workspace picker.
+    ClientOpenWorkspacePicker {
+        id: u64,
+    },
+    /// A display client reported its cell size in pixels, once after the handshake
+    /// and again on resize. This is passive metadata, not interaction: it must not
+    /// promote the reporting client to foreground or disturb render baselines.
+    ClientCellPixels {
+        id: u64,
+        cell_width_px: u16,
+        cell_height_px: u16,
     },
     /// Input from a binary display client. The server unwraps this only after
     /// activating the correct per-client viewport; it never reaches `App`.
@@ -133,6 +188,18 @@ pub enum AppEvent {
     NamedSessionsLoaded {
         generation: u64,
         result: Result<Vec<crate::session::SessionInfo>, String>,
+    },
+    /// A stop request for a named session finished (from the session-menu context menu).
+    NamedSessionStopped {
+        generation: u64,
+        name: String,
+        result: Result<(), String>,
+    },
+    /// A delete request for a stopped named session finished off the app loop.
+    NamedSessionDeleted {
+        generation: u64,
+        name: String,
+        result: Result<(), String>,
     },
     /// A selected named session is ready for this client to attach.
     NamedSessionPrepared {
@@ -237,6 +304,10 @@ pub enum AppEvent {
         scanned: Vec<crate::mission::UsageKey>,
         usage: std::collections::HashMap<crate::mission::UsageKey, crate::mission::AgentUsage>,
         mtimes: std::collections::HashMap<crate::mission::UsageKey, std::time::SystemTime>,
+        /// Integration-owned keys excluded when this worker started. Carrying
+        /// the snapshot prevents a late result from reclassifying report data
+        /// as native after pane ownership changes.
+        report_owned: Vec<crate::mission::UsageKey>,
     },
     /// A git-tab fetch finished; apply it to the matching `GitView`.
     GitData {
@@ -282,7 +353,10 @@ pub enum AppEvent {
     /// only validates and swaps the resulting live configuration.
     ConfigReloaded {
         id: String,
-        config: crate::config::Config,
+        /// Boxed: the whole config is by far the largest thing any event
+        /// carries, and every other `AppEvent` in the channel would otherwise
+        /// be padded to its size.
+        config: Box<crate::config::Config>,
         reply: Sender<String>,
     },
     /// Agent manifest IO and parsing completed on the socket worker.
@@ -314,7 +388,7 @@ pub enum AppEvent {
     AgentWait {
         id: String,
         pane: String,
-        state: String,
+        states: Vec<String>,
         timeout: Option<std::time::Duration>,
         reply: Sender<String>,
         cancelled: Arc<AtomicBool>,
@@ -337,4 +411,9 @@ pub enum AppEvent {
         reply: Sender<String>,
         cancelled: Arc<AtomicBool>,
     },
+    /// A termination signal arrived. The handler only writes a self-pipe; this
+    /// event wakes a sleeping event loop so shutdown does not wait on a timer.
+    /// Windows has no POSIX signals; the detached server stops via `server stop`.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Shutdown,
 }

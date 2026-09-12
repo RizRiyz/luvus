@@ -40,6 +40,20 @@ pub struct UsageKey {
     pub session_id: String,
 }
 
+/// Ownership metadata for usage reported by a live agent integration. Native
+/// store scans must not overwrite these entries because the integration is the
+/// authority for the exact session visible in its pane.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ReportedUsage {
+    pub pane: PaneId,
+    pub updated_at: u64,
+}
+
+/// A hard bound for integration-only Mission Control entries. In normal use
+/// there is at most one entry per live pane; the larger ceiling lets stale
+/// reports be pruned safely before malformed clients can grow memory forever.
+pub(crate) const MAX_REPORTED_USAGE_ENTRIES: usize = 1024;
+
 impl UsageKey {
     pub fn new(agent: impl Into<String>, session_id: impl Into<String>) -> Self {
         Self {
@@ -50,8 +64,9 @@ impl UsageKey {
 }
 
 /// Token / context / cost usage for one agent session (docs/54 §5). Every figure
-/// is best-effort from the agent's own on-disk store. Cost uses an agent's exact
-/// persisted amount where available, otherwise the model price table in
+/// is best-effort from an agent's structured native store or a validated local
+/// integration report. Cost uses an agent's exact amount where available,
+/// otherwise the model price table in
 /// [`pricing`]; it is still informational, never a bill. `None` means unknown.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AgentUsage {

@@ -7,17 +7,29 @@ use std::io::{self, Read, Write};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::style::{Color, Modifier};
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, Error as _, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 use crate::sound::SoundSignal;
 use crate::terminal::theme_probe::TerminalColors;
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 18;
 const MAX_FRAME: usize = 64 * 1024 * 1024;
+
+/// Local display cell size in pixels, or `(0, 0)` when the host does not report it.
+pub fn local_cell_pixels() -> (u16, u16) {
+    crate::platform::terminal_cell_pixels().unwrap_or((0, 0))
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub enum ClientMessage {
+    /// **Frozen wire shape.** `Hello` is decoded *before* the version check, so a
+    /// server must be able to read it from every client that ever shipped. bincode
+    /// is not self-describing: adding a field here makes an older client's shorter
+    /// frame fail to decode, and the server then cannot reply with the
+    /// version-mismatch `Welcome` that tells the user to restart. Carry new
+    /// per-client data in a post-handshake message such as [`ClientMessage::CellPixels`]
+    /// instead, where both peers have already agreed on the protocol version.
     Hello {
         version: u32,
         cols: u16,
@@ -26,17 +38,136 @@ pub enum ClientMessage {
     Key(KeyEvent),
     Mouse(MouseEvent),
     Paste(String),
+    /// PNG bytes read from the display client's local clipboard after an
+    /// explicit image-paste gesture. The server validates and stages them.
+    ClipboardImage(#[serde(deserialize_with = "deserialize_clipboard_image")] Vec<u8>),
     Resize {
         cols: u16,
         rows: u16,
+        cell_width_px: u16,
+        cell_height_px: u16,
     },
+    /// Negotiate whether this attached display owns a visible surface. A
+    /// suspended remote endpoint remains connected but receives no frames,
+    /// cursor, resize ownership, input, or interactive host effects.
+    SurfaceInterest(SurfaceInterest),
+    /// Advertise a machine-aware client and its legacy bounded-row hint. A
+    /// capable server returns the complete native Workspaces dock geometry so
+    /// the client can keep one owner-local navigation shell while endpoint
+    /// content changes. Machine data itself never crosses into the server.
+    ShellDockLayout(ShellDockLayout),
+    ShellSidebars(ShellSidebars),
+    /// Focus one workspace on the owner-local server before a machine-aware
+    /// client switches its visible surface back from a remote endpoint.
+    ShellWorkspaceFocus {
+        workspace_id: String,
+    },
+    /// Ask the selected server to reopen its workspace picker after the
+    /// owner-local remote-machine form switches back to the local tab.
+    OpenWorkspacePicker,
     Detach,
     /// Response to [`ServerMessage::Ready`] when terminal colors were requested.
     TerminalColors(Option<TerminalColors>),
+    /// Display geometry reported after the version-checked handshake.
+    CellPixels {
+        cell_width_px: u16,
+        cell_height_px: u16,
+    },
+    /// Request a fresh candidate frame. The opaque ticket is echoed in the
+    /// same frame envelope so an older queued frame cannot commit a switch.
+    PrepareSurface {
+        ticket: u64,
+        cols: u16,
+        rows: u16,
+    },
+    /// Open the native workspace menu on the active owning endpoint.
+    ShellWorkspaceMenu {
+        workspace_id: String,
+        col: u16,
+        row: u16,
+    },
+    /// Lightweight liveness check for a quiet persistent machine endpoint.
+    HealthCheck {
+        nonce: u64,
+    },
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SurfaceInterest {
+    Suspended,
+    Prepared,
+    Active,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ShellDockLayout {
+    pub workspace_width: Option<u16>,
+    pub owns_workspaces: bool,
+    /// The machine-aware client composes the owner-local named-session chrome.
+    /// Endpoint servers leave the complete slot blank and expose no hit target.
+    pub owns_session_chrome: bool,
+    pub rows: u16,
+    pub leading: bool,
+    pub indent_workspaces: bool,
+}
+
+/// Client-owned dock arrangement, independent of endpoint-owned file trees
+/// and agent data. Revision fences late updates from a previous surface.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ShellSidebars {
+    pub revision: u64,
+    pub layout: crate::config::SidebarsConfig,
+    /// Client-owned visibility for workspace paths in the combined Local and
+    /// Machines tree. Keeping this beside sidebar geometry prevents endpoint
+    /// configuration from making the same dock change shape after a switch.
+    pub workspace_paths: bool,
+}
+
+fn deserialize_clipboard_image<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct ClipboardImageVisitor;
+
+    impl<'de> Visitor<'de> for ClipboardImageVisitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                formatter,
+                "at most {} clipboard image bytes",
+                crate::clipboard_image::MAX_PNG_BYTES
+            )
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let length = sequence.size_hint().unwrap_or(0);
+            if length > crate::clipboard_image::MAX_PNG_BYTES {
+                return Err(A::Error::custom("clipboard image exceeds size limit"));
+            }
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(length)
+                .map_err(|_| A::Error::custom("clipboard image allocation failed"))?;
+            while let Some(byte) = sequence.next_element()? {
+                if bytes.len() == crate::clipboard_image::MAX_PNG_BYTES {
+                    return Err(A::Error::custom("clipboard image exceeds size limit"));
+                }
+                bytes.push(byte);
+            }
+            Ok(bytes)
+        }
+    }
+
+    deserializer.deserialize_seq(ClipboardImageVisitor)
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub enum ServerMessage {
+    ShellSidebars(ShellSidebars),
     Welcome {
         version: u32,
         error: Option<String>,
@@ -80,6 +211,122 @@ pub enum ServerMessage {
     Ready {
         probe_terminal: bool,
     },
+    /// Exact client-owned Workspaces dock for the current viewport. `None`
+    /// means the client must use its modal/mobile fallback.
+    ShellDock(Option<ShellDockRect>),
+    /// Bounded owner-local workspace metadata used only by a machine-aware
+    /// client to keep local workspaces reachable while a remote surface is
+    /// visible. Remote endpoints never receive this catalog.
+    ShellWorkspaces(Vec<ShellWorkspace>),
+    /// Ask a machine-aware thin client to open its owner-local selector. Plain
+    /// clients ignore this optional shell action.
+    OpenMachineSelector,
+    /// Ask a machine-aware thin client to open its owner-local profile form.
+    /// SSH destinations and profile data never enter the selected server.
+    OpenMachineCreate {
+        theme: MachineFormTheme,
+        modal: ShellDockBlock,
+    },
+    PreparedFrame {
+        ticket: u64,
+        frame: FrameData,
+    },
+    /// Response to a client liveness check. It carries no application state.
+    HealthCheck {
+        nonce: u64,
+    },
+    /// Opaque identity for one running server process and selected session.
+    /// Sent only after the version-checked handshake.
+    EndpointIdentity {
+        boot_id: u64,
+        session: String,
+    },
+    /// The owner-local machine catalog committed a newer revision. This carries
+    /// no profile data: machine-aware clients reload their own private catalog,
+    /// while ordinary and remote endpoint clients never receive the message.
+    MachineCatalogChanged {
+        revision: u64,
+    },
+}
+
+/// Theme projection for the owner-local Remote Machine form. Keeping this
+/// semantic and bounded lets the thin client match the selected server's
+/// ordinary modal chrome without sending profile fields to that server.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MachineFormTheme {
+    pub surface: u32,
+    pub border: u32,
+    pub text: u32,
+    pub subtext0: u32,
+    pub subtext1: u32,
+    pub accent: u32,
+    pub accent_text: u32,
+    pub divider: u32,
+    pub rule: u32,
+    pub error: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShellDockRect {
+    pub resize: Option<ShellResize>,
+    /// Complete chrome interval reserved for the owner-local session control.
+    /// Unlike the button itself, this does not shrink with a short label.
+    pub session_slot: Option<ShellDockBlock>,
+    /// Exact owner-server named-session button. A machine-aware client keeps
+    /// this local control visible while a remote workspace owns pane content.
+    pub session_button: Option<ShellDockBlock>,
+    /// Exact server-owned popup rectangle overlapping the client-owned shell.
+    /// The client neither paints nor accepts input inside this rectangle.
+    pub overlay: Option<ShellDockBlock>,
+    /// Whether the server's native overlay dims the content behind it. This is
+    /// semantic state; the client must not infer modal treatment from pixels.
+    pub overlay_dims_background: bool,
+    pub workspace_focused: bool,
+    pub workspace_modal: bool,
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+    pub show_paths: bool,
+    pub normal_fg: u32,
+    pub secondary_fg: u32,
+    pub active_fg: u32,
+    pub active_secondary_fg: u32,
+    pub active_bg: u32,
+    pub branch_fg: u32,
+    pub chrome: MachineFormTheme,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShellDockBlock {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShellResize {
+    pub left: bool,
+    pub column: u16,
+    pub top: u16,
+    pub bottom: u16,
+    pub origin: u16,
+    pub maximum: u16,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]
+pub struct ShellWorkspace {
+    pub dot: String,
+    pub dot_color: u32,
+    pub id: String,
+    pub index: u16,
+    pub name: String,
+    pub cwd: String,
+    pub branch: Option<String>,
+    pub active: bool,
+    pub selected: bool,
+    pub nested: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
@@ -215,7 +462,8 @@ pub fn read_message<R: Read, M: DeserializeOwned>(r: &mut R) -> io::Result<M> {
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
-    let (msg, _) = bincode::serde::decode_from_slice(&buf, bincode::config::standard())
+    let config = bincode::config::standard().with_limit::<MAX_FRAME>();
+    let (msg, _) = bincode::serde::decode_from_slice(&buf, config)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     Ok(msg)
 }
@@ -432,6 +680,54 @@ fn sq(x: i32) -> i32 {
 mod tests {
     use super::*;
 
+    /// `Hello` is decoded before the version check, so its encoded shape must stay
+    /// byte-for-byte stable across releases. If this fails, an older client can no
+    /// longer reach the version-mismatch `Welcome` that tells the user to restart —
+    /// put the new field in a post-handshake message instead of `Hello`.
+    #[test]
+    fn hello_wire_shape_is_frozen() {
+        let mut buf = Vec::new();
+        write_message(
+            &mut buf,
+            &ClientMessage::Hello {
+                version: 7,
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .unwrap();
+        // 4-byte length prefix, then variant 0 followed by three varints.
+        assert_eq!(buf, [4, 0, 0, 0, 0, 7, 80, 24], "Hello wire shape changed");
+    }
+
+    /// The reverse of the guarantee above: a peer that only knows the three frozen
+    /// fields still decodes a current `Hello`, which is what lets an older server
+    /// read the version and answer with a mismatch error instead of hanging up.
+    #[test]
+    fn frozen_hello_decodes_without_later_fields() {
+        #[derive(Deserialize)]
+        enum LegacyClientMessage {
+            Hello { version: u32, cols: u16, rows: u16 },
+        }
+
+        let mut buf = Vec::new();
+        write_message(
+            &mut buf,
+            &ClientMessage::Hello {
+                version: PROTOCOL_VERSION,
+                cols: 100,
+                rows: 40,
+            },
+        )
+        .unwrap();
+        let LegacyClientMessage::Hello {
+            version,
+            cols,
+            rows,
+        } = read_message::<_, LegacyClientMessage>(&mut &buf[..]).unwrap();
+        assert_eq!((version, cols, rows), (PROTOCOL_VERSION, 100, 40));
+    }
+
     #[test]
     fn message_roundtrip() {
         let msg = ServerMessage::Frame(FrameData {
@@ -467,6 +763,142 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn machine_health_identity_and_overlay_roundtrip() {
+        let mut bytes = Vec::new();
+        write_message(&mut bytes, &ClientMessage::HealthCheck { nonce: 41 }).unwrap();
+        assert!(matches!(
+            read_message::<_, ClientMessage>(&mut &bytes[..]).unwrap(),
+            ClientMessage::HealthCheck { nonce: 41 }
+        ));
+
+        bytes.clear();
+        write_message(
+            &mut bytes,
+            &ServerMessage::EndpointIdentity {
+                boot_id: 9,
+                session: "review".into(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            read_message::<_, ServerMessage>(&mut &bytes[..]).unwrap(),
+            ServerMessage::EndpointIdentity { boot_id: 9, session } if session == "review"
+        ));
+
+        bytes.clear();
+        write_message(
+            &mut bytes,
+            &ServerMessage::MachineCatalogChanged { revision: 12 },
+        )
+        .unwrap();
+        assert!(matches!(
+            read_message::<_, ServerMessage>(&mut &bytes[..]).unwrap(),
+            ServerMessage::MachineCatalogChanged { revision: 12 }
+        ));
+
+        bytes.clear();
+        let modal = ShellDockBlock {
+            x: 12,
+            y: 4,
+            width: 76,
+            height: 26,
+        };
+        write_message(
+            &mut bytes,
+            &ServerMessage::OpenMachineCreate {
+                theme: MachineFormTheme {
+                    surface: 0,
+                    border: 1,
+                    text: 2,
+                    subtext0: 3,
+                    subtext1: 4,
+                    accent: 5,
+                    accent_text: 6,
+                    divider: 7,
+                    rule: 8,
+                    error: 9,
+                },
+                modal,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            read_message::<_, ServerMessage>(&mut &bytes[..]).unwrap(),
+            ServerMessage::OpenMachineCreate { modal: decoded, .. } if decoded == modal
+        ));
+
+        bytes.clear();
+        let mut shell_layout = crate::config::SidebarsConfig::default_layout();
+        // The wire projection is produced by `Sidebars::to_config`, which
+        // always preserves the last concrete Files side.
+        shell_layout.files_side = Some(crate::app::Side::Left);
+        let shell = ShellSidebars {
+            revision: 4,
+            layout: shell_layout,
+            workspace_paths: false,
+        };
+        write_message(&mut bytes, &ClientMessage::ShellSidebars(shell.clone())).unwrap();
+        assert!(matches!(
+            read_message::<_, ClientMessage>(&mut &bytes[..]).unwrap(),
+            ClientMessage::ShellSidebars(decoded) if decoded == shell
+        ));
+
+        let dock = ShellDockRect {
+            resize: None,
+            session_slot: Some(ShellDockBlock {
+                x: 5,
+                y: 0,
+                width: 24,
+                height: 1,
+            }),
+            session_button: Some(ShellDockBlock {
+                x: 5,
+                y: 0,
+                width: 10,
+                height: 1,
+            }),
+            overlay: Some(ShellDockBlock {
+                x: 4,
+                y: 3,
+                width: 20,
+                height: 8,
+            }),
+            overlay_dims_background: true,
+            workspace_focused: false,
+            workspace_modal: true,
+            x: 0,
+            y: 1,
+            width: 30,
+            height: 20,
+            show_paths: false,
+            normal_fg: 0,
+            secondary_fg: 0,
+            branch_fg: 0,
+            active_fg: 0,
+            active_secondary_fg: 0,
+            active_bg: 0,
+            chrome: MachineFormTheme {
+                surface: 0,
+                border: 0,
+                text: 0,
+                subtext0: 0,
+                subtext1: 0,
+                accent: 0,
+                accent_text: 0,
+                divider: 0,
+                rule: 0,
+                error: 0,
+            },
+        };
+        bytes.clear();
+        write_message(&mut bytes, &ServerMessage::ShellDock(Some(dock))).unwrap();
+        assert!(matches!(
+            read_message::<_, ServerMessage>(&mut &bytes[..]).unwrap(),
+            ServerMessage::ShellDock(Some(decoded)) if decoded == dock
+        ));
     }
 
     #[test]
@@ -506,6 +938,47 @@ mod tests {
             read_message::<_, ServerMessage>(&mut &bytes[..]).unwrap(),
             ServerMessage::OpenPath(decoded) if decoded == path
         ));
+    }
+
+    #[test]
+    fn clipboard_image_roundtrips_as_binary_png_data() {
+        let png = crate::clipboard_image::encode_rgba_png(1, 1, |_, _| [1, 2, 3, 255])
+            .expect("fixture PNG");
+        let mut bytes = Vec::new();
+        write_message(&mut bytes, &ClientMessage::ClipboardImage(png.clone())).unwrap();
+        assert!(matches!(
+            read_message::<_, ClientMessage>(&mut &bytes[..]).unwrap(),
+            ClientMessage::ClipboardImage(decoded) if decoded == png
+        ));
+    }
+
+    #[test]
+    fn clipboard_image_rejects_an_oversized_declared_length_before_allocation() {
+        let config = bincode::config::standard();
+        let mut encoded =
+            bincode::serde::encode_to_vec(ClientMessage::ClipboardImage(Vec::new()), config)
+                .unwrap();
+        assert_eq!(
+            encoded.pop(),
+            Some(0),
+            "empty image ends with a zero length"
+        );
+        encoded.extend(
+            bincode::serde::encode_to_vec(crate::clipboard_image::MAX_PNG_BYTES + 1, config)
+                .unwrap(),
+        );
+
+        let mut frame = Vec::with_capacity(encoded.len() + 4);
+        frame.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&encoded);
+        let error = match read_message::<_, ClientMessage>(&mut &frame[..]) {
+            Ok(_) => panic!("oversized clipboard image length must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error
+            .to_string()
+            .contains("clipboard image exceeds size limit"));
     }
 
     /// A wide glyph written through ratatui's own `set_string` (the path modals,

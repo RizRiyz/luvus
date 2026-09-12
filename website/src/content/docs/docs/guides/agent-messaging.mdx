@@ -31,6 +31,25 @@ A `<target>` is one of three things:
 
 `agent prompt` and `agent keys` only target a pane that is actually running an agent, so a plain shell is refused. `agent send` remains a compatibility alias.
 
+`agent.keys` requires a recognized agent pane and a non-empty array of named
+keys. A target that resolves to a plain shell returns `agent_not_ready`. Luvus
+validates every entry before it queues one ordered byte sequence, so a
+mixed-type or unknown-key batch sends no prefix. A closed PTY input queue
+returns `send_failed` instead of reporting delivery.
+
+Prompt text and its final Enter are queued as one ordered submission, including
+direct `agent.send` requests and DIFF note handoffs. Other queued input cannot
+interleave between that paste and Enter. A successful send means the queue
+accepted the submission, not that the agent completed it. A closed queue fails
+without recording a successful handoff. Submission uses the existing PTY writer
+and does not create a delayed-send thread.
+
+Paired control Access also permits this exact RPC; read-only Access refuses
+it. The key grammar stays identical to local `agent keys`, including `ctrl+z`
+and printable Unicode. `["esc","[","Z"]` sends Shift+Tab as one ordered batch.
+Inspect the prompt before answering; Enter remains a separate intentional
+action. Access does not permit the compatibility `agent.send` method.
+
 For line-specific feedback, the native [DIFF review](/docs/guides/diff/) uses
 the same target validation. It groups selected local notes into one bounded
 message, quotes source context as untrusted review data, and records delivery
@@ -38,7 +57,7 @@ without resolving the notes.
 
 ### How to tell two of the same kind apart
 
-Run `luvus agent list` (each row has `pane`, `agent` kind, `name`, `cwd`, `workspace_name`). Two Claudes share the kind `claude` but differ by pane id and folder. Give each a name so you can mention it:
+Run `luvus agent list` (each row has `pane`, `agent` kind, `name`, `cwd`, `workspace_name`, and the stable `workspace_id`). Two Claudes share the kind `claude` but differ by pane id and folder. Give each a name so you can mention it:
 
 ```sh
 luvus agent name api --pane 1     # or run `luvus pane name api` inside that pane
@@ -137,7 +156,10 @@ skill through their native adapters:
 
 - **Claude Code:** `~/.claude/skills/luvus/`
 - **Codex:** `~/.agents/skills/luvus/`
+- **Kilo Code:** `~/.agents/skills/luvus/`
+- **Devin:** `~/.agents/skills/luvus/`
 - **opencode:** `${XDG_CONFIG_HOME:-~/.config}/opencode/skills/luvus/`
+- **OpenCode 2 Preview:** `${XDG_CONFIG_HOME:-~/.config}/opencode/skills/luvus/`
 
 The command makes no network request and never replaces a skill directory it
 does not own. Luvus does not add a global `AGENTS.md` pointer. Supported agents
@@ -151,7 +173,7 @@ detection, sidebar visibility, and ordinary resume need no hook. Enabling either
 one never enables the other.
 
 The messaging **commands themselves work with every agent luvus detects**
-(claude, codex, gemini, opencode, kimi, grok, aider, and more), whether or not
+(claude, codex, gemini, opencode, opencode2, kimi, grok, aider, and more), whether or not
 that agent has the skill installed. The skill just teaches an agent to reach for
 them on its own.
 

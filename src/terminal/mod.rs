@@ -5,6 +5,7 @@ pub mod appearance;
 pub mod backend;
 #[cfg(any(windows, test))]
 pub mod host_input;
+pub mod host_key;
 pub mod pty;
 pub mod theme_probe;
 pub mod vt;

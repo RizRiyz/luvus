@@ -8,6 +8,7 @@
 //! All mutation happens on the single-writer app loop (via `app/dispatch.rs`), so
 //! claims and leases are race-free by construction; this module holds no locks.
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,9 +19,10 @@ pub type TaskId = String;
 
 /// Where an orchestration worker owns its working files. Worktree remains the
 /// default; workspace mode is an explicit shared-checkout choice.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskWorkerMode {
+    #[default]
     Worktree,
     Workspace,
 }
@@ -49,6 +51,16 @@ pub struct WorkspaceWorkerBinding {
     pub workspace_id: String,
     pub tab_id: String,
     pub root: String,
+}
+
+/// Durable link from one concrete ORCH task to the automation occurrence that
+/// created it. The run id is unique, so restart reconciliation can never create
+/// a second task for the same occurrence.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct AutomationProvenance {
+    pub automation_id: String,
+    pub run_id: String,
+    pub scheduled_at: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -99,6 +111,9 @@ impl TaskStatus {
 pub struct Task {
     pub id: TaskId,
     pub title: String,
+    /// Optional detailed briefing. Manual legacy tasks continue to use `title`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
     pub status: TaskStatus,
     /// Owning pane's raw id (`PaneId.0`), once claimed.
     pub assignee: Option<u32>,
@@ -132,6 +147,9 @@ pub struct Task {
     /// gate). Above the threshold, completion is blocked until it compacts.
     #[serde(default)]
     pub context: Option<f64>,
+    /// Present only when this task was materialized by Agent Automation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation: Option<AutomationProvenance>,
     pub created: u64,
     pub updated: u64,
 }
@@ -144,6 +162,10 @@ pub const COMPACTION_THRESHOLD: f64 = 0.85;
 /// `orch.json` on disk, and the UHP can drive it programmatically — so
 /// nothing may grow without bound. Limits far above real use, well below harm.
 pub const MAX_TASKS: usize = 1000;
+/// Task titles remain compact board labels while still allowing descriptive names.
+pub const MAX_TASK_TITLE_BYTES: usize = 256;
+/// Detailed worker briefings share the reviewed automation prompt budget.
+pub const MAX_TASK_PROMPT_BYTES: usize = 32 * 1024;
 /// Per-task `outputs` / `notes` keep only the most recent entries…
 pub const MAX_TASK_LOG: usize = 100;
 /// …and each entry is truncated to this many bytes (a runaway agent piping a
@@ -155,6 +177,37 @@ pub const MAX_LEASES: usize = 1024;
 pub const MAX_LEASE_PATHS: usize = 64;
 /// Maximum UTF-8 byte length of one path pattern.
 pub const MAX_LEASE_PATH_BYTES: usize = 1024;
+
+/// Task briefings are sent to a live shell as terminal input. Reject every
+/// control character before launch so restored task text cannot synthesize an
+/// Enter, Escape, or another terminal action.
+pub(crate) fn contains_terminal_control(value: &str) -> bool {
+    value.chars().any(char::is_control)
+}
+
+fn validate_task_text(
+    field: &'static str,
+    value: &str,
+    max_bytes: usize,
+    multiline: bool,
+) -> OrchResult<()> {
+    if value.len() > max_bytes {
+        return Err(Reject::new(
+            "bad_request",
+            format!("{field} exceeds the {max_bytes}-byte limit"),
+        ));
+    }
+    if value
+        .chars()
+        .any(|character| character.is_control() && !(multiline && character == '\n'))
+    {
+        return Err(Reject::new(
+            "bad_request",
+            format!("{field} contains an unsupported control character"),
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Lease {
@@ -213,8 +266,24 @@ impl OrchState {
         deps: Vec<TaskId>,
         gate: Option<String>,
     ) -> OrchResult<Task> {
+        self.add_task_with_prompt(title, None, paths, deps, gate)
+    }
+
+    /// Add a task and its optional detailed worker briefing atomically.
+    pub fn add_task_with_prompt(
+        &mut self,
+        title: String,
+        prompt: Option<String>,
+        paths: Vec<String>,
+        deps: Vec<TaskId>,
+        gate: Option<String>,
+    ) -> OrchResult<Task> {
         if title.trim().is_empty() {
             return Err(Reject::new("bad_request", "task title is required"));
+        }
+        validate_task_text("task title", &title, MAX_TASK_TITLE_BYTES, false)?;
+        if let Some(prompt) = &prompt {
+            validate_task_text("task prompt", prompt, MAX_TASK_PROMPT_BYTES, true)?;
         }
         if self.tasks.len() >= MAX_TASKS {
             return Err(Reject::new(
@@ -233,6 +302,7 @@ impl OrchState {
         let task = Task {
             id: format!("t{}", self.next_task),
             title,
+            prompt: prompt.filter(|value| !value.trim().is_empty()),
             status: TaskStatus::Queued,
             assignee: None,
             deps,
@@ -245,6 +315,7 @@ impl OrchState {
             worker_mode: None,
             workspace_worker: None,
             context: None,
+            automation: None,
             created: now,
             updated: now,
         };
@@ -252,8 +323,70 @@ impl OrchState {
         Ok(task)
     }
 
+    /// Attach the immutable automation briefing and occurrence provenance to a
+    /// freshly added task. Reusing `run_id` is rejected to preserve exactly-once
+    /// materialization across retries and restarts.
+    pub fn attach_automation(
+        &mut self,
+        id: &str,
+        prompt: String,
+        provenance: AutomationProvenance,
+    ) -> OrchResult<Task> {
+        validate_task_text("task prompt", &prompt, MAX_TASK_PROMPT_BYTES, true)?;
+        if self.tasks.iter().any(|task| {
+            task.id != id
+                && task
+                    .automation
+                    .as_ref()
+                    .is_some_and(|existing| existing.run_id == provenance.run_id)
+        }) {
+            return Err(Reject::new(
+                "duplicate_automation_run",
+                format!("automation run {} already has a task", provenance.run_id),
+            ));
+        }
+        let task = self
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+            .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        task.prompt = Some(prompt);
+        task.automation = Some(provenance);
+        task.updated = unix_now();
+        Ok(task.clone())
+    }
+
+    pub fn task_for_automation_run(&self, run_id: &str) -> Option<&Task> {
+        self.tasks.iter().find(|task| {
+            task.automation
+                .as_ref()
+                .is_some_and(|automation| automation.run_id == run_id)
+        })
+    }
+
     pub fn task(&self, id: &str) -> Option<&Task> {
         self.tasks.iter().find(|t| t.id == id)
+    }
+
+    pub fn set_prompt(&mut self, id: &str, prompt: Option<String>) -> OrchResult<Task> {
+        let task = self
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+            .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        if task.status != TaskStatus::Queued || task.assignee.is_some() || task.automation.is_some()
+        {
+            return Err(Reject::new(
+                "task_active",
+                "task prompt can only be edited before a manual task starts",
+            ));
+        }
+        if let Some(prompt) = &prompt {
+            validate_task_text("task prompt", prompt, MAX_TASK_PROMPT_BYTES, true)?;
+        }
+        task.prompt = prompt.filter(|value| !value.trim().is_empty());
+        task.updated = unix_now();
+        Ok(task.clone())
     }
 
     /// A task is *ready* to claim when every dependency is available in the
@@ -769,19 +902,31 @@ impl OrchState {
     /// Atomic save (temp + rename), best-effort — a failed write never breaks
     /// the app; the ledger is a convenience layer, not core session state.
     pub fn save(&self) {
+        let _ = self.try_save();
+    }
+
+    /// Fallible persistence used by Agent Automation before it launches work.
+    /// A scheduled occurrence must not start unless its ORCH provenance reached
+    /// disk, otherwise a restart could materialize it twice.
+    pub fn try_save(&self) -> std::io::Result<()> {
         let Some(path) = self.persist_path.as_ref() else {
-            return;
+            return Ok(());
         };
         if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            std::fs::create_dir_all(dir)?;
         }
-        let Ok(json) = serde_json::to_string_pretty(self) else {
-            return;
-        };
+        let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, json).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        crate::platform::atomic_replace_file(&tmp, path)?;
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
         }
+        Ok(())
     }
 
     fn recover_interrupted_merges(&mut self) {
@@ -969,6 +1114,72 @@ mod tests {
         let stored = s.task("t2").unwrap().outputs.last().unwrap().clone();
         assert!(stored.len() <= MAX_LOG_ENTRY + '…'.len_utf8());
         assert!(stored.ends_with('…'));
+    }
+
+    #[test]
+    fn task_title_and_prompt_are_bounded_and_created_atomically() {
+        let mut state = OrchState::default();
+        let task = state
+            .add_task_with_prompt(
+                "Review the authentication migration".into(),
+                Some("Check the API contract.\nCover rollback behavior.".into()),
+                vec!["src/auth/**".into()],
+                vec![],
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            task.prompt.as_deref(),
+            Some("Check the API contract.\nCover rollback behavior.")
+        );
+
+        let too_long_title = "x".repeat(MAX_TASK_TITLE_BYTES + 1);
+        let error = state
+            .add_task(too_long_title, vec![], vec![], None)
+            .unwrap_err();
+        assert_eq!(error.code, "bad_request");
+
+        let too_long_prompt = "x".repeat(MAX_TASK_PROMPT_BYTES + 1);
+        let error = state
+            .add_task_with_prompt(
+                "not inserted".into(),
+                Some(too_long_prompt),
+                vec![],
+                vec![],
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "bad_request");
+        assert_eq!(state.tasks.len(), 1, "a rejected prompt creates no task");
+    }
+
+    #[test]
+    fn manual_prompt_is_editable_only_before_start() {
+        let mut state = OrchState::default();
+        state
+            .add_task_with_prompt(
+                "Review".into(),
+                Some("First briefing".into()),
+                vec![],
+                vec![],
+                None,
+            )
+            .unwrap();
+        state
+            .set_prompt("t1", Some("Updated\nbriefing".into()))
+            .unwrap();
+        assert_eq!(
+            state.task("t1").unwrap().prompt.as_deref(),
+            Some("Updated\nbriefing")
+        );
+
+        state.claim("t1", 7).unwrap();
+        let error = state.set_prompt("t1", Some("too late".into())).unwrap_err();
+        assert_eq!(error.code, "task_active");
+        assert_eq!(
+            state.task("t1").unwrap().prompt.as_deref(),
+            Some("Updated\nbriefing")
+        );
     }
 
     #[test]

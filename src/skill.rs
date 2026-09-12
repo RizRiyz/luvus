@@ -54,7 +54,7 @@ static INSTALL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 pub enum SkillHost {
     Claude,
     /// The open `~/.agents/skills` location shared by Codex, Copilot, Gemini,
-    /// Pi, Cursor, Amp, Droid, and fx.
+    /// Pi, Cursor, Amp, Droid, fx, Kilo Code, and Devin.
     Shared,
     Opencode,
     Kimi,
@@ -541,8 +541,11 @@ fn host_commands(host: SkillHost) -> &'static [&'static str] {
             "amp",
             "droid",
             "fx",
+            "kilo",
+            "kilocode",
+            "devin",
         ],
-        SkillHost::Opencode => &["opencode"],
+        SkillHost::Opencode => &["opencode", "opencode2"],
         SkillHost::Kimi => &["kimi"],
         SkillHost::Grok => &["grok"],
         SkillHost::Qwen => &["qwen"],
@@ -580,6 +583,8 @@ fn host_config_dirs(
             xdg.join("amp"),
             home.join(".factory"),
             home.join(".fx"),
+            home.join(".kilo"),
+            xdg.join("devin"),
         ],
         SkillHost::Opencode => vec![xdg.join("opencode")],
         SkillHost::Kimi => vec![kimi_home
@@ -1124,6 +1129,10 @@ mod tests {
             PathBuf::from("/xdg/config/opencode/skills/luvus")
         );
         assert_eq!(
+            host_commands(SkillHost::Opencode),
+            ["opencode", "opencode2"]
+        );
+        assert_eq!(
             target_dir_at(SkillHost::Kimi, home, None),
             PathBuf::from("/home/tester/.kimi-code/skills/luvus")
         );
@@ -1171,6 +1180,9 @@ mod tests {
             "amp",
             "droid",
             "fx",
+            "kilo",
+            "kilocode",
+            "devin",
         ] {
             assert!(
                 shared.contains(&agent),

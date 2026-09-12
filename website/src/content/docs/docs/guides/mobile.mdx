@@ -48,7 +48,15 @@ it when necessary and hands only this client to it; the previous session and
 its panes stay alive. New names use ASCII letters, digits, `.`, `_`, or `-` and
 may be up to 64 bytes. `Ctrl+Space t` opens the sheet directly. Arrow keys,
 `j` / `k`, `Home` / `End`, Enter, `q`, Escape, mouse wheel, and touch work in
-the same sheet.
+the same sheet. Press `a` on a selected session to open its actions, then use
+the same navigation keys and Enter.
+
+Right-click or press `a` on a running session that is not current and select
+**Stop** to end its server and live panes. A stopped session offers **Start**;
+a stopped named session also offers **Delete** to remove its saved state after
+confirmation. The current session cannot be stopped or deleted, and the default
+session cannot be deleted. Reopening the sheet shows its last known rows
+immediately while one background refresh checks for external changes.
 
 Exit appears after Changelog and behaves like `Ctrl+Space q`. In a server-backed
 session it detaches the current client while the server and panes keep running.

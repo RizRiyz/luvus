@@ -14,43 +14,10 @@ import '@fontsource/ibm-plex-mono/600.css';
 import '@fontsource/ibm-plex-mono/700.css';
 import '@fontsource/orbit/400.css'; // the wordmark face
 import Logo from '../components/Logo.astro';
-import XLogo from '../components/XLogo.astro';
-// The surviving Luvus mark. Imported raw and retinted at build time so it can be a
-// theme-aware line drawing rather than a flat image:
-//   * the white backing rect goes, or it would be a white square on a dark page;
-//   * `#272727` becomes `currentColor`, so CSS decides the ink;
-//   * the `white` knockout fills (they hide the antennae behind the circles)
-//     become `var(--bg)`, so they still occlude but match whatever the page is.
+import MarketingNav from '../components/MarketingNav.astro';
+// The canonical fixed-colour pixel mark used by the hero and final CTA.
 import luvusRaw from '../assets/luvus-logo.svg?raw';
-const luvusTinted = luvusRaw
-  .replace(/<rect width="1000" height="1000" fill="white"\/>/, '')
-  .replace(/#272727/g, 'currentColor')
-  .replace(/fill="white"/g, 'fill="var(--bg)"');
-// Split the puppet into the three parts that hang, so each can swing on its own
-// string instead of the whole mark moving as one rigid piece. The artwork is a
-// flat list of 16 shapes in a fixed order:
-//   0-1 crossbar · 2 neck · 3-4 strings · 5 head + 6-7 eyes ·
-//   8 left ball + 9-11 its marks · 12 right ball + 13-15 its marks
-// Guarded on that count: if the artwork is re-exported differently the grouping
-// is skipped and the mark still renders, just swinging as a whole.
-const luvusParts = luvusTinted.match(/<(?:rect|circle)[^>]*\/>/g) ?? [];
-// Rebuilt between the <svg> tags rather than by substituting the joined shapes:
-// the source keeps one element per line, so a join with no separator matches
-// nothing and the grouping silently does not happen.
-const luvusSvg =
-  luvusParts.length === 16
-    ? luvusTinted.replace(
-        /(<svg[^>]*>)[\s\S]*(<\/svg>)/,
-        (_m: string, open: string, close: string) =>
-          open +
-          luvusParts.slice(0, 5).join('') +
-          `<g class="p-head">${luvusParts.slice(5, 8).join('')}</g>` +
-          `<g class="p-left">${luvusParts.slice(8, 12).join('')}</g>` +
-          `<g class="p-right">${luvusParts.slice(12, 16).join('')}</g>` +
-          close
-      )
-    : luvusTinted;
-import { NAV_MARK } from '../lib/mark';
+const luvusSvg = luvusRaw;
 import FeatureIcon from '../components/FeatureIcon.astro';
 // Authentic brand marks (24×24 SVGs) for the "works with" grid. The `-color`
 // ones carry their own fills; the rest are `currentColor` (recolored via CSS,
@@ -74,7 +41,6 @@ import IconAider from '../assets/icons/aider.svg';
 import droidMask from '../assets/icons/droid-mask.png';
 
 const GITHUB = 'https://github.com/RizRiyz/luvus';
-const X = 'https://x.com/luvusdev';
 
 // Curated public "works with" grid. Built-in descriptors live in
 // `agent::registry`, while `src/detect.rs` owns runtime identity and state.
@@ -85,17 +51,21 @@ const AGENTS = [
   { name: 'Claude Code', Icon: IconClaudeCode, hook: true },
   { name: 'Codex', Icon: IconCodex, hook: true },
   { name: 'Gemini', Icon: IconGemini },
+  { name: 'Antigravity', letter: 'A', hook: true },
   { name: 'Aider', Icon: IconAider },
   { name: 'opencode', Icon: IconOpencode, mono: true, hook: true },
+  { name: 'OpenCode 2', Icon: IconOpencode, mono: true },
   { name: 'Copilot', Icon: IconCopilot, mono: true, hook: true },
   { name: 'Kimi', Icon: IconKimi, hook: true },
   { name: 'Qwen', Icon: IconQwen },
+  { name: 'Kilo Code', letter: 'K' },
   { name: 'Kiro', Icon: IconKiro },
   { name: 'Cursor', Icon: IconCursor, mono: true },
   { name: 'Amp', Icon: IconAmp },
   { name: 'Droid', mask: droidMask.src },
   { name: 'Grok', Icon: IconGrok, mono: true, hook: true },
   { name: 'Pi', Icon: IconPi, mono: true, hook: true },
+  { name: 'Devin', letter: 'D' },
 ];
 
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -153,31 +123,7 @@ const ogImage = 'https://luvus.dev/og.png';
     </script>
   </head>
   <body>
-    <nav>
-      <div class="nav-inner">
-      <a class="brand" href="/">
-        <!-- Canonical Luvus mark, retinted with the active theme. -->
-        <span class="mark mark-luvus" aria-hidden="true" set:html={NAV_MARK}></span>
-        <span>Luvus</span>
-      </a>
-      <div class="nav-links">
-        <a href="/docs/">Docs</a>
-        <a href="/modules/">Modules</a>
-        <a href="/themes/">Themes</a>
-        <a href="/blog/">Blog</a>
-        <a href="/changelog/">Changelog</a>
-        <a href={GITHUB} class="gh" aria-label="luvus on GitHub" title="GitHub">
-          <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"
-            ><path
-              fill="currentColor"
-              d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
-            ></path></svg
-          >
-        </a>
-        <a href={X} class="gh" aria-label="Luvus on X" title="X"><XLogo /></a>
-      </div>
-      </div>
-    </nav>
+    <MarketingNav />
 
     <div class="page-frame">
 
@@ -738,7 +684,7 @@ const ogImage = 'https://luvus.dev/og.png';
 
     <section class="cta-repo">
       <div class="cta-card" aria-labelledby="name-note-title">
-        <div class="cta-art" aria-hidden="true" set:html={luvusTinted}></div>
+        <div class="cta-art" aria-hidden="true" set:html={luvusSvg}></div>
 
         <div class="cta-copy">
         <div class="name-dictionary">
@@ -1385,56 +1331,7 @@ const ogImage = 'https://luvus.dev/og.png';
         color: var(--sub); font-size: 0.85rem; line-height: 1.8;
       }
 
-      nav {
-        background: rgb(from var(--bg) r g b / 0.85);
-        border-bottom: 1px solid var(--line);
-      }
-      .nav-inner {
-        display: flex; justify-content: space-between; align-items: center;
-        max-width: 1440px; margin: 0 auto; padding: 0.3rem var(--gut);
-        /* The bar's height is stated, not inherited from whatever is in it. It
-           used to be 34px of mark plus 0.85rem of padding; pinning that means the
-           mark and wordmark can be resized without the header growing. */
-        min-height: 3.8rem;
-      }
-      /* The lockup: mark and wordmark share one `color`, so they can never read as
-         two different whites. Tight gap so the word sits against the mark rather
-         than floating beside it. */
-      .brand { display: flex; align-items: center; gap: 0.35rem; font-size: 1.7rem; letter-spacing: -0.05em; color: var(--text); }
-      /* Orbit, for the wordmark and nothing else. It ships one 400 weight, so the
-         brand is never asked for a bold it does not have; the tight tracking is
-         what keeps it from reading as body text at this size. */
-      .brand span {
-        font-family: 'Orbit', var(--bh-display, ui-monospace), monospace;
-        font-weight: 400;
-        /* `normal` so the glyph sits centred in a box the face actually asked
-           for; the page's 1.75 body leading would otherwise make the wordmark a
-           tall item that only looks centred by accident. */
-        line-height: normal;
-        /* Orbit carries a deep descender, so its *optical* centre sits below the
-           box centre that flexbox aligns on: next to the mark the word reads low.
-           A transform, not a margin, so nothing reflows and the bar keeps its
-           height. Tune with one number. */
-        transform: translateY(var(--brand-nudge, -0.06em));
-      }
-      /* Inline SVG logo mark · crisp at any size, sits flush with the wordmark. */
       .mark { display: block; flex-shrink: 0; }
-      /* The nav mark is inline line art. Ink follows the wordmark, so it
-         reads as one lockup rather than an image sat beside text. */
-      .mark-luvus { width: 42px; height: 42px; }
-      .mark-luvus svg { width: 100%; height: 100%; display: block; }
-      .nav-links {
-        display: flex; align-items: center; gap: 1.4rem; color: var(--sub); font-size: 0.88rem;
-        font-family: 'IBM Plex Mono', ui-monospace, monospace; letter-spacing: -0.01em;
-      }
-      .nav-links a:hover { color: var(--text); }
-      .gh {
-        display: inline-flex; align-items: center; justify-content: center;
-        width: 33px; height: 33px; flex: 0 0 33px; box-sizing: border-box;
-        border: 1px solid var(--line); padding: 0;
-        transition: border-color 0.15s, color 0.15s;
-      }
-      .gh:hover { border-color: var(--accent); color: var(--accent); }
 
       /* Centred, but with the radial green wash gone. The glow and the rounded
          chrome were what made this read as a template, not the alignment. */
@@ -1472,73 +1369,24 @@ const ogImage = 'https://luvus.dev/og.png';
         -webkit-mask: var(--art) center / contain no-repeat;
         mask: var(--art) center / contain no-repeat;
       }
-      /* The inline Luvus mark uses real SVG rather than a masked image, so the
-         knockout fills can sit at `--bg` and read as line art. `color` is the ink,
-         the same `--overlay1` the masked mark used, so the weight is comparable.
-         Not mirrored: the mark is near-symmetric, so flipping it does nothing. */
+      /* The fixed-colour pixel mark remains crisp and recognizable across all
+         palettes instead of being retinted as generic theme artwork. */
       .hero-art-svg {
         background: none; -webkit-mask: none; mask: none;
         transform: none;
-        color: var(--overlay1);
         display: flex; align-items: flex-end; justify-content: center;
       }
-      /* The mark is a marionette: a control bar up top, two strings, and a
-         puppet hanging off them. So it hangs. The pivot is the crossbar rather
-         than the middle of the box, which is what makes it read as swinging from
-         its strings instead of spinning about its waist.
-         Two cycles again, unequal, so the sway and the bob drift against each
-         other and it never ticks like a metronome. A couple of degrees is
-         plenty; more reads as a pendulum, not a puppet at rest. */
       .hero-art-svg svg {
         width: 100%; height: 100%; display: block;
-        transform-origin: 50% 9%;
-        animation:
-          bh-puppet-sway 6.5s cubic-bezier(0.45, 0, 0.55, 1) infinite,
-          bh-puppet-bob 4.3s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+        filter: drop-shadow(0 0 24px rgb(219 198 111 / 0.18));
+        animation: bh-logo-float 5.2s cubic-bezier(0.45, 0, 0.55, 1) infinite;
       }
-      @keyframes bh-puppet-sway {
-        0%, 100% { rotate: -2.1deg; }
-        50%      { rotate: 2.1deg; }
-      }
-      @keyframes bh-puppet-bob {
-        0%, 100% { translate: 0 0; }
-        50%      { translate: 0 1.1%; }
-      }
-      /* Each ball swings from the point its own string ends, in viewBox units:
-         the head off the neck, the two hands off the strings either side. That
-         pivot is the whole trick — rotate about a ball's centre and it spins,
-         rotate about where it hangs and it dangles.
-         Four periods across the mark, none a multiple of another, so the parts
-         drift in and out of step and it never settles into a pattern. */
-      .hero-art-svg :is(.p-head, .p-left, .p-right) { transform-box: view-box; }
-      .hero-art-svg .p-head {
-        transform-origin: 500px 407px;
-        animation: bh-hang-head 5.1s cubic-bezier(0.45, 0, 0.55, 1) infinite;
-      }
-      .hero-art-svg .p-left {
-        transform-origin: 232px 643px;
-        animation: bh-hang-left 3.7s cubic-bezier(0.45, 0, 0.55, 1) infinite;
-      }
-      .hero-art-svg .p-right {
-        transform-origin: 782px 643px;
-        animation: bh-hang-right 4.9s cubic-bezier(0.45, 0, 0.55, 1) infinite;
-      }
-      /* The hands swing wider than the head: less mass on the end of the string. */
-      @keyframes bh-hang-head {
-        0%, 100% { rotate: 2.4deg; }
-        50%      { rotate: -2.4deg; }
-      }
-      @keyframes bh-hang-left {
-        0%, 100% { rotate: -6deg; }
-        50%      { rotate: 5deg; }
-      }
-      @keyframes bh-hang-right {
-        0%, 100% { rotate: 5.5deg; }
-        50%      { rotate: -6.5deg; }
+      @keyframes bh-logo-float {
+        0%, 100% { transform: translateY(0); }
+        50%      { transform: translateY(-1.2%); }
       }
       @media (prefers-reduced-motion: reduce) {
-        .hero-art-svg svg,
-        .hero-art-svg :is(.p-head, .p-left, .p-right) { animation: none; }
+        .hero-art-svg svg { animation: none; }
       }
       .install {
         display: inline-flex; align-items: center; gap: 0.85rem; margin-top: 2.2rem;
@@ -2399,14 +2247,6 @@ const ogImage = 'https://luvus.dev/og.png';
       }
       @media (max-width: 480px) {
         .agent-grid { grid-template-columns: repeat(2, max-content); }
-        .nav-links a[href$='orchestration/'] { display: none; }
-      }
-
-      /* Four nav links + the GitHub pill no longer fit a phone in one row:
-         let them wrap rather than widen the page. */
-      @media (max-width: 560px) {
-        .nav-inner { flex-wrap: wrap; row-gap: 0.45rem; padding-top: 0.7rem; padding-bottom: 0.7rem; }
-        .nav-links { gap: 0.9rem; font-size: 0.78rem; flex-wrap: wrap; justify-content: flex-end; }
       }
 
       /* Brand context menu (right-click the wordmark). Same square, hairline
@@ -2426,8 +2266,6 @@ const ogImage = 'https://luvus.dev/og.png';
       .bm-item:hover, .bm-item:focus-visible {
         background: rgb(from var(--accent) r g b / 0.14); color: var(--text); outline: none;
       }
-      .brand { cursor: pointer; }
-
       /* Theme picker · floating dock, bottom-right, opening upward. Names only:
          descriptions wrapped and forced scrollbars, and the list is short enough
          to show all palettes at once, so there is nothing to scroll. Hovering a
@@ -2563,7 +2401,7 @@ const ogImage = 'https://luvus.dev/og.png';
       // `download` links; the copy reads the built SVG and writes the markup to
       // the clipboard so it can be pasted straight into a design tool.
       (() => {
-        const brand = document.querySelector('.brand');
+        const brand = document.querySelector('[data-site-nav-brand]');
         const menu = document.getElementById('brandmenu');
         const copy = document.getElementById('bm-copy');
         if (!brand || !menu) return;

@@ -1,33 +1,42 @@
 //! `alacritty_terminal` implementation of `VtEngine`. Pure Rust — no Zig, no FFI.
 
-use std::sync::mpsc::Sender;
+use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{Color as VtColor, NamedColor, Processor, Rgb};
 
 use ratatui::style::{Color, Modifier};
 
 use super::{
-    AlignedRows, CodexComposerRegion, Cursor, HistoryMetrics, RenderCell, RetainedRowLayout,
-    VtEngine, ALIGNED_WIDE_CELL,
+    AlignedRows, CodexComposerRegion, Cursor, DamageCell, DamageKind, DamageRow, DamageSnapshot,
+    HistoryMetrics, RenderCell, RetainedRowLayout, VtEngine, ALIGNED_WIDE_CELL,
 };
 use crate::terminal::appearance::PaneAppearance;
 use crate::terminal::backend::{CaptureMode, CaptureResult};
-use crate::terminal::pty::InputAction;
+use crate::terminal::pty::{InputAction, InputSender};
 
-type TitleSlot = Arc<Mutex<Option<String>>>;
+#[derive(Default)]
+struct TitleState {
+    value: Option<String>,
+    // Title chrome must be fully projected before terminal-only patching can
+    // resume. Cleared only by a generation-matched damage acknowledgement.
+    changed: bool,
+    generation: u64,
+}
+
+type TitleSlot = Arc<Mutex<TitleState>>;
 
 /// Receives terminal-generated responses (cursor reports, device attributes,
 /// etc.) and forwards them back to the child via the shared write channel.
 /// Also captures the window title (OSC 0/2) for agent detection.
 #[derive(Clone)]
 pub struct EventProxy {
-    tx: Sender<InputAction>,
+    tx: InputSender,
     title: TitleSlot,
     appearance: Arc<Mutex<PaneAppearance>>,
 }
@@ -57,12 +66,19 @@ impl EventListener for EventProxy {
             }
             Event::Title(t) => {
                 if let Ok(mut g) = self.title.lock() {
-                    *g = Some(t);
+                    if g.value.as_ref() != Some(&t) {
+                        g.value = Some(t);
+                        g.changed = true;
+                        g.generation = g.generation.wrapping_add(1);
+                    }
                 }
             }
             Event::ResetTitle => {
                 if let Ok(mut g) = self.title.lock() {
-                    *g = None;
+                    if g.value.take().is_some() {
+                        g.changed = true;
+                        g.generation = g.generation.wrapping_add(1);
+                    }
                 }
             }
             _ => {}
@@ -93,18 +109,29 @@ pub struct AlacrittyEngine {
     term: Term<EventProxy>,
     parser: Processor,
     title: TitleSlot,
-    response_tx: Sender<InputAction>,
+    response_tx: InputSender,
     appearance: Arc<Mutex<PaneAppearance>>,
     history_budget_bytes: usize,
     output_generation: u64,
+    // One bounded summary, invalidated at every storage mutation boundary.
+    // Output generation alone is insufficient: quiet packing changes storage.
+    history_metrics_cache: Cell<Option<HistoryMetrics>>,
+    history_maintenance_cursors: [usize; 2],
+    history_maintenance_pending: bool,
+    history_maintenance_full_scan: bool,
+    damage_line_indices: Vec<u16>,
+    damage_rows: Vec<DamageRow>,
 }
+
+const MAX_PARTIAL_DAMAGE_ROWS: usize = 8;
+const MAX_PARTIAL_DAMAGE_CELLS: usize = 2_048;
 
 impl AlacrittyEngine {
     #[cfg(test)]
     pub fn new(
         cols: u16,
         rows: u16,
-        resp_tx: Sender<InputAction>,
+        resp_tx: impl Into<InputSender>,
         history_budget_bytes: usize,
     ) -> Self {
         Self::with_appearance(
@@ -119,15 +146,16 @@ impl AlacrittyEngine {
     pub(crate) fn with_appearance(
         cols: u16,
         rows: u16,
-        resp_tx: Sender<InputAction>,
+        resp_tx: impl Into<InputSender>,
         history_budget_bytes: usize,
         initial_appearance: PaneAppearance,
     ) -> Self {
+        let resp_tx = resp_tx.into();
         let dims = Dims {
             cols: cols.max(1) as usize,
             rows: rows.max(1) as usize,
         };
-        let title: TitleSlot = Arc::new(Mutex::new(None));
+        let title: TitleSlot = Arc::new(Mutex::new(TitleState::default()));
         let appearance = Arc::new(Mutex::new(initial_appearance));
         let proxy = EventProxy {
             tx: resp_tx.clone(),
@@ -143,7 +171,8 @@ impl AlacrittyEngine {
             kitty_keyboard: true,
             ..Config::default()
         };
-        let term = Term::new(config, &dims, proxy);
+        let mut term = Term::new(config, &dims, proxy);
+        term.set_deferred_history_maintenance(true);
         AlacrittyEngine {
             term,
             parser: Processor::new(),
@@ -152,10 +181,20 @@ impl AlacrittyEngine {
             appearance,
             history_budget_bytes,
             output_generation: 0,
+            history_metrics_cache: Cell::new(None),
+            history_maintenance_cursors: [0; 2],
+            history_maintenance_pending: false,
+            history_maintenance_full_scan: false,
+            damage_line_indices: Vec::new(),
+            damage_rows: Vec::new(),
         }
     }
 
     fn apply_history_budget(&mut self) {
+        self.history_maintenance_full_scan = true;
+        self.history_maintenance_cursors = [0; 2];
+        self.history_maintenance_pending = true;
+        self.history_metrics_cache.set(None);
         self.term.set_options(Config {
             scrolling_history: history_rows_for_budget(
                 self.history_budget_bytes,
@@ -335,12 +374,43 @@ fn history_rows_for_budget(bytes: usize, cols: u16) -> usize {
 
 impl VtEngine for AlacrittyEngine {
     fn advance(&mut self, bytes: &[u8]) {
+        // If output interrupts a partial pass, its packed frontier is no longer
+        // proof that all older rows are packed. Otherwise retain the O(1)
+        // already-packed frontier fast path for ordinary quiet output.
+        self.history_maintenance_full_scan |= self.history_maintenance_pending
+            && self
+                .history_maintenance_cursors
+                .iter()
+                .any(|cursor| *cursor > 0);
+        self.history_maintenance_cursors = [0; 2];
+        self.history_maintenance_pending = true;
+        self.history_metrics_cache.set(None);
         self.parser.advance(&mut self.term, bytes);
         self.output_generation = self.output_generation.wrapping_add(1);
     }
 
     fn finish_output_batch(&mut self) {
-        self.term.finish_output_batch();
+        self.history_metrics_cache.set(None);
+        while self.finish_output_batch_step() {}
+    }
+
+    fn finish_output_batch_step(&mut self) -> bool {
+        if !self.history_maintenance_pending {
+            return false;
+        }
+        self.history_metrics_cache.set(None);
+        self.history_maintenance_pending = self.term.finish_output_batch_step(
+            &mut self.history_maintenance_cursors,
+            self.history_maintenance_full_scan,
+        );
+        if !self.history_maintenance_pending {
+            self.history_maintenance_full_scan = false;
+        }
+        self.history_maintenance_pending
+    }
+
+    fn history_maintenance_pending(&self) -> bool {
+        self.history_maintenance_pending
     }
 
     fn output_generation(&self) -> u64 {
@@ -460,6 +530,131 @@ impl VtEngine for AlacrittyEngine {
         }
     }
 
+    fn damage_snapshot(&mut self) -> DamageSnapshot {
+        self.damage_line_indices.clear();
+        let mut kind = match self.term.damage() {
+            TermDamage::Full => DamageKind::Full,
+            TermDamage::Partial(lines) => {
+                self.damage_line_indices
+                    .extend(lines.map(|line| line.line as u16));
+                DamageKind::Partial
+            }
+        };
+        if self.title.lock().map_or(true, |title| title.changed) {
+            kind = DamageKind::Full;
+        }
+
+        let cursor = self.cursor();
+        let composer_region = self.codex_composer_region();
+        let scroll_offset = self.term.grid().display_offset();
+        let columns = self.term.grid().columns();
+        let too_large = self.damage_line_indices.len() > MAX_PARTIAL_DAMAGE_ROWS
+            || self.damage_line_indices.len().saturating_mul(columns) > MAX_PARTIAL_DAMAGE_CELLS;
+        if kind == DamageKind::Full || too_large {
+            return DamageSnapshot {
+                generation: self.output_generation,
+                kind: DamageKind::Full,
+                cursor,
+                composer_region,
+                scroll_offset,
+                rows: Vec::new(),
+            };
+        }
+
+        let mut row_indices = std::mem::take(&mut self.damage_line_indices);
+        let screen_lines = self.term.grid().screen_lines();
+        row_indices.retain(|row| (*row as usize) < screen_lines);
+        let grid = self.term.grid();
+        let display_offset = grid.display_offset() as i32;
+        let mut damaged_rows = std::mem::take(&mut self.damage_rows);
+        while damaged_rows.len() < row_indices.len() {
+            damaged_rows.push(DamageRow {
+                row: 0,
+                cells: Vec::with_capacity(columns),
+            });
+        }
+        damaged_rows.truncate(row_indices.len());
+        for (damaged_row, row) in damaged_rows.iter_mut().zip(row_indices.iter().copied()) {
+            if row as usize >= grid.screen_lines() {
+                continue;
+            }
+            damaged_row.row = row;
+            let line = Line(row as i32 - display_offset);
+            let mut used = 0;
+            for column in 0..columns {
+                let cell = &grid[line][Column(column)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                let style = RenderCell {
+                    fg: map_color(cell.fg),
+                    bg: map_color(cell.bg),
+                    mods: map_flags(cell.flags),
+                };
+                if let Some(damage_cell) = damaged_row.cells.get_mut(used) {
+                    damage_cell.column = column as u16;
+                    damage_cell.character = cell.c;
+                    damage_cell.zero_width.clear();
+                    if let Some(zero_width) = cell.zerowidth() {
+                        damage_cell.zero_width.extend(zero_width);
+                    }
+                    damage_cell.style = style;
+                } else {
+                    damaged_row.cells.push(DamageCell {
+                        column: column as u16,
+                        character: cell.c,
+                        zero_width: cell.zerowidth().unwrap_or_default().to_vec(),
+                        style,
+                    });
+                }
+                used += 1;
+            }
+            damaged_row.cells.truncate(used);
+        }
+        row_indices.clear();
+        self.damage_line_indices = row_indices;
+
+        DamageSnapshot {
+            generation: self.output_generation,
+            kind: DamageKind::Partial,
+            cursor,
+            composer_region,
+            scroll_offset,
+            rows: damaged_rows,
+        }
+    }
+
+    fn acknowledge_damage(&mut self, generation: u64) -> bool {
+        if self.output_generation != generation {
+            return false;
+        }
+        self.term.reset_damage();
+        if let Ok(mut title) = self.title.lock() {
+            title.changed = false;
+        }
+        true
+    }
+
+    fn recycle_damage_snapshot(&mut self, mut snapshot: DamageSnapshot) {
+        if snapshot.kind != DamageKind::Partial
+            || snapshot.rows.len() > MAX_PARTIAL_DAMAGE_ROWS
+            || snapshot
+                .rows
+                .iter()
+                .map(|row| row.cells.capacity())
+                .sum::<usize>()
+                > MAX_PARTIAL_DAMAGE_CELLS
+        {
+            return;
+        }
+        for row in &mut snapshot.rows {
+            for cell in &mut row.cells {
+                cell.zero_width.clear();
+            }
+        }
+        self.damage_rows = snapshot.rows;
+    }
+
     fn detection_text(&self, n: u16) -> String {
         // Index the grid by `Line` rather than using `display_iter()`: line
         // indexing is relative to the **live** screen (`Storage::compute_index`
@@ -574,6 +769,14 @@ impl VtEngine for AlacrittyEngine {
             } else {
                 indexed.cell.zerowidth()
             };
+            if let Some(hyperlink) = indexed.cell.hyperlink() {
+                lines.push_hyperlink_cell(
+                    r as u16,
+                    indexed.point.column.0 as u16,
+                    hyperlink.id(),
+                    hyperlink.uri(),
+                );
+            }
             lines.push_cell(r as u16, indexed.point.column.0 as u16, c, zero_width);
         }
         lines
@@ -710,7 +913,11 @@ impl VtEngine for AlacrittyEngine {
     }
 
     fn title(&self) -> Option<String> {
-        self.title.lock().ok().and_then(|g| g.clone())
+        self.title.lock().ok().and_then(|g| g.value.clone())
+    }
+
+    fn title_generation(&self) -> u64 {
+        self.title.lock().map_or(0, |title| title.generation)
     }
 
     fn set_history_budget(&mut self, bytes: usize) {
@@ -753,20 +960,35 @@ impl VtEngine for AlacrittyEngine {
     }
 
     fn history_metrics(&self) -> HistoryMetrics {
+        if let Some(mut metrics) = self.history_metrics_cache.get() {
+            // Viewport movement changes no allocation. Keep it live without
+            // traversing history or invalidating the storage summary.
+            metrics.offset = self.scroll_offset();
+            return metrics;
+        }
         let retained_rows = self.history_len();
         let retained_bytes =
             retained_rows.saturating_mul(estimated_row_bytes(self.term.grid().columns()));
-        HistoryMetrics {
+        let storage = self.term.history_storage_metrics();
+        let metrics = HistoryMetrics {
             offset: self.scroll_offset(),
             retained_rows,
             budget_bytes: self.history_budget_bytes,
             retained_bytes,
-            estimated_grid_bytes: self.term.estimated_grid_bytes(),
-            cache_bytes: Some(self.term.history_cache_bytes()),
+            estimated_grid_bytes: storage.estimated_bytes,
+            cache_bytes: Some(storage.cache_bytes),
             compacted_rows: Some(self.term.compacted_history_rows()),
-            allocated_cells: Some(self.term.allocated_cell_capacity()),
+            allocated_cells: Some(storage.allocated_cells),
+            packed_blocks: Some(storage.packed_blocks),
+            packed_bytes: Some(storage.packed_block_bytes),
+            packed_rows: Some(storage.packed_rows),
+            dense_row_bytes: Some(storage.dense_cell_bytes),
+            row_descriptor_bytes: Some(storage.row_descriptor_bytes),
+            allocation_count: Some(storage.allocations),
             exact_bytes: false,
-        }
+        };
+        self.history_metrics_cache.set(Some(metrics));
+        metrics
     }
 
     fn retained_row_count(&self) -> usize {
@@ -883,6 +1105,10 @@ impl VtEngine for AlacrittyEngine {
         self.term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES)
     }
 
+    fn report_all_keys_as_escape_codes(&self) -> bool {
+        self.term.mode().contains(TermMode::REPORT_ALL_KEYS_AS_ESC)
+    }
+
     fn mouse_drag(&self) -> bool {
         self.term
             .mode()
@@ -921,51 +1147,47 @@ impl VtEngine for AlacrittyEngine {
         if rows == 0 || cols == 0 {
             return String::new();
         }
-        let default = (' ', Color::Reset, Color::Reset, Modifier::empty());
-        let mut cells = vec![vec![default; cols]; rows];
-        for indexed in grid.display_iter() {
-            let r = indexed.point.line.0;
-            let c = indexed.point.column.0;
-            if r < 0 || r as usize >= rows || c >= cols {
-                continue;
-            }
-            let cell = indexed.cell;
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                continue;
-            }
-            let ch = if cell.c == '\0' { ' ' } else { cell.c };
-            cells[r as usize][c] = (
-                ch,
-                map_color(cell.fg),
-                map_color(cell.bg),
-                map_flags(cell.flags),
-            );
-        }
-
-        // Trim trailing blank rows so replaying into any-size engine doesn't
-        // scroll the content off-screen.
-        let last_row = match cells
-            .iter()
-            .rposition(|row| row.iter().any(|c| *c != default))
-        {
-            Some(r) => r,
-            None => return String::from("\x1b[2J\x1b[H"),
-        };
+        // Logical nonnegative rows are the live screen, irrespective of the
+        // user's scroll offset. Do not change that viewport to take a snapshot,
+        // or allocate another grid just to serialize this bounded screen.
         let mut out = String::from("\x1b[2J\x1b[H");
-        for (ri, row) in cells.iter().take(last_row + 1).enumerate() {
-            let last = row.iter().rposition(|c| *c != default).map_or(0, |i| i + 1);
+        for ri in 0..rows {
+            let row = &grid[Line(ri as i32)];
+            let last = (0..cols).rfind(|&ci| {
+                let cell = &row[Column(ci)];
+                !cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+                    && (cell.c != ' ' && cell.c != '\0'
+                        || cell.zerowidth().is_some_and(|chars| !chars.is_empty())
+                        || map_color(cell.fg) != Color::Reset
+                        || map_color(cell.bg) != Color::Reset
+                        || !map_flags(cell.flags).is_empty())
+            });
+            let Some(last) = last else { continue };
+            // Absolute rows avoid a pending autowrap at the right edge causing
+            // the next row to scroll. Empty trailing rows need no replay bytes.
+            out.push_str(&format!("\x1b[{};1H", ri + 1));
             let mut cur = (Color::Reset, Color::Reset, Modifier::empty());
-            for (ch, fg, bg, m) in &row[..last] {
-                if (*fg, *bg, *m) != cur {
-                    out.push_str(&sgr(*fg, *bg, *m));
-                    cur = (*fg, *bg, *m);
+            for ci in 0..=last {
+                let cell = &row[Column(ci)];
+                // The preceding wide character already advances two cells.
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
                 }
-                out.push(*ch);
+                let style = (
+                    map_color(cell.fg),
+                    map_color(cell.bg),
+                    map_flags(cell.flags),
+                );
+                if style != cur {
+                    out.push_str(&sgr(style.0, style.1, style.2));
+                    cur = style;
+                }
+                out.push(if cell.c == '\0' { ' ' } else { cell.c });
+                if let Some(chars) = cell.zerowidth() {
+                    out.extend(chars);
+                }
             }
             out.push_str("\x1b[0m");
-            if ri < last_row {
-                out.push_str("\r\n");
-            }
         }
         out
     }
@@ -987,6 +1209,12 @@ fn sgr(fg: Color, bg: Color, m: Modifier) -> String {
     }
     if m.contains(Modifier::REVERSED) {
         s.push_str(";7");
+    }
+    if m.contains(Modifier::HIDDEN) {
+        s.push_str(";8");
+    }
+    if m.contains(Modifier::CROSSED_OUT) {
+        s.push_str(";9");
     }
     push_color(&mut s, fg, 38);
     push_color(&mut s, bg, 48);
@@ -1063,6 +1291,369 @@ mod tests {
         estimated_row_bytes(cols).saturating_mul(rows)
     }
 
+    #[test]
+    fn history_metrics_cache_tracks_storage_changes_and_live_scroll() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 1000));
+        feed_lines(&mut engine, 800);
+        let dense = engine.history_metrics();
+        assert_eq!(engine.history_metrics_cache.get(), Some(dense));
+        let output_generation = engine.output_generation();
+        engine.finish_output_batch();
+        assert!(engine.history_metrics_cache.get().is_none());
+        assert_eq!(engine.output_generation(), output_generation);
+        let packed = engine.history_metrics();
+        assert!(packed.packed_rows > dense.packed_rows);
+        engine.scroll(10);
+        let scrolled = engine.history_metrics();
+        assert_eq!(scrolled.offset, 10);
+        assert_eq!(scrolled.estimated_grid_bytes, packed.estimated_grid_bytes);
+        assert_eq!(engine.history_metrics_cache.get(), Some(packed));
+        engine.advance(b"\x1b[?1049hhello");
+        assert!(engine.history_metrics_cache.get().is_none());
+        assert_eq!(engine.history_metrics().retained_rows, 0);
+        engine.advance(b"\x1b[?1049l");
+        assert_eq!(engine.history_metrics().retained_rows, packed.retained_rows);
+        engine.resize(40, 12);
+        assert!(engine.history_metrics_cache.get().is_none());
+        engine.history_metrics();
+        engine.set_history_budget(budget_for_rows(40, 30));
+        assert!(engine.history_metrics_cache.get().is_none());
+        let small = engine.history_metrics();
+        assert!(small.retained_rows <= 30);
+        // Compare against a forced fresh computation, not another cache hit.
+        engine.history_metrics_cache.set(None);
+        assert_eq!(engine.history_metrics(), small);
+    }
+
+    /// Opt-in inspection benchmark. No child processes or production sessions.
+    #[test]
+    #[ignore]
+    fn history_inspection_benchmark() {
+        use std::{hint::black_box, time::Instant};
+        for count in [1, 20, 50] {
+            let mut engines = Vec::new();
+            for _ in 0..count {
+                let (tx, _rx) = channel();
+                let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 10_000));
+                feed_lines(&mut engine, 10_024);
+                engine.finish_output_batch();
+                engines.push(engine);
+            }
+            for trial in 1..=3 {
+                for engine in &engines {
+                    black_box(engine.history_metrics());
+                }
+                let start = Instant::now();
+                for _ in 0..100 {
+                    for engine in &engines {
+                        black_box(engine.history_metrics());
+                    }
+                }
+                eprintln!(
+                    "history_inspection panes={count} rows=10000 trial={trial} us_per_fleet={:.3}",
+                    start.elapsed().as_secs_f64() * 1_000_000.0 / 100.0
+                );
+            }
+        }
+    }
+
+    /// Measure the lock-held maintenance boundary separately from ingestion.
+    /// Opt-in only: no timers, production instrumentation, or child processes.
+    #[test]
+    #[ignore]
+    fn history_maintenance_benchmark() {
+        use std::{hint::black_box, io::Write, time::Instant};
+        for styled in [false, true] {
+            let mut corpus = Vec::new();
+            for row in 0..10_024usize {
+                for column in 0..80usize {
+                    let value = row.wrapping_mul(7919).wrapping_add(column * 104729);
+                    if styled {
+                        write!(
+                            &mut corpus,
+                            "\x1b[38;2;{};{};{}m",
+                            value % 256,
+                            (value >> 8) % 256,
+                            (value >> 16) % 256
+                        )
+                        .unwrap();
+                    }
+                    corpus.push(b'!' + (value % 94) as u8);
+                }
+                corpus.extend_from_slice(b"\r\n");
+            }
+            for trial in 1..=3 {
+                let (tx, _rx) = channel();
+                let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 10_000));
+                engine.advance(&corpus);
+                let start = Instant::now();
+                let mut steps = Vec::new();
+                loop {
+                    let step = Instant::now();
+                    let more = engine.finish_output_batch_step();
+                    steps.push(step.elapsed().as_secs_f64() * 1000.0);
+                    if !more {
+                        break;
+                    }
+                }
+                let elapsed = start.elapsed();
+                steps.sort_by(f64::total_cmp);
+                let metrics = black_box(engine.history_metrics());
+                eprintln!("history_maintenance styled={styled} trial={trial} rows={} packed_rows={} milliseconds={:.3} turns={} step_p95_ms={:.3} step_p99_ms={:.3} step_max_ms={:.3}", metrics.retained_rows, metrics.packed_rows.unwrap_or(0), elapsed.as_secs_f64() * 1000.0, steps.len(), steps[(steps.len()-1)*95/100], steps[(steps.len()-1)*99/100], steps.last().unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_history_maintenance_is_lossless_and_restarts_after_mutation() {
+        fn rows(engine: &AlacrittyEngine) -> Vec<String> {
+            let mut rows = Vec::new();
+            engine.for_each_retained_row(&mut |_, text| rows.push(text.to_owned()));
+            rows
+        }
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 10_000));
+        for i in 0..1024 {
+            engine.advance(format!("row {i} cafe\u{301} 界\r\n").as_bytes());
+        }
+        let before = rows(&engine);
+        assert!(
+            engine.finish_output_batch_step(),
+            "large backlog takes multiple turns"
+        );
+        let packed = engine.history_metrics().packed_rows.unwrap();
+        assert!(packed > 0 && packed <= 512);
+        assert_eq!(before, rows(&engine));
+        engine.advance(b"new output\r\n");
+        engine.resize(90, 24);
+        let after_mutation = rows(&engine);
+        let mut turns = 0;
+        while engine.finish_output_batch_step() {
+            turns += 1;
+            assert!(turns < 200, "quiet backlog must finish without new output");
+        }
+        assert!(turns > 0);
+        assert!(!engine.history_maintenance_pending());
+        assert_eq!(after_mutation, rows(&engine));
+        let metrics = engine.history_metrics();
+        assert_eq!(
+            metrics.packed_rows.unwrap(),
+            metrics.retained_rows.saturating_sub(128)
+        );
+        assert!(
+            !engine.finish_output_batch_step(),
+            "no idle maintenance work"
+        );
+        engine.advance(b"\x1b]2;title only\x07");
+        assert!(
+            !engine.finish_output_batch_step(),
+            "packed frontier avoids a full quiet-history scan"
+        );
+        let blocks = engine.history_metrics().packed_blocks;
+        engine.advance(b"one more line\r\n");
+        assert!(!engine.finish_output_batch_step());
+        assert_eq!(
+            engine.history_metrics().packed_blocks,
+            blocks,
+            "trickle output retains the minimum batch size"
+        );
+    }
+
+    #[test]
+    fn title_changes_force_full_damage_until_matching_acknowledgement() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(24, 4, tx, budget_for_rows(24, 20));
+        assert!(engine.acknowledge_damage(engine.output_generation()));
+        engine.advance(b"\x1b[22;0t\x1b]2;review\x07");
+        let changed = engine.damage_snapshot();
+        assert_eq!(changed.kind, DamageKind::Full);
+        engine.advance(b"ordinary output");
+        assert!(!engine.acknowledge_damage(changed.generation));
+        assert_eq!(engine.damage_snapshot().kind, DamageKind::Full);
+        assert!(engine.acknowledge_damage(engine.output_generation()));
+        engine.advance(b"\x1b]2;review\x07!");
+        assert_eq!(engine.damage_snapshot().kind, DamageKind::Partial);
+        engine.advance(b"\x1b[23;0t");
+        assert_eq!(engine.damage_snapshot().kind, DamageKind::Full);
+        assert!(engine.title().is_none());
+    }
+
+    #[test]
+    fn snapshot_replays_live_unicode_cells_independent_of_scroll() {
+        for cols in [8, 24] {
+            let (tx, _rx) = channel();
+            let mut source = AlacrittyEngine::new(cols, 4, tx, budget_for_rows(cols as usize, 40));
+            feed_lines(&mut source, 15);
+            source.advance("\x1b[2J\x1b[H界Aé e\u{301}\r\n♥\u{fe0f}X\r\n👩\u{200d}💻Z\r\n\x1b[1;3;4;8;9;38;2;2;3;4;48;5;12m界B\x1b[0m".as_bytes());
+            let snapshot = source.snapshot_ansi();
+            source.scroll(8);
+            let offset = source.term.grid().display_offset();
+            let cursor = source.term.grid().cursor.point;
+            assert!(offset > 0);
+            assert_eq!(source.snapshot_ansi(), snapshot);
+            assert_eq!(source.term.grid().display_offset(), offset);
+            assert_eq!(source.term.grid().cursor.point, cursor);
+            assert!(!snapshot.contains("line"), "history must not be serialized");
+
+            let (tx, _rx) = channel();
+            let mut replay = AlacrittyEngine::new(cols, 4, tx, budget_for_rows(cols as usize, 40));
+            replay.advance(snapshot.as_bytes());
+            for line in 0..4 {
+                for col in 0..cols {
+                    let point = Point::new(Line(line), Column(col as usize));
+                    let expected = &source.term.grid()[point];
+                    let actual = &replay.term.grid()[point];
+                    assert_eq!(actual.c, expected.c, "{cols}: {point:?}");
+                    assert_eq!(actual.zerowidth(), expected.zerowidth());
+                    assert_eq!(map_color(actual.fg), map_color(expected.fg));
+                    assert_eq!(map_color(actual.bg), map_color(expected.bg));
+                    assert_eq!(map_flags(actual.flags), map_flags(expected.flags));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_preserves_right_edge_and_blank_rows_after_resize() {
+        let (tx, _rx) = channel();
+        let mut source = AlacrittyEngine::new(8, 4, tx, budget_for_rows(8, 20));
+        source.advance("123456界\r\n\r\nlast".as_bytes());
+        source.resize(12, 4);
+        let snapshot = source.snapshot_ansi();
+        let (tx, _rx) = channel();
+        let mut replay = AlacrittyEngine::new(12, 4, tx, budget_for_rows(12, 20));
+        replay.advance(snapshot.as_bytes());
+        assert_eq!(replay.snapshot_ansi(), snapshot);
+        // ED2 retains the initial blank cursor row; replay adds no scrolling.
+        assert_eq!(replay.term.grid().history_size(), 1);
+    }
+
+    #[test]
+    fn visible_rows_retain_osc8_targets_and_spans() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(24, 2, tx, budget_for_rows(24, 20));
+        engine.advance(
+            b"before \x1b]8;id=claude;file:///repo/src/main.rs\x1b\\main.rs\x1b]8;;\x1b\\ after",
+        );
+
+        let rows = engine.visible_rows_aligned();
+        let hyperlink = rows.hyperlink_at(0, 8).expect("OSC 8 target retained");
+        assert_eq!(hyperlink.uri(), "file:///repo/src/main.rs");
+        assert_eq!(hyperlink.spans(), &[(0, 7, 14)]);
+        assert!(rows.hyperlink_at(0, 6).is_none());
+        assert!(rows.hyperlink_at(0, 14).is_none());
+    }
+
+    #[test]
+    fn damage_snapshot_is_owned_bounded_and_generation_safe() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(8, 3, tx, budget_for_rows(8, 20));
+
+        let initial = engine.damage_snapshot();
+        assert_eq!(initial.kind, DamageKind::Full);
+        assert!(initial.rows.is_empty());
+        assert!(engine.acknowledge_damage(initial.generation));
+        engine.recycle_damage_snapshot(initial);
+
+        engine.advance("A界e\u{301}".as_bytes());
+        let first = engine.damage_snapshot();
+        assert_eq!(first.kind, DamageKind::Partial);
+        assert_eq!(first.rows.len(), 1);
+        assert_eq!(first.rows[0].row, 0);
+        assert!(first.rows[0].cells.len() <= 8);
+        assert!(first.rows[0]
+            .cells
+            .iter()
+            .any(|cell| cell.character == '界' && cell.zero_width.is_empty()));
+        assert!(first.rows[0]
+            .cells
+            .iter()
+            .any(|cell| cell.character == 'e' && cell.zero_width.as_ref() == ['\u{301}']));
+
+        // Output arriving after capture invalidates the acknowledgement. The
+        // newer byte and the old damage must both survive in the next snapshot.
+        engine.advance(b"Z");
+        assert!(!engine.acknowledge_damage(first.generation));
+        let first_generation = first.generation;
+        engine.recycle_damage_snapshot(first);
+        let second = engine.damage_snapshot();
+        assert!(second.generation > first_generation);
+        assert!(second.rows.iter().any(|row| row.row == 0));
+        assert!(engine.acknowledge_damage(second.generation));
+        engine.recycle_damage_snapshot(second);
+        let cursor_only = engine.damage_snapshot();
+        assert!(cursor_only.rows.len() <= 1, "only cursor damage remains");
+        engine.recycle_damage_snapshot(cursor_only);
+    }
+
+    #[test]
+    fn partial_damage_reuses_row_and_cell_storage() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 20));
+
+        let initial = engine.damage_snapshot();
+        assert!(engine.acknowledge_damage(initial.generation));
+        engine.recycle_damage_snapshot(initial);
+
+        engine.advance(b"first");
+        let first = engine.damage_snapshot();
+        assert_eq!(first.kind, DamageKind::Partial);
+        assert_eq!(first.rows.len(), 1);
+        let row_ptr = first.rows.as_ptr();
+        let cell_ptr = first.rows[0].cells.as_ptr();
+        let row_capacity = first.rows.capacity();
+        let cell_capacity = first.rows[0].cells.capacity();
+        assert!(engine.acknowledge_damage(first.generation));
+        engine.recycle_damage_snapshot(first);
+
+        engine.advance(b"\rsecond");
+        let second = engine.damage_snapshot();
+        assert_eq!(second.kind, DamageKind::Partial);
+        assert_eq!(second.rows.as_ptr(), row_ptr);
+        assert_eq!(second.rows.capacity(), row_capacity);
+        assert_eq!(second.rows[0].cells.as_ptr(), cell_ptr);
+        assert_eq!(second.rows[0].cells.capacity(), cell_capacity);
+        assert!(engine.acknowledge_damage(second.generation));
+        engine.recycle_damage_snapshot(second);
+    }
+
+    #[test]
+    fn structural_terminal_changes_force_full_damage() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(8, 3, tx, budget_for_rows(8, 20));
+
+        let initial = engine.damage_snapshot();
+        assert!(engine.acknowledge_damage(initial.generation));
+        engine.recycle_damage_snapshot(initial);
+
+        engine.advance(b"\x1b[31;1mX");
+        let styled = engine.damage_snapshot();
+        assert_eq!(styled.kind, DamageKind::Partial);
+        let cell = styled.rows[0]
+            .cells
+            .iter()
+            .find(|cell| cell.character == 'X')
+            .expect("styled cell captured");
+        assert_eq!(cell.style.fg, Color::Indexed(1));
+        assert!(cell.style.mods.contains(Modifier::BOLD));
+        assert!(engine.acknowledge_damage(styled.generation));
+        engine.recycle_damage_snapshot(styled);
+
+        engine.resize(10, 4);
+        let resized = engine.damage_snapshot();
+        assert_eq!(resized.kind, DamageKind::Full);
+        assert!(resized.rows.is_empty());
+        assert!(engine.acknowledge_damage(resized.generation));
+        engine.recycle_damage_snapshot(resized);
+
+        engine.advance(b"\x1b[?1049h");
+        let alternate_screen = engine.damage_snapshot();
+        assert_eq!(alternate_screen.kind, DamageKind::Full);
+        assert!(engine.acknowledge_damage(alternate_screen.generation));
+        engine.recycle_damage_snapshot(alternate_screen);
+    }
+
     // docs/07: agent detection must read the **live** screen, never the
     // scrolled-back viewport. Scrollback preserves the spinner/interrupt frames
     // an agent printed earlier, so a user scrolling up would otherwise drag a
@@ -1112,14 +1703,24 @@ mod tests {
     #[test]
     fn cold_history_compacts_losslessly_and_survives_reflow() {
         let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 500));
+        // Size the budget for the wider post-reflow grid so width-dependent
+        // history accounting does not intentionally evict the oldest rows.
+        let mut e = AlacrittyEngine::new(40, 5, tx, budget_for_rows(80, 500));
         e.advance(b"\x1b[38;2;12;200;155mCOLOR\x1b[0m cafe\xcc\x81 \x1b]8;;https://luvus.dev\x1b\\LINK\x1b]8;;\x1b\\\r\n");
         assert!(e.detection_text(100).contains("cafe\u{301}"));
-        feed_lines(&mut e, 80);
+        feed_lines(&mut e, 300);
+        e.finish_output_batch();
 
         let before = e.history_metrics();
         assert!(before.compacted_rows.unwrap_or(0) > 0);
         assert!(before.allocated_cells.unwrap_or(0) > 0);
+        assert!(before.packed_blocks.unwrap_or(0) > 0);
+        assert!(before.packed_rows.unwrap_or(0) >= 64);
+        assert!(before.packed_bytes.unwrap_or(usize::MAX) < before.estimated_grid_bytes);
+        assert!(
+            before.allocation_count.unwrap_or(usize::MAX) <= before.retained_rows + 16,
+            "bounded reusable row buffers may retain one allocation per row plus block metadata"
+        );
 
         e.scroll_to_top();
         let mut rendered = Vec::new();
@@ -1138,12 +1739,87 @@ mod tests {
             .expect("oldest feature row remains readable");
         assert!(retained.contains("cafe\u{301}"));
 
-        e.resize(80, 8);
+        // Exercise width reflow without changing the viewport height. Growing
+        // the viewport intentionally consumes the oldest history rows in
+        // Alacritty, which is a separate terminal semantic from reflow.
+        e.resize(80, 5);
+        e.finish_output_batch(); // reflow packing is deferred to maintenance
         e.scroll_to_top();
         let after = e.history_metrics();
         assert!(after.compacted_rows.unwrap_or(0) > 0);
-        assert!(e.visible_rows().join("\n").contains("COLOR"));
-        assert!(e.visible_rows().join("\n").contains("LINK"));
+        assert!(after.packed_blocks.unwrap_or(0) > 0);
+        let mut retained = String::new();
+        e.for_each_retained_row(&mut |_row, text| {
+            retained.push_str(text);
+            retained.push('\n');
+        });
+        assert!(retained.contains("COLOR"));
+        assert!(retained.contains("LINK"));
+    }
+
+    #[test]
+    fn dense_history_width_reflow_preserves_oldest_feature_row() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 500));
+        e.advance(b"OLDEST FEATURE\r\n");
+        // Stay below the cold-packing threshold so this remains the dense
+        // representation control for the packed-history test above.
+        feed_lines(&mut e, 150);
+        e.resize(80, 5);
+
+        let mut retained = String::new();
+        e.for_each_retained_row(&mut |_row, text| {
+            retained.push_str(text);
+            retained.push('\n');
+        });
+        assert!(retained.contains("OLDEST FEATURE"));
+    }
+
+    #[test]
+    fn selection_and_capture_cross_packed_and_hot_history() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 1_000));
+        e.advance(b"PACKED START\r\n");
+        feed_lines(&mut e, 300);
+        e.advance(b"HOT END\r\n");
+        e.finish_output_batch();
+        assert!(e.history_metrics().packed_rows.unwrap_or(0) > 0);
+
+        let mut start = None;
+        let mut end = None;
+        e.for_each_retained_row(&mut |row, text| {
+            if text == "PACKED START" {
+                start = Some(row);
+            }
+            if text == "HOT END" {
+                end = Some(row);
+            }
+        });
+        let (start, end) = (start.expect("packed row"), end.expect("hot row"));
+        let selected = e
+            .retained_selection_text(((start, 0), (end, 6)))
+            .expect("cross-boundary selection");
+        assert!(selected.starts_with("PACKED START\nline0"));
+        assert!(selected.ends_with("HOT END"));
+
+        let capture = e.backend_capture(CaptureMode::RecentUnwrapped, 400, false, 64 * 1024);
+        assert!(capture.text.contains("PACKED START"));
+        assert!(capture.text.contains("HOT END"));
+    }
+
+    #[test]
+    fn shrinking_history_releases_packed_blocks() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 1_000));
+        feed_lines(&mut e, 300);
+        e.finish_output_batch();
+        assert!(e.history_metrics().packed_blocks.unwrap_or(0) > 0);
+
+        e.set_history_budget(budget_for_rows(40, 20));
+        let metrics = e.history_metrics();
+        assert_eq!(e.history_len(), 20);
+        assert_eq!(metrics.packed_blocks, Some(0));
+        assert_eq!(metrics.packed_rows, Some(0));
     }
 
     #[test]
@@ -1566,6 +2242,22 @@ mod tests {
     }
 
     #[test]
+    fn packed_alternate_history_is_reclaimed_on_exit() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 500));
+        e.advance(b"\x1b[?1049h");
+        feed_lines(&mut e, 300);
+        e.finish_output_batch();
+        assert!(e.history_metrics().packed_blocks.unwrap_or(0) > 0);
+
+        e.advance(b"\x1b[?1049l");
+        e.finish_output_batch();
+        let metrics = e.history_metrics();
+        assert_eq!(metrics.packed_blocks, Some(0));
+        assert_eq!(metrics.packed_rows, Some(0));
+    }
+
+    #[test]
     fn alternate_history_displaces_primary_rows_only_as_it_grows() {
         let (tx, _rx) = channel();
         let mut engine = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 20));
@@ -1607,22 +2299,29 @@ mod tests {
     }
 
     #[test]
-    fn nested_keyboard_disambiguation_is_tracked_across_config_updates() {
+    fn nested_keyboard_modes_are_tracked_across_config_updates() {
         let (tx, _rx) = channel();
         let mut e = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 2_000));
         assert!(!e.disambiguate_escape_codes());
+        assert!(!e.report_all_keys_as_escape_codes());
 
         e.advance(b"\x1b[>1u");
         assert!(e.disambiguate_escape_codes());
+        assert!(!e.report_all_keys_as_escape_codes());
+
+        e.advance(b"\x1b[=8u");
+        assert!(!e.disambiguate_escape_codes());
+        assert!(e.report_all_keys_as_escape_codes());
 
         e.set_history_budget(budget_for_rows(20, 1_000));
         assert!(
-            e.disambiguate_escape_codes(),
+            e.report_all_keys_as_escape_codes(),
             "changing scrollback settings must not disable the child keyboard protocol"
         );
 
         e.advance(b"\x1b[<u");
         assert!(!e.disambiguate_escape_codes());
+        assert!(!e.report_all_keys_as_escape_codes());
     }
 
     #[test]

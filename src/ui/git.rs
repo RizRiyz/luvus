@@ -6,8 +6,8 @@
 use super::*;
 use crate::git::model::{Checks, IssueDetail, PrDetail, PullRequest};
 use crate::git::{
-    filtered_branches, filtered_commits, filtered_issues, filtered_prs, GitView, Load, Scope,
-    Section,
+    filtered_branches, filtered_commits, filtered_issues, filtered_prs, DetailTextCache,
+    DetailTextRow, DetailTextTarget, GitView, Load, Scope, Section,
 };
 use crate::i18n::Catalog;
 
@@ -233,13 +233,180 @@ fn check_glyph(c: Checks, t: &Theme) -> (&'static str, Color) {
     }
 }
 
-/// The PR detail panel (GIT-6): description, branches, per-check CI, individual
-/// reviews, mergeability, and stats. Scrolls as a block; returns the clamped
-/// scroll offset (like Flow/Status).
+const DETAIL_SPLIT_MIN_WIDTH: u16 = 90;
+
+fn detail_columns(area: Rect) -> Option<(Rect, u16, Rect)> {
+    if area.width < DETAIL_SPLIT_MIN_WIDTH {
+        return None;
+    }
+    let rail_width = area.width / 3;
+    let main_width = area.width.saturating_sub(rail_width + 2);
+    if main_width < 48 || rail_width < 26 {
+        return None;
+    }
+    let main = Rect::new(area.x, area.y, main_width, area.height);
+    let divider = main.right();
+    let rail = Rect::new(divider.saturating_add(2), area.y, rail_width, area.height);
+    Some((main, divider, rail))
+}
+
+fn detail_heading(title: impl Into<String>, t: &Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        title.into(),
+        Style::new().fg(t.subtext1).bold(),
+    ))
+}
+
+fn push_detail_title(
+    rows: &mut Vec<Line<'static>>,
+    number: u64,
+    title: &str,
+    width: usize,
+    t: &Theme,
+) {
+    let prefix = format!("#{number}  ");
+    let indent = " ".repeat(prefix.chars().count());
+    for (index, line) in wrap(title, width.saturating_sub(prefix.chars().count()))
+        .into_iter()
+        .enumerate()
+    {
+        rows.push(if index == 0 {
+            Line::from(vec![
+                Span::styled(prefix.clone(), Style::new().fg(t.subtext0)),
+                Span::styled(line, Style::new().fg(t.text).bold()),
+            ])
+        } else {
+            Line::from(vec![
+                Span::raw(indent.clone()),
+                Span::styled(line, Style::new().fg(t.text).bold()),
+            ])
+        });
+    }
+}
+
+fn update_detail_text_cache(
+    cache: &mut Option<DetailTextCache>,
+    target: DetailTextTarget,
+    width: usize,
+    body: &str,
+    comments: &[crate::git::model::DiscussionComment],
+    total: u64,
+) -> bool {
+    if cache
+        .as_ref()
+        .is_some_and(|cached| cached.target == target && cached.width == width)
+    {
+        return false;
+    }
+    *cache = Some(DetailTextCache {
+        target,
+        width,
+        rows: DetailTextCache::rows(width, body, comments, total, wrap),
+    });
+    true
+}
+
+fn detail_text_line<'a>(row: &'a DetailTextRow, cat: &'a Catalog, t: &Theme) -> Line<'a> {
+    match row {
+        DetailTextRow::DescriptionHeading => detail_heading(cat.detail_description, t),
+        DetailTextRow::EmptyDescription => Line::from(vec![
+            Span::raw("   "),
+            Span::styled(cat.detail_no_description, Style::new().fg(t.overlay0)),
+        ]),
+        DetailTextRow::Description(line) => {
+            Line::from(Span::styled(line.as_str(), Style::new().fg(t.subtext0)))
+        }
+        DetailTextRow::Blank => Line::from(""),
+        DetailTextRow::CommentsHeading { shown, total } => {
+            let count = if shown < total {
+                format!("{shown}/{total}")
+            } else {
+                total.to_string()
+            };
+            detail_heading(format!("{} ({count})", title_case(cat.detail_comments)), t)
+        }
+        DetailTextRow::CommentHeader { author, date } => Line::from(vec![
+            Span::styled(author.as_str(), Style::new().fg(t.text).bold()),
+            Span::styled(
+                if date.is_empty() {
+                    String::new()
+                } else {
+                    format!("  ·  {date}")
+                },
+                Style::new().fg(t.overlay1),
+            ),
+        ]),
+        DetailTextRow::EmptyComment => Line::from(vec![
+            Span::styled("│ ", Style::new().fg(t.accent)),
+            Span::styled(cat.detail_no_description, Style::new().fg(t.overlay0)),
+        ]),
+        DetailTextRow::CommentBody(line) => Line::from(vec![
+            Span::styled("│ ", Style::new().fg(t.accent)),
+            Span::styled(line.as_str(), Style::new().fg(t.subtext0)),
+        ]),
+    }
+}
+
+fn title_case(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+struct DetailRows<'a> {
+    prefix: &'a [Line<'static>],
+    discussion: &'a [DetailTextRow],
+    peer_row_count: usize,
+}
+
+fn render_scrolled_detail(
+    f: &mut RenderTarget,
+    area: Rect,
+    rows: DetailRows<'_>,
+    requested_scroll: usize,
+    cat: &Catalog,
+    t: &Theme,
+) -> usize {
+    let available = area.height as usize;
+    let row_count = rows.prefix.len() + rows.discussion.len();
+    let scroll = requested_scroll.min(row_count.max(rows.peer_row_count).saturating_sub(available));
+    for (y, index) in (area.y..).zip((scroll..row_count).take(available)) {
+        let row = Rect::new(area.x, y, area.width, 1);
+        if let Some(line) = rows.prefix.get(index) {
+            f.render_widget(Paragraph::new(line.clone()), row);
+        } else {
+            let line = detail_text_line(&rows.discussion[index - rows.prefix.len()], cat, t);
+            f.render_widget(Paragraph::new(line), row);
+        }
+    }
+    scroll
+}
+
+fn render_detail_rail(f: &mut RenderTarget, area: Rect, rows: Vec<Line<'static>>, scroll: usize) {
+    let available = area.height as usize;
+    let scroll = scroll.min(rows.len().saturating_sub(available));
+    for (y, line) in (area.y..).zip(rows.into_iter().skip(scroll).take(available)) {
+        f.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
+    }
+}
+
+fn draw_detail_divider(f: &mut RenderTarget, x: u16, area: Rect, t: &Theme) {
+    let buffer = f.buffer_mut();
+    for y in area.y..area.bottom() {
+        buffer[(x, y)]
+            .set_symbol("│")
+            .set_style(Style::new().fg(t.surface1).bg(t.mantle));
+    }
+}
+
+/// The PR detail panel keeps the discussion in a two-thirds reading column and
+/// stable metadata in a one-third rail. Narrow screens stack the same content.
 fn draw_pr_detail(
     f: &mut RenderTarget,
     area: Rect,
-    g: &GitView,
+    g: &mut GitView,
     cat: &Catalog,
     t: &Theme,
 ) -> usize {
@@ -255,139 +422,147 @@ fn draw_pr_detail(
         Load::Loaded(d) => d,
         Load::Idle => return 0,
     };
-    let head = |title: &str| {
-        Line::from(Span::styled(
-            title.to_string(),
-            Style::new().fg(t.subtext1).bold(),
-        ))
-    };
-    let mut rows: Vec<Line> = Vec::new();
+    let columns = detail_columns(area);
+    let content_width = columns.map_or(area.width, |(main, _, _)| main.width) as usize;
+    update_detail_text_cache(
+        &mut g.detail_text_cache,
+        DetailTextTarget::Pr(d.number),
+        content_width,
+        &d.body,
+        &d.comments,
+        d.comment_count,
+    );
+    let mut lead: Vec<Line> = Vec::new();
+    let mut rail: Vec<Line> = Vec::new();
 
-    // Title + branches + badge.
     let (badge, bcol) = detail_badge(d, cat, t);
-    rows.push(Line::from(vec![
-        Span::styled(format!("#{}  ", d.number), Style::new().fg(t.subtext0)),
-        Span::styled(d.title.clone(), Style::new().fg(t.text).bold()),
-    ]));
-    // `updatedAt` is an ISO timestamp; show just the date.
+    push_detail_title(&mut lead, d.number, &d.title, content_width, t);
     let updated = d.updated_at.split('T').next().unwrap_or("");
-    let mut byline = vec![
-        Span::styled(
-            format!("{} → {}", d.head, d.base),
-            Style::new().fg(t.accent),
-        ),
-        Span::styled(
-            format!("  {} {}", cat.detail_by, d.author),
-            Style::new().fg(t.subtext0),
-        ),
-    ];
+    let mut byline = vec![Span::styled(
+        format!("{} {}", cat.detail_by, d.author),
+        Style::new().fg(t.subtext0),
+    )];
     if !updated.is_empty() {
         byline.push(Span::styled(
             format!("  · {} {updated}", cat.detail_updated),
             Style::new().fg(t.subtext0),
         ));
     }
-    byline.push(Span::styled(
-        format!("   [{badge}]"),
+    lead.push(Line::from(byline));
+    lead.push(Line::from(""));
+
+    rail.push(Line::from(Span::styled(
+        format!("[{badge}]"),
         Style::new().fg(bcol).bold(),
-    ));
-    rows.push(Line::from(byline));
-    // Stats + mergeability.
-    let mut stats = vec![
+    )));
+    rail.push(Line::from(""));
+    rail.push(detail_heading(title_case(cat.branch), t));
+    rail.push(Line::from(Span::styled(
+        d.head.clone(),
+        Style::new().fg(t.accent).bold(),
+    )));
+    rail.push(Line::from(Span::styled(
+        format!("→ {}", d.base),
+        Style::new().fg(t.subtext0),
+    )));
+    if !d.labels.is_empty() {
+        rail.push(Line::from(""));
+        rail.push(detail_heading(cat.detail_labels, t));
+        for label in &d.labels {
+            rail.push(Line::from(Span::styled(
+                format!("● {label}"),
+                Style::new().fg(t.amber),
+            )));
+        }
+    }
+    rail.push(Line::from(""));
+    rail.push(Line::from(vec![
         Span::styled(format!("+{} ", d.additions), Style::new().fg(t.green)),
         Span::styled(format!("-{}", d.deletions), Style::new().fg(t.coral)),
-        Span::styled(
-            format!(
-                "  · {} {} · {} {} · {} {}",
-                d.changed_files,
-                cat.detail_files,
-                d.commits,
-                cat.detail_commits,
-                d.comments,
-                cat.detail_comments
-            ),
-            Style::new().fg(t.subtext0),
-        ),
-    ];
+    ]));
+    rail.push(Line::from(Span::styled(
+        format!("{} {}", d.changed_files, cat.detail_files),
+        Style::new().fg(t.subtext0),
+    )));
+    rail.push(Line::from(Span::styled(
+        format!("{} {}", d.commits, cat.detail_commits),
+        Style::new().fg(t.subtext0),
+    )));
+    rail.push(Line::from(Span::styled(
+        format!("{} {}", d.comment_count, cat.detail_comments),
+        Style::new().fg(t.subtext0),
+    )));
     match d.mergeable.as_str() {
-        "MERGEABLE" => stats.push(Span::styled(
-            format!("  · {}", cat.detail_mergeable),
+        "MERGEABLE" => rail.push(Line::from(Span::styled(
+            format!("✓ {}", cat.detail_mergeable),
             Style::new().fg(t.green),
-        )),
-        "CONFLICTING" => stats.push(Span::styled(
-            format!("  · {}", cat.detail_conflicts),
+        ))),
+        "CONFLICTING" => rail.push(Line::from(Span::styled(
+            format!("✗ {}", cat.detail_conflicts),
             Style::new().fg(t.coral),
-        )),
+        ))),
         _ => {}
     }
-    rows.push(Line::from(stats));
-    rows.push(Line::from(""));
 
-    // Per-check CI.
     if !d.check_runs.is_empty() {
-        rows.push(head(cat.detail_checks));
+        rail.push(Line::from(""));
+        rail.push(detail_heading(cat.detail_checks, t));
         for c in &d.check_runs {
             let (gly, col) = check_glyph(c.bucket, t);
-            rows.push(Line::from(vec![
-                Span::styled(format!("   {gly}  "), Style::new().fg(col)),
+            rail.push(Line::from(vec![
+                Span::styled(format!("{gly}  "), Style::new().fg(col)),
                 Span::styled(c.name.clone(), Style::new().fg(t.text)),
             ]));
         }
-        rows.push(Line::from(""));
     }
 
-    // Individual reviews.
     if !d.reviews.is_empty() {
-        rows.push(head(cat.detail_reviews));
+        rail.push(Line::from(""));
+        rail.push(detail_heading(cat.detail_reviews, t));
         for r in &d.reviews {
             let (gly, col, label) = review_glyph(&r.state, cat, t);
-            rows.push(Line::from(vec![
-                Span::styled(format!("   {gly}  "), Style::new().fg(col)),
-                Span::styled(pad(&r.author, 18), Style::new().fg(t.text)),
-                Span::styled(label.to_string(), Style::new().fg(col)),
+            rail.push(Line::from(vec![
+                Span::styled(format!("{gly}  "), Style::new().fg(col)),
+                Span::styled(r.author.clone(), Style::new().fg(t.text)),
+                Span::styled(format!("  {label}"), Style::new().fg(col)),
             ]));
         }
-        rows.push(Line::from(""));
     }
 
-    // Labels.
-    if !d.labels.is_empty() {
-        rows.push(Line::from(vec![
-            Span::styled(
-                format!("{}  ", cat.detail_labels),
-                Style::new().fg(t.subtext1).bold(),
-            ),
-            Span::styled(d.labels.join(", "), Style::new().fg(t.amber)),
-        ]));
-        rows.push(Line::from(""));
-    }
-
-    // Description (word-wrapped).
-    rows.push(head(cat.detail_description));
-    if d.body.trim().is_empty() {
-        rows.push(Line::from(Span::styled(
-            format!("   {}", cat.detail_no_description),
-            Style::new().fg(t.overlay0),
-        )));
+    if let Some((main, divider, sidebar)) = columns {
+        let discussion = &g.detail_text_cache.as_ref().unwrap().rows;
+        let scroll = render_scrolled_detail(
+            f,
+            main,
+            DetailRows {
+                prefix: &lead,
+                discussion,
+                peer_row_count: rail.len(),
+            },
+            g.scroll,
+            cat,
+            t,
+        );
+        draw_detail_divider(f, divider, area, t);
+        render_detail_rail(f, sidebar, rail, scroll);
+        scroll
     } else {
-        let wrap_w = area.width.saturating_sub(6) as usize;
-        for raw in d.body.replace('\r', "").lines() {
-            for wl in wrap(raw, wrap_w) {
-                rows.push(Line::from(Span::styled(
-                    format!("   {wl}"),
-                    Style::new().fg(t.subtext0),
-                )));
-            }
-        }
+        lead.extend(rail);
+        lead.push(Line::from(""));
+        let discussion = &g.detail_text_cache.as_ref().unwrap().rows;
+        render_scrolled_detail(
+            f,
+            area,
+            DetailRows {
+                prefix: &lead,
+                discussion,
+                peer_row_count: 0,
+            },
+            g.scroll,
+            cat,
+            t,
+        )
     }
-
-    // Render from the top with the scroll offset.
-    let avail = area.height as usize;
-    let scroll = g.scroll.min(rows.len().saturating_sub(avail));
-    for (y, line) in (area.y..).zip(rows.into_iter().skip(scroll).take(avail)) {
-        f.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
-    }
-    scroll
 }
 
 /// The in-tab commit detail (docs/17): the `git show` output, per-line colored
@@ -439,13 +614,12 @@ fn draw_commit_detail(f: &mut RenderTarget, area: Rect, g: &GitView, t: &Theme) 
     scroll
 }
 
-/// The in-tab issue detail (docs/17): state, author, labels, and the body,
-/// scrolling as a block. The issue-side mirror of `draw_pr_detail`. Returns the
-/// clamped scroll offset.
+/// The issue detail mirrors the PR reading layout: discussion on the left,
+/// stable status and ownership metadata on the right, stacked when narrow.
 fn draw_issue_detail(
     f: &mut RenderTarget,
     area: Rect,
-    g: &GitView,
+    g: &mut GitView,
     cat: &Catalog,
     t: &Theme,
 ) -> usize {
@@ -461,80 +635,103 @@ fn draw_issue_detail(
         Load::Loaded(d) => d,
         Load::Idle => return 0,
     };
-    let mut rows: Vec<Line> = Vec::new();
-    rows.push(Line::from(vec![
-        Span::styled(format!("#{}  ", d.number), Style::new().fg(t.subtext0)),
-        Span::styled(d.title.clone(), Style::new().fg(t.text).bold()),
-    ]));
+    let columns = detail_columns(area);
+    let content_width = columns.map_or(area.width, |(main, _, _)| main.width) as usize;
+    update_detail_text_cache(
+        &mut g.detail_text_cache,
+        DetailTextTarget::Issue(d.number),
+        content_width,
+        &d.body,
+        &d.comments,
+        d.comment_count,
+    );
+    let mut lead: Vec<Line> = Vec::new();
+    let mut rail: Vec<Line> = Vec::new();
+
+    push_detail_title(&mut lead, d.number, &d.title, content_width, t);
     let (badge, bcol) = if d.state.eq_ignore_ascii_case("CLOSED") {
         (cat.badge_closed, t.coral)
     } else {
         (cat.badge_open, t.green)
     };
     let updated = d.updated_at.split('T').next().unwrap_or("");
-    let mut byline = vec![
-        Span::styled(format!("[{badge}]"), Style::new().fg(bcol).bold()),
-        Span::styled(
-            format!("  {} {}", cat.detail_by, d.author),
-            Style::new().fg(t.subtext0),
-        ),
-        Span::styled(
-            format!("  · {} {}", d.comments, cat.detail_comments),
-            Style::new().fg(t.subtext0),
-        ),
-    ];
+    let mut byline = vec![Span::styled(
+        format!("{} {}", cat.detail_by, d.author),
+        Style::new().fg(t.subtext0),
+    )];
     if !updated.is_empty() {
         byline.push(Span::styled(
             format!("  · {} {updated}", cat.detail_updated),
             Style::new().fg(t.subtext0),
         ));
     }
-    rows.push(Line::from(byline));
-    rows.push(Line::from(""));
-    if !d.labels.is_empty() {
-        rows.push(Line::from(vec![
-            Span::styled(
-                format!("{}  ", cat.detail_labels),
-                Style::new().fg(t.subtext1).bold(),
-            ),
-            Span::styled(d.labels.join(", "), Style::new().fg(t.amber)),
-        ]));
-    }
-    if !d.assignees.is_empty() {
-        rows.push(Line::from(vec![
-            Span::styled("assignees  ", Style::new().fg(t.subtext1).bold()),
-            Span::styled(d.assignees.join(", "), Style::new().fg(t.subtext0)),
-        ]));
-    }
-    if !d.labels.is_empty() || !d.assignees.is_empty() {
-        rows.push(Line::from(""));
-    }
-    rows.push(Line::from(Span::styled(
-        cat.detail_description.to_string(),
-        Style::new().fg(t.subtext1).bold(),
+    lead.push(Line::from(byline));
+    lead.push(Line::from(""));
+
+    rail.push(Line::from(Span::styled(
+        format!("[{badge}]"),
+        Style::new().fg(bcol).bold(),
     )));
-    if d.body.trim().is_empty() {
-        rows.push(Line::from(Span::styled(
-            format!("   {}", cat.detail_no_description),
-            Style::new().fg(t.overlay0),
-        )));
-    } else {
-        let wrap_w = area.width.saturating_sub(6) as usize;
-        for raw in d.body.replace('\r', "").lines() {
-            for wl in wrap(raw, wrap_w) {
-                rows.push(Line::from(Span::styled(
-                    format!("   {wl}"),
-                    Style::new().fg(t.subtext0),
-                )));
-            }
+    rail.push(Line::from(""));
+    rail.push(Line::from(Span::styled(
+        format!("{} {}", d.comment_count, cat.detail_comments),
+        Style::new().fg(t.subtext0),
+    )));
+    if !d.labels.is_empty() {
+        rail.push(Line::from(""));
+        rail.push(detail_heading(cat.detail_labels, t));
+        for label in &d.labels {
+            rail.push(Line::from(Span::styled(
+                format!("● {label}"),
+                Style::new().fg(t.amber),
+            )));
         }
     }
-    let avail = area.height as usize;
-    let scroll = g.scroll.min(rows.len().saturating_sub(avail));
-    for (y, line) in (area.y..).zip(rows.into_iter().skip(scroll).take(avail)) {
-        f.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
+    if !d.assignees.is_empty() {
+        rail.push(Line::from(""));
+        rail.push(detail_heading(cat.detail_assignees, t));
+        for assignee in &d.assignees {
+            rail.push(Line::from(Span::styled(
+                format!("@{assignee}"),
+                Style::new().fg(t.subtext0),
+            )));
+        }
     }
-    scroll
+
+    if let Some((main, divider, sidebar)) = columns {
+        let discussion = &g.detail_text_cache.as_ref().unwrap().rows;
+        let scroll = render_scrolled_detail(
+            f,
+            main,
+            DetailRows {
+                prefix: &lead,
+                discussion,
+                peer_row_count: rail.len(),
+            },
+            g.scroll,
+            cat,
+            t,
+        );
+        draw_detail_divider(f, divider, area, t);
+        render_detail_rail(f, sidebar, rail, scroll);
+        scroll
+    } else {
+        lead.extend(rail);
+        lead.push(Line::from(""));
+        let discussion = &g.detail_text_cache.as_ref().unwrap().rows;
+        render_scrolled_detail(
+            f,
+            area,
+            DetailRows {
+                prefix: &lead,
+                discussion,
+                peer_row_count: 0,
+            },
+            g.scroll,
+            cat,
+            t,
+        )
+    }
 }
 
 /// Big state badge for the detail header.
@@ -575,14 +772,33 @@ fn wrap(s: &str, width: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut line = String::new();
     for word in s.split_whitespace() {
-        if line.is_empty() {
-            line = word.to_string();
-        } else if line.chars().count() + 1 + word.chars().count() <= width {
-            line.push(' ');
-            line.push_str(word);
-        } else {
-            out.push(std::mem::take(&mut line));
-            line = word.to_string();
+        let word_width = word.chars().count();
+        let mut chunks = word.chars();
+        let mut first_chunk = true;
+        loop {
+            let chunk: String = chunks.by_ref().take(width).collect();
+            if chunk.is_empty() {
+                break;
+            }
+            if !first_chunk || word_width > width {
+                if !line.is_empty() {
+                    out.push(std::mem::take(&mut line));
+                }
+                if chunk.chars().count() == width {
+                    out.push(chunk);
+                } else {
+                    line = chunk;
+                }
+            } else if line.is_empty() {
+                line = chunk;
+            } else if line.chars().count() + 1 + chunk.chars().count() <= width {
+                line.push(' ');
+                line.push_str(&chunk);
+            } else {
+                out.push(std::mem::take(&mut line));
+                line = chunk;
+            }
+            first_chunk = false;
         }
     }
     if !line.is_empty() {
@@ -830,11 +1046,8 @@ fn draw_footer(f: &mut RenderTarget, area: Rect, g: &GitView, cat: &Catalog, t: 
     if g.open_pr.is_some() {
         let pairs = [
             ("esc", cat.act_back),
-            ("M", cat.act_merge),
             ("a", cat.act_approve),
-            ("R", cat.act_ready),
             ("c", cat.act_checkout),
-            ("d", cat.act_diff),
             ("o", cat.act_open),
             ("r", cat.act_refresh),
         ];
@@ -1320,6 +1533,244 @@ fn draw_list(
             Paragraph::new(line),
             Rect::new(area.x + 2, ry, area.width.saturating_sub(2), 1),
         );
+    }
+}
+
+#[cfg(test)]
+mod detail_layout_tests {
+    use super::*;
+    use crate::git::model::{Check, DiscussionComment, Review};
+    use ratatui::buffer::Buffer;
+
+    fn find_text(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
+        for y in buffer.area.y..buffer.area.bottom() {
+            let row = (buffer.area.x..buffer.area.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>();
+            if let Some(column) = row.find(needle) {
+                return Some((column as u16, y));
+            }
+        }
+        None
+    }
+
+    fn comment() -> DiscussionComment {
+        DiscussionComment {
+            author: "reviewer".into(),
+            body: "This comment belongs in the discussion column.".into(),
+            created_at: "2026-09-02T08:00:00Z".into(),
+        }
+    }
+
+    fn pr_detail() -> PrDetail {
+        PrDetail {
+            number: 42,
+            title: "Improve Git detail UX".into(),
+            state: "OPEN".into(),
+            is_draft: false,
+            author: "alice".into(),
+            base: "main".into(),
+            head: "feature/git-reader".into(),
+            body: "The pull request description stays in the reading column.".into(),
+            additions: 120,
+            deletions: 8,
+            changed_files: 5,
+            commits: 3,
+            comment_count: 1,
+            comments: vec![comment()],
+            mergeable: "MERGEABLE".into(),
+            review_decision: "APPROVED".into(),
+            reviews: vec![Review {
+                author: "bob".into(),
+                state: "APPROVED".into(),
+            }],
+            check_runs: vec![Check {
+                name: "build".into(),
+                bucket: Checks::Passing,
+            }],
+            labels: vec!["ux".into()],
+            updated_at: "2026-09-02T09:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn wide_pr_detail_keeps_discussion_left_and_metadata_right() {
+        let area = Rect::new(0, 0, 120, 30);
+        let (main, divider, rail) = detail_columns(area).expect("wide split");
+        assert_eq!(main.width, 78);
+        assert_eq!(divider, 78);
+        assert_eq!(rail, Rect::new(80, 0, 40, 30));
+
+        let mut view = GitView::new(std::path::PathBuf::from("."));
+        view.detail = Load::Loaded(pr_detail());
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+        draw_pr_detail(
+            &mut target,
+            area,
+            &mut view,
+            crate::i18n::by_code("en"),
+            &Theme::quattro_rally(),
+        );
+
+        assert!(find_text(&buffer, "pull request description").unwrap().0 < divider);
+        assert!(find_text(&buffer, "This comment belongs").unwrap().0 < divider);
+        assert!(find_text(&buffer, "feature/git-reader").unwrap().0 >= rail.x);
+        assert!(find_text(&buffer, "Checks").unwrap().0 >= rail.x);
+        assert!(find_text(&buffer, "● ux").unwrap().0 >= rail.x);
+    }
+
+    #[test]
+    fn wide_issue_detail_shows_comments_and_ownership_rail() {
+        let area = Rect::new(0, 0, 120, 24);
+        let mut view = GitView::new(std::path::PathBuf::from("."));
+        view.issue_detail = Load::Loaded(IssueDetail {
+            number: 7,
+            title: "Improve issue details".into(),
+            state: "OPEN".into(),
+            author: "alice".into(),
+            body: "Issue description in the main column.".into(),
+            labels: vec!["bug".into()],
+            assignees: vec!["bob".into()],
+            comment_count: 1,
+            comments: vec![comment()],
+            updated_at: "2026-09-02T09:00:00Z".into(),
+        });
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+        draw_issue_detail(
+            &mut target,
+            area,
+            &mut view,
+            crate::i18n::by_code("en"),
+            &Theme::quattro_rally(),
+        );
+
+        let (_, divider, rail) = detail_columns(area).unwrap();
+        assert!(find_text(&buffer, "Issue description").unwrap().0 < divider);
+        assert!(find_text(&buffer, "This comment belongs").unwrap().0 < divider);
+        assert!(find_text(&buffer, "● bug").unwrap().0 >= rail.x);
+        assert!(find_text(&buffer, "@bob").unwrap().0 >= rail.x);
+    }
+
+    #[test]
+    fn narrow_detail_stacks_metadata_without_hiding_the_discussion() {
+        let area = Rect::new(0, 0, 70, 40);
+        assert!(detail_columns(area).is_none());
+        let mut view = GitView::new(std::path::PathBuf::from("."));
+        view.detail = Load::Loaded(pr_detail());
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+        draw_pr_detail(
+            &mut target,
+            area,
+            &mut view,
+            crate::i18n::by_code("en"),
+            &Theme::quattro_rally(),
+        );
+
+        assert!(find_text(&buffer, "feature/git-reader").is_some());
+        assert!(find_text(&buffer, "pull request description").is_some());
+        assert!(find_text(&buffer, "This comment belongs").is_some());
+    }
+
+    #[test]
+    fn discussion_rows_are_reused_until_target_or_width_changes() {
+        let comments = vec![comment()];
+        let mut cache = None;
+        assert!(update_detail_text_cache(
+            &mut cache,
+            DetailTextTarget::Pr(42),
+            78,
+            "description",
+            &comments,
+            1,
+        ));
+        let rows = cache.as_ref().unwrap().rows.as_ptr();
+
+        assert!(!update_detail_text_cache(
+            &mut cache,
+            DetailTextTarget::Pr(42),
+            78,
+            "description",
+            &comments,
+            1,
+        ));
+        assert_eq!(cache.as_ref().unwrap().rows.as_ptr(), rows);
+
+        assert!(update_detail_text_cache(
+            &mut cache,
+            DetailTextTarget::Pr(42),
+            60,
+            "description",
+            &comments,
+            1,
+        ));
+        assert_eq!(cache.as_ref().unwrap().width, 60);
+    }
+
+    #[test]
+    fn long_unbroken_comment_is_split_to_the_reader_width() {
+        let comments = vec![DiscussionComment {
+            author: "reviewer".into(),
+            body: "https://example.com/abcdefghijklmnopqrstuvwxyz0123456789".into(),
+            created_at: "2026-09-02T08:00:00Z".into(),
+        }];
+        let rows = DetailTextCache::rows(20, "description", &comments, 1, wrap);
+        let body_rows: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match row {
+                DetailTextRow::CommentBody(line) => Some(line.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(body_rows.len() > 1);
+        assert!(body_rows.iter().all(|line| line.chars().count() <= 17));
+        assert_eq!(body_rows.concat(), comments[0].body);
+    }
+
+    #[test]
+    fn wide_short_details_can_scroll_to_late_metadata() {
+        let area = Rect::new(0, 0, 120, 7);
+        let mut pr = GitView::new(std::path::PathBuf::from("."));
+        pr.detail = Load::Loaded(pr_detail());
+        pr.scroll = usize::MAX;
+        let mut pr_buffer = Buffer::empty(area);
+        let mut pr_target = RenderTarget::new(&mut pr_buffer, area);
+        draw_pr_detail(
+            &mut pr_target,
+            area,
+            &mut pr,
+            crate::i18n::by_code("en"),
+            &Theme::quattro_rally(),
+        );
+        assert!(find_text(&pr_buffer, "bob").is_some());
+
+        let mut issue = GitView::new(std::path::PathBuf::from("."));
+        issue.issue_detail = Load::Loaded(IssueDetail {
+            number: 7,
+            title: "Improve issue details".into(),
+            state: "OPEN".into(),
+            author: "alice".into(),
+            body: "Issue description in the main column.".into(),
+            labels: vec!["bug".into(), "ux".into(), "reader".into()],
+            assignees: vec!["bob".into()],
+            comment_count: 1,
+            comments: vec![comment()],
+            updated_at: "2026-09-02T09:00:00Z".into(),
+        });
+        issue.scroll = usize::MAX;
+        let mut issue_buffer = Buffer::empty(area);
+        let mut issue_target = RenderTarget::new(&mut issue_buffer, area);
+        draw_issue_detail(
+            &mut issue_target,
+            area,
+            &mut issue,
+            crate::i18n::by_code("en"),
+            &Theme::quattro_rally(),
+        );
+        assert!(find_text(&issue_buffer, "@bob").is_some());
     }
 }
 

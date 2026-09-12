@@ -7,6 +7,12 @@ These examples use UHP 1.0 through the selected Luvus session. Start with
 read-only discovery, use stable IDs returned by the server, and reconcile state
 before retrying any mutation whose response was lost.
 
+For a paired Access connection, inspect `result.access.allowed_methods` in the
+`uhp.capabilities` response before enabling a supported UI action. Keep
+`result.methods` as the server capability catalog; `access.mode` and
+`access.limits` describe this endpoint. Missing `access` on an older gateway
+must not be treated as unrestricted authority.
+
 ## Choose a connection path
 
 | Need | Use |
@@ -258,6 +264,27 @@ pairing code, or token, and never put them in logs.
 With `--no-expiry`, the pairing response uses `expires_on_close:true`. The
 client token remains valid only while that access command is running; Ctrl-C
 closes the gateway and revokes its bounded upstream authority.
+
+## Manage owner-local machines
+
+Machine methods exist only on an access gateway started with `--machines`.
+List profiles first and retain the returned catalog revision:
+
+```json
+{"id":"machines-1","method":"machine.list","params":{},"auth":"<token>"}
+```
+
+Every catalog mutation requires that revision. This example records a disabled
+profile, so it performs no SSH connection:
+
+```json
+{"id":"machine-add-1","method":"machine.add","params":{"id":"build","host":"buildbox","enabled":false,"if_revision":0},"auth":"<token>"}
+```
+
+Re-read `machine.list` before retrying if the response is lost. Profile reads
+omit the SSH destination and negotiated executable path. Session and terminal
+methods remain scoped to their selected Luvus server; machine access does not
+silently redirect an ordinary UHP request.
 
 ## Retry rules
 

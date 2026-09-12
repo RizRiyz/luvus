@@ -1,0 +1,11 @@
+# Official Luvus detection manifest for Devin CLI.
+# This provides detection-only compatibility to older identity-enabled Luvus
+# versions. Native launch, resume, and the screen rules for Devin's trust and
+# interrupt screens ship in the Luvus binary: those screens sit above the
+# bottom-row window a manifest rule reads, so they are not repeated here.
+agent = "devin"
+
+# `devin` is also an ordinary given name, so it is only ever ambiguous
+# evidence, exactly as the built-in descriptor declares it.
+[identity]
+ambiguous = ["devin"]

@@ -7,7 +7,9 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use super::model::{Check, Checks, Issue, IssueDetail, PrDetail, PullRequest, Review};
+use super::model::{
+    Check, Checks, DiscussionComment, Issue, IssueDetail, PrDetail, PullRequest, Review,
+};
 use super::{Scope, StateFilter};
 
 /// Availability of the `gh` CLI for this session.
@@ -304,7 +306,8 @@ fn parse_pr_detail(v: &Value) -> PrDetail {
         deletions: v.get("deletions").and_then(Value::as_u64).unwrap_or(0),
         changed_files: v.get("changedFiles").and_then(Value::as_u64).unwrap_or(0),
         commits: count("commits"),
-        comments: count("comments"),
+        comment_count: count("comments"),
+        comments: parse_comments(v.get("comments")),
         mergeable: str_at(v, "mergeable"),
         review_decision: str_at(v, "reviewDecision"),
         reviews: parse_reviews(v.get("reviews")),
@@ -330,21 +333,62 @@ pub fn issue_detail(cwd: &Path, number: u64) -> Result<IssueDetail, String> {
         ],
     )?;
     let v: Value = serde_json::from_str(&raw).map_err(|e| format!("parse gh: {e}"))?;
-    Ok(IssueDetail {
+    Ok(parse_issue_detail(&v))
+}
+
+fn parse_issue_detail(v: &Value) -> IssueDetail {
+    let comments = v.get("comments").and_then(Value::as_array);
+    IssueDetail {
         number: v.get("number").and_then(Value::as_u64).unwrap_or(0),
-        title: str_at(&v, "title"),
-        state: str_at(&v, "state"),
+        title: str_at(v, "title"),
+        state: str_at(v, "state"),
         author: login(v.get("author")),
-        body: str_at(&v, "body"),
+        body: str_at(v, "body"),
         labels: names(v.get("labels"), "name"),
         assignees: logins(v.get("assignees")),
-        comments: v
-            .get("comments")
-            .and_then(Value::as_array)
-            .map(|a| a.len() as u64)
-            .unwrap_or(0),
-        updated_at: str_at(&v, "updatedAt"),
-    })
+        comment_count: comments.map_or(0, |items| items.len() as u64),
+        comments: parse_comments(v.get("comments")),
+        updated_at: str_at(v, "updatedAt"),
+    }
+}
+
+const MAX_DETAIL_COMMENTS: usize = 100;
+const MAX_COMMENT_BODY_CHARS: usize = 8_192;
+
+/// Keep recent conversation useful without retaining an unbounded public issue
+/// in the app. `gh` has already fetched the JSON off the app loop; this bounds
+/// only the long-lived view state and render work.
+fn parse_comments(value: Option<&Value>) -> Vec<DiscussionComment> {
+    let Some(items) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .skip(items.len().saturating_sub(MAX_DETAIL_COMMENTS))
+        .map(|comment| {
+            let body = truncate_chars(
+                comment.get("body").and_then(Value::as_str).unwrap_or(""),
+                MAX_COMMENT_BODY_CHARS,
+            );
+            DiscussionComment {
+                author: login(comment.get("author")),
+                body,
+                created_at: str_at(comment, "createdAt"),
+            }
+        })
+        .collect()
+}
+
+fn truncate_chars(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        value.to_string()
+    } else {
+        value
+            .chars()
+            .take(max.saturating_sub(1))
+            .chain(['…'])
+            .collect()
+    }
 }
 
 /// Latest decision per reviewer (gh returns reviews chronologically, so a later
@@ -438,7 +482,10 @@ mod tests {
                 "number":42,"title":"Wire up auth","state":"OPEN","isDraft":false,
                 "author":{"login":"alice"},"baseRefName":"main","headRefName":"feat/auth",
                 "body":"Adds login.\n\nSee the RFC.","additions":120,"deletions":8,
-                "changedFiles":5,"commits":[{},{},{}],"comments":[{}],
+                "changedFiles":5,"commits":[{},{},{}],"comments":[
+                    {"author":{"login":"dora"},"body":"Looks good to me.",
+                     "createdAt":"2026-06-25T09:00:00Z"}
+                ],
                 "mergeable":"MERGEABLE","reviewDecision":"CHANGES_REQUESTED",
                 "reviews":[
                     {"author":{"login":"bob"},"state":"COMMENTED"},
@@ -459,7 +506,10 @@ mod tests {
         assert_eq!(d.base, "main");
         assert_eq!(d.head, "feat/auth");
         assert_eq!(d.commits, 3);
-        assert_eq!(d.comments, 1);
+        assert_eq!(d.comment_count, 1);
+        assert_eq!(d.comments.len(), 1);
+        assert_eq!(d.comments[0].author, "dora");
+        assert_eq!(d.comments[0].body, "Looks good to me.");
         assert_eq!(d.changed_files, 5);
         // Reviews collapse to the latest decision per author (bob's APPROVED wins).
         assert_eq!(d.reviews.len(), 2);
@@ -471,5 +521,50 @@ mod tests {
         assert!(matches!(d.check_runs[1].bucket, Checks::Failing));
         assert!(matches!(d.check_runs[2].bucket, Checks::Pending));
         assert_eq!(d.check_runs[2].name, "ci/lint");
+    }
+
+    #[test]
+    fn parses_issue_discussion_for_the_in_tab_reader() {
+        let value: Value = serde_json::from_str(
+            r#"{
+                "number":7,"title":"Broken layout","state":"OPEN",
+                "author":{"login":"alice"},"body":"Steps here.",
+                "labels":[{"name":"bug"}],"assignees":[{"login":"bob"}],
+                "comments":[
+                    {"author":{"login":"carol"},"body":"I can reproduce this.",
+                     "createdAt":"2026-08-01T12:30:00Z"}
+                ],
+                "updatedAt":"2026-08-01T13:00:00Z"
+            }"#,
+        )
+        .unwrap();
+
+        let detail = parse_issue_detail(&value);
+        assert_eq!(detail.comment_count, 1);
+        assert_eq!(detail.comments.len(), 1);
+        assert_eq!(detail.comments[0].author, "carol");
+        assert_eq!(detail.comments[0].created_at, "2026-08-01T12:30:00Z");
+    }
+
+    #[test]
+    fn retained_discussion_is_recent_and_bounded() {
+        let comments = (0..MAX_DETAIL_COMMENTS + 3)
+            .map(|index| {
+                serde_json::json!({
+                    "author": {"login": format!("user-{index}")},
+                    "body": "x".repeat(MAX_COMMENT_BODY_CHARS + 20),
+                    "createdAt": "2026-08-01T12:30:00Z"
+                })
+            })
+            .collect::<Vec<_>>();
+        let value = serde_json::json!({"comments": comments});
+
+        let retained = parse_comments(value.get("comments"));
+        assert_eq!(retained.len(), MAX_DETAIL_COMMENTS);
+        assert_eq!(retained[0].author, "user-3");
+        assert_eq!(
+            retained.last().unwrap().body.chars().count(),
+            MAX_COMMENT_BODY_CHARS
+        );
     }
 }

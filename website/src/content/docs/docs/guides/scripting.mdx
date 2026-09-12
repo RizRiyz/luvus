@@ -13,7 +13,7 @@ luvus pane split --down                # split the focused pane
 luvus pane run 7 cargo test           # run a command in pane 7
 luvus pane read 7                      # print a pane's recent output
 luvus wait output 7 --match "passed"  # block until text appears (exit 0; 2 on timeout)
-luvus wait agent-status 7 --status done --timeout 600
+luvus wait agent-status 7 --status done,blocked --timeout 600
 luvus attach 7                         # open the TUI fullscreen into one pane
 luvus events                           # stream every status change (ND-JSON)
 ```
@@ -31,6 +31,8 @@ luvus wait output "$id" --match "done" --timeout 300
 ```
 
 `wait` exit codes are script-friendly: `0` = condition met, `2` = timeout.
+Repeat `--status` or separate states with commas when any terminal state should
+unblock the script.
 
 ## Watching everything
 

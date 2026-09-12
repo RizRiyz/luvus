@@ -84,10 +84,11 @@ for an agent to receive it:
 `luvus skill enable` makes no network request. It installs the same bundled
 skill into detected native skill locations without overwriting external or
 modified content. The shared `~/.agents/skills/luvus/` copy serves Codex,
-GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, and fx. Dedicated
-adapters serve Claude Code, OpenCode, Kimi Code CLI, Grok Build, Hermes CLI,
-Qwen Code, and Kiro. Aider has no native Agent Skills installation surface, so
-use `luvus skill show` when an Aider conversation needs the instructions.
+GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, fx, Kilo Code, and
+Devin. Dedicated adapters serve Claude Code, OpenCode, OpenCode 2 Preview,
+Kimi Code CLI, Grok Build, Hermes CLI, Qwen Code, and Kiro. Aider has no
+native Agent Skills installation surface, so use `luvus skill show` when an
+Aider conversation needs the instructions.
 
 Start a new agent conversation after installation, or use that agent's skill
 reload command when it provides one. To remove unchanged Luvus-managed copies:
@@ -134,6 +135,14 @@ Branch-backed dependencies unblock only after they are merged into the shared
 integration history.
 `task release` requeues active work and releases its path leases, but it does
 not stop the worker pane or discard its worktree.
+Use `task add --prompt <text>` or `--prompt-file <path>` for the detailed worker
+briefing. A manual task's prompt can be replaced with `task update` only while
+the task is queued and unassigned; inspect it before starting the worker.
+Use `task update --note` for work progress. `task heartbeat --context-used
+<0..1>` reports only the fraction of the model context window already consumed,
+where `0.6` means 60% consumed, not 60% task progress. Omit the heartbeat when
+that measurement is unknown. The older `--context` spelling remains a CLI
+compatibility alias; UHP keeps the stable `context` field.
 `task start` checks path leases before creating a worker. Its default
 `mode=worktree` creates an isolated branch and checkout. Explicit
 `mode=workspace` creates a dedicated task tab in an existing shared checkout;
@@ -152,6 +161,8 @@ Every managed pane receives context:
 - `LUVUS_ENV=1` identifies a Luvus-managed environment.
 - `LUVUS_PANE_ID` identifies the current pane.
 - `LUVUS_SOCKET_PATH` identifies the selected session's control endpoint.
+- `LUVUS_API_ADDRESS` identifies the platform-native address used by direct
+  local integrations, including the complete named-pipe address on Windows.
 
 Preserve these variables when invoking `luvus`. They keep development, named,
 remote, and default sessions isolated. Do not replace the endpoint with a
@@ -240,6 +251,10 @@ Target a named session without attaching its TUI:
 luvus --session <name> pane list
 ```
 
+Each named session owns an independent workspace tree and saved-machine
+catalog. A session switch must not copy workspaces or machine profiles from the
+previous session.
+
 ## Panes and agents
 
 Discover the exact target first:
@@ -259,7 +274,8 @@ luvus pane split --down
 luvus pane run <pane-id> <command> [args...]
 luvus agent start reviewer --kind codex --anchor <pane-id> --timeout 60
 luvus agent prompt reviewer "Review the current diff" --wait --timeout 600
-luvus wait agent-status <pane-id> --status done --timeout 600
+luvus agent keys reviewer esc
+luvus wait agent-status <pane-id> --status done,blocked --timeout 600
 ```
 
 The neutral home workspace supports ordinary tabs and panes, and its displayed
@@ -269,6 +285,37 @@ user named a specific project.
 `agent prompt` submits one complete prompt and can wait semantically. Prefer it
 to separate text and Enter operations. A timeout does not prove that an agent
 failed or stopped. Inspect it before deciding what to do next.
+For `agent.send` and `agent.prompt`, detected blocked prompt evidence—including
+in non-Codex panes—rejects submission with `agent_not_ready` before either text
+or Enter is queued. Startup, sign-in, selection, and approval screens are
+examples, not an exhaustive list. A server-launched or restored Codex pane with
+an `agent_session` also returns `agent_not_ready` when prompt evidence is
+Unknown, unless live Codex composer geometry reports Ready. Existing Codex panes
+without that requirement retain the permissive Unknown-evidence fallback.
+
+`agent keys` refuses plain shells, validates every named key before sending any
+bytes, and queues a valid list as one ordered action. A closed target returns a
+structured `send_failed` error.
+
+For UHP interactions that must match the inspected screen, use `agent.read`
+with `source:"visible"` and pass its `content_revision` as `if_content_revision`
+together with its `terminal_id` in `agent.keys` params. The revision is a
+non-negative integer; the terminal ID is exactly 32 lowercase hex characters.
+Both fields are optional as a pair; a one-sided or malformed pair is
+`invalid_request`. A deferred pane has `terminal_id:null` and cannot be fenced.
+An unavailable read snapshot has empty text and null coordinates.
+
+The server checks the pair and queues keys under the same engine lock used to
+capture the text. `content_revision_conflict` means no keys were queued: re-read
+and reassess the authorized action, never retry the same pair. Generic response
+`revision` / request `if_revision` are global event coordinates, not the pane's
+content counter. Without the pair, behavior is unchanged. Older servers omit the
+coordinates or reject the new fields; omit the pair only when legacy unfenced
+admission is acceptable. These are UHP params, not CLI flags.
+
+The fence covers queue admission only. Already queued input and child-side
+changes not yet observed remain outside it. Cursor/SGR output can make a pair
+stale even if the dialog text looks unchanged.
 
 Identity, live state, lifecycle hooks, usage, native resume, and fork support
 are separate capabilities. An agent can be detected without supporting every
@@ -282,9 +329,27 @@ discovery rather than inferring support from an agent name.
   and terminal state.
 - Supported agents can reopen their own conversation through native session
   discovery and resume commands.
-- Hermes session discovery works without setup. When exact pane ownership is
-  required, `luvus integration install hermes` adds an opt-in Hermes plugin
-  that reports each session once while retaining the native database fallback.
+- Antigravity CLI is detected natively. Its optional
+  `luvus integration install antigravity` hook reports only the exact
+  conversation id needed for `agy --conversation <id>` restore; screen
+  detection remains authoritative for state.
+- OpenCode detection and legacy JSON session discovery work without setup.
+  `luvus integration install opencode` adds a TUI-local plugin that reports
+  only the root session selected in that pane plus structured usage. Without
+  it, Mission Control leaves OpenCode usage unavailable instead of guessing.
+- OpenCode 2 Preview is detected separately as `opencode2`. Luvus can launch it
+  and resume an exact known ID with `opencode2 --session <id>`, but does not
+  scan its live SQLite database or reuse the OpenCode V1 integration. Its
+  reviewed unattended command, `opencode2 run --auto`, is available only for
+  an explicit `full_access` automation.
+- Kilo Code is detected through the official `kilo` and `kilocode` commands.
+  Resume and fork use Kilo's native commands only when Luvus already has the
+  exact session ID; Luvus does not scan or guess sessions from Kilo's database.
+  A scheduled Kilo worker requires the user's explicit `full_access` selection
+  because its reviewed unattended command is `kilo run --auto`.
+- `luvus integration install hermes` adds exact per-pane session ownership for
+  restart resume. Hermes detection still works without it, but Luvus does not
+  scan Hermes's private history database or guess a session.
 
 Do not claim every shell command resumes after restart. Do not guess native
 session IDs. List sessions and use the exact returned identifier.
@@ -293,13 +358,44 @@ session IDs. List sessions and use the exact returned identifier.
 
 Universal Harness Protocol 1.0 is Luvus's public automation contract for
 workspaces, tabs, panes, agents, terminals, files, Git, DIFF, Mission Control,
-tasks, leases, modules, bars, configuration, and events.
+tasks, agent schedules, leases, modules, bars, configuration, and events.
 
 Open Mission Control in the active workspace with `luvus mission open`, target
 a zero-based workspace with `luvus mission open <workspace>`, or call the
 workspace-scoped UHP method `mission.open`. Use `mission.snapshot` to read agent
 and usage data without changing the UI. `mission.refresh` requests one explicit
 off-render-path usage scan rather than enabling background polling.
+
+Use `automation.preview` before storing a calendar trigger, then
+`automation.create` with a canonical built-in agent, stable workspace ID,
+explicit prompt, IANA timezone, and the narrowest `task.access` value:
+`read_only`, `workspace` (the default), or `full_access`. Access is separate from
+the worktree/workspace Git mode, and unsupported agent/access pairs are rejected
+before a worker is created. Read definitions with `automation.list`,
+runs with `automation.history`, and fleet health with `automation.health`.
+Create and manual-run requests accept idempotency keys for safe retries.
+Mutation success waits for its ledger checkpoint. After `persistence_failed`
+or a lost response, inspect state and retry the same idempotency key instead of
+creating a duplicate schedule. Failed prelaunch runs do not automatically
+relaunch when storage recovers.
+Use `automation.rebind` only to reconnect a durable active-agent definition to
+a pane that proves the same native conversation; it requires orchestration
+authority and is safe to repeat with the same pane.
+Disabling a definition prevents future occurrences but never kills its current
+ORCH task or pane. Detection-only manifest agents cannot be scheduled.
+Luvus uses reviewed one-shot flags from the built-in adapter and never types a
+blind approval response or changes an agent's permanent permission config.
+
+To continue an existing interactive conversation, set `target.kind` to
+`active_agent` and provide the exact `pane_id`, 32-character `terminal_id`,
+matching `task.agent_id`, and matching `task.workspace_id` from `agent.list`.
+Use `target.if_busy` as `wait` or `skip`. If Luvus has a trusted native session
+identity, it can recover the route after restart only from an exact unique
+match; public automation data exposes `binding` and `target_state` but never
+the native session ID. Otherwise the target remains valid only for that PTY and
+server lifetime. Active targets create no ORCH worker and record queue
+acceptance as `delivered`, not task completion. Never guess a terminal ID or
+rebind to a different conversation.
 
 Start with capability discovery and validate against the installed JSON Schema
 bundle. Do not infer method support from a release number alone.
@@ -336,17 +432,49 @@ read-only and control access both default to 24 hours. `--no-expiry` binds the
 client token to the foreground access process and keeps it valid until that
 process closes.
 
+Control Access permits `agent.keys` for recognized agent panes with the local
+key grammar, including `ctrl+z`, printable Unicode and `["esc","[","Z"]`.
+Read-only Access denies it. A rejected batch queues no prefix; success returns
+the resolved `pane` and means queued, not consumed. This does not authorize
+`agent.send`, raw pane input, launch, fork, or close through the gateway.
+
+Control also permits `pane.rename` with the existing `pane` and `name` parameters;
+read-only Access denies it. Rename retains the owner name validation and
+`pane.renamed` event. An empty name clears the pane alias.
+
 ## Remote use
+
+Observe/control `terminal.frame` messages replace the previous capture at the
+frame's own `content_revision`. The acknowledgment revision is not an emitted
+frame cursor. A quiet final update must remain deliverable after an in-flight
+write; reconnect for a fresh frame after EOF or `terminal.resync_required`.
 
 ```sh
 ssh <host>             # run Luvus on that machine
 luvus --remote <host>  # local thin client, remote Luvus server
+luvus machine list     # inspect saved SSH machines
 ```
 
-Both require Luvus on the remote machine. `--remote` uses the user's existing
-SSH transport. It does not create a Luvus network daemon. For diagnosis,
-identify the server host, selected session, remote binary, noninteractive PATH,
-and inherited endpoint.
+`--remote` requires Luvus on the remote machine and uses the user's existing
+SSH transport. Saved-machine onboarding can install a compatible user-local
+binary only after explicit foreground approval. `machine status` and background
+reconnects never install, update, or start a server. Neither mode creates a
+Luvus network daemon. For diagnosis, identify the server host, selected session,
+verified remote binary, noninteractive PATH, and inherited endpoint.
+
+In the saved-machine TUI, the header session control always owns the local
+named-session namespace. It remains local while remote workspace content is
+active and never rewrites the machine's configured remote session. Switching
+that local session reloads its independent workspace tree and machine catalog.
+
+After pairing through Access, `uhp.capabilities` retains owner `methods` and
+adds `access.mode`, `access.allowed_methods`, and gateway-specific
+`access.limits.connections` / `requests_per_minute`. Intersect the allowed set
+with server methods and your supported actions. Owner endpoints omit `access`;
+older gateways may omit it too, which never proves write permission. Control
+includes `pane.rename`, keys, and existing automation writes, but excludes standalone terminal
+input and token administration. Re-discover after reconnect; accept unknown
+additive fields. No owner socket/token or new event is exposed.
 
 ## Troubleshooting order
 
@@ -401,3 +529,20 @@ newer release.
 
 When the website and installed binary disagree, follow the installed binary and
 tell the human about the version difference.
+
+## Prompt wait observation
+
+With `--wait`, `agent prompt` (also `agent send`) requires a new `working` or
+`blocked` transition before the requested `--until` state can complete the wait.
+An unchanged status, title flicker, or quiet output alone cannot complete it.
+`observed_state` records the first active transition; `status` is the current state.
+The absolute `--timeout` covers both stages (default 300 seconds). Timeout returns
+`matched:false`, `evidence:"timeout"`, and a null `observed_state` if no transition
+was seen. Pane or terminal exit returns `agent_not_running` with `pane`, `queued`,
+`submitted`, `observed_state`, `reason:"pane_closed"`, `baseline_revision`, and
+`content_revision` under `error.data`. Timeout and pane exit during a wait use CLI
+exit code 2. Cancellation, timeout, and exit release pending wait ownership.
+Without `--wait`, the immediate `submitted:true`, `evidence:"queued"` response is
+unchanged and omits `observed_state`. Submission still means queue admission;
+state transitions do not confirm consumption of the prompt text. Do not resend
+automatically after a timeout or lost response because queued input may execute.

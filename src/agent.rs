@@ -17,20 +17,24 @@ use std::time::SystemTime;
 
 pub(crate) mod aider;
 pub(crate) mod amp;
+pub(crate) mod antigravity;
 pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod copilot;
 pub(crate) mod cursor;
+pub(crate) mod devin;
 pub(crate) mod droid;
 pub(crate) mod fx;
 pub(crate) mod gemini;
 pub(crate) mod grok;
 pub(crate) mod hermes;
+pub(crate) mod kilo;
 pub(crate) mod kimi;
 pub(crate) mod kiro;
 pub(crate) mod muse;
 pub(crate) mod omp;
 pub(crate) mod opencode;
+pub(crate) mod opencode2;
 pub(crate) mod pi;
 pub(crate) mod qwen;
 pub(crate) mod registry;
@@ -107,7 +111,7 @@ pub fn sessions_for(agent: &str, cwd: &Path) -> Vec<String> {
 /// The shell command that resumes an agent's native session, if supported.
 /// Returns `None` for unknown agents or unsafe ids.
 pub fn resume_command(agent: &str, session_id: &str) -> Option<String> {
-    if !safe_id(session_id) {
+    if !safe_session_id(session_id) {
         return None;
     }
     let src = source(agent)?;
@@ -143,6 +147,19 @@ fn filter_launch_flags(agent: &str, launch: &[String]) -> Vec<String> {
     while i < launch.len() {
         let t = launch[i].as_str();
         let head = t.split('=').next().unwrap_or(t);
+        // Antigravity resumes by conversation id and uses `-c` for the newest
+        // conversation. Neither selector may survive beside the exact id Luvus
+        // is restoring.
+        if agent == antigravity::NAME && matches!(head, "--conversation" | "-c") {
+            i += 1;
+            if head == "--conversation"
+                && !t.contains('=')
+                && launch.get(i).is_some_and(|value| !value.starts_with('-'))
+            {
+                i += 1;
+            }
+            continue;
+        }
         // Hermes accepts an optional name after continue. Neither the selector
         // nor its value may survive into an exact-id restore.
         if agent == "hermes" && matches!(head, "--continue" | "-c") {
@@ -151,6 +168,12 @@ fn filter_launch_flags(agent: &str, launch: &[String]) -> Vec<String> {
                 i += 1;
             }
             continue;
+        }
+        // Devin reads everything after `--` as the initial prompt. Replaying it
+        // on `devin --resume <id>` would run the captured task briefing again,
+        // so the separator ends the copy; the flags before it still apply.
+        if agent == "devin" && t == "--" {
+            break;
         }
         if t.contains('=') && TAKES_VALUE.contains(&head) {
             i += 1; // glued form, e.g. --resume=<id>
@@ -236,7 +259,7 @@ pub fn fork_session_id(agent: &str, bound: Option<&str>, cwd: &Path) -> Option<S
 /// full context in a new, diverging session (the original is left untouched).
 /// `None` for agents without a native fork, unknown agents, or unsafe ids.
 pub fn fork_command(agent: &str, session_id: &str) -> Option<String> {
-    if !safe_id(session_id) {
+    if !safe_session_id(session_id) {
         return None;
     }
     let f = source(agent)?.fork?;
@@ -249,12 +272,18 @@ pub fn can_fork(agent: &str) -> bool {
     source(agent).and_then(|s| s.fork).is_some()
 }
 
-fn safe_id(id: &str) -> bool {
+pub(crate) fn safe_session_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 256
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/'))
+}
+
+/// Canonical built-in agent id for trusted integration reports. Manifest-only
+/// identities do not gain native session capabilities through this path.
+pub(crate) fn canonical_builtin(agent: &str) -> Option<&'static str> {
+    registry::find(agent).map(|descriptor| descriptor.id)
 }
 
 fn home() -> PathBuf {
@@ -348,6 +377,10 @@ mod tests {
         assert!(resume_command("opencode", "ses_1")
             .unwrap()
             .contains("opencode --session"));
+        assert_eq!(
+            resume_command("opencode2", "ses_2").as_deref(),
+            Some("opencode2 --session 'ses_2'\r")
+        );
         // Aliases + resume-only agents resolve through the registry.
         assert!(resume_command("codex", "c1")
             .unwrap()
@@ -372,11 +405,25 @@ mod tests {
         assert!(resume_command("cursor-agent", "z")
             .unwrap()
             .contains("cursor-agent --resume"));
-        assert!(is_resumable("opencode") && is_resumable("cursor-agent"));
+        assert_eq!(
+            resume_command("kilocode", "ses_123").as_deref(),
+            Some("kilo --session 'ses_123'\r")
+        );
+        assert!(
+            is_resumable("opencode")
+                && is_resumable("opencode2")
+                && is_resumable("cursor-agent")
+                && is_resumable("kilo")
+        );
         assert_eq!(
             resume_command("gemini", "g1").as_deref(),
             Some("gemini --resume 'g1'\r")
         );
+        assert_eq!(
+            resume_command("agy", "ec33ebf9-0cba-4100-8142-c61503f6c587").as_deref(),
+            Some("agy --conversation 'ec33ebf9-0cba-4100-8142-c61503f6c587'\r")
+        );
+        assert!(is_resumable("antigravity-cli"));
         assert_eq!(
             resume_command("qwen", "q1").as_deref(),
             Some("qwen --resume 'q1'\r")
@@ -390,6 +437,11 @@ mod tests {
             Some("hermes --resume '20260830_120000_a1b2c3'\r")
         );
         assert!(is_resumable("hermes"));
+        assert_eq!(
+            resume_command("devin", "quiet-meadow").as_deref(),
+            Some("devin --resume 'quiet-meadow'\r")
+        );
+        assert!(is_resumable("devin"));
         assert!(resume_command("unknown", "x").is_none());
         assert!(resume_command("claude", "").is_none()); // empty id
         assert!(resume_command("claude", "a b").is_none()); // unsafe char
@@ -652,6 +704,25 @@ mod tests {
             f("copilot", &["--resume=old", "--banner"]),
             vec!["--banner"]
         );
+        // Devin: the flags before `--` are kept; the separator and the task
+        // briefing after it are not, and a stale selector before it still goes.
+        assert_eq!(
+            f(
+                "devin",
+                &[
+                    "--permission-mode",
+                    "auto",
+                    "--",
+                    "fix",
+                    "the",
+                    "login",
+                    "bug"
+                ]
+            ),
+            vec!["--permission-mode", "auto"]
+        );
+        assert!(f("devin", &["--", "fix", "the", "login", "bug"]).is_empty());
+        assert!(f("devin", &["--resume", "old", "--", "fix"]).is_empty());
         // Standalone selectors, a fork flag, and one-shot print mode all go.
         assert_eq!(
             f(
@@ -664,6 +735,10 @@ mod tests {
         assert_eq!(
             f("grok", &["--resume", "old-id", "--fork-session", "--yolo"]),
             vec!["--yolo"]
+        );
+        assert_eq!(
+            f("opencode2", &["--session", "old-id", "--standalone"]),
+            vec!["--standalone"]
         );
         // Codex selects a session with positional resume/fork subcommands.
         assert_eq!(
@@ -682,6 +757,17 @@ mod tests {
             f("hermes", &["--continue", "old title", "--tui"]),
             vec!["--tui"],
             "Hermes drops its optional continue title"
+        );
+        assert_eq!(
+            f(
+                "antigravity",
+                &["--conversation", "old-id", "--model", "gemini-3.1-pro"]
+            ),
+            vec!["--model", "gemini-3.1-pro"]
+        );
+        assert_eq!(
+            f("antigravity", &["--conversation=old-id", "-c", "--sandbox"]),
+            vec!["--sandbox"]
         );
         // A kept flag keeps its value.
         assert_eq!(
@@ -706,6 +792,33 @@ mod tests {
         assert!(cmd.ends_with('\r'));
         // The stale captured --resume was filtered: exactly one resume id remains.
         assert_eq!(cmd.matches("--resume").count(), 1);
+
+        let opencode2_launch = ["--session", "old", "--standalone"]
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            resume_command_with_flags("opencode2", "ses_2", &opencode2_launch).as_deref(),
+            Some("opencode2 --session 'ses_2' '--standalone'\r")
+        );
+
+        // Devin keeps its option but never the `-- <briefing>` it was launched with.
+        let devin_launch = [
+            "--permission-mode",
+            "auto",
+            "--",
+            "fix",
+            "the",
+            "login",
+            "bug",
+        ]
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+        assert_eq!(
+            resume_command_with_flags("devin", "quiet-meadow", &devin_launch).as_deref(),
+            Some("devin --resume 'quiet-meadow' '--permission-mode' 'auto'\r")
+        );
 
         // All-filtered input and empty input both fall back to the plain command.
         let base = resume_command("claude", "abc").unwrap();
@@ -781,7 +894,17 @@ mod tests {
             .contains("pi --fork"));
         let grok = fork_command("grok", "g1").unwrap();
         assert!(grok.contains("grok --resume") && grok.contains("--fork-session"));
-        assert!(can_fork("claude") && can_fork("codex") && can_fork("pi") && can_fork("grok"));
+        assert_eq!(
+            fork_command("kilocode", "ses_123").as_deref(),
+            Some("kilo --session 'ses_123' --fork\r")
+        );
+        assert!(
+            can_fork("claude")
+                && can_fork("codex")
+                && can_fork("kilo")
+                && can_fork("pi")
+                && can_fork("grok")
+        );
         assert!(
             !can_fork("muse"),
             "Muse has no external native fork entrypoint"
@@ -789,6 +912,7 @@ mod tests {
         // Resume-capable, but no native fork (the copy-then-resume tier is future).
         assert!(!can_fork("copilot"));
         assert!(!can_fork("cursor"));
+        assert!(!can_fork("devin"));
         // Unknown agent / unsafe / empty id all refuse.
         assert!(fork_command("unknown", "x").is_none());
         assert!(fork_command("claude", "a b").is_none());

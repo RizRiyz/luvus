@@ -189,12 +189,13 @@ pub(super) fn draw_ws_menu(
         return;
     };
     let anchor = menu.anchor;
+    let selected = menu.selected;
     let items = app.ws_menu_items(index);
     let extras = menu.module_actions.clone();
     let rows: Vec<MenuRow> = items
         .iter()
         .map(|it| MenuRow {
-            text: ws_label(*it, cat, &extras),
+            text: ws_label(*it, cat, &extras, app.config.layout.workspace_paths),
             divider: matches!(it, WsMenuItem::Divider),
             destructive: matches!(it, WsMenuItem::Close | WsMenuItem::DeleteWorktree),
         })
@@ -207,7 +208,7 @@ pub(super) fn draw_ws_menu(
         t,
         PopupCtx {
             hover: app.hover,
-            selected: None,
+            selected,
             mobile: app.compact,
             id: PopupId::Ws,
             scroll: &mut app.menu_scroll,
@@ -453,14 +454,16 @@ pub(super) fn draw_agent_menu(
         return;
     };
     let anchor = menu.anchor;
-    let items = app.agent_menu_items(menu.target);
+    let selected = menu.selected;
+    let items = app.agent_menu_items(menu.target.clone());
     let extras = menu.module_actions.clone();
+    let scoped = app.agents_this_workspace;
     let rows: Vec<MenuRow> = items
         .iter()
         .map(|it| MenuRow {
-            text: agent_label(*it, cat, &extras),
+            text: agent_label(*it, cat, &extras, scoped, app.config.layout.agent_paths),
             divider: matches!(it, AgentMenuItem::Divider),
-            destructive: matches!(it, AgentMenuItem::Close),
+            destructive: matches!(it, AgentMenuItem::Close | AgentMenuItem::AutomationDelete),
         })
         .collect();
     let rects = render_popup(
@@ -471,7 +474,7 @@ pub(super) fn draw_agent_menu(
         t,
         PopupCtx {
             hover: app.hover,
-            selected: None,
+            selected,
             mobile: app.compact,
             id: PopupId::Agent,
             scroll: &mut app.menu_scroll,
@@ -482,22 +485,102 @@ pub(super) fn draw_agent_menu(
     }
 }
 
-fn agent_label(it: AgentMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> String {
+fn agent_label(
+    it: AgentMenuItem,
+    cat: &Catalog,
+    extras: &[ModuleMenuAction],
+    scoped: bool,
+    paths_visible: bool,
+) -> String {
     match it {
+        AgentMenuItem::ToggleWorkspaceScope => if scoped {
+            cat.menu_show_all_workspaces
+        } else {
+            cat.menu_show_workspace_only
+        }
+        .to_string(),
         AgentMenuItem::Resume => cat.menu_resume.to_string(),
         AgentMenuItem::RenamePane => cat.menu_rename.to_string(),
         AgentMenuItem::Pin => cat.menu_pin.to_string(),
         AgentMenuItem::Unpin => cat.menu_unpin.to_string(),
+        AgentMenuItem::TogglePath => if paths_visible {
+            cat.menu_hide_path
+        } else {
+            cat.menu_show_path
+        }
+        .to_string(),
         AgentMenuItem::Close => cap_first(cat.act_close),
+        AgentMenuItem::AutomationDetails => cap_first(cat.act_details),
+        AgentMenuItem::AutomationRun => cap_first(cat.automation_now),
+        AgentMenuItem::AutomationToggle => cap_first(cat.board_automation_toggle),
+        AgentMenuItem::AutomationDelete => cap_first(cat.act_delete),
         AgentMenuItem::Divider => String::new(),
         AgentMenuItem::Module(i) => module_label(extras, i),
     }
 }
 
-fn ws_label(it: WsMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> String {
+pub(super) fn draw_session_menu(
+    f: &mut RenderTarget,
+    area: Rect,
+    app: &mut App,
+    cat: &Catalog,
+    t: &Theme,
+) {
+    let Some(menu) = app.session_menu.as_ref() else {
+        return;
+    };
+    let anchor = menu.anchor;
+    let selected = menu.selected;
+    let actions = menu.actions.clone();
+    let rows: Vec<MenuRow> = actions
+        .iter()
+        .map(|action| MenuRow {
+            text: match action {
+                crate::app::SessionMenuItem::Start => cat.menu_start_session.to_string(),
+                crate::app::SessionMenuItem::Stop => cat.menu_stop_session.to_string(),
+                crate::app::SessionMenuItem::Delete => cap_first(cat.act_delete),
+            },
+            divider: false,
+            destructive: matches!(
+                action,
+                crate::app::SessionMenuItem::Stop | crate::app::SessionMenuItem::Delete
+            ),
+        })
+        .collect();
+    let rects = render_popup(
+        f,
+        area,
+        anchor,
+        &rows,
+        t,
+        PopupCtx {
+            hover: app.hover,
+            selected,
+            mobile: app.compact,
+            id: PopupId::Session,
+            scroll: &mut app.menu_scroll,
+        },
+    );
+    if let Some(menu) = app.session_menu.as_mut() {
+        menu.items = actions.into_iter().zip(rects).collect();
+    }
+}
+
+fn ws_label(
+    it: WsMenuItem,
+    cat: &Catalog,
+    extras: &[ModuleMenuAction],
+    paths_visible: bool,
+) -> String {
     match it {
         WsMenuItem::Pin => cat.menu_pin.to_string(),
         WsMenuItem::Unpin => cat.menu_unpin.to_string(),
+        WsMenuItem::TogglePath => if paths_visible {
+            cat.menu_hide_path
+        } else {
+            cat.menu_show_path
+        }
+        .to_string(),
         WsMenuItem::Close => cap_first(cat.act_close),
         WsMenuItem::Rename => cat.menu_rename.to_string(),
         WsMenuItem::DeleteWorktree => cat.menu_delete_worktree.to_string(),
@@ -826,6 +909,7 @@ mod label_case_tests {
         for it in [
             WsMenuItem::Close,
             WsMenuItem::Rename,
+            WsMenuItem::TogglePath,
             WsMenuItem::DeleteWorktree,
             WsMenuItem::NewWorktree,
             WsMenuItem::OpenWorktree,
@@ -833,7 +917,7 @@ mod label_case_tests {
             WsMenuItem::OpenOrch,
             WsMenuItem::OpenMission,
         ] {
-            rows.push(ws_label(it, cat, none));
+            rows.push(ws_label(it, cat, none, true));
         }
         for it in PaneMenuItem::ALL.iter().copied() {
             rows.push(pane_label(it, cat, none));
@@ -850,8 +934,12 @@ mod label_case_tests {
         // user content, but the trailing "New Tab" is ours (`move_targets` in
         // `app/mod.rs`).
         rows.push(cat.menu_new_tab.to_string());
-        for it in [AgentMenuItem::Resume, AgentMenuItem::Close] {
-            rows.push(agent_label(it, cat, none));
+        for it in [
+            AgentMenuItem::Resume,
+            AgentMenuItem::TogglePath,
+            AgentMenuItem::Close,
+        ] {
+            rows.push(agent_label(it, cat, none, false, true));
         }
         for it in [
             OrchMenuItem::Start,
@@ -896,7 +984,7 @@ mod label_case_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{App, FileMenu, FileMenuItem, PopupId};
+    use crate::app::{App, FileMenu, FileMenuItem, PopupId, SessionMenu, SessionMenuItem};
     use crate::event::AppEvent;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -1111,5 +1199,44 @@ mod tests {
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         assert_eq!(app.menu_scroll.offset_of(PopupId::File), 0);
         assert!(rect_of(&app, FileMenuItem::OpenReadonly).height > 0);
+    }
+
+    #[test]
+    fn stopped_session_menu_renders_start_and_delete_for_keyboard_and_mouse() {
+        let _env = crate::persist::test_env("session-actions-render");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 20, tx).unwrap();
+        app.session_menu = Some(SessionMenu {
+            name: "review".into(),
+            anchor: (4, 4),
+            actions: vec![SessionMenuItem::Start, SessionMenuItem::Delete],
+            items: Vec::new(),
+            selected: Some(0),
+        });
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        let mut target = crate::ui::RenderTarget::new(&mut buffer, area);
+        let theme = app.theme.clone();
+        let catalog = app.catalog;
+
+        draw_session_menu(&mut target, area, &mut app, catalog, &theme);
+
+        let items = &app.session_menu.as_ref().unwrap().items;
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].0, SessionMenuItem::Start);
+        assert_eq!(items[1].0, SessionMenuItem::Delete);
+        assert_ne!(items[0].1, items[1].1);
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains(catalog.menu_start_session));
+        assert!(text.contains("Delete"));
+        assert_eq!(
+            buffer.cell((items[0].1.x, items[0].1.y)).unwrap().bg,
+            theme.accent,
+            "the keyboard-selected Start row is highlighted"
+        );
     }
 }

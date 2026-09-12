@@ -4,7 +4,7 @@
 //! `AppEvent::ModuleCommandFinished`. Fire-and-forget; the caller gets a
 //! `Running` log immediately.
 
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,6 +21,7 @@ use crate::event::AppEvent;
 pub const MAX_IN_FLIGHT: usize = 32;
 pub const LOG_LIMIT: usize = 200;
 pub const OUTPUT_CAP: usize = 64 * 1024;
+pub const MODULE_TOKEN_ENV: &str = "LUVUS_MODULE_TOKEN";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -55,7 +56,7 @@ pub fn next_log_id() -> u64 {
 /// Alongside `LUVUS_MODULE_CONTEXT_JSON` this flattens the ids into plain
 /// `LUVUS_WORKSPACE_ID` / `LUVUS_PANE_ID` / … vars and each declared setting
 /// into `LUVUS_SETTING_<KEY>`, so a bash module never has to parse JSON.
-fn base_env(module: &InstalledModule, ctx: &Value) -> Vec<(String, String)> {
+fn base_env(module: &InstalledModule, module_token: &str, ctx: &Value) -> Vec<(String, String)> {
     let config = paths::config_dir(&module.id);
     let state = paths::state_dir(&module.id);
     let _ = std::fs::create_dir_all(&config);
@@ -64,6 +65,7 @@ fn base_env(module: &InstalledModule, ctx: &Value) -> Vec<(String, String)> {
     let mut env = vec![
         ("LUVUS_ENV".to_string(), "1".to_string()),
         ("LUVUS_MODULE_ID".to_string(), module.id.clone()),
+        (MODULE_TOKEN_ENV.to_string(), module_token.to_string()),
         (
             "LUVUS_MODULE_ROOT".to_string(),
             module.root.display().to_string(),
@@ -100,10 +102,11 @@ fn base_env(module: &InstalledModule, ctx: &Value) -> Vec<(String, String)> {
 /// selected entrypoint, dock, row, action, or event.
 pub fn env(
     module: &InstalledModule,
+    module_token: &str,
     ctx: &Value,
     extra: Vec<(String, String)>,
 ) -> Vec<(String, String)> {
-    complete_env(base_env(module, ctx), extra)
+    complete_env(base_env(module, module_token, ctx), extra)
 }
 
 fn complete_env(
@@ -187,6 +190,7 @@ fn read_capped<R: Read>(r: &mut R) -> String {
                     kept.extend_from_slice(&chunk[..take]);
                 }
             }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         }
     }
@@ -195,12 +199,15 @@ fn read_capped<R: Read>(r: &mut R) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::complete_env;
+    use super::{complete_env, MODULE_TOKEN_ENV};
 
     #[test]
     fn complete_environment_keeps_canonical_module_variables() {
         let env = complete_env(
-            vec![("LUVUS_MODULE_ID".into(), "example.test".into())],
+            vec![
+                ("LUVUS_MODULE_ID".into(), "example.test".into()),
+                (MODULE_TOKEN_ENV.into(), "runtime-token".into()),
+            ],
             vec![
                 ("LUVUS_MODULE_ENTRYPOINT_ID".into(), "monitor".into()),
                 ("LUVUS_MODULE_DOCK_ID".into(), "boards".into()),
@@ -209,6 +216,7 @@ mod tests {
         );
         for (key, value) in [
             ("LUVUS_MODULE_ID", "example.test"),
+            (MODULE_TOKEN_ENV, "runtime-token"),
             ("LUVUS_MODULE_ENTRYPOINT_ID", "monitor"),
             ("LUVUS_MODULE_DOCK_ID", "boards"),
             ("LUVUS_MODULE_ACTION_ID", "flash"),

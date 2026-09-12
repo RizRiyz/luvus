@@ -4,8 +4,8 @@ import '@fontsource-variable/jetbrains-mono';
 import '../styles/themes.css';
 import { DEFAULT_THEME } from '../lib/themes';
 import Logo from './Logo.astro';
+import MarketingNav from './MarketingNav.astro';
 import ThemeProvider from './ThemeProvider.astro';
-import XLogo from './XLogo.astro';
 
 interface Props {
   title: string;
@@ -17,7 +17,6 @@ interface Props {
 const { title, description, path, updated } = Astro.props;
 const canonical = new URL(path, 'https://luvus.dev').toString();
 const GITHUB = 'https://github.com/RizRiyz/luvus';
-const X = 'https://x.com/luvusdev';
 ---
 
 <!doctype html>
@@ -39,23 +38,7 @@ const X = 'https://x.com/luvusdev';
     <ThemeProvider />
   </head>
   <body>
-    <nav>
-      <div class="nav-inner">
-        <a class="brand" href="/">
-          <Logo width={30} height={30} aria-hidden="true" />
-          <span>Luvus</span>
-        </a>
-        <div class="nav-links">
-          <a href="/docs/">Docs</a>
-          <a href="/modules/">Modules</a>
-          <a href="/changelog/">Changelog</a>
-          <a href={GITHUB} class="social-icon" aria-label="Luvus on GitHub" title="GitHub">
-            <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path></svg>
-          </a>
-          <a href={X} class="social-icon" aria-label="Luvus on X" title="X"><XLogo /></a>
-        </div>
-      </div>
-    </nav>
+    <MarketingNav />
 
     <main>
       <article>
@@ -94,29 +77,7 @@ const X = 'https://x.com/luvusdev';
     line-height: 1.7;
   }
   :global(a) { color: inherit; text-decoration: none; }
-  nav { border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 92%, transparent); }
-  .nav-inner {
-    width: min(1120px, calc(100% - 2.5rem));
-    min-height: 68px;
-    margin: 0 auto;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1.5rem;
-  }
-  .brand { display: inline-flex; align-items: center; gap: 0.65rem; font-weight: 760; font-size: 1.05rem; }
-  .nav-links { display: flex; align-items: center; gap: 1.3rem; color: var(--sub); font-size: 0.9rem; }
-  .social-icon {
-    display: inline-flex;
-    width: 33px;
-    height: 33px;
-    flex: 0 0 33px;
-    box-sizing: border-box;
-    align-items: center;
-    justify-content: center;
-    border: 1px solid var(--line);
-  }
-  .nav-links a:hover, .foot-links a:hover { color: var(--accent); }
+  .foot-links a:hover { color: var(--accent); }
   main { min-height: calc(100vh - 190px); }
   article { width: min(780px, calc(100% - 2.5rem)); margin: 0 auto; padding: 5rem 0 6rem; }
   .eyebrow {
@@ -159,9 +120,6 @@ const X = 'https://x.com/luvusdev';
   .foot-brand { display: flex; align-items: center; gap: 0.55rem; font-weight: 700; }
   .foot-links { display: flex; gap: 1.3rem; flex-wrap: wrap; color: var(--sub); font-size: 0.9rem; }
   @media (max-width: 640px) {
-    .nav-inner { width: min(100% - 2rem, 1120px); min-height: 62px; }
-    .nav-links { gap: 0.9rem; font-size: 0.78rem; }
-    .nav-links a:nth-child(2), .nav-links a:nth-child(3) { display: none; }
     article { width: min(100% - 2rem, 780px); padding: 3.5rem 0 4.5rem; }
     .foot-inner { width: min(100% - 2rem, 1120px); flex-direction: column; gap: 1rem; text-align: center; }
     .foot-links { justify-content: center; }

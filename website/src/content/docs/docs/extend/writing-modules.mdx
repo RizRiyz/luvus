@@ -25,6 +25,7 @@ A module can reach every surface the app has:
 | **Settings** | `[[settings]]` | Typed controls in Settings → Modules, no UI code |
 | **Events** | `[[events]]` | Run when agents, panes, tabs, or tasks change |
 | **Startup** | `[[startup]]` | Restore your state when the session comes up |
+| **AGENTS titles** | any command | Publish session titles onto live and resumable AGENTS rows |
 
 ## Author with your AI agent
 
@@ -288,7 +289,9 @@ custom colors, and module-controlled rendering are rejected.
 
 An actionable segment names an action from the same manifest. Its command gets
 `LUVUS_MODULE_BAR_ID`, `LUVUS_MODULE_BAR_SEGMENT`, and
-`LUVUS_MODULE_BAR_VALUE`. Live content is in-memory, so restore it from a
+`LUVUS_MODULE_BAR_VALUE` — except on a `progress` segment, whose `value` is the
+numeric fill, so its click passes no payload; carry it on a neighboring `text`
+or `badge` segment instead. Live content is in-memory, so restore it from a
 one-shot startup hook. A repeated push is an atomic replacement, not an append.
 
 For transient status, use the bounded notification lane instead of repeatedly
@@ -387,8 +390,10 @@ Each **row** is an object:
 
 | Field | Required | Meaning |
 |---|:---:|---|
-| `text` | ✓ | The row label. |
+| `text` | ✓ | The row label. May be omitted only when `spans` has at least one non-empty segment, then it defaults to the segments joined. A row with neither renders empty and its action receives an empty `LUVUS_MODULE_ROW_TEXT`. |
 | `dot` |  | A status dot: `idle` / `working` / `blocked` / `done` (colored like the Agents list). |
+| `tone` |  | Colors the row text with a Luvus Bar tone: `normal` / `muted` / `accent` / `success` / `warning` / `error`. Omit for the default row color (`normal` is the bar's own text color, one step dimmer than the default). An unknown name falls back to the default. |
+| `spans` |  | Draw the row from segments instead of `text`: `[{"text": "[", "tone": "muted"}, {"text": "━━━", "tone": "success"}]`. Each segment takes its own tone, else the row's. `text` stays the plain version handed to the action, and defaults to the segments joined when omitted. |
 | `action` |  | A module **action id** run when the row is clicked. |
 | `value` |  | An opaque payload for that action, so one action can back every row. |
 | `menu` |  | Extra actions offered when the row is **right-clicked**. See below. |
@@ -570,6 +575,7 @@ takes down luvus.
 |---|---|
 | `LUVUS_ENV` | Always `1`, meaning you're running under luvus. |
 | `LUVUS_MODULE_ID` | Your module's id. |
+| `LUVUS_MODULE_TOKEN` | Per-server credential forwarded automatically by the CLI for module-owned UI data. Do not persist or override it. |
 | `LUVUS_MODULE_VERSION` | Your module's declared version. |
 | `LUVUS_MODULE_ROOT` | The module directory (also the cwd). Read-only by convention. |
 | `LUVUS_MODULE_CONFIG_DIR` | Durable, user-owned config/secrets dir (created for you). |
@@ -642,7 +648,36 @@ selected=$(printf '%s' "$LUVUS_MODULE_CONTEXT_JSON" | jq -r .selection)
 "$LUVUS_BIN_PATH" tab rename review        # name the current tab
 "$LUVUS_BIN_PATH" ui toast "build passing" # flash a one-line message
 "$LUVUS_BIN_PATH" ui dock push --id you:ci --rows '[...]'   # feed your sidebar dock
+"$LUVUS_BIN_PATH" ui agent-title push --titles '[{"agent":"pi","session_id":"01a0…","title":"Ship desktop"}]'
 ```
+
+### AGENTS sidebar titles
+
+Luvus does not parse an agent's native session store for the AGENTS sidebar.
+A module can publish titles onto live rows (including idle) and All/history
+resumable rows. `agent` must name a built-in Luvus adapter:
+
+```sh
+"$LUVUS_BIN_PATH" ui agent-title push --titles '[
+  {"pane":"3","title":"Ship desktop"},
+  {"agent":"pi","session_id":"01a07061-9cc8-779d-b50d-f09889439f94","title":"Ship desktop"}
+]'
+```
+
+OSC titles still win. If there is no OSC title, the pane title is used, then
+the `agent`+`session_id` title. If neither exists, live rows keep
+`workspace · =pane` and resumable rows keep the project folder. Never send a
+Luvus pane alias (`=name`) as `title`. Empty `title` clears that key. Clear all
+titles owned by your module with `ui agent-title clear`, or one row with
+`--pane` / `--agent` + `--session-id`. The CLI authenticates these updates with
+the module token automatically; do not pass or persist it manually. Luvus removes
+a module's titles when the module is disabled, unlinked, or uninstalled, and a
+disabled module cannot publish. Your token stays valid while the module remains
+registered on that server, so a pane or command that outlives a disable/enable
+toggle keeps working.
+
+Repaint from `[[startup]]` and `[[events]]` such as `pane.agent_status_changed`.
+Pi's `session_info.name` belongs in that module, not in Luvus core.
 
 Anything in `luvus help all` is available: panes, tabs, workspaces, worktrees, the
 git tab, the orchestration board, agents, and the UI chrome. Your command reads

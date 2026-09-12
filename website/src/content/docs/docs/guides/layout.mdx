@@ -88,11 +88,16 @@ split terminals with different working directories remain unambiguous.
 - **Open one:** the `+` button above the list, or `Ctrl+Space N`, opens a
   **folder picker**. Browse with the arrows / wheel, use the **Home** row to jump
   home, or press `g` (also clickable in the footer) to type an absolute, relative,
-  or `~/…` path without leaving the picker. `⏎` in **Go to** only navigates; select
-  **Open this folder** afterward to confirm the workspace. Press `n` to
-  create-and-open a new folder, or `w` to open a repo **as a new worktree**.
+  or `~/…` path without leaving the picker. Tab completes folders in **Go to**;
+  `⏎` only navigates. Select **Open this folder** afterward to confirm the
+  workspace. Press `n` to create-and-open a new folder, or `w` to open a repo
+  **as a new worktree**.
   Running `luvus` inside a folder also adds it automatically.
-- **Switch:** click a row, or `Ctrl+Space w` / `W` to cycle.
+- **Switch quickly:** use `Ctrl+Space u` / `U` to cycle to the next / previous
+  workspace.
+- **Navigate the list:** `Ctrl+Space w` focuses WORKSPACES. Use arrows or
+  `j` / `k`, press `Enter` to switch, `a` to open the selected row's action
+  menu, and `Esc` or `q` to return input to the pane.
 - **Jump to its git tab:** right-click the workspace and choose **Open Git
   Tab**, or focus it and press `Ctrl+Space g`.
 
@@ -114,7 +119,13 @@ Right-click any workspace row for its menu:
   disk)
 - **Pin** / **Unpin** it at the top of the list. A linked worktree stays with
   its parent, so pinning either one moves the complete group.
-- **New Git Worktree** / **Open Worktree** (for git repos)
+- **Hide Path** switches WORKSPACES to compact one-row entries. Right-click
+  again and choose **Show Path** to restore the cwd rows. Luvus remembers this
+  choice across restarts.
+- **New Git Worktree** creates a checkout on a new branch; **Open Worktree**
+  lists every existing, non-bare checkout git knows about and opens (or
+  focuses) one. Both appear for git repos only; see
+  [Worktrees](/docs/guides/worktrees/).
 - **Open Git Tab** · **Open Task Board** · **Open Mission Control**
 
 The same organization actions are available from the CLI using stable 0-based
@@ -164,16 +175,27 @@ Arrange them in **Settings → Layout**, under the `── Docks ──` divider
   sidebar, the right sidebar, or hide it. The current placement is highlighted.
 - Toggle both sidebars with `Ctrl+Space b`. `Ctrl+Space B` toggles only the
   right sidebar when you want to keep the left side visible.
+- Drag the horizontal rule between two stacked docks on the same side to
+  resize them. Only those two docks change size. The split is remembered
+  across restarts and terminal resizes, and a dock cannot be squeezed below
+  three rows.
 
 For example, move **Agents** to the right so your agent statuses sit on one edge
 and your project list on the other. If you hide the left sidebar entirely, the
 **Menu** button moves to the right sidebar so Settings is always reachable.
 
 :::tip
-The **Agents** dock header has an **All / Active** toggle: *Active* shows only
-running agents, while *All* also lists the resumable sessions luvus found on disk (click
-one to reopen it). Luvus remembers the selected filter across restarts. See
-[Working with Agents](/docs/guides/agents/).
+The **Agents** dock has two independent filters. **All / Active** controls
+lifecycle: *Active* shows only running agents, while *All* also lists resumable
+sessions found on disk (click one to reopen it). Workspace scope filters both
+live agents and resumable sessions to the active workspace. Both choices are
+remembered across restarts; use prefix `a` for All/Active and prefix `A` for All
+workspaces/this workspace. You can also right-click any agent or resumable
+session row and choose **Show Workspace Only** or **Show All Workspaces**.
+
+Attention stays global while workspace scope is selected. If another workspace
+has a blocked agent, one overflow line reports the count; click it to jump to
+that agent without clearing the scope. See [Working with Agents](/docs/guides/agents/).
 :::
 
 ## Luvus Bar
@@ -210,6 +232,21 @@ Unicode character counts; wide glyphs such as CJK and many emoji consume two.
 Drag across any pane to select, and releasing **auto-copies** to your clipboard. Full
 details, plus scrollback, are in [Scrollback & Copy](/docs/guides/scrollback/).
 
+## Pasting images on Windows
+
+Copy a screenshot or image, focus an agent pane, then press `Ctrl+V` or
+`Ctrl+Shift+V` if that is the paste chord your terminal sends. Luvus reads the
+clipboard only for that explicit gesture. A supported PNG or bitmap is staged
+as a private PNG and its path is pasted into the focused pane without submitting
+the prompt. Agents that accept image paths can then attach or inspect it.
+
+If the clipboard has text, is unavailable, or contains an unsupported image,
+Luvus forwards the original key unchanged. Image paste is ignored while a Luvus
+modal, native file view, dashboard, copy mode, or navigation mode owns input, so
+the private path cannot leak into a pane behind it. This dedicated reader is
+currently available in Windows display clients. Text paste and the existing
+terminal-native behavior on macOS and Linux are unchanged.
+
 ## Opening links and files
 
 Agents print references all day: the PR they opened, the doc they read, the file
@@ -244,6 +281,10 @@ same as `Shift`+click on a FILES row.
 `path:42` preserves the requested line in Preview, permanent-pane and built-in
 read-only tab placements. A configured terminal editor opens the file at the
 top, because line-jump arguments differ between editors.
+
+When an agent such as Claude prints a terminal file hyperlink, luvus uses its
+validated local file target rather than guessing from the visible label. It
+then follows the same **File click behavior** and **Open files with** settings.
 
 **A path only underlines if the file is really there.** Paths are resolved against
 that pane's working directory, so `src/main.rs` means what it means to the shell

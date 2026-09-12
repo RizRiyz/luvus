@@ -6,11 +6,19 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::mem::size_of;
+use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
 
 use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
 use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Security::{
     EqualSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+};
+use windows_sys::Win32::System::Console::{
+    GetCurrentConsoleFontEx, GetStdHandle, CONSOLE_FONT_INFOEX, STD_OUTPUT_HANDLE,
 };
 use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -22,9 +30,67 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_VM_READ, RTL_USER_PROCESS_PARAMETERS,
 };
 
+mod clipboard;
+
+pub(super) fn clipboard_image() -> Option<Vec<u8>> {
+    clipboard::clipboard_image()
+}
+
+pub(super) fn terminal_cell_pixels() -> Option<(u16, u16)> {
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut info: CONSOLE_FONT_INFOEX = std::mem::zeroed();
+        info.cbSize = size_of::<CONSOLE_FONT_INFOEX>() as u32;
+        if GetCurrentConsoleFontEx(handle, 0, &mut info) == 0 {
+            return None;
+        }
+        let width = info.dwFontSize.X;
+        let height = info.dwFontSize.Y;
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        Some((width as u16, height as u16))
+    }
+}
+
 const MAX_PROCESS_ENTRIES: usize = 16_384;
 const MAX_DESCENDANTS_PER_ROOT: usize = 64;
 const MAX_COMMAND_LINE_BYTES: usize = 64 * 1024;
+
+pub(super) fn atomic_replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fn wide(path: &Path) -> std::io::Result<Vec<u16>> {
+        let mut value: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if value.contains(&0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path contains a null character",
+            ));
+        }
+        value.push(0);
+        Ok(value)
+    }
+
+    let source = wide(source)?;
+    let destination = wide(destination)?;
+    // SAFETY: both pointers reference live, null-terminated UTF-16 buffers for
+    // the duration of the call. The files share a directory, so replacement
+    // stays on one volume and MOVEFILE_WRITE_THROUGH waits for completion.
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
 
 struct OwnedHandle(HANDLE);
 

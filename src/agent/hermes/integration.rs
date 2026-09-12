@@ -9,6 +9,7 @@ pub(super) const OPERATIONS: IntegrationOperations = IntegrationOperations {
     install,
     uninstall,
     is_installed,
+    hook: None,
 };
 
 const PLUGIN_NAME: &str = "luvus-agent-state";
@@ -87,7 +88,7 @@ def register(ctx):
 "#;
 
 fn base() -> PathBuf {
-    super::sessions::base()
+    super::base()
 }
 
 fn plugin_dir() -> PathBuf {

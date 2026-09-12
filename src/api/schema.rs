@@ -104,6 +104,47 @@ mod tests {
     }
 
     #[test]
+    fn task_prompt_request_contract_is_bounded_and_editable() {
+        let bundle = schema_bundle();
+        let definitions = &bundle["request"]["$defs"];
+        assert_eq!(definitions["taskAddParams"]["required"], json!(["title"]));
+        assert_eq!(
+            definitions["taskAddParams"]["properties"]["title"]["$comment"],
+            format!(
+                "Consumers must enforce a {}-byte UTF-8 limit.",
+                crate::orch::MAX_TASK_TITLE_BYTES
+            )
+        );
+        assert_eq!(
+            definitions["taskAddParams"]["properties"]["prompt"]["$comment"],
+            format!(
+                "Consumers must enforce a {}-byte UTF-8 limit.",
+                crate::orch::MAX_TASK_PROMPT_BYTES
+            )
+        );
+        assert!(definitions["taskAddParams"]["properties"]["title"]
+            .get("maxLength")
+            .is_none());
+        assert!(definitions["taskAddParams"]["properties"]["prompt"]
+            .get("maxLength")
+            .is_none());
+        assert_eq!(
+            definitions["taskUpdateParams"]["properties"]["prompt"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(
+            definitions["taskUpdateParams"]["properties"]["prompt"]["$comment"],
+            format!(
+                "Consumers must enforce a {}-byte UTF-8 limit.",
+                crate::orch::MAX_TASK_PROMPT_BYTES
+            )
+        );
+        assert!(definitions["taskUpdateParams"]["properties"]["prompt"]
+            .get("maxLength")
+            .is_none());
+    }
+
+    #[test]
     fn schema_bundle_publishes_the_general_event_catalog() {
         let bundle = schema_bundle();
         let catalog = bundle["event_catalog"]["properties"].as_object().unwrap();
@@ -118,6 +159,18 @@ mod tests {
             "agent.authority_released",
             "agent.authority_reported",
             "agent.hook",
+            "automation.created",
+            "automation.deleted",
+            "automation.disabled",
+            "automation.enabled",
+            "automation.rebound",
+            "automation.run_failed",
+            "automation.run_finished",
+            "automation.run_materialized",
+            "automation.run_queued",
+            "automation.run_started",
+            "automation.run_updated",
+            "automation.updated",
             "config.changed",
             "events.resync_required",
             "layout.applied",
@@ -198,6 +251,23 @@ mod tests {
             "#/$defs/agent_status"
         );
 
+        let automation_definition = &bundle["event_catalog"]["$defs"]["automation_definition"];
+        assert_eq!(automation_definition["additionalProperties"], false);
+        assert_eq!(
+            automation_definition["properties"]["task"]["additionalProperties"],
+            false
+        );
+        assert!(
+            automation_definition["properties"]["task"]["properties"]
+                .get("prompt")
+                .is_none(),
+            "automation events must not expose stored prompts"
+        );
+        assert_eq!(
+            bundle["event_catalog"]["$defs"]["automation_run"]["additionalProperties"],
+            false
+        );
+
         fn assert_refs_resolve(root: &Value, documents: &Value, value: &Value) {
             if let Some(reference) = value.get("$ref").and_then(Value::as_str) {
                 let (document, pointer) = reference.split_once('#').unwrap_or((reference, ""));
@@ -264,6 +334,7 @@ mod tests {
             .iter()
             .map(|value| value.as_str().unwrap())
             .collect();
+        assert!(!task_required.contains("prompt"));
         assert!(!task_required.contains("mode"));
         assert!(!task_required.contains("workspace_worker"));
         assert_eq!(
@@ -273,6 +344,10 @@ mod tests {
         assert_eq!(
             task["properties"]["workspace_worker"]["$ref"],
             "#/$defs/workspace_worker"
+        );
+        assert_eq!(
+            task["properties"]["prompt"]["type"],
+            json!(["string", "null"])
         );
 
         let workspace_worker = &definitions["workspace_worker"];

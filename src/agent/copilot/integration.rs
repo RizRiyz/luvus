@@ -9,6 +9,7 @@ pub(super) const OPERATIONS: IntegrationOperations = IntegrationOperations {
     install,
     uninstall,
     is_installed,
+    hook: None,
 };
 
 fn config_dir() -> PathBuf {

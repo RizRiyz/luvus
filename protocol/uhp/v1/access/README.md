@@ -51,3 +51,21 @@ the Luvus server and panes remain alive.
 
 UHP Access is not a new UHP version. Clients must discover live capabilities
 after pairing and validate frames against the installed UHP schema bundle.
+
+Control Access permits the exact `agent.keys` RPC for a recognized agent pane;
+read-only Access refuses it. It retains the owner key grammar: named keys,
+`ctrl+`/`c-` plus any ASCII letter (including `ctrl+z`), and single printable
+Unicode codepoints. A batch can compose escape sequences such as
+`["esc","[","Z"]`. This is intentionally wider than control-stream `send_key`.
+The ordinary 1 MiB frame limit still applies. Validation rejects an entire bad
+batch before queueing any prefix; success returns `{"type":"ok","pane":"7"}`
+and means queue admission, not child consumption. `agent.send`, pane raw input,
+agent launch/fork, close, token management, and standalone terminal input
+actions remain forbidden through Access. No request, response, or event shape
+changes are introduced by this permission.
+
+Control also permits `pane.rename` with the existing `pane` and `name` parameters;
+read-only Access denies it. Rename retains the owner name validation and
+`pane.renamed` event. An empty name clears the pane alias. Effective
+`access.allowed_methods` includes `pane.rename` only for Control endpoints
+whose owner advertises it; the request, response, and event schemas are unchanged.

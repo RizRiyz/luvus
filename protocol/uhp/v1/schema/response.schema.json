@@ -7,7 +7,7 @@
   "required": ["id"],
   "properties": {
     "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:-]+$" },
-    "result": {},
+    "result": { "type": "object" },
     "error": {
       "type": "object",
       "additionalProperties": true,
@@ -15,5 +15,128 @@
       "properties": { "code": { "type": "string" }, "message": { "type": "string" } }
     }
   },
-  "oneOf": [ { "required": ["result"] }, { "required": ["error"] } ]
+  "oneOf": [ { "required": ["result"] }, { "required": ["error"] } ],
+  "allOf": [
+    {
+      "if": {
+        "required": ["result"],
+        "properties": { "result": { "required": ["type", "access"], "properties": { "type": { "const": "uhp_capabilities" } } } }
+      },
+      "then": { "properties": { "result": {
+        "required": ["methods"],
+        "properties": {
+          "methods": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+          "access": { "$ref": "#/$defs/effectiveAccess" }
+        }
+      } } }
+    },
+    {
+      "if": {
+        "required": ["result"],
+        "properties": {
+          "result": {
+            "type": "object",
+            "required": ["type"],
+            "properties": { "type": { "const": "agent_wait" } }
+          }
+        }
+      },
+      "then": { "properties": { "result": { "$ref": "#/$defs/agentWaitResult" } } }
+    },
+    {
+      "if": {
+        "required": ["result"],
+        "properties": { "result": {
+          "required": ["type", "observed_state"],
+          "properties": { "type": { "const": "agent_prompt" } }
+        } }
+      },
+      "then": { "properties": { "result": { "$ref": "#/$defs/observedAgentPromptResult" } } }
+    },
+    {
+      "if": {
+        "required": ["error"],
+        "properties": { "error": {
+          "required": ["code", "data"],
+          "properties": { "code": { "const": "agent_not_running" }, "data": { "type": "object", "required": ["observed_state"] } }
+        } }
+      },
+      "then": { "properties": { "error": { "properties": { "data": { "$ref": "#/$defs/promptFailureData" } } } } }
+    }
+  ],
+  "$defs": {
+    "promptFailureData": {
+      "description": "Coordinates retained when a queued prompt wait loses its pane or terminal. submitted and queued describe queue admission only.",
+      "type": "object",
+      "required": ["pane", "queued", "submitted", "observed_state", "reason", "baseline_revision", "content_revision"],
+      "properties": {
+        "pane": { "type": "string", "pattern": "^[1-9][0-9]{0,9}$" },
+        "queued": { "const": true },
+        "submitted": { "const": true },
+        "observed_state": { "enum": ["working", "blocked", null] },
+        "reason": { "const": "pane_closed" },
+        "baseline_revision": { "type": "integer", "minimum": 0 },
+        "content_revision": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "observedAgentPromptResult": {
+      "description": "The observed_state field identifies the prompt-wait shape. It records the first new working or blocked transition, or null on timeout before one occurs. submitted means queued, not confirmed delivery. No-wait and legacy responses omit this field.",
+      "type": "object",
+      "required": ["type", "pane", "submitted", "matched", "status", "baseline_revision", "content_revision", "evidence", "observed_state"],
+      "properties": {
+        "type": { "const": "agent_prompt" },
+        "pane": { "type": "string", "pattern": "^[1-9][0-9]{0,9}$" },
+        "submitted": { "const": true },
+        "matched": { "type": "boolean" },
+        "status": { "enum": ["idle", "working", "blocked", "done", "unknown", null] },
+        "baseline_revision": { "type": "integer", "minimum": 0 },
+        "content_revision": { "type": "integer", "minimum": 0 },
+        "evidence": { "enum": ["state_transition", "timeout"] },
+        "observed_state": { "enum": ["working", "blocked", null] }
+      },
+      "oneOf": [
+        { "properties": { "evidence": { "const": "state_transition" }, "matched": { "const": true }, "observed_state": { "enum": ["working", "blocked"] } } },
+        { "properties": { "evidence": { "const": "timeout" }, "matched": { "const": false } } }
+      ]
+    },
+    "effectiveAccess": {
+      "description": "Access-only endpoint authority. The owner endpoint omits this field; unknown additive fields remain valid. allowed_methods is a subset of methods enforced by the gateway.",
+      "type": "object",
+      "required": ["mode", "allowed_methods", "limits"],
+      "properties": {
+        "mode": { "enum": ["read_only", "control"] },
+        "allowed_methods": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "limits": {
+          "type": "object",
+          "required": ["connections", "requests_per_minute"],
+          "properties": {
+            "connections": { "type": "integer", "minimum": 1 },
+            "requests_per_minute": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "agentWaitResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "matched", "pane", "status"],
+      "properties": {
+        "type": { "const": "agent_wait" },
+        "matched": { "type": "boolean" },
+        "pane": { "type": ["string", "null"], "pattern": "^[1-9][0-9]{0,9}$" },
+        "status": { "type": ["string", "null"], "enum": ["idle", "working", "blocked", "done", null] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "matched": { "const": true } }, "required": ["matched"] },
+          "then": {
+            "properties": {
+              "pane": { "type": "string", "pattern": "^[1-9][0-9]{0,9}$" },
+              "status": { "enum": ["idle", "working", "blocked", "done"] }
+            }
+          }
+        }
+      ]
+    }
+  }
 }

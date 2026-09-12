@@ -10,8 +10,9 @@ back after a restart, all without wrapping or modifying the agents themselves.
 ## The AGENTS sidebar
 
 Every pane running a recognized agent (Claude Code, Copilot, Codex, opencode,
-Kimi, Grok, Hermes CLI, Muse Code, Pi, Oh My Pi (OMP), Cursor, Gemini, Qwen,
-Kiro, Aider, Amp, Droid, or fx) appears in the sidebar with a live state:
+OpenCode 2 Preview, Kimi, Grok, Hermes CLI, Muse Code, Pi, Oh My Pi (OMP),
+Cursor, Gemini, Qwen, Kilo Code, Kiro, Aider, Amp, Droid, Devin, or fx) appears
+in the sidebar with a live state:
 
 | State | Meaning | How it's detected |
 |---|---|---|
@@ -25,7 +26,14 @@ which agents are still busy without continuous UI animation. When one finishes
 or blocks, luvus can play a Retro, Soft, or Pulse cue. Sounds are optional and
 off by default, turn on the events you want in **Settings → General**.
 
-Click a row to jump to that agent's pane from anywhere, across workspaces.
+Click a row to jump to that agent's pane from anywhere, across workspaces. For
+keyboard navigation, press `Ctrl+Space a` to focus AGENTS, move with arrows or
+`j` / `k`, and press `Enter` to open the selected live or resumable agent. Press
+`a` for the selected row's right-click actions, `f` to switch All / Active, `s`
+to switch all workspaces / this workspace, and `Esc` or `q` to return input to
+the pane. Choose **Hide Path** in any agent row's menu for a compact one-row
+list, then **Show Path** to restore the workspace and session detail rows. The
+choice persists across restarts.
 
 States are **debounced**: an agent that pauses mid-turn (thinking, tool calls,
 API latency) holds at *working* instead of flickering. You get one clean
@@ -40,6 +48,13 @@ idle. That way you never get a false state or a false completion chime.
 The **All / Active** toggle in the header switches between the full resumable
 history and live agents only. A new configuration starts with **All**, then
 luvus remembers whichever view you select across restarts.
+
+When **Show agent session title** is on, the second line of each agent row
+prefers the live OSC title, then a title a module published with
+`ui.agent_title.push`. If neither is set, live rows keep `workspace · =pane`
+and resumable rows keep the project folder. Luvus pane aliases (`=name`) are
+not used as titles. Core Luvus does not parse an agent's native session store
+for this line; a module supplies names such as Pi's `session_info.name`.
 
 ## Usage in Mission Control
 
@@ -62,7 +77,8 @@ Click a session row to select it and update the Selected Agent panel. Use
 | Claude Code | project transcript |
 | Codex | rollout token counters |
 | GitHub Copilot CLI | session shutdown metrics |
-| opencode | read-only session database |
+| opencode | selected-session integration events |
+| OpenCode 2 Preview | unavailable until an exact structured counter is exposed |
 | Kimi | session status records |
 | Grok | completed-turn usage records |
 | Pi | assistant message usage |
@@ -70,10 +86,10 @@ Click a session row to select it and update the Selected Agent panel. Use
 | Gemini and Qwen | project chat records |
 | fx | session usage snapshot |
 
-Aider, Kiro, Cursor, Amp, Droid, Muse, and manifest-defined agents still receive live
-identity and state detection, but show `—` for usage until they expose a stable
-per-session counter or report one through an integration. Luvus never estimates
-tokens from transcript text.
+Aider, OpenCode 2 Preview, Kilo Code, Kiro, Cursor, Amp, Droid, Muse, Devin,
+and manifest-defined agents still receive live identity and state detection,
+but show `—` for usage until they expose a stable per-session counter or report
+one through an integration. Luvus never estimates tokens from transcript text.
 
 Usage parsing runs off the render path only when Mission Control becomes active,
 its scope changes, or you choose **Refresh**. A hidden dashboard schedules no
@@ -114,20 +130,22 @@ pane, so a repeating prompt can't spam you.
 
 ## Session resume: the flagship
 
-luvus reopens each agent's **own conversation** after a restart, with zero
-configuration. It discovers the agent's most recent session from the agent's
-native on-disk store, keyed to the pane's folder, and runs the right resume
-command for you:
+luvus reopens each agent's **own conversation** after a restart. For agents
+with a stable native store, it discovers the session by pane folder with no
+setup. Integrations provide exact ownership where directory matching alone is
+not sufficient, and Luvus runs the agent's own resume command:
 
 | Agent | Resumes via |
 |---|---|
 | Claude Code | its project transcript store |
 | GitHub Copilot CLI | its session-state store |
 | Codex | its rollout files |
-| opencode | its session storage |
+| Antigravity CLI | its workspace conversation cache (`~/.gemini/antigravity-cli/cache/last_conversations.json`) |
+| opencode | its session storage, plus exact live ownership from the optional integration |
+| OpenCode 2 Preview | `opencode2 --session <id>` when the exact ID is already known |
 | Kimi | its session index (`~/.kimi-code/session_index.jsonl`) |
 | Grok | its session directory (`~/.grok/sessions`) |
-| Hermes CLI | its active SQLite session store (`$HERMES_HOME/state.db` or `~/.hermes/state.db`) |
+| Hermes CLI | its exact session report from the optional integration |
 | Pi | its session store (`~/.pi/agent/sessions`) |
 | Oh My Pi (OMP) | its profile-, XDG-, and override-aware native session store |
 | Muse Code | its XDG data store (`$XDG_DATA_HOME/muse/sessions`) |
@@ -135,6 +153,13 @@ command for you:
 | Qwen | its project chat store (`~/.qwen/tmp`) |
 | fx | its session store (`~/.fx/sessions`) |
 | Cursor | resume command (when the session id is known) |
+| Kilo Code | `kilo --session <id>` (when the exact session id is known) |
+| Devin | `devin --resume <id>` (when the exact session id is known) |
+
+OpenCode 2 Preview runs beside OpenCode V1 under the distinct `opencode2`
+executable. Luvus does not scan the V2 service's live SQLite database or reuse
+the V1 TUI plugin. Exact-ID resume remains available, and scheduled V2 work is
+offered only for explicit **Full access** through `opencode2 run --auto`.
 
 You'll also see **recent sessions** listed at the bottom of the AGENTS sidebar
 (toggle *All*): click one to reopen it into a new pane, even sessions from
@@ -169,6 +194,7 @@ support it natively:
 | Claude Code | `claude --resume <id> --fork-session` |
 | Grok Build | `grok --resume <id> --fork-session` |
 | Codex | `codex fork <id>` |
+| Kilo Code | `kilo --session <id> --fork` |
 | Pi | `pi --fork <id>` |
 | Oh My Pi (OMP) | `omp --fork <id>` |
 
@@ -183,37 +209,58 @@ conversation. Install or refresh the Codex hook with
 `luvus integration install codex`; its SessionStart and prompt hooks bind new
 and resumed Codex panes to their exact rollout.
 
+Kilo Code also requires an exact session ID for resume or fork. Luvus detects
+the `kilo` and `kilocode` executables natively, but it does not scan Kilo's
+current database or guess which session belongs to a pane.
+
+Devin has the same boundary, without fork. Luvus does not open Devin's private
+session database, so its sessions are never listed as resumable and
+`luvus agent resume <id>` cannot find them. A pane resumes on restore only from
+an exact binding reported to Luvus (`luvus pane report --agent devin --session
+<id>`) and persisted, which restores as `devin --resume <id>`.
+
 Muse Code supports native detection and resume, but not **Fork to New Pane**.
 Its `/fork` command exists only inside the active TUI, and its CLI refuses to
 resume the same live session in a sibling pane.
 
-Hermes CLI has the same external boundary. Luvus can resume its native
-sessions, but Hermes exposes `/branch` and `/fork` only inside the active TUI,
-so it is not listed as a native pane-fork target.
+Hermes CLI has the same external boundary. Luvus can resume a session whose
+exact identity was reported and persisted by its integration, but Hermes
+exposes `/branch` and `/fork` only inside the active TUI, so it is not listed as
+a native pane-fork target.
 
 ## Precise events: the integration hook
 
 Screen-based detection needs no setup and works for everything. The optional
-**hook** adds precision: the agent itself reports its exact session id and
-lifecycle events (permission prompt raised, turn ended) into luvus:
+**hook** adds precision: the agent itself reports its exact session id and,
+where its hook contract supports them safely, lifecycle events into luvus:
 
 ```sh
-luvus integration install claude    # or: copilot · codex · opencode · kimi · grok · hermes · omp
+luvus integration install claude    # or: copilot · codex · antigravity · opencode · kimi · grok · hermes · omp
 ```
 
 or toggle it in **Settings → Integrations**. What it does per agent:
 
 - **claude / copilot / codex**: registers a small session-start hook script in
   the agent's own settings file.
-- **opencode**: installs a tiny plugin file.
+- **antigravity**: adds one Luvus-owned `PreInvocation` entry to
+  `~/.gemini/config/hooks.json`. It reports only the exact conversation id for
+  `agy --conversation <id>` restore; screen detection continues to own agent
+  state, and every other named Antigravity hook is preserved.
+- **opencode**: installs a TUI-local plugin and registers it in the effective
+  `tui.json`, `tui.jsonc`, or `OPENCODE_TUI_CONFIG` file
+  without removing comments or unrelated plugins. It reports only the root
+  session selected in that pane and sends cumulative structured usage directly
+  to the inherited owner-local Luvus endpoint. No `luvus` process is spawned per
+  update and no agent database is opened.
 - **kimi**: adds a `[[hooks]]` entry to `~/.kimi-code/config.toml`, edited in
   place so your API keys, comments, and own hooks are left untouched.
 - **grok**: installs its own hook file without editing Grok's authentication
   configuration.
 - **hermes**: installs an opt-in plugin under the active `HERMES_HOME`. It
-  reports an exact session id once per session while the read-only SQLite
-  adapter remains the zero-setup fallback. Luvus preserves unrelated YAML
-  settings and removes only its own plugin entry on uninstall.
+  reports an exact session id once per session, which Luvus persists for
+  restart resume. Luvus preserves unrelated YAML settings and removes only its
+  own plugin entry on uninstall. Without the integration, detection still
+  works but historical Hermes sessions are not scanned or guessed.
 - **omp**: installs one managed TypeScript extension in OMP's active agent
   directory. It reports exact session identity and authoritative
   idle/working/blocked/done transitions while preserving Luvus's native
