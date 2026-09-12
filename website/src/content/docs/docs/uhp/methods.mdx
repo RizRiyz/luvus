@@ -79,6 +79,41 @@ method registry, event sequence fence, identity rules, limits, and
 graphics support. Discover capabilities instead of inferring support from the
 Luvus release number.
 
+`graphics` remains a boolean in UHP 1.0: it says whether the build implements
+graphics. Optional, additive `graphics_details` describes the implementation and
+the current display:
+
+```json
+{"graphics":true,
+ "graphics_details":{"protocol":"kitty","placement":"unicode_placeholder",
+                     "supported":true,"available":false}}
+```
+
+`graphics_details.supported` describes build support; `available` says whether
+the **foreground client** can draw images right now. The latter changes on
+attach, detach, and input-driven foreground changes, not on a passive client's
+resize. A program running in a pane asks the terminal with kitty's own query;
+Luvus acknowledges it only when that foreground display can draw.
+
+Already-running image streams can still be delivered to another attached
+graphics-capable client. Non-graphics clients paint their image cells as blanks;
+switching clients does not make a child renegotiate an earlier successful query.
+Consumers must tolerate absent `graphics_details` on older servers and ignore
+unknown additive fields. Do not interpret the build-support boolean alone as
+permission to draw on the active display.
+
+Inline chunked images are buffered per pane until the complete transfer arrives,
+so concurrent panes cannot interleave their chunks on one host terminal. Pending
+transfers are bounded to 8 MiB / 4,096 commands per pane; an overflow discards the
+partial transfer, including late-attach replay. Incomplete transfers are not
+replayed to newly attached clients. A pane with an unfinished image does not block
+another pane's complete image.
+
+The machine-aware client supports graphics on its owner-local endpoint. Remote
+machine endpoints currently negotiate text-only output to avoid collisions
+between independent servers' image IDs. Check `graphics_details.available` on
+the endpoint in use rather than assuming support from the local terminal.
+
 | Family | Methods |
 |---|---|
 | host / sessions | `host.capabilities` · `host.info` · `host.doctor` · `host.update.check` · `host.update.install` · `session.list` · `session.status` · `session.start` · `session.stop` · `session.restart` · `session.delete` · `skill.status` · `skill.enable` · `skill.disable` · `integration.status` · `integration.install` · `integration.uninstall` |

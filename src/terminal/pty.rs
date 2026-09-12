@@ -134,6 +134,9 @@ pub struct Pane {
     size: Arc<Mutex<(u16, u16)>>,
     /// Set by `Drop` so a close-before-spawn aborts the spawn worker.
     cancelled: Arc<AtomicBool>,
+    /// Read whenever this pane's window size is set, so the pixel dimensions a
+    /// child sees follow the terminal the user is actually looking at.
+    host_graphics: crate::terminal::graphics::HostGraphics,
 }
 
 impl Drop for Pane {
@@ -198,6 +201,7 @@ impl Pane {
         shell: &str,
         history_budget_bytes: usize,
         appearance: PaneAppearance,
+        host_graphics: crate::terminal::graphics::HostGraphics,
     ) -> Result<Pane> {
         let cmd = CommandBuilder::new(shell);
         Self::build(
@@ -212,6 +216,7 @@ impl Pane {
             &[],
             history_budget_bytes,
             appearance,
+            host_graphics,
         )
     }
 
@@ -231,6 +236,7 @@ impl Pane {
         argv: &[String],
         history_budget_bytes: usize,
         appearance: PaneAppearance,
+        host_graphics: crate::terminal::graphics::HostGraphics,
     ) -> Result<Pane> {
         let Some((program, args)) = argv.split_first() else {
             return Err(anyhow::anyhow!("empty shell command"));
@@ -251,6 +257,7 @@ impl Pane {
             &[],
             history_budget_bytes,
             appearance,
+            host_graphics,
         )
     }
 
@@ -267,6 +274,7 @@ impl Pane {
         env: &[(String, String)],
         history_budget_bytes: usize,
         appearance: PaneAppearance,
+        host_graphics: crate::terminal::graphics::HostGraphics,
     ) -> Result<Pane> {
         let Some((program, args)) = argv.split_first() else {
             return Err(anyhow::anyhow!("empty module command"));
@@ -287,6 +295,7 @@ impl Pane {
             env,
             history_budget_bytes,
             appearance,
+            host_graphics,
         )
     }
 
@@ -306,6 +315,7 @@ impl Pane {
         shell: &str,
         history_budget_bytes: usize,
         appearance: PaneAppearance,
+        host_graphics: crate::terminal::graphics::HostGraphics,
     ) -> Pane {
         let cmd = CommandBuilder::new(shell);
         Self::build_deferred(
@@ -321,6 +331,7 @@ impl Pane {
             &[],
             history_budget_bytes,
             appearance,
+            host_graphics,
         )
     }
 
@@ -340,6 +351,7 @@ impl Pane {
         shell: &str,
         history_budget_bytes: usize,
         appearance: PaneAppearance,
+        host_graphics: crate::terminal::graphics::HostGraphics,
     ) -> Pane {
         let cmd = CommandBuilder::new(shell);
         Self::build_deferred(
@@ -355,6 +367,7 @@ impl Pane {
             &[],
             history_budget_bytes,
             appearance,
+            host_graphics,
         )
     }
 
@@ -373,6 +386,7 @@ impl Pane {
         argv: &[String],
         history_budget_bytes: usize,
         appearance: PaneAppearance,
+        host_graphics: crate::terminal::graphics::HostGraphics,
     ) -> Result<Pane> {
         let Some((program, args)) = argv.split_first() else {
             return Err(anyhow::anyhow!("empty shell command"));
@@ -394,6 +408,7 @@ impl Pane {
             &[],
             history_budget_bytes,
             appearance,
+            host_graphics,
         ))
     }
 
@@ -410,14 +425,11 @@ impl Pane {
         extra_env: &[(String, String)],
         history_budget_bytes: usize,
         appearance: PaneAppearance,
+        host_graphics: crate::terminal::graphics::HostGraphics,
     ) -> Result<Pane> {
         let pty_system = native_pty_system();
-        let pair = pty_system.openpty(PtySize {
-            rows: rows.max(1),
-            cols: cols.max(1),
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
+        let pane_host_graphics = host_graphics.clone();
+        let pair = pty_system.openpty(pty_size(cols, rows, &host_graphics))?;
 
         apply_pane_env(&mut cmd, id, &cwd, extra_env);
         let mut child = pair.slave.spawn_command(cmd)?;
@@ -444,6 +456,7 @@ impl Pane {
             input_tx.clone(),
             history_budget_bytes,
             appearance,
+            host_graphics,
         );
         // Replay the saved screen so a restored pane shows its prior content.
         if let Some(screen) = initial {
@@ -478,6 +491,7 @@ impl Pane {
 
         Ok(Pane {
             id,
+            host_graphics: pane_host_graphics,
             engine,
             child_pid: Arc::new(AtomicU32::new(child_pid)),
             terminal_runtime: Arc::new(Mutex::new(Some(terminal_runtime))),
@@ -514,6 +528,7 @@ impl Pane {
         extra_env: &[(String, String)],
         history_budget_bytes: usize,
         appearance: PaneAppearance,
+        host_graphics: crate::terminal::graphics::HostGraphics,
     ) -> Pane {
         // Everything a caller can observe before the child exists: the engine
         // (pane.read, detection, rendering) and the input queue.
@@ -526,7 +541,9 @@ impl Pane {
             input_tx.clone(),
             history_budget_bytes,
             appearance,
+            host_graphics.clone(),
         );
+        let pane_host_graphics = host_graphics.clone();
         if let Some(screen) = initial {
             if let Ok(mut engine) = engine.lock() {
                 engine.advance(screen.as_bytes());
@@ -569,6 +586,7 @@ impl Pane {
             let worker_cwd = cwd.clone();
             let worker_fallback_cwds = fallback_cwds.to_vec();
             let worker_env = extra_env.to_vec();
+            let worker_host_graphics = host_graphics.clone();
             thread::spawn(move || {
                 let fail = || {
                     let _ = tx.send(AppEvent::PtyExit(id));
@@ -576,12 +594,7 @@ impl Pane {
 
                 let (cols, rows) = *size.lock().unwrap_or_else(|p| p.into_inner());
                 let pty_system = native_pty_system();
-                let pair = match pty_system.openpty(PtySize {
-                    rows: rows.max(1),
-                    cols: cols.max(1),
-                    pixel_width: 0,
-                    pixel_height: 0,
-                }) {
+                let pair = match pty_system.openpty(pty_size(cols, rows, &worker_host_graphics)) {
                     Ok(pair) => pair,
                     Err(_) => return fail(),
                 };
@@ -648,12 +661,9 @@ impl Pane {
                 // A resize raced the spawn: re-apply the latest size.
                 let latest = *size.lock().unwrap_or_else(|p| p.into_inner());
                 if latest != (cols, rows) {
-                    let _ = pair.master.resize(PtySize {
-                        rows: latest.1.max(1),
-                        cols: latest.0.max(1),
-                        pixel_width: 0,
-                        pixel_height: 0,
-                    });
+                    let _ = pair
+                        .master
+                        .resize(pty_size(latest.0, latest.1, &worker_host_graphics));
                 }
 
                 if io::start(
@@ -688,6 +698,7 @@ impl Pane {
 
         Pane {
             id,
+            host_graphics: pane_host_graphics,
             engine,
             child_pid,
             terminal_runtime,
@@ -1080,6 +1091,21 @@ impl Pane {
         self.try_send(&wrap_paste(text, bracketed))
     }
 
+    /// Re-send the window size without changing the cell grid.
+    ///
+    /// The pixel dimensions in it come from the terminal displaying a client,
+    /// so they change when clients attach or detach even though the pane is
+    /// the same size. A child that draws images reads those fields, and only
+    /// learns the new ones when the size is sent again.
+    pub fn refresh_window_size(&self) {
+        let (cols, rows) = *self.size.lock().unwrap_or_else(|p| p.into_inner());
+        if let Ok(master) = self.master.lock() {
+            if let Some(master) = master.as_ref() {
+                let _ = master.resize(pty_size(cols, rows, &self.host_graphics));
+            }
+        }
+    }
+
     /// Resize the PTY + engine. Returns whether the size actually changed (so the
     /// caller can note the resize for detection's post-resize grace, docs/07).
     /// A deferred pane that has not spawned yet records the size; the spawn
@@ -1097,12 +1123,7 @@ impl Pane {
         }
         if let Ok(master) = self.master.lock() {
             if let Some(master) = master.as_ref() {
-                let _ = master.resize(PtySize {
-                    rows,
-                    cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                });
+                let _ = master.resize(pty_size(cols, rows, &self.host_graphics));
             }
         }
         if let Ok(mut e) = self.engine.lock() {
@@ -1137,6 +1158,24 @@ fn wrap_paste(text: &str, bracketed: bool) -> Vec<u8> {
     out.extend_from_slice(text.as_bytes());
     out.extend_from_slice(b"\x1b[201~");
     out
+}
+
+/// The window size a pane reports to its child.
+///
+/// A terminal reports its text area in pixels as well as in cells, and a
+/// program that draws an image reads the pixel fields to choose a resolution.
+/// Luvus is not a display, so it can only answer once a client has told it how
+/// big a cell is on the terminal in front of the user; until then the pixel
+/// fields stay zero, which is the conventional way to say "unknown".
+fn pty_size(cols: u16, rows: u16, host: &crate::terminal::graphics::HostGraphics) -> PtySize {
+    let (cols, rows) = (cols.max(1), rows.max(1));
+    let cell = host.cell_size();
+    PtySize {
+        rows,
+        cols,
+        pixel_width: cell.map_or(0, |cell| cols.saturating_mul(cell.width)),
+        pixel_height: cell.map_or(0, |cell| rows.saturating_mul(cell.height)),
+    }
 }
 
 /// The file-name component of a program path, for the pane's display command.
@@ -1305,6 +1344,7 @@ mod reap_tests {
             "/bin/sh",
             500,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         )
         .expect("spawn")
     }
@@ -1362,6 +1402,7 @@ mod reap_tests {
             "/bin/sh",
             500,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         )
         .expect("spawn shell with inherited blocked SIGCHLD");
         let pid = pane.child_pid.load(Ordering::SeqCst);
@@ -1411,6 +1452,7 @@ mod reap_tests {
             PaneId::alloc(), 80, 24, std::env::current_dir().unwrap(), tx,
             &["/bin/sh".into(), "-c".into(), "i=0; while [ $i -lt 2024 ]; do printf 'row %s cafe\n' \"$i\"; i=$((i + 1)); done; sleep 10".into()],
             &[], 16 * 1024 * 1024, PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         ).unwrap();
         for resize in [false, true] {
             if resize {
@@ -1455,6 +1497,7 @@ mod reap_tests {
             "/bin/sh",
             500,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         );
         assert_eq!(
             pane.child_pid.load(Ordering::SeqCst),
@@ -1501,6 +1544,7 @@ mod reap_tests {
             "/bin/sh",
             500,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         );
         assert!(
             pane.engine
@@ -1529,6 +1573,7 @@ mod reap_tests {
             "/bin/sh",
             500,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1571,6 +1616,7 @@ mod reap_tests {
             "/bin/sh",
             500,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1607,6 +1653,7 @@ mod reap_tests {
             "/bin/sh",
             500,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         );
         // The spawn has not forked yet: this is the racing resize.
         assert!(pane.resize(132, 40));
@@ -1669,12 +1716,58 @@ mod reap_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_pane_env, child_poll_finished, path_with_server_binary, wrap_paste,
+        apply_pane_env, child_poll_finished, path_with_server_binary, pty_size, wrap_paste,
         write_input_action, CommandBuilder, InputAction, PaneId,
     };
+    use crate::terminal::graphics::HostGraphics;
+    use crate::terminal::theme_probe::CellSize;
     use std::ffi::OsStr;
     use std::path::PathBuf;
     use std::time::Duration;
+
+    /// A pane reports its size in pixels as well as in cells, and a program
+    /// that draws an image reads the pixel fields to pick a resolution. Luvus
+    /// is not a display, so it can only fill them in once a client has said how
+    /// big a cell is on the terminal in front of the user.
+    #[test]
+    fn a_pane_reports_pixels_only_once_a_client_has_measured_a_cell() {
+        let host = HostGraphics::default();
+
+        let unknown = pty_size(80, 24, &host);
+        assert_eq!((unknown.cols, unknown.rows), (80, 24));
+        assert_eq!(
+            (unknown.pixel_width, unknown.pixel_height),
+            (0, 0),
+            "zero is how a terminal says it does not know, and luvus does not"
+        );
+
+        host.set_cell_size(Some(CellSize {
+            width: 14,
+            height: 34,
+        }));
+        let known = pty_size(80, 24, &host);
+        assert_eq!((known.cols, known.rows), (80, 24));
+        assert_eq!((known.pixel_width, known.pixel_height), (80 * 14, 24 * 34));
+
+        // The last drawing client detaching takes the measurement with it.
+        host.set_cell_size(None);
+        let forgotten = pty_size(80, 24, &host);
+        assert_eq!((forgotten.pixel_width, forgotten.pixel_height), (0, 0));
+    }
+
+    #[test]
+    fn a_degenerate_pane_still_reports_a_usable_size() {
+        let host = HostGraphics::default();
+        host.set_cell_size(Some(CellSize {
+            width: 14,
+            height: 34,
+        }));
+        // A zero-column pane would otherwise divide into a zero-pixel area,
+        // which a program reads as "unknown" rather than "empty".
+        let size = pty_size(0, 0, &host);
+        assert_eq!((size.cols, size.rows), (1, 1));
+        assert_eq!((size.pixel_width, size.pixel_height), (14, 34));
+    }
 
     #[test]
     fn submit_action_writes_one_paste_then_exactly_one_enter() {

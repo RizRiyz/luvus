@@ -360,6 +360,12 @@ Universal Harness Protocol 1.0 is Luvus's public automation contract for
 workspaces, tabs, panes, agents, terminals, files, Git, DIFF, Mission Control,
 tasks, agent schedules, leases, modules, bars, configuration, and events.
 
+In `uhp.capabilities`, `graphics` remains a UHP 1.0 build-support boolean.
+Optional `graphics_details.available` reports whether the foreground display can
+draw kitty images right now; a passive graphics client does not make it true.
+Older servers may omit the details. Pane programs use kitty's own support query;
+the build flag alone is not permission to draw on the active display.
+
 Open Mission Control in the active workspace with `luvus mission open`, target
 a zero-based workspace with `luvus mission open <workspace>`, or call the
 workspace-scoped UHP method `mission.open`. Use `mission.snapshot` to read agent

@@ -20,6 +20,16 @@
     {
       "if": {
         "required": ["result"],
+        "properties": { "result": { "required": ["type"], "properties": { "type": { "const": "uhp_capabilities" } } } }
+      },
+      "then": { "properties": { "result": { "properties": {
+        "graphics": { "type": "boolean", "description": "UHP 1.0 build-support flag; not live display availability." },
+        "graphics_details": { "$ref": "#/$defs/graphicsDetails" }
+      } } } }
+    },
+    {
+      "if": {
+        "required": ["result"],
         "properties": { "result": { "required": ["type", "access"], "properties": { "type": { "const": "uhp_capabilities" } } } }
       },
       "then": { "properties": { "result": {
@@ -65,6 +75,18 @@
     }
   ],
   "$defs": {
+    "graphicsDetails": {
+      "description": "Optional additive graphics metadata. available, when present, follows the foreground display, not passive renderers.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["protocol", "placement", "supported"],
+      "properties": {
+        "protocol": { "type": "string", "minLength": 1 },
+        "placement": { "type": "string", "minLength": 1 },
+        "supported": { "type": "boolean" },
+        "available": { "type": "boolean" }
+      }
+    },
     "promptFailureData": {
       "description": "Coordinates retained when a queued prompt wait loses its pane or terminal. submitted and queued describe queue admission only.",
       "type": "object",

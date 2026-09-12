@@ -11,9 +11,10 @@ use serde::de::{DeserializeOwned, Error as _, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 use crate::sound::SoundSignal;
-use crate::terminal::theme_probe::TerminalColors;
+use crate::terminal::theme_probe::{CellSize, TerminalColors};
 
-pub const PROTOCOL_VERSION: u32 = 17;
+/// Adds terminal graphics negotiation and ordered image delivery to the machine protocol.
+pub const PROTOCOL_VERSION: u32 = 18;
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 /// Local display cell size in pixels, or `(0, 0)` when the host does not report it.
@@ -66,8 +67,18 @@ pub enum ClientMessage {
     /// owner-local remote-machine form switches back to the local tab.
     OpenWorkspacePicker,
     Detach,
-    /// Response to [`ServerMessage::Ready`] when terminal colors were requested.
-    TerminalColors(Option<TerminalColors>),
+    /// Response to [`ServerMessage::Ready`] when a terminal probe was requested.
+    ///
+    /// Each field is independently optional: a terminal can report its palette
+    /// without answering the graphics query, or the reverse. An absent
+    /// `graphics` is not a refusal — see [`crate::terminal::theme_probe`].
+    TerminalProbe {
+        colors: Option<TerminalColors>,
+        graphics: Option<bool>,
+        /// Pixel size of one cell on the client's terminal, when it reported
+        /// one. A pane's window size carries it to programs that draw images.
+        cell_size: Option<CellSize>,
+    },
     /// Display geometry reported after the version-checked handshake.
     CellPixels {
         cell_width_px: u16,
@@ -177,6 +188,14 @@ pub enum ServerMessage {
     /// Only the cells that changed since the last frame (docs/18 — the wire-level
     /// diff that keeps remote attach over SSH cheap; also cuts local serialization).
     FrameDiff(FrameDiff),
+    /// Kitty graphics commands from a pane's child, to be written to this
+    /// client's terminal verbatim.
+    ///
+    /// They teach that terminal an image without saying where it appears;
+    /// position comes from the placeholder cells in the frame. This travels on
+    /// the same ordered channel as frames and is always sent first, so a
+    /// terminal is never asked to draw an image it has not been given.
+    Graphics(Vec<Vec<u8>>),
     /// Ring the bell + raise a desktop notification on the client's terminal.
     Notify(String),
     /// Play the selected notification cue on the client.
@@ -203,7 +222,10 @@ pub enum ServerMessage {
     /// Completes negotiation after `Welcome`. Kept separate so a new client can
     /// still decode the version-mismatch reply from an older server.
     Ready {
-        probe_terminal: bool,
+        /// Whether to ask the terminal for its palette, which only the virtual
+        /// Terminal theme reads. The client probes either way — graphics
+        /// support describes the terminal, not the theme.
+        probe_colors: bool,
     },
     /// Exact client-owned Workspaces dock for the current viewport. `None`
     /// means the client must use its modal/mobile fallback.

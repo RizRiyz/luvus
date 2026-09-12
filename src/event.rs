@@ -80,12 +80,25 @@ pub enum AppEvent {
         /// detach notifications can never be dropped merely because a frame is
         /// already queued.
         frame_pending: Arc<AtomicBool>,
+        /// The same one-message gate for the images a client is owed while its
+        /// projection is unchanged. Separate from the frame slot so a stalled
+        /// writer cannot let one starve the other.
+        graphics_pending: Arc<AtomicBool>,
         cols: u16,
         rows: u16,
         terminal_colors: Option<TerminalColors>,
+        /// Whether this client's terminal can draw images.
+        terminal_graphics: Option<bool>,
+        terminal_cell_size: Option<crate::terminal::theme_probe::CellSize>,
     },
     /// A binary client detached.
     ClientDetach {
+        id: u64,
+    },
+    /// A client's socket writer dequeued the images it was sent, freeing its
+    /// graphics gate. A backlog held back by a taken gate is flushed on this
+    /// event, not by rendering on every tick until the gate happens to be free.
+    ClientGraphicsSent {
         id: u64,
     },
     /// Change one client's frame/input ownership without closing its transport.

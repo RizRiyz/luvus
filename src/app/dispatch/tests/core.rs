@@ -95,6 +95,57 @@ fn config_reload_applies_the_agents_filter_live() {
     assert_eq!(app.agents_scroll, 0);
 }
 
+/// Automation is told to discover graphics support rather than infer it
+/// from a release number, so the two halves of the answer have to be there
+/// and have to mean different things: what this build implements, and
+/// whether the foreground display can draw right now.
+#[test]
+fn capabilities_separate_graphics_support_from_present_availability() {
+    let (_env, mut app) = app("socket-graphics-capabilities");
+
+    let reported = app
+        .dispatch("uhp.capabilities", &serde_json::json!({}))
+        .expect("capabilities are reported");
+    assert_eq!(reported["graphics"], true, "the UHP 1.0 flag stays boolean");
+    let graphics = &reported["graphics_details"];
+    assert_eq!(graphics["protocol"], "kitty");
+    assert_eq!(graphics["placement"], "unicode_placeholder");
+    assert_eq!(graphics["supported"], true, "the build implements it");
+    assert_eq!(
+        graphics["available"], false,
+        "no client is attached, so nothing could be drawn"
+    );
+
+    app.set_host_graphics(true);
+    let reported = app
+        .dispatch("uhp.capabilities", &serde_json::json!({}))
+        .expect("capabilities are reported");
+    assert_eq!(
+        reported["graphics_details"]["available"], true,
+        "the foreground display can draw"
+    );
+}
+
+/// UHP 1.0 clients deserialize the original graphics flag as a boolean.
+#[test]
+fn review_capabilities_preserve_the_legacy_graphics_wire_type() {
+    #[derive(serde::Deserialize)]
+    struct LegacyCapabilities {
+        graphics: bool,
+    }
+    let (_env, mut app) = app("graphics-legacy-wire-type");
+    for available in [false, true] {
+        app.set_host_graphics(available);
+        let reported = app.dispatch("uhp.capabilities", &json!({})).unwrap();
+        let legacy: LegacyCapabilities = serde_json::from_value(reported.clone())
+            .expect("additive metadata must not break the original boolean field");
+        assert!(legacy.graphics);
+        assert_eq!(reported["protocol"]["major"], 1);
+        assert_eq!(reported["graphics_details"]["supported"], true);
+        assert_eq!(reported["graphics_details"]["available"], available);
+    }
+}
+
 #[test]
 fn config_patch_updates_child_appearance_and_notifies_mode_2031() {
     let (_env, mut app) = app("socket-theme-appearance");
@@ -106,6 +157,7 @@ fn config_patch_updates_child_appearance_and_notifies_mode_2031() {
         response_tx,
         crate::config::SCROLLBACK_BYTES_DEFAULT,
         crate::terminal::appearance::PaneAppearance::default(),
+        crate::terminal::graphics::HostGraphics::default(),
     );
     crate::terminal::vt::VtEngine::advance(&mut engine, b"\x1b[?2031h");
     app.panes.get_mut(&pane_id).unwrap().engine =

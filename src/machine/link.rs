@@ -336,10 +336,12 @@ fn verify_endpoint_with_mode(
                         }
                         welcomed = true;
                     }
-                    ServerMessage::Ready { probe_terminal } if welcomed => {
-                        if probe_terminal {
-                            task.control.send(&ClientMessage::TerminalColors(None))?;
-                        }
+                    ServerMessage::Ready { .. } if welcomed => {
+                        task.control.send(&ClientMessage::TerminalProbe {
+                            colors: None,
+                            graphics: Some(false),
+                            cell_size: None,
+                        })?;
                         task.control.send(&ClientMessage::CellPixels {
                             cell_width_px: 0,
                             cell_height_px: 0,

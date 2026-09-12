@@ -719,6 +719,19 @@ def valid_global_response(value):
             )
     result = value.get("result")
     if isinstance(result, dict) and result.get("type") == "uhp_capabilities":
+        if "graphics" in result and type(result["graphics"]) is not bool:
+            return False
+        if "graphics_details" in result:
+            details = result["graphics_details"]
+            if not (
+                isinstance(details, dict)
+                and {"protocol", "placement", "supported"} <= set(details)
+                and isinstance(details["protocol"], str) and details["protocol"]
+                and isinstance(details["placement"], str) and details["placement"]
+                and type(details["supported"]) is bool
+                and ("available" not in details or type(details["available"]) is bool)
+            ):
+                return False
         return valid_effective_access(result)
     if isinstance(result, dict) and result.get("type") == "agent_prompt" and "observed_state" in result:
         return (

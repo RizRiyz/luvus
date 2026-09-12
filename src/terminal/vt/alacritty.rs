@@ -1,9 +1,10 @@
 //! `alacritty_terminal` implementation of `VtEngine`. Pure Rust — no Zig, no FFI.
 
 use std::cell::Cell;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use alacritty_terminal::event::{Event, EventListener};
+use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
@@ -18,6 +19,8 @@ use super::{
 };
 use crate::terminal::appearance::PaneAppearance;
 use crate::terminal::backend::{CaptureMode, CaptureResult};
+use crate::terminal::graphics;
+use crate::terminal::graphics::placeholder;
 use crate::terminal::pty::{InputAction, InputSender};
 
 #[derive(Default)]
@@ -39,6 +42,30 @@ pub struct EventProxy {
     tx: InputSender,
     title: TitleSlot,
     appearance: Arc<Mutex<PaneAppearance>>,
+    host_graphics: graphics::HostGraphics,
+    graphics_queue: GraphicsSlot,
+    grid: GridSlot,
+}
+
+/// Graphics commands waiting to reach the clients that can draw them. Shared
+/// with the engine, which drains it when a frame is about to be sent.
+type GraphicsSlot = Arc<Mutex<graphics::GraphicsQueue>>;
+
+/// The pane's cell grid, packed as columns in the high half and rows in the
+/// low half. Shared because size queries are answered from inside a terminal
+/// callback, which cannot borrow the terminal to ask it how big it is.
+type GridSlot = Arc<AtomicU32>;
+
+fn pack_grid(cols: u16, rows: u16) -> u32 {
+    (u32::from(cols) << 16) | u32::from(rows)
+}
+
+fn placeholder_color(image_id: u32) -> VtColor {
+    VtColor::Spec(Rgb {
+        r: (image_id >> 16) as u8,
+        g: (image_id >> 8) as u8,
+        b: image_id as u8,
+    })
 }
 
 impl EventListener for EventProxy {
@@ -81,8 +108,60 @@ impl EventListener for EventProxy {
                     }
                 }
             }
+            // How big the pane is in pixels, and how big one cell is. A program
+            // that draws an image asks these to choose a resolution.
+            Event::TextAreaSizeRequest(format) | Event::CellSizeRequest(format) => {
+                self.answer_window_size(format.as_ref());
+            }
+            // Answer the protocol's support query, then either forward the
+            // command to the clients that can draw it or drop it. See
+            // `crate::terminal::graphics`.
+            Event::KittyGraphics(command) => {
+                if let Some(reply) =
+                    graphics::query_reply(&command.payload, self.host_graphics.query_supported())
+                {
+                    let _ = self.tx.send(InputAction::Bytes(reply));
+                    return;
+                }
+                // Nothing can draw this, so collecting it would only cost
+                // memory for a command that is never sent anywhere.
+                if !self.host_graphics.supported() {
+                    return;
+                }
+                self.host_graphics.mark_pending();
+                if let Ok(mut queue) = self.graphics_queue.lock() {
+                    queue.push(
+                        &command.payload,
+                        (command.line, command.column),
+                        self.host_graphics.cell_size(),
+                    );
+                }
+            }
             _ => {}
         }
+    }
+}
+
+impl EventProxy {
+    /// Answer a window-size report, but only when the size is really known.
+    ///
+    /// A pane has no pixels of its own: a cell is as big as the terminal in
+    /// front of the user makes it, which Luvus only learns once a client says
+    /// so. Until then there is nothing truthful to answer, and the report has
+    /// no form for "unsupported", so silence is what tells the child to fall
+    /// back — the same thing a terminal that never implemented it does.
+    fn answer_window_size(&self, format: &(dyn Fn(WindowSize) -> String + Sync + Send)) {
+        let Some(cell) = self.host_graphics.cell_size() else {
+            return;
+        };
+        let packed = self.grid.load(Ordering::Relaxed);
+        let reply = format(WindowSize {
+            num_cols: (packed >> 16) as u16,
+            num_lines: packed as u16,
+            cell_width: cell.width,
+            cell_height: cell.height,
+        });
+        let _ = self.tx.send(InputAction::Bytes(reply.into_bytes()));
     }
 }
 
@@ -105,10 +184,44 @@ impl Dimensions for Dims {
     }
 }
 
+#[derive(Clone, Copy)]
+struct AppliedPlacement {
+    image_id: u32,
+    placement_id: u32,
+    columns: usize,
+    rows: usize,
+    line: i32,
+    column: usize,
+    dirty: bool,
+}
+
+impl AppliedPlacement {
+    fn from_placement(placement: &graphics::Placement) -> Self {
+        Self {
+            image_id: placement.image_id,
+            placement_id: placement.placement_id,
+            columns: placement.columns,
+            rows: placement.rows,
+            line: placement.line,
+            column: placement.column,
+            dirty: false,
+        }
+    }
+
+    fn has_same_geometry(&self, placement: &graphics::Placement) -> bool {
+        self.columns == placement.columns
+            && self.rows == placement.rows
+            && self.line == placement.line
+            && self.column == placement.column
+    }
+}
+
 pub struct AlacrittyEngine {
     term: Term<EventProxy>,
     parser: Processor,
     title: TitleSlot,
+    graphics_queue: GraphicsSlot,
+    grid: GridSlot,
     response_tx: InputSender,
     appearance: Arc<Mutex<PaneAppearance>>,
     history_budget_bytes: usize,
@@ -119,6 +232,16 @@ pub struct AlacrittyEngine {
     history_maintenance_cursors: [usize; 2],
     history_maintenance_pending: bool,
     history_maintenance_full_scan: bool,
+    /// Set when placeholder cells were written straight into the grid, which
+    /// the emulator's own damage tracking cannot have seen.
+    placement_damage: bool,
+    // Placement geometry shares the retained-image working-set bound, so an
+    // image-id stream cannot grow per-pane state without limit.
+    applied: Vec<AppliedPlacement>,
+    /// Shared with the event proxy: the engine queues a command of its own
+    /// when it stretches an image to a resized pane, and has to wake the
+    /// render pass for it the same way the proxy does.
+    host_graphics: graphics::HostGraphics,
     damage_line_indices: Vec<u16>,
     damage_rows: Vec<DamageRow>,
 }
@@ -140,6 +263,7 @@ impl AlacrittyEngine {
             resp_tx,
             history_budget_bytes,
             PaneAppearance::default(),
+            graphics::HostGraphics::default(),
         )
     }
 
@@ -149,6 +273,7 @@ impl AlacrittyEngine {
         resp_tx: impl Into<InputSender>,
         history_budget_bytes: usize,
         initial_appearance: PaneAppearance,
+        host_graphics: graphics::HostGraphics,
     ) -> Self {
         let resp_tx = resp_tx.into();
         let dims = Dims {
@@ -156,11 +281,19 @@ impl AlacrittyEngine {
             rows: rows.max(1) as usize,
         };
         let title: TitleSlot = Arc::new(Mutex::new(TitleState::default()));
+        let graphics_queue: GraphicsSlot = Arc::new(Mutex::new(graphics::GraphicsQueue::default()));
         let appearance = Arc::new(Mutex::new(initial_appearance));
+        let grid: GridSlot = Arc::new(AtomicU32::new(pack_grid(
+            dims.cols as u16,
+            dims.rows as u16,
+        )));
         let proxy = EventProxy {
             tx: resp_tx.clone(),
             title: title.clone(),
             appearance: appearance.clone(),
+            host_graphics: host_graphics.clone(),
+            graphics_queue: graphics_queue.clone(),
+            grid: grid.clone(),
         };
         // Alacritty retains history by rows, not bytes. Derive a conservative
         // capacity from Luvus's per-pane byte budget and current width. The
@@ -177,6 +310,8 @@ impl AlacrittyEngine {
             term,
             parser: Processor::new(),
             title,
+            graphics_queue,
+            grid,
             response_tx: resp_tx,
             appearance,
             history_budget_bytes,
@@ -185,9 +320,151 @@ impl AlacrittyEngine {
             history_maintenance_cursors: [0; 2],
             history_maintenance_pending: false,
             history_maintenance_full_scan: false,
+            placement_damage: false,
+            applied: Vec::with_capacity(graphics::MAX_RETAINED_IMAGES),
+            host_graphics,
             damage_line_indices: Vec::new(),
             damage_rows: Vec::new(),
         }
+    }
+
+    fn apply_pending_placements(&mut self) {
+        let placements = match self.graphics_queue.lock() {
+            Ok(mut queue) => queue.drain_placements(),
+            Err(_) => return,
+        };
+        for placement in placements {
+            let applied_index = self
+                .applied
+                .iter()
+                .position(|applied| applied.image_id == placement.image_id);
+            let applied = applied_index.map(|index| self.applied[index]);
+            let geometry_matches =
+                applied.is_some_and(|applied| applied.has_same_geometry(&placement));
+            let can_skip = applied.is_some_and(|applied| !applied.dirty)
+                && geometry_matches
+                && self.placement_anchor_matches(&placement);
+
+            if !can_skip {
+                if let Some(applied) = applied.filter(|_| !geometry_matches) {
+                    self.clear_stale_placeholder_cells(&applied, &placement);
+                }
+                self.write_placeholder_cells(&placement);
+                let updated = AppliedPlacement::from_placement(&placement);
+                if let Some(index) = applied_index {
+                    self.applied[index] = updated;
+                } else {
+                    if self.applied.len() == graphics::MAX_RETAINED_IMAGES {
+                        self.applied.remove(0);
+                    }
+                    self.applied.push(updated);
+                }
+            }
+            if placement.move_cursor {
+                // A terminal that placed the image itself would leave the
+                // cursor past it. Feeding real line breaks lets the existing
+                // scroll-region logic handle an image that reaches the bottom.
+                let feed = "\r\n".repeat(placement.rows);
+                self.parser.advance(&mut self.term, feed.as_bytes());
+            }
+        }
+    }
+
+    fn placement_anchor_matches(&self, placement: &graphics::Placement) -> bool {
+        let grid = self.term.grid();
+        if placement.line < 0
+            || placement.line >= grid.screen_lines() as i32
+            || placement.column >= grid.columns()
+        {
+            return false;
+        }
+        let cell = &grid[Line(placement.line)][Column(placement.column)];
+        cell.c == placeholder::PLACEHOLDER && cell.fg == placeholder_color(placement.image_id)
+    }
+
+    fn clear_stale_placeholder_cells(&mut self, old: &AppliedPlacement, new: &graphics::Placement) {
+        let color = placeholder_color(old.image_id);
+        let grid = self.term.grid_mut();
+        let columns = grid.columns();
+        let screen_lines = grid.screen_lines() as i32;
+        for row in 0..old.rows {
+            let line = old.line.saturating_add(row as i32);
+            if line < 0 || line >= screen_lines {
+                continue;
+            }
+            for column in 0..old.columns {
+                let column = old.column.saturating_add(column);
+                if column >= columns {
+                    break;
+                }
+                let covered_by_new = line
+                    .checked_sub(new.line)
+                    .and_then(|row| usize::try_from(row).ok())
+                    .is_some_and(|row| row < new.rows)
+                    && column
+                        .checked_sub(new.column)
+                        .is_some_and(|column| column < new.columns);
+                if covered_by_new {
+                    continue;
+                }
+                let cell = &mut grid[Line(line)][Column(column)];
+                if cell.c == placeholder::PLACEHOLDER && cell.fg == color {
+                    *cell = alacritty_terminal::term::cell::Cell::default();
+                }
+            }
+        }
+    }
+
+    /// Write the placeholder cells that make one forwarded image appear.
+    ///
+    /// Each cell holds the private-use character, the image id in its
+    /// foreground color, and its own coordinate within the image in combining
+    /// marks. Writing them straight into the grid — rather than printing them
+    /// through the parser — keeps the child's cursor, colors and scroll region
+    /// exactly as they were: none of that belongs to the image.
+    ///
+    /// Cells outside the screen are skipped, so an image larger than its pane
+    /// is clipped by the pane instead of overflowing it.
+    fn write_placeholder_cells(&mut self, placement: &graphics::Placement) {
+        let id = placement.image_id;
+        let color = placeholder_color(id);
+        // Ids need a fourth byte only above three, and it rides a third mark.
+        let high_byte = placeholder::diacritic((id >> 24) as usize).filter(|_| id >> 24 != 0);
+
+        let grid = self.term.grid_mut();
+        let columns = grid.columns();
+        let screen_lines = grid.screen_lines() as i32;
+        for row in 0..placement.rows {
+            let line = placement.line.saturating_add(row as i32);
+            if line < 0 || line >= screen_lines {
+                continue;
+            }
+            let Some(row_mark) = placeholder::diacritic(row) else {
+                continue;
+            };
+            for column in 0..placement.columns {
+                let column = placement.column.saturating_add(column);
+                if column >= columns {
+                    break;
+                }
+                let Some(column_mark) = placeholder::diacritic(column - placement.column) else {
+                    continue;
+                };
+                let cell = &mut grid[Line(line)][Column(column)];
+                *cell = alacritty_terminal::term::cell::Cell::default();
+                cell.c = placeholder::PLACEHOLDER;
+                cell.fg = color;
+                cell.push_zerowidth(row_mark);
+                cell.push_zerowidth(column_mark);
+                if let Some(high_byte) = high_byte {
+                    cell.push_zerowidth(high_byte);
+                }
+            }
+        }
+        // Streaming children re-send the same placement on every image frame,
+        // and `apply_pending_placements` skips those. Full damage is paid only
+        // when the placement's cells actually need to be rewritten.
+        self.placement_damage = true;
     }
 
     fn apply_history_budget(&mut self) {
@@ -224,9 +501,12 @@ impl AlacrittyEngine {
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                 continue;
             }
-            output.push(if cell.c == '\0' { ' ' } else { cell.c });
-            if let Some(zerowidth) = cell.zerowidth() {
-                output.extend(zerowidth);
+            let (character, marks_are_text) = cell_as_text(cell);
+            output.push(character);
+            if marks_are_text {
+                if let Some(zerowidth) = cell.zerowidth() {
+                    output.extend(zerowidth);
+                }
             }
         }
         let trimmed = output.trim_end().len();
@@ -270,13 +550,13 @@ impl AlacrittyEngine {
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                 continue;
             }
-            let character = if cell.c == '\0' { ' ' } else { cell.c };
+            let (character, marks_are_text) = cell_as_text(cell);
             if (!character.is_control() || character == '\t')
                 && !append_utf8_bounded(output, character.encode_utf8(&mut encoded), max_bytes)
             {
                 return false;
             }
-            if let Some(zerowidth) = cell.zerowidth() {
+            if let Some(zerowidth) = cell.zerowidth().filter(|_| marks_are_text) {
                 for character in zerowidth.iter().copied().filter(|c| !c.is_control()) {
                     if !append_utf8_bounded(output, character.encode_utf8(&mut encoded), max_bytes)
                     {
@@ -305,7 +585,7 @@ impl AlacrittyEngine {
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                 continue;
             }
-            let character = if cell.c == '\0' { ' ' } else { cell.c };
+            let (character, marks_are_text) = cell_as_text(cell);
             if character.is_control() && character != '\t' {
                 continue;
             }
@@ -317,7 +597,7 @@ impl AlacrittyEngine {
             let style_code =
                 (next_style != style).then(|| sgr(next_style.0, next_style.1, next_style.2));
             let mut symbol = character.to_string();
-            if let Some(zerowidth) = cell.zerowidth() {
+            if let Some(zerowidth) = cell.zerowidth().filter(|_| marks_are_text) {
                 symbol.extend(zerowidth.iter().copied().filter(|c| !c.is_control()));
             }
             let needed = style_code.as_ref().map_or(0, String::len) + symbol.len();
@@ -337,6 +617,27 @@ impl AlacrittyEngine {
             output.push_str("\x1b[0m");
         }
         true
+    }
+}
+
+/// What a grid cell contributes when the grid is read as *text* rather than
+/// rendered: the character to emit, and whether the cell's zero-width marks
+/// belong with it.
+///
+/// Two cells are not the text they hold. `\0` is an untouched cell, which reads
+/// as a blank. A kitty graphics placeholder is an image cell: the private-use
+/// character is not something anyone typed, and its combining marks encode a
+/// coordinate inside the image rather than an accent. Letting either reach
+/// extracted text puts unusable characters in the user's clipboard and noise in
+/// the screen text that agent detection matches against.
+///
+/// Rendering must not use this — a placeholder cell is drawn, so the render
+/// path keeps the character and its marks exactly as the child wrote them.
+fn cell_as_text(cell: &alacritty_terminal::term::cell::Cell) -> (char, bool) {
+    match cell.c {
+        graphics::placeholder::PLACEHOLDER => (' ', false),
+        '\0' => (' ', true),
+        character => (character, true),
     }
 }
 
@@ -386,6 +687,7 @@ impl VtEngine for AlacrittyEngine {
         self.history_maintenance_pending = true;
         self.history_metrics_cache.set(None);
         self.parser.advance(&mut self.term, bytes);
+        self.apply_pending_placements();
         self.output_generation = self.output_generation.wrapping_add(1);
     }
 
@@ -418,10 +720,52 @@ impl VtEngine for AlacrittyEngine {
     }
 
     fn resize(&mut self, cols: u16, rows: u16) {
+        let (cols, rows) = (cols.max(1), rows.max(1));
+        let old_cols = self.term.grid().columns();
+        let old_rows = self.term.grid().screen_lines();
         self.term.resize(Dims {
-            cols: cols.max(1) as usize,
-            rows: rows.max(1) as usize,
+            cols: cols as usize,
+            rows: rows as usize,
         });
+        for index in 0..self.applied.len() {
+            let applied = self.applied[index];
+            if applied.line == 0
+                && applied.column == 0
+                && applied.columns == old_cols
+                && applied.rows == old_rows
+                && usize::from(cols) <= placeholder::MAX_EXTENT
+                && usize::from(rows) <= placeholder::MAX_EXTENT
+            {
+                // During a divider drag the child has not repainted yet. Stretch
+                // the full-pane image it already sent, as a GUI would, rather
+                // than exposing a gap until the next image frame arrives.
+                let placement = graphics::Placement {
+                    image_id: applied.image_id,
+                    placement_id: applied.placement_id,
+                    columns: cols as usize,
+                    rows: rows as usize,
+                    line: 0,
+                    column: 0,
+                    move_cursor: false,
+                };
+                self.write_placeholder_cells(&placement);
+                // The cells alone change nothing on the terminal, which is
+                // still fitting the image into the rectangle it was told
+                // about: tell it the new one, the protocol's own resize.
+                if let Ok(mut queue) = self.graphics_queue.lock() {
+                    queue.replace_virtual_rect(&placement);
+                }
+                self.host_graphics.mark_pending();
+                self.applied[index] = AppliedPlacement::from_placement(&placement);
+            } else {
+                // A shrink may truncate non-anchor cells, so the anchor alone
+                // cannot prove that this rectangle survived the resize whole.
+                // Beyond the coordinate table, retain the last valid rectangle
+                // rather than advertising cells we cannot encode.
+                self.applied[index].dirty = true;
+            }
+        }
+        self.grid.store(pack_grid(cols, rows), Ordering::Relaxed);
         self.apply_history_budget();
     }
 
@@ -541,6 +885,9 @@ impl VtEngine for AlacrittyEngine {
             }
         };
         if self.title.lock().map_or(true, |title| title.changed) {
+            kind = DamageKind::Full;
+        }
+        if std::mem::take(&mut self.placement_damage) {
             kind = DamageKind::Full;
         }
 
@@ -677,9 +1024,12 @@ impl VtEngine for AlacrittyEngine {
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     continue;
                 }
-                line.push(if cell.c == '\0' { ' ' } else { cell.c });
-                if let Some(zerowidth) = cell.zerowidth() {
-                    line.extend(zerowidth);
+                let (character, marks_are_text) = cell_as_text(cell);
+                line.push(character);
+                if marks_are_text {
+                    if let Some(zerowidth) = cell.zerowidth() {
+                        line.extend(zerowidth);
+                    }
                 }
             }
             if !out.is_empty() {
@@ -703,9 +1053,12 @@ impl VtEngine for AlacrittyEngine {
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     continue;
                 }
-                line.push(if cell.c == '\0' { ' ' } else { cell.c });
-                if let Some(zerowidth) = cell.zerowidth() {
-                    line.extend(zerowidth);
+                let (character, marks_are_text) = cell_as_text(cell);
+                line.push(character);
+                if marks_are_text {
+                    if let Some(zerowidth) = cell.zerowidth() {
+                        line.extend(zerowidth);
+                    }
                 }
             }
             let line = line.trim_end();
@@ -737,8 +1090,7 @@ impl VtEngine for AlacrittyEngine {
             if indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                 continue;
             }
-            let c = indexed.cell.c;
-            lines[r as usize].push(if c == '\0' { ' ' } else { c });
+            lines[r as usize].push(cell_as_text(indexed.cell).0);
         }
         lines
     }
@@ -757,14 +1109,16 @@ impl VtEngine for AlacrittyEngine {
             if r < 0 || r as usize >= rows {
                 continue;
             }
-            let c = if indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            let wide_spacer = indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER);
+            let (character, marks_are_text) = cell_as_text(indexed.cell);
+            // One char per terminal column is this method's whole contract, so a
+            // filtered image cell becomes a blank rather than disappearing.
+            let c = if wide_spacer {
                 ALIGNED_WIDE_CELL
-            } else if indexed.cell.c == '\0' {
-                ' '
             } else {
-                indexed.cell.c
+                character
             };
-            let zero_width = if indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            let zero_width = if wide_spacer || !marks_are_text {
                 None
             } else {
                 indexed.cell.zerowidth()
@@ -912,6 +1266,26 @@ impl VtEngine for AlacrittyEngine {
         }
     }
 
+    fn take_graphics(&mut self) -> Vec<Vec<u8>> {
+        self.graphics_queue
+            .lock()
+            .map(|mut queue| queue.drain())
+            .unwrap_or_default()
+    }
+
+    fn has_graphics(&self) -> bool {
+        self.graphics_queue
+            .lock()
+            .is_ok_and(|queue| !queue.is_empty())
+    }
+
+    fn retained_graphics(&self) -> Vec<Vec<u8>> {
+        self.graphics_queue
+            .lock()
+            .map(|queue| queue.retained())
+            .unwrap_or_default()
+    }
+
     fn title(&self) -> Option<String> {
         self.title.lock().ok().and_then(|g| g.value.clone())
     }
@@ -1033,7 +1407,14 @@ impl VtEngine for AlacrittyEngine {
 
         // Alacritty owns the VT line-wrap metadata. Extract the complete range
         // once so soft wraps are rejoined while real line breaks are retained.
-        Some(self.term.bounds_to_string(start, end))
+        // The engine returns a finished string, so image cells are removed from
+        // the text rather than skipped per cell as everywhere else. A selection
+        // holding no image keeps the engine's own allocation.
+        let text = self.term.bounds_to_string(start, end);
+        Some(match graphics::placeholder::strip(&text) {
+            std::borrow::Cow::Borrowed(_) => text,
+            std::borrow::Cow::Owned(stripped) => stripped,
+        })
     }
 
     fn retained_row_layout(&self, index: usize) -> Option<RetainedRowLayout> {
@@ -1182,8 +1563,13 @@ impl VtEngine for AlacrittyEngine {
                     out.push_str(&sgr(style.0, style.1, style.2));
                     cur = style;
                 }
-                out.push(if cell.c == '\0' { ' ' } else { cell.c });
-                if let Some(chars) = cell.zerowidth() {
+                // A restored pane replays this text, but no client still holds
+                // the image a placeholder pointed at, so replaying one would
+                // paint an unresolvable character. Revisit if image data ever
+                // becomes part of the snapshot.
+                let (character, marks_are_text) = cell_as_text(cell);
+                out.push(character);
+                if let Some(chars) = cell.zerowidth().filter(|_| marks_are_text) {
                     out.extend(chars);
                 }
             }
@@ -2022,6 +2408,791 @@ mod tests {
         );
     }
 
+    /// A kitty graphics Unicode placeholder is ordinary text: the private-use
+    /// character `U+10EEEE` with its coordinates in combining marks and the
+    /// image id in a truecolor foreground. Nothing about it is special to the
+    /// grid, and that is exactly the property the whole approach rests on — the
+    /// cells scroll, clip, and reflow because they are text like any other.
+    #[test]
+    fn a_unicode_placeholder_survives_the_grid_as_one_cell_per_image_cell() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 3, tx, budget_for_rows(20, 20));
+        // Image id 42 as a 2x1 block, exactly as a client writes it.
+        e.advance(
+            "\x1b[38;2;0;0;42m\u{10eeee}\u{0305}\u{0305}\u{10eeee}\u{0305}\u{030d}\x1b[39m"
+                .as_bytes(),
+        );
+
+        let mut cells = Vec::new();
+        e.for_each_cell(&mut |row, col, symbol, cell| {
+            if symbol.starts_with('\u{10eeee}') {
+                cells.push((row, col, symbol.to_string(), cell.fg));
+            }
+        });
+
+        assert_eq!(cells.len(), 2, "one grid cell per image cell: {cells:?}");
+        assert_eq!(
+            (cells[0].0, cells[0].1, cells[1].0, cells[1].1),
+            (0, 0, 0, 1),
+            "the block occupies adjacent columns on one row"
+        );
+        assert_eq!(
+            cells[0].2, "\u{10eeee}\u{0305}\u{0305}",
+            "the coordinate diacritics must survive with the base character"
+        );
+        assert_eq!(cells[1].2, "\u{10eeee}\u{0305}\u{030d}");
+        assert_eq!(
+            cells[0].3,
+            Color::Rgb(0, 0, 42),
+            "the image id rides in the foreground color and must stay exact"
+        );
+    }
+
+    /// Feed a pane the two image cells of a 2x1 placement, surrounded by text.
+    fn engine_with_a_placeholder() -> AlacrittyEngine {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(20, 3, tx, budget_for_rows(20, 200));
+        engine.advance(
+            "ab\x1b[38;2;0;0;42m\u{10eeee}\u{0305}\u{0305}\u{10eeee}\u{0305}\u{030d}\x1b[39mcd"
+                .as_bytes(),
+        );
+        engine
+    }
+
+    /// An image cell is not text. Reading it as text puts a private-use
+    /// character nobody can use into the clipboard, and noise into the screen
+    /// text that agent detection matches against.
+    #[test]
+    fn an_image_cell_never_reaches_extracted_text() {
+        let engine = engine_with_a_placeholder();
+
+        let mut sources = vec![
+            ("detection_text", engine.detection_text(3)),
+            (
+                "detection_text_non_empty",
+                engine.detection_text_non_empty(3),
+            ),
+            ("visible_rows", engine.visible_rows().join("\n")),
+            (
+                "visible_rows_aligned",
+                engine.visible_rows_aligned().rows().join("\n"),
+            ),
+            ("snapshot_ansi", engine.snapshot_ansi()),
+        ];
+        let mut retained = String::new();
+        engine.for_each_retained_row(&mut |_index, line| {
+            retained.push_str(line);
+        });
+        sources.push(("for_each_retained_row", retained));
+        sources.push((
+            "backend_capture",
+            engine
+                .backend_capture(CaptureMode::Visible, 3, false, 4_096)
+                .text,
+        ));
+        sources.push((
+            "backend_capture (ansi)",
+            engine
+                .backend_capture(CaptureMode::Visible, 3, true, 4_096)
+                .text,
+        ));
+
+        for (source, text) in sources {
+            assert!(
+                !text.contains('\u{10eeee}'),
+                "{source} leaked a placeholder: {text:?}"
+            );
+            assert!(
+                !text.contains('\u{030d}'),
+                "{source} leaked a coordinate diacritic: {text:?}"
+            );
+            assert!(
+                text.contains("ab") && text.contains("cd"),
+                "{source} must keep the surrounding text: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_filtered_image_cell_still_occupies_its_column() {
+        // `visible_rows_aligned` promises one char per terminal column: it is
+        // how a double-click finds the token under the pointer. Dropping an
+        // image cell would shift every column after it.
+        let engine = engine_with_a_placeholder();
+        let aligned = engine.visible_rows_aligned();
+        assert_eq!(
+            &aligned.rows()[0][..6],
+            "ab  cd",
+            "each image cell leaves exactly one blank behind"
+        );
+    }
+
+    #[test]
+    fn copying_a_selection_across_an_image_keeps_the_text_around_it() {
+        let engine = engine_with_a_placeholder();
+        let row = engine
+            .visible_rows()
+            .iter()
+            .position(|line| line.contains("ab"))
+            .expect("the line is on screen");
+        let text = engine
+            .retained_selection_text(((row, 0), (row, 5)))
+            .expect("the range is selectable");
+        assert!(
+            !text.contains('\u{10eeee}') && !text.contains('\u{030d}'),
+            "the clipboard must not receive image cells: {text:?}"
+        );
+        assert!(text.contains("ab"), "{text:?}");
+        assert!(text.contains("cd"), "{text:?}");
+    }
+
+    /// The value is shared, not copied, so a pane built before a drawing client
+    /// attached must start answering as soon as one does — and stop when the
+    /// last one leaves. A child asks this question in the middle of parsing its
+    /// own output, so a stale answer is one it acts on immediately.
+    #[test]
+    fn the_support_answer_follows_the_clients_that_are_attached() {
+        let (tx, rx) = channel();
+        let host_graphics = graphics::HostGraphics::default();
+        let mut e = AlacrittyEngine::with_appearance(
+            40,
+            5,
+            tx,
+            budget_for_rows(40, 20),
+            PaneAppearance::default(),
+            host_graphics.clone(),
+        );
+
+        let probe = b"\x1b_Gi=4207,a=q,t=d,f=24,s=1,v=1;AAAA\x1b\\";
+        e.advance(probe);
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b_Gi=4207;ENOTSUPPORTED:foreground client cannot draw images\x1b\\",
+            "no client is attached yet"
+        );
+
+        host_graphics.set(true);
+        e.advance(probe);
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b_Gi=4207;OK\x1b\\",
+            "a pane built earlier must see the client that attached later"
+        );
+
+        host_graphics.set(false);
+        e.advance(probe);
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b_Gi=4207;ENOTSUPPORTED:foreground client cannot draw images\x1b\\",
+            "the last drawing client detached"
+        );
+    }
+
+    /// A child that draws asks how big the pane is in pixels and how big one
+    /// cell is, and picks the resolution it renders at from the answers. The
+    /// pane is measured in cells, so both answers are only as good as the cell
+    /// size the attached client reported — and must track the pane's own size.
+    #[test]
+    fn a_pane_reports_its_pixel_size_and_its_cell_size() {
+        let (tx, rx) = channel();
+        let host_graphics = graphics::HostGraphics::default();
+        host_graphics.set_cell_size(Some(crate::terminal::theme_probe::CellSize {
+            width: 19,
+            height: 42,
+        }));
+        let mut e = AlacrittyEngine::with_appearance(
+            80,
+            24,
+            tx,
+            budget_for_rows(80, 40),
+            PaneAppearance::default(),
+            host_graphics.clone(),
+        );
+
+        e.advance(b"\x1b[16t");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b[6;42;19t",
+            "the cell is as big as the terminal showing a client makes it"
+        );
+
+        e.advance(b"\x1b[14t");
+        assert_eq!(
+            recv_bytes(&rx),
+            format!("\x1b[4;{};{}t", 24 * 42, 80 * 19).into_bytes(),
+            "the text area is the pane's own cells at that size"
+        );
+
+        // A pane is resized far more often than a terminal window is, and a
+        // child that redraws on SIGWINCH asks again straight away.
+        e.resize(100, 30);
+        e.advance(b"\x1b[14t");
+        assert_eq!(
+            recv_bytes(&rx),
+            format!("\x1b[4;{};{}t", 30 * 42, 100 * 19).into_bytes(),
+            "the answer must follow the pane, not the size it was built at"
+        );
+    }
+
+    /// With no client that draws, Luvus does not know how big a cell is on any
+    /// screen. The report has no way to say "unsupported", so the honest answer
+    /// is none at all: a child that hears nothing falls back to its own
+    /// estimate, while a made-up size is one it would render at.
+    #[test]
+    fn a_pane_that_cannot_know_its_pixel_size_says_nothing() {
+        let (tx, rx) = channel();
+        let mut e = AlacrittyEngine::with_appearance(
+            80,
+            24,
+            tx,
+            budget_for_rows(80, 40),
+            PaneAppearance::default(),
+            graphics::HostGraphics::default(),
+        );
+
+        e.advance(b"\x1b[16t\x1b[14t");
+        assert!(
+            rx.try_recv().is_err(),
+            "neither report can be answered without a cell size"
+        );
+
+        // The size in cells needs no client, so that report is always owed.
+        e.advance(b"\x1b[18t");
+        assert_eq!(recv_bytes(&rx), b"\x1b[8;24;80t");
+    }
+
+    /// The whole path a real image takes through a pane: the child transmits it
+    /// and creates a virtual placement, then writes the placeholder cells that
+    /// say where it goes. The command must come back out byte for byte — Luvus
+    /// decodes none of it, and a terminal that receives an altered command
+    /// resolves a different image or none.
+    #[test]
+    fn an_image_reaches_the_clients_exactly_as_the_child_wrote_it() {
+        let (tx, _rx) = channel();
+        let host_graphics = graphics::HostGraphics::default();
+        host_graphics.set(true);
+        let mut e = AlacrittyEngine::with_appearance(
+            40,
+            5,
+            tx,
+            budget_for_rows(40, 20),
+            PaneAppearance::default(),
+            host_graphics.clone(),
+        );
+
+        let transmit = "\x1b_Ga=T,U=1,i=42,c=2,r=1,f=100,q=2;iVBORw0KGgo=\x1b\\";
+        e.advance(transmit.as_bytes());
+        e.advance(
+            "\x1b[38;5;42m\u{10eeee}\u{0305}\u{0305}\u{10eeee}\u{0305}\u{030d}\x1b[39m".as_bytes(),
+        );
+
+        assert!(
+            host_graphics.take_pending(),
+            "the pane must flag that a render pass has something to collect"
+        );
+        assert!(e.has_graphics());
+        let forwarded = e.take_graphics();
+        assert_eq!(forwarded.len(), 1);
+        assert_eq!(
+            String::from_utf8(forwarded[0].clone()).unwrap(),
+            transmit,
+            "the command must reach the terminal unchanged"
+        );
+        assert!(
+            !e.has_graphics(),
+            "a command is delivered once, not on every frame"
+        );
+
+        // The placeholder cells stay in the grid: they are what positions the
+        // image, and the frame carries them like any other text.
+        let mut cells = Vec::new();
+        e.for_each_cell(&mut |row, column, symbol, cell| {
+            if row == 0 && column < 2 {
+                cells.push((column, symbol.to_string(), cell.fg));
+            }
+        });
+        assert_eq!(cells.len(), 2, "one cell per image column");
+        assert!(cells[0].1.starts_with('\u{10eeee}'));
+        assert_eq!(
+            cells[1].1, "\u{10eeee}\u{0305}\u{030d}",
+            "the coordinate marks travel with their cell"
+        );
+    }
+
+    /// A pane outlives the client that was watching it. Its grid still holds
+    /// the cells naming an image, so the pane has to be able to teach that
+    /// image again to whoever attaches next — long after it was handed to the
+    /// clients that were there when it arrived.
+    #[test]
+    fn a_pane_can_still_teach_its_images_after_todays_clients_have_them() {
+        let (tx, _rx) = channel();
+        let host_graphics = graphics::HostGraphics::default();
+        host_graphics.set(true);
+        let mut e = AlacrittyEngine::with_appearance(
+            40,
+            5,
+            tx,
+            budget_for_rows(40, 20),
+            PaneAppearance::default(),
+            host_graphics.clone(),
+        );
+
+        let transmit = "\x1b_Ga=T,U=1,i=42,c=2,r=1,f=100,q=2;iVBORw0KGgo=\x1b\\";
+        e.advance(transmit.as_bytes());
+
+        assert_eq!(e.take_graphics().len(), 1, "the clients attached now");
+        assert!(!e.has_graphics(), "and they are not sent it twice");
+        assert_eq!(
+            e.retained_graphics(),
+            vec![transmit.as_bytes().to_vec()],
+            "but a client attaching later must be taught the same image"
+        );
+
+        // Deleting it is the child saying the pane no longer shows it.
+        e.advance(b"\x1b_Ga=d,d=I,i=42\x1b\\");
+        assert!(
+            e.retained_graphics().is_empty(),
+            "a deleted image is not owed to anyone"
+        );
+    }
+
+    /// A child that believes it has the terminal to itself asks for the image
+    /// at the cursor and writes no cells of its own. Luvus makes the placement
+    /// virtual and builds the cells, so the image lands inside the pane instead
+    /// of wherever the client's own cursor happens to be.
+    #[test]
+    fn an_image_placed_at_the_cursor_is_given_cells_of_its_own() {
+        let (tx, _rx) = channel();
+        let host_graphics = graphics::HostGraphics::default();
+        host_graphics.set(true);
+        host_graphics.set_cell_size(Some(crate::terminal::theme_probe::CellSize {
+            width: 10,
+            height: 20,
+        }));
+        let mut e = AlacrittyEngine::with_appearance(
+            40,
+            5,
+            tx,
+            budget_for_rows(40, 20),
+            PaneAppearance::default(),
+            host_graphics.clone(),
+        );
+
+        // Move the cursor first: a placement at the cursor starts there, and
+        // the image must not be pinned to the top-left of the pane.
+        e.advance(b"\x1b[2;3H");
+        // 30x40 pixels over a 10x20 cell is 3x2 cells. `C=1` keeps the cursor.
+        e.advance(b"\x1b_Ga=T,f=32,s=30,v=40,t=d,i=5,p=1,C=1,q=2;AAAA\x1b\\");
+
+        let forwarded = e.take_graphics();
+        assert_eq!(
+            forwarded.len(),
+            2,
+            "whatever the terminal holds for the id is deleted first, then the image"
+        );
+        assert_eq!(
+            String::from_utf8(forwarded[0].clone()).unwrap(),
+            "\x1b_Ga=d,d=i,i=5,q=2\x1b\\"
+        );
+        let command = String::from_utf8(forwarded[1].clone()).unwrap();
+        assert!(
+            command.contains("U=1,p=1,c=3,r=2"),
+            "the placement must become virtual, sized in cells, under the child's \
+             own placement id: {command:?}"
+        );
+        assert!(
+            !command.contains("C=1"),
+            "the placement at the cursor must not survive: {command:?}"
+        );
+
+        let mut cells = Vec::new();
+        e.for_each_cell(&mut |row, column, symbol, cell| {
+            if symbol.starts_with('\u{10eeee}') {
+                cells.push((row, column, symbol.to_string(), cell.fg));
+            }
+        });
+        assert_eq!(cells.len(), 6, "a 3x2 image is six cells: {cells:?}");
+        assert_eq!(
+            (cells[0].0, cells[0].1),
+            (1, 2),
+            "the image starts where the cursor stood, not at the pane's corner"
+        );
+        assert_eq!(
+            cells[0].3,
+            Color::Rgb(0, 0, 5),
+            "the image id rides in the foreground color"
+        );
+        assert_eq!(
+            cells[0].2, "\u{10eeee}\u{0305}\u{0305}",
+            "row 0, column 0 of the image"
+        );
+        assert_eq!(
+            cells[5].2, "\u{10eeee}\u{030d}\u{030e}",
+            "row 1, column 2 of the image"
+        );
+
+        assert_eq!(
+            (e.cursor().x, e.cursor().y),
+            (2, 1),
+            "C=1 asked for the cursor to stay where it was"
+        );
+        assert_eq!(
+            e.damage_snapshot().kind,
+            DamageKind::Full,
+            "cells written behind the emulator's back must still reach a client"
+        );
+        assert!(
+            !e.visible_rows().join("").contains('\u{10eeee}'),
+            "the cells are an image, so they must not read back as text"
+        );
+    }
+
+    fn graphics_engine(cols: u16, rows: u16) -> AlacrittyEngine {
+        let (tx, _rx) = channel();
+        let host_graphics = graphics::HostGraphics::default();
+        host_graphics.set(true);
+        host_graphics.set_cell_size(Some(crate::terminal::theme_probe::CellSize {
+            width: 10,
+            height: 20,
+        }));
+        AlacrittyEngine::with_appearance(
+            cols,
+            rows,
+            tx,
+            budget_for_rows(cols as usize, 20),
+            PaneAppearance::default(),
+            host_graphics,
+        )
+    }
+
+    fn rendered_cell_snapshot(engine: &AlacrittyEngine) -> Vec<(u16, u16, String, RenderCell)> {
+        let mut cells = Vec::new();
+        engine.for_each_cell(&mut |row, column, symbol, cell| {
+            cells.push((row, column, symbol.to_owned(), cell));
+        });
+        cells
+    }
+
+    fn placeholder_cells(engine: &AlacrittyEngine) -> Vec<(u16, u16, String, Color)> {
+        let mut cells = Vec::new();
+        engine.for_each_cell(&mut |row, column, symbol, cell| {
+            if symbol.starts_with(placeholder::PLACEHOLDER) {
+                cells.push((row, column, symbol.to_owned(), cell.fg));
+            }
+        });
+        cells
+    }
+
+    #[test]
+    fn the_same_streamed_placement_is_not_rewritten() {
+        let mut engine = graphics_engine(10, 4);
+        let placement = b"\x1b_Ga=T,f=32,s=30,v=40,t=d,i=5,p=1,C=1,c=3,r=2,q=2;AAAA\x1b\\";
+
+        engine.advance(placement);
+        let first_damage = engine.damage_snapshot();
+        assert_eq!(first_damage.kind, DamageKind::Full);
+        assert!(engine.acknowledge_damage(first_damage.generation));
+        let before = rendered_cell_snapshot(&engine);
+
+        engine.advance(placement);
+        let after = rendered_cell_snapshot(&engine);
+        assert_eq!(
+            after, before,
+            "an unchanged frame must leave every rendered cell byte-identical"
+        );
+        assert_ne!(
+            engine.damage_snapshot().kind,
+            DamageKind::Full,
+            "an unchanged placement must not force a full projection"
+        );
+    }
+
+    #[test]
+    fn clearing_the_screen_forces_an_identical_placement_to_be_rewritten() {
+        let mut engine = graphics_engine(10, 4);
+        let placement = b"\x1b_Ga=T,f=32,s=30,v=40,t=d,i=5,p=1,C=1,c=3,r=2,q=2;AAAA\x1b\\";
+
+        engine.advance(placement);
+        let first_damage = engine.damage_snapshot();
+        assert!(engine.acknowledge_damage(first_damage.generation));
+        engine.advance(b"\x1b[2J");
+        let clear_damage = engine.damage_snapshot();
+        assert!(engine.acknowledge_damage(clear_damage.generation));
+        assert!(
+            placeholder_cells(&engine).is_empty(),
+            "ED2 must remove the old image cells before the child places it again"
+        );
+
+        engine.advance(placement);
+        assert_eq!(
+            placeholder_cells(&engine).len(),
+            6,
+            "a missing anchor must force all six image cells to be restored"
+        );
+        assert_eq!(
+            engine.damage_snapshot().kind,
+            DamageKind::Full,
+            "restoring cells behind the emulator's back needs full damage"
+        );
+    }
+
+    #[test]
+    fn a_resize_forces_a_non_full_pane_placement_to_be_rewritten() {
+        let mut engine = graphics_engine(10, 4);
+        let placement = b"\x1b_Ga=T,f=32,s=30,v=40,t=d,i=5,p=1,C=1,c=3,r=2,q=2;AAAA\x1b\\";
+        engine.advance(b"\x1b[2;3H");
+        engine.advance(placement);
+        let first_damage = engine.damage_snapshot();
+        assert!(engine.acknowledge_damage(first_damage.generation));
+
+        engine.resize(12, 5);
+        let resize_damage = engine.damage_snapshot();
+        assert!(engine.acknowledge_damage(resize_damage.generation));
+        engine.advance(placement);
+
+        assert_eq!(
+            placeholder_cells(&engine).len(),
+            6,
+            "the non-full-pane rectangle must still be present after resize"
+        );
+        assert_eq!(
+            engine.damage_snapshot().kind,
+            DamageKind::Full,
+            "resize dirties the placement even when its anchor survived"
+        );
+    }
+
+    #[test]
+    fn shrinking_a_placement_clears_only_its_stale_cells() {
+        let mut engine = graphics_engine(8, 4);
+        engine.advance(b"safe\x1b[2;3H");
+        engine.advance(b"\x1b_Ga=T,f=32,s=30,v=40,t=d,i=7,p=1,C=1,c=3,r=2,q=2;AAAA\x1b\\");
+        engine.advance(b"\x1b_Ga=T,f=32,s=20,v=20,t=d,i=7,p=1,C=1,c=2,r=1,q=2;BBBB\x1b\\");
+
+        let grid = engine.term.grid();
+        let expected_color = placeholder_color(7);
+        for column in 2..4 {
+            let cell = &grid[Line(1)][Column(column)];
+            assert_eq!(cell.c, placeholder::PLACEHOLDER, "new image cell missing");
+            assert_eq!(cell.fg, expected_color, "new image id must be retained");
+        }
+        for (line, column) in [(1, 4), (2, 2), (2, 3), (2, 4)] {
+            assert_eq!(
+                grid[Line(line)][Column(column)],
+                alacritty_terminal::term::cell::Cell::default(),
+                "old image cell at ({line}, {column}) must become blank"
+            );
+        }
+        let text: String = (0..4)
+            .map(|column| grid[Line(0)][Column(column)].c)
+            .collect();
+        assert_eq!(
+            text, "safe",
+            "clearing the old rectangle must not erase unrelated child text"
+        );
+    }
+
+    #[test]
+    fn a_full_pane_placement_follows_the_pane_when_it_resizes() {
+        let mut engine = graphics_engine(10, 4);
+        engine.advance(b"\x1b_Ga=T,f=32,s=100,v=80,t=d,i=9,p=1,C=1,c=10,r=4,q=2;AAAA\x1b\\");
+        let first_damage = engine.damage_snapshot();
+        assert!(engine.acknowledge_damage(first_damage.generation));
+        assert!(
+            engine.host_graphics.take_pending(),
+            "the first image woke a render pass; consume that so the resize's own wake shows"
+        );
+
+        engine.resize(14, 6);
+        // Stretching the cells alone changes nothing on a terminal still
+        // fitting the image into 10x4: it is told the new rectangle as the
+        // protocol's own resize — the same placement id, so it replaces.
+        let forwarded: Vec<String> = engine
+            .take_graphics()
+            .into_iter()
+            .map(|command| String::from_utf8(command).unwrap())
+            .collect();
+        assert_eq!(
+            forwarded.len(),
+            4,
+            "the first image with its delete, then the resize with its delete: {forwarded:?}"
+        );
+        assert!(forwarded[2].contains("a=d,d=i,i=9"), "{forwarded:?}");
+        assert_eq!(forwarded[3], "\x1b_Ga=p,i=9,p=1,U=1,c=14,r=6,q=2\x1b\\");
+        assert!(
+            engine.host_graphics.take_pending(),
+            "a render pass has to be woken to deliver it"
+        );
+        let cells = placeholder_cells(&engine);
+        assert_eq!(
+            cells.len(),
+            14 * 6,
+            "the previous full-pane image must stretch across the grown pane"
+        );
+        assert!(
+            cells.iter().all(|cell| cell.3 == Color::Rgb(0, 0, 9)),
+            "resizing must preserve the image id"
+        );
+        let resize_damage = engine.damage_snapshot();
+        assert_eq!(resize_damage.kind, DamageKind::Full);
+        assert!(engine.acknowledge_damage(resize_damage.generation));
+        let before = rendered_cell_snapshot(&engine);
+
+        engine.advance(b"\x1b_Ga=T,f=32,s=140,v=120,t=d,i=9,p=1,C=1,c=14,r=6,q=2;BBBB\x1b\\");
+        assert_eq!(
+            rendered_cell_snapshot(&engine),
+            before,
+            "the child's matching repaint must reuse the stretched placement"
+        );
+        assert_ne!(
+            engine.damage_snapshot().kind,
+            DamageKind::Full,
+            "the first matching child frame after resize must be skipped"
+        );
+    }
+
+    #[test]
+    fn a_different_image_at_the_same_place_is_written() {
+        let mut engine = graphics_engine(10, 4);
+        engine.advance(b"\x1b_Ga=T,f=32,s=20,v=20,t=d,i=5,p=1,C=1,c=2,r=1,q=2;AAAA\x1b\\");
+        let first_damage = engine.damage_snapshot();
+        assert!(engine.acknowledge_damage(first_damage.generation));
+
+        engine.advance(b"\x1b_Ga=T,f=32,s=20,v=20,t=d,i=6,p=1,C=1,c=2,r=1,q=2;BBBB\x1b\\");
+        let cells = placeholder_cells(&engine);
+        assert_eq!(cells.len(), 2);
+        assert!(
+            cells.iter().all(|cell| cell.3 == Color::Rgb(0, 0, 6)),
+            "a new id at identical geometry must replace the visible image cells"
+        );
+        assert_eq!(
+            engine.damage_snapshot().kind,
+            DamageKind::Full,
+            "a different image id must never take the geometry-only fast path"
+        );
+    }
+
+    /// Resizing must not advertise coordinates the placeholder table cannot encode.
+    #[test]
+    fn review_oversized_resize_keeps_the_last_valid_image_rectangle() {
+        let max = placeholder::MAX_EXTENT as u16;
+        for (cols, rows) in [(max + 1, 4), (10, max + 1)] {
+            let mut engine = graphics_engine(10, 4);
+            let command = b"\x1b_Ga=T,f=32,s=100,v=80,t=d,i=9,p=1,C=1,c=10,r=4,q=2;AAAA\x1b\\";
+            engine.advance(command);
+            engine.take_graphics();
+            let retained = engine.retained_graphics();
+            let before = placeholder_cells(&engine);
+            engine.host_graphics.take_pending();
+
+            engine.resize(cols, rows);
+            assert!(
+                engine.take_graphics().is_empty(),
+                "no oversized placement is forwarded"
+            );
+            assert_eq!(engine.retained_graphics(), retained);
+            assert_eq!(placeholder_cells(&engine), before);
+            assert_eq!((engine.applied[0].columns, engine.applied[0].rows), (10, 4));
+            assert!(!engine.host_graphics.pending());
+
+            // Returning to a supported size and receiving a child repaint works.
+            engine.resize(10, 4);
+            engine.advance(command);
+            assert_eq!(placeholder_cells(&engine).len(), 40);
+            engine.resize(max, 4);
+            assert_eq!(placeholder_cells(&engine).len(), usize::from(max) * 4);
+            assert!(engine
+                .take_graphics()
+                .iter()
+                .any(|command| { String::from_utf8_lossy(command).contains("U=1,c=297,r=4") }));
+        }
+    }
+
+    /// A pane whose clients cannot draw must not accumulate images for nobody.
+    #[test]
+    fn nothing_is_collected_while_no_client_can_draw() {
+        let (tx, _rx) = channel();
+        let host_graphics = graphics::HostGraphics::default();
+        let mut e = AlacrittyEngine::with_appearance(
+            40,
+            5,
+            tx,
+            budget_for_rows(40, 20),
+            PaneAppearance::default(),
+            host_graphics.clone(),
+        );
+
+        e.advance(b"\x1b_Ga=T,U=1,i=42,c=2,r=1,f=100,q=2;iVBORw0KGgo=\x1b\\");
+        assert!(!e.has_graphics());
+        assert!(
+            !host_graphics.take_pending(),
+            "no render pass should be woken to collect nothing"
+        );
+    }
+
+    /// The support probe every kitty-graphics client sends: a query action
+    /// followed by DA1. Both must be answered, and the query must be answered
+    /// first — a client that sees only the DA1 concludes "no graphics", which
+    /// is the right conclusion but reached the slow way, after a timeout.
+    #[test]
+    fn kitty_graphics_probe_is_declined_before_device_attributes() {
+        let (tx, rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 20));
+        e.advance(b"\x1b_Gi=4207,a=q,t=d,f=24,s=1,v=1;AAAA\x1b\\\x1b[c");
+
+        let query = recv_bytes(&rx);
+        assert_eq!(
+            query, b"\x1b_Gi=4207;ENOTSUPPORTED:foreground client cannot draw images\x1b\\",
+            "the query must be declined, keyed to the queried image id"
+        );
+        let da1 = recv_bytes(&rx);
+        assert!(
+            da1.starts_with(b"\x1b[?"),
+            "device attributes still answered: {da1:?}"
+        );
+        assert!(
+            !e.visible_rows().join("").contains("AAAA"),
+            "the payload must never reach the grid"
+        );
+    }
+
+    #[test]
+    fn kitty_graphics_commands_other_than_a_query_are_silent() {
+        let (tx, rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 20));
+        // Transmit-and-display, place, and delete. With no renderer there is
+        // nothing to acknowledge, and an unrequested reply would be read by the
+        // child as input.
+        e.advance(b"\x1b_Ga=T,f=100,s=1,v=1;iVBORw0KGgo=\x1b\\");
+        e.advance(b"\x1b_Ga=p,i=1,c=10,r=5\x1b\\");
+        e.advance(b"\x1b_Ga=d,d=A\x1b\\");
+        assert!(rx.try_recv().is_err(), "no reply is owed");
+        assert_eq!(e.visible_rows().join("").trim(), "");
+    }
+
+    /// An APC that outgrows the parser's buffer is dropped whole. Half a
+    /// graphics command is not a shorter command, and answering one would
+    /// acknowledge an image id the sender may never have written.
+    #[test]
+    fn oversized_kitty_apc_is_dropped_without_a_reply() {
+        let (tx, rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 20));
+        let mut oversized = b"\x1b_Gi=9,a=q;".to_vec();
+        oversized.extend(std::iter::repeat_n(b'A', 16_384));
+        oversized.extend_from_slice(b"\x1b\\");
+        e.advance(&oversized);
+
+        assert!(rx.try_recv().is_err(), "an unbounded APC earns no reply");
+        assert!(
+            !e.visible_rows().join("").contains('A'),
+            "and its payload must not fall through to the grid"
+        );
+
+        // The parser recovers: the next well-formed query is answered.
+        e.advance(b"\x1b_Gi=10,a=q\x1b\\");
+        assert!(recv_bytes(&rx).starts_with(b"\x1b_Gi=10;"));
+    }
+
     #[test]
     fn scrolled_back_still_renders_and_copies_history() {
         let (tx, _rx) = channel();
@@ -2461,13 +3632,20 @@ mod tests {
 
     #[test]
     fn pi_cursor_marker_apc_is_not_a_grid_cell() {
-        let (tx, _rx) = channel();
+        let (tx, rx) = channel();
         let mut e = AlacrittyEngine::new(20, 3, tx, budget_for_rows(20, 20));
         e.advance(b"> \x1b_pi:c\x07\x1b[7m \x1b[27mhi");
         let text = e.visible_rows().join("");
         assert!(
             !text.contains("pi:c"),
             "APC marker must not become cells: {text:?}"
+        );
+        // Agents use APC for private markers on the hot output path. Collecting
+        // APC for the graphics protocol must leave every other one exactly as
+        // inert as it was: no reply, and nothing written back to the child.
+        assert!(
+            rx.try_recv().is_err(),
+            "a non-graphics APC must not be answered"
         );
         let mut reversed = Vec::new();
         e.for_each_cell(&mut |row, col, _, cell| {
@@ -2486,8 +3664,14 @@ mod tests {
     ) -> (AlacrittyEngine, std::sync::mpsc::Receiver<InputAction>) {
         let (tx, rx) = channel();
         let appearance = PaneAppearance { background, scheme };
-        let engine =
-            AlacrittyEngine::with_appearance(40, 5, tx, budget_for_rows(40, 20), appearance);
+        let engine = AlacrittyEngine::with_appearance(
+            40,
+            5,
+            tx,
+            budget_for_rows(40, 20),
+            appearance,
+            graphics::HostGraphics::default(),
+        );
         (engine, rx)
     }
 
