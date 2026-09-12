@@ -7,11 +7,30 @@ use super::super::types::IntegrationOperations;
 use crate::integration;
 
 pub(super) const OPERATIONS: IntegrationOperations = IntegrationOperations {
-    install,
-    uninstall,
-    is_installed,
+    install: install_current,
+    uninstall: uninstall_current,
+    is_installed: current_installed,
     hook: None,
 };
+
+fn install_current() -> Result<()> {
+    // An explicitly selected legacy TUI config retains the V1 installer.
+    // Ordinary `opencode` installations now use the official V2 CLI contract.
+    if std::env::var_os("OPENCODE_TUI_CONFIG").is_some_and(|value| !value.is_empty()) {
+        install()
+    } else {
+        super::v2_integration::install()
+    }
+}
+
+fn uninstall_current() -> Result<()> {
+    super::v2_integration::uninstall()?;
+    uninstall()
+}
+
+fn current_installed() -> bool {
+    super::v2_integration::is_installed() || is_installed()
+}
 
 const TUI_PLUGIN: &str = include_str!("luvus-tui.js");
 

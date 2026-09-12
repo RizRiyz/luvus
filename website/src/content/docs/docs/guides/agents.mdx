@@ -77,7 +77,7 @@ Click a session row to select it and update the Selected Agent panel. Use
 | Claude Code | project transcript |
 | Codex | rollout token counters |
 | GitHub Copilot CLI | session shutdown metrics |
-| opencode | selected-session integration events |
+| opencode | selected-session V1 integration events; unavailable from the V2 plugin |
 | OpenCode 2 Preview | unavailable until an exact structured counter is exposed |
 | Kimi | session status records |
 | Grok | completed-turn usage records |
@@ -246,12 +246,12 @@ or toggle it in **Settings → Integrations**. What it does per agent:
   `~/.gemini/config/hooks.json`. It reports only the exact conversation id for
   `agy --conversation <id>` restore; screen detection continues to own agent
   state, and every other named Antigravity hook is preserved.
-- **opencode**: installs a TUI-local plugin and registers it in the effective
-  `tui.json`, `tui.jsonc`, or `OPENCODE_TUI_CONFIG` file
-  without removing comments or unrelated plugins. It reports only the root
-  session selected in that pane and sends cumulative structured usage directly
-  to the inherited owner-local Luvus endpoint. No `luvus` process is spawned per
-  update and no agent database is opened.
+- **opencode**: installs a V2 CLI-only plugin in `~/.config/opencode/luvus-v2/`
+  and registers it in global `cli.json` (respecting `XDG_CONFIG_HOME`). It reports
+  only the selected root session's exact identity, not usage, directly to the
+  inherited owner-local endpoint. No agent database is opened. To install the
+  V1 session-and-usage plugin instead, explicitly set `OPENCODE_TUI_CONFIG` to
+  its `tui.json(c)`. Comments, settings and unrelated plugins are preserved.
 - **kimi**: adds a `[[hooks]]` entry to `~/.kimi-code/config.toml`, edited in
   place so your API keys, comments, and own hooks are left untouched.
 - **grok**: installs its own hook file without editing Grok's authentication

@@ -334,9 +334,10 @@ discovery rather than inferring support from an agent name.
   conversation id needed for `agy --conversation <id>` restore; screen
   detection remains authoritative for state.
 - OpenCode detection and legacy JSON session discovery work without setup.
-  `luvus integration install opencode` adds a TUI-local plugin that reports
-  only the root session selected in that pane plus structured usage. Without
-  it, Mission Control leaves OpenCode usage unavailable instead of guessing.
+  `luvus integration install opencode` adds a V2 CLI-only plugin in global
+  `cli.json` for selected root-session identity, not usage. Explicit
+  `OPENCODE_TUI_CONFIG` selects the legacy V1 session/usage installer.
+  Scheduled `opencode run --auto` requires `full_access`.
 - OpenCode 2 Preview is detected separately as `opencode2`. Luvus can launch it
   and resume an exact known ID with `opencode2 --session <id>`, but does not
   scan its live SQLite database or reuse the OpenCode V1 integration. Its

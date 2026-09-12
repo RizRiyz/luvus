@@ -835,9 +835,9 @@ mod tests {
         std::env::remove_var("OPENCODE_TUI_CONFIG");
 
         install("opencode").unwrap();
-        let plugin = tmp.join("opencode").join("luvus-tui.mjs");
+        let plugin = tmp.join("opencode").join("luvus-v2/tui.js");
         let js = fs::read_to_string(&plugin).unwrap();
-        assert!(js.contains("session.created"), "hooks the session event");
+        assert!(js.contains("session.updated"), "hooks the session event");
         assert!(js.contains("pane.report_session"), "reports the session");
         assert!(
             js.contains("net.createConnection"),
@@ -845,6 +845,10 @@ mod tests {
         );
         assert!(!js.contains("child_process"));
         assert!(js.contains("opencode"));
+        assert!(
+            js.contains("export default"),
+            "V2 auto-loads this directory and rejects a module without a default"
+        );
         assert!(is_installed("opencode"));
 
         match old {

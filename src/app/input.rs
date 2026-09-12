@@ -4628,6 +4628,7 @@ mod tests {
         let _env = crate::persist::test_env("prefix-shifted-workspace-jump");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        app.workspaces[0].worktree = None;
         let focus = app.layout().focus;
         for position in 2..=9 {
             app.workspaces[0]

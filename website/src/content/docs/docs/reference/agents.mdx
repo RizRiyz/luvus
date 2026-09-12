@@ -66,13 +66,16 @@ description: What luvus supports per agent, covering live status, session resume
   remains responsible for idle/working/blocked state, and uninstall preserves
   every other named hook.
 
-  OpenCode installs `~/.config/opencode/luvus-tui.mjs`, or the equivalent under
-  `XDG_CONFIG_HOME`, and adds only that file to the TUI plugin list. The plugin
-  binds the root session selected by that specific TUI and reports its
-  structured usage over the inherited local Luvus endpoint. Background and
-  child-session events cannot claim the pane. Without the integration,
-  OpenCode detection and legacy JSON session discovery still work while usage
-  remains unavailable.
+  OpenCode V2 installs a CLI-only package at `~/.config/opencode/luvus-v2/`
+  (or under `XDG_CONFIG_HOME`) and registers it in the global `cli.json`.
+  It reports the exact selected root session over the inherited Luvus endpoint,
+  with no shared-service or database mutation. Background and child sessions
+  cannot claim the pane. The V2 plugin reports session identity, not usage.
+  Legacy JSON discovery remains available; V2 SQLite discovery is not provided.
+  For V1, explicitly set `OPENCODE_TUI_CONFIG` to its `tui.json(c)` when installing
+  the legacy plugin, which also reports structured usage. Both installers
+  preserve unrelated settings and plugins. Scheduled `opencode run --auto`
+  requires explicit **Full access**; it does not enforce workspace confinement.
 
   OpenCode 2 Preview is a separate built-in agent because its `opencode2`
   executable can run beside OpenCode V1 and uses a different service, database,
