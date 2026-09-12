@@ -16,6 +16,7 @@ pub const SESSION_ENV_VAR: &str = "LUVUS_SESSION";
 pub const DEFAULT_SESSION_NAME: &str = "default";
 
 const MAX_SESSION_NAME_LEN: usize = 64;
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const START_TIMEOUT: Duration = Duration::from_secs(5);
@@ -36,6 +37,19 @@ pub struct SessionInfo {
 pub struct SessionEndpoint {
     pub transport: &'static str,
     pub address: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClientSessionAction {
+    Start,
+    Reuse,
+    Restart,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SessionServerIdentity {
+    version: String,
+    client_protocol: Option<u32>,
 }
 
 /// Resolve `session attach` and leading global `--session` flags before normal
@@ -286,11 +300,47 @@ pub fn list_sessions() -> std::io::Result<Vec<SessionInfo>> {
 pub fn start_client_session(name: &str) -> Result<SessionInfo, String> {
     let selected = normalize_name(name)?;
     let selected = selected.as_deref();
-    start_session(selected)?;
+    let info = session_info(selected);
+    let running_identity = info
+        .running
+        .then(|| {
+            server_identity_for(selected, CONTROL_TIMEOUT).map_err(|error| {
+                format!("session {name} is running but its version could not be checked: {error}")
+            })
+        })
+        .transpose()?;
+    match client_session_action(
+        info.running,
+        running_identity.as_ref(),
+        env!("CARGO_PKG_VERSION"),
+        crate::ipc::protocol::PROTOCOL_VERSION,
+    ) {
+        ClientSessionAction::Start => {
+            start_session(selected)?;
+        }
+        ClientSessionAction::Reuse => {}
+        ClientSessionAction::Restart => {
+            restart_session(selected)?;
+        }
+    }
     let client = client_socket_path_for(selected);
     let deadline = Instant::now() + START_TIMEOUT;
     while Instant::now() < deadline {
         if is_running_at(&client) {
+            let running = server_identity_for(selected, CONTROL_TIMEOUT).map_err(|error| {
+                format!("session {name} started but its version could not be checked: {error}")
+            })?;
+            if running.version != env!("CARGO_PKG_VERSION")
+                || running.client_protocol != Some(crate::ipc::protocol::PROTOCOL_VERSION)
+            {
+                return Err(format!(
+                    "session {name} is running luvus v{} with client protocol {}, but this client is v{} with protocol {}",
+                    running.version,
+                    running.client_protocol.map_or_else(|| "unknown".to_string(), |value| value.to_string()),
+                    env!("CARGO_PKG_VERSION"),
+                    crate::ipc::protocol::PROTOCOL_VERSION,
+                ));
+            }
             return Ok(session_info(selected));
         }
         std::thread::sleep(STOP_POLL_INTERVAL);
@@ -299,6 +349,69 @@ pub fn start_client_session(name: &str) -> Result<SessionInfo, String> {
         "session {name} started but its client transport was unavailable after {}ms",
         START_TIMEOUT.as_millis(),
     ))
+}
+
+fn client_session_action(
+    running: bool,
+    running_identity: Option<&SessionServerIdentity>,
+    binary_version: &str,
+    client_protocol: u32,
+) -> ClientSessionAction {
+    if !running {
+        ClientSessionAction::Start
+    } else if running_identity.is_some_and(|identity| {
+        identity.version == binary_version && identity.client_protocol == Some(client_protocol)
+    }) {
+        ClientSessionAction::Reuse
+    } else {
+        ClientSessionAction::Restart
+    }
+}
+
+/// Read the selected session's version over the stable newline-delimited JSON
+/// control endpoint. This check happens before a client enters the binary
+/// protocol, whose schema is intentionally versioned and may be incompatible.
+fn server_identity_for(
+    name: Option<&str>,
+    timeout: Duration,
+) -> Result<SessionServerIdentity, String> {
+    let mut stream = crate::ipc::transport::connect_timeout(&api_socket_path_for(name), timeout)
+        .map_err(|error| error.to_string())?;
+    writeln!(
+        stream,
+        "{}",
+        serde_json::json!({"id":"session:version","method":"ping","params":{}})
+    )
+    .map_err(|error| error.to_string())?;
+    stream.flush().map_err(|error| error.to_string())?;
+    let frame = crate::ipc::api::read_response_frame_with_deadline(&mut stream, timeout)
+        .map_err(|error| error.to_string())?;
+    let response: serde_json::Value =
+        serde_json::from_str(&frame).map_err(|error| error.to_string())?;
+    if response.get("id").and_then(serde_json::Value::as_str) != Some("session:version") {
+        return Err("server control response id does not match request".to_string());
+    }
+    let result = response
+        .get("result")
+        .ok_or_else(|| "server returned an invalid ping response".to_string())?;
+    let version = result
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(String::from)
+        .ok_or_else(|| "server returned an invalid ping response".to_string())?;
+    let client_protocol = result
+        .get("client_protocol")
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| "server returned an invalid client protocol".to_string())
+        })
+        .transpose()?;
+    Ok(SessionServerIdentity {
+        version,
+        client_protocol,
+    })
 }
 
 pub fn stop_session(name: Option<&str>) -> Result<SessionInfo, String> {
@@ -502,6 +615,46 @@ mod tests {
         let mut child = crate::platform::no_window(&mut command).spawn().unwrap();
         terminate_and_wait(&mut child).unwrap();
         assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn client_session_restarts_only_a_running_stale_target() {
+        assert_eq!(
+            client_session_action(false, None, "0.14.2", 18),
+            ClientSessionAction::Start
+        );
+        let current = SessionServerIdentity {
+            version: "0.14.2".into(),
+            client_protocol: Some(18),
+        };
+        assert_eq!(
+            client_session_action(true, Some(&current), "0.14.2", 18),
+            ClientSessionAction::Reuse
+        );
+        let old_version = SessionServerIdentity {
+            version: "0.13.4".into(),
+            client_protocol: None,
+        };
+        assert_eq!(
+            client_session_action(true, Some(&old_version), "0.14.2", 18),
+            ClientSessionAction::Restart
+        );
+        let old_protocol = SessionServerIdentity {
+            version: "0.14.2".into(),
+            client_protocol: Some(17),
+        };
+        assert_eq!(
+            client_session_action(true, Some(&old_protocol), "0.14.2", 18),
+            ClientSessionAction::Restart
+        );
+        let unknown_protocol = SessionServerIdentity {
+            version: "0.14.2".into(),
+            client_protocol: None,
+        };
+        assert_eq!(
+            client_session_action(true, Some(&unknown_protocol), "0.14.2", 18),
+            ClientSessionAction::Restart
+        );
     }
 
     #[test]

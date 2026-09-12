@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::sound::SoundSignal;
 use crate::terminal::theme_probe::TerminalColors;
 
-pub const PROTOCOL_VERSION: u32 = 17;
+pub const PROTOCOL_VERSION: u32 = 18;
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 /// Local display cell size in pixels, or `(0, 0)` when the host does not report it.
@@ -167,11 +167,14 @@ where
 
 #[derive(Serialize, Deserialize, Clone)]
 pub enum ServerMessage {
-    ShellSidebars(ShellSidebars),
+    /// **Frozen wire position and shape.** `Welcome` is decoded before peers
+    /// agree on a protocol version. Keep it as variant zero and carry new
+    /// negotiation data in messages sent after a successful handshake.
     Welcome {
         version: u32,
         error: Option<String>,
     },
+    ShellSidebars(ShellSidebars),
     /// A full frame — sent first, on resize, and to a freshly-attached client.
     Frame(FrameData),
     /// Only the cells that changed since the last frame (docs/18 — the wire-level
@@ -720,6 +723,47 @@ mod tests {
             rows,
         } = read_message::<_, LegacyClientMessage>(&mut &buf[..]).unwrap();
         assert_eq!((version, cols, rows), (PROTOCOL_VERSION, 100, 40));
+    }
+
+    /// `Welcome` is the server half of the pre-version handshake. Both an old
+    /// server reply and a current mismatch reply must remain decodable before
+    /// either peer knows whether later messages are compatible.
+    #[test]
+    fn welcome_wire_shape_is_backward_decodable() {
+        #[derive(Serialize, Deserialize)]
+        enum LegacyServerMessage {
+            Welcome { version: u32, error: Option<String> },
+        }
+
+        let mut old_reply = Vec::new();
+        write_message(
+            &mut old_reply,
+            &LegacyServerMessage::Welcome {
+                version: 5,
+                error: Some("protocol version mismatch".into()),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            read_message::<_, ServerMessage>(&mut &old_reply[..]).unwrap(),
+            ServerMessage::Welcome { version: 5, error: Some(error) }
+                if error == "protocol version mismatch"
+        ));
+
+        let mut current_reply = Vec::new();
+        write_message(
+            &mut current_reply,
+            &ServerMessage::Welcome {
+                version: PROTOCOL_VERSION,
+                error: Some("protocol version mismatch".into()),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            read_message::<_, LegacyServerMessage>(&mut &current_reply[..]).unwrap(),
+            LegacyServerMessage::Welcome { version, error: Some(error) }
+                if version == PROTOCOL_VERSION && error == "protocol version mismatch"
+        ));
     }
 
     #[test]

@@ -18,7 +18,11 @@ everything is mouse-driven, and `Shift+↑` scroll mode needs no prefix.
 
 The background server is still the old version, and it keeps running across
 installs by design. Run `luvus server restart` (your session is saved and
-restored). luvus also warns about this at attach.
+restored) for the selected session, or `luvus server restart --all` to restart
+every currently running session. Stopped sessions remain stopped. The
+named-session switcher also detects another running session left on the previous
+version and restarts that session before switching; direct attaches fail with
+the restart instruction instead of entering an incompatible client connection.
 
 ## The git tab is empty / PRs are missing
 
