@@ -2422,6 +2422,17 @@ static HELP: &[Translation] = &[
         "완료 표시 및 임대 해제"
     ),
     tr!(
+        "queue a fresh attempt without deleting previous work",
+        "poner en cola un nuevo intento sin eliminar el trabajo anterior",
+        "colocar uma nova tentativa na fila sem excluir o trabalho anterior",
+        "mettre en file une nouvelle tentative sans supprimer le travail précédent",
+        "einen neuen Versuch einreihen, ohne frühere Arbeit zu löschen",
+        "antrekan percobaan baru tanpa menghapus pekerjaan sebelumnya",
+        "在不删除先前工作的情况下排队新的尝试",
+        "以前の作業を削除せずに新しい試行をキューへ追加",
+        "이전 작업을 삭제하지 않고 새 시도 대기열 추가"
+    ),
+    tr!(
         "integrate the task's branch into luvus/integration",
         "integrar la rama de la tarea en luvus/integration",
         "integrar a branch da tarefa em luvus/integration",

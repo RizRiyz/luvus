@@ -203,6 +203,7 @@ pub(super) fn render(
             ("a", cat.act_new),
             ("s", cat.board_start),
             ("d", cat.task_done),
+            ("r", cat.board_retry),
         ];
         if orch.tasks.get(cursor).and_then(|task| task.worker_mode)
             != Some(crate::orch::TaskWorkerMode::Workspace)

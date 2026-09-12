@@ -288,6 +288,7 @@ orchestration (multiple agents on one project, docs/22):
                              (>85% blocks done; --context remains accepted)
   task update <id> [--prompt <text>|--prompt-file <path>] [--status <s>] [--output <o>] [--note <n>]
   task done <id>             mark done + release its leases
+  task retry <id>            queue a fresh attempt without deleting previous work
   task merge <id>            integrate the task's branch into luvus/integration
                              (isolated worktree, conflicts block the task)
   task release <id>          return a claimed task to the queue
@@ -3928,6 +3929,7 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             ("task.claim".into(), Value::Object(obj))
         }
         ("task", "done") => ("task.done".into(), one("id", arg0())),
+        ("task", "retry") => ("task.retry".into(), one("id", arg0())),
         ("task", "delete") => ("task.delete".into(), one("id", arg0())),
         ("task", "merge") => ("task.merge".into(), one("id", arg0())),
         ("task", "release") => ("task.release".into(), one("id", arg0())),
@@ -5297,6 +5299,9 @@ mod tests {
         assert_eq!(p.get("id").and_then(|v| v.as_str()), Some("t3"));
         let (m, _) = parse(&argv("luvus task done t3")).unwrap();
         assert_eq!(m, "task.done");
+        let (m, p) = parse(&argv("luvus task retry t3")).unwrap();
+        assert_eq!(m, "task.retry");
+        assert_eq!(p.get("id").and_then(|v| v.as_str()), Some("t3"));
 
         let (m, p) = parse(&argv("luvus lease acquire src/auth/** --task t1")).unwrap();
         assert_eq!(m, "lease.acquire");

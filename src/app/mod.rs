@@ -30,7 +30,7 @@ mod config_persistence;
 mod cwd;
 pub use board::{
     agent_choices, automation_agent_choices, automation_agent_choices_for,
-    automation_agent_supports, task_agent_choices,
+    automation_agent_supports, task_agent_choices, TaskRetryResult,
 };
 pub(crate) mod diff;
 mod dispatch;
@@ -1772,6 +1772,7 @@ pub enum OrchMenuItem {
     Jump,
     Details,
     Done,
+    Retry,
     Merge,
     Release,
     CopyId,

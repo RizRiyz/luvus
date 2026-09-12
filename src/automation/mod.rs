@@ -397,6 +397,69 @@ impl AutomationState {
         Ok(run)
     }
 
+    /// Queue a new occurrence from one terminal run's captured execution
+    /// contract. Definition edits do not rewrite what is being retried.
+    pub fn request_retry(&mut self, run_id: &str, now: u64) -> Result<AutomationRun, Reject> {
+        let original = self
+            .run(run_id)
+            .cloned()
+            .ok_or_else(|| Reject::new("not_found", format!("no such automation run: {run_id}")))?;
+        if original.status.is_live() {
+            return Err(Reject::new(
+                "run_active",
+                "a live automation run cannot be retried",
+            ));
+        }
+        let definition = self.automation(&original.automation_id).ok_or_else(|| {
+            Reject::new(
+                "not_found",
+                format!("no such automation: {}", original.automation_id),
+            )
+        })?;
+        if !definition.enabled {
+            return Err(Reject::new(
+                "automation_disabled",
+                "enable the automation before retrying its run",
+            ));
+        }
+        if self.has_live_run(&original.automation_id) {
+            return Err(Reject::new(
+                "automation_busy",
+                "this automation already has a live run",
+            ));
+        }
+
+        self.next_run += 1;
+        let run = AutomationRun {
+            id: format!("r{}", self.next_run),
+            automation_id: original.automation_id,
+            scheduled_at: now,
+            created_at: now,
+            started_at: None,
+            finished_at: None,
+            task_id: None,
+            status: RunStatus::Pending,
+            attempt: original.attempt.saturating_add(1),
+            error: None,
+            retry_of: Some(original.id),
+            trigger: original.trigger,
+            policy: original.policy,
+            target: original.target,
+            task: original.task,
+        };
+        self.runs.push(run.clone());
+        if self.runs.len() > MAX_RUNS {
+            if let Some(index) = self
+                .runs
+                .iter()
+                .position(|candidate| !candidate.status.is_live() && candidate.id != run.id)
+            {
+                self.runs.remove(index);
+            }
+        }
+        Ok(run)
+    }
+
     /// Resolve a previously accepted run request without emitting another
     /// queued event or attempting a second launch.
     pub fn run_retry(
@@ -651,6 +714,7 @@ impl AutomationState {
             status,
             attempt: 1,
             error,
+            retry_of: None,
             trigger: Some(automation.trigger.clone()),
             policy: automation.policy.clone(),
             target: automation.target.clone(),
@@ -1018,6 +1082,7 @@ pub fn public_run(run: &AutomationRun) -> serde_json::Value {
         "status":run.status,
         "attempt":run.attempt,
         "error":run.error,
+        "retry_of":run.retry_of,
         "trigger":run.trigger,
         "policy":run.policy,
         "target":public_target(&run.target),
@@ -1375,6 +1440,40 @@ mod tests {
                 .code,
             "idempotency_conflict"
         );
+    }
+
+    #[test]
+    fn retry_creates_a_new_run_from_the_original_snapshot() {
+        let mut state = AutomationState::default();
+        let automation = state
+            .create(input(Trigger::Once { at_utc: 100 }), None, 10)
+            .unwrap();
+        let original = state.request_run(&automation.id, None, 20).unwrap();
+        state
+            .set_run_status(&original.id, RunStatus::Failed, Some("stopped".into()), 30)
+            .unwrap();
+        state
+            .update(
+                &automation.id,
+                CreateAutomation {
+                    name: "Changed later".into(),
+                    task: TaskTemplate {
+                        prompt: "new prompt".into(),
+                        ..automation.task.clone()
+                    },
+                    ..input(Trigger::Once { at_utc: 200 })
+                },
+                40,
+            )
+            .unwrap();
+
+        let retried = state.request_retry(&original.id, 50).unwrap();
+        assert_ne!(retried.id, original.id);
+        assert_eq!(retried.retry_of.as_deref(), Some(original.id.as_str()));
+        assert_eq!(retried.status, RunStatus::Pending);
+        assert_eq!(retried.attempt, 2);
+        assert_eq!(retried.task.prompt, original.task.prompt);
+        assert_eq!(state.run(&original.id).unwrap().status, RunStatus::Failed);
     }
 
     #[test]

@@ -77,6 +77,33 @@ pub enum TaskStatus {
     Failed,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskCompletionSource {
+    Command,
+    Gate,
+    Automation,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskAttempt {
+    pub number: u32,
+    pub final_status: TaskStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    pub finished_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_source: Option<TaskCompletionSource>,
+}
+
+const fn default_task_attempt() -> u32 {
+    1
+}
+
 impl TaskStatus {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -150,6 +177,19 @@ pub struct Task {
     /// Present only when this task was materialized by Agent Automation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub automation: Option<AutomationProvenance>,
+    /// Monotonic user-visible attempt number. Old ledgers deserialize as the
+    /// original first attempt.
+    #[serde(default = "default_task_attempt")]
+    pub attempt: u32,
+    /// Bounded immutable summaries of attempts replaced through `task.retry`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_attempts: Vec<TaskAttempt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_finished_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_source: Option<TaskCompletionSource>,
     pub created: u64,
     pub updated: u64,
 }
@@ -168,6 +208,8 @@ pub const MAX_TASK_TITLE_BYTES: usize = 256;
 pub const MAX_TASK_PROMPT_BYTES: usize = 32 * 1024;
 /// Per-task `outputs` / `notes` keep only the most recent entries…
 pub const MAX_TASK_LOG: usize = 100;
+/// Retried attempts remain useful history without growing `orch.json` forever.
+pub const MAX_TASK_ATTEMPTS: usize = 16;
 /// …and each entry is truncated to this many bytes (a runaway agent piping a
 /// build log into `task update --output` can't balloon the ledger).
 pub const MAX_LOG_ENTRY: usize = 4 * 1024;
@@ -316,6 +358,11 @@ impl OrchState {
             workspace_worker: None,
             context: None,
             automation: None,
+            attempt: 1,
+            previous_attempts: Vec::new(),
+            attempt_started_at: None,
+            attempt_finished_at: None,
+            completion_source: None,
             created: now,
             updated: now,
         };
@@ -477,6 +524,7 @@ impl OrchState {
         }
         t.assignee = Some(pane);
         t.status = TaskStatus::Claimed;
+        t.attempt_started_at.get_or_insert(now);
         t.updated = now;
         Ok(t.clone())
     }
@@ -489,11 +537,110 @@ impl OrchState {
             .find(|t| t.id == id)
             .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
         t.status = status;
+        t.attempt_finished_at = matches!(
+            status,
+            TaskStatus::Done | TaskStatus::Failed | TaskStatus::Review | TaskStatus::Blocked
+        )
+        .then_some(now);
         t.updated = now;
         let task = t.clone();
         // Only `begin_merge` may create a durable integration reservation.
         self.merge_previous.remove(id);
         Ok(task)
+    }
+
+    /// Queue a fresh manual attempt while preserving the previous worker and
+    /// worktree as immutable history. The caller persists the returned state
+    /// before replacing the live ledger.
+    pub fn retry_task(&mut self, id: &str) -> OrchResult<Task> {
+        let task = self.validate_retry(id)?;
+        if task.automation.is_some() {
+            return Err(Reject::new(
+                "automation_task",
+                "automation-owned tasks must be retried as a new automation run",
+            ));
+        }
+        self.retry_validated_task(id)
+    }
+
+    pub fn validate_retry(&self, id: &str) -> OrchResult<&Task> {
+        let task = self
+            .task(id)
+            .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        if !matches!(
+            task.status,
+            TaskStatus::Done | TaskStatus::Failed | TaskStatus::Review | TaskStatus::Blocked
+        ) {
+            return Err(Reject::new(
+                "not_retryable",
+                format!("{id} cannot be retried while {}", task.status.as_str()),
+            ));
+        }
+        if let Some(dependent) = self.tasks.iter().find(|candidate| {
+            candidate.deps.iter().any(|dep| dep == id) && candidate.status != TaskStatus::Queued
+        }) {
+            return Err(Reject::new(
+                "dependent_started",
+                format!(
+                    "{} already left the queue and depends on {id}",
+                    dependent.id
+                ),
+            ));
+        }
+        Ok(task)
+    }
+
+    fn retry_validated_task(&mut self, id: &str) -> OrchResult<Task> {
+        let now = unix_now();
+        let retried = {
+            let task = self.tasks.iter_mut().find(|task| task.id == id).unwrap();
+            task.previous_attempts.push(TaskAttempt {
+                number: task.attempt,
+                final_status: task.status,
+                branch: task.branch.clone(),
+                worktree: task.worktree.clone(),
+                started_at: task.attempt_started_at,
+                finished_at: task.attempt_finished_at.unwrap_or(task.updated),
+                completion_source: task.completion_source,
+            });
+            if task.previous_attempts.len() > MAX_TASK_ATTEMPTS {
+                let excess = task.previous_attempts.len() - MAX_TASK_ATTEMPTS;
+                task.previous_attempts.drain(..excess);
+            }
+            task.attempt = task.attempt.saturating_add(1);
+            task.assignee = None;
+            task.status = TaskStatus::Queued;
+            task.worktree = None;
+            task.branch = None;
+            task.workspace_worker = None;
+            task.context = None;
+            task.attempt_started_at = None;
+            task.attempt_finished_at = None;
+            task.completion_source = None;
+            task.updated = now;
+            push_log(
+                &mut task.outputs,
+                format!("attempt {} queued after retry", task.attempt),
+            );
+            task.clone()
+        };
+        self.merge_previous.remove(id);
+        self.release_task_leases(id);
+        Ok(retried)
+    }
+
+    pub fn set_completion_source(
+        &mut self,
+        id: &str,
+        source: TaskCompletionSource,
+    ) -> OrchResult<()> {
+        let task = self
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+            .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        task.completion_source = Some(source);
+        Ok(())
     }
 
     /// Reserve the shared integration branch for one task. The actual Git work
@@ -890,6 +1037,11 @@ impl OrchState {
         for task in &mut state.tasks {
             if task.worker_mode.is_none() && task.worktree.is_some() {
                 task.worker_mode = Some(TaskWorkerMode::Worktree);
+            }
+            task.attempt = task.attempt.max(1);
+            if task.previous_attempts.len() > MAX_TASK_ATTEMPTS {
+                let excess = task.previous_attempts.len() - MAX_TASK_ATTEMPTS;
+                task.previous_attempts.drain(..excess);
             }
         }
         // A process exit can interrupt a background Git job after the durable
@@ -1349,6 +1501,88 @@ mod tests {
         s.claim("t1", 1).unwrap();
         let err = s.claim("t1", 2).unwrap_err();
         assert_eq!(err.code, "already_claimed");
+    }
+
+    #[test]
+    fn retry_archives_the_attempt_and_clears_only_live_binding() {
+        let mut state = OrchState::default();
+        state
+            .add_task("retry me".into(), vec!["src/**".into()], vec![], None)
+            .unwrap();
+        state.claim("t1", 7).unwrap();
+        state.bind_worktree(
+            "t1",
+            Some("/repo/.luvus/worktrees/t1".into()),
+            Some("luvus/t1".into()),
+        );
+        state.bind_task_paths("t1", 7, &["src/**".into()]).unwrap();
+        state
+            .set_completion_source("t1", TaskCompletionSource::Command)
+            .unwrap();
+        state.set_status("t1", TaskStatus::Done).unwrap();
+
+        let retried = state.retry_task("t1").unwrap();
+        assert_eq!(retried.status, TaskStatus::Queued);
+        assert_eq!(retried.attempt, 2);
+        assert_eq!(retried.assignee, None);
+        assert_eq!(retried.branch, None);
+        assert_eq!(retried.worktree, None);
+        assert_eq!(retried.worker_mode, Some(TaskWorkerMode::Worktree));
+        assert!(state.leases.is_empty());
+        let archived = retried.previous_attempts.last().unwrap();
+        assert_eq!(archived.number, 1);
+        assert_eq!(archived.final_status, TaskStatus::Done);
+        assert_eq!(archived.branch.as_deref(), Some("luvus/t1"));
+        assert_eq!(
+            archived.worktree.as_deref(),
+            Some("/repo/.luvus/worktrees/t1")
+        );
+        assert_eq!(
+            archived.completion_source,
+            Some(TaskCompletionSource::Command)
+        );
+    }
+
+    #[test]
+    fn retry_rejects_active_integrated_and_started_dependency_states() {
+        for status in [
+            TaskStatus::Queued,
+            TaskStatus::Claimed,
+            TaskStatus::Running,
+            TaskStatus::Merging,
+            TaskStatus::Merged,
+        ] {
+            let mut state = OrchState::default();
+            state.add_task("task".into(), vec![], vec![], None).unwrap();
+            state.set_status("t1", status).unwrap();
+            assert_eq!(state.retry_task("t1").unwrap_err().code, "not_retryable");
+        }
+
+        let mut state = OrchState::default();
+        state.add_task("base".into(), vec![], vec![], None).unwrap();
+        state
+            .add_task("dependent".into(), vec![], vec!["t1".into()], None)
+            .unwrap();
+        state.set_status("t1", TaskStatus::Done).unwrap();
+        state.set_status("t2", TaskStatus::Running).unwrap();
+        assert_eq!(
+            state.retry_task("t1").unwrap_err().code,
+            "dependent_started"
+        );
+        assert_eq!(state.task("t1").unwrap().status, TaskStatus::Done);
+    }
+
+    #[test]
+    fn legacy_tasks_deserialize_as_attempt_one() {
+        let value = serde_json::json!({
+            "id":"t1", "title":"legacy", "status":"done", "assignee":null,
+            "deps":[], "paths":[], "gate":null, "outputs":[], "notes":[],
+            "worktree":null, "branch":null, "context":null,
+            "created":1, "updated":2
+        });
+        let task: Task = serde_json::from_value(value).unwrap();
+        assert_eq!(task.attempt, 1);
+        assert!(task.previous_attempts.is_empty());
     }
 
     #[test]

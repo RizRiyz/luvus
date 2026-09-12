@@ -56,6 +56,7 @@
     "task.needs_compaction",
     "task.ready",
     "task.released",
+    "task.retried",
     "task.started",
     "task.updated",
     "terminal.closed",
@@ -120,6 +121,7 @@
     "task.needs_compaction": { "$ref": "#/$defs/task_needs_compaction" },
     "task.ready": { "$ref": "#/$defs/id_only" },
     "task.released": { "$ref": "#/$defs/task_released" },
+    "task.retried": { "$ref": "#/$defs/task_retried" },
     "task.started": { "$ref": "#/$defs/task_started" },
     "task.updated": { "$ref": "#/$defs/task" },
     "terminal.closed": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/event.schema.json#/oneOf/1/properties/data" },
@@ -185,6 +187,7 @@
       "properties": {
         "automation_id": { "type": "string" },
         "run_id": { "type": "string" },
+        "retry_of": { "type": "string" },
         "task_id": { "type": "string" },
         "pane": { "type": "string" },
         "scheduled_at": { "type": "integer", "minimum": 0 },
@@ -392,7 +395,7 @@
     "task": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "title", "status", "assignee", "deps", "paths", "gate", "outputs", "notes", "worktree", "branch", "context", "created", "updated"],
+      "required": ["id", "title", "status", "assignee", "deps", "paths", "gate", "outputs", "notes", "worktree", "branch", "context", "attempt", "previous_attempts", "created", "updated"],
       "properties": {
         "id": { "type": "string" },
         "title": { "type": "string" },
@@ -409,8 +412,28 @@
         "mode": { "enum": ["worktree", "workspace"] },
         "workspace_worker": { "$ref": "#/$defs/workspace_worker" },
         "context": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "previous_attempts": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/task_attempt" }
+        },
         "created": { "type": "integer", "minimum": 0 },
         "updated": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "task_attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["number", "final_status", "finished_at"],
+      "properties": {
+        "number": { "type": "integer", "minimum": 1 },
+        "final_status": { "enum": ["blocked", "review", "done", "failed"] },
+        "branch": { "type": "string" },
+        "worktree": { "type": "string" },
+        "started_at": { "type": "integer", "minimum": 0 },
+        "finished_at": { "type": "integer", "minimum": 0 },
+        "completion_source": { "enum": ["command", "gate", "automation"] }
       }
     },
     "workspace_worker": {
@@ -428,6 +451,15 @@
         { "$ref": "#/$defs/task" },
         { "$ref": "#/$defs/id_only" }
       ]
+    },
+    "task_retried": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "attempt"],
+      "properties": {
+        "id": { "type": "string" },
+        "attempt": { "type": "integer", "minimum": 2 }
+      }
     },
     "task_started": {
       "type": "object",

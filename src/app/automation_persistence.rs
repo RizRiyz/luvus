@@ -172,6 +172,7 @@ impl App {
                 | "automation.delete"
                 | "automation.rebind"
                 | "automation.run"
+                | "task.retry"
         )
     }
 
