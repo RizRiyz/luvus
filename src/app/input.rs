@@ -1090,6 +1090,13 @@ impl App {
             // Handled by the server loop; never reaches here at runtime.
             AppEvent::ClientConnected { .. }
             | AppEvent::ClientDetach { .. }
+            | AppEvent::ClientSurfaceInterest { .. }
+            | AppEvent::ClientPrepareSurface { .. }
+            | AppEvent::ClientShellDockLayout { .. }
+            | AppEvent::ClientShellSidebars { .. }
+            | AppEvent::ClientShellWorkspaceFocus { .. }
+            | AppEvent::ClientShellWorkspaceMenu { .. }
+            | AppEvent::ClientOpenWorkspacePicker { .. }
             | AppEvent::ClientCellPixels { .. }
             | AppEvent::ClientInput { .. }
             | AppEvent::Shutdown => false,
@@ -1727,6 +1734,8 @@ impl App {
                         })
                         .map(|(hit, _)| *hit);
                     match hit {
+                        Some(PickerHit::OpenWorkspaceTab) => {}
+                        Some(PickerHit::RemoteMachineTab) => self.picker_open_remote_machine(),
                         Some(PickerHit::Row(i)) => self.picker_click(i),
                         Some(PickerHit::Hint(k)) => {
                             self.handle_picker_key(KeyEvent::new(k, KeyModifiers::NONE))
@@ -1918,7 +1927,10 @@ impl App {
                     match hit {
                         Some(PickerHit::Row(i)) => self.worktree_open_click(i),
                         // Inert modal surface; the footer is handled above.
-                        Some(PickerHit::Hint(_)) | Some(PickerHit::Modal) => {}
+                        Some(PickerHit::OpenWorkspaceTab)
+                        | Some(PickerHit::RemoteMachineTab)
+                        | Some(PickerHit::Hint(_))
+                        | Some(PickerHit::Modal) => {}
                         None => self.close_worktree_list(), // click outside cancels
                     }
                 }

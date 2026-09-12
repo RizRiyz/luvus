@@ -528,6 +528,7 @@ pub enum EventKind {
     ClientResize,
     ClientFrameError,
     ClientRenderFailed,
+    ClientMachineCatalog,
     ClientInputRecord,
     ClientInputDecoded,
     LogWriteRecovered,
@@ -583,6 +584,7 @@ impl EventKind {
             Self::ClientResize => "client.resize",
             Self::ClientFrameError => "client.frame_error",
             Self::ClientRenderFailed => "client.render_failed",
+            Self::ClientMachineCatalog => "client.machine_catalog",
             Self::ClientInputRecord => "client.input_record",
             Self::ClientInputDecoded => "client.input_decoded",
             Self::LogWriteRecovered => "log.write_recovered",
@@ -609,6 +611,7 @@ impl EventKind {
             | Self::WorkerFailed
             | Self::ClientDisconnect
             | Self::ClientFrameError
+            | Self::ClientMachineCatalog
             | Self::LogWriteRecovered
             | Self::UhpRequestFailed
             | Self::UhpRequestRejected => Level::Warn,
@@ -640,6 +643,7 @@ impl EventKind {
             | Self::ClientResize
             | Self::ClientFrameError
             | Self::ClientRenderFailed
+            | Self::ClientMachineCatalog
             | Self::ClientInputRecord
             | Self::ClientInputDecoded => Some(LoggerKind::Client),
             Self::LogWriteRecovered => None,
@@ -702,6 +706,7 @@ impl EventKind {
             E::ClientDisconnect => matches!(key, F::Reason),
             E::ClientResize => matches!(key, F::Cols | F::Rows),
             E::ClientFrameError => matches!(key, F::ErrorCode),
+            E::ClientMachineCatalog => matches!(key, F::Outcome | F::ErrorCode),
             E::ClientInputRecord => matches!(
                 key,
                 F::KeyDown

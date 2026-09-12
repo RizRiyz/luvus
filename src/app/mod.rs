@@ -476,7 +476,7 @@ impl Sidebars {
             Side::Right => &mut self.right,
         }
     }
-    fn from_config(cfg: &crate::config::SidebarsConfig) -> Sidebars {
+    pub(crate) fn from_config(cfg: &crate::config::SidebarsConfig) -> Sidebars {
         let left = SideState::from_config(&cfg.left);
         let right = SideState::from_config(&cfg.right);
         let files_side = if left.has(&DockKind::Files) {
@@ -492,7 +492,7 @@ impl Sidebars {
             files_side,
         }
     }
-    fn to_config(&self) -> crate::config::SidebarsConfig {
+    pub(crate) fn to_config(&self) -> crate::config::SidebarsConfig {
         crate::config::SidebarsConfig {
             left: self.left.to_config(),
             right: self.right.to_config(),
@@ -737,6 +737,7 @@ pub enum SwitcherTarget {
     Settings,
     MissionControl,
     Version,
+    Machines,
     Sessions,
     Exit,
 }
@@ -2397,6 +2398,26 @@ pub struct App {
     /// Left + right sidebars, their widths, and their docks (docs/29). Resolved
     /// from `config.sidebars()` at startup; runtime edits persist via `save_sidebars`.
     pub sidebars: Sidebars,
+    /// Legacy bounded-row hint carried by the version-8 machine client
+    /// capability. The complete Workspaces dock is client-owned whenever
+    /// `client_machine_capable` is true.
+    pub client_shell_dock_rows: u16,
+    /// Legacy version-8 placement hint retained for wire compatibility.
+    pub client_shell_dock_leading: bool,
+    /// Legacy version-8 indentation hint retained for wire compatibility.
+    pub client_shell_dock_indent_workspaces: bool,
+    /// Whether the active display can own remote-machine profile UI. Unlike
+    /// the endpoint row count, this remains true for an empty catalog so the
+    /// first machine can be added through the workspace picker.
+    pub client_machine_capable: bool,
+    pub client_shell_owns_workspaces: bool,
+    /// Remote endpoint frames leave this client-owned top-row slot blank and
+    /// inert. The owner-local client composes the named-session control there.
+    pub client_shell_owns_session_chrome: bool,
+    pub client_sidebar_input: bool,
+    pub client_files_visible: bool,
+    /// Exact complete Workspaces dock owned by the machine-aware thin client.
+    pub client_shell_dock_rect: Option<Rect>,
     /// Module-contributed dock content, keyed by dock id (docs/29, DOCK-4).
     /// Populated by `ui.dock.push`; rendered by the sidebar.
     pub module_docks: std::collections::HashMap<String, ModuleDock>,
@@ -2501,6 +2522,16 @@ pub struct App {
     /// finder. The server consumes this once and sends a logical handoff only
     /// to that client.
     pub pending_session_switch: Option<String>,
+    /// One-shot request for the attached thin client to open its owner-local
+    /// machine selector. The server never receives the machine catalog.
+    pub pending_machine_selector: bool,
+    /// One-shot request for the attached machine-aware client to open the
+    /// owner-local profile form selected from the workspace picker.
+    pub pending_machine_create: bool,
+    /// Highest owner-local machine catalog revision waiting to be announced to
+    /// attached machine-aware clients. External mutations wake the app through
+    /// the selected session's owner-only control socket; no polling is needed.
+    pub pending_machine_catalog_revision: Option<u64>,
     /// On-demand named-session menu. Its filesystem/process discovery runs only
     /// while opening or activating this surface, never on an idle timer.
     pub named_session_menu: Option<session_menu::NamedSessionMenu>,
@@ -2509,6 +2540,8 @@ pub struct App {
     pub(crate) named_session_cache: Vec<session_menu::NamedSessionRow>,
     /// Lifecycle work already running off-loop, keyed by validated session name.
     pub(crate) pending_named_session_actions: HashMap<String, session_menu::NamedSessionAction>,
+    /// Complete top-row interval reserved for the named-session control.
+    pub named_session_slot_rect: Option<Rect>,
     pub named_session_button_rect: Option<Rect>,
     pub named_session_menu_rect: Option<Rect>,
     pub named_session_close_rect: Option<Rect>,
@@ -3084,6 +3117,15 @@ impl App {
             worktree_error: None,
             mode: Mode::Normal,
             sidebars,
+            client_shell_dock_rows: 0,
+            client_shell_dock_leading: false,
+            client_shell_dock_indent_workspaces: false,
+            client_machine_capable: false,
+            client_shell_owns_workspaces: false,
+            client_shell_owns_session_chrome: false,
+            client_sidebar_input: false,
+            client_files_visible: false,
+            client_shell_dock_rect: None,
             module_docks: std::collections::HashMap::new(),
             module_dock_rects: Vec::new(),
             bar,
@@ -3128,9 +3170,13 @@ impl App {
             last_cursor: None,
             detach_requested: false,
             pending_session_switch: None,
+            pending_machine_selector: false,
+            pending_machine_create: false,
+            pending_machine_catalog_revision: None,
             named_session_menu: None,
             named_session_cache: Vec::new(),
             pending_named_session_actions: HashMap::new(),
+            named_session_slot_rect: None,
             named_session_button_rect: None,
             named_session_menu_rect: None,
             named_session_close_rect: None,
@@ -3747,6 +3793,15 @@ impl App {
             worktree_error: None,
             mode: Mode::Normal,
             sidebars,
+            client_shell_dock_rows: 0,
+            client_shell_dock_leading: false,
+            client_shell_dock_indent_workspaces: false,
+            client_machine_capable: false,
+            client_shell_owns_workspaces: false,
+            client_shell_owns_session_chrome: false,
+            client_sidebar_input: false,
+            client_files_visible: false,
+            client_shell_dock_rect: None,
             module_docks: std::collections::HashMap::new(),
             module_dock_rects: Vec::new(),
             bar,
@@ -3791,9 +3846,13 @@ impl App {
             last_cursor: None,
             detach_requested: false,
             pending_session_switch: None,
+            pending_machine_selector: false,
+            pending_machine_create: false,
+            pending_machine_catalog_revision: None,
             named_session_menu: None,
             named_session_cache: Vec::new(),
             pending_named_session_actions: HashMap::new(),
+            named_session_slot_rect: None,
             named_session_button_rect: None,
             named_session_menu_rect: None,
             named_session_close_rect: None,
@@ -4051,6 +4110,11 @@ impl App {
     /// Write the current sidebar layout into `config` and persist it, mirroring
     /// the legacy `sidebar_width` from the left for safe downgrade (docs/29).
     pub fn save_sidebars(&mut self) {
+        // Machine-aware input operates on the originating client's layout.
+        // The IPC owner captures it after dispatch; never persist it remotely.
+        if self.client_sidebar_input {
+            return;
+        }
         self.config.sidebars = Some(self.sidebars.to_config());
         self.config.sidebar_width = self.sidebars.left.width;
         self.persist_config();
@@ -5823,7 +5887,14 @@ impl App {
             }
             WsMenuItem::TogglePath => {
                 self.config.layout.workspace_paths = !self.config.layout.workspace_paths;
-                self.persist_config();
+                // A machine-aware client owns one combined Local/Machines
+                // Workspaces shell. Its per-client state is captured by the
+                // server after input dispatch and broadcast to every endpoint;
+                // do not leak that display preference into one server's
+                // persistent configuration.
+                if !self.client_sidebar_input {
+                    self.persist_config();
+                }
             }
             // The right-clicked node, which needn't be the focused one.
             WsMenuItem::Module(i) => {

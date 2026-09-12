@@ -82,6 +82,7 @@ Luvus release number.
 | Family | Methods |
 |---|---|
 | host / sessions | `host.capabilities` · `host.info` · `host.doctor` · `host.update.check` · `host.update.install` · `session.list` · `session.status` · `session.start` · `session.stop` · `session.restart` · `session.delete` · `skill.status` · `skill.enable` · `skill.disable` · `integration.status` · `integration.install` · `integration.uninstall` |
+| machines (`uhp access --machines` only) | `machine.list` · `machine.get` · `machine.status` · `machine.sessions` · `machine.add` · `machine.rename` · `machine.enable` · `machine.disable` · `machine.remove` |
 | discovery / config | `uhp.capabilities` · `uhp.stats` · `uhp.token.create` · `uhp.token.list` · `uhp.token.revoke` · `config.get` · `config.patch` · `server.reload_config` · `server.agent_manifests` · `server.reload_agent_manifests` |
 | workspaces | `workspace.list` · `workspace.get` · `workspace.open` · `workspace.focus` · `workspace.rename` · `workspace.pin` · `workspace.move` · `workspace.move_block` · `workspace.report_metadata` · `workspace.close` |
 | tabs | `tab.list` · `tab.get` · `tab.new` · `tab.focus` · `tab.move` · `tab.swap` · `tab.rename` · `tab.close` |
@@ -110,6 +111,26 @@ currently focused pane. Methods with a focus default also treat an explicit
 pane fails with `not_found`; malformed or out-of-range IDs fail with
 `invalid_request` before any mutation. Pane IDs accept an unsigned 32-bit JSON
 integer or its decimal string form.
+
+Machine methods are an opt-in access-gateway surface, not methods of the
+selected session server. `machine.list` takes `{}`. `machine.get`,
+`machine.status`, and `machine.sessions` take `{id}`. `machine.add` takes
+`{id, host, if_revision, label?, preferred_session?, remote_binary?, enabled?}`.
+`preferred_session` selects the remote named session and defaults to `default`.
+Rename takes
+`{id, label, if_revision}`; enable, disable, and remove take
+`{id, if_revision}`. Read projections omit SSH destinations and executable
+paths, but include `automatic_provisioning` so a client can distinguish a
+managed binary from an explicit path. Control methods are advertised only by
+`luvus uhp access --machines --control`.
+
+`machine.add` and `machine.enable` validate remote compatibility but never
+install through UHP. A saved `automatic_provisioning:true` is provenance, not
+installation authority. If a binary is missing or incompatible, run foreground
+CLI setup and approve its default-No prompt, or pass `--install` explicitly for
+that operation. Installation never restarts a running remote server.
+`machine.status` and all background reconnects remain read-only. Use
+`enabled:false` to save without contacting the host.
 
 `task.add` accepts a short `title` and an optional multiline `prompt` containing
 the detailed worker briefing. `task.get`, `task.list`, and task events return

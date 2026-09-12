@@ -92,6 +92,7 @@ export default defineConfig({
             { label: 'DIFF Review', slug: 'docs/guides/diff' },
             { label: 'Worktrees', slug: 'docs/guides/worktrees' },
             { label: 'Remote Sessions', slug: 'docs/guides/remote' },
+            { label: 'Multiple Machines', slug: 'docs/guides/machines' },
             { label: 'Mobile Sessions', slug: 'docs/guides/mobile' },
             { label: 'Scrollback & Copy', slug: 'docs/guides/scrollback' },
             { label: 'Settings & Theming', slug: 'docs/guides/settings' },

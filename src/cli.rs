@@ -45,6 +45,7 @@ pub fn is_cli(args: &[String]) -> bool {
                 | "update"
                 | "skill"
                 | "session"
+                | "machine"
         )
     )
 }
@@ -76,6 +77,7 @@ Commands:
   bar          Publish and arrange top and bottom status widgets
   ui           Configure sidebars, docks, and notifications
   session      List, attach, stop, and delete server sessions
+  machine      Save, inspect, and open Luvus machines over SSH
   server       Inspect and manage the selected background server
   integration  Manage agent session-resume integrations
   skill        Enable, inspect, show, or remove the bundled agent skill
@@ -90,7 +92,6 @@ Commands:
 Examples:
   luvus agent list                       See every active coding agent
   luvus pane split --down                Add a pane below the focused pane
-  luvus workspace open .                 Open the current project
   luvus session attach docs              Start or open a named session
   luvus --session docs agent list        Control a session from another terminal
 
@@ -325,7 +326,8 @@ universal harness protocol:
   uhp schema                print the complete installed UHP JSON Schema bundle
   uhp snapshot              print a fenced session snapshot for harness bootstrap
   uhp events                stream sequenced UHP events
-  uhp access [--control] [--ttl <seconds> | --no-expiry]   expose scoped UHP through a private provider endpoint
+  uhp access [--machines] [--control] [--ttl <seconds> | --no-expiry]
+                             expose scoped UHP through a private provider endpoint
   uhp proxy                 forward one JSON request from stdin to the selected server
 
 sessions:
@@ -333,6 +335,23 @@ sessions:
   session attach <name>      start or attach the named session
   session stop <name> [--json]    stop only the named session and its panes
   session delete <name> [--json]  delete a stopped named session
+
+machines:
+  machine add <id> --host <ssh-alias> [--label <label>] [--session <name>] [--remote-binary <path>] [--install] [--disabled] [--revision <n>]
+                             provision and validate one SSH machine
+  machine list               list saved machine profiles and catalog revision
+  machine show <id>          show one saved profile
+  machine rename <id> <label> [--revision <n>]
+                             rename a profile with optional revision protection
+  machine enable <id> [--install] [--revision <n>]
+  machine disable <id> [--revision <n>]
+                             provision and enable after a bounded SSH probe, or disable locally
+  machine remove <id> [--revision <n>]
+                             remove only the local profile; remote panes stay alive
+  machine status <id>        verify the running selected server and workspace projection
+  machine sessions <id>      list named sessions through bounded SSH
+  machine open <id> [--session <name>]
+                             attach using the verified absolute remote binary
 
 remote:
   --remote <host> [ssh args] attach to a luvus session on <host> over plain ssh
@@ -607,6 +626,7 @@ fn help_topic_has_subcommands(topic: &str) -> bool {
             | "bar"
             | "ui"
             | "session"
+            | "machine"
             | "server"
             | "integration"
             | "skill"
@@ -620,7 +640,7 @@ fn normalize_help_topic(topic: &str) -> Option<&str> {
         "workspace" | "tab" | "pane" | "agent" | "files" | "git" | "mission" | "worktree"
         | "task" | "lease" | "automation" | "module" | "theme" | "bar" | "ui" | "session"
         | "server" | "integration" | "diff" | "skill" | "wait" | "search" | "events" | "uhp"
-        | "ping" | "doctor" | "update" | "attach" => Some(topic),
+        | "machine" | "ping" | "doctor" | "update" | "attach" => Some(topic),
         "node" => Some("pane"),
         "remote" | "--remote" => Some("remote"),
         _ => None,
@@ -808,6 +828,10 @@ fn write_topic_help_english(
         "uhp" => (
             "luvus uhp <capabilities|schema|snapshot|events|access|proxy>",
             detailed_section("universal harness protocol:\n", "\nsessions:\n"),
+        ),
+        "machine" => (
+            "luvus machine <command> [args]",
+            detailed_section("machines:\n", "\nremote:\n"),
         ),
         "remote" => (
             "luvus [--session <name>] --remote <host> [ssh args]",
@@ -4328,6 +4352,8 @@ mod tests {
                             | "task"
                             | "automation"
                             | "integration"
+                            | "machine"
+                            | "uhp"
                     )
                 ) && !trimmed.contains("  ");
                 if trimmed.is_empty()
@@ -4684,7 +4710,9 @@ mod tests {
     #[test]
     fn uhp_help_includes_transport_neutral_access() {
         let help = rendered_topic_help("uhp", None);
-        assert!(help.contains("uhp access [--control] [--ttl <seconds> | --no-expiry]"));
+        assert!(
+            help.contains("uhp access [--machines] [--control] [--ttl <seconds> | --no-expiry]")
+        );
         assert!(help.contains("private provider endpoint"));
     }
 

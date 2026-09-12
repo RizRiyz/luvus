@@ -39,8 +39,9 @@
 - **Worktrees and orchestration:** Create worktrees, coordinate dependent tasks,
   reserve file paths, assign agents, schedule timezone-aware recurring work,
   run quality gates, and merge completed work.
-- **Remote and multi-client use:** Attach over SSH, connect several clients with
-  independent viewport sizes, and use the compact switcher on narrow screens.
+- **Remote and multi-machine use:** Attach over SSH, save persistent machine
+  profiles, switch complete remote sessions from one TUI, connect several
+  clients with independent viewports, and use the compact mobile selector.
 - **Terminal tools:** Configure per-pane Scrollback Memory, search across pane
   history, use copy mode, click detected links, and run full-screen terminal apps.
 - **Extensible surfaces:** Install modules with actions, events, settings,

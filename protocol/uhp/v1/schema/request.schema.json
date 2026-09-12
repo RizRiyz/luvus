@@ -15,6 +15,7 @@
         "uhp.capabilities", "uhp.stats", "uhp.token.create", "uhp.token.list", "uhp.token.revoke",
         "ping", "server.stop", "server.reload_config", "server.agent_manifests", "server.reload_agent_manifests", "config.get", "config.patch",
         "host.capabilities", "host.info", "host.doctor", "host.update.check", "host.update.install", "session.snapshot", "session.list", "session.status", "session.start", "session.stop", "session.restart", "session.delete", "skill.status", "skill.enable", "skill.disable", "integration.status", "integration.install", "integration.uninstall", "events.subscribe", "events.wait", "wait.output",
+        "machine.list", "machine.get", "machine.status", "machine.sessions", "machine.add", "machine.rename", "machine.enable", "machine.disable", "machine.remove",
         "workspace.list", "workspace.get", "workspace.new", "workspace.open", "workspace.focus", "workspace.rename", "workspace.pin", "workspace.move", "workspace.move_block", "workspace.report_metadata", "workspace.close",
         "node.list", "node.new", "node.open", "node.focus", "node.rename", "node.pin", "node.close",
         "tab.list", "tab.get", "tab.new", "tab.focus", "tab.move", "tab.swap", "tab.rename", "tab.close",
@@ -40,6 +41,36 @@
   },
   "$defs": {
     "emptyParams": { "type": "object", "additionalProperties": false, "maxProperties": 0 },
+    "machineIdParams": {
+      "type": "object", "additionalProperties": false, "required": ["id"],
+      "properties": { "id": { "type": "string", "minLength": 1, "maxLength": 48, "pattern": "^[a-z0-9][a-z0-9._-]*$" } }
+    },
+    "machineMutationParams": {
+      "type": "object", "additionalProperties": false, "required": ["id", "if_revision"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 48, "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+        "if_revision": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "machineRenameParams": {
+      "type": "object", "additionalProperties": false, "required": ["id", "label", "if_revision"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 48, "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "if_revision": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "machineAddParams": {
+      "type": "object", "additionalProperties": false, "required": ["id", "host", "if_revision"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 48, "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+        "host": { "type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[^-\\s][^\\s]*$" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "remote_binary": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^(?:/[A-Za-z0-9/_.+-]+|[A-Za-z]:[\\\\/][A-Za-z0-9\\\\/_.+-]+)$" },
+        "enabled": { "type": "boolean" },
+        "if_revision": { "type": "integer", "minimum": 0 }
+      }
+    },
     "tokenCreateParams": {
       "type": "object", "additionalProperties": false, "required": ["scopes"],
       "properties": {
@@ -311,6 +342,16 @@
   "allOf": [
     { "if": { "properties": { "method": { "enum": ["host.capabilities", "host.info", "host.doctor", "host.update.check", "skill.status", "integration.status", "uhp.capabilities", "uhp.stats", "uhp.token.list", "session.list"] } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
+    { "if": { "properties": { "method": { "const": "machine.list" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
+    { "if": { "properties": { "method": { "enum": ["machine.get", "machine.status", "machine.sessions"] } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/machineIdParams" } } } },
+    { "if": { "properties": { "method": { "const": "machine.add" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/machineAddParams" } } } },
+    { "if": { "properties": { "method": { "const": "machine.rename" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/machineRenameParams" } } } },
+    { "if": { "properties": { "method": { "enum": ["machine.enable", "machine.disable", "machine.remove"] } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/machineMutationParams" } } } },
     { "if": { "properties": { "method": { "const": "uhp.token.create" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/tokenCreateParams" } } } },
     { "if": { "properties": { "method": { "const": "uhp.token.revoke" } } },

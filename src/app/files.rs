@@ -66,7 +66,8 @@ impl App {
     /// there is nothing to do (a few `HashSet` checks), and a no-op when the dock
     /// isn't mounted.
     pub fn ensure_file_tree(&mut self) {
-        let dock_visible = self.sidebars.side_of(&DockKind::Files).is_some();
+        let dock_visible =
+            self.client_files_visible || self.sidebars.side_of(&DockKind::Files).is_some();
         let diff_visible = self
             .layout()
             .leaves()

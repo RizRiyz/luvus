@@ -67,6 +67,7 @@ impl App {
             "server.reload_config",
             "server.agent_manifests",
             "server.reload_agent_manifests",
+            "__machine.catalog_changed",
             "config.get",
             "config.patch",
             "workspace.open",
@@ -165,6 +166,7 @@ impl App {
             "server.reload_agent_manifests" | "manifest.reload" => {
                 self.api_server_reload_agent_manifests(method, p)
             }
+            "__machine.catalog_changed" => self.api_machine_catalog_changed(method, p),
             "session.snapshot" => self.api_session_snapshot(method, p),
             "search.capabilities" => self.api_search_capabilities(method, p),
             "theme.list" => self.api_theme_list(method, p),

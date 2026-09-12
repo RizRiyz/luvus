@@ -10,6 +10,7 @@ use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 
 use crate::ids::PaneId;
 use crate::ipc::protocol::ServerMessage;
+use crate::ipc::protocol::SurfaceInterest;
 use crate::terminal::theme_probe::TerminalColors;
 
 /// Input originating from one attached display client. Keeping the source id at
@@ -85,6 +86,40 @@ pub enum AppEvent {
     },
     /// A binary client detached.
     ClientDetach {
+        id: u64,
+    },
+    /// Change one client's frame/input ownership without closing its transport.
+    ClientSurfaceInterest {
+        id: u64,
+        interest: SurfaceInterest,
+    },
+    ClientPrepareSurface {
+        id: u64,
+        ticket: u64,
+        cols: u16,
+        rows: u16,
+    },
+    ClientShellDockLayout {
+        id: u64,
+        layout: crate::ipc::protocol::ShellDockLayout,
+    },
+    ClientShellSidebars {
+        id: u64,
+        state: crate::ipc::protocol::ShellSidebars,
+    },
+    ClientShellWorkspaceFocus {
+        id: u64,
+        workspace_id: String,
+    },
+    ClientShellWorkspaceMenu {
+        id: u64,
+        workspace_id: String,
+        col: u16,
+        row: u16,
+    },
+    /// The owner-local client switched from its remote-machine form back to
+    /// the server-rendered workspace picker.
+    ClientOpenWorkspacePicker {
         id: u64,
     },
     /// A display client reported its cell size in pixels, once after the handshake

@@ -24,6 +24,7 @@ mod ipc;
 mod layout;
 mod links;
 mod logging;
+mod machine;
 mod mission;
 mod module;
 mod orch;
@@ -46,7 +47,7 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 #[cfg(not(windows))]
 use ratatui::crossterm::event::read as read_event;
 use ratatui::crossterm::event::{
@@ -92,6 +93,12 @@ fn main() -> Result<()> {
     if is_backend_discovery_request(&args) {
         std::process::exit(cli::run(&args)?);
     }
+    if args.get(1).map(String::as_str) == Some("remote-client-info")
+        && args.get(2).map(String::as_str) == Some("--json")
+        && args.len() == 3
+    {
+        return remote_client_info(&args);
+    }
     // Private foreground route used only by scheduled worker panes. Keep it
     // ahead of migrations and TUI/server routing: it must run exactly one
     // adapter process, settle its ORCH task, and exit.
@@ -108,7 +115,7 @@ fn main() -> Result<()> {
         Some("client") => return ipc::client::run(&persist::client_socket_path()),
         // Remote attach (docs/18 RA): the bridge runs on the remote host (via
         // ssh); `--remote <host>` launches it from the local side.
-        Some("remote-client-bridge") => return remote_client_bridge(),
+        Some("remote-client-bridge") => return remote_client_bridge(&args[2..]),
         Some("--remote") => return remote_attach(&args),
         // `attach <id>` (docs/18 WA-2): focus + zoom the pane, then open the TUI
         // straight into that fullscreen terminal.
@@ -116,6 +123,10 @@ fn main() -> Result<()> {
         Some("integration") => {
             std::process::exit(integration::run(&args, i18n::cli::Context::configured())?)
         }
+        Some("machine") => std::process::exit(machine::run_cli(
+            &args[2.min(args.len())..],
+            i18n::cli::Context::configured(),
+        )?),
         Some("--local") => return run_local(),
         Some(_) if cli::is_cli(&args) => {
             let code = cli::run(&args)?;
@@ -627,10 +638,127 @@ fn open_cwd_workspace() {
 /// Remote bridge role (docs/18 RA-1), run *on the remote host* by ssh. Ensure a
 /// server is up, then pump this process's stdin/stdout to/from the local socket
 /// so the `luvus --remote` client on the other end of the ssh pipe drives it.
-fn remote_client_bridge() -> Result<()> {
+fn remote_client_bridge(args: &[String]) -> Result<()> {
     let sock = persist::client_socket_path();
-    ensure_server_ready(&sock)?;
+    match args {
+        [] => ensure_server_ready(&sock)?,
+        [mode] if mode == "--existing-only" => ensure_server_existing(&sock)?,
+        [mode] if mode == "--start-if-missing" => ensure_server_start_if_missing(&sock)?,
+        _ => return Err(anyhow!("invalid remote client bridge mode")),
+    }
     ipc::client::remote_bridge(&sock)
+}
+
+/// Validate an already-running selected server without starting, stopping, or
+/// recycling it. Persistent saved-machine links use this path so a reconnect
+/// never gains foreground repair authority.
+fn ensure_server_existing(_sock: &Path) -> Result<()> {
+    let _running = retry_control_probe(
+        SERVER_CONTROL_TIMEOUT,
+        SERVER_RECOVERY_TIMEOUT,
+        server_version_with_timeout,
+    )
+    .context("selected remote Luvus session is not responding")?;
+    Ok(())
+}
+
+/// Start an absent selected server, but never recycle an existing one. This is
+/// reserved for an explicit foreground onboarding/enable operation.
+fn ensure_server_start_if_missing(sock: &Path) -> Result<()> {
+    if retry_control_probe(
+        SERVER_CONTROL_TIMEOUT,
+        SERVER_RECOVERY_TIMEOUT,
+        server_version_with_timeout,
+    )
+    .is_ok()
+    {
+        return Ok(());
+    }
+    match ipc::transport::connect_timeout(sock, SERVER_RECOVERY_TIMEOUT) {
+        Ok(_) => Err(anyhow!(
+            "selected remote Luvus session is present but not responding; no restart was attempted"
+        )),
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => Err(anyhow!(
+            "selected remote Luvus session endpoint is busy; no restart was attempted"
+        )),
+        Err(error) if remote_endpoint_is_missing(&error) => {
+            spawn_server()?;
+            wait_for_socket(sock)?;
+            let _running = retry_control_probe(
+                SERVER_CONTROL_TIMEOUT,
+                SERVER_RECOVERY_TIMEOUT,
+                server_version_with_timeout,
+            )
+            .context("new remote Luvus session did not become responsive")?;
+            Ok(())
+        }
+        Err(error) => Err(error).context(
+            "selected remote Luvus session endpoint could not be accessed; no server was started",
+        ),
+    }
+}
+
+fn remote_endpoint_is_missing(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound
+}
+
+/// Read-only capability probe used before a saved machine is enabled. It does
+/// not start a server, read a session, or mutate the remote installation.
+fn remote_client_info(args: &[String]) -> Result<()> {
+    let binary = args
+        .first()
+        .filter(|path| Path::new(path).is_absolute())
+        .cloned()
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .unwrap_or_default()
+                .display()
+                .to_string()
+        });
+    println!(
+        "{}",
+        serde_json::json!({
+            "protocol_version": ipc::protocol::PROTOCOL_VERSION,
+            "machine_endpoint_version": machine::MACHINE_ENDPOINT_VERSION,
+            "capabilities": [machine::MACHINE_ENDPOINT_CAPABILITY],
+            "version": env!("CARGO_PKG_VERSION"),
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "binary": binary,
+        })
+    );
+    Ok(())
+}
+
+/// Attach through one previously validated profile. Unlike legacy `--remote`,
+/// this path never searches a remote PATH and never accepts arbitrary SSH
+/// options; OpenSSH configuration owns keys, ports, and jump hosts.
+pub(crate) fn remote_attach_profile(
+    destination: &str,
+    binary: &str,
+    session_name: Option<&str>,
+) -> Result<()> {
+    let mut command = Command::new("ssh");
+    command
+        .arg("-T")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=10")
+        .arg("-o")
+        .arg("ServerAliveInterval=15")
+        .arg("-o")
+        .arg("ServerAliveCountMax=3")
+        .arg(destination);
+    let mut remote_args = Vec::new();
+    if let Some(name) = session_name {
+        session::validate_name(name).map_err(anyhow::Error::msg)?;
+        remote_args.extend(["--session", name]);
+    }
+    remote_args.push("remote-client-bridge");
+    machine::command::append(&mut command, binary, &remote_args)?;
+    let (result, _) = remote_attach_attempt(command);
+    result
 }
 
 /// `luvus attach <id>` (docs/18 WA-2): focus + zoom the pane (one round-trip via
@@ -685,6 +813,7 @@ fn remote_attach(args: &[String]) -> Result<()> {
 
 fn remote_attach_attempt(mut cmd: Command) -> (Result<()>, Option<std::process::ExitStatus>) {
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()); // stderr inherited so ssh can prompt for auth
+    platform::no_window(&mut cmd);
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow!("failed to launch ssh: {e}"));
@@ -1578,6 +1707,23 @@ mod tests {
 
         assert_eq!(result.expect("recovery probe succeeds"), "0.13.1");
         assert_eq!(attempts, vec![ordinary, recovery]);
+    }
+
+    #[test]
+    fn remote_start_if_missing_rejects_non_missing_endpoint_errors() {
+        assert!(remote_endpoint_is_missing(&io::Error::from(
+            io::ErrorKind::NotFound
+        )));
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::ConnectionRefused,
+        ] {
+            assert!(
+                !remote_endpoint_is_missing(&io::Error::from(kind)),
+                "{kind:?} must not authorize starting a server"
+            );
+        }
     }
 
     #[test]
