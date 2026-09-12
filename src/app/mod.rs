@@ -2355,6 +2355,13 @@ pub struct App {
     /// Bumped by every Go to edit, directory change, and picker close, so a
     /// completion scan carrying an older value is stale and ignored.
     picker_go_to_generation: u64,
+    /// A Go to listing is still draining on [`IoJobs`], including superseded
+    /// ones whose result will be discarded. Tab must not admit another until
+    /// this clears, or obsolete scans fill the shared eight-job budget.
+    picker_go_to_inflight: bool,
+    /// Tab was pressed while a superseded listing was still draining. When that
+    /// listing lands, start one scan for the field as it is then.
+    picker_go_to_rescan: bool,
     /// Clickable targets in the open-worktree list, set by the renderer each
     /// frame. Rows precede the modal body in hit-test order, so a click lands on
     /// the row under it and only a click on neither is "outside".
@@ -3070,6 +3077,8 @@ impl App {
             worktree_open: None,
             worktree_open_generation: 0,
             picker_go_to_generation: 0,
+            picker_go_to_inflight: false,
+            picker_go_to_rescan: false,
             worktree_open_rects: Vec::new(),
             tab_rename: None,
             tab_menu: None,
@@ -3734,6 +3743,8 @@ impl App {
             worktree_open: None,
             worktree_open_generation: 0,
             picker_go_to_generation: 0,
+            picker_go_to_inflight: false,
+            picker_go_to_rescan: false,
             worktree_open_rects: Vec::new(),
             tab_rename: None,
             tab_menu: None,

@@ -497,8 +497,10 @@ impl App {
 
     pub fn close_folder_picker(&mut self) {
         // Retire the generation so a scan in flight cannot apply to a picker the
-        // user reopens later.
+        // user reopens later. The abandoned listing still occupies IoJobs until
+        // it lands; do not clear inflight here.
         self.picker_go_to_generation = self.picker_go_to_generation.wrapping_add(1);
+        self.picker_go_to_rescan = false;
         self.picker = None;
     }
 
@@ -776,9 +778,15 @@ impl App {
             }
             return;
         }
-        // One scan at a time for the *current* text. Editing or navigating
-        // retires the slot, so a superseded listing never gates the next Tab.
+        // One scan at a time for the *current* text.
         if picker.go_to_scanning.is_some() {
+            return;
+        }
+        // A superseded listing still occupies the shared IoJobs budget until it
+        // lands. Remember the Tab instead of admitting another job that would
+        // sit behind the stalled read on the single worker anyway.
+        if self.picker_go_to_inflight {
+            self.picker_go_to_rescan = true;
             return;
         }
         let scan = GoToScan {
@@ -793,12 +801,13 @@ impl App {
             let result = scan.run();
             Box::new(move |app| app.apply_go_to_completion(generation, result))
         });
-        if accepted.is_err() {
+        if accepted.is_ok() {
+            self.picker_go_to_inflight = true;
+            self.picker_go_to_rescan = false;
+        } else if let Some(p) = self.picker.as_mut() {
             // A completion that cannot even be queued stays a no-op, like one
             // that finds nothing. Just free the slot for the next Tab.
-            if let Some(p) = self.picker.as_mut() {
-                p.go_to_scanning = None;
-            }
+            p.go_to_scanning = None;
         }
     }
 
@@ -819,13 +828,11 @@ impl App {
     /// armed cycle and fences any scan still in flight. Every edit and every
     /// directory change routes through here.
     ///
-    /// The scan slot is released too, so Tab can immediately request completion
-    /// for the new text instead of waiting on a listing whose result is already
-    /// doomed — a stalled network mount would otherwise leave Tab dead. That is
-    /// safe because the slot carries its generation: the abandoned scan can no
-    /// longer match, so it cannot release the slot a later Tab is waiting on.
-    /// A filesystem read cannot be cancelled, so the abandoned work still runs to
-    /// completion on the worker; admission stays bounded by `IoJobs`.
+    /// The UI slot is released so the field is not waiting on a doomed listing.
+    /// The worker occupancy is not: a filesystem read cannot be cancelled, and
+    /// the single IoJobs thread would run a replacement behind the stalled one
+    /// anyway. A later Tab sets [`App::picker_go_to_rescan`] instead of admitting
+    /// another job into the shared eight-job budget.
     fn invalidate_go_to_completion(&mut self) {
         self.picker_go_to_generation = self.picker_go_to_generation.wrapping_add(1);
         let generation = self.picker_go_to_generation;
@@ -846,25 +853,37 @@ impl App {
         generation: u64,
         result: Option<(String, Option<GoToCycle>)>,
     ) -> bool {
-        let Some(p) = self.picker.as_mut() else {
-            return false;
+        self.picker_go_to_inflight = false;
+        let rescan = {
+            let Some(p) = self.picker.as_mut() else {
+                self.picker_go_to_rescan = false;
+                return false;
+            };
+            // Only this scan's own UI slot is freed: a newer one may already be
+            // waiting on a later generation.
+            if p.go_to_scanning == Some(generation) {
+                p.go_to_scanning = None;
+            }
+            if p.go_to_generation == generation && p.going_to.is_some() {
+                self.picker_go_to_rescan = false;
+                let Some((text, cycle)) = result else {
+                    return false;
+                };
+                p.going_to = Some(text);
+                p.go_to_cycle = cycle;
+                p.error = None;
+                return true;
+            }
+            self.picker_go_to_rescan
+                && p.going_to.is_some()
+                && p.go_to_cycle.is_none()
+                && p.go_to_scanning.is_none()
         };
-        // Release the slot before validating, so a discarded result still lets
-        // the next Tab start a scan. Only this scan's own slot is freed: a newer
-        // one may already be queued against a later generation.
-        if p.go_to_scanning == Some(generation) {
-            p.go_to_scanning = None;
+        self.picker_go_to_rescan = false;
+        if rescan {
+            self.picker_complete_go_to(false);
         }
-        if p.go_to_generation != generation || p.going_to.is_none() {
-            return false;
-        }
-        let Some((text, cycle)) = result else {
-            return false;
-        };
-        p.going_to = Some(text);
-        p.go_to_cycle = cycle;
-        p.error = None;
-        true
+        false
     }
 
     /// Resolve an entered path and browse to it. Absolute paths, paths relative
@@ -2083,39 +2102,33 @@ mod tests {
         app.handle_picker_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
 
         // Queue one scan and hold its completion, then edit so it can never
-        // apply. Editing retires its slot, which is what lets the next Tab run.
+        // apply. Editing retires its UI slot; the worker occupancy stays until
+        // apply, so the next Tab must not admit a second job.
         app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         let first = take_completion(&rx);
-        let first_slot = app
-            .picker
-            .as_ref()
-            .unwrap()
-            .go_to_scanning
-            .expect("the first scan holds a slot");
         app.handle_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         assert!(app.picker.as_ref().unwrap().go_to_scanning.is_none());
 
-        // Queue a second scan, then deliver the first scan's late result. It must
-        // neither write the field nor free the slot the second scan is waiting on.
         app.handle_picker_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
         app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        let second_slot = app.picker.as_ref().unwrap().go_to_scanning;
-        assert!(second_slot.is_some());
-        assert_ne!(second_slot, Some(first_slot), "a fresh generation");
-
-        assert!(!first.apply(&mut app));
-        assert_eq!(
-            app.picker.as_ref().unwrap().go_to_scanning,
-            second_slot,
-            "a late scan must not release the queued scan's slot"
+        assert!(
+            app.picker.as_ref().unwrap().go_to_scanning.is_none(),
+            "Tab remembers a rescan instead of admitting a second job"
         );
+
+        // The abandoned listing starts that rescan and must not write the field.
+        assert!(!first.apply(&mut app));
         assert_eq!(
             app.picker.as_ref().unwrap().going_to.as_deref(),
             Some("D"),
-            "and must not write the field"
+            "a late scan must not write the field"
+        );
+        let second_slot = app.picker.as_ref().unwrap().go_to_scanning;
+        assert!(
+            second_slot.is_some(),
+            "the remembered Tab starts one new scan"
         );
 
-        // The second scan still applies normally.
         take_completion(&rx).apply(&mut app);
         let p = app.picker.as_ref().unwrap();
         assert_eq!(p.going_to.as_deref(), Some("Documents/"));
@@ -2145,32 +2158,77 @@ mod tests {
         let stalled_slot = app.picker.as_ref().unwrap().go_to_scanning;
         assert!(stalled_slot.is_some());
 
-        // The user gives up on it and types something else. Tab must serve the
-        // new text immediately rather than wait on the doomed listing.
+        // The user gives up on it and types something else. Tab must accept the
+        // new text without admitting another job behind the stalled read.
         app.handle_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         assert!(
             app.picker.as_ref().unwrap().go_to_scanning.is_none(),
-            "editing retires the doomed scan's slot"
+            "editing retires the doomed scan's UI slot"
         );
         app.handle_picker_key(KeyEvent::new(KeyCode::Char('M'), KeyModifiers::NONE));
-        press_tab(
-            &mut app,
-            &rx,
-            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(
+            app.picker.as_ref().unwrap().go_to_scanning.is_none(),
+            "Tab does not queue a second job while one is draining"
         );
+        assert_eq!(app.picker.as_ref().unwrap().going_to.as_deref(), Some("M"));
+
+        // The abandoned listing finally lands, starts the remembered scan, and
+        // must not write the old completion into the new text.
+        assert!(!stalled.apply(&mut app));
+        assert_eq!(app.picker.as_ref().unwrap().going_to.as_deref(), Some("M"));
+        take_completion(&rx).apply(&mut app);
         assert_eq!(
             app.picker.as_ref().unwrap().going_to.as_deref(),
             Some("Music/"),
-            "Tab is not gated on the abandoned scan"
+            "the remembered Tab completes against the live field"
         );
 
-        // The abandoned listing finally lands and must change nothing.
-        assert!(!stalled.apply(&mut app));
-        assert_eq!(
-            app.picker.as_ref().unwrap().going_to.as_deref(),
-            Some("Music/")
+        app.drain_io_jobs();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn obsolete_go_to_scans_do_not_fill_the_io_queue() {
+        let _env = crate::persist::test_env("picker-go-to-queue");
+        let tmp = complete_fixture("queue");
+        std::fs::create_dir_all(tmp.join("Documents")).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_folder_picker_at(tmp.clone());
+        app.picker_start_go_to();
+        app.handle_picker_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
+        app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let stalled = take_completion(&rx);
+
+        // Seven edit-plus-Tab gestures used to admit seven more jobs into the
+        // shared eight-job budget. They must collapse into one remembered rescan.
+        for _ in 0..7 {
+            app.handle_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+            app.handle_picker_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
+            app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
+        assert!(app.picker.as_ref().unwrap().go_to_scanning.is_none());
+
+        let mut dummy = 0;
+        while app
+            .io_jobs
+            .submit(app.app_tx.clone(), || Box::new(|_| false))
+            .is_ok()
+        {
+            dummy += 1;
+            assert!(
+                dummy < 16,
+                "admission must remain bounded even if this helper loops"
+            );
+        }
+        assert!(
+            dummy >= 7,
+            "one held Go to listing must leave room in the shared budget, got {dummy} free slots"
         );
 
+        stalled.apply(&mut app);
         app.drain_io_jobs();
         let _ = std::fs::remove_dir_all(&tmp);
     }
