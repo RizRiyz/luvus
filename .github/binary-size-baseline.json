@@ -10,8 +10,8 @@
       "archive_bytes": 4666841
     },
     "x86_64-apple-darwin": {
-      "executable_bytes": 9550124,
-      "archive_bytes": 4031584
+      "executable_bytes": 12150348,
+      "archive_bytes": 5084425
     },
     "aarch64-unknown-linux-musl": {
       "executable_bytes": 10345896,
