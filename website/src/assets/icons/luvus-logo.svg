@@ -1,33 +1,12 @@
 <svg width="1000" height="1000" viewBox="200 200 1000 1000" fill="none" xmlns="http://www.w3.org/2000/svg">
-<rect x="400" y="300" width="100" height="100" fill="#DBC66F"/>
-<rect x="500" y="400" width="100" height="100" fill="#DBC66F"/>
-<rect x="600" y="400" width="100" height="100" fill="#DBC66F"/>
-<rect x="700" y="400" width="100" height="100" fill="#DBC66F"/>
-<rect x="800" y="400" width="100" height="100" fill="#DBC66F"/>
-<rect x="500" y="500" width="100" height="100" fill="#DBC66F"/>
-<rect x="600" y="500" width="100" height="100" fill="#DBC66F"/>
-<rect x="700" y="500" width="100" height="100" fill="#DBC66F"/>
-<rect x="800" y="500" width="100" height="100" fill="#DBC66F"/>
-<rect x="400" y="600" width="100" height="100" fill="#DBC66F"/>
-<rect x="500" y="600" width="100" height="100" fill="#DBC66F"/>
-<rect x="700" y="600" width="100" height="100" fill="#DBC66F"/>
-<rect x="900" y="600" width="100" height="100" fill="#DBC66F"/>
-<rect x="400" y="700" width="100" height="100" fill="#DBC66F"/>
-<rect x="500" y="700" width="100" height="100" fill="#DBC66F"/>
-<rect x="600" y="700" width="100" height="100" fill="#DBC66F"/>
-<rect x="700" y="700" width="100" height="100" fill="#DBC66F"/>
-<rect x="800" y="700" width="100" height="100" fill="#DBC66F"/>
-<rect x="900" y="700" width="100" height="100" fill="#DBC66F"/>
-<rect x="300" y="800" width="100" height="100" fill="#DBC66F"/>
-<rect x="500" y="800" width="100" height="100" fill="#DBC66F"/>
-<rect x="600" y="800" width="100" height="100" fill="#DBC66F"/>
-<rect x="700" y="800" width="100" height="100" fill="#DBC66F"/>
-<rect x="800" y="800" width="100" height="100" fill="#DBC66F"/>
-<rect x="1000" y="800" width="100" height="100" fill="#DBC66F"/>
-<rect x="300" y="900" width="100" height="100" fill="#DBC66F"/>
-<rect x="500" y="900" width="100" height="100" fill="#DBC66F"/>
-<rect x="800" y="900" width="100" height="100" fill="#DBC66F"/>
-<rect x="1000" y="900" width="100" height="100" fill="#DBC66F"/>
-<rect x="500" y="1000" width="100" height="100" fill="#DBC66F"/>
-<rect x="800" y="1000" width="100" height="100" fill="#DBC66F"/>
+<path fill="#DBC66F" shape-rendering="crispEdges" d="
+M400 300h100v100H400z
+M500 400h400v100H500z
+M500 500h400v100H500z
+M400 600h200v100H400z M700 600h100v100H700z M900 600h100v100H900z
+M400 700h600v100H400z
+M300 800h100v100H300z M500 800h400v100H500z M1000 800h100v100H1000z
+M300 900h100v100H300z M500 900h100v100H500z M800 900h100v100H800z M1000 900h100v100H1000z
+M500 1000h100v100H500z M800 1000h100v100H800z
+"/>
 </svg>
