@@ -74,9 +74,22 @@ impl ThemeRegistry {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     let is_toml = path.extension().and_then(|value| value.to_str()) == Some("toml");
-                    let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
-                    if is_toml && is_file {
-                        paths.push(path);
+                    if !is_toml {
+                        continue;
+                    }
+                    match entry.file_type() {
+                        Ok(kind) if kind.is_file() => paths.push(path),
+                        Ok(kind) if kind.is_symlink() => match fs::metadata(&path) {
+                            Ok(metadata) if metadata.is_file() => paths.push(path),
+                            Ok(_) => {}
+                            // Keep broken links in the bounded path set so
+                            // read_theme_file reports the concrete error.
+                            Err(_) => paths.push(path),
+                        },
+                        Ok(_) => {}
+                        // Recheck inaccessible candidates through the existing
+                        // bounded reader so failures are visible to the user.
+                        Err(_) => paths.push(path),
                     }
                 }
             }
@@ -448,6 +461,9 @@ fn display_name(id: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+
     fn write(dir: &Path, name: &str, body: &str) {
         fs::create_dir_all(dir).unwrap();
         fs::write(dir.join(name), body).unwrap();
@@ -510,6 +526,46 @@ coral = "#aa0000"
         assert!(registry.index_of("a-custom").unwrap() < registry.index_of("z-custom").unwrap());
         assert!(registry.problems().is_empty());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loads_symlinked_theme_files() {
+        let root = temp("symlink-load");
+        let themes = root.join("themes");
+        let source = root.join("managed-theme");
+        fs::create_dir_all(&themes).unwrap();
+        fs::write(&source, complete("managed-link")).unwrap();
+        symlink(&source, themes.join("managed-link.toml")).unwrap();
+
+        let registry = ThemeRegistry::load_from(&themes);
+
+        let entry = registry
+            .get("managed-link")
+            .expect("symlinked theme is loaded");
+        assert!(matches!(entry.source, ThemeSource::Local { .. }));
+        assert!(registry.problems().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reports_broken_theme_symlinks_and_ignores_symlinked_directories() {
+        let root = temp("symlink-invalid");
+        let themes = root.join("themes");
+        let directory = root.join("directory-target");
+        fs::create_dir_all(&themes).unwrap();
+        fs::create_dir_all(&directory).unwrap();
+        symlink(root.join("missing-theme"), themes.join("broken.toml")).unwrap();
+        symlink(&directory, themes.join("directory.toml")).unwrap();
+
+        let registry = ThemeRegistry::load_from(&themes);
+
+        assert_eq!(registry.problems().len(), 1);
+        assert!(registry.problems()[0].path.ends_with("broken.toml"));
+        assert!(registry.problems()[0].message.contains("inspect"));
+        assert!(!registry.problems()[0].path.ends_with("directory.toml"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

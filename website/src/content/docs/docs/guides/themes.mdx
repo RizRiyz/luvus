@@ -75,9 +75,10 @@ luvus theme uninstall my-theme
 
 `theme path` prints and creates the shared home-level directory, normally
 `~/.luvus/themes/` (`~/.luvus-dev/themes/` for debug builds). Manually copied
-`*.toml` files are loaded too. Invalid files are omitted from Settings and
-reported by `theme list` and `theme reload` without preventing valid themes from
-loading.
+`*.toml` files and symbolic links to theme files are loaded too, so managed
+configurations from tools such as Home Manager, Stow, and chezmoi work without
+copying. Broken links and invalid files are omitted from Settings and reported
+by `theme list` and `theme reload` without preventing valid themes from loading.
 
 The Settings remove action switches an active installed theme to the bundled
 default before removing it. The CLI remains explicit: select another theme
