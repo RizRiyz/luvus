@@ -117,6 +117,10 @@ fn read_handshake_message<R: Read>(reader: &mut R) -> Result<ServerMessage> {
     protocol::read_message(reader).map_err(|error| HandshakeIoError(error).into())
 }
 
+fn read_welcome_message<R: Read>(reader: &mut R) -> Result<(u32, Option<String>)> {
+    protocol::read_welcome_message(reader).map_err(|error| HandshakeIoError(error).into())
+}
+
 fn write_handshake_message<W: Write>(writer: &mut W, message: &ClientMessage) -> Result<()> {
     protocol::write_message(writer, message).map_err(|error| HandshakeIoError(error).into())
 }
@@ -273,10 +277,11 @@ where
     #[cfg(not(unix))]
     let completion = crate::clipboard::Completion::local();
     let mut reader = BufReader::new(reader);
-    match read_handshake_message(&mut reader)? {
+    let (server_protocol, handshake_error) = read_welcome_message(&mut reader)?;
+    match handshake_error {
         // The one user-facing handshake failure is an old server after an
         // upgrade — tell them the fix, not just the symptom.
-        ServerMessage::Welcome { error: Some(e), .. } => {
+        Some(error) => {
             crate::logging::event(
                 crate::logging::EventKind::ClientHandshakeRejected,
                 &[
@@ -285,19 +290,24 @@ where
                 ],
             );
             return Err(anyhow!(
-                "server: {e}\nAn older luvus server is likely still running — \
+                "server: {error}\nAn older luvus server is likely still running — \
                  run `luvus server restart` to load this version (your session is saved)."
             ));
         }
-        ServerMessage::Welcome { .. } => {}
-        _ => {
+        None if server_protocol == protocol::PROTOCOL_VERSION => {}
+        None => {
             crate::logging::event(
                 crate::logging::EventKind::ClientHandshakeRejected,
-                &[crate::logging::Field::Reason(
-                    crate::logging::Reason::Handshake,
-                )],
+                &[
+                    crate::logging::Field::Reason(crate::logging::Reason::VersionMismatch),
+                    crate::logging::Field::ProtocolVersion(u64::from(server_protocol)),
+                ],
             );
-            return Err(anyhow!("unexpected handshake"));
+            return Err(anyhow!(
+                "server protocol {server_protocol} does not match client protocol {}\n\
+                 Run `luvus server restart` to load this version (your session is saved).",
+                protocol::PROTOCOL_VERSION
+            ));
         }
     }
 
@@ -901,7 +911,8 @@ mod tests {
     }
 
     use super::{
-        copy_and_flush, is_handshake_io_error, read_handshake_message, write_handshake_message,
+        copy_and_flush, is_handshake_io_error, read_handshake_message, read_welcome_message,
+        write_handshake_message,
     };
     use crate::ipc::protocol::{ClientMessage, PROTOCOL_VERSION};
     use std::cell::RefCell;
@@ -921,6 +932,49 @@ mod tests {
             error.to_string(),
             "connection failed before the Luvus handshake: failed to fill whole buffer"
         );
+    }
+
+    #[test]
+    fn welcome_reader_accepts_frozen_and_v0141_wire_positions() {
+        #[derive(serde::Serialize)]
+        enum FrozenServerMessage {
+            Welcome { version: u32, error: Option<String> },
+        }
+        #[derive(serde::Serialize)]
+        enum V0141ServerMessage {
+            ShellSidebars,
+            Welcome { version: u32, error: Option<String> },
+        }
+
+        let mut frozen = Vec::new();
+        crate::ipc::protocol::write_message(
+            &mut frozen,
+            &FrozenServerMessage::Welcome {
+                version: 5,
+                error: Some("protocol version mismatch".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_welcome_message(&mut &frozen[..]).unwrap(),
+            (5, Some("protocol version mismatch".into()))
+        );
+
+        let mut v0141 = Vec::new();
+        crate::ipc::protocol::write_message(
+            &mut v0141,
+            &V0141ServerMessage::Welcome {
+                version: 17,
+                error: Some("protocol version mismatch".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_welcome_message(&mut &v0141[..]).unwrap(),
+            (17, Some("protocol version mismatch".into()))
+        );
+
+        let _ = V0141ServerMessage::ShellSidebars;
     }
 
     #[test]

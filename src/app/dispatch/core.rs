@@ -10,6 +10,7 @@ impl App {
             "type":"pong",
             "version": env!("CARGO_PKG_VERSION"),
             "protocol":1,
+            "client_protocol":crate::ipc::protocol::PROTOCOL_VERSION,
             "session": crate::session::display_name()
         }))
     }

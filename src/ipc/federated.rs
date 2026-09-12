@@ -455,6 +455,22 @@ pub(super) fn run(
     }
 }
 
+fn validate_local_welcome(reader: &mut impl std::io::Read) -> Result<()> {
+    let (server_protocol, error) = protocol::read_welcome_message(reader)?;
+    if let Some(error) = error {
+        return Err(anyhow!(
+            "server: {error}\nAn older luvus server is likely still running — \
+             run `luvus server restart` to load this version (your session is saved)."
+        ));
+    }
+    if server_protocol != PROTOCOL_VERSION {
+        return Err(anyhow!(
+            "server protocol {server_protocol} does not match client {PROTOCOL_VERSION}"
+        ));
+    }
+    Ok(())
+}
+
 fn run_inner(
     reader: crate::ipc::transport::Conn,
     mut writer: crate::ipc::transport::Conn,
@@ -472,18 +488,7 @@ fn run_inner(
         },
     )?;
     let mut reader = BufReader::new(reader);
-    match protocol::read_message::<_, ServerMessage>(&mut reader)? {
-        ServerMessage::Welcome { error: None, .. } => {}
-        ServerMessage::Welcome {
-            error: Some(error), ..
-        } => {
-            return Err(anyhow!(
-                "server: {error}\nAn older luvus server is likely still running — \
-                 run `luvus server restart` to load this version (your session is saved)."
-            ))
-        }
-        _ => return Err(anyhow!("unexpected local server handshake")),
-    }
+    validate_local_welcome(&mut reader)?;
     let probe_terminal = match protocol::read_message::<_, ServerMessage>(&mut reader)? {
         ServerMessage::Ready { probe_terminal } => probe_terminal,
         _ => return Err(anyhow!("unexpected local server negotiation")),
@@ -5538,6 +5543,31 @@ fn write_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_handshake_decodes_v0141_mismatch_as_actionable_error() {
+        #[allow(dead_code)]
+        #[derive(serde::Serialize)]
+        enum V0141ServerMessage {
+            ShellSidebars,
+            Welcome { version: u32, error: Option<String> },
+        }
+
+        let mut bytes = Vec::new();
+        protocol::write_message(
+            &mut bytes,
+            &V0141ServerMessage::Welcome {
+                version: 17,
+                error: Some("protocol version mismatch".into()),
+            },
+        )
+        .unwrap();
+
+        let error = validate_local_welcome(&mut &bytes[..]).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("protocol version mismatch"));
+        assert!(message.contains("luvus server restart"));
+    }
 
     #[test]
     fn frame_diff_repaints_only_when_it_touches_the_client_dock() {

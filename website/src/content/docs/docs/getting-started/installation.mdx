@@ -172,8 +172,14 @@ The running server is left alone so active panes are not interrupted. After a
 successful update, reload it when you are ready:
 
 ```sh
-luvus server restart   # your session is saved and restored
+luvus server restart         # restart only the selected session
+luvus server restart --all   # restart every currently running session
 ```
+
+Stopped sessions remain stopped. If you restart only the selected session,
+other running named sessions remain uninterrupted until you select them; the
+session switcher then detects the older server version, restarts that target,
+and completes the switch.
 
 Development binaries under `target/debug` or `target/release` are never
 overwritten by `luvus update`. Rebuild those from source instead.

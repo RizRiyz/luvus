@@ -1924,13 +1924,7 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
                 crate::logging::Field::ProtocolVersion(u64::from(version.unwrap_or(0))),
             ],
         );
-        let _ = protocol::write_message(
-            writer,
-            &ServerMessage::Welcome {
-                version: protocol::PROTOCOL_VERSION,
-                error: Some("protocol version mismatch".into()),
-            },
-        );
+        let _ = protocol::write_version_mismatch(writer, version);
     };
 
     let (cols, rows) = match protocol::read_message::<_, ClientMessage>(&mut reader) {

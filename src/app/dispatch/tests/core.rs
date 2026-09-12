@@ -1,5 +1,17 @@
 use super::super::*;
 use super::support::*;
+
+#[test]
+fn ping_exposes_the_binary_transport_protocol_for_upgrade_preflight() {
+    let (_env, mut app) = app("ping-client-protocol");
+    let result = app.dispatch("ping", &json!({})).unwrap();
+    assert_eq!(result["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        result["client_protocol"],
+        crate::ipc::protocol::PROTOCOL_VERSION
+    );
+}
+
 #[test]
 fn config_patch_rejects_unknown_fields_without_mutation() {
     let (_env, mut app) = app("socket-config");

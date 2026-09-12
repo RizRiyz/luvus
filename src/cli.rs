@@ -360,7 +360,7 @@ server:
   server status              is the server running, and what version
   server start               start the background server if it isn't up
   server stop                stop the server (and all panes)
-  server restart             stop + start (load a newly-installed binary)
+  server restart [--all]     stop + start (load a newly-installed binary)
   server update-manifest     fetch the latest agent-detection rules from luvus.dev
                              (applies live if the server is up; else on next start)
   integration install|uninstall <claude|copilot|codex|antigravity|opencode|kimi|grok|hermes|omp>
