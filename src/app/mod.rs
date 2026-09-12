@@ -3475,12 +3475,13 @@ impl App {
                         let tx = app_tx.clone();
                         let p = path.clone();
                         std::thread::spawn(move || {
-                            let load = crate::files::read_file(&p);
+                            let (load, string_states) = crate::files::read_file_prepared(&p);
                             let _ = tx.send(crate::event::AppEvent::FileRead {
                                 id,
                                 path: p,
                                 token: 1,
                                 load,
+                                string_states,
                             });
                         });
                         remap.insert(*raw, id);

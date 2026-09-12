@@ -1013,6 +1013,7 @@ impl App {
                 path,
                 token,
                 load,
+                string_states,
             } => {
                 match self.views.get_mut(&id) {
                     // Only the newest read the leaf asked for may apply. One
@@ -1022,7 +1023,7 @@ impl App {
                     Some(crate::app::ViewKind::File(v))
                         if v.read_token == token && v.path == path =>
                     {
-                        v.apply(load);
+                        v.apply_prepared(load, string_states);
                         true
                     }
                     // The leaf closed, became a diff, or has asked for a newer

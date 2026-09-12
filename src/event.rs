@@ -249,11 +249,15 @@ pub enum AppEvent {
     /// invariant: newest wins. `path` is the file it carries — redundant while
     /// every scheduler bumps the token, kept as a cheap backstop so a future one
     /// that forgets cannot put another file's contents in this view.
+    ///
+    /// `string_states` is the worker-prepared multiline-string opener per line,
+    /// so the application thread stores without scanning the whole file.
     FileRead {
         id: PaneId,
         path: std::path::PathBuf,
         token: u64,
         load: crate::files::FileLoad,
+        string_states: Vec<Option<crate::files::highlight::MultilineKind>>,
     },
     /// Per-line git change markers for a file view finished computing
     /// (docs/38 + docs/30). Guarded exactly like `FileRead`, and it matters more

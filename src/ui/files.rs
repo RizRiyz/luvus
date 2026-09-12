@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::app::App;
-use crate::files::{FileLoad, FileView, SIZE_CAP};
+use crate::files::{highlight, FileLoad, FileView, SIZE_CAP};
 use crate::ui::theme::Theme;
 use crate::ui::RenderTarget;
 
@@ -330,8 +330,11 @@ fn diff_list_stats(
 }
 
 /// Draw a native file view (docs/38 FILE-3) into `area`, the pane's content
-/// rect. O(visible rows): only the on-screen slice of `lines` is rendered. The
-/// bottom row is a dim status footer.
+/// rect. O(visible rows × visible width): only the on-screen slice of `lines`
+/// is rendered, and each on-screen logical line is tokenized only up to its
+/// visible char window (cached per generation), so a very long logical line
+/// costs its viewport slice, not the file. The bottom row is a dim status
+/// footer.
 pub(super) fn draw_file_view(
     f: &mut RenderTarget,
     area: Rect,
@@ -446,6 +449,12 @@ fn draw_text(f: &mut RenderTarget, body: Rect, v: &FileView, lines: &[String], t
     if text_w == 0 {
         return;
     }
+    // The highlight language is a pure function of the path: one lookup per
+    // frame, then O(visible rows × visible width) windowed tokenization below
+    // — never O(file). A multi-megabyte single logical line costs a viewport,
+    // not the file: tokens come from the bounded generation-checked cache and
+    // cover only the visible char window.
+    let lang = highlight::language_for_path(&v.path);
     // The gutter is `marker + number + one space`, totalling `gutter + 1` — the
     // same width as before, so `text_x` and mouse-selection column mapping are
     // unchanged. The git change marker (docs/38 + docs/30) sits in column 0,
@@ -479,25 +488,32 @@ fn draw_text(f: &mut RenderTarget, body: Rect, v: &FileView, lines: &[String], t
     if v.wrap {
         // Soft-wrap: each file line occupies as many screen rows as it needs.
         // Scroll stays line-based (top row = file line `scroll`), so vertical
-        // scroll, goto, and search reveal are unchanged.
+        // scroll, goto, and search reveal are unchanged. Each segment is
+        // syntax-highlighted from the line's windowed tokens, with search
+        // matches overlaid — the same spans the no-wrap path builds.
+        //
+        // Bounded per frame: `wrap_ranges_limited` computes only the rows we
+        // will actually draw, and `highlight_window` tokenizes only up to the
+        // last visible segment end (cached per generation).
         let mut y = body.y;
         let bottom = body.y + body.height;
         let mut i = v.scroll;
         while y < bottom && i < lines.len() {
             let line = &lines[i];
-            for (si, range) in crate::files::wrap_ranges(line, text_w as usize)
-                .into_iter()
-                .enumerate()
-            {
+            let remaining = (bottom - y) as usize;
+            let ranges = crate::files::wrap_ranges_limited(line, text_w as usize, remaining);
+            let needed_end = ranges.iter().map(|&(_, e)| e).max().unwrap_or(0);
+            let open = v.string_states.get(i).copied().flatten();
+            let tokens = v.highlight_window(i, line, lang, open, needed_end);
+            let hits = search_hits_for_line(v, i);
+            for (si, range) in ranges.into_iter().enumerate() {
                 if y >= bottom {
                     break;
                 }
                 gutter_cell(f, y, (si == 0).then_some(i + 1), i + 1);
+                let spans = spans_in_range(line, &tokens, range, &hits, t);
                 f.render_widget(
-                    Paragraph::new(Span::styled(
-                        crate::files::seg_text(line, range),
-                        Style::new().fg(t.text),
-                    )),
+                    Paragraph::new(Line::from(spans)),
                     Rect::new(text_x, y, text_w, 1),
                 );
                 y += 1;
@@ -507,13 +523,20 @@ fn draw_text(f: &mut RenderTarget, body: Rect, v: &FileView, lines: &[String], t
         return;
     }
 
-    // No-wrap: one file line per row, clipped, with horizontal scroll.
+    // No-wrap: one file line per row. Only the visible `[hscroll,
+    // hscroll+text_w)` char window is tokenized and spanned — never the whole
+    // multi-megabyte line — and the paragraph needs no scroll offset.
     for (i, line) in lines.iter().enumerate().skip(v.scroll).take(rows) {
         let y = body.y + (i - v.scroll) as u16;
         gutter_cell(f, y, Some(i + 1), i + 1);
-        let line_ui = search_line(v, i, line, t);
+        let open = v.string_states.get(i).copied().flatten();
+        let hstart = v.hscroll as usize;
+        let needed_end = hstart.saturating_add(text_w as usize);
+        let tokens = v.highlight_window(i, line, lang, open, needed_end);
+        let hits = search_hits_for_line(v, i);
+        let spans = spans_in_range(line, &tokens, (hstart, needed_end), &hits, t);
         f.render_widget(
-            Paragraph::new(line_ui).scroll((0, v.hscroll)),
+            Paragraph::new(Line::from(spans)),
             Rect::new(text_x, y, text_w, 1),
         );
     }
@@ -547,46 +570,129 @@ fn human(n: u64) -> String {
     }
 }
 
-/// Build a line's spans, highlighting any search matches on it (the current
-/// match brighter). No match → one plain span.
-fn search_line<'a>(v: &FileView, line_idx: usize, line: &'a str, t: &Theme) -> Line<'a> {
-    let Some(s) = &v.search else {
-        return Line::from(Span::styled(line, Style::new().fg(t.text)));
+/// Base text style for one highlight role, resolved through the active theme
+/// so a theme switch recolors the viewer without reparsing any file.
+fn highlight_style(kind: highlight::Kind, t: &Theme) -> Style {
+    match kind {
+        highlight::Kind::Normal => Style::new().fg(t.text),
+        highlight::Kind::Keyword => Style::new().fg(t.accent),
+        highlight::Kind::String => Style::new().fg(t.green),
+        highlight::Kind::Comment => Style::new().fg(t.overlay1).italic(),
+        highlight::Kind::Number => Style::new().fg(t.amber),
+        highlight::Kind::Function => Style::new().fg(t.mint),
+        highlight::Kind::Type => Style::new().fg(t.subtext1),
+    }
+}
+
+/// Search hits on one file line as `(start_col, end_col, is_current)` in
+/// original-line character columns. `None`/editing/empty queries yield no
+/// hits, so plain syntax spans render alone.
+///
+/// Matches are stored in document order, so the per-line slice is found with
+/// two binary searches — O(log matches + hits), not O(matches) per visible
+/// row.
+fn search_hits_for_line(v: &FileView, line_idx: usize) -> Vec<(usize, usize, bool)> {
+    let Some(search) = &v.search else {
+        return Vec::new();
     };
-    let hits: Vec<(usize, usize)> = s
-        .matches
+    if search.editing || search.query.is_empty() {
+        return Vec::new();
+    }
+    let matches = &search.matches;
+    let lo = matches.partition_point(|(l, _, _)| *l < line_idx);
+    let hi = matches.partition_point(|(l, _, _)| *l <= line_idx);
+    matches[lo..hi]
         .iter()
         .enumerate()
-        .filter(|(_, (l, _))| *l == line_idx)
-        .map(|(i, (_, c))| (i, *c))
-        .collect();
-    if hits.is_empty() || s.query.is_empty() {
-        return Line::from(Span::styled(line, Style::new().fg(t.text)));
+        .map(|(k, (_, start, end))| (*start, *end, lo + k == search.current))
+        .collect()
+}
+
+/// Build spans for the char range of one line: syntax tokens clipped to the
+/// range, split at search-match boundaries so the current match stays brighter
+/// than the rest. Adjacent pieces with the same style merge back into one span.
+///
+/// Only the visible `range` is materialized: the segment text is collected via
+/// `skip`/`take` (no whole-line `Vec<char>`), so a 5 MiB line costs its
+/// viewport slice, not the file.
+fn spans_in_range(
+    line: &str,
+    tokens: &[highlight::Token],
+    range: (usize, usize),
+    hits: &[(usize, usize, bool)],
+    t: &Theme,
+) -> Vec<Span<'static>> {
+    let (seg_start, seg_end) = range;
+    if seg_start >= seg_end {
+        return Vec::new();
     }
-    let qlen = s.query.chars().count();
-    let mut spans: Vec<Span> = Vec::new();
-    let mut cursor = 0usize; // char index
-    let chars: Vec<char> = line.chars().collect();
-    for (mi, col) in hits {
-        if col > cursor {
-            let seg: String = chars[cursor..col.min(chars.len())].iter().collect();
-            spans.push(Span::styled(seg, Style::new().fg(t.text)));
-        }
-        let end = (col + qlen).min(chars.len());
-        let seg: String = chars[col..end].iter().collect();
-        let hl = if mi == s.current {
-            Style::new().fg(t.base).bg(t.accent).bold()
+    let seg_len = seg_end - seg_start;
+    // Visible slice only.
+    let seg_chars: Vec<char> = line.chars().skip(seg_start).take(seg_len).collect();
+    let text_of = |start: usize, end: usize| -> String {
+        let (lo, hi) = (
+            start.saturating_sub(seg_start),
+            end.saturating_sub(seg_start),
+        );
+        let (lo, hi) = (lo.min(seg_chars.len()), hi.min(seg_chars.len()));
+        if lo >= hi {
+            String::new()
         } else {
-            Style::new().fg(t.base).bg(t.amber)
-        };
-        spans.push(Span::styled(seg, hl));
-        cursor = end;
+            seg_chars[lo..hi].iter().collect()
+        }
+    };
+    let mut intervals: Vec<(usize, usize, bool)> = hits
+        .iter()
+        .map(|(start, end, current)| (*start, *end, *current))
+        .map(|(start, end, current)| (start.max(seg_start), end.min(seg_end), current))
+        .filter(|(start, end, _)| start < end)
+        .collect();
+    intervals.sort();
+    intervals.dedup();
+    let mut pieces: Vec<(String, Style)> = Vec::new();
+    let mut push = |text: String, style: Style| {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(last) = pieces.last_mut().filter(|(_, prev)| *prev == style) {
+            last.0.push_str(&text);
+        } else {
+            pieces.push((text, style));
+        }
+    };
+    for token in tokens {
+        let token_start = token.start.max(seg_start);
+        let token_end = token.end.min(seg_end);
+        if token_start >= token_end {
+            continue;
+        }
+        let base = highlight_style(token.kind, t);
+        let mut cursor = token_start;
+        for (hit_start, hit_end, current) in intervals
+            .iter()
+            .filter(|(start, end, _)| *end > token_start && *start < token_end)
+        {
+            let hit_start = (*hit_start).max(token_start);
+            let hit_end = (*hit_end).min(token_end);
+            if hit_start > cursor {
+                push(text_of(cursor, hit_start), base);
+            }
+            let highlight = if *current {
+                Style::new().fg(t.base).bg(t.accent).bold()
+            } else {
+                Style::new().fg(t.base).bg(t.amber)
+            };
+            push(text_of(hit_start, hit_end), highlight);
+            cursor = hit_end;
+        }
+        if cursor < token_end {
+            push(text_of(cursor, token_end), base);
+        }
     }
-    if cursor < chars.len() {
-        let seg: String = chars[cursor..].iter().collect();
-        spans.push(Span::styled(seg, Style::new().fg(t.text)));
-    }
-    Line::from(spans)
+    pieces
+        .into_iter()
+        .map(|(text, style)| Span::styled(text, style))
+        .collect()
 }
 
 /// The tint color for a git working-tree status in the FILES dock (docs/38).
@@ -767,5 +873,184 @@ mod tests {
         assert!(!file_selection_contains(&selection, 6, 2, text_x));
         assert!(file_selection_contains(&selection, 7, 2, text_x));
         assert!(file_selection_contains(&selection, 12, 3, text_x));
+    }
+
+    /// Syntax spans keep the line's text intact while coloring each role
+    /// through the theme: keywords use the accent, strings the idle green,
+    /// comments the dim overlay, numbers amber, calls mint, types subtext.
+    #[test]
+    fn rust_viewer_spans_color_each_role_through_the_theme() {
+        use crate::files::highlight;
+
+        let theme = Theme::quattro_rally();
+        let line = "fn load(path: &Path) -> usize { // open";
+        let tokens = highlight::tokenize_continued(line, highlight::Language::Rust, None);
+        let width = line.chars().count();
+        let spans = super::spans_in_range(line, &tokens, (0, width), &[], &theme);
+        let text: String = spans.iter().map(|span| span.content.as_ref()).collect();
+        assert_eq!(text, line, "spans must cover the line exactly");
+
+        let style_of = |needle: &str| {
+            spans
+                .iter()
+                .find(|span| span.content == needle)
+                .map(|span| span.style)
+        };
+        assert_eq!(
+            style_of("fn").map(|style| style.fg),
+            Some(Some(theme.accent)),
+            "keywords use the accent"
+        );
+        assert_eq!(
+            style_of("load").map(|style| style.fg),
+            Some(Some(theme.mint)),
+            "calls use mint"
+        );
+        assert_eq!(
+            style_of("Path").map(|style| style.fg),
+            Some(Some(theme.subtext1)),
+            "types use subtext"
+        );
+        assert!(
+            spans
+                .iter()
+                .find(|span| span.content.contains("// open"))
+                .is_some_and(|span| span.style.fg == Some(theme.overlay1)),
+            "the trailing comment is dim"
+        );
+    }
+
+    /// Search matches overlay the syntax color with the same backgrounds the
+    /// viewer used before highlighting, and wrapped segments clip both layers
+    /// to their own char range.
+    #[test]
+    fn viewer_search_overlays_syntax_and_clips_to_wrap_segments() {
+        use crate::files::highlight;
+
+        let theme = Theme::quattro_rally();
+        let line = "let loaded = load(path); // load";
+        let tokens = highlight::tokenize_continued(line, highlight::Language::Rust, None);
+        let width = line.chars().count();
+        // `load` occurs at columns 4 ("loaded" prefix) and 13; highlight the
+        // standalone call as the current match.
+        let spans = super::spans_in_range(line, &tokens, (0, width), &[(13, 17, true)], &theme);
+        let current = spans
+            .iter()
+            .find(|span| span.content == "load")
+            .expect("current match is its own span");
+        assert_eq!(current.style.bg, Some(theme.accent));
+        assert_eq!(current.style.fg, Some(theme.base));
+
+        // A wrapped segment sees only its own slice of both layers.
+        let segment = super::spans_in_range(line, &tokens, (0, 10), &[(13, 17, true)], &theme);
+        let text: String = segment.iter().map(|span| span.content.as_ref()).collect();
+        assert_eq!(text, "let loaded");
+        assert!(
+            segment.iter().all(|span| span.style.bg.is_none()),
+            "the match outside the segment must not leak in"
+        );
+    }
+
+    /// Near-limit single-line JavaScript: windowed spans cover only the
+    /// viewport slice, stay coalesced, clip search to the window, and recolor
+    /// across themes without re-tokenizing.
+    #[test]
+    fn huge_single_line_js_spans_stay_windowed_across_themes() {
+        use crate::files::{highlight, FileLoad, FileView};
+        use std::path::PathBuf;
+
+        let unit = r#"const v0123456789="abcdefghij0123456789";"#;
+        let reps = (2_000_000 / unit.len()).max(1);
+        let huge: String = unit.repeat(reps);
+        assert!(huge.len() > 1_000_000);
+
+        let mut v = FileView::new(PathBuf::from("bundle.min.js"));
+        let lang = highlight::language_for_path(&v.path);
+        let lines = vec![huge.clone()];
+        let states = highlight::continuation_states(&lines, lang);
+        v.apply_prepared(FileLoad::Text(lines), states);
+
+        // No-wrap window: hscroll + width.
+        v.wrap = false;
+        v.hscroll = 200;
+        let text_w = 80usize;
+        let needed = 200 + text_w;
+        let tokens = v.highlight_window(0, &huge, lang, None, needed);
+        assert!(tokens.iter().all(|t| t.start < needed));
+        let hits = super::search_hits_for_line(&v, 0);
+        assert!(hits.is_empty());
+        let spans =
+            super::spans_in_range(&huge, &tokens, (200, needed), &[], &Theme::quattro_rally());
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        let expected: String = huge.chars().skip(200).take(text_w).collect();
+        assert_eq!(text, expected);
+        assert!(
+            spans.len() < text_w,
+            "coalesced spans stay far below one-per-char (got {})",
+            spans.len()
+        );
+
+        // Wrap window: first viewport rows only.
+        v.wrap = true;
+        let ranges = crate::files::wrap_ranges_limited(&huge, text_w, 40);
+        assert_eq!(ranges.len(), 40);
+        let needed = ranges.iter().map(|&(_, e)| e).max().unwrap();
+        let tokens = v.highlight_window(0, &huge, lang, None, needed);
+        let first = ranges[0];
+        let spans = super::spans_in_range(&huge, &tokens, first, &[], &Theme::quattro_rally());
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        let expected: String = huge.chars().skip(first.0).take(first.1 - first.0).collect();
+        assert_eq!(text, expected);
+
+        // A match outside the window must not leak into it.
+        let far_hit = vec![(needed + 1000, needed + 1004, true)];
+        let spans = super::spans_in_range(&huge, &tokens, first, &far_hit, &Theme::quattro_rally());
+        assert!(spans.iter().all(|s| s.style.bg.is_none()));
+
+        // Theme change recolors the same tokens without re-tokenizing.
+        let other = Theme::dracula();
+        let a = super::spans_in_range(&huge, &tokens, first, &[], &Theme::quattro_rally());
+        let b = super::spans_in_range(&huge, &tokens, first, &[], &other);
+        let ta: String = a.iter().map(|s| s.content.as_ref()).collect();
+        let tb: String = b.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(ta, tb, "same text across themes");
+        assert_ne!(
+            a.iter().map(|s| s.style).collect::<Vec<_>>(),
+            b.iter().map(|s| s.style).collect::<Vec<_>>(),
+            "styles resolve through the theme"
+        );
+        assert_eq!(v.token_cache_len(), 1, "one cached window reused");
+    }
+
+    /// End-to-end draw of a huge single-line file completes in both modes.
+    #[test]
+    fn huge_file_view_draws_in_both_wrap_modes() {
+        use crate::files::{FileLoad, FileView};
+        use std::path::PathBuf;
+
+        let huge = "x".repeat(500_000);
+        let mut v = FileView::new(PathBuf::from("data.json"));
+        v.apply_prepared(FileLoad::Text(vec![huge.clone()]), vec![None]);
+        let area = Rect::new(0, 0, 100, 24);
+        for wrap in [true, false] {
+            v.wrap = wrap;
+            let mut buf = Buffer::empty(area);
+            {
+                let mut target = RenderTarget::new(&mut buf, area);
+                super::draw_file_view(&mut target, area, &v, None, false, &Theme::quattro_rally());
+            }
+            let screen: String = (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                screen.contains('x'),
+                "the huge line's viewport slice drew (wrap={wrap})"
+            );
+        }
     }
 }
