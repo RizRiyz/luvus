@@ -2063,6 +2063,49 @@ mod tests {
     }
 
     #[test]
+    fn reopening_defers_tab_until_the_abandoned_scan_lands() {
+        let _env = crate::persist::test_env("picker-go-to-reopen");
+        let tmp = complete_fixture("reopen");
+        std::fs::create_dir_all(tmp.join("Documents")).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_folder_picker_at(tmp.clone());
+        app.picker_start_go_to();
+        app.handle_picker_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
+        app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let abandoned = take_completion(&rx);
+
+        app.close_folder_picker();
+        app.open_folder_picker_at(tmp.clone());
+        app.picker_start_go_to();
+        app.handle_picker_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
+        app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.picker.as_ref().unwrap().going_to.as_deref(), Some("D"));
+        assert!(
+            app.picker.as_ref().unwrap().go_to_scanning.is_none(),
+            "Tab must not admit a second job while the closed picker's listing still occupies IoJobs"
+        );
+
+        assert!(
+            !abandoned.apply(&mut app),
+            "the abandoned listing must not write into the reopened field"
+        );
+        assert!(
+            app.picker.as_ref().unwrap().go_to_scanning.is_some(),
+            "the remembered Tab starts one scan after the old listing lands"
+        );
+        take_completion(&rx).apply(&mut app);
+        assert_eq!(
+            app.picker.as_ref().unwrap().going_to.as_deref(),
+            Some("Documents/")
+        );
+
+        app.drain_io_jobs();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn go_to_candidates_stay_bounded_without_overclaiming() {
         let tmp = complete_fixture("bounded");
         // More matches than the cap, all sharing `dir-`, so the shared prefix the
