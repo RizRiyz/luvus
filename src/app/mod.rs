@@ -3413,9 +3413,13 @@ impl App {
                 for (raw, ps) in &tab.panes {
                     let id = PaneId::alloc();
                     // Re-attach the pane's live name to its new id (docs: names are
-                    // pane-keyed and pane ids are reallocated each run).
+                    // pane-keyed and pane ids are reallocated each run). Agent
+                    // sessions restored as plain shells drop their alias so
+                    // `agent.start` can reuse the previous name.
                     if let Some(nm) = &ps.name {
-                        restored_names.push((nm.clone(), id));
+                        if ps.agent_session.is_none() || config.resume_agent_sessions {
+                            restored_names.push((nm.clone(), id));
+                        }
                     }
                     // A file-view leaf (docs/38 FILE-3): rebuild the view and
                     // re-read the file off-loop; no PTY is spawned.
@@ -8529,6 +8533,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let pane = app.layout().focus;
+        app.set_agent_name(pane, Some("reviewer"));
         let status = app.status.get_mut(&pane).unwrap();
         status.agent = "codex".into();
         status.agent_session = Some(AgentSession {
@@ -8536,14 +8541,29 @@ mod tests {
             session_id: "saved-session".into(),
         });
 
+        app.handle_event(key(' ', KeyModifiers::CONTROL));
+        app.handle_event(key('v', KeyModifiers::NONE));
+        let shell = *app
+            .layout()
+            .leaves()
+            .iter()
+            .find(|id| **id != pane)
+            .expect("split created a second pane");
+        app.set_agent_name(shell, Some("backend"));
+
         let snapshot = persist::snapshot(&app);
-        assert_eq!(
-            snapshot.workspaces[0].tabs[0].panes[0]
-                .1
-                .agent_session
-                .as_ref()
-                .map(|(agent, session)| (agent.as_str(), session.as_str())),
-            Some(("codex", "saved-session")),
+        assert!(
+            snapshot.workspaces[0].tabs[0]
+                .panes
+                .iter()
+                .any(|(_, pane)| {
+                    pane.name.as_deref() == Some("reviewer")
+                        && pane
+                            .agent_session
+                            .as_ref()
+                            .map(|(agent, session)| (agent.as_str(), session.as_str()))
+                            == Some(("codex", "saved-session"))
+                }),
             "disabling restore must not make snapshot capture destructive"
         );
 
@@ -8566,6 +8586,14 @@ mod tests {
                 .values()
                 .all(|status| status.agent != "codex"),
             "the sidebar must not present the replacement shell as the old agent"
+        );
+        assert!(
+            !restored.agent_names.contains_key("reviewer"),
+            "discarded agent sessions must release their alias for reuse"
+        );
+        assert!(
+            restored.agent_names.contains_key("backend"),
+            "plain-shell aliases still restore when agent resume is disabled"
         );
     }
 
