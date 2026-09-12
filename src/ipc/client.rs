@@ -434,6 +434,9 @@ where
                 }
             }
             Ok(ServerMessage::OpenUrl(url)) => crate::platform::open_url(&url),
+            Ok(ServerMessage::OpenPath(path)) => {
+                crate::platform::open_path(std::path::Path::new(&path));
+            }
             Ok(ServerMessage::SwitchSession { name }) => {
                 // The server retains the source for transactional clients.
                 // This legacy direct-attach path explicitly releases it before

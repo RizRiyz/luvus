@@ -1055,6 +1055,7 @@ mod tests {
         let _env = crate::persist::test_env("jump-workspace-display-order");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].worktree = None;
         let focus = app.layout().focus;
         for position in 2..=3 {
             app.workspaces.push(Workspace {
@@ -1667,6 +1668,7 @@ mod tests {
         let _env = crate::persist::test_env("focus-workspaces-command");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].worktree = None;
         let pane = app.layout().focus;
         app.workspaces.push(Workspace {
             id: crate::ids::public_id("workspace"),

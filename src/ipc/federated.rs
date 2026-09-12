@@ -1819,6 +1819,9 @@ fn handle_surface_message(
         ServerMessage::Sound(signal) if endpoint == *active => crate::emit_sound(signal),
         ServerMessage::Clipboard(text) if endpoint == *active => crate::emit_clipboard(&text),
         ServerMessage::OpenUrl(url) if endpoint == *active => crate::platform::open_url(&url),
+        ServerMessage::OpenPath(path) if endpoint == *active => {
+            crate::platform::open_path(std::path::Path::new(&path));
+        }
         ServerMessage::SwitchSession { name } if endpoint == *active => {
             if let Some(exit) = owner_local_session_switch(&endpoint, name) {
                 return Ok(Some(exit));

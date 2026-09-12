@@ -131,11 +131,16 @@ workspace. FILES additionally uses `h` / `l` to collapse or expand folders.
 After `Enter` opens a file view, `x` closes that view. An opened DIFF review
 closes with `q` or `Esc`.
 
+In FILES, `o` or `Ctrl+O` opens the selected file or folder in the desktop's
+application on the client machine. The path is passed as a separate argument;
+application or shortcut-like entries (`.app`, `.desktop`, `.lnk`, `.command`)
+run as a double-click would, so only open entries you trust.
+
 **Right-click menus** (no key needed): a **tab** to rename it, a **workspace** row
 for its menu (rename / close / path visibility / worktrees / git / board), a
 **pane** to split or close it, an **agent** row for quick actions and path
 visibility, or a **FILES** row to open it
-read-only or in an editor, explicitly preview Markdown/Mermaid, or manage the
+read-only or in an editor, open it externally, explicitly preview Markdown/Mermaid, or manage the
 entry (new / rename / delete). See
 [Panes, Tabs & Workspaces](/docs/guides/layout/) and
 [Browsing & Opening Files](/docs/guides/files/).

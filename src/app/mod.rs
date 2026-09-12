@@ -875,6 +875,9 @@ pub enum FileMenuItem {
     InsertPath,
     /// Open this folder as a workspace (folders only), or focus it if already open.
     OpenAsNewWorkspace,
+    /// Hand the entry to the desktop: a file opens in its default application,
+    /// a folder in the file manager. Offered for both.
+    OpenInOs,
     Divider,
     Delete,
 }
@@ -896,6 +899,7 @@ impl FileMenu {
                 }
                 None => {}
             }
+            v.push(FileMenuItem::OpenInOs);
             v.push(FileMenuItem::Divider);
         }
         v.extend([
@@ -907,6 +911,7 @@ impl FileMenu {
         ]);
         if self.is_dir {
             v.push(FileMenuItem::OpenAsNewWorkspace);
+            v.push(FileMenuItem::OpenInOs);
         }
         v.extend([FileMenuItem::Divider, FileMenuItem::Delete]);
         v
@@ -2594,6 +2599,11 @@ pub struct App {
     /// A URL to open in the client's browser (docs/58) — set by a Ctrl+click on a
     /// link in a pane, drained + broadcast by the loop like `pending_clipboard`.
     pub pending_open_url: Option<String>,
+    /// A filesystem path to open with the OS handler of the client whose input
+    /// set it — from the FILES tree. Unlike `pending_open_url` it is not
+    /// broadcast: the server drains it right after applying that client's
+    /// input and sends it to that client alone.
+    pub pending_open_path: Option<String>,
     /// The cell `hover_link` was resolved for, so holding `Ctrl` while resting on a
     /// cell does not rescan. Cleared when `Ctrl` is released, so pointing at a
     /// link *first* and pressing `Ctrl` after still lights it up.
@@ -3207,6 +3217,7 @@ impl App {
             mouse_grab: None,
             pending_clipboard: None,
             pending_open_url: None,
+            pending_open_path: None,
             link_scan_at: None,
             hover_link: None,
             link_press: None,
@@ -3886,6 +3897,7 @@ impl App {
             mouse_grab: None,
             pending_clipboard: None,
             pending_open_url: None,
+            pending_open_path: None,
             link_scan_at: None,
             hover_link: None,
             link_press: None,
@@ -11867,7 +11879,9 @@ mod tests {
         // The bare middle of the same border row (between the title and the
         // buttons) is not chrome, so it still grabs the divider to resize.
         let divider_row = zoom.y;
-        let bare = 60u16; // mid-width: past the title, before the right-edge buttons
+        let bare = (title.right()..zoom.x)
+            .find(|&x| !app.on_pane_chrome(x, divider_row))
+            .expect("there is a bare seam between title and zoom");
         assert!(
             !app.on_pane_chrome(bare, divider_row),
             "the chosen seam cell is genuinely not chrome"

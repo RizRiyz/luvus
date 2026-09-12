@@ -83,10 +83,13 @@ fn strip_title_icon_drops_a_leading_glyph_only() {
 /// the node label.
 #[test]
 fn agent_list_labels_a_pane_with_its_node_name() {
+    let _env = crate::persist::test_env("agent-node-label");
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
     // Rename the node so its label and its cwd basename can't coincide.
     app.workspaces[0].name = "renamed-node".into();
+    // This fixture is an ordinary workspace even when tests run in a worktree.
+    app.workspaces[0].worktree = None;
     app.workspaces[0].branch = Some("feat/x".into());
 
     // Make the one existing pane look like a live agent.
@@ -710,8 +713,19 @@ fn observed_prompt_no_wait_keeps_the_queued_response_and_no_ownership() {
 #[test]
 fn observed_prompt_exited_terminal_releases_ownership_before_pane_removal() {
     let _env = crate::persist::test_env("prompt-terminal-exit");
+    // Exercise prompt/exit ordering without the user's interactive shell rc.
+    #[cfg(unix)]
+    let previous_shell = std::env::var_os("LUVUS_SHELL");
+    #[cfg(unix)]
+    std::env::set_var("LUVUS_SHELL", "/bin/sh");
     let (tx, _rx) = std::sync::mpsc::channel();
-    let mut app = App::new(80, 24, tx).unwrap();
+    let app = App::new(80, 24, tx);
+    #[cfg(unix)]
+    match previous_shell {
+        Some(value) => std::env::set_var("LUVUS_SHELL", value),
+        None => std::env::remove_var("LUVUS_SHELL"),
+    }
+    let mut app = app.unwrap();
     let pane = app.layout().focus;
     mark_codex_prompt_ready(&mut app, pane);
     let (reply, response) = std::sync::mpsc::channel();

@@ -290,10 +290,7 @@ fn parse_win32_record(body: &str) -> Option<ConsoleKeyRecord> {
 }
 
 fn stream_record_candidate(record: ConsoleKeyRecord) -> bool {
-    record.key_down
-        && (record.virtual_key == 0
-            || record.scan_code == 0
-            || (record.utf16 == 0x1b && record.scan_code == 0 && record.control_state == 0))
+    record.key_down && (record.virtual_key == 0 || record.scan_code == 0)
 }
 
 fn record_for_char(ch: char) -> ConsoleKeyRecord {
@@ -320,7 +317,7 @@ fn raw_escape_candidate(record: ConsoleKeyRecord) -> bool {
     record.key_down
         && record.scan_code == 0
         && record.control_state == 0
-        && (record.utf16 == 0x1b || (record.virtual_key == VK_ESCAPE && record.scan_code == 0))
+        && (record.utf16 == 0x1b || record.virtual_key == VK_ESCAPE)
 }
 
 fn control_prefix(text: &str) -> bool {

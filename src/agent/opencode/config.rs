@@ -131,9 +131,9 @@ fn value_end(input: &[u8], start: usize) -> Result<usize> {
         Some(_) => {
             let mut cursor = start;
             while input.get(cursor).is_some_and(|byte| {
-                !byte.is_ascii_whitespace()
-                    && !matches!(byte, b',' | b']' | b'}')
-                    && !(matches!(byte, b'/') && matches!(input.get(cursor + 1), Some(b'/' | b'*')))
+                !(byte.is_ascii_whitespace()
+                    || matches!(byte, b',' | b']' | b'}')
+                    || (matches!(byte, b'/') && matches!(input.get(cursor + 1), Some(b'/' | b'*'))))
             }) {
                 cursor += 1;
             }
