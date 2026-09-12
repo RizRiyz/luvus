@@ -11867,7 +11867,9 @@ mod tests {
         // The bare middle of the same border row (between the title and the
         // buttons) is not chrome, so it still grabs the divider to resize.
         let divider_row = zoom.y;
-        let bare = 60u16; // mid-width: past the title, before the right-edge buttons
+        let bare = (title.right()..zoom.x)
+            .find(|&x| !app.on_pane_chrome(x, divider_row))
+            .expect("there is a bare seam between title and zoom");
         assert!(
             !app.on_pane_chrome(bare, divider_row),
             "the chosen seam cell is genuinely not chrome"

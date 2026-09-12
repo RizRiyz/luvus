@@ -158,6 +158,10 @@ mod tests {
         assert!(!opencode2.supports(AutomationAccess::ReadOnly));
         assert!(!opencode2.supports(AutomationAccess::Workspace));
         assert!(opencode2.supports(AutomationAccess::FullAccess));
+        let opencode = find("opencode").unwrap().automation.unwrap();
+        assert!(!opencode.supports(AutomationAccess::ReadOnly));
+        assert!(!opencode.supports(AutomationAccess::Workspace));
+        assert!(opencode.supports(AutomationAccess::FullAccess));
     }
 
     #[test]

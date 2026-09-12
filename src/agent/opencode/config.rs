@@ -131,9 +131,9 @@ fn value_end(input: &[u8], start: usize) -> Result<usize> {
         Some(_) => {
             let mut cursor = start;
             while input.get(cursor).is_some_and(|byte| {
-                !byte.is_ascii_whitespace()
-                    && !matches!(byte, b',' | b']' | b'}')
-                    && !(matches!(byte, b'/') && matches!(input.get(cursor + 1), Some(b'/' | b'*')))
+                !(byte.is_ascii_whitespace()
+                    || matches!(byte, b',' | b']' | b'}')
+                    || (matches!(byte, b'/') && matches!(input.get(cursor + 1), Some(b'/' | b'*'))))
             }) {
                 cursor += 1;
             }
@@ -220,7 +220,12 @@ fn validate_jsonc(input: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn root_object(input: &str) -> Result<RootObject> {
+    root_object_for(input, "plugin")
+}
+
+fn root_object_for(input: &str, property: &str) -> Result<RootObject> {
     if input.len() > MAX_TUI_CONFIG_BYTES {
         return Err(anyhow!("OpenCode tui config exceeds 1 MiB"));
     }
@@ -264,7 +269,7 @@ fn root_object(input: &str) -> Result<RootObject> {
         skip_trivia(bytes, &mut cursor)?;
         let start = cursor;
         let end = value_end(bytes, start)?;
-        if key == "plugin" && plugin.replace((start, end)).is_some() {
+        if key == property && plugin.replace((start, end)).is_some() {
             return Err(anyhow!(
                 "OpenCode tui config contains duplicate plugin properties"
             ));
@@ -322,8 +327,8 @@ fn array_value(input: &str, start: usize, end: usize) -> Result<ArrayValue> {
     }
 }
 
-fn plugin_elements(input: &str) -> Result<(RootObject, ArrayValue)> {
-    let root = root_object(input)?;
+fn plugin_elements_for(input: &str, property: &str) -> Result<(RootObject, ArrayValue)> {
+    let root = root_object_for(input, property)?;
     let (start, end) = root
         .plugin
         .ok_or_else(|| anyhow!("OpenCode tui config has no plugin array"))?;
@@ -353,8 +358,8 @@ fn remove_element(input: &str, array: &ArrayValue, index: usize) -> String {
     output
 }
 
-fn add_plugin(input: &str) -> Result<String> {
-    let root = root_object(input)?;
+fn add_plugin(input: &str, property: &str, spec: &str) -> Result<String> {
+    let root = root_object_for(input, property)?;
     let mut output = input.to_string();
     if root.plugin.is_none() {
         let separator = if root.properties == 0 || root.trailing_comma {
@@ -364,38 +369,47 @@ fn add_plugin(input: &str) -> Result<String> {
         };
         output.insert_str(
             root.close,
-            &format!("{separator}\n  \"plugin\": [\"{TUI_PLUGIN_SPEC}\"]\n"),
+            &format!("{separator}\n  \"{property}\": [\"{spec}\"]\n"),
         );
         return Ok(output);
     }
-    let (_, array) = plugin_elements(input)?;
+    let (_, array) = plugin_elements_for(input, property)?;
     if let Some(last) = array.elements.last() {
         if last.comma_after.is_some() {
-            output.insert_str(array.close, &format!("\"{TUI_PLUGIN_SPEC}\""));
+            output.insert_str(array.close, &format!("\"{spec}\""));
         } else {
-            output.insert_str(last.end, &format!(", \"{TUI_PLUGIN_SPEC}\""));
+            output.insert_str(last.end, &format!(", \"{spec}\""));
         }
     } else {
-        output.insert_str(array.close, &format!("\"{TUI_PLUGIN_SPEC}\""));
+        output.insert_str(array.close, &format!("\"{spec}\""));
     }
     Ok(output)
 }
 
 pub(super) fn enable(input: &str) -> Result<String> {
+    enable_for(input, "plugin", TUI_PLUGIN_SPEC, LEGACY_TUI_PLUGIN_SPEC)
+}
+
+pub(super) fn enable_for(
+    input: &str,
+    property: &str,
+    spec: &str,
+    legacy_spec: &str,
+) -> Result<String> {
     validate_jsonc(input)?;
     let mut output = input.to_string();
     loop {
-        let root = root_object(&output)?;
+        let root = root_object_for(&output, property)?;
         if root.plugin.is_none() {
-            return add_plugin(&output);
+            return add_plugin(&output, property, spec);
         }
-        let (_, array) = plugin_elements(&output)?;
+        let (_, array) = plugin_elements_for(&output, property)?;
         let mut current = Vec::new();
         let mut legacy = None;
         for (index, element) in array.elements.iter().copied().enumerate() {
             match plugin_name(&output, element).as_deref() {
-                Some(TUI_PLUGIN_SPEC) => current.push(index),
-                Some(LEGACY_TUI_PLUGIN_SPEC) => legacy = Some(index),
+                Some(value) if value == spec => current.push(index),
+                Some(value) if value == legacy_spec => legacy = Some(index),
                 _ => {}
             }
         }
@@ -406,16 +420,25 @@ pub(super) fn enable(input: &str) -> Result<String> {
         } else if current.len() == 1 {
             return Ok(output);
         } else {
-            return add_plugin(&output);
+            return add_plugin(&output, property, spec);
         }
     }
 }
 
 pub(super) fn disable(input: &str) -> Result<String> {
+    disable_for(input, "plugin", TUI_PLUGIN_SPEC, LEGACY_TUI_PLUGIN_SPEC)
+}
+
+pub(super) fn disable_for(
+    input: &str,
+    property: &str,
+    spec: &str,
+    legacy_spec: &str,
+) -> Result<String> {
     validate_jsonc(input)?;
     let mut output = input.to_string();
     loop {
-        let root = root_object(&output)?;
+        let root = root_object_for(&output, property)?;
         let Some((start, end)) = root.plugin else {
             return Ok(output);
         };
@@ -423,7 +446,7 @@ pub(super) fn disable(input: &str) -> Result<String> {
         let Some(index) = array.elements.iter().copied().position(|element| {
             matches!(
                 plugin_name(&output, element).as_deref(),
-                Some(TUI_PLUGIN_SPEC | LEGACY_TUI_PLUGIN_SPEC)
+                Some(value) if value == spec || value == legacy_spec
             )
         }) else {
             return Ok(output);
@@ -433,13 +456,17 @@ pub(super) fn disable(input: &str) -> Result<String> {
 }
 
 pub(super) fn enabled(input: &str) -> bool {
+    enabled_for(input, "plugin", TUI_PLUGIN_SPEC)
+}
+
+pub(super) fn enabled_for(input: &str, property: &str, spec: &str) -> bool {
     validate_jsonc(input).is_ok()
-        && plugin_elements(input).is_ok_and(|(_, array)| {
+        && plugin_elements_for(input, property).is_ok_and(|(_, array)| {
             array
                 .elements
                 .iter()
                 .copied()
-                .any(|element| plugin_name(input, element).as_deref() == Some(TUI_PLUGIN_SPEC))
+                .any(|element| plugin_name(input, element).as_deref() == Some(spec))
         })
 }
 

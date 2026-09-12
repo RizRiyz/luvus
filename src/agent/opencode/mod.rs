@@ -6,6 +6,7 @@ use super::types::{
 mod config;
 mod integration;
 pub(in crate::agent) mod sessions;
+mod v2_integration;
 #[cfg(test)]
 pub(super) use sessions::{latest as opencode_latest, recent as opencode_recent};
 
@@ -16,10 +17,12 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     task_prompt_args: &["--prompt"],
     automation: Some(AutomationOperations {
         read_only: None,
-        workspace: Some(AutomationLaunch {
+        // Since 2.0.2, `opencode` is the V2 executable. --auto is not a
+        // workspace confinement policy; keep it behind explicit full access.
+        workspace: None,
+        full_access: Some(AutomationLaunch {
             args: &["run", "--auto"],
         }),
-        full_access: None,
     }),
     identity: IdentityDescriptor {
         distinct: &["opencode"],
