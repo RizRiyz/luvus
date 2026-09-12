@@ -205,6 +205,12 @@
         "note": { "type": "string" }
       }
     },
+    "taskRetryParams": {
+      "type": "object", "additionalProperties": false, "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
     "taskStartParams": {
       "type": "object", "additionalProperties": false, "required": ["id"],
       "properties": {
@@ -380,6 +386,8 @@
       "then": { "properties": { "params": { "$ref": "#/$defs/taskAddParams" } } } },
     { "if": { "properties": { "method": { "const": "task.update" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/taskUpdateParams" } } } },
+    { "if": { "properties": { "method": { "const": "task.retry" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/taskRetryParams" } } } },
     { "if": { "properties": { "method": { "const": "task.start" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/taskStartParams" } } } },
     { "if": { "properties": { "method": { "const": "task.next" } } },

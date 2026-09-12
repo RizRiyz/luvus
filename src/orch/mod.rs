@@ -577,7 +577,12 @@ impl OrchState {
             ));
         }
         if let Some(dependent) = self.tasks.iter().find(|candidate| {
-            candidate.deps.iter().any(|dep| dep == id) && candidate.status != TaskStatus::Queued
+            candidate.deps.iter().any(|dep| dep == id)
+                && (candidate.status != TaskStatus::Queued
+                    || candidate.attempt_started_at.is_some()
+                    || candidate.assignee.is_some()
+                    || candidate.worktree.is_some()
+                    || candidate.workspace_worker.is_some())
         }) {
             return Err(Reject::new(
                 "dependent_started",
@@ -1570,6 +1575,29 @@ mod tests {
             "dependent_started"
         );
         assert_eq!(state.task("t1").unwrap().status, TaskStatus::Done);
+    }
+
+    #[test]
+    fn retry_rejects_a_released_dependent_that_already_started() {
+        let mut state = OrchState::default();
+        state.add_task("base".into(), vec![], vec![], None).unwrap();
+        state
+            .add_task("dependent".into(), vec![], vec!["t1".into()], None)
+            .unwrap();
+        state.set_status("t1", TaskStatus::Done).unwrap();
+        state.claim("t2", 7).unwrap();
+        state.bind_worktree(
+            "t2",
+            Some("/repo/.luvus/worktrees/t2".into()),
+            Some("luvus/t2".into()),
+        );
+        state.release_task("t2").unwrap();
+
+        assert_eq!(state.task("t2").unwrap().status, TaskStatus::Queued);
+        assert_eq!(
+            state.retry_task("t1").unwrap_err().code,
+            "dependent_started"
+        );
     }
 
     #[test]

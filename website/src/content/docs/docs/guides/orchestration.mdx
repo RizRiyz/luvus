@@ -254,8 +254,9 @@ worker, and queues a fresh attempt without closing the pane or deleting its
 branch, worktree, output, or notes. A retry is rejected once a dependent task
 has started, and `merging` or `merged` tasks remain immutable. Worktree retries
 use `luvus/<task-id>-retry-<attempt>` by default. Retrying an automation-owned
-task creates a new immutable automation run from the failed run's captured
-contract while leaving the original run and task untouched.
+task creates a new automation run from the original run's captured contract
+while preserving the original records. Retrying from `review` or `blocked`
+finishes the superseded run as cancelled without closing its worker pane.
 
 - **Only armed agent automations spawn unattended.** Manual tasks still start
   only when you press `s` or run `task start`. Every automation stores one

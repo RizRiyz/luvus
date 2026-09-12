@@ -404,7 +404,10 @@ impl AutomationState {
             .run(run_id)
             .cloned()
             .ok_or_else(|| Reject::new("not_found", format!("no such automation run: {run_id}")))?;
-        if original.status.is_live() {
+        if matches!(
+            original.status,
+            RunStatus::Pending | RunStatus::Starting | RunStatus::Running
+        ) {
             return Err(Reject::new(
                 "run_active",
                 "a live automation run cannot be retried",
@@ -422,7 +425,11 @@ impl AutomationState {
                 "enable the automation before retrying its run",
             ));
         }
-        if self.has_live_run(&original.automation_id) {
+        if self.runs.iter().any(|run| {
+            run.id != original.id
+                && run.automation_id == original.automation_id
+                && run.status.is_live()
+        }) {
             return Err(Reject::new(
                 "automation_busy",
                 "this automation already has a live run",
@@ -430,8 +437,17 @@ impl AutomationState {
         }
 
         self.next_run += 1;
+        let id = format!("r{}", self.next_run);
+        if original.status == RunStatus::Review {
+            self.set_run_status(
+                &original.id,
+                RunStatus::Cancelled,
+                Some(format!("superseded by retry {id}")),
+                now,
+            )?;
+        }
         let run = AutomationRun {
-            id: format!("r{}", self.next_run),
+            id,
             automation_id: original.automation_id,
             scheduled_at: now,
             created_at: now,
@@ -512,10 +528,11 @@ impl AutomationState {
             };
             let active = self.has_active_run(&automation_id);
             let queued = self.has_pending_run(&automation_id);
-            let duplicate = self
-                .runs
-                .iter()
-                .any(|run| run.automation_id == automation_id && run.scheduled_at == occurrence_at);
+            let duplicate = self.runs.iter().any(|run| {
+                run.retry_of.is_none()
+                    && run.automation_id == automation_id
+                    && run.scheduled_at == occurrence_at
+            });
             let too_late =
                 now.saturating_sub(occurrence_at) > automation.policy.misfire_grace_seconds;
             let status = if duplicate {
@@ -660,9 +677,19 @@ impl AutomationState {
     }
 
     pub fn run_for_task_mut(&mut self, task_id: &str) -> Option<&mut AutomationRun> {
-        self.runs
-            .iter_mut()
-            .find(|run| run.task_id.as_deref() == Some(task_id))
+        let index = self
+            .runs
+            .iter()
+            .position(|run| run.task_id.as_deref() == Some(task_id))?;
+        let run_id = self.runs[index].id.as_str();
+        if self
+            .runs
+            .iter()
+            .any(|run| run.retry_of.as_deref() == Some(run_id))
+        {
+            return None;
+        }
+        self.runs.get_mut(index)
     }
 
     pub fn has_live_run(&self, automation_id: &str) -> bool {
@@ -1477,6 +1504,26 @@ mod tests {
     }
 
     #[test]
+    fn review_retry_supersedes_the_source_run_without_reusing_its_task() {
+        let mut state = AutomationState::default();
+        let automation = state
+            .create(input(Trigger::Once { at_utc: 100 }), None, 10)
+            .unwrap();
+        let original = state.request_run(&automation.id, None, 20).unwrap();
+        state.bind_task(&original.id, "t1".into(), 20).unwrap();
+        state
+            .set_run_status(&original.id, RunStatus::Review, None, 30)
+            .unwrap();
+
+        let retried = state.request_retry(&original.id, 40).unwrap();
+        let source = state.run(&original.id).unwrap();
+        assert_eq!(source.status, RunStatus::Cancelled);
+        assert_eq!(source.finished_at, Some(40));
+        assert_eq!(retried.retry_of.as_deref(), Some(original.id.as_str()));
+        assert!(state.run_for_task_mut("t1").is_none());
+    }
+
+    #[test]
     fn legacy_task_templates_default_to_workspace_access() {
         let task: TaskTemplate = serde_json::from_value(serde_json::json!({
             "title":"Review",
@@ -1682,6 +1729,38 @@ mod tests {
         let first = state.collect_due(100);
         assert_eq!(first.len(), 1);
         assert!(state.collect_due(100).is_empty());
+        assert_eq!(
+            state.automation(&automation.id).unwrap().next_run_at,
+            Some(160)
+        );
+    }
+
+    #[test]
+    fn retry_at_the_due_second_does_not_hide_the_scheduled_occurrence() {
+        let mut state = AutomationState::default();
+        let automation = state
+            .create(
+                input(Trigger::Interval {
+                    every_seconds: 60,
+                    anchor_utc: 100,
+                }),
+                None,
+                10,
+            )
+            .unwrap();
+        let original = state.request_run(&automation.id, None, 20).unwrap();
+        state
+            .set_run_status(&original.id, RunStatus::Failed, None, 30)
+            .unwrap();
+        let retry = state.request_retry(&original.id, 100).unwrap();
+
+        assert!(state.collect_due(100).is_empty());
+        let scheduled = state
+            .runs
+            .iter()
+            .find(|run| run.id != retry.id && run.retry_of.is_none() && run.scheduled_at == 100)
+            .expect("the scheduled occurrence remains visible in run history");
+        assert_eq!(scheduled.status, RunStatus::Skipped);
         assert_eq!(
             state.automation(&automation.id).unwrap().next_run_at,
             Some(160)

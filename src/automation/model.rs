@@ -266,8 +266,8 @@ pub struct AutomationRun {
     pub status: RunStatus,
     pub attempt: u8,
     pub error: Option<String>,
-    /// The terminal run this occurrence retries. The referenced run remains
-    /// immutable and keeps its original task and outcome.
+    /// The earlier run this occurrence retries. Its captured contract and task
+    /// remain historical; a live review source is terminalized as cancelled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_of: Option<AutomationRunId>,
     /// Snapshot the effective schedule and execution policy for auditability.
