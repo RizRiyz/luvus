@@ -198,6 +198,13 @@ impl App {
             // Keep the established desktop action here. Mobile groups common
             // phone-safe actions in its dedicated Actions section below.
             if query.is_empty() && !self.compact {
+                if self.client_machine_capable {
+                    rows.push(SwitcherRow::Action {
+                        target: SwitcherTarget::Machines,
+                        label: self.catalog.machines.to_string(),
+                        detail: String::new(),
+                    });
+                }
                 rows.push(SwitcherRow::Action {
                     target: SwitcherTarget::NewWorkspace,
                     label: format!("+ {}", self.catalog.cmd_new_workspace),
@@ -212,6 +219,13 @@ impl App {
         }
         if self.compact && scope == SwitcherScope::All && query.is_empty() {
             rows.push(SwitcherRow::Header(self.catalog.mobile_actions.to_string()));
+            if self.client_machine_capable {
+                rows.push(SwitcherRow::Action {
+                    target: SwitcherTarget::Machines,
+                    label: self.catalog.machines.to_string(),
+                    detail: String::new(),
+                });
+            }
             rows.push(SwitcherRow::Action {
                 target: SwitcherTarget::NewTab,
                 label: format!("+ {}", self.catalog.act_new_tab),
@@ -321,6 +335,7 @@ impl App {
             SwitcherTarget::Settings => self.open_settings(),
             SwitcherTarget::MissionControl => self.open_mission_control(self.active_ws),
             SwitcherTarget::Version => self.open_changelog(),
+            SwitcherTarget::Machines => self.pending_machine_selector = true,
             SwitcherTarget::Sessions => self.open_named_session_menu(),
             SwitcherTarget::Exit => self.detach_requested = true,
         }
@@ -833,5 +848,53 @@ mod tests {
         app.switcher_activate(SwitcherTarget::Exit);
         assert!(app.detach_requested, "Exit detaches the current client");
         assert!(!app.should_quit, "Exit does not stop the persistent server");
+    }
+
+    #[test]
+    fn mobile_machine_shell_is_reached_from_the_actions_menu() {
+        let _env = crate::persist::test_env("switcher-machines");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(60, 24, tx).unwrap();
+        app.compact = true;
+        app.client_machine_capable = true;
+        assert_eq!(app.client_shell_dock_rows, 0);
+        let target = app
+            .switcher_rows()
+            .into_iter()
+            .find_map(|row| match row {
+                SwitcherRow::Action {
+                    target: SwitcherTarget::Machines,
+                    ..
+                } => Some(SwitcherTarget::Machines),
+                _ => None,
+            })
+            .expect("machine-aware mobile clients expose Machines in Menu");
+        app.switcher_activate(target);
+        assert!(app.pending_machine_selector);
+    }
+
+    #[test]
+    fn desktop_machine_selector_remains_available_with_sidebar_rows() {
+        let _env = crate::persist::test_env("switcher-machines-fallback");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.client_machine_capable = true;
+        assert_eq!(app.client_shell_dock_rows, 0);
+        assert!(app.switcher_rows().into_iter().any(|row| matches!(
+            row,
+            SwitcherRow::Action {
+                target: SwitcherTarget::Machines,
+                ..
+            }
+        )));
+
+        app.client_shell_dock_rect = Some(ratatui::layout::Rect::new(0, 1, 20, 4));
+        assert!(app.switcher_rows().into_iter().any(|row| matches!(
+            row,
+            SwitcherRow::Action {
+                target: SwitcherTarget::Machines,
+                ..
+            }
+        )));
     }
 }

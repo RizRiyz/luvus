@@ -10,6 +10,7 @@ use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 
 use crate::ids::PaneId;
 use crate::ipc::protocol::ServerMessage;
+use crate::ipc::protocol::SurfaceInterest;
 use crate::terminal::theme_probe::TerminalColors;
 
 /// Input originating from one attached display client. Keeping the source id at
@@ -20,7 +21,12 @@ pub enum ClientInput {
     Mouse(MouseEvent),
     Paste(String),
     PasteImage(PathBuf),
-    Resize(u16, u16),
+    Resize {
+        cols: u16,
+        rows: u16,
+        cell_width_px: u16,
+        cell_height_px: u16,
+    },
 }
 
 pub enum AppEvent {
@@ -94,6 +100,48 @@ pub enum AppEvent {
     /// event, not by rendering on every tick until the gate happens to be free.
     ClientGraphicsSent {
         id: u64,
+    },
+    /// Change one client's frame/input ownership without closing its transport.
+    ClientSurfaceInterest {
+        id: u64,
+        interest: SurfaceInterest,
+    },
+    ClientPrepareSurface {
+        id: u64,
+        ticket: u64,
+        cols: u16,
+        rows: u16,
+    },
+    ClientShellDockLayout {
+        id: u64,
+        layout: crate::ipc::protocol::ShellDockLayout,
+    },
+    ClientShellSidebars {
+        id: u64,
+        state: crate::ipc::protocol::ShellSidebars,
+    },
+    ClientShellWorkspaceFocus {
+        id: u64,
+        workspace_id: String,
+    },
+    ClientShellWorkspaceMenu {
+        id: u64,
+        workspace_id: String,
+        col: u16,
+        row: u16,
+    },
+    /// The owner-local client switched from its remote-machine form back to
+    /// the server-rendered workspace picker.
+    ClientOpenWorkspacePicker {
+        id: u64,
+    },
+    /// A display client reported its cell size in pixels, once after the handshake
+    /// and again on resize. This is passive metadata, not interaction: it must not
+    /// promote the reporting client to foreground or disturb render baselines.
+    ClientCellPixels {
+        id: u64,
+        cell_width_px: u16,
+        cell_height_px: u16,
     },
     /// Input from a binary display client. The server unwraps this only after
     /// activating the correct per-client viewport; it never reaches `App`.

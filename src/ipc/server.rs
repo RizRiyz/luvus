@@ -19,7 +19,7 @@ use ratatui::layout::Rect;
 use crate::app::App;
 use crate::event::{AppEvent, ClientInput};
 use crate::ipc::api;
-use crate::ipc::protocol::{self, ClientMessage, ServerMessage};
+use crate::ipc::protocol::{self, ClientMessage, ServerMessage, SurfaceInterest};
 use crate::persist;
 use crate::ui;
 
@@ -310,6 +310,8 @@ impl ClientSender {
 struct ClientState {
     sender: ClientSender,
     size: (u16, u16),
+    cell_width_px: u16,
+    cell_height_px: u16,
     terminal_colors: Option<crate::terminal::theme_probe::TerminalColors>,
     /// Whether this client's terminal answered the kitty graphics query.
     /// Unknown counts as no: painting image bytes at a terminal that cannot
@@ -331,6 +333,16 @@ struct ClientState {
     retained_pane_content: Vec<(crate::ids::PaneId, Rect)>,
     retained_ready: bool,
     last_activity: u64,
+    interest: SurfaceInterest,
+    prepare_ticket: Option<u64>,
+    shell_dock_layout: protocol::ShellDockLayout,
+    shell_sidebars: Option<protocol::ShellSidebars>,
+    sidebar_cache: Option<crate::app::Sidebars>,
+    last_shell_sidebars: Option<protocol::ShellSidebars>,
+    machine_capable: bool,
+    last_shell_dock: Option<protocol::ShellDockRect>,
+    last_shell_workspaces: Vec<protocol::ShellWorkspace>,
+    shell_dock_dirty: bool,
 }
 
 #[derive(Default)]
@@ -342,10 +354,13 @@ struct RenderScratch {
 }
 
 impl ClientState {
+    #[allow(clippy::too_many_arguments)] // Initial per-display handshake state.
     fn new(
         sender: ClientSender,
         cols: u16,
         rows: u16,
+        cell_width_px: u16,
+        cell_height_px: u16,
         terminal_colors: Option<crate::terminal::theme_probe::TerminalColors>,
         graphics: bool,
         cell_size: Option<crate::terminal::theme_probe::CellSize>,
@@ -355,6 +370,8 @@ impl ClientState {
         Self {
             sender,
             size,
+            cell_width_px,
+            cell_height_px,
             terminal_colors,
             graphics,
             graphics_backlog: crate::terminal::graphics::GraphicsBacklog::default(),
@@ -367,6 +384,16 @@ impl ClientState {
             retained_pane_content: Vec::new(),
             retained_ready: false,
             last_activity,
+            interest: SurfaceInterest::Active,
+            prepare_ticket: None,
+            shell_dock_layout: protocol::ShellDockLayout::default(),
+            shell_sidebars: None,
+            sidebar_cache: None,
+            last_shell_sidebars: None,
+            machine_capable: false,
+            last_shell_dock: None,
+            last_shell_workspaces: Vec::new(),
+            shell_dock_dirty: false,
         }
     }
 
@@ -551,7 +578,7 @@ pub fn run() -> Result<()> {
             // Already-due persist/re-arm must not `recv_timeout(0)`: that busy-loops
             // until the 100ms re-arm cadence elapses.
             None
-        } else if render_request.needs_render() && !clients.is_empty() {
+        } else if render_request.needs_render() && has_render_clients(&clients) {
             match rx.recv_timeout(frame_wait(last_render_attempt.elapsed())) {
                 Ok(ev) => Some(ev),
                 Err(RecvTimeoutError::Timeout) => {
@@ -561,7 +588,7 @@ pub fn run() -> Result<()> {
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         } else {
-            let mut deadline = app.next_runtime_deadline(now, !clients.is_empty());
+            let mut deadline = app.next_runtime_deadline(now, has_active_clients(&clients));
             if app.session_dirty && !app.session_save_inflight {
                 App::sooner_deadline(&mut deadline, last_save + SESSION_SAVE_DEBOUNCE);
             }
@@ -668,22 +695,67 @@ pub fn run() -> Result<()> {
             }
         }
         if let Some(name) = app.pending_session_switch.take() {
-            if let Some(id) = foreground.take() {
-                if let Some(client) = clients.remove(&id) {
+            if let Some(id) = foreground {
+                if let Some(client) = clients.get(&id) {
                     let _ = client.send_control(ServerMessage::SwitchSession { name });
                 }
-                foreground = latest_client(&clients);
-                apply_client_state(&mut app, &clients, foreground);
-                render_request.record(RenderCause::UserInterface);
             } else {
                 app.show_toast("no attached client to switch".to_string());
             }
+        }
+        if std::mem::take(&mut app.pending_machine_selector) {
+            if let Some(client) = foreground.and_then(|id| clients.get(&id)) {
+                let _ = client.send_control(ServerMessage::OpenMachineSelector);
+            } else {
+                app.show_toast("no attached client to open the machine selector".to_string());
+            }
+        }
+        if std::mem::take(&mut app.pending_machine_create) {
+            if let Some(client) = foreground.and_then(|id| clients.get(&id)) {
+                if client.machine_capable {
+                    let area = Rect::new(0, 0, client.size.0, client.size.1);
+                    let modal = app
+                        .picker_rects
+                        .iter()
+                        .find_map(|(hit, rect)| {
+                            matches!(hit, crate::app::PickerHit::Modal).then_some(*rect)
+                        })
+                        .unwrap_or_else(|| ui::workspace_picker_modal_rect(area, app.compact));
+                    let _ = client.send_control(ServerMessage::OpenMachineCreate {
+                        theme: protocol::MachineFormTheme {
+                            surface: protocol::pack(app.theme.surface0),
+                            border: protocol::pack(app.theme.border_focus),
+                            text: protocol::pack(app.theme.text),
+                            subtext0: protocol::pack(app.theme.subtext0),
+                            subtext1: protocol::pack(app.theme.subtext1),
+                            accent: protocol::pack(app.theme.accent),
+                            accent_text: protocol::pack(app.theme.crust),
+                            divider: protocol::pack(app.theme.overlay0),
+                            rule: protocol::pack(app.theme.surface1),
+                            error: protocol::pack(app.theme.coral),
+                        },
+                        modal: protocol::ShellDockBlock {
+                            x: modal.x,
+                            y: modal.y,
+                            width: modal.width,
+                            height: modal.height,
+                        },
+                    });
+                } else {
+                    app.show_toast("this client cannot add remote machines".to_string());
+                }
+            } else {
+                app.show_toast("no attached client to add a remote machine".to_string());
+            }
+        }
+        if let Some(revision) = app.pending_machine_catalog_revision.take() {
+            broadcast_machine_catalog_changed(&mut clients, revision);
         }
 
         // A state transition here (e.g. a silent agent reaching Done) has no PtyData
         // to ride on, so repaint when detection reports a visible change.
         let now = Instant::now();
-        if app.detect_tick_with(now, !clients.is_empty()) {
+        if app.detect_tick_with(now, has_active_clients(&clients)) {
             render_request.record(RenderCause::Detection);
         }
         // Parked `wait.output` deadlines lapse on the tick (docs/81); a no-op
@@ -697,17 +769,17 @@ pub fn run() -> Result<()> {
         }
         let mut clients_removed = false;
         for msg in app.pending_notify.drain(..) {
-            clients_removed |= broadcast(&mut clients, ServerMessage::Notify(msg));
+            clients_removed |= broadcast_effect(&mut clients, ServerMessage::Notify(msg));
         }
         if let Some(signal) = app.pending_sound.take() {
-            clients_removed |= broadcast(&mut clients, ServerMessage::Sound(signal));
+            clients_removed |= broadcast_effect(&mut clients, ServerMessage::Sound(signal));
         }
         // A finished mouse selection copies to the client's clipboard (OSC 52).
         if let Some(url) = app.pending_open_url.take() {
-            clients_removed |= broadcast(&mut clients, ServerMessage::OpenUrl(url));
+            clients_removed |= broadcast_effect(&mut clients, ServerMessage::OpenUrl(url));
         }
         if let Some(text) = app.pending_clipboard.take() {
-            clients_removed |= broadcast(&mut clients, ServerMessage::Clipboard(text));
+            clients_removed |= broadcast_effect(&mut clients, ServerMessage::Clipboard(text));
         }
         if clients_removed {
             reconcile_client_state(&mut app, &mut clients, &mut foreground);
@@ -748,7 +820,9 @@ pub fn run() -> Result<()> {
         // waiting on its full-frame resync (see `needs_render`). A client owed
         // only images is not this case: its writer wakes the loop when its gate
         // frees (`ClientGraphicsSent`), and the images go out without a frame.
-        let any_behind = clients.values().any(|client| client.behind);
+        let any_behind = clients
+            .values()
+            .any(|client| client.interest != SurfaceInterest::Suspended && client.behind);
         if app.force_redraw {
             render_request.record(RenderCause::ForcedRepair);
         }
@@ -765,8 +839,13 @@ pub fn run() -> Result<()> {
             render_request.clear();
         }
 
+        let projection_causes = RenderCause::UserInterface.bit()
+            | RenderCause::ApiOrMaintenance.bit()
+            | RenderCause::Metadata.bit()
+            | RenderCause::ClientAttachOrResize.bit();
+        let refresh_navigation = render_request.causes & projection_causes != 0;
         if render_request.needs_render()
-            && !clients.is_empty()
+            && has_render_clients(&clients)
             && frame_cadence_ready(last_render_attempt.elapsed())
         {
             let forced = std::mem::take(&mut app.force_redraw);
@@ -801,6 +880,17 @@ pub fn run() -> Result<()> {
             if background {
                 render_request.record_hidden_pty();
             }
+        }
+        // Suspended clients retain semantic navigation, not terminal frames.
+        // Refresh only after a non-PTY change and send only changed snapshots.
+        if refresh_navigation {
+            refresh_suspended_workspaces(&app, &mut clients);
+        }
+        if !has_render_clients(&clients) {
+            // Suspended remote endpoints retain no render debt. Preparing one
+            // later always starts with a complete fresh projection.
+            render_request.clear();
+            app.force_redraw = false;
         }
     }
 
@@ -850,6 +940,11 @@ fn apply(
                     },
                     cols,
                     rows,
+                    // The client reports cell pixels in a separate post-handshake
+                    // message; until it lands, auto-split uses the documented
+                    // fallback aspect.
+                    0,
+                    0,
                     terminal_colors,
                     terminal_graphics.unwrap_or(false),
                     terminal_cell_size,
@@ -892,15 +987,220 @@ fn apply(
                 .get(&id)
                 .is_some_and(|client| !client.graphics_backlog.is_empty())
         }
+        AppEvent::ClientPrepareSurface {
+            id,
+            ticket,
+            cols,
+            rows,
+        } => {
+            let Some(client) = clients.get_mut(&id) else {
+                return false;
+            };
+            client.prepare_ticket = Some(ticket);
+            client.size = (cols.max(1), rows.max(1));
+            client.interest = SurfaceInterest::Prepared;
+            client.force_full = true;
+            client.retained_ready = false;
+            client.retained_pane_content.clear();
+            if *foreground == Some(id) {
+                *foreground = latest_client(clients);
+            }
+            apply_client_state(app, clients, *foreground);
+            true
+        }
+        AppEvent::ClientSurfaceInterest { id, interest } => {
+            let Some(client) = clients.get_mut(&id) else {
+                return false;
+            };
+            if client.interest == interest {
+                return false;
+            }
+            client.interest = interest;
+            client.prepare_ticket = None;
+            client.force_full = true;
+            client.behind = false;
+            client.retained_ready = false;
+            client.retained_pane_content.clear();
+            if interest == SurfaceInterest::Prepared && client.shell_dock_layout.rows > 0 {
+                client.shell_dock_dirty = true;
+            }
+            if interest == SurfaceInterest::Suspended {
+                client.last_frame = None;
+                client.render_buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+            }
+            if interest == SurfaceInterest::Active {
+                client.last_activity = *next_activity;
+                *next_activity = next_activity.saturating_add(1);
+                *foreground = Some(id);
+            } else if *foreground == Some(id) {
+                *foreground = latest_client(clients);
+            }
+            apply_client_state(app, clients, *foreground);
+            true
+        }
+        AppEvent::ClientShellSidebars { id, mut state } => {
+            let Some(client) = clients.get_mut(&id) else {
+                return false;
+            };
+            if !client.machine_capable || !client.shell_dock_layout.owns_workspaces {
+                return false;
+            }
+            if client
+                .shell_sidebars
+                .as_ref()
+                .is_some_and(|current| current.revision > state.revision)
+            {
+                return false;
+            }
+            // Reuse the native cap, width clamp, and weight normalization.
+            state.layout = crate::app::Sidebars::from_config(&state.layout).to_config();
+            if client.shell_sidebars.as_ref() == Some(&state) {
+                return false;
+            }
+            client.sidebar_cache = Some(crate::app::Sidebars::from_config(&state.layout));
+            client.shell_sidebars = Some(state);
+            // Layout still needs a complete render pass, but the existing
+            // client frame remains a valid diff baseline. Sending a full frame
+            // for every client-owned drag update made remote resizing much
+            // heavier than the native local path.
+            client.retained_ready = false;
+            true
+        }
+        AppEvent::ClientShellDockLayout { id, mut layout } => {
+            let Some(client) = clients.get_mut(&id) else {
+                return false;
+            };
+            layout.rows = layout.rows.min(12);
+            layout.workspace_width = layout
+                .workspace_width
+                .or(client.shell_dock_layout.workspace_width)
+                .map(|width| {
+                    width.clamp(crate::app::SIDEBAR_WIDTH_MIN, crate::app::SIDEBAR_WIDTH_MAX)
+                });
+            if layout.rows == 0 {
+                layout.leading = false;
+                layout.indent_workspaces = false;
+            }
+            let changed = client.shell_dock_layout != layout || !client.machine_capable;
+            client.machine_capable = true;
+            if !changed {
+                return false;
+            }
+            client.shell_dock_layout = layout;
+            client.force_full = true;
+            client.retained_ready = false;
+            client.shell_dock_dirty = layout.rows > 0 || client.last_shell_dock.is_some();
+            true
+        }
+        AppEvent::ClientShellWorkspaceFocus { id, workspace_id } => {
+            let Some(client) = clients.get(&id) else {
+                return false;
+            };
+            if !client.machine_capable {
+                return false;
+            }
+            let Some(index) = app
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.id == workspace_id)
+            else {
+                return false;
+            };
+            app.active_ws = index;
+            app.sidebar_focus = None;
+            app.files_focused = false;
+            true
+        }
+        AppEvent::ClientShellWorkspaceMenu {
+            id,
+            workspace_id,
+            col,
+            row,
+        } => {
+            let Some(client) = clients.get(&id) else {
+                return false;
+            };
+            if !client.machine_capable || client.interest != SurfaceInterest::Active {
+                return false;
+            }
+            let Some(index) = app
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.id == workspace_id)
+            else {
+                return false;
+            };
+            app.files_focused = false;
+            app.open_ws_menu(
+                index,
+                col.min(client.size.0.saturating_sub(1)),
+                row.min(client.size.1.saturating_sub(1)),
+            );
+            true
+        }
+        AppEvent::ClientOpenWorkspacePicker { id } => {
+            let Some(client) = clients.get(&id) else {
+                return false;
+            };
+            if !client.machine_capable {
+                return false;
+            }
+            app.open_folder_picker();
+            true
+        }
+        AppEvent::ClientCellPixels {
+            id,
+            cell_width_px,
+            cell_height_px,
+        } => {
+            let Some(client) = clients.get_mut(&id) else {
+                return false;
+            };
+            client.cell_width_px = cell_width_px;
+            client.cell_height_px = cell_height_px;
+            // Passive metadata: only the interactive client's display may define
+            // the geometry shared state uses, and it never forces a repaint.
+            if *foreground == Some(id) {
+                app.set_client_cell_pixels(cell_width_px, cell_height_px);
+            }
+            false
+        }
         AppEvent::ClientInput { id, input } => {
             let Some(client) = clients.get_mut(&id) else {
                 discard_client_input(input);
                 return false;
             };
+            if client.interest != SurfaceInterest::Active {
+                // A prepared channel may update only its candidate viewport.
+                if let (
+                    SurfaceInterest::Prepared,
+                    ClientInput::Resize {
+                        cols,
+                        rows,
+                        cell_width_px,
+                        cell_height_px,
+                    },
+                ) = (client.interest, &input)
+                {
+                    client.size = ((*cols).max(1), (*rows).max(1));
+                    client.cell_width_px = *cell_width_px;
+                    client.cell_height_px = *cell_height_px;
+                    client.force_full = true;
+                    return true;
+                }
+                discard_client_input(input);
+                return false;
+            }
             client.last_activity = *next_activity;
             *next_activity = next_activity.saturating_add(1);
 
-            if let ClientInput::Resize(cols, rows) = input {
+            if let ClientInput::Resize {
+                cols,
+                rows,
+                cell_width_px,
+                cell_height_px,
+            } = input
+            {
                 crate::logging::event(
                     crate::logging::EventKind::ServerClientResize,
                     &[
@@ -910,6 +1210,11 @@ fn apply(
                     ],
                 );
                 client.size = (cols.max(1), rows.max(1));
+                client.cell_width_px = cell_width_px;
+                client.cell_height_px = cell_height_px;
+                if *foreground == Some(id) {
+                    app.set_client_cell_pixels(cell_width_px, cell_height_px);
+                }
                 // Resize/focus repair is local to this terminal. Its next frame
                 // must be complete, but other clients keep their diff baselines.
                 client.force_full = true;
@@ -947,9 +1252,43 @@ fn apply(
                 ClientInput::Mouse(mouse) => AppEvent::Mouse(mouse),
                 ClientInput::Paste(text) => AppEvent::Paste(text),
                 ClientInput::PasteImage(path) => AppEvent::PasteImage(path),
-                ClientInput::Resize(..) => unreachable!("handled above"),
+                ClientInput::Resize { .. } => unreachable!("handled above"),
             };
-            app.handle_event(event)
+            let client = clients
+                .get_mut(&id)
+                .expect("input client remains registered");
+            let scoped = client.machine_capable && client.shell_dock_layout.owns_workspaces;
+            if !scoped {
+                return app.handle_event(event);
+            }
+            let previous = app.sidebars.clone();
+            let previous_workspace_paths = app.config.layout.workspace_paths;
+            if let Some(state) = &client.shell_sidebars {
+                app.sidebars = crate::app::Sidebars::from_config(&state.layout);
+                app.config.layout.workspace_paths = state.workspace_paths;
+            }
+            app.client_sidebar_input = true;
+            let changed = app.handle_event(event);
+            app.client_sidebar_input = false;
+            let layout = app.sidebars.to_config();
+            let workspace_paths = app.config.layout.workspace_paths;
+            app.sidebars = previous;
+            app.config.layout.workspace_paths = previous_workspace_paths;
+            let revision = client.shell_sidebars.as_ref().map_or(1, |state| {
+                state.revision.saturating_add(u64::from(
+                    state.layout != layout || state.workspace_paths != workspace_paths,
+                ))
+            });
+            client.shell_sidebars = Some(protocol::ShellSidebars {
+                revision,
+                layout,
+                workspace_paths,
+            });
+            client.sidebar_cache = client
+                .shell_sidebars
+                .as_ref()
+                .map(|state| crate::app::Sidebars::from_config(&state.layout));
+            changed
         }
         // Redraw only if the event actually changed the UI — a plain keystroke
         // forwarded to a pane does not (its echo arrives as a separate `PtyData`).
@@ -971,9 +1310,39 @@ fn broadcast(clients: &mut Clients, msg: ServerMessage) -> bool {
     clients.len() != before
 }
 
+fn broadcast_effect(clients: &mut Clients, msg: ServerMessage) -> bool {
+    let before = clients.len();
+    clients.retain(|_, client| {
+        client.interest != SurfaceInterest::Active || client.send_control(msg.clone()).is_ok()
+    });
+    clients.len() != before
+}
+
+fn broadcast_machine_catalog_changed(clients: &mut Clients, revision: u64) {
+    clients.retain(|_, client| {
+        !client.machine_capable
+            || client
+                .send_control(ServerMessage::MachineCatalogChanged { revision })
+                .is_ok()
+    });
+}
+
+fn has_active_clients(clients: &Clients) -> bool {
+    clients
+        .values()
+        .any(|client| client.interest == SurfaceInterest::Active)
+}
+
+fn has_render_clients(clients: &Clients) -> bool {
+    clients
+        .values()
+        .any(|client| client.interest != SurfaceInterest::Suspended)
+}
+
 fn latest_client(clients: &Clients) -> Option<u64> {
     clients
         .iter()
+        .filter(|(_, client)| client.interest == SurfaceInterest::Active)
         .max_by_key(|(_, client)| client.last_activity)
         .map(|(&id, _)| id)
 }
@@ -1003,19 +1372,23 @@ fn apply_client_state(app: &mut App, clients: &Clients, foreground: Option<u64>)
     // streams still reach passive renderers; plain clients keep blanking cells.
     app.set_host_graphics_clients(
         display.is_some_and(|client| client.graphics),
-        clients.values().any(|client| client.graphics),
+        clients
+            .values()
+            .any(|client| client.graphics && client.interest != SurfaceInterest::Suspended),
     );
     // Prefer foreground, otherwise the most recently active client. An existing
     // foreground with unknown pixel size must not borrow another display's size.
     app.set_host_cell_size(display.and_then(|client| client.cell_size));
 
+    app.client_files_visible = client_files_visible(clients);
+    let Some(client) = display else {
+        return;
+    };
+    app.set_client_cell_pixels(client.cell_width_px, client.cell_height_px);
     if app.config.theme != "terminal" {
         return;
     }
-    if let Some(colors) = foreground
-        .and_then(|id| clients.get(&id))
-        .and_then(|client| client.terminal_colors.as_ref())
-    {
+    if let Some(colors) = client.terminal_colors.as_ref() {
         app.apply_terminal_colors(colors);
     }
 }
@@ -1036,9 +1409,12 @@ fn event_render_source(app: &App, event: &AppEvent) -> EventRenderSource {
         AppEvent::PtyData(_) => EventRenderSource::HiddenPty,
         AppEvent::ClientConnected { .. }
         | AppEvent::ClientInput {
-            input: ClientInput::Resize(..),
+            input: ClientInput::Resize { .. },
             ..
         } => EventRenderSource::Cause(RenderCause::ClientAttachOrResize),
+        // Cell-size metadata changes future split geometry, never the current
+        // frame. `apply` reports no damage, so this never asks for a render.
+        AppEvent::ClientCellPixels { .. } => EventRenderSource::Cause(RenderCause::Metadata),
         AppEvent::Api(_) => EventRenderSource::Cause(RenderCause::ApiOrMaintenance),
         AppEvent::ClientGraphicsSent { .. } => EventRenderSource::Cause(RenderCause::GraphicsDue),
         _ => EventRenderSource::Cause(RenderCause::UserInterface),
@@ -1069,7 +1445,10 @@ fn record_event_render_request(
 /// leaves the backlog where it is, coalesced, for the next release.
 fn flush_graphics(clients: &mut Clients) {
     for client in clients.values_mut() {
-        if !client.graphics || client.graphics_backlog.is_empty() {
+        if !client.graphics
+            || client.interest == SurfaceInterest::Suspended
+            || client.graphics_backlog.is_empty()
+        {
             continue;
         }
         let backlog = &mut client.graphics_backlog;
@@ -1091,6 +1470,18 @@ fn flush_graphics(clients: &mut Clients) {
 /// render every other client as a projection at that client's own dimensions.
 /// The common one-client case is still exactly one buffer reset, one UI render,
 /// and one in-place diff.
+fn client_files_visible(clients: &Clients) -> bool {
+    clients.values().any(|client| {
+        client.interest != SurfaceInterest::Suspended
+            && client.shell_dock_layout.owns_workspaces
+            && client.shell_sidebars.as_ref().is_some_and(|state| {
+                [&state.layout.left, &state.layout.right]
+                    .iter()
+                    .any(|side| side.visible && side.docks.iter().any(|dock| dock == "files"))
+            })
+    })
+}
+
 fn render_clients(
     app: &mut App,
     clients: &mut Clients,
@@ -1101,7 +1492,11 @@ fn render_clients(
     scratch: &mut RenderScratch,
 ) -> bool {
     RENDER_PASSES.fetch_add(1, Ordering::Relaxed);
-    if clients.is_empty() {
+    app.client_files_visible = client_files_visible(clients);
+    if !clients
+        .values()
+        .any(|client| client.interest != SurfaceInterest::Suspended)
+    {
         return false;
     }
     if foreground.is_none_or(|id| !clients.contains_key(&id)) {
@@ -1151,6 +1546,12 @@ fn render_clients(
     scratch.dead.clear();
     let mut presented = false;
     for id in scratch.order.iter().copied() {
+        if clients
+            .get(&id)
+            .is_some_and(|client| client.interest == SurfaceInterest::Suspended)
+        {
+            continue;
+        }
         let interactive = *foreground == Some(id);
         if let Some(client) = clients.get_mut(&id) {
             let outcome = render_client(
@@ -1270,6 +1671,88 @@ fn acknowledge_visible_terminal_generations(
     }
 }
 
+fn refresh_suspended_workspaces(app: &App, clients: &mut Clients) {
+    if !clients
+        .values()
+        .any(|client| client.machine_capable && client.interest == SurfaceInterest::Suspended)
+    {
+        return;
+    }
+    let projection = shell_workspace_projection(app);
+    clients.retain(|_, client| {
+        if client.machine_capable
+            && client.interest == SurfaceInterest::Suspended
+            && client.last_shell_workspaces != projection
+        {
+            if client
+                .send_control(ServerMessage::ShellWorkspaces(projection.clone()))
+                .is_err()
+            {
+                return false;
+            }
+            client.last_shell_workspaces.clone_from(&projection);
+        }
+        true
+    });
+}
+
+fn shell_resize_projection(
+    rect: Rect,
+    left_seam: Option<Rect>,
+    right_seam: Option<Rect>,
+    main: Rect,
+    pane: Rect,
+) -> Option<protocol::ShellResize> {
+    let left = left_seam.is_some_and(|seam| seam.x == rect.right().saturating_sub(1));
+    let seam = if left { left_seam? } else { right_seam? };
+    let other = if left {
+        right_seam.map_or(0, |s| main.right().saturating_sub(s.x))
+    } else {
+        left_seam.map_or(0, |s| s.x.saturating_sub(main.x).saturating_add(1))
+    };
+    Some(protocol::ShellResize {
+        left,
+        column: seam.x,
+        top: pane.y.max(seam.y),
+        bottom: pane.bottom().min(seam.bottom()),
+        origin: if left { main.x } else { main.right() },
+        maximum: main
+            .width
+            .saturating_sub(24 + other)
+            .clamp(crate::app::SIDEBAR_WIDTH_MIN, crate::app::SIDEBAR_WIDTH_MAX),
+    })
+}
+
+fn shell_workspace_projection(app: &App) -> Vec<protocol::ShellWorkspace> {
+    let order = app.workspace_display_order();
+    order
+        .iter()
+        .take(256)
+        .filter_map(|(index, nested)| {
+            let workspace = app.workspaces.get(*index)?;
+            let state = ui::sidebar::rollup(app, *index);
+            Some(protocol::ShellWorkspace {
+                dot: state.dot().to_string(),
+                dot_color: protocol::pack(state.color(&app.theme)),
+                id: workspace.id.clone(),
+                index: u16::try_from(*index).ok()?,
+                name: workspace.name.clone(),
+                cwd: ui::short_path(
+                    app.workspace_terminal_cwd(*index).unwrap_or(&workspace.cwd),
+                    u16::MAX,
+                ),
+                branch: workspace.branch.clone(),
+                active: *index == app.active_ws,
+                selected: app.sidebar_focus == Some(crate::app::SidebarListFocus::Workspaces)
+                    && order
+                        .get(app.workspace_cursor)
+                        .is_some_and(|(selected, _)| selected == index),
+                nested: *nested,
+            })
+        })
+        .collect()
+}
+
 /// Render and enqueue one client's next frame. Returns true when its writer is
 /// disconnected and the caller should remove it.
 fn render_client(
@@ -1312,9 +1795,62 @@ fn render_client(
         None
     };
 
-    let (cursor, cursor_visible) = if let Some(cursor) = patched {
+    let previous_shell_rows = app.client_shell_dock_rows;
+    let previous_workspace_paths = app.config.layout.workspace_paths;
+    let scoped_sidebars = client.machine_capable && client.shell_dock_layout.owns_workspaces;
+    if scoped_sidebars {
+        if client.shell_sidebars.is_none() {
+            let mut layout = app.sidebars.to_config();
+            if let Some(width) = client.shell_dock_layout.workspace_width {
+                for side in [&mut layout.left, &mut layout.right] {
+                    if side.docks.iter().any(|dock| dock == "workspaces") {
+                        side.width = width;
+                    }
+                }
+            }
+            client.shell_sidebars = Some(protocol::ShellSidebars {
+                revision: 0,
+                layout,
+                workspace_paths: app.config.layout.workspace_paths,
+            });
+        }
+        let sidebars = client.sidebar_cache.get_or_insert_with(|| {
+            crate::app::Sidebars::from_config(
+                &client
+                    .shell_sidebars
+                    .as_ref()
+                    .expect("initialized layout")
+                    .layout,
+            )
+        });
+        std::mem::swap(&mut app.sidebars, sidebars);
+        app.config.layout.workspace_paths = client
+            .shell_sidebars
+            .as_ref()
+            .expect("initialized shell state")
+            .workspace_paths;
+    }
+    let previous_shell_leading = app.client_shell_dock_leading;
+    let previous_workspace_indent = app.client_shell_dock_indent_workspaces;
+    let previous_machine_capable = app.client_machine_capable;
+    let previous_shell_owner = app.client_shell_owns_workspaces;
+    let previous_session_chrome_owner = app.client_shell_owns_session_chrome;
+    let previous_shell_rect = app.client_shell_dock_rect;
+    app.client_shell_dock_rows = client.shell_dock_layout.rows;
+    app.client_shell_dock_leading = client.shell_dock_layout.leading;
+    app.client_shell_dock_indent_workspaces = client.shell_dock_layout.indent_workspaces;
+    app.client_machine_capable = client.machine_capable;
+    app.client_shell_owns_workspaces = client.shell_dock_layout.owns_workspaces;
+    app.client_shell_owns_session_chrome = client.shell_dock_layout.owns_session_chrome;
+    app.client_shell_dock_rect = None;
+    let (cursor, cursor_visible, shell_dock, shell_workspaces) = if let Some(cursor) = patched {
         PARTIAL_TERMINAL_PROJECTIONS.fetch_add(1, Ordering::Relaxed);
-        cursor
+        (
+            cursor.0,
+            cursor.1,
+            client.last_shell_dock,
+            client.last_shell_workspaces.clone(),
+        )
     } else {
         if partial_pass {
             RETAINED_RENDER_FALLBACKS.fetch_add(1, Ordering::Relaxed);
@@ -1322,18 +1858,164 @@ fn render_client(
         FULL_TERMINAL_PROJECTIONS.fetch_add(1, Ordering::Relaxed);
         client.render_buf.reset();
         let mut target = ui::RenderTarget::new(&mut client.render_buf, area);
-        if interactive {
+        let (shell_overlay, session_slot, session_button, shell_geometry) = if interactive {
             ui::render_into(&mut target, app);
             client
                 .retained_pane_content
                 .clone_from(&app.pane_content_rects);
             client.retained_ready = true;
+            (
+                ui::shell_overlay_rect(app, area),
+                app.named_session_slot_rect,
+                app.named_session_button_rect,
+                (
+                    app.left_seam,
+                    app.right_seam,
+                    app.last_main_area,
+                    app.last_pane_area,
+                ),
+            )
         } else {
-            client.retained_pane_content = ui::render_projection(&mut target, app);
+            let projection = ui::render_projection(&mut target, app);
+            client.retained_pane_content = projection.pane_content;
             client.retained_ready = true;
-        }
-        (target.cursor(), target.cursor_visible())
+            app.client_shell_dock_rect = projection.shell_dock;
+            (
+                projection.shell_overlay,
+                projection.session_slot,
+                projection.session_button,
+                (
+                    projection.left_seam,
+                    projection.right_seam,
+                    projection.main_area,
+                    projection.pane_area,
+                ),
+            )
+        };
+        (
+            target.cursor(),
+            target.cursor_visible(),
+            app.client_shell_dock_rect
+                .map(|rect| protocol::ShellDockRect {
+                    resize: shell_resize_projection(
+                        rect,
+                        shell_geometry.0,
+                        shell_geometry.1,
+                        shell_geometry.2,
+                        shell_geometry.3,
+                    ),
+                    session_slot: session_slot.map(|slot| protocol::ShellDockBlock {
+                        x: slot.x,
+                        y: slot.y,
+                        width: slot.width,
+                        height: slot.height,
+                    }),
+                    session_button: session_button.map(|button| protocol::ShellDockBlock {
+                        x: button.x,
+                        y: button.y,
+                        width: button.width,
+                        height: button.height,
+                    }),
+                    overlay: shell_overlay.map(|overlay| protocol::ShellDockBlock {
+                        x: overlay.x,
+                        y: overlay.y,
+                        width: overlay.width,
+                        height: overlay.height,
+                    }),
+                    overlay_dims_background: app.picker.is_some(),
+                    workspace_focused: app.sidebar_focus
+                        == Some(crate::app::SidebarListFocus::Workspaces),
+                    workspace_modal: app.mode != crate::app::Mode::Normal
+                        || app.ws_menu.is_some()
+                        || app.ws_rename.is_some()
+                        || app.named_session_menu.is_some(),
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.width,
+                    height: rect.height,
+                    show_paths: app.config.layout.workspace_paths,
+                    normal_fg: protocol::pack(app.theme.subtext1),
+                    secondary_fg: protocol::pack(app.theme.overlay0),
+                    active_fg: protocol::pack(app.theme.accent),
+                    active_secondary_fg: protocol::pack(app.theme.subtext0),
+                    active_bg: protocol::pack(app.theme.sel_bg),
+                    branch_fg: protocol::pack(app.theme.green),
+                    chrome: protocol::MachineFormTheme {
+                        surface: protocol::pack(app.theme.surface0),
+                        border: protocol::pack(app.theme.border_focus),
+                        text: protocol::pack(app.theme.text),
+                        subtext0: protocol::pack(app.theme.subtext0),
+                        subtext1: protocol::pack(app.theme.subtext1),
+                        accent: protocol::pack(app.theme.accent),
+                        accent_text: protocol::pack(app.theme.crust),
+                        divider: protocol::pack(app.theme.overlay0),
+                        rule: protocol::pack(app.theme.surface1),
+                        error: protocol::pack(app.theme.coral),
+                    },
+                }),
+            shell_workspace_projection(app),
+        )
     };
+    if scoped_sidebars {
+        std::mem::swap(
+            &mut app.sidebars,
+            client
+                .sidebar_cache
+                .as_mut()
+                .expect("initialized layout cache"),
+        );
+        app.config.layout.workspace_paths = previous_workspace_paths;
+    }
+    if !interactive {
+        app.client_shell_dock_rows = previous_shell_rows;
+        app.client_shell_dock_leading = previous_shell_leading;
+        app.client_shell_dock_indent_workspaces = previous_workspace_indent;
+        app.client_machine_capable = previous_machine_capable;
+        app.client_shell_owns_workspaces = previous_shell_owner;
+        app.client_shell_owns_session_chrome = previous_session_chrome_owner;
+        app.client_shell_dock_rect = previous_shell_rect;
+    }
+    if client.shell_sidebars != client.last_shell_sidebars {
+        if let Some(state) = &client.shell_sidebars {
+            if client
+                .send_control(ServerMessage::ShellSidebars(state.clone()))
+                .is_err()
+            {
+                return RenderClientOutcome {
+                    enqueued: false,
+                    disconnected: true,
+                };
+            }
+        }
+        client
+            .last_shell_sidebars
+            .clone_from(&client.shell_sidebars);
+    }
+    if client.machine_capable && shell_workspaces != client.last_shell_workspaces {
+        if client
+            .send_control(ServerMessage::ShellWorkspaces(shell_workspaces.clone()))
+            .is_err()
+        {
+            return RenderClientOutcome {
+                enqueued: false,
+                disconnected: true,
+            };
+        }
+        client.last_shell_workspaces = shell_workspaces;
+    }
+    if client.shell_dock_dirty || shell_dock != client.last_shell_dock {
+        if client
+            .send_control(ServerMessage::ShellDock(shell_dock))
+            .is_err()
+        {
+            return RenderClientOutcome {
+                enqueued: false,
+                disconnected: true,
+            };
+        }
+        client.last_shell_dock = shell_dock;
+        client.shell_dock_dirty = false;
+    }
 
     // The PTY reader can mutate a grid after the pass drained its commands;
     // rendering can also resize a pane and queue a replacement placement.
@@ -1400,6 +2082,12 @@ fn render_client(
             disconnected: matches!(sent, Err(FrameSendError::Disconnected)),
         };
     };
+    let message = match (client.prepare_ticket, message) {
+        (Some(ticket), ServerMessage::Frame(frame)) => {
+            ServerMessage::PreparedFrame { ticket, frame }
+        }
+        (_, message) => message,
+    };
     CHANGED_PROJECTIONS.fetch_add(1, Ordering::Relaxed);
     // A client that cannot draw images never has a backlog, and takes the path
     // it always did.
@@ -1429,6 +2117,7 @@ fn render_client(
     match sent {
         Ok(()) => {
             FRAMES_ENQUEUED.fetch_add(1, Ordering::Relaxed);
+            client.prepare_ticket = None;
             client.behind = false;
             client.force_full = false;
             client.graphics_resync = false;
@@ -1501,9 +2190,37 @@ fn remove_unbound_socket(path: &Path) -> io::Result<()> {
     }
 }
 
+fn ends_client_writer(message: &ServerMessage) -> bool {
+    matches!(
+        message,
+        ServerMessage::Detach | ServerMessage::ServerShutdown { .. }
+    )
+}
+
 fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme: Arc<AtomicBool>) {
     let mut reader = BufReader::new(stream.clone());
     let mut writer = stream;
+
+    // Reject with a reason the user can act on. `Hello` keeps a frozen wire shape
+    // so every released client decodes here, but a corrupt or truly foreign frame
+    // still has to answer with the mismatch error rather than hanging up silently:
+    // the client turns a dropped socket into an opaque IO error.
+    let reject_version = |writer: &mut Conn, version: Option<u32>| {
+        crate::logging::event(
+            crate::logging::EventKind::ServerClientHandshakeRejected,
+            &[
+                crate::logging::Field::Reason(crate::logging::Reason::VersionMismatch),
+                crate::logging::Field::ProtocolVersion(u64::from(version.unwrap_or(0))),
+            ],
+        );
+        let _ = protocol::write_message(
+            writer,
+            &ServerMessage::Welcome {
+                version: protocol::PROTOCOL_VERSION,
+                error: Some("protocol version mismatch".into()),
+            },
+        );
+    };
 
     let (cols, rows) = match protocol::read_message::<_, ClientMessage>(&mut reader) {
         Ok(ClientMessage::Hello {
@@ -1512,25 +2229,19 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
             rows,
         }) => {
             if version != protocol::PROTOCOL_VERSION {
-                crate::logging::event(
-                    crate::logging::EventKind::ServerClientHandshakeRejected,
-                    &[
-                        crate::logging::Field::Reason(crate::logging::Reason::VersionMismatch),
-                        crate::logging::Field::ProtocolVersion(u64::from(version)),
-                    ],
-                );
-                let _ = protocol::write_message(
-                    &mut writer,
-                    &ServerMessage::Welcome {
-                        version: protocol::PROTOCOL_VERSION,
-                        error: Some("protocol version mismatch".into()),
-                    },
-                );
+                reject_version(&mut writer, Some(version));
                 return;
             }
             (cols, rows)
         }
-        _ => return,
+        Ok(_) => {
+            reject_version(&mut writer, None);
+            return;
+        }
+        Err(_) => {
+            reject_version(&mut writer, None);
+            return;
+        }
     };
 
     if protocol::write_message(
@@ -1553,6 +2264,17 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
     if protocol::write_message(&mut writer, &ServerMessage::Ready { probe_colors }).is_err() {
         return;
     }
+    if protocol::write_message(
+        &mut writer,
+        &ServerMessage::EndpointIdentity {
+            boot_id: server_boot_id(),
+            session: crate::session::display_name(),
+        },
+    )
+    .is_err()
+    {
+        return;
+    }
     let (terminal_colors, terminal_graphics, terminal_cell_size) =
         match protocol::read_message::<_, ClientMessage>(&mut reader) {
             Ok(ClientMessage::TerminalProbe {
@@ -1564,6 +2286,7 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
         };
 
     let (message_tx, message_rx) = mpsc::channel::<ServerMessage>();
+    let health_tx = message_tx.clone();
     let frame_pending = Arc::new(AtomicBool::new(false));
     let writer_frame_pending = frame_pending.clone();
     let graphics_pending = Arc::new(AtomicBool::new(false));
@@ -1572,7 +2295,9 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
     thread::spawn(move || {
         for msg in message_rx {
             let frame_stats = match &msg {
-                ServerMessage::Frame(_) => Some((true, 0usize)),
+                ServerMessage::Frame(_) | ServerMessage::PreparedFrame { .. } => {
+                    Some((true, 0usize))
+                }
                 ServerMessage::FrameDiff(frame) => Some((false, frame.runs.len())),
                 _ => None,
             };
@@ -1591,12 +2316,7 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
                 // every tick until the gate happens to be free.
                 let _ = writer_app_tx.send(AppEvent::ClientGraphicsSent { id });
             }
-            let stop = matches!(
-                msg,
-                ServerMessage::Detach
-                    | ServerMessage::ServerShutdown { .. }
-                    | ServerMessage::SwitchSession { .. }
-            );
+            let stop = ends_client_writer(&msg);
             match protocol::write_message_counted(&mut writer, &msg) {
                 Ok(bytes) => {
                     if let Some((full, runs)) = frame_stats {
@@ -1681,12 +2401,135 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
                     break;
                 }
             }
-            Ok(ClientMessage::Resize { cols, rows }) => {
+            Ok(ClientMessage::Resize {
+                cols,
+                rows,
+                cell_width_px,
+                cell_height_px,
+            }) => {
                 if app_tx
                     .send(AppEvent::ClientInput {
                         id,
-                        input: ClientInput::Resize(cols, rows),
+                        input: ClientInput::Resize {
+                            cols,
+                            rows,
+                            cell_width_px,
+                            cell_height_px,
+                        },
                     })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMessage::CellPixels {
+                cell_width_px,
+                cell_height_px,
+            }) => {
+                if app_tx
+                    .send(AppEvent::ClientCellPixels {
+                        id,
+                        cell_width_px,
+                        cell_height_px,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMessage::PrepareSurface { ticket, cols, rows }) => {
+                if app_tx
+                    .send(AppEvent::ClientPrepareSurface {
+                        id,
+                        ticket,
+                        cols,
+                        rows,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMessage::SurfaceInterest(interest)) => {
+                if app_tx
+                    .send(AppEvent::ClientSurfaceInterest { id, interest })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMessage::ShellSidebars(state)) => {
+                if state.layout.left.docks.len() > crate::app::MAX_DOCKS_PER_SIDE
+                    || state.layout.right.docks.len() > crate::app::MAX_DOCKS_PER_SIDE
+                    || state
+                        .layout
+                        .left
+                        .docks
+                        .iter()
+                        .chain(&state.layout.right.docks)
+                        .any(|id| id.len() > 256)
+                    || state.layout.left.dock_weights.len() > crate::app::MAX_DOCKS_PER_SIDE
+                    || state.layout.right.dock_weights.len() > crate::app::MAX_DOCKS_PER_SIDE
+                {
+                    break;
+                }
+                if app_tx
+                    .send(AppEvent::ClientShellSidebars { id, state })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMessage::ShellDockLayout(layout)) => {
+                if app_tx
+                    .send(AppEvent::ClientShellDockLayout { id, layout })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMessage::ShellWorkspaceFocus { workspace_id }) => {
+                if workspace_id.len() > 256 {
+                    break;
+                }
+                if app_tx
+                    .send(AppEvent::ClientShellWorkspaceFocus { id, workspace_id })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMessage::ShellWorkspaceMenu {
+                workspace_id,
+                col,
+                row,
+            }) => {
+                if workspace_id.len() > 256 {
+                    break;
+                }
+                if app_tx
+                    .send(AppEvent::ClientShellWorkspaceMenu {
+                        id,
+                        workspace_id,
+                        col,
+                        row,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMessage::OpenWorkspacePicker) => {
+                if app_tx
+                    .send(AppEvent::ClientOpenWorkspacePicker { id })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMessage::HealthCheck { nonce }) => {
+                if health_tx
+                    .send(ServerMessage::HealthCheck { nonce })
                     .is_err()
                 {
                     break;
@@ -1699,6 +2542,17 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
             Ok(ClientMessage::Hello { .. } | ClientMessage::TerminalProbe { .. }) => {}
         }
     }
+}
+
+fn server_boot_id() -> u64 {
+    static BOOT_ID: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *BOOT_ID.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        nanos.rotate_left(17) ^ u64::from(std::process::id())
+    })
 }
 
 /// Graceful shutdown on a termination signal. The handler only flips an atomic
@@ -1898,14 +2752,15 @@ mod shutdown {
 mod tests {
     use super::ServerMessage;
     use super::{
-        apply, broadcast, flush_graphics, frame_cadence_ready, frame_wait,
+        apply, broadcast, broadcast_effect, broadcast_machine_catalog_changed, ends_client_writer,
+        flush_graphics, frame_cadence_ready, frame_wait, handle_client,
         record_event_render_request, render_clients, ClientSender, ClientState, Clients,
         EventRenderSource, FrameSendError, RenderCause, RenderRequest, RenderScratch,
         FRAME_INTERVAL,
     };
     use crate::app::App;
     use crate::event::{AppEvent, ClientInput};
-    use crate::ipc::protocol::FrameDiff;
+    use crate::ipc::protocol::{FrameDiff, SurfaceInterest};
     use crate::terminal::appearance::PaneAppearance;
     use crate::terminal::vt::{create_engine, VtEngineKind};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1914,6 +2769,57 @@ mod tests {
     use std::sync::mpsc;
     use std::sync::Arc;
     use std::time::Duration;
+
+    /// A client built before `Hello` carried anything but these three fields must
+    /// still receive the version-mismatch `Welcome`. If the server cannot decode
+    /// the frame it hangs up instead, and the client reports an opaque IO error
+    /// rather than telling the user to run `luvus server restart`.
+    #[test]
+    fn legacy_hello_still_gets_the_version_mismatch_reply() {
+        #[derive(serde::Serialize)]
+        enum LegacyClientMessage {
+            Hello { version: u32, cols: u16, rows: u16 },
+        }
+
+        let dir = std::env::temp_dir().join(format!("luvus-legacy-hello-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("s");
+        let _ = std::fs::remove_file(&sock);
+        let listener = crate::ipc::transport::bind(&sock).unwrap();
+
+        let server = std::thread::spawn(move || {
+            let conn = crate::ipc::transport::incoming(&listener).next().unwrap();
+            let (tx, _rx) = mpsc::channel();
+            handle_client(1, conn, tx, Arc::new(AtomicBool::new(false)));
+        });
+
+        let mut client = crate::ipc::transport::connect(&sock).unwrap();
+        // An older release announces protocol 6 with the frozen three-field shape.
+        crate::ipc::protocol::write_message(
+            &mut client,
+            &LegacyClientMessage::Hello {
+                version: 6,
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .unwrap();
+
+        let mut reader = std::io::BufReader::new(client);
+        let reply = crate::ipc::protocol::read_message::<_, ServerMessage>(&mut reader)
+            .expect("the server must answer instead of hanging up");
+        match reply {
+            ServerMessage::Welcome { version, error } => {
+                assert_eq!(version, crate::ipc::protocol::PROTOCOL_VERSION);
+                assert_eq!(error.as_deref(), Some("protocol version mismatch"));
+            }
+            _ => panic!("expected a Welcome carrying the mismatch error"),
+        }
+
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&sock);
+        let _ = std::fs::remove_dir(&dir);
+    }
 
     fn display_client(
         cols: u16,
@@ -1949,6 +2855,8 @@ mod tests {
                 },
                 cols,
                 rows,
+                0,
+                0,
                 None,
                 graphics,
                 None,
@@ -2146,6 +3054,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn machine_catalog_changes_reach_only_machine_aware_clients() {
+        let (mut machine_client, machine_rx) = display_client(80, 24, 2);
+        machine_client.machine_capable = true;
+        let (plain_client, plain_rx) = display_client(80, 24, 1);
+        let mut clients = HashMap::from([(1, plain_client), (2, machine_client)]);
+
+        broadcast_machine_catalog_changed(&mut clients, 7);
+
+        assert!(matches!(
+            machine_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            ServerMessage::MachineCatalogChanged { revision: 7 }
+        ));
+        assert!(plain_rx.try_recv().is_err());
+        assert_eq!(clients.len(), 2);
+    }
+
     fn received_frame_size(rx: &mpsc::Receiver<ServerMessage>) -> (u16, u16) {
         match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
             ServerMessage::Frame(frame) => (frame.width, frame.height),
@@ -2175,7 +3100,12 @@ mod tests {
         );
         drawing.event(AppEvent::ClientInput {
             id: 1,
-            input: ClientInput::Resize(100, 30),
+            input: ClientInput::Resize {
+                cols: 100,
+                rows: 30,
+                cell_width_px: 0,
+                cell_height_px: 0,
+            },
         });
         assert_eq!(drawing.foreground, Some(2));
         assert!(
@@ -2495,6 +3425,635 @@ mod tests {
             .is_ok());
         assert_eq!(received_images(&rx), vec![command]);
         assert_eq!(received_frame_size(&rx), (20, 5));
+    }
+
+    #[test]
+    fn prepared_frame_echoes_latest_ticket_without_taking_input_ownership() {
+        let _env = crate::persist::test_env("prepared-frame-ticket");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(80, 24, app_tx).unwrap();
+        let (client, rx) = display_client(80, 24, 1);
+        let mut clients = HashMap::from([(7, client)]);
+        let mut foreground = Some(7);
+        let mut interactive_size = (80, 24);
+        let mut activity = 2;
+        for ticket in [10, 11] {
+            assert!(apply(
+                AppEvent::ClientPrepareSurface {
+                    id: 7,
+                    ticket,
+                    cols: 60,
+                    rows: 20
+                },
+                &mut app,
+                &mut clients,
+                &mut foreground,
+                &mut interactive_size,
+                &mut activity,
+            ));
+        }
+        assert_eq!(foreground, None);
+        assert_eq!(clients[&7].interest, SurfaceInterest::Prepared);
+        assert!(apply(
+            AppEvent::ClientInput {
+                id: 7,
+                input: ClientInput::Resize {
+                    cols: 60,
+                    rows: 20,
+                    cell_width_px: 9,
+                    cell_height_px: 18
+                },
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut activity,
+        ));
+        assert_eq!(
+            (clients[&7].cell_width_px, clients[&7].cell_height_px),
+            (9, 18)
+        );
+        assert_eq!(foreground, None, "candidate geometry cannot claim input");
+        let mut scratch = RenderScratch::default();
+        assert!(render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            false,
+            false,
+            &mut scratch
+        ));
+        match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            ServerMessage::PreparedFrame { ticket, frame } => {
+                assert_eq!(ticket, 11);
+                assert_eq!((frame.width, frame.height), (60, 20));
+            }
+            _ => panic!("expected ticketed candidate frame"),
+        }
+        assert!(clients[&7].prepare_ticket.is_none());
+        assert_eq!(foreground, None);
+    }
+
+    #[test]
+    fn suspended_surface_releases_frames_and_receives_no_render_or_effect() {
+        let _env = crate::persist::test_env("suspended-surface");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(80, 24, app_tx).unwrap();
+        let (client, rx) = display_client(80, 24, 1);
+        let mut clients = HashMap::from([(7, client)]);
+        let mut foreground = Some(7);
+        let mut interactive_size = (80, 24);
+        let mut next_activity = 2;
+        let mut scratch = RenderScratch::default();
+
+        assert!(render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            true,
+            false,
+            &mut scratch,
+        ));
+        assert!(matches!(rx.recv().unwrap(), ServerMessage::Frame(_)));
+        clients[&7]
+            .sender
+            .frame_pending
+            .store(false, Ordering::Release);
+
+        assert!(apply(
+            AppEvent::ClientSurfaceInterest {
+                id: 7,
+                interest: SurfaceInterest::Suspended,
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        ));
+        assert_eq!(foreground, None);
+        assert!(clients[&7].last_frame.is_none());
+        assert_eq!(
+            clients[&7].render_buf.area,
+            ratatui::layout::Rect::new(0, 0, 1, 1)
+        );
+        assert!(!render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            true,
+            false,
+            &mut scratch,
+        ));
+        broadcast_effect(&mut clients, ServerMessage::Notify("hidden".into()));
+        assert!(rx.try_recv().is_err());
+
+        assert!(apply(
+            AppEvent::ClientSurfaceInterest {
+                id: 7,
+                interest: SurfaceInterest::Prepared,
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        ));
+        assert!(render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            true,
+            false,
+            &mut scratch,
+        ));
+        assert!(matches!(rx.recv().unwrap(), ServerMessage::Frame(_)));
+    }
+
+    #[test]
+    fn client_sidebars_follow_native_files_input_without_changing_server_settings() {
+        use super::render_client;
+        use crate::ipc::protocol;
+        let _env = crate::persist::test_env("machine-both-docks");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(120, 30, tx).unwrap();
+        let saved = app.sidebars.to_config();
+        let saved_config = app.config.sidebars();
+        let (mut client, _client_rx) = display_client(120, 30, 1);
+        client.machine_capable = true;
+        client.shell_dock_layout.owns_workspaces = true;
+        let mut layout = saved.clone();
+        layout.left.width = 34;
+        layout.right.width = 30;
+        layout.files_side = Some(crate::app::Side::Right);
+        client.shell_sidebars = Some(protocol::ShellSidebars {
+            revision: 5,
+            layout,
+            workspace_paths: true,
+        });
+        let mut clients = HashMap::from([(7, client)]);
+        let mut foreground = Some(7);
+        let mut size = (120, 30);
+        let mut activity = 2;
+        app.mode = crate::app::Mode::Prefix;
+        apply(
+            AppEvent::ClientInput {
+                id: 7,
+                input: ClientInput::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)),
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity,
+        );
+        let updated = clients[&7].shell_sidebars.as_ref().unwrap().clone();
+        assert_eq!(updated.revision, 6);
+        assert!(updated.layout.right.visible);
+        assert!(updated
+            .layout
+            .right
+            .docks
+            .iter()
+            .any(|dock| dock == "files"));
+        assert_eq!(updated.layout.left.width, 34);
+        assert_eq!(updated.layout.right.width, 30);
+        assert!(updated.workspace_paths);
+        assert_eq!(app.sidebars.to_config(), saved);
+        assert_eq!(app.config.sidebars(), saved_config);
+
+        // A second endpoint starts with different server defaults but receives
+        // the client's exact layout before rendering its own file content.
+        let (mut remote, _remote_rx) = display_client(120, 30, 1);
+        remote.machine_capable = true;
+        remote.shell_dock_layout.owns_workspaces = true;
+        remote.shell_sidebars = Some(updated);
+        render_client(&mut app, &mut remote, true, true, false, &HashMap::new());
+        assert_eq!(remote.last_shell_dock.unwrap().width, 34);
+        assert!(
+            remote
+                .last_shell_sidebars
+                .as_ref()
+                .unwrap()
+                .layout
+                .right
+                .visible
+        );
+        assert_eq!(app.sidebars.to_config(), saved);
+        assert_eq!(app.config.sidebars(), saved_config);
+
+        // An old broadcast cannot roll back newer native input from this client.
+        assert!(!apply(
+            AppEvent::ClientShellSidebars {
+                id: 7,
+                state: protocol::ShellSidebars {
+                    revision: 5,
+                    layout: saved.clone(),
+                    workspace_paths: false,
+                }
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity,
+        ));
+        assert_eq!(clients[&7].shell_sidebars.as_ref().unwrap().revision, 6);
+    }
+
+    #[test]
+    fn client_sidebar_state_keeps_the_existing_frame_diff_baseline() {
+        use crate::ipc::protocol;
+
+        let _env = crate::persist::test_env("machine-sidebar-frame-diff");
+        let (tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(120, 30, tx).unwrap();
+        let (mut client, rx) = display_client(120, 30, 1);
+        client.machine_capable = true;
+        client.shell_dock_layout.owns_workspaces = true;
+        let mut clients = HashMap::from([(7, client)]);
+        let mut foreground = Some(7);
+        let mut size = (120, 30);
+        let mut activity = 2;
+        let mut scratch = RenderScratch::default();
+
+        assert!(render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            true,
+            false,
+            &mut scratch,
+        ));
+        while !matches!(rx.recv().unwrap(), ServerMessage::Frame(_)) {}
+        clients[&7]
+            .sender
+            .frame_pending
+            .store(false, Ordering::Release);
+
+        let mut layout = clients[&7].shell_sidebars.as_ref().unwrap().layout.clone();
+        layout.left.width = 36;
+        assert!(apply(
+            AppEvent::ClientShellSidebars {
+                id: 7,
+                state: protocol::ShellSidebars {
+                    revision: 1,
+                    layout,
+                    workspace_paths: true,
+                },
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity,
+        ));
+        assert!(!clients[&7].force_full);
+        assert!(render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            false,
+            false,
+            &mut scratch,
+        ));
+        let mut rendered = None;
+        for _ in 0..4 {
+            match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+                ServerMessage::Frame(_) => panic!("sidebar update sent an avoidable full frame"),
+                ServerMessage::FrameDiff(diff) => {
+                    rendered = Some(diff);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(rendered.is_some(), "sidebar update produced a frame diff");
+    }
+
+    #[test]
+    fn machine_workspace_path_toggle_is_client_owned_across_endpoints() {
+        use crate::ipc::protocol;
+
+        let _env = crate::persist::test_env("machine-workspace-path-owner");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(120, 30, tx).unwrap();
+        let persistent_workspace_paths = app.config.layout.workspace_paths;
+        let (mut client, _client_rx) = display_client(120, 30, 1);
+        client.machine_capable = true;
+        client.shell_dock_layout.owns_workspaces = true;
+        client.shell_sidebars = Some(protocol::ShellSidebars {
+            revision: 5,
+            layout: app.sidebars.to_config(),
+            workspace_paths: true,
+        });
+        let mut clients = HashMap::from([(7, client)]);
+        let mut foreground = Some(7);
+        let mut size = (120, 30);
+        let mut activity = 2;
+
+        app.open_ws_menu(0, 10, 5);
+        app.ws_menu.as_mut().unwrap().selected = Some(3);
+        assert!(apply(
+            AppEvent::ClientInput {
+                id: 7,
+                input: ClientInput::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity,
+        ));
+
+        let state = clients[&7].shell_sidebars.as_ref().unwrap();
+        assert_eq!(state.revision, 6);
+        assert!(!state.workspace_paths);
+        assert_eq!(
+            app.config.layout.workspace_paths, persistent_workspace_paths,
+            "the endpoint server config must not absorb client shell state"
+        );
+    }
+
+    #[test]
+    fn workspace_width_override_is_per_client_and_never_persisted() {
+        use super::render_client;
+        use crate::ipc::protocol::ShellDockLayout;
+        let _env = crate::persist::test_env("machine-width-owner");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(120, 30, tx).unwrap();
+        let saved = (app.sidebars.left.width, app.sidebars.right.width);
+        let (mut first, _first_rx) = display_client(120, 30, 1);
+        let (mut second, _second_rx) = display_client(120, 30, 2);
+        first.machine_capable = true;
+        second.machine_capable = true;
+        first.shell_dock_layout = ShellDockLayout {
+            owns_workspaces: true,
+            workspace_width: Some(34),
+            ..ShellDockLayout::default()
+        };
+        second.shell_dock_layout = ShellDockLayout {
+            owns_workspaces: true,
+            workspace_width: Some(42),
+            ..ShellDockLayout::default()
+        };
+        render_client(&mut app, &mut first, true, true, false, &HashMap::new());
+        assert_eq!(first.last_shell_dock.unwrap().width, 34);
+        assert_eq!(first.last_shell_dock.unwrap().resize.unwrap().column, 33);
+        assert_eq!((app.sidebars.left.width, app.sidebars.right.width), saved);
+        for width in [44, 26] {
+            let state = first.shell_sidebars.as_mut().unwrap();
+            state.layout.left.width = width;
+            first.sidebar_cache = Some(crate::app::Sidebars::from_config(&state.layout));
+            first.retained_ready = false;
+            render_client(&mut app, &mut first, false, true, false, &HashMap::new());
+            let dock = first.last_shell_dock.unwrap();
+            assert_eq!(dock.width, width);
+            let resize = dock.resize.expect("resized left dock retains its seam");
+            assert!(resize.left);
+            assert_eq!(resize.column, width - 1);
+        }
+        render_client(&mut app, &mut second, false, true, false, &HashMap::new());
+        assert_eq!(second.last_shell_dock.unwrap().width, 42);
+        assert_eq!(first.last_shell_dock.unwrap().width, 26);
+        assert_eq!((app.sidebars.left.width, app.sidebars.right.width), saved);
+    }
+
+    #[test]
+    fn machine_endpoint_rows_follow_workspace_paths_without_resizing_the_pty() {
+        let _env = crate::persist::test_env("machine-dock-slot");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(100, 30, app_tx).unwrap();
+        let pane = app.layout().focus;
+        let (client, rx) = display_client(100, 30, 1);
+        let mut clients = HashMap::from([(7, client)]);
+        let mut foreground = Some(7);
+        let mut interactive_size = (100, 30);
+        let mut next_activity = 2;
+        let mut scratch = RenderScratch::default();
+
+        assert!(render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            true,
+            false,
+            &mut scratch,
+        ));
+        assert!(matches!(rx.recv().unwrap(), ServerMessage::Frame(_)));
+        clients[&7]
+            .sender
+            .frame_pending
+            .store(false, Ordering::Release);
+        let pty_size = app.panes[&pane].size();
+
+        assert!(apply(
+            AppEvent::ClientShellDockLayout {
+                id: 7,
+                layout: crate::ipc::protocol::ShellDockLayout {
+                    workspace_width: None,
+                    owns_workspaces: true,
+                    owns_session_chrome: false,
+                    rows: 4,
+                    leading: false,
+                    indent_workspaces: false,
+                },
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        ));
+        assert!(render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            true,
+            false,
+            &mut scratch,
+        ));
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            ServerMessage::ShellSidebars(_)
+        ));
+        let workspaces = match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            ServerMessage::ShellWorkspaces(workspaces) => workspaces,
+            _ => panic!("machine-aware clients receive the local workspace projection first"),
+        };
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].index, 0);
+        assert!(workspaces[0].active);
+        let slot = match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            ServerMessage::ShellDock(Some(slot)) => slot,
+            _ => panic!("machine-aware clients receive dock geometry before their frame"),
+        };
+        assert_eq!(slot.height, 13);
+        assert!(slot.show_paths);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            ServerMessage::Frame(_)
+        ));
+        assert_eq!(app.panes[&pane].size(), pty_size);
+    }
+
+    #[test]
+    fn empty_machine_catalog_still_enables_first_time_workspace_picker_tab() {
+        let _env = crate::persist::test_env("machine-empty-catalog-capability");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(80, 24, app_tx).unwrap();
+        let (client, _rx) = display_client(80, 24, 1);
+        let mut clients = HashMap::from([(7, client)]);
+        let mut foreground = Some(7);
+        let mut interactive_size = (80, 24);
+        let mut next_activity = 2;
+
+        assert!(apply(
+            AppEvent::ClientShellDockLayout {
+                id: 7,
+                layout: crate::ipc::protocol::ShellDockLayout::default(),
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        ));
+        assert!(clients[&7].machine_capable);
+        assert_eq!(clients[&7].shell_dock_layout.rows, 0);
+    }
+
+    #[test]
+    fn machine_client_can_focus_local_workspace_while_surface_is_suspended() {
+        let _env = crate::persist::test_env("machine-local-workspace-focus");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(80, 24, app_tx).unwrap();
+        let (client, _rx) = display_client(80, 24, 1);
+        let mut clients = HashMap::from([(7, client)]);
+        let mut foreground = Some(7);
+        let mut interactive_size = (80, 24);
+        let mut next_activity = 2;
+
+        assert!(apply(
+            AppEvent::ClientShellDockLayout {
+                id: 7,
+                layout: crate::ipc::protocol::ShellDockLayout::default(),
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        ));
+        assert!(apply(
+            AppEvent::ClientSurfaceInterest {
+                id: 7,
+                interest: SurfaceInterest::Suspended,
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        ));
+        app.sidebar_focus = Some(crate::app::SidebarListFocus::Workspaces);
+        assert!(apply(
+            AppEvent::ClientShellWorkspaceFocus {
+                id: 7,
+                workspace_id: app.workspaces[0].id.clone()
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        ));
+        assert_eq!(app.active_ws, 0);
+        assert_eq!(app.sidebar_focus, None);
+        assert_eq!(
+            foreground, None,
+            "focus does not prematurely activate the surface"
+        );
+        assert!(apply(
+            AppEvent::ClientOpenWorkspacePicker { id: 7 },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        ));
+        assert!(app.picker.is_some());
+        assert!(!apply(
+            AppEvent::ClientShellWorkspaceFocus {
+                id: 7,
+                workspace_id: "missing-workspace".into()
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        ));
+    }
+
+    #[test]
+    fn machine_workspace_menu_uses_native_identity_and_requires_active_surface() {
+        let _env = crate::persist::test_env("machine-workspace-menu");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(80, 24, app_tx).unwrap();
+        let workspace_id = app.workspaces[0].id.clone();
+        let (mut client, _rx) = display_client(80, 24, 1);
+        client.machine_capable = true;
+        client.interest = SurfaceInterest::Suspended;
+        let mut clients = HashMap::from([(7, client)]);
+        let mut foreground = Some(7);
+        let mut size = (80, 24);
+        let mut activity = 2;
+        let menu = |workspace_id| AppEvent::ClientShellWorkspaceMenu {
+            id: 7,
+            workspace_id,
+            col: 10,
+            row: 5,
+        };
+        assert!(!apply(
+            menu(workspace_id.clone()),
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity
+        ));
+        assert!(app.ws_menu.is_none());
+        clients.get_mut(&7).unwrap().interest = SurfaceInterest::Active;
+        assert!(!apply(
+            menu("stale-workspace".into()),
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity
+        ));
+        assert!(app.ws_menu.is_none());
+        assert!(apply(
+            menu(workspace_id.clone()),
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity
+        ));
+        assert_eq!(app.ws_menu.as_ref().unwrap().workspace_id, workspace_id);
+        assert_eq!(app.ws_menu_target_index(), Some(0));
+        assert_eq!(app.active_ws, 0);
     }
 
     #[test]
@@ -2942,6 +4501,8 @@ mod tests {
             },
             120,
             32,
+            0,
+            0,
             None,
             false,
             None,
@@ -3040,6 +4601,35 @@ mod tests {
     }
 
     #[test]
+    fn machine_selector_does_not_end_the_client_writer() {
+        assert!(!ends_client_writer(&ServerMessage::OpenMachineSelector));
+        assert!(!ends_client_writer(&ServerMessage::OpenMachineCreate {
+            theme: crate::ipc::protocol::MachineFormTheme {
+                surface: 0,
+                border: 0,
+                text: 0,
+                subtext0: 0,
+                subtext1: 0,
+                accent: 0,
+                accent_text: 0,
+                divider: 0,
+                rule: 0,
+                error: 0,
+            },
+            modal: crate::ipc::protocol::ShellDockBlock {
+                x: 2,
+                y: 2,
+                width: 40,
+                height: 20,
+            },
+        }));
+        assert!(ends_client_writer(&ServerMessage::Detach));
+        assert!(!ends_client_writer(&ServerMessage::SwitchSession {
+            name: "review".into(),
+        }));
+    }
+
+    #[test]
     fn different_client_sizes_receive_independent_frames_and_active_geometry() {
         let _env = crate::persist::test_env("multi-client-resolution");
         let (app_tx, _app_rx) = mpsc::channel();
@@ -3099,7 +4689,12 @@ mod tests {
         assert!(apply(
             AppEvent::ClientInput {
                 id: 2,
-                input: ClientInput::Resize(46, 16),
+                input: ClientInput::Resize {
+                    cols: 46,
+                    rows: 16,
+                    cell_width_px: 0,
+                    cell_height_px: 0,
+                },
             },
             &mut app,
             &mut clients,

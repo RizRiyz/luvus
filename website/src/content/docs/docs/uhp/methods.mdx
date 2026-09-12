@@ -43,7 +43,7 @@ See [effective permissions](/docs/uhp/remote-access/#effective-permissions).
 One request per connection, newline-terminated, and one JSON reply:
 
 ```json
-→ {"id":"1","method":"pane.split","params":{"down":true}}
+→ {"id":"1","method":"pane.split","params":{"direction":"auto"}}
 ← {"id":"1","result":{"type":"ok","pane":"7"}}
 ```
 
@@ -102,9 +102,22 @@ Consumers must tolerate absent `graphics_details` on older servers and ignore
 unknown additive fields. Do not interpret the build-support boolean alone as
 permission to draw on the active display.
 
+Inline chunked images are buffered per pane until the complete transfer arrives,
+so concurrent panes cannot interleave their chunks on one host terminal. Pending
+transfers are bounded to 8 MiB / 4,096 commands per pane; an overflow discards the
+partial transfer, including late-attach replay. Incomplete transfers are not
+replayed to newly attached clients. A pane with an unfinished image does not block
+another pane's complete image.
+
+The machine-aware client supports graphics on its owner-local endpoint. Remote
+machine endpoints currently negotiate text-only output to avoid collisions
+between independent servers' image IDs. Check `graphics_details.available` on
+the endpoint in use rather than assuming support from the local terminal.
+
 | Family | Methods |
 |---|---|
 | host / sessions | `host.capabilities` · `host.info` · `host.doctor` · `host.update.check` · `host.update.install` · `session.list` · `session.status` · `session.start` · `session.stop` · `session.restart` · `session.delete` · `skill.status` · `skill.enable` · `skill.disable` · `integration.status` · `integration.install` · `integration.uninstall` |
+| machines (`uhp access --machines` only) | `machine.list` · `machine.get` · `machine.status` · `machine.sessions` · `machine.add` · `machine.rename` · `machine.enable` · `machine.disable` · `machine.remove` |
 | discovery / config | `uhp.capabilities` · `uhp.stats` · `uhp.token.create` · `uhp.token.list` · `uhp.token.revoke` · `config.get` · `config.patch` · `server.reload_config` · `server.agent_manifests` · `server.reload_agent_manifests` |
 | workspaces | `workspace.list` · `workspace.get` · `workspace.open` · `workspace.focus` · `workspace.rename` · `workspace.pin` · `workspace.move` · `workspace.move_block` · `workspace.report_metadata` · `workspace.close` |
 | tabs | `tab.list` · `tab.get` · `tab.new` · `tab.focus` · `tab.move` · `tab.swap` · `tab.rename` · `tab.close` |
@@ -123,7 +136,7 @@ permission to draw on the active display.
 | agent automation | `automation.create` · `automation.list` · `automation.get` · `automation.update` · `automation.enable` · `automation.disable` · `automation.rebind` · `automation.delete` · `automation.run` · `automation.history` · `automation.preview` · `automation.health` |
 | modules | `module.list` · `module.info` · `module.link` · `module.unlink` · `module.enable` · `module.disable` · `module.action.list` · `module.action.invoke` · `module.pane.open` · `module.pane.focus` · `module.pane.close` · `module.config_dir` · `module.settings.list` · `module.settings.get` · `module.settings.set` · `module.log.list` |
 | themes | `theme.list` · `theme.path` · `theme.use` · `theme.reload` |
-| ui / server | `ui.sidebar` · `ui.dock.push` · `ui.dock.list` · `ui.dock.move` · `ui.bar.push` · `ui.bar.list` · `ui.bar.move` · `ui.bar.remove` · `ui.notification.push` · `ui.notification.clear` · `ui.toast` · `ping` · `server.stop` · `events.subscribe` · `events.wait` |
+| ui / server | `ui.sidebar` · `ui.agent_title.push` · `ui.agent_title.clear` · `ui.dock.push` · `ui.dock.list` · `ui.dock.move` · `ui.bar.push` · `ui.bar.list` · `ui.bar.move` · `ui.bar.remove` · `ui.notification.push` · `ui.notification.clear` · `ui.toast` · `ping` · `server.stop` · `events.subscribe` · `events.wait` |
 
 Parameter shapes mirror the CLI flags (`luvus task add --paths x` →
 `{"paths": ["x"]}`). For CLI commands, an omitted pane uses
@@ -133,6 +146,26 @@ currently focused pane. Methods with a focus default also treat an explicit
 pane fails with `not_found`; malformed or out-of-range IDs fail with
 `invalid_request` before any mutation. Pane IDs accept an unsigned 32-bit JSON
 integer or its decimal string form.
+
+Machine methods are an opt-in access-gateway surface, not methods of the
+selected session server. `machine.list` takes `{}`. `machine.get`,
+`machine.status`, and `machine.sessions` take `{id}`. `machine.add` takes
+`{id, host, if_revision, label?, preferred_session?, remote_binary?, enabled?}`.
+`preferred_session` selects the remote named session and defaults to `default`.
+Rename takes
+`{id, label, if_revision}`; enable, disable, and remove take
+`{id, if_revision}`. Read projections omit SSH destinations and executable
+paths, but include `automatic_provisioning` so a client can distinguish a
+managed binary from an explicit path. Control methods are advertised only by
+`luvus uhp access --machines --control`.
+
+`machine.add` and `machine.enable` validate remote compatibility but never
+install through UHP. A saved `automatic_provisioning:true` is provenance, not
+installation authority. If a binary is missing or incompatible, run foreground
+CLI setup and approve its default-No prompt, or pass `--install` explicitly for
+that operation. Installation never restarts a running remote server.
+`machine.status` and all background reconnects remain read-only. Use
+`enabled:false` to save without contacting the host.
 
 `task.add` accepts a short `title` and an optional multiline `prompt` containing
 the detailed worker briefing. `task.get`, `task.list`, and task events return
@@ -312,7 +345,19 @@ not change focus:
 logical area. Headless clients therefore receive deterministic geometry that
 does not depend on the latest attached terminal size. `pane.edges` reports
 which outer edges the pane touches. Directional queries use the same geometric
-selection as the TUI.
+selection as the TUI. `pane.split` takes optional `direction`: omitted or `"auto"` splits the longer
+physical side of the target pane using the last interactive client size. Cell
+pixels come from the display client when the host reports them; otherwise Luvus
+uses a documented 2:1 cell height/width. With no painted client it splits side
+by side. `"right"` and `"down"` force a direction (`"stack"` is an alias for
+`"down"`). Older servers reject `"auto"` and treat an omitted direction as
+right, so callers that want the server default should omit the field.
+
+`direction` is now validated: any other value, or a non-string, returns
+`invalid_request`. Earlier servers silently treated an unrecognized value as
+`"right"`, so a caller that sent something like `"vertical"` used to get a
+side-by-side split and now gets an error. Send `"right"` explicitly, or omit the
+field, to keep that behavior.
 
 `layout.export` returns the complete binary split tree and focused pane.
 `layout.apply` accepts that tree plus an optional focus. It succeeds only when
@@ -466,6 +511,51 @@ Before either prompt method queues input, Luvus rejects a currently detected
 startup, sign-in, selection, or approval screen with `agent_not_ready`. The
 rejection queues neither text nor Enter. Read the visible agent output and use
 `agent.keys` only when an explicit interaction is intended.
+
+For explicit key interactions, `agent.read` adds `content_revision` (the pane's
+PTY output counter) and `terminal_id` (32 lowercase hexadecimal characters for
+that PTY lifetime) alongside `text`. Text and coordinates are captured under the
+same engine lock for both `source:"visible"` and recent output. A deferred pane
+without a runtime has `terminal_id:null`; an unavailable engine snapshot returns
+empty text and null coordinates. These fields are additive: legacy results stay
+valid. The response's generic `revision` is a global event sequence and is not
+this pane counter.
+
+`agent.keys` still requires only `target` and a non-empty `keys` array. UHP callers
+may optionally supply **both** `if_content_revision` (a non-negative integer)
+and `terminal_id` from the read they inspected:
+
+```json
+{"id":"inspect","method":"agent.read","params":{"target":"reviewer","source":"visible"}}
+{"id":"answer","method":"agent.keys","params":{"target":"reviewer","keys":["enter"],"if_content_revision":12,"terminal_id":"0123456789abcdef0123456789abcdef"}}
+```
+
+The example coordinates must be replaced with the actual read result. Supplying
+only one field, malformed coordinates, an unknown parameter, or any invalid key
+returns `invalid_request` without queuing input. The complete key list validates
+before the fence comparison. Plain shells still return `agent_not_ready`.
+
+For a fenced request, the server holds the existing engine lock while comparing
+identity and content revision and admitting the entire key batch. A stale
+revision, different terminal lifetime, missing runtime, or unavailable engine
+returns `content_revision_conflict` with expected/actual values (or an explicit
+unavailable actual value), and queues no bytes. A matching fence still reports
+`send_failed` if the writer rejects admission.
+
+On conflict, re-read the visible screen and reassess the intended action; never
+retry the same pair. Without the pair, admission is unchanged. Older servers omit
+the read coordinates or reject the unknown parameters; use the legacy unfenced
+request only when that compatibility behavior is acceptable for the authorized
+action. The pair is a UHP parameter option, not a new CLI flag.
+
+This is an **admission-only** fence: it does not cancel already queued input or
+cover child-side changes the server has not observed. Cursor, SGR, and other PTY
+output can increment the counter without changing visible dialog text; a conflict
+still requires a fresh read. Generic `if_revision` cannot replace this fence:
+it tracks unrelated global events and is checked before dispatch without the
+engine lock. The prompt guard introduced in #320 routes explicit interactions
+to `agent.keys`; this opt-in fence binds those interactions to the inspected
+terminal snapshot.
 
 With `wait:true`, a **new** `working` or `blocked` transition must be observed
 before a requested `until` state can complete the wait. An already active state,
@@ -905,9 +995,36 @@ rendering.
 | Method | Params | Result |
 |---|---|---|
 | `ui.sidebar` | `{side?: "left"\|"right", width?: int, visible?: bool}` | `{width, visible}` for that side |
+| `ui.agent_title.push` | `{owner?, module_token?, titles: Title[]}` | `{type:"ok", changed}` |
+| `ui.agent_title.clear` | `{owner?, module_token?, pane?, agent?, session_id?}` | `{type:"ok", changed}` |
 | `ui.dock.push` | `{id, title?, placement?: "left"\|"right", rows: Row[]}` | `{type:"ok"}` |
 | `ui.dock.list` | `{}` | `{docks: [{id, side}]}` |
 | `ui.dock.move` | `{id, side: "left"\|"right"}` | `{type:"ok"}` |
+
+`ui.agent_title.push` lets a module supply AGENTS sidebar session titles without
+Luvus parsing any agent's native store. Each `Title` is:
+
+```json
+{ "pane": "3", "agent": "pi", "session_id": "01a0…", "title": "Ship desktop" }
+```
+
+A row needs `pane` and/or `agent`+`session_id`. `agent` must name a built-in
+Luvus adapter. Empty `title` clears that key. Live rows still prefer an OSC title; otherwise they use a pane title, then a
+session title. Resumable All/history rows use the session title. Luvus pane
+aliases (`=name`) are never used as titles. Module commands include their owner
+and per-server `module_token` automatically. Luvus accepts a module owner only
+with that token, so one module cannot publish or clear another module's titles.
+`clear` with no filters drops every title owned by the authenticated module.
+Direct local control-API calls may omit both fields; those calls can mutate only
+unowned titles, and an unfiltered clear is a no-op. Luvus clears an owner's
+titles when that module is disabled, unlinked, or uninstalled, and a disabled
+module cannot publish. A module's token stays valid for as long as it remains
+registered on that server, so toggling a module does not strand a module process
+that is still running; the token is dropped on unlink or uninstall. The CLI
+wrappers are `luvus ui agent-title push|clear` (`push` also
+reads `--titles` from stdin). Raw local API clients acting for a module must pass
+the injected `LUVUS_MODULE_TOKEN` as `module_token`; module scripts calling the
+CLI do not handle it themselves.
 
 A `Row` is:
 

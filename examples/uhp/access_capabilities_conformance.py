@@ -41,6 +41,7 @@ def main():
     parser.add_argument("--home", required=True)
     parser.add_argument("--session", default="luvus-pr-test")
     parser.add_argument("--expect", choices=["missing", "present"], required=True)
+    parser.add_argument("--expect-rename", choices=["denied", "allowed"])
     args = parser.parse_args()
     binary = str(pathlib.Path(args.binary).resolve(strict=True))
     home = pathlib.Path(args.home).resolve(strict=True)
@@ -122,10 +123,27 @@ def main():
                 allowed = access["allowed_methods"]
                 assert set(allowed) <= set(owner_caps["methods"])
                 assert ("agent.keys" in allowed) == control
+                if args.expect_rename is not None:
+                    assert ("pane.rename" in allowed) == (control and args.expect_rename == "allowed")
                 assert ("automation.create" in allowed) == control
                 assert "uhp.capabilities" in allowed
                 assert "terminal.backend.type_literal" not in allowed
                 assert not any(method.startswith("uhp.token.") for method in allowed)
+            if args.expect_rename is not None:
+                rename_params = {"pane": pane, "name": "mobile-worker"}
+                name_before_rename = owner("agent.get", {"target": pane})["name"]
+                rename = exchange(endpoint, {"id": "rename", "method": "pane.rename",
+                                            "params": rename_params, "auth": token})
+                if control and args.expect_rename == "allowed":
+                    for key, value in {"type": "pane_rename", **rename_params}.items():
+                        assert rename["result"][key] == value, rename
+                    assert owner("agent.get", {"target": pane})["name"] == "mobile-worker"
+                else:
+                    assert rename["error"]["code"] == "forbidden", rename
+                    assert owner("agent.get", {"target": pane})["name"] == name_before_rename
+                print(json.dumps({"mode": "control" if control else "read_only",
+                                  "request": {"id": "rename", "method": "pane.rename", "params": rename_params},
+                                  "response": rename}))
             denied = []
             for method, auth in [("agent.keys", "wrong"), ("terminal.backend.type_literal", token),
                                  ("uhp.capabilities.", token), ("uhp.token.list", token)]:

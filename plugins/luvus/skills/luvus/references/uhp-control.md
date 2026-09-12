@@ -46,12 +46,16 @@ control-stream `send_key`. Invalid batches queue no prefix. Success identifies
 the resolved `pane` and means queued, not consumed. Inspect before answering;
 do not infer permission for `agent.send`, raw pane input, launch, fork, or close.
 
+Control also permits `pane.rename` with the existing `pane` and `name` parameters;
+read-only Access denies it. Rename retains the owner name validation and
+`pane.renamed` event. An empty name clears the pane alias.
+
 After pairing through Access, `uhp.capabilities` retains owner `methods` and
 adds `access.mode`, `access.allowed_methods`, and gateway-specific
 `access.limits.connections` / `requests_per_minute`. Intersect the allowed set
 with server methods and your supported actions. Owner endpoints omit `access`;
 older gateways may omit it too, which never proves write permission. Control
-includes keys and existing automation writes, but excludes standalone terminal
+includes `pane.rename`, keys, and existing automation writes, but excludes standalone terminal
 input and token administration. Re-discover after reconnect; accept unknown
 additive fields. No owner socket/token or new event is exposed.
 
@@ -106,7 +110,7 @@ read current state and reconcile instead of blindly retrying.
     selected pane proves the same native conversation.
 - Extensions: `module.*`
 - Themes and configuration: `theme.*`, `config.*`, and `manifest.reload`
-- UI surfaces: `ui.sidebar`, `ui.dock.*`, `ui.bar.*`,
+- UI surfaces: `ui.sidebar`, `ui.agent_title.*`, `ui.dock.*`, `ui.bar.*`,
   `ui.notification.*`, and `ui.toast`
 - Terminal backends: `terminal.backend.*`
 
@@ -190,3 +194,33 @@ also returns `agent_not_ready` when prompt evidence is Unknown, unless live Code
 composer geometry reports Ready. Existing Codex panes without that requirement
 retain the permissive Unknown-evidence fallback. Inspect the visible screen and
 use `agent.keys` only for an explicitly authorized interaction.
+
+For UHP interactions that must match the inspected screen, use `agent.read`
+with `source:"visible"` and pass its `content_revision` as `if_content_revision`
+together with its `terminal_id` in `agent.keys` params. The revision is a
+non-negative integer; the terminal ID is exactly 32 lowercase hex characters.
+Both fields are optional as a pair; a one-sided or malformed pair is
+`invalid_request`. A deferred pane has `terminal_id:null` and cannot be fenced.
+An unavailable read snapshot has empty text and null coordinates.
+
+The server checks the pair and queues keys under the same engine lock used to
+capture the text. `content_revision_conflict` means no keys were queued: re-read
+and reassess the authorized action, never retry the same pair. Generic response
+`revision` / request `if_revision` are global event coordinates, not the pane's
+content counter. Without the pair, behavior is unchanged. Older servers omit the
+coordinates or reject the new fields; omit the pair only when legacy unfenced
+admission is acceptable. These are UHP params, not CLI flags.
+
+The fence covers queue admission only. Already queued input and child-side
+changes not yet observed remain outside it. Cursor/SGR output can make a pair
+stale even if the dialog text looks unchanged.
+
+```json
+{"id":"answer","method":"agent.keys","params":{"target":"reviewer","keys":["enter"],"if_content_revision":12,"terminal_id":"0123456789abcdef0123456789abcdef"}}
+```
+
+Replace the example coordinates with the actual `agent.read` result. The whole
+key list validates before comparing the fence. A mismatched revision or terminal
+identity, missing runtime, or unavailable engine sends nothing and reports
+`content_revision_conflict` with expected/actual context; a closed writer still
+returns `send_failed` for an otherwise matching pair.

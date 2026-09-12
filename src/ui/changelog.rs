@@ -616,8 +616,27 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("Contributors"));
-        assert!(text.contains("RizRiyz"));
-        assert!(text.contains("RiN (@r17x)"));
+
+        let contributor_labels = CHANGELOG[0]
+            .2
+            .split_once("## Contributors")
+            .expect("latest release has contributors")
+            .1
+            .lines()
+            .skip_while(|line| line.trim().is_empty())
+            .take_while(|line| !line.starts_with("## "))
+            .filter_map(|line| line.strip_prefix("- "))
+            .map(|line| {
+                crate::changelog::inline(line)
+                    .into_iter()
+                    .map(|seg| seg.text)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert!(!contributor_labels.is_empty());
+        for contributor in contributor_labels {
+            assert!(text.contains(&contributor), "missing {contributor}");
+        }
     }
 
     /// Commit and PR references in the notes are clickable, which is the whole

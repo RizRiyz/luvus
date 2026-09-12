@@ -22,6 +22,12 @@
       "required": ["major"],
       "additionalProperties": false
     },
+    "features": {
+      "type": "object",
+      "properties": { "machines": { "const": true } },
+      "required": ["machines"],
+      "additionalProperties": false
+    },
     "endpoint": {
       "type": "object",
       "properties": {
@@ -49,7 +55,7 @@
         "mode": { "enum": ["read_only", "control"] },
         "scopes": {
           "type": "array",
-          "items": { "enum": ["read", "workspace", "agent", "terminal", "orchestration"] },
+          "items": { "enum": ["read", "workspace", "agent", "terminal", "orchestration", "machine"] },
           "minItems": 1,
           "uniqueItems": true
         },
@@ -74,7 +80,8 @@
       "if": { "properties": { "authority": { "properties": { "mode": { "const": "control" } }, "required": ["mode"] } } },
       "then": { "properties": { "authority": { "properties": { "scopes": { "oneOf": [
         { "const": ["read", "workspace", "agent", "terminal"] },
-        { "const": ["read", "workspace", "agent", "terminal", "orchestration"] }
+        { "const": ["read", "workspace", "agent", "terminal", "orchestration"] },
+        { "const": ["read", "workspace", "agent", "terminal", "orchestration", "machine"] }
       ] } } } } }
     }
   ],

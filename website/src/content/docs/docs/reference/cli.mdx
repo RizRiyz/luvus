@@ -14,6 +14,12 @@ a trailing `--help`. Pass-through commands preserve that flag as payload, so
 use the explicit `luvus help` form for them. Help writes to stdout, while
 invalid usage writes to stderr.
 
+For `machine add` and `machine enable`, remote validation does not authorize
+installation. Provisioning requires `--install` or an explicit Yes at the
+interactive permission prompt; its default is No. Non-interactive callers
+must supply `--install` when installation is needed. Existing explicit binary
+paths are never replaced. See [Multiple Machines](/docs/guides/machines/).
+
 ## Language and stable automation
 
 Human CLI information follows the language selected in **Settings → Language**.
@@ -82,7 +88,7 @@ tabs:
 
 panes / agents:
   pane list                  list panes and read-only history metrics in the current tab
-  pane split [<id>] [--down] [--no-focus]   split a pane (default: side by side, creates a workspace if empty)
+  pane split [<id>] [--auto|--right|--down] [--no-focus]   split a pane (default: auto by size, creates a workspace if empty)
   pane focus <id>            focus a pane (jumps to its workspace/tab)
   pane move [<id>] (--tab <n> | --new-tab)  move a pane within its workspace
   pane run [<id>] <cmd...>   run a command in a pane
@@ -93,7 +99,7 @@ panes / agents:
   pane name <name>           name a pane so you can mention it (--pane <id>; --clear)
   pane close [<id>]          close a pane
   agent list                 list every agent across all workspaces/tabs
-  agent start <name> --kind <k> [--pane <id> | --anchor <id>] [--down] [--timeout <s>] [-- <args>]
+  agent start <name> --kind <k> [--pane <id> | --anchor <id>] [--auto|--right|--down] [--timeout <s>] [-- <args>]
                              spawn beside an anchor or reuse a pane, wait until ready, name it
   agent fork <target> [--name <alias>] [--no-focus]
                              fork a supported agent's session into a sibling pane
@@ -153,6 +159,10 @@ appearance:
   ui dock push --id <id> [--title <t>] [--side left|right] [--rows <json>]
                              feed a module's sidebar dock its rows (JSON array,
                              or piped on stdin). See docs/29 + the website
+  ui agent-title push [--titles <json>]
+                             set AGENTS sidebar titles for live and resumable rows
+  ui agent-title clear [--pane <id>|--agent <id> --session-id <id>]
+                             clear module-provided AGENTS sidebar titles
   ui notification push --text <text> [--level info|success|warning|error]
   ui notification clear [--dedupe-key <key>]
   ui toast <text>            flash a one-line message in the UI
@@ -261,7 +271,8 @@ universal harness protocol:
   uhp schema                print the complete installed UHP JSON Schema bundle
   uhp snapshot              print a fenced session snapshot for harness bootstrap
   uhp events                stream sequenced UHP events
-  uhp access [--control] [--ttl <seconds> | --no-expiry]   expose scoped UHP through a private provider endpoint
+  uhp access [--machines] [--control] [--ttl <seconds> | --no-expiry]
+                             expose scoped UHP through a private provider endpoint
   uhp proxy                 forward one JSON request from stdin to the selected server
 
 sessions:
@@ -269,6 +280,23 @@ sessions:
   session attach <name>      start or attach the named session
   session stop <name> [--json]    stop only the named session and its panes
   session delete <name> [--json]  delete a stopped named session
+
+machines:
+  machine add <id> --host <ssh-alias> [--label <label>] [--session <name>] [--remote-binary <path>] [--install] [--disabled] [--revision <n>]
+                             provision and validate one SSH machine
+  machine list               list saved machine profiles and catalog revision
+  machine show <id>          show one saved profile
+  machine rename <id> <label> [--revision <n>]
+                             rename a profile with optional revision protection
+  machine enable <id> [--install] [--revision <n>]
+  machine disable <id> [--revision <n>]
+                             provision and enable after a bounded SSH probe, or disable locally
+  machine remove <id> [--revision <n>]
+                             remove only the local profile; remote panes stay alive
+  machine status <id>        verify the running selected server and workspace projection
+  machine sessions <id>      list named sessions through bounded SSH
+  machine open <id> [--session <name>]
+                             attach using the verified absolute remote binary
 
 remote:
   --remote <host> [ssh args] attach to a luvus session on <host> over plain ssh
@@ -291,8 +319,12 @@ server:
 ```
 
 When `pane split <id>` targets a pane outside the current view, the new pane is
-inserted beside that target in the same workspace and tab. It starts in the
-target pane's live working directory; with
+inserted beside that target in the same workspace and tab. With no direction
+flag, Luvus omits `direction` on the wire so an older server still accepts the
+request and splits side by side; a current server splits along the longer physical side of the target pane,
+using the display client's cell pixels when the host reports them, otherwise
+treating cells as about twice as tall as they are wide. `--auto`, `--right`, and `--down` send an explicit
+direction. It starts in the target pane's live working directory; with
 `layout.new_pane_to_workspace_root = true`, it starts at the target workspace
 root instead. `--no-focus` preserves the caller's current view.
 

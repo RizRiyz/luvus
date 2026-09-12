@@ -46,3 +46,4 @@
 {"id":"prompt-0","method":"agent.prompt","params":{"target":"7","text":"review"}}
 {"id":"prompt-1","method":"agent.prompt","params":{"target":"reviewer","text":"review","wait":true,"until":["idle","idle"],"timeout_s":0}}
 {"id":"prompt-2","method":"agent.prompt","params":{"target":"codex","text":"first\n\u7b2c\u4e8c\u884c","wait":true,"until":["idle","working","blocked","done"],"timeout_s":3600}}
+{"id":"keys-content-fence","method":"agent.keys","params":{"target":"7","keys":["enter"],"if_content_revision":12,"terminal_id":"0123456789abcdef0123456789abcdef"}}

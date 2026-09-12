@@ -76,6 +76,44 @@ jobs:
           python3 examples/uhp/terminal/live_conformance.py --luvus target/debug/luvus
           python3 examples/uhp/terminal/failure_conformance.py --luvus target/debug/luvus
 
+  # Native build and portable contract coverage. The full runtime suite still
+  # needs FreeBSD process inspection and PTY lifecycle support; do not advertise
+  # full platform parity or automatic remote provisioning from this job.
+  freebsd:
+    name: freebsd amd64 test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Build and test on FreeBSD
+        uses: vmactions/freebsd-vm@f0552d3b69211736abd97f02ff3d4674c56b73b1 # v1.5.5
+        with:
+          release: '14.4'
+          arch: x86_64
+          mem: 6144
+          envs: 'CARGO_TERM_COLOR CARGO_NET_RETRY CARGO_HTTP_MULTIPLEXING'
+          copyback: false
+          prepare: |
+            set -eu
+            pkg install -y rust git python3 pkgconf sqlite3
+          run: |
+            set -eu
+            freebsd-version
+            rustc --version
+            cargo --version
+            cargo test --locked --no-run
+            cargo test --locked ipc::protocol::
+            cargo test --locked machine::catalog::
+            cargo test --locked machine::api::
+            cargo test --locked layout::
+            cargo build --release --locked
+            ./target/release/luvus --version
+            python3 examples/uhp/terminal/consumer.py --fixtures
+            python3 examples/uhp/terminal/mock_conformance.py
+            python3 examples/uhp/consumer.py
+
   binary-size:
     name: macos binary size
     runs-on: macos-14
@@ -97,9 +135,61 @@ jobs:
             --binary target/release/luvus \
             --archive target/luvus-size.tar.gz
 
+  binary-size-intel-macos:
+    name: macos Intel binary size
+    runs-on: macos-14
+    permissions:
+      contents: read
+    env:
+      SQLITE3_LIB_DIR: /usr/lib
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - run: cargo build --release --locked --target x86_64-apple-darwin
+      - name: Package measured binary
+        run: |
+          COPYFILE_DISABLE=1 tar \
+            -C target/x86_64-apple-darwin/release \
+            -czf target/luvus-x86_64-size.tar.gz \
+            luvus
+      - name: Check reviewed baseline
+        run: |
+          python3 scripts/check-binary-size.py \
+            --target x86_64-apple-darwin \
+            --binary target/x86_64-apple-darwin/release/luvus \
+            --archive target/luvus-x86_64-size.tar.gz
+
+  binary-size-windows:
+    name: windows binary size
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - id: package
+        uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: luvus
+          target: x86_64-pc-windows-msvc
+          archive: luvus-size-$target
+          checksum: sha256
+          locked: true
+          dry-run: true
+          dry-run-intended: true
+      - name: Check reviewed baseline
+        shell: bash
+        run: |
+          python3 scripts/check-binary-size.py \
+            --target x86_64-pc-windows-msvc \
+            --binary target/x86_64-pc-windows-msvc/release/luvus.exe \
+            --archive "${{ steps.package.outputs.zip }}"
+
   windows:
     name: windows protocol · ConPTY
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -115,6 +205,10 @@ jobs:
           cargo test --locked app::cwd::tests
           cargo test --locked platform::tests::no_window_keeps_the_command_working
           cargo test --locked ipc::transport::windows_
+          cargo test --locked machine::
+          if ($LASTEXITCODE -ne 0) { throw "Windows saved-machine tests failed" }
+          cargo test --locked ipc::server::tests::client_sidebars
+          if ($LASTEXITCODE -ne 0) { throw "Windows client-sidebar tests failed" }
           cargo test --locked app::backend::tests
           cargo test --locked terminal::backend::tests
           cargo test --locked altgr

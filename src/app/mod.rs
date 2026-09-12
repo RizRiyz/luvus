@@ -258,6 +258,92 @@ pub struct ModuleDock {
     pub rows: Vec<DockRow>,
 }
 
+/// One volatile AGENTS-row title and its authenticated publishing module.
+/// `None` is reserved for direct local control-API calls.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct AgentRowTitle {
+    pub(crate) owner: Option<String>,
+    pub(crate) text: String,
+}
+
+pub(crate) const MAX_AGENT_ROW_TITLE_BYTES: usize = 256;
+pub(crate) const MAX_AGENT_ROW_TITLES: usize = 256;
+pub(crate) const MAX_AGENT_ROW_TITLE_AGENT_BYTES: usize = 64;
+
+pub(crate) fn agent_session_title_count(
+    titles: &HashMap<String, HashMap<String, AgentRowTitle>>,
+) -> usize {
+    titles.values().map(HashMap::len).sum()
+}
+
+pub(crate) fn set_owned_agent_row_title(
+    titles: &mut HashMap<PaneId, AgentRowTitle>,
+    pane: PaneId,
+    text: Option<String>,
+    owner: Option<&str>,
+) -> Result<bool, String> {
+    if let Some(existing) = titles.get(&pane) {
+        if existing.owner.as_deref() != owner {
+            return Err("agent row title belongs to another publisher".into());
+        }
+    }
+    match text {
+        Some(text) => {
+            let title = AgentRowTitle {
+                owner: owner.map(String::from),
+                text,
+            };
+            if titles.get(&pane) == Some(&title) {
+                Ok(false)
+            } else {
+                titles.insert(pane, title);
+                Ok(true)
+            }
+        }
+        None => Ok(titles.remove(&pane).is_some()),
+    }
+}
+
+pub(crate) fn set_owned_agent_session_title(
+    titles: &mut HashMap<String, HashMap<String, AgentRowTitle>>,
+    agent: String,
+    session_id: String,
+    text: Option<String>,
+    owner: Option<&str>,
+) -> Result<bool, String> {
+    let existing = titles
+        .get(&agent)
+        .and_then(|sessions| sessions.get(&session_id));
+    if let Some(existing) = existing {
+        if existing.owner.as_deref() != owner {
+            return Err("agent row title belongs to another publisher".into());
+        }
+    }
+    match text {
+        Some(text) => {
+            let title = AgentRowTitle {
+                owner: owner.map(String::from),
+                text,
+            };
+            if existing == Some(&title) {
+                return Ok(false);
+            }
+            titles.entry(agent).or_default().insert(session_id, title);
+            Ok(true)
+        }
+        None => {
+            let Some(sessions) = titles.get_mut(&agent) else {
+                return Ok(false);
+            };
+            let changed = sessions.remove(&session_id).is_some();
+            if sessions.is_empty() {
+                titles.remove(&agent);
+            }
+            Ok(changed)
+        }
+    }
+}
+
 /// One sidebar's live state: shown/hidden, width, and its ordered docks.
 #[derive(Clone)]
 pub struct SideState {
@@ -390,7 +476,7 @@ impl Sidebars {
             Side::Right => &mut self.right,
         }
     }
-    fn from_config(cfg: &crate::config::SidebarsConfig) -> Sidebars {
+    pub(crate) fn from_config(cfg: &crate::config::SidebarsConfig) -> Sidebars {
         let left = SideState::from_config(&cfg.left);
         let right = SideState::from_config(&cfg.right);
         let files_side = if left.has(&DockKind::Files) {
@@ -406,7 +492,7 @@ impl Sidebars {
             files_side,
         }
     }
-    fn to_config(&self) -> crate::config::SidebarsConfig {
+    pub(crate) fn to_config(&self) -> crate::config::SidebarsConfig {
         crate::config::SidebarsConfig {
             left: self.left.to_config(),
             right: self.right.to_config(),
@@ -651,6 +737,7 @@ pub enum SwitcherTarget {
     Settings,
     MissionControl,
     Version,
+    Machines,
     Sessions,
     Exit,
 }
@@ -2270,6 +2357,18 @@ pub struct App {
     /// Bumped on every open and close of the open-worktree list, so a scan
     /// result carrying an older value is stale and ignored.
     worktree_open_generation: u64,
+    /// Bumped by every Go to edit, directory change, and picker close, so a
+    /// completion scan carrying an older value is stale and ignored.
+    picker_go_to_generation: u64,
+    /// A Go to listing is still draining on [`IoJobs`], including superseded
+    /// ones whose result will be discarded. Tab must not admit another until
+    /// this clears, or obsolete scans fill the shared eight-job budget.
+    picker_go_to_inflight: bool,
+    /// Tab was pressed while a superseded listing was still draining. `Some`
+    /// keeps the last Tab/BackTab direction so the deferred scan does not
+    /// always cycle forward. When that listing lands, start one scan for the
+    /// field as it is then.
+    picker_go_to_rescan: Option<bool>,
     /// Clickable targets in the open-worktree list, set by the renderer each
     /// frame. Rows precede the modal body in hit-test order, so a click lands on
     /// the row under it and only a click on neither is "outside".
@@ -2315,6 +2414,26 @@ pub struct App {
     /// Left + right sidebars, their widths, and their docks (docs/29). Resolved
     /// from `config.sidebars()` at startup; runtime edits persist via `save_sidebars`.
     pub sidebars: Sidebars,
+    /// Legacy bounded-row hint carried by the version-8 machine client
+    /// capability. The complete Workspaces dock is client-owned whenever
+    /// `client_machine_capable` is true.
+    pub client_shell_dock_rows: u16,
+    /// Legacy version-8 placement hint retained for wire compatibility.
+    pub client_shell_dock_leading: bool,
+    /// Legacy version-8 indentation hint retained for wire compatibility.
+    pub client_shell_dock_indent_workspaces: bool,
+    /// Whether the active display can own remote-machine profile UI. Unlike
+    /// the endpoint row count, this remains true for an empty catalog so the
+    /// first machine can be added through the workspace picker.
+    pub client_machine_capable: bool,
+    pub client_shell_owns_workspaces: bool,
+    /// Remote endpoint frames leave this client-owned top-row slot blank and
+    /// inert. The owner-local client composes the named-session control there.
+    pub client_shell_owns_session_chrome: bool,
+    pub client_sidebar_input: bool,
+    pub client_files_visible: bool,
+    /// Exact complete Workspaces dock owned by the machine-aware thin client.
+    pub client_shell_dock_rect: Option<Rect>,
     /// Module-contributed dock content, keyed by dock id (docs/29, DOCK-4).
     /// Populated by `ui.dock.push`; rendered by the sidebar.
     pub module_docks: std::collections::HashMap<String, ModuleDock>,
@@ -2419,6 +2538,16 @@ pub struct App {
     /// finder. The server consumes this once and sends a logical handoff only
     /// to that client.
     pub pending_session_switch: Option<String>,
+    /// One-shot request for the attached thin client to open its owner-local
+    /// machine selector. The server never receives the machine catalog.
+    pub pending_machine_selector: bool,
+    /// One-shot request for the attached machine-aware client to open the
+    /// owner-local profile form selected from the workspace picker.
+    pub pending_machine_create: bool,
+    /// Highest owner-local machine catalog revision waiting to be announced to
+    /// attached machine-aware clients. External mutations wake the app through
+    /// the selected session's owner-only control socket; no polling is needed.
+    pub pending_machine_catalog_revision: Option<u64>,
     /// On-demand named-session menu. Its filesystem/process discovery runs only
     /// while opening or activating this surface, never on an idle timer.
     pub named_session_menu: Option<session_menu::NamedSessionMenu>,
@@ -2427,6 +2556,8 @@ pub struct App {
     pub(crate) named_session_cache: Vec<session_menu::NamedSessionRow>,
     /// Lifecycle work already running off-loop, keyed by validated session name.
     pub(crate) pending_named_session_actions: HashMap<String, session_menu::NamedSessionAction>,
+    /// Complete top-row interval reserved for the named-session control.
+    pub named_session_slot_rect: Option<Rect>,
     pub named_session_button_rect: Option<Rect>,
     pub named_session_menu_rect: Option<Rect>,
     pub named_session_close_rect: Option<Rect>,
@@ -2500,6 +2631,11 @@ pub struct App {
     cwd_git_hits: HashMap<PaneId, (PathBuf, u8)>,
     /// Resumable agent sessions discovered on disk (for the AGENTS sidebar).
     pub resumable: Vec<crate::agent::SessionInfo>,
+    /// Module-provided AGENTS sidebar titles for live panes. OSC still wins.
+    pub(crate) agent_title_panes: HashMap<PaneId, AgentRowTitle>,
+    /// Module-provided titles for native sessions (live idle fallback and All/history).
+    /// The nested shape permits borrowed, allocation-free lookups while rendering.
+    pub(crate) agent_title_sessions: HashMap<String, HashMap<String, AgentRowTitle>>,
     /// A resumable-session disk scan is running on a worker thread; don't start
     /// another until its `SessionsScanned` result arrives.
     sessions_scan_inflight: bool,
@@ -2705,6 +2841,10 @@ pub struct App {
     pub menu_scroll: MenuScroll,
     app_tx: Sender<AppEvent>,
     pub last_pane_area: Rect,
+    /// Pixel size of one cell on the interactive display client. `0` means the
+    /// host did not report it; auto-split then uses the documented 2:1 fallback.
+    pub cell_width_px: u16,
+    pub cell_height_px: u16,
     // Hit-test geometry from the last render, for mouse clicks.
     pub pane_rects: Vec<(PaneId, Rect)>,
     /// Each pane's **content** rect (inside the border/title) — maps a mouse
@@ -2810,11 +2950,16 @@ pub struct App {
     /// `(previous theme, selection revision)` restores an automatically replaced
     /// active theme only when the user has not selected another theme meanwhile.
     pub(crate) pending_theme_uninstalls: HashMap<String, Option<(String, u64)>>,
+    /// Pending removals waiting for configuration persistence, not worker completion.
+    pub(crate) deferred_theme_uninstalls: Vec<String>,
     pub(crate) theme_selection_revision: u64,
     /// Slider arrows in the modal: (control index, ±1 direction, rect).
     pub settings_arrow_rects: Vec<(usize, i32, Rect)>,
     /// Installed modules (docs/13) and the ring buffer of their command logs.
     pub modules: crate::module::ModuleRegistry,
+    /// Per-server credentials injected only into processes Luvus starts for each
+    /// module. Public API owner fields are accepted only with the matching token.
+    pub(crate) module_tokens: HashMap<String, String>,
     pub module_logs: Vec<crate::module::ModuleCommandLog>,
     /// Live module panes by pane id, untracked automatically on close (MOD-2).
     pub module_panes: HashMap<PaneId, crate::module::ModulePaneRecord>,
@@ -2833,6 +2978,20 @@ pub struct ModuleSettingEdit {
     pub title: String,
     pub buffer: String,
     pub secret: bool,
+}
+
+/// One publisher credential per registered module, valid for this server's
+/// lifetime. Every registered module gets one regardless of its enabled state,
+/// so toggling a module cannot strand a still-running module process with a
+/// stale token. Authorization is enforced per request against `is_runnable()`.
+fn module_tokens_for(
+    modules: &crate::module::ModuleRegistry,
+) -> Result<HashMap<String, String>, String> {
+    modules
+        .modules
+        .iter()
+        .map(|module| crate::terminal::backend::random_id().map(|token| (module.id.clone(), token)))
+        .collect()
 }
 
 fn child_appearance(
@@ -2870,6 +3029,7 @@ impl App {
         let direct_keymap = keys::build_direct_keymap(&config.direct_keybindings);
         let prefix = keys::PrefixSpec::parse(&config.prefix).unwrap_or_default();
         let modules = crate::module::registry::load();
+        let module_tokens = module_tokens_for(&modules).map_err(anyhow::Error::msg)?;
         let mut bar = crate::bar::BarState::default();
         bar.sync_modules(&modules);
 
@@ -2958,6 +3118,9 @@ impl App {
             worktree_prompt_rect: None,
             worktree_open: None,
             worktree_open_generation: 0,
+            picker_go_to_generation: 0,
+            picker_go_to_inflight: false,
+            picker_go_to_rescan: None,
             worktree_open_rects: Vec::new(),
             tab_rename: None,
             tab_menu: None,
@@ -2976,6 +3139,15 @@ impl App {
             worktree_error: None,
             mode: Mode::Normal,
             sidebars,
+            client_shell_dock_rows: 0,
+            client_shell_dock_leading: false,
+            client_shell_dock_indent_workspaces: false,
+            client_machine_capable: false,
+            client_shell_owns_workspaces: false,
+            client_shell_owns_session_chrome: false,
+            client_sidebar_input: false,
+            client_files_visible: false,
+            client_shell_dock_rect: None,
             module_docks: std::collections::HashMap::new(),
             module_dock_rects: Vec::new(),
             bar,
@@ -3020,9 +3192,13 @@ impl App {
             last_cursor: None,
             detach_requested: false,
             pending_session_switch: None,
+            pending_machine_selector: false,
+            pending_machine_create: false,
+            pending_machine_catalog_revision: None,
             named_session_menu: None,
             named_session_cache: Vec::new(),
             pending_named_session_actions: HashMap::new(),
+            named_session_slot_rect: None,
             named_session_button_rect: None,
             named_session_menu_rect: None,
             named_session_close_rect: None,
@@ -3049,6 +3225,8 @@ impl App {
             cwd_scan_inflight: false,
             cwd_git_hits: HashMap::new(),
             resumable: Vec::new(),
+            agent_title_panes: HashMap::new(),
+            agent_title_sessions: HashMap::new(),
             sessions_scan_inflight: false,
             proc_commands: HashMap::new(),
             proc_scan_inflight: false,
@@ -3153,6 +3331,8 @@ impl App {
             menu_scroll: MenuScroll::default(),
             app_tx,
             last_pane_area: Rect::ZERO,
+            cell_width_px: 0,
+            cell_height_px: 0,
             pane_rects: Vec::new(),
             pane_content_rects: Vec::new(),
             scroll_pane: None,
@@ -3195,9 +3375,11 @@ impl App {
             settings_ctl_rects: Vec::new(),
             settings_theme_remove_rects: Vec::new(),
             pending_theme_uninstalls: HashMap::new(),
+            deferred_theme_uninstalls: Vec::new(),
             theme_selection_revision: 0,
             settings_arrow_rects: Vec::new(),
             modules,
+            module_tokens,
             module_logs: Vec::new(),
             module_panes: HashMap::new(),
             module_startup_done: std::collections::HashSet::new(),
@@ -3240,6 +3422,7 @@ impl App {
         let shell = crate::platform::resolve_shell(&config.shell);
         let history_budget_bytes = config.scrollback_bytes();
         let modules = crate::module::registry::load();
+        let module_tokens = module_tokens_for(&modules).ok()?;
         let mut panes = HashMap::new();
         let mut status = HashMap::new();
         let mut module_panes: HashMap<PaneId, crate::module::ModulePaneRecord> = HashMap::new();
@@ -3421,7 +3604,7 @@ impl App {
                     // installed + runnable; otherwise it falls back to a shell.
                     let restored = ps.module.as_ref().and_then(|(mid, ep)| {
                         restore_module_pane(
-                            &modules,
+                            (&modules, &module_tokens),
                             mid,
                             ep,
                             id,
@@ -3619,6 +3802,9 @@ impl App {
             worktree_prompt_rect: None,
             worktree_open: None,
             worktree_open_generation: 0,
+            picker_go_to_generation: 0,
+            picker_go_to_inflight: false,
+            picker_go_to_rescan: None,
             worktree_open_rects: Vec::new(),
             tab_rename: None,
             tab_menu: None,
@@ -3637,6 +3823,15 @@ impl App {
             worktree_error: None,
             mode: Mode::Normal,
             sidebars,
+            client_shell_dock_rows: 0,
+            client_shell_dock_leading: false,
+            client_shell_dock_indent_workspaces: false,
+            client_machine_capable: false,
+            client_shell_owns_workspaces: false,
+            client_shell_owns_session_chrome: false,
+            client_sidebar_input: false,
+            client_files_visible: false,
+            client_shell_dock_rect: None,
             module_docks: std::collections::HashMap::new(),
             module_dock_rects: Vec::new(),
             bar,
@@ -3681,9 +3876,13 @@ impl App {
             last_cursor: None,
             detach_requested: false,
             pending_session_switch: None,
+            pending_machine_selector: false,
+            pending_machine_create: false,
+            pending_machine_catalog_revision: None,
             named_session_menu: None,
             named_session_cache: Vec::new(),
             pending_named_session_actions: HashMap::new(),
+            named_session_slot_rect: None,
             named_session_button_rect: None,
             named_session_menu_rect: None,
             named_session_close_rect: None,
@@ -3710,6 +3909,8 @@ impl App {
             cwd_scan_inflight: false,
             cwd_git_hits: HashMap::new(),
             resumable: Vec::new(),
+            agent_title_panes: HashMap::new(),
+            agent_title_sessions: HashMap::new(),
             sessions_scan_inflight: false,
             proc_commands: HashMap::new(),
             proc_scan_inflight: false,
@@ -3814,6 +4015,8 @@ impl App {
             menu_scroll: MenuScroll::default(),
             app_tx,
             last_pane_area: Rect::ZERO,
+            cell_width_px: 0,
+            cell_height_px: 0,
             pane_rects: Vec::new(),
             pane_content_rects: Vec::new(),
             scroll_pane: None,
@@ -3856,9 +4059,11 @@ impl App {
             settings_ctl_rects: Vec::new(),
             settings_theme_remove_rects: Vec::new(),
             pending_theme_uninstalls: HashMap::new(),
+            deferred_theme_uninstalls: Vec::new(),
             theme_selection_revision: 0,
             settings_arrow_rects: Vec::new(),
             modules,
+            module_tokens,
             module_logs: Vec::new(),
             module_panes,
             module_startup_done: std::collections::HashSet::new(),
@@ -4010,6 +4215,11 @@ impl App {
     /// Write the current sidebar layout into `config` and persist it, mirroring
     /// the legacy `sidebar_width` from the left for safe downgrade (docs/29).
     pub fn save_sidebars(&mut self) {
+        // Machine-aware input operates on the originating client's layout.
+        // The IPC owner captures it after dispatch; never persist it remotely.
+        if self.client_sidebar_input {
+            return;
+        }
         self.config.sidebars = Some(self.sidebars.to_config());
         self.config.sidebar_width = self.sidebars.left.width;
         self.persist_config();
@@ -4877,6 +5087,78 @@ impl App {
         let _ = self.split_pane(pane, axis, true);
     }
 
+    /// Split the focused pane along its longer side.
+    fn split_auto(&mut self) {
+        let pane = self.layout().focus;
+        let axis = self.auto_split_axis_for(pane);
+        let _ = self.split_pane(pane, axis, true);
+    }
+
+    /// Has an interactive client painted a usable pane area yet? Automatic splits
+    /// only trust reported cell geometry once one has; before that the square
+    /// logical area keeps the historical left/right default.
+    fn has_painted_area(&self) -> bool {
+        self.last_pane_area.width > 1 && self.last_pane_area.height > 1
+    }
+
+    /// Geometry used when choosing an automatic split. Prefer the last rendered
+    /// pane area so a live client decides; fall back to the square logical area
+    /// used by headless topology queries.
+    fn split_area(&self) -> Rect {
+        if self.has_painted_area() {
+            self.last_pane_area
+        } else {
+            crate::api::topology::logical_area()
+        }
+    }
+
+    pub(crate) fn set_client_cell_pixels(&mut self, width: u16, height: u16) {
+        self.cell_width_px = width;
+        self.cell_height_px = height;
+    }
+
+    fn painted_cell_aspect(&self) -> f32 {
+        if self.cell_width_px > 0 && self.cell_height_px > 0 {
+            f32::from(self.cell_height_px) / f32::from(self.cell_width_px)
+        } else {
+            crate::layout::CELL_ASPECT_HEIGHT_OVER_WIDTH
+        }
+    }
+
+    /// Axis that cuts the longer physical side of `pane` in its current tab.
+    /// Painted clients use reported cell pixels when available, else the
+    /// documented 2:1 fallback. The square logical area used before any client
+    /// has painted keeps the historical left/right split.
+    fn auto_split_axis_for(&self, pane: PaneId) -> Axis {
+        let painted = self.has_painted_area();
+        let area = self.split_area();
+        let rect = self
+            .pane_location(pane)
+            .and_then(|(workspace, tab)| {
+                self.workspaces[workspace].tabs[tab]
+                    .layout
+                    .pane_rect(area, pane)
+            })
+            .unwrap_or(area);
+        if painted {
+            crate::layout::auto_split_axis_with_cell_aspect(
+                rect.width,
+                rect.height,
+                self.painted_cell_aspect(),
+            )
+        } else {
+            crate::layout::auto_split_axis(rect.width, rect.height)
+        }
+    }
+
+    /// Attach a newly allocated leaf beside the focused pane, choosing the split
+    /// axis from that pane's current aspect ratio.
+    fn split_focused_auto(&mut self, new_id: PaneId) {
+        let focus = self.layout().focus;
+        let axis = self.auto_split_axis_for(focus);
+        self.layout_mut().split_focused(axis, new_id);
+    }
+
     /// Spawn and attach a sibling beside `target`, preserving inactive view state
     /// when the caller requests a background operation.
     fn spawn_and_attach_new_pane(
@@ -5714,7 +5996,14 @@ impl App {
             }
             WsMenuItem::TogglePath => {
                 self.config.layout.workspace_paths = !self.config.layout.workspace_paths;
-                self.persist_config();
+                // A machine-aware client owns one combined Local/Machines
+                // Workspaces shell. Its per-client state is captured by the
+                // server after input dispatch and broadcast to every endpoint;
+                // do not leak that display preference into one server's
+                // persistent configuration.
+                if !self.client_sidebar_input {
+                    self.persist_config();
+                }
             }
             // The right-clicked node, which needn't be the focused one.
             WsMenuItem::Module(i) => {
@@ -7113,6 +7402,49 @@ impl App {
         changed
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_agent_row_title_for_session(
+        &mut self,
+        agent: String,
+        session_id: String,
+        title: Option<String>,
+    ) -> bool {
+        set_owned_agent_session_title(
+            &mut self.agent_title_sessions,
+            agent,
+            session_id,
+            title,
+            None,
+        )
+        .expect("the test helper writes only unowned title keys")
+    }
+
+    pub(crate) fn clear_agent_row_titles_for_owner(&mut self, owner: &str) -> bool {
+        let pane_count = self.agent_title_panes.len();
+        self.agent_title_panes
+            .retain(|_, title| title.owner.as_deref() != Some(owner));
+        let session_count = agent_session_title_count(&self.agent_title_sessions);
+        self.agent_title_sessions.retain(|_, sessions| {
+            sessions.retain(|_, title| title.owner.as_deref() != Some(owner));
+            !sessions.is_empty()
+        });
+        pane_count != self.agent_title_panes.len()
+            || session_count != agent_session_title_count(&self.agent_title_sessions)
+    }
+
+    pub(crate) fn agent_row_title_for_session(
+        &self,
+        agent: &str,
+        session_id: &str,
+    ) -> Option<&str> {
+        let agent = crate::agent::canonical_builtin(agent)?;
+        self.agent_title_sessions
+            .get(agent)?
+            .get(session_id)
+            .map(|title| title.text.as_str())
+            .filter(|title| !title.is_empty())
+    }
+
     /// Remove a resumable session from the sidebar list. Hides it for the rest of
     /// the run (so the periodic rescan doesn't bring it back) — it does NOT touch
     /// the agent's stored session on disk.
@@ -7587,6 +7919,7 @@ impl App {
         self.emit_backend_terminal_event(id, "terminal.closed", serde_json::json!({}));
         self.backend_terminal_index.retain(|_, pane| *pane != id);
         self.backend_labels.remove(&id);
+        self.agent_title_panes.remove(&id);
         self.cancel_backend_revision_waits(id);
         let reported = self
             .reported_usage
@@ -8010,7 +8343,7 @@ pub(crate) fn worktree_membership(cwd: &std::path::Path) -> Option<crate::git::W
 /// returns the pane + its tracking record, or `None` to fall back to a shell.
 #[allow(clippy::too_many_arguments)]
 fn restore_module_pane(
-    modules: &crate::module::ModuleRegistry,
+    module_runtime: (&crate::module::ModuleRegistry, &HashMap<String, String>),
     mid: &str,
     ep: &str,
     id: PaneId,
@@ -8019,6 +8352,7 @@ fn restore_module_pane(
     appearance: crate::terminal::appearance::PaneAppearance,
     host_graphics: crate::terminal::graphics::HostGraphics,
 ) -> Option<(Pane, crate::module::ModulePaneRecord)> {
+    let (modules, module_tokens) = module_runtime;
     let m = modules.find(mid).filter(|m| m.is_runnable())?;
     let argv = m
         .manifest
@@ -8029,6 +8363,9 @@ fn restore_module_pane(
     let ctx = serde_json::json!({ "invocation_source": "restore" });
     let env = crate::module::runtime::env(
         m,
+        // A snapshot may name the module by its install shorthand, which
+        // `find` accepts but the token map (keyed by manifest id) does not.
+        module_tokens.get(m.id.as_str())?,
         &ctx,
         vec![("LUVUS_MODULE_ENTRYPOINT_ID".to_string(), ep.to_string())],
     );
@@ -8048,7 +8385,7 @@ fn restore_module_pane(
     Some((
         pane,
         crate::module::ModulePaneRecord {
-            module_id: mid.to_string(),
+            module_id: m.id.clone(),
             entrypoint: ep.to_string(),
         },
     ))
@@ -8611,6 +8948,9 @@ mod tests {
             cursor: 0,
             creating: None,
             going_to: None,
+            go_to_cycle: None,
+            go_to_generation: 0,
+            go_to_scanning: None,
             error: None,
             is_repo,
             show_hidden: false,
@@ -10324,6 +10664,65 @@ mod tests {
         assert_eq!(old.agent_launch, None);
     }
 
+    /// A Devin pane restores from the exact binding Luvus persisted (it has no
+    /// session discovery), and the restore never replays the `-- <briefing>`
+    /// the pane was launched with: only the options before the separator come
+    /// back.
+    #[test]
+    fn devin_restores_its_exact_binding_without_replaying_the_briefing() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let focus = app.layout().focus;
+        let st = app.status.get_mut(&focus).unwrap();
+        st.agent = "devin".into();
+        st.agent_session = Some(AgentSession {
+            agent: "devin".into(),
+            session_id: "quiet-meadow".into(),
+        });
+        app.proc_commands.insert(
+            focus,
+            vec!["devin --permission-mode auto -- fix the login bug".into()],
+        );
+
+        let snap = persist::snapshot(&app);
+        let ps = snap
+            .workspaces
+            .iter()
+            .flat_map(|w| &w.tabs)
+            .flat_map(|t| &t.panes)
+            .find(|(id, _)| *id == focus.0)
+            .map(|(_, ps)| ps)
+            .unwrap();
+        assert_eq!(
+            ps.agent_session,
+            Some(("devin".to_string(), "quiet-meadow".to_string()))
+        );
+        assert_eq!(
+            ps.agent_launch.as_deref(),
+            Some(
+                &[
+                    "--permission-mode".to_string(),
+                    "auto".into(),
+                    "--".into(),
+                    "fix".into(),
+                    "the".into(),
+                    "login".into(),
+                    "bug".into(),
+                ][..]
+            )
+        );
+
+        let (agent, sid) = ps.agent_session.clone().unwrap();
+        assert_eq!(
+            crate::agent::resume_for(&agent, &sid, ps.agent_launch.as_deref(), true).as_deref(),
+            Some("devin --resume 'quiet-meadow' '--permission-mode' 'auto'\r")
+        );
+        assert_eq!(
+            crate::agent::resume_for(&agent, &sid, ps.agent_launch.as_deref(), false).as_deref(),
+            Some("devin --resume 'quiet-meadow'\r")
+        );
+    }
+
     /// The captured CLI options are **per pane**, not one global set (docs/62).
     ///
     /// `proc_commands` is keyed by `PaneId` and filled from each pane's own
@@ -11562,7 +11961,9 @@ mod tests {
         // The bare middle of the same border row (between the title and the
         // buttons) is not chrome, so it still grabs the divider to resize.
         let divider_row = zoom.y;
-        let bare = 60u16; // mid-width: past the title, before the right-edge buttons
+        let bare = (title.right()..zoom.x)
+            .find(|&x| !app.on_pane_chrome(x, divider_row))
+            .expect("there is a bare seam between title and zoom");
         assert!(
             !app.on_pane_chrome(bare, divider_row),
             "the chosen seam cell is genuinely not chrome"
@@ -13196,6 +13597,78 @@ mod tests {
 
         drop(restored);
         let _ = std::fs::remove_dir_all(other);
+    }
+
+    #[test]
+    fn module_agent_title_owners_cannot_overwrite_or_clear_each_other() {
+        let _env = crate::persist::test_env("module-agent-title-owners");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        set_owned_agent_session_title(
+            &mut app.agent_title_sessions,
+            "pi".into(),
+            "shared".into(),
+            Some("Alpha".into()),
+            Some("module.alpha"),
+        )
+        .unwrap();
+        assert!(set_owned_agent_session_title(
+            &mut app.agent_title_sessions,
+            "pi".into(),
+            "shared".into(),
+            Some("Beta".into()),
+            Some("module.beta"),
+        )
+        .is_err());
+        set_owned_agent_session_title(
+            &mut app.agent_title_sessions,
+            "pi".into(),
+            "beta-only".into(),
+            Some("Beta".into()),
+            Some("module.beta"),
+        )
+        .unwrap();
+        assert!(app.clear_agent_row_titles_for_owner("module.alpha"));
+        assert!(app.agent_row_title_for_session("pi", "shared").is_none());
+        assert_eq!(
+            app.agent_row_title_for_session("pi", "beta-only"),
+            Some("Beta")
+        );
+    }
+
+    #[test]
+    fn module_agent_titles_apply_to_live_and_resumable_without_using_alias() {
+        let _env = crate::persist::test_env("module-agent-titles");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        {
+            let status = app.status.get_mut(&pane).unwrap();
+            status.agent = "pi".into();
+            status.agent_session = Some(AgentSession {
+                agent: "pi".into(),
+                session_id: "live-1".into(),
+            });
+        }
+        app.agent_names.insert("chezmoi".into(), pane);
+        assert!(app.set_agent_row_title_for_session(
+            "pi".into(),
+            "live-1".into(),
+            Some("Live module title".into()),
+        ));
+        assert!(app.set_agent_row_title_for_session(
+            "pi".into(),
+            "old-1".into(),
+            Some("History title".into()),
+        ));
+        assert_eq!(app.pane_title(pane).as_deref(), Some("Live module title"));
+        assert_eq!(app.agent_name_for(pane), Some("chezmoi"));
+        assert_eq!(
+            app.agent_row_title_for_session("pi", "old-1"),
+            Some("History title")
+        );
+        assert!(app.set_agent_row_title_for_session("pi".into(), "live-1".into(), None));
+        assert!(app.pane_title(pane).is_none());
     }
 
     #[test]

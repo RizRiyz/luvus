@@ -212,10 +212,11 @@ pub struct LayoutConfig {
     /// its name, an unnamed pane its path (the original behavior).
     #[serde(default)]
     pub pane_title_path: bool,
-    /// In the AGENTS sidebar, show each agent's live session title (the OSC title
-    /// it sets, e.g. "Ship the desktop release…") in place of the `wsname · =<id>`
-    /// meta line. Off by default; falls back to the meta line when an agent set no
-    /// useful title.
+    /// In the AGENTS sidebar, show each agent's session title in place of the
+    /// `wsname · =<id>` meta line (live) or the project folder (resumable).
+    /// OSC title wins when the agent set one; otherwise a module-provided title
+    /// from `ui.agent_title.push`. Off by default. Luvus pane aliases are never
+    /// used as a title.
     #[serde(default)]
     pub agent_title: bool,
     /// Show the cwd line beneath each WORKSPACES entry. On by default to retain
@@ -327,7 +328,7 @@ pub const SHIFT_ENTER_CHOICES: &[(&str, &str, &[u8])] = &[
 ];
 
 /// Left + right sidebar layout (docs/29). Serialized under `sidebars`.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SidebarsConfig {
     #[serde(default = "SideConfig::left_default")]
     pub left: SideConfig,
@@ -340,7 +341,7 @@ pub struct SidebarsConfig {
 }
 
 /// One sidebar's persisted state: shown/hidden, width, and its ordered dock ids.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SideConfig {
     #[serde(default = "yes")]
     pub visible: bool,

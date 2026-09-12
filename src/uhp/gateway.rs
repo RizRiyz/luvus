@@ -34,6 +34,7 @@ struct Shared {
     upstream_token: Mutex<String>,
     pairing: Mutex<Pairing>,
     mode: AccessMode,
+    machine_access: bool,
     cancelled: Arc<AtomicBool>,
     active: AtomicUsize,
     next_connection_id: AtomicUsize,
@@ -77,6 +78,7 @@ impl RateWindow {
 }
 
 impl Gateway {
+    #[cfg(test)]
     pub(super) fn start(
         socket_path: PathBuf,
         client_token: String,
@@ -84,6 +86,26 @@ impl Gateway {
         upstream_token: String,
         pairing: Pairing,
         mode: AccessMode,
+    ) -> Result<Self> {
+        Self::start_with_machines(
+            socket_path,
+            client_token,
+            authority_expires_unix,
+            upstream_token,
+            pairing,
+            mode,
+            false,
+        )
+    }
+
+    pub(super) fn start_with_machines(
+        socket_path: PathBuf,
+        client_token: String,
+        authority_expires_unix: Option<u64>,
+        upstream_token: String,
+        pairing: Pairing,
+        mode: AccessMode,
+        machine_access: bool,
     ) -> Result<Self> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .context("cannot bind the private UHP access gateway")?;
@@ -96,6 +118,7 @@ impl Gateway {
             upstream_token: Mutex::new(upstream_token),
             pairing: Mutex::new(pairing),
             mode,
+            machine_access,
             cancelled: cancelled.clone(),
             active: AtomicUsize::new(0),
             next_connection_id: AtomicUsize::new(0),
@@ -120,6 +143,10 @@ impl Gateway {
 
     pub(super) fn address(&self) -> SocketAddr {
         self.address
+    }
+
+    pub(super) fn machine_access(&self) -> bool {
+        self.shared.machine_access
     }
 
     pub(super) fn replace_upstream_token(&self, token: String) {
@@ -297,13 +324,33 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) -> Result<()> {
     };
     if authority_expired(shared)
         || !constant_time_eq(shared.client_token.as_bytes(), auth.as_bytes())
-        || !allowed_method(shared.mode, &method)
+        || !allowed_method_with_machines(shared.mode, &method, shared.machine_access)
     {
         write_gateway_error(stream, id, "forbidden")?;
         return Ok(());
     }
     if shared.cancelled.load(Ordering::Acquire) {
         return Err(io::Error::new(io::ErrorKind::Interrupted, "UHP access stopped").into());
+    }
+
+    if method.starts_with("machine.") {
+        let params = value.get("params").cloned().unwrap_or_else(|| json!({}));
+        let response = match crate::machine::api::dispatch(&method, &params) {
+            Ok(result) => json!({"id":id,"result":result}),
+            Err(error) => {
+                let conflict = error
+                    .to_string()
+                    .starts_with("machine catalog revision conflict:");
+                json!({"id":id,"error":{
+                    "code":if conflict {"revision_conflict"} else {"invalid_request"},
+                    "message":if conflict {"Machine catalog revision conflict; refresh and retry."}
+                        else {"Machine operation failed; inspect the owner-local machine catalog or CLI status."}
+                }})
+            }
+        };
+        writeln!(stream, "{}", serde_json::to_string(&response)?)?;
+        stream.flush()?;
+        return Ok(());
     }
 
     let mut local = match crate::ipc::transport::connect(&shared.socket_path) {
@@ -360,7 +407,12 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) -> Result<()> {
             }
         };
         let response = if method == "uhp.capabilities" {
-            match project_access_capabilities(&response, &id, shared.mode) {
+            match project_access_capabilities_with_machines(
+                &response,
+                &id,
+                shared.mode,
+                shared.machine_access,
+            ) {
                 Ok(response) => response,
                 Err(_) => {
                     write_gateway_error(stream, id, "unavailable")?;
@@ -379,7 +431,17 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) -> Result<()> {
 
 /// Add endpoint authority without replacing the owner's supported-method catalog.
 /// The effective set is compiled, advertised upstream, and permitted by this gateway.
+#[cfg(test)]
 fn project_access_capabilities(response: &str, id: &Value, mode: AccessMode) -> Result<String> {
+    project_access_capabilities_with_machines(response, id, mode, false)
+}
+
+fn project_access_capabilities_with_machines(
+    response: &str,
+    id: &Value,
+    mode: AccessMode,
+    machine_access: bool,
+) -> Result<String> {
     validate_response_id(response, id)?;
     let mut value: Value = serde_json::from_str(response)?;
     if let Some(error) = value.get("error") {
@@ -407,11 +469,45 @@ fn project_access_capabilities(response: &str, id: &Value, mode: AccessMode) -> 
         .map(|method| method.as_str().filter(|method| !method.is_empty()))
         .collect();
     let advertised = advertised.ok_or_else(|| anyhow!("invalid owner method catalog"))?;
-    let allowed: Vec<_> = crate::api::capabilities::METHODS
+    let mut allowed: Vec<_> = crate::api::capabilities::METHODS
         .iter()
         .copied()
         .filter(|method| advertised.contains(method) && allowed_method(mode, method))
         .collect();
+    if machine_access {
+        if mode == AccessMode::Control {
+            if let Some(scopes) = result
+                .get_mut("authorization")
+                .and_then(|auth| auth.get_mut("scopes"))
+            {
+                if let Some(scopes) = scopes.as_array_mut() {
+                    if !scopes.iter().any(|scope| scope == "machine") {
+                        scopes.push(json!("machine"));
+                    }
+                }
+            }
+        }
+        let mut machine_methods = crate::machine::api::READ_METHODS.to_vec();
+        if mode == AccessMode::Control {
+            machine_methods.extend(crate::machine::api::CONTROL_METHODS);
+        }
+        allowed.extend(machine_methods.iter().copied());
+        let methods = result
+            .get_mut("methods")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| anyhow!("missing owner method catalog"))?;
+        methods.extend(machine_methods.iter().map(|method| json!(method)));
+        if let Some(contracts) = result
+            .get_mut("method_contracts")
+            .and_then(Value::as_array_mut)
+        {
+            contracts.extend(machine_methods.iter().map(|method| {
+                let read = crate::machine::api::READ_METHODS.contains(method);
+                json!({"method":method,"access":if read {"read"} else {"write"},
+                    "scope":if read {"read"} else {"machine"},"idempotent":read})
+            }));
+        }
+    }
     if allowed.is_empty() {
         return Err(anyhow!("empty effective method catalog"));
     }
@@ -449,7 +545,7 @@ fn handle_pairing(mut stream: TcpStream, shared: &Shared, value: &Value) -> Resu
     let mut response = json!({
         "type":"paired",
         "token":shared.client_token,
-        "scopes":shared.mode.scopes(),
+        "scopes":super::access_scopes(shared.mode, shared.machine_access),
     });
     if let Some(expires_at) = shared.authority_expires_unix {
         response["expires_at"] = json!(expires_at);
@@ -462,6 +558,13 @@ fn handle_pairing(mut stream: TcpStream, shared: &Shared, value: &Value) -> Resu
 }
 
 fn allowed_method(mode: AccessMode, method: &str) -> bool {
+    allowed_method_with_machines(mode, method, false)
+}
+
+fn allowed_method_with_machines(mode: AccessMode, method: &str, machines: bool) -> bool {
+    if machines && crate::machine::api::allowed(method, mode == AccessMode::Control) {
+        return true;
+    }
     let safe_read =
         crate::api::capabilities::is_read_only(method) && !method.starts_with("uhp.token.");
     safe_read
@@ -471,6 +574,7 @@ fn allowed_method(mode: AccessMode, method: &str) -> bool {
                 "workspace.focus"
                     | "tab.focus"
                     | "pane.focus"
+                    | "pane.rename"
                     | "agent.prompt"
                     | "agent.keys"
                     | "automation.create"
@@ -986,6 +1090,8 @@ mod tests {
         assert!(allowed_method(AccessMode::Control, "workspace.focus"));
         assert!(allowed_method(AccessMode::Control, "tab.focus"));
         assert!(allowed_method(AccessMode::Control, "pane.focus"));
+        assert!(!allowed_method(AccessMode::ReadOnly, "pane.rename"));
+        assert!(allowed_method(AccessMode::Control, "pane.rename"));
         assert!(allowed_method(AccessMode::Control, "agent.prompt"));
         assert!(allowed_method(AccessMode::Control, "agent.keys"));
         assert!(!allowed_method(AccessMode::ReadOnly, "agent.keys"));
@@ -1018,6 +1124,9 @@ mod tests {
         assert!(!allowed_method(AccessMode::Control, "pane.send_input"));
         assert!(!allowed_method(AccessMode::Control, "pane.run"));
         assert!(!allowed_method(AccessMode::Control, "pane.close"));
+        for method in ["agent.name", "Pane.rename", "pane.rename.", "pane.rename "] {
+            assert!(!allowed_method(AccessMode::Control, method), "{method}");
+        }
         assert!(!allowed_method(AccessMode::Control, "agent.start"));
         assert!(!allowed_method(AccessMode::Control, "agent.fork"));
         assert!(!allowed_method(AccessMode::Control, "uhp.token.list"));
@@ -1123,6 +1232,13 @@ mod tests {
         assert_eq!(mutation["id"], "1");
         assert_eq!(mutation["error"]["code"], "forbidden");
 
+        let rename = exchange(
+            gateway.address(),
+            &json!({"id":"rename","method":"pane.rename","params":{"pane":"1","name":"worker"},"auth":token}),
+        );
+        assert_eq!(rename["id"], "rename");
+        assert_eq!(rename["error"]["code"], "forbidden");
+
         let omitted_auth = exchange(
             gateway.address(),
             &json!({"id":"2","method":"session.snapshot","params":{}}),
@@ -1159,6 +1275,12 @@ mod tests {
             &json!({"id":"focus","method":"workspace.focus","params":{"workspace":0},"auth":token}),
         );
         assert_eq!(focus["error"]["code"], "unavailable");
+        let rename = exchange(
+            gateway.address(),
+            &json!({"id":"rename","method":"pane.rename","params":{"pane":"1","name":"worker"},"auth":token}),
+        );
+        assert_eq!(rename["id"], "rename");
+        assert_eq!(rename["error"]["code"], "unavailable");
         let terminal_write = exchange(
             gateway.address(),
             &json!({"id":"write","method":"pane.send_input","params":{"pane":"1","text":"x"},"auth":token}),
@@ -1389,6 +1511,154 @@ mod tests {
     }
 
     #[test]
+    fn control_access_forwards_validated_pane_rename() {
+        // Fail before starting an upstream accept if the RPC is still denied.
+        assert!(allowed_method(AccessMode::Control, "pane.rename"));
+        let _env = crate::persist::test_env("access-pane-rename");
+        let path = crate::persist::ensure_config_dir().join("rename.sock");
+        let listener = crate::ipc::transport::bind(&path).unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let mut gateway = Gateway::start(
+            path,
+            "client".into(),
+            None,
+            "upstream-rename-test".into(),
+            Pairing::new(Duration::from_secs(60)).unwrap(),
+            AccessMode::Control,
+        )
+        .unwrap();
+        let relay = |app: &mut crate::app::App, params: Value| {
+            let request =
+                json!({"id":"rename","method":"pane.rename","params":params,"auth":"client"});
+            thread::scope(|scope| {
+                let address = gateway.address();
+                let client = scope.spawn(move || exchange(address, &request));
+                let mut local = BufReader::new(listener.accept().unwrap());
+                let forwarded: Value = serde_json::from_str(
+                    &crate::ipc::api::read_response_frame(&mut local).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(forwarded["method"], "pane.rename");
+                assert_eq!(forwarded["auth"], "upstream-rename-test");
+                let response = match app.dispatch("pane.rename", &forwarded["params"]) {
+                    Ok(result) => json!({"id":"rename","result":result}),
+                    Err((code, message)) => {
+                        json!({"id":"rename","error":{"code":code,"message":message}})
+                    }
+                };
+                writeln!(local.get_mut(), "{response}").unwrap();
+                local.get_mut().flush().unwrap();
+                client.join().unwrap()
+            })
+        };
+        for (name, expected) in [
+            ("worker", Some("worker")),
+            ("  worker-2_a  ", Some("worker-2_a")),
+            (
+                "abcdefghijklmnopqrstuvwxyz0123_-",
+                Some("abcdefghijklmnopqrstuvwxyz0123_-"),
+            ),
+            ("", None),
+            ("  ", None),
+        ] {
+            let sequence = crate::ipc::api::current_sequence(&app.events);
+            let result = relay(&mut app, json!({"pane":pane.0.to_string(),"name":name}));
+            assert_eq!(
+                result["result"],
+                json!({
+                    "type":"pane_rename","pane":pane.0.to_string(),"name":expected
+                })
+            );
+            assert_eq!(
+                app.agent_names.get(expected.unwrap_or("")),
+                expected.map(|_| &pane)
+            );
+            assert_eq!(app.agent_names.len(), usize::from(expected.is_some()));
+            assert!(app.session_dirty);
+            let events = crate::ipc::api::replayed_events_after(&app.events, sequence);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["event"], "pane.renamed");
+            assert_eq!(
+                events[0]["data"],
+                json!({"pane":pane.0.to_string(),"name":expected})
+            );
+            assert_eq!(app.layout().focus, pane);
+        }
+        app.set_agent_name(pane, Some("original"));
+        app.session_dirty = false;
+        for (params, code) in [
+            (json!({"pane":pane.0.to_string()}), "invalid_request"),
+            (
+                json!({"pane":pane.0.to_string(),"name":null}),
+                "invalid_request",
+            ),
+            (
+                json!({"pane":pane.0.to_string(),"name":7}),
+                "invalid_request",
+            ),
+            (
+                json!({"pane":pane.0.to_string(),"name":"Bad"}),
+                "invalid_request",
+            ),
+            (
+                json!({"pane":pane.0.to_string(),"name":"bad name"}),
+                "invalid_request",
+            ),
+            (
+                json!({"pane":pane.0.to_string(),"name":"a".repeat(33)}),
+                "invalid_request",
+            ),
+            (
+                json!({"pane":pane.0.to_string(),"name":"worker","extra":true}),
+                "invalid_request",
+            ),
+            (json!({"pane":"4294967295","name":"worker"}), "not_found"),
+        ] {
+            let before = app.agent_names.clone();
+            let sequence = crate::ipc::api::current_sequence(&app.events);
+            let result = relay(&mut app, params.clone());
+            assert_eq!(result["error"]["code"], code, "{params}: {result}");
+            assert_eq!(app.agent_names, before);
+            assert_eq!(crate::ipc::api::current_sequence(&app.events), sequence);
+            assert!(!app.session_dirty);
+            assert_eq!(app.layout().focus, pane);
+        }
+
+        // Reusing an alias transfers it, just as it does on the owner endpoint.
+        let split = app.dispatch("pane.split", &json!({})).unwrap();
+        let second = crate::ids::PaneId(split["pane"].as_str().unwrap().parse().unwrap());
+        assert_ne!(second, pane);
+        let first = relay(&mut app, json!({"pane":pane.0.to_string(),"name":"shared"}));
+        assert_eq!(first["result"]["name"], "shared");
+        assert_eq!(app.agent_name_for(pane), Some("shared"));
+        assert_eq!(app.agent_name_for(second), None);
+        let sequence = crate::ipc::api::current_sequence(&app.events);
+        app.session_dirty = false;
+        let transferred = relay(
+            &mut app,
+            json!({"pane":second.0.to_string(),"name":"shared"}),
+        );
+        assert_eq!(
+            transferred["result"],
+            json!({"type":"pane_rename","pane":second.0.to_string(),"name":"shared"})
+        );
+        assert_eq!(app.agent_name_for(pane), None);
+        assert_eq!(app.agent_name_for(second), Some("shared"));
+        assert_eq!(app.agent_names.len(), 1);
+        assert!(app.session_dirty);
+        let events = crate::ipc::api::replayed_events_after(&app.events, sequence);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event"], "pane.renamed");
+        assert_eq!(
+            events[0]["data"],
+            json!({"pane":second.0.to_string(),"name":"shared"})
+        );
+        gateway.stop();
+    }
+
+    #[test]
     fn access_keys_rejections_never_admit_input() {
         let _env = crate::persist::test_env("access-keys-denied");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -1556,6 +1826,10 @@ mod tests {
                 mode == AccessMode::Control
             );
             assert_eq!(
+                expected.contains(&"pane.rename"),
+                mode == AccessMode::Control
+            );
+            assert_eq!(
                 expected.contains(&"automation.create"),
                 mode == AccessMode::Control
             );
@@ -1574,6 +1848,115 @@ mod tests {
             response["result"]["access"]["allowed_methods"],
             json!(["uhp.capabilities"])
         );
+    }
+
+    #[test]
+    fn machine_access_is_explicit_and_capability_projected() {
+        assert!(!allowed_method_with_machines(
+            AccessMode::Control,
+            "machine.add",
+            false
+        ));
+        assert!(allowed_method_with_machines(
+            AccessMode::ReadOnly,
+            "machine.list",
+            true
+        ));
+        assert!(!allowed_method_with_machines(
+            AccessMode::ReadOnly,
+            "machine.add",
+            true
+        ));
+        assert!(allowed_method_with_machines(
+            AccessMode::Control,
+            "machine.add",
+            true
+        ));
+
+        let owner = json!({"id":"caps","result":crate::api::capabilities::capabilities(0)});
+        let projected = project_access_capabilities_with_machines(
+            &owner.to_string(),
+            &json!("caps"),
+            AccessMode::Control,
+            true,
+        )
+        .unwrap();
+        let projected: Value = serde_json::from_str(&projected).unwrap();
+        assert!(projected["result"]["authorization"]["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scope| scope == "machine"));
+        assert!(!owner["result"]["authorization"]["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scope| scope == "machine"));
+        assert!(projected["result"]["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|method| method == "machine.list"));
+        assert!(projected["result"]["access"]["allowed_methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|method| method == "machine.add"));
+    }
+
+    #[test]
+    fn machine_gateway_mutates_only_with_control_and_catalog_revision() {
+        let _env = crate::persist::test_env("uhp-machine-gateway");
+        let pairing = Pairing::new(Duration::from_secs(60)).unwrap();
+        let code = pairing.display_code().to_string();
+        let token = "luv_tok_machine_test".to_string();
+        let mut gateway = Gateway::start_with_machines(
+            PathBuf::from("target/test-state/uhp/no-machine-server.sock"),
+            token.clone(),
+            Some(4_000_000_000),
+            "unused-upstream".to_string(),
+            pairing,
+            AccessMode::Control,
+            true,
+        )
+        .unwrap();
+        let paired = exchange(gateway.address(), &json!({"type":"pair","code":code}));
+        assert!(paired["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scope| scope == "machine"));
+
+        let added = exchange(
+            gateway.address(),
+            &json!({"id":"add","method":"machine.add","params":{
+                "id":"build","host":"dev@build","enabled":false,"if_revision":0
+            },"auth":token}),
+        );
+        assert_eq!(added["result"]["revision"], 1);
+        assert!(added["result"]["machine"].get("destination").is_none());
+        assert!(added["result"]["machine"].get("remote_binary").is_none());
+
+        let stale = exchange(
+            gateway.address(),
+            &json!({"id":"stale","method":"machine.disable","params":{
+                "id":"build","if_revision":0
+            },"auth":token}),
+        );
+        assert!(stale["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("revision conflict"));
+        let private = exchange(
+            gateway.address(),
+            &json!({
+                "id":"private","method":"machine.get",
+                "params":{"id":"/private/secret-host"},"auth":token
+            }),
+        );
+        assert_eq!(private["error"]["code"], "invalid_request");
+        assert!(!private.to_string().contains("secret-host"));
+        gateway.stop();
     }
 
     /// Malformed, mismatched and oversized owner replies fail closed with clean connections/input.

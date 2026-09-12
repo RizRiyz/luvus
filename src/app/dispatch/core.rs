@@ -101,6 +101,33 @@ impl App {
         }
     }
 
+    /// Owner-local wakeup used after a machine catalog commit. This method is
+    /// intentionally absent from public capability discovery and UHP routing:
+    /// the catalog stays client-owned and the server only relays a revision.
+    pub(super) fn api_machine_catalog_changed(
+        &mut self,
+        method: &str,
+        p: &Value,
+    ) -> DispatchResult {
+        let _ = method;
+        reject_api_fields(p, &["revision"])?;
+        let revision = p
+            .get("revision")
+            .and_then(Value::as_u64)
+            .filter(|revision| *revision > 0)
+            .ok_or_else(|| {
+                (
+                    "invalid_request".to_string(),
+                    "revision must be a positive integer".to_string(),
+                )
+            })?;
+        self.pending_machine_catalog_revision = Some(
+            self.pending_machine_catalog_revision
+                .map_or(revision, |pending| pending.max(revision)),
+        );
+        Ok(json!({"type":"ok"}))
+    }
+
     pub(super) fn api_session_snapshot(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = (method, p);
         {
@@ -263,5 +290,44 @@ impl App {
             "server.agent_manifests_reloaded",
             json!({"rules":self.manifests.rule_count()}),
         );
+    }
+}
+
+#[cfg(test)]
+mod machine_catalog_notification_tests {
+    use super::*;
+
+    #[test]
+    fn catalog_revision_wakeup_coalesces_to_the_newest_commit() {
+        let _env = crate::persist::test_env("machine-catalog-wakeup");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        app.dispatch("__machine.catalog_changed", &json!({"revision": 8}))
+            .unwrap();
+        app.dispatch("__machine.catalog_changed", &json!({"revision": 7}))
+            .unwrap();
+        app.dispatch("__machine.catalog_changed", &json!({"revision": 11}))
+            .unwrap();
+
+        assert_eq!(app.pending_machine_catalog_revision, Some(11));
+    }
+
+    #[test]
+    fn catalog_revision_wakeup_rejects_invalid_payloads() {
+        let _env = crate::persist::test_env("machine-catalog-wakeup-invalid");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        assert!(app
+            .dispatch("__machine.catalog_changed", &json!({"revision": 0}))
+            .is_err());
+        assert!(app
+            .dispatch(
+                "__machine.catalog_changed",
+                &json!({"revision": 1, "host": "private.example"})
+            )
+            .is_err());
+        assert_eq!(app.pending_machine_catalog_revision, None);
     }
 }

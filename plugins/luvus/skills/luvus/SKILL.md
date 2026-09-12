@@ -1,6 +1,6 @@
 ---
 name: luvus
-description: "Control Luvus through its local CLI and UHP. Use only for a line beginning with `=target message`, an explicit request naming Luvus, a request to delegate to a named live Luvus agent or pane, or an explicit Luvus operation involving sessions, workspaces, tabs, panes, agents, files, Git, DIFF, worktrees, tasks, leases, modules, themes, Luvus Bar, configuration, UI, integrations, or Luvus UHP. Do not use for ordinary coding, file edits, Git operations, tests, task planning, generic agent work, or parallelization unless the user explicitly connects the request to Luvus. Being inside Luvus does not trigger this skill by itself. Inside Luvus use the inherited session; outside use the installed production Luvus command and configured session."
+description: "Control Luvus through its local CLI and UHP. Use only for a line beginning with `=target message`, an explicit request naming Luvus, a request to delegate to a named live Luvus agent or pane, or an explicit Luvus operation involving sessions, machines, workspaces, tabs, panes, agents, files, Git, DIFF, worktrees, tasks, leases, modules, themes, Luvus Bar, configuration, UI, integrations, or Luvus UHP. Do not use for ordinary coding, file edits, Git operations, tests, task planning, generic agent work, or parallelization unless the user explicitly connects the request to Luvus. Being inside Luvus does not trigger this skill by itself. Inside Luvus use the inherited session; outside use the installed production Luvus command and configured session."
 ---
 
 # Luvus
@@ -110,6 +110,39 @@ whether a session exists. `session stop` ends every pane in that named server.
 Before deletion, list sessions once, require the exact stopped name, and obtain
 clear authorization. Never delete `default` and never substitute workspace
 commands for server-session commands.
+
+### Manage saved SSH machines
+
+A saved machine is an SSH profile owned by the selected local named session and
+selecting one remote named session. It is not a workspace, and opening remote
+workspaces must not create more profiles or sessions. Switching local named
+sessions reloads that session's independent workspace tree and machine catalog.
+
+The session control in the TUI header always manages the owner-local named
+session, even while a remote machine workspace is active. Do not interpret it
+as a machine-session selector or claim that local session switching changes a
+saved machine's remote-session preference.
+
+Use read-only inspection before proposing a change:
+
+```sh
+luvus machine list
+luvus machine show <id>
+luvus machine status <id>
+luvus machine sessions <id>
+```
+
+`machine status` verifies the already-running selected server and its workspace
+projection; it does not install or start anything. `machine add` and `machine
+enable` are foreground mutations that may contact the host and start an absent
+selected server. Never pass passwords or keys as CLI data. Use the user's
+OpenSSH destination or config alias, and use `--install` only when the user
+explicitly authorizes that operation. Select a non-default remote session with
+`machine add ... --session <name>`.
+
+Machine UHP methods are absent unless the user explicitly starts `uhp access
+--machines`; mutations additionally require `--control`. Do not infer machine
+authority from ordinary session UHP access.
 
 ## Use the fast command path
 
@@ -223,8 +256,9 @@ luvus pane split <anchor-pane-id> --no-focus
 luvus agent start reviewer --kind codex --pane <new-pane-id> --timeout 30
 ```
 
-Omit `--down` for a right-side split and add it to the split or anchored start
-for a split below. Never combine `--anchor` and `--pane`.
+Omit direction flags to split along the longer side of the anchor pane. Pass
+`--right` or `--down` on the split or anchored start to force a direction.
+Never combine `--anchor` and `--pane`.
 
 Send work with `agent send`, not raw pane text and Enter:
 
@@ -293,6 +327,26 @@ For a blocked agent:
 `agent keys` accepts only a recognized agent pane and a non-empty list of known
 key names. It validates the entire list before queuing one ordered action; any
 invalid entry sends nothing, and a closed target returns `send_failed`.
+
+For UHP interactions that must match the inspected screen, use `agent.read`
+with `source:"visible"` and pass its `content_revision` as `if_content_revision`
+together with its `terminal_id` in `agent.keys` params. The revision is a
+non-negative integer; the terminal ID is exactly 32 lowercase hex characters.
+Both fields are optional as a pair; a one-sided or malformed pair is
+`invalid_request`. A deferred pane has `terminal_id:null` and cannot be fenced.
+An unavailable read snapshot has empty text and null coordinates.
+
+The server checks the pair and queues keys under the same engine lock used to
+capture the text. `content_revision_conflict` means no keys were queued: re-read
+and reassess the authorized action, never retry the same pair. Generic response
+`revision` / request `if_revision` are global event coordinates, not the pane's
+content counter. Without the pair, behavior is unchanged. Older servers omit the
+coordinates or reject the new fields; omit the pair only when legacy unfenced
+admission is acceptable. These are UHP params, not CLI flags.
+
+The fence covers queue admission only. Already queued input and child-side
+changes not yet observed remain outside it. Cursor/SGR output can make a pair
+stale even if the dialog text looks unchanged.
 
 ## Control panes, tabs, and workspaces
 
@@ -462,6 +516,10 @@ surface:
   session ownership and structured usage. Without it, usage stays unavailable.
 - OpenCode 2 Preview is a separate `opencode2` agent. Do not install the
   OpenCode V1 integration for it or infer session IDs from its live database.
+- Devin has native detection and exact-ID resume only. Do not infer session
+  IDs from its private database; `luvus agent resume <id>` cannot find Devin
+  sessions, so bind a pane with `luvus pane report --agent devin --session
+  <id>` when the exact id is known.
 - For Hermes, `luvus integration install hermes` adds exact per-pane session
   ownership for restart resume. Detection remains native, but Luvus does not
   scan Hermes's private history store.

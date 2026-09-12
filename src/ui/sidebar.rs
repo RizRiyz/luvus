@@ -18,7 +18,7 @@ fn attention(s: State) -> u8 {
 }
 
 /// Most urgent pane state across a whole workspace.
-fn rollup(app: &App, ws_index: usize) -> State {
+pub(crate) fn rollup(app: &App, ws_index: usize) -> State {
     let mut best = State::Idle;
     if let Some(ws) = app.workspaces.get(ws_index) {
         for tab in &ws.tabs {
@@ -82,22 +82,15 @@ fn draw_scrollbar(
     scroll: usize,
     t: &Theme,
 ) {
-    if total <= cap || track.height == 0 {
-        return;
-    }
-    let len = track.height as usize;
-    let thumb = (len * cap / total).clamp(1, len);
-    let span = total - cap;
-    let pos = ((len - thumb) * scroll.min(span))
-        .checked_div(span)
-        .unwrap_or(0);
-    let buf = f.buffer_mut();
-    for i in 0..len {
-        let on = i >= pos && i < pos + thumb;
-        let cell = &mut buf[(track.x, track.y + i as u16)];
-        cell.set_symbol("▕");
-        cell.set_fg(if on { t.overlay1 } else { t.surface1 });
-    }
+    super::workspace_row::scrollbar(
+        f.buffer_mut(),
+        track,
+        total,
+        cap,
+        scroll,
+        t.overlay1,
+        t.surface1,
+    );
 }
 
 /// Split a sidebar `body` rect into `n` stacked dock slots with a one-row
@@ -374,6 +367,15 @@ fn draw_named_session_button(
     t: &Theme,
 ) {
     let available = right.saturating_sub(x);
+    let slot = Rect::new(x, y, available, 1);
+    app.named_session_slot_rect = (app.server_mode && slot.width > 0).then_some(slot);
+    if app.client_shell_owns_session_chrome {
+        // The machine-aware client owns this complete interval. A remote
+        // endpoint must contribute neither session pixels nor a live hit
+        // target, regardless of the length of its backing session name.
+        app.named_session_button_rect = None;
+        return;
+    }
     let name = crate::ui::truncate(
         &crate::session::display_name(),
         available.saturating_sub(2) as usize,
@@ -415,6 +417,21 @@ fn draw_workspaces_dock(
     };
     let mut ws_rects = Vec::new();
 
+    // A machine-aware thin client owns the complete Workspaces projection.
+    // The server still chooses the native dock geometry and theme, but leaves
+    // its cells blank so the client can present one stable list containing
+    // owner-local workspaces and remote machines while endpoint content swaps
+    // underneath it. This also gives popup/modal occlusion a clean baseline.
+    if app.client_machine_capable {
+        app.client_shell_dock_rect = Some(area);
+        if app.client_shell_owns_workspaces {
+            // Preserve native keyboard paging and menu anchoring even though
+            // endpoint grouping is painted by the thin client.
+            app.workspaces_area = area;
+            return (ws_rects, None);
+        }
+    }
+
     line_at(f, area.y, header(cat.workspaces, t));
     let new_ws_rect = if area.width >= 8 {
         let rect = Rect::new(area.right().saturating_sub(4), area.y, 3, 1);
@@ -433,8 +450,33 @@ fn draw_workspaces_dock(
     let nrows = area.height.saturating_sub(1);
     let paths_visible = app.config.layout.workspace_paths;
     let row_stride = dock_row_stride(paths_visible);
-    let ncap = list_capacity(nrows, row_stride);
     let ntotal = app.workspaces.len();
+    // A machine-aware display client owns only the endpoint labels. The server
+    // still owns the Workspaces layout and appends a bounded client projection
+    // to this list, so remote endpoints share its row height and Show Paths
+    // behavior without receiving the owner-local machine catalog.
+    let endpoint_count = if app.client_shell_dock_rect.is_none() {
+        usize::from(app.client_shell_dock_rows)
+    } else {
+        0
+    };
+    let total_capacity = list_capacity(nrows, row_stride);
+    let workspace_floor = usize::from(ntotal > 0 && total_capacity > 0);
+    let endpoint_capacity = if endpoint_count <= total_capacity.saturating_sub(workspace_floor) {
+        endpoint_count
+    } else {
+        // Never expose a misleading partial endpoint list. The machine-aware
+        // client keeps its complete keyboard selector in Menu when the
+        // Workspaces dock is too short for every saved endpoint.
+        0
+    };
+    let ncap = total_capacity.saturating_sub(endpoint_capacity);
+    let endpoint_leading = app.client_shell_dock_leading && endpoint_capacity > 0;
+    let machine_children = endpoint_leading && app.client_shell_dock_indent_workspaces;
+    let endpoint_rows = u16::try_from(endpoint_capacity)
+        .unwrap_or(u16::MAX)
+        .saturating_mul(row_stride);
+    let workspace_top = nlist_top.saturating_add(if endpoint_leading { endpoint_rows } else { 0 });
     // Draw order groups each worktree under the node it branched from (docs/18
     // WT-4), so scroll positions index into this order, not raw creation order.
     let order = app.workspace_display_order();
@@ -461,104 +503,69 @@ fn draw_workspaces_dock(
         app.last_active_ws_shown = app.active_ws;
     }
     app.workspaces_scroll = app.workspaces_scroll.min(ntotal.saturating_sub(ncap));
-    app.workspaces_area = Rect::new(area.x, nlist_top, area.width, nrows);
     let nscroll = app.workspaces_scroll;
-    for (vi, (i, is_member)) in order.into_iter().skip(nscroll).take(ncap).enumerate() {
-        let y = nlist_top + vi as u16 * row_stride;
+    let visible = order
+        .into_iter()
+        .skip(nscroll)
+        .take(ncap)
+        .collect::<Vec<_>>();
+    let workspace_rows = u16::try_from(visible.len())
+        .unwrap_or(u16::MAX)
+        .saturating_mul(row_stride);
+    app.workspaces_area = Rect::new(area.x, workspace_top, area.width, workspace_rows);
+    for (vi, (i, is_member)) in visible.into_iter().enumerate() {
+        let y = workspace_top + vi as u16 * row_stride;
         let active = i == app.active_ws;
         let selected = keyboard_focused && nscroll + vi == app.workspace_cursor;
         ws_rects.push((i, Rect::new(area.x, y, area.width, row_stride)));
         let st = rollup(app, i);
         let ws = &app.workspaces[i];
         let terminal_cwd = app.workspace_terminal_cwd(i).unwrap_or(&ws.cwd);
-        let name_style = if selected || active {
-            Style::new().fg(t.accent).bold()
-        } else {
-            Style::new().fg(t.subtext1)
-        };
-        // A linked worktree is nested under its parent checkout with a connector.
-        let indent: u16 = if is_member { 2 } else { 0 };
-        // Row 1: state dot + workspace name + git branch (dot aligned with "WORKSPACES").
-        // On a narrow sidebar the name keeps priority: it is ellipsized only when
-        // it can't share the row, and the branch is fitted (then ellipsized, then
-        // dropped) into whatever space is left, so the row never hard-cuts.
-        let avail = (cw as usize).saturating_sub(indent as usize + 2);
-        let name_w = crate::ui::display_width(&ws.name);
-        let (name_disp, branch_disp) = match &ws.branch {
-            Some(b) => {
-                let branch_seg = 2 + crate::ui::display_width(b); // "  branch"
-                if name_w + branch_seg <= avail {
-                    (ws.name.clone(), Some(b.clone()))
-                } else if name_w + 4 <= avail {
-                    (
-                        ws.name.clone(),
-                        Some(crate::ui::truncate(b, avail - name_w - 2)),
-                    )
-                } else {
-                    (crate::ui::truncate(&ws.name, avail), None)
-                }
-            }
-            None => (crate::ui::truncate(&ws.name, avail), None),
-        };
-        let mut line1: Vec<Span> = Vec::new();
-        if is_member {
-            line1.push(Span::styled("└ ", Style::new().fg(t.overlay0)));
-        }
-        line1.push(Span::styled(st.dot(), Style::new().fg(st.color(t))));
-        line1.push(Span::raw(" "));
-        line1.push(Span::styled(name_disp, name_style));
-        if let Some(b) = &branch_disp {
-            line1.push(Span::styled(
-                format!("  {b}"),
-                Style::new().fg(if selected {
-                    t.accent
-                } else if active {
-                    t.green
-                } else {
-                    t.overlay0
-                }),
-            ));
-        }
-        line_at(f, y, Line::from(line1));
-        if paths_visible {
-            // Row 2: the project path, indented under the name (extra for members).
-            let pad = 2 + indent as usize;
-            line_at(
-                f,
-                y + 1,
-                Line::from(Span::styled(
-                    format!(
-                        "{}{}",
-                        " ".repeat(pad),
-                        short_path(terminal_cwd, cw.saturating_sub(pad as u16))
-                    ),
-                    Style::new().fg(if selected {
-                        t.accent
-                    } else if active {
-                        t.subtext0
-                    } else {
-                        t.overlay0
-                    }),
-                )),
-            );
-        }
-        if active || selected {
-            let buf = f.buffer_mut();
-            for row in y..y + row_stride {
-                for x in area.x..area.right().saturating_sub(1) {
-                    buf[(x, row)].set_bg(if selected { t.surface1 } else { t.sel_bg });
-                }
-            }
-        }
+        super::workspace_row::draw(
+            f.buffer_mut(),
+            Rect::new(area.x, y, area.width, row_stride),
+            super::workspace_row::WorkspaceRow {
+                name: &ws.name,
+                branch: ws.branch.as_deref(),
+                path: &short_path(terminal_cwd, u16::MAX),
+                dot: st.dot(),
+                dot_color: st.color(t),
+                nested: machine_children || is_member,
+                active,
+                selected,
+                hovered: false,
+            },
+            super::workspace_row::Palette {
+                accent: t.accent,
+                normal: t.subtext1,
+                muted: t.overlay0,
+                path: t.subtext0,
+                branch: t.green,
+                active_bg: t.sel_bg,
+                selected_bg: t.surface1,
+            },
+        );
     }
     draw_scrollbar(
         f,
-        Rect::new(bar_col, nlist_top, 1, nrows),
+        Rect::new(bar_col, workspace_top, 1, workspace_rows),
         ntotal,
         ncap,
         nscroll,
         t,
     );
+    if endpoint_capacity > 0 {
+        app.client_shell_dock_rect = Some(Rect::new(
+            area.x,
+            if endpoint_leading {
+                nlist_top
+            } else {
+                workspace_top.saturating_add(workspace_rows)
+            },
+            area.width,
+            endpoint_rows,
+        ));
+    }
     (ws_rects, new_ws_rect)
 }
 
@@ -824,8 +831,8 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                         .agent_name_for(id)
                         .map(|n| format!("={n}"))
                         .unwrap_or_else(|| format!("={}", id.0));
-                    // When enabled, show the live OSC title in place of the meta
-                    // line; fall back when the agent set no useful title.
+                    // When enabled, show OSC first, then a module-provided
+                    // title; fall back to workspace · =pane when neither is set.
                     let meta = app
                         .config
                         .layout
@@ -924,11 +931,21 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("project");
+                    let meta = app
+                        .config
+                        .layout
+                        .agent_title
+                        .then(|| {
+                            app.agent_row_title_for_session(&s.agent, &s.session_id)
+                                .map(|title| format!("  {title}"))
+                        })
+                        .flatten()
+                        .unwrap_or_else(|| format!("  {proj}"));
                     line_at(
                         f,
                         y + 1,
                         Line::from(Span::styled(
-                            crate::ui::truncate(&format!("  {proj}"), cw as usize),
+                            crate::ui::truncate(&meta, cw as usize),
                             Style::new().fg(t.overlay0),
                         )),
                     );
@@ -1339,6 +1356,7 @@ mod tests {
         let _env = crate::persist::test_env("agent-mention");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
+        app.workspaces[0].name = "project".into();
         let id = app.layout().focus;
         app.status.get_mut(&id).unwrap().agent = "claude".into();
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
@@ -1393,6 +1411,7 @@ mod tests {
         let _env = crate::persist::test_env("agent-meta-colour");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
+        app.workspaces[0].name = "project".into();
         let id = app.layout().focus;
         app.status.get_mut(&id).unwrap().agent = "claude".into();
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
@@ -1678,6 +1697,66 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["a1"],
             "closed-workspace schedules do not leak into the remaining scope"
+        );
+    }
+
+    #[test]
+    fn agent_title_shows_module_title_not_alias() {
+        let _env = crate::persist::test_env("agent-module-title");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.config.layout.agent_title = true;
+        let id = app.layout().focus;
+        {
+            let status = app.status.get_mut(&id).unwrap();
+            status.agent = "pi".into();
+            status.agent_session = Some(crate::app::AgentSession {
+                agent: "pi".into(),
+                session_id: "sess-1".into(),
+            });
+        }
+        app.agent_names.insert("chezmoi".into(), id);
+        assert!(app.set_agent_row_title_for_session(
+            "pi".into(),
+            "sess-1".into(),
+            Some("Ship desktop".into()),
+        ));
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(
+            buffer_contains(&term, "Ship desktop"),
+            "idle live rows show the module-provided session title"
+        );
+        assert!(
+            !buffer_contains(&term, "=chezmoi"),
+            "a Luvus pane alias must not stand in for the session title"
+        );
+    }
+
+    #[test]
+    fn resumable_rows_show_module_session_title() {
+        let _env = crate::persist::test_env("resumable-module-title");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.config.layout.agent_title = true;
+        app.agents_active_only = false;
+        app.resumable = vec![crate::agent::SessionInfo {
+            agent: "pi".into(),
+            session_id: "sess-closed".into(),
+            cwd: std::path::PathBuf::from("/tmp/proj"),
+            updated: std::time::SystemTime::UNIX_EPOCH,
+        }];
+        assert!(app.set_agent_row_title_for_session(
+            "pi".into(),
+            "sess-closed".into(),
+            Some("Closed session name".into()),
+        ));
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(buffer_contains(&term, "resume"));
+        assert!(
+            buffer_contains(&term, "Closed session name"),
+            "All history rows show the module-provided title"
         );
     }
 }

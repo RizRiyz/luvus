@@ -53,6 +53,7 @@ impl App {
         if self.modules.find(&id).is_some() {
             return Err(format!("module {id} is already registered"));
         }
+        let token = crate::terminal::backend::random_id()?;
         self.modules.modules.push(InstalledModule {
             id: id.clone(),
             root,
@@ -61,6 +62,7 @@ impl App {
             manifest,
             warning: None,
         });
+        self.module_tokens.insert(id.clone(), token);
         registry::save(&self.modules);
         self.bar.sync_modules(&self.modules);
         // A freshly linked module gets its startup hooks now rather than at the
@@ -89,6 +91,8 @@ impl App {
         let _ = std::fs::remove_dir_all(&root);
         self.remove_module_docks(&dock_ids);
         self.bar.clear_owner(id);
+        self.clear_agent_row_titles_for_owner(id);
+        self.module_tokens.remove(id);
         self.bar.sync_modules(&self.modules);
         Ok(())
     }
@@ -105,24 +109,41 @@ impl App {
         registry::save(&self.modules);
         self.remove_module_docks(&dock_ids);
         self.bar.clear_owner(id);
+        self.clear_agent_row_titles_for_owner(id);
+        self.module_tokens.remove(id);
         self.bar.sync_modules(&self.modules);
         Ok(())
     }
 
     pub fn module_set_enabled(&mut self, spec: &str, on: bool) -> Result<(), String> {
         let id = &self.module_id_for(spec)?;
-        let m = self
+        let was_enabled = self
             .modules
+            .find(id)
+            .ok_or_else(|| format!("no module {id}"))?
+            .enabled;
+        if was_enabled == on {
+            return Ok(());
+        }
+        self.modules
             .find_mut(id)
-            .ok_or_else(|| format!("no module {id}"))?;
-        m.enabled = on;
+            .ok_or_else(|| format!("no module {id}"))?
+            .enabled = on;
         registry::save(&self.modules);
         // Disabling a module retires its docks; re-enabling re-runs its startup
         // hooks so it can repaint them (docs/29, DOCK-4).
+        //
+        // The publisher credential deliberately survives this transition. A
+        // module pane or command started before the toggle keeps running with
+        // the token it was given, and rotating here would fail-closed on that
+        // still-legitimate process. Authorization is enforced per request
+        // against `is_runnable()`, so a disabled module cannot publish even
+        // while holding a valid token.
         if !on {
             let dock_ids = self.module_dock_ids(id);
             self.remove_module_docks(&dock_ids);
             self.bar.clear_owner(id);
+            self.clear_agent_row_titles_for_owner(id);
             self.module_startup_done.remove(id);
             self.bar.sync_modules(&self.modules);
         } else {
@@ -385,9 +406,12 @@ impl App {
         source: &str,
         extra_env: Vec<(String, String)>,
     ) -> Result<u64, String> {
+        let module_filter = module_filter
+            .map(|spec| self.module_id_for(spec))
+            .transpose()?;
         // When a specific module is named, validate it up front for a clear
         // error (e.g. "disabled") instead of a generic "no runnable module …".
-        if let Some(mid) = module_filter {
+        if let Some(mid) = module_filter.as_deref() {
             match self.modules.find(mid) {
                 None => return Err(format!("no module {mid}")),
                 Some(m) if !m.is_runnable() => {
@@ -407,7 +431,7 @@ impl App {
             .modules
             .iter()
             .filter(|m| m.is_runnable())
-            .filter(|m| module_filter.is_none_or(|f| m.id == f))
+            .filter(|m| module_filter.as_deref().is_none_or(|f| m.id == f))
             .filter_map(|m| {
                 m.manifest
                     .action(action_id)
@@ -480,10 +504,11 @@ impl App {
         placement: Option<&str>,
         source: &str,
     ) -> Result<PaneId, String> {
+        let module_id = self.module_id_for(module_id)?;
         let argv = {
             let m = self
                 .modules
-                .find(module_id)
+                .find(&module_id)
                 .ok_or_else(|| format!("no module {module_id}"))?;
             if !m.is_runnable() {
                 return Err(m
@@ -504,11 +529,14 @@ impl App {
 
         let ctx = context::build(self, source);
         let (root, env) = {
-            let m = self.modules.find(module_id).unwrap();
+            let m = self.modules.find(&module_id).unwrap();
             (
                 m.root.clone(),
                 runtime::env(
                     m,
+                    self.module_tokens
+                        .get(m.id.as_str())
+                        .ok_or_else(|| format!("module {module_id} has no runtime token"))?,
                     &ctx,
                     vec![(
                         "LUVUS_MODULE_ENTRYPOINT_ID".to_string(),
@@ -548,18 +576,18 @@ impl App {
                 self.zoomed = false;
             }
             "overlay" => {
-                self.layout_mut().split_focused(Axis::Col, id);
+                self.split_focused_auto(id);
                 self.zoomed = true; // fill the screen, overlay-style
             }
             _ => {
-                self.layout_mut().split_focused(Axis::Col, id);
+                self.split_focused_auto(id);
                 self.zoomed = false;
             }
         }
         self.module_panes.insert(
             id,
             ModulePaneRecord {
-                module_id: module_id.to_string(),
+                module_id: module_id.clone(),
                 entrypoint: entrypoint.to_string(),
             },
         );
@@ -594,10 +622,11 @@ impl App {
         source: &str,
         target: Target,
     ) -> Result<u64, String> {
+        let module_id = self.module_id_for(module_id)?;
         {
             let module = self
                 .modules
-                .find(module_id)
+                .find(&module_id)
                 .ok_or_else(|| format!("no module {module_id}"))?;
             if !module.is_runnable() {
                 return Err(module
@@ -619,13 +648,20 @@ impl App {
         }
         let ctx = context::build_for(self, source, &target);
         let (root, env) = {
-            let module = self.modules.find(module_id).unwrap();
-            (module.root.clone(), runtime::env(module, &ctx, extra_env))
+            let module = self.modules.find(&module_id).unwrap();
+            let token = self
+                .module_tokens
+                .get(module.id.as_str())
+                .ok_or_else(|| format!("module {module_id} has no runtime token"))?;
+            (
+                module.root.clone(),
+                runtime::env(module, token, &ctx, extra_env),
+            )
         };
         let log_id = runtime::next_log_id();
         self.push_module_log(ModuleCommandLog {
             id: log_id,
-            module_id: module_id.to_string(),
+            module_id: module_id.clone(),
             label,
             argv: argv.clone(),
             status: ModuleStatus::Running,
@@ -919,6 +955,8 @@ command = ["sh", "-c", "echo hello-from-module; echo oops 1>&2"]
         assert_eq!(id, "you.echo");
         assert!(app.modules.find(&id).unwrap().is_runnable());
 
+        let original_token = app.module_tokens[&id].clone();
+
         // Invoke the action; pump the loop until its log resolves.
         let log_id = app.module_invoke_action("refresh", None, "test").unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -946,16 +984,39 @@ command = ["sh", "-c", "echo hello-from-module; echo oops 1>&2"]
         );
         assert!(log.err.contains("oops"), "captured stderr: {:?}", log.err);
 
-        // Disabling makes it non-runnable; unlink removes it.
+        // Volatile UI contributions are owned and retire with the module.
+        set_owned_agent_session_title(
+            &mut app.agent_title_sessions,
+            "pi".into(),
+            "owned-session".into(),
+            Some("Owned title".into()),
+            Some(&id),
+        )
+        .unwrap();
+        assert_eq!(
+            app.agent_row_title_for_session("pi", "owned-session"),
+            Some("Owned title")
+        );
+
+        // Disabling makes it non-runnable; unlink removes it. The publisher
+        // credential is stable for the module's registry lifetime, so a module
+        // process that outlives a disable/enable toggle stays authorized.
         app.module_set_enabled(&id, false).unwrap();
         assert!(!app.modules.find(&id).unwrap().is_runnable());
+        assert_eq!(app.module_tokens[&id], original_token);
+        assert!(app
+            .agent_row_title_for_session("pi", "owned-session")
+            .is_none());
         assert!(app.module_invoke_action("refresh", None, "test").is_err());
         // Naming the module explicitly gives a clear "disabled" error.
         let err = app
             .module_invoke_action("refresh", Some(&id), "test")
             .unwrap_err();
         assert!(err.contains("disabled"), "got: {err}");
+        app.module_set_enabled(&id, true).unwrap();
+        assert_eq!(app.module_tokens[&id], original_token);
         app.module_unlink(&id).unwrap();
+        assert!(!app.module_tokens.contains_key(&id));
         assert!(app.modules.find(&id).is_none());
 
         std::env::remove_var("LUVUS_HOME");
@@ -1136,6 +1197,66 @@ command = ["sh", "-c", "sleep 5"]
             .iter()
             .find(|(_, r)| r.module_id == "you.board" && r.entrypoint == "board");
         assert!(rec.is_some(), "module pane was restored as a module pane");
+        let (rid, _) = rec.unwrap();
+        assert_eq!(
+            restored.panes.get(rid).map(|p| p.command.as_str()),
+            Some("sh"),
+            "it re-ran the module command, not the login shell"
+        );
+
+        std::env::remove_var("LUVUS_HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn module_pane_restores_from_a_snapshot_that_names_the_install_shorthand() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("luvus-restoreshort-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("LUVUS_HOME", &home);
+
+        let dir = home.join("short-mod");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("luvus-module.toml"),
+            r#"
+id = "you.short"
+name = "Short"
+version = "0.1.0"
+min_luvus_version = "0.1.0"
+
+[[panes]]
+id = "board"
+title = "Board"
+command = ["sh", "-c", "sleep 5"]
+"#,
+        )
+        .unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.module_link_with(&dir, true, Some("Riz/luvus-short@abc123".into()))
+            .unwrap();
+        let pid = app
+            .module_open_pane("you.short", "board", Some("split"), "test")
+            .unwrap();
+
+        // A snapshot written by an older build stored whatever spec the caller
+        // used, so the persisted id can be the `owner/repo` install shorthand
+        // rather than the manifest id. Restore must still re-run the module.
+        app.module_panes.get_mut(&pid).unwrap().module_id = "Riz/luvus-short".into();
+        let snap = crate::persist::snapshot(&app);
+        let (tx2, _rx2) = std::sync::mpsc::channel();
+        let restored = App::from_snapshot(snap, tx2).expect("restore");
+
+        let rec = restored
+            .module_panes
+            .iter()
+            .find(|(_, r)| r.entrypoint == "board");
+        assert!(
+            rec.is_some(),
+            "a shorthand-named module pane still restores as a module pane"
+        );
         let (rid, _) = rec.unwrap();
         assert_eq!(
             restored.panes.get(rid).map(|p| p.command.as_str()),
@@ -1789,7 +1910,7 @@ secret = true
         let _ = std::fs::remove_dir_all(&home);
         std::env::set_var("LUVUS_HOME", &home);
 
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
 
         let dir = home.join("spec-mod");
@@ -1806,6 +1927,16 @@ min_luvus_version = "0.1.0"
 key = "token"
 title = "Token"
 type = "string"
+
+[[actions]]
+id = "ping"
+title = "Ping"
+command = ["sh", "-c", "echo shorthand-action"]
+
+[[panes]]
+id = "status"
+title = "Status"
+command = ["sh", "-c", "sleep 5"]
 "#,
         )
         .unwrap();
@@ -1855,6 +1986,27 @@ type = "string"
         assert!(!app.modules.find("example.agent-ping").unwrap().enabled);
         app.module_set_enabled("Riz/luvus-agent-ping", true)
             .unwrap();
+
+        // Executable entrypoints also resolve before looking up their runtime
+        // token, and every retained identity uses the canonical manifest id.
+        let log_id = app
+            .module_invoke_action("ping", Some("Riz/luvus-agent-ping"), "test")
+            .unwrap();
+        settle(&mut app, &rx, log_id);
+        let log = app.module_logs.iter().find(|log| log.id == log_id).unwrap();
+        assert_eq!(log.module_id, "example.agent-ping");
+        assert_eq!(log.status, ModuleStatus::Succeeded);
+
+        let pane = app
+            .module_open_pane("Riz/luvus-agent-ping", "status", Some("split"), "test")
+            .unwrap();
+        assert_eq!(
+            app.module_panes
+                .get(&pane)
+                .map(|record| record.module_id.as_str()),
+            Some("example.agent-ping")
+        );
+        app.close_pane(pane);
 
         // And unlink by owner/repo actually removes it, rather than reporting
         // success while the module stays registered.

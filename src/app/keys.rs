@@ -65,6 +65,7 @@ pub enum Cmd {
     NextAttention,
     SplitRight,
     SplitDown,
+    SplitAuto,
     ForkSession,
     ClosePane,
     ZoomPane,
@@ -112,6 +113,7 @@ impl Cmd {
         Cmd::NextAttention,
         Cmd::SplitRight,
         Cmd::SplitDown,
+        Cmd::SplitAuto,
         Cmd::ForkSession,
         Cmd::ClosePane,
         Cmd::ZoomPane,
@@ -163,6 +165,7 @@ impl Cmd {
             Cmd::NextAttention => "next_attention",
             Cmd::SplitRight => "split_right",
             Cmd::SplitDown => "split_down",
+            Cmd::SplitAuto => "split_auto",
             Cmd::ForkSession => "fork_session",
             Cmd::ClosePane => "close_pane",
             Cmd::ZoomPane => "zoom_pane",
@@ -219,6 +222,7 @@ impl Cmd {
             Cmd::NextAttention => cat.cmd_next_attention,
             Cmd::SplitRight => cat.cmd_split_right,
             Cmd::SplitDown => cat.cmd_split_down,
+            Cmd::SplitAuto => cat.cmd_split_auto,
             Cmd::ForkSession => cat.cmd_fork_session,
             Cmd::ClosePane => cat.cmd_close_pane,
             Cmd::ZoomPane => cat.cmd_zoom_pane,
@@ -264,6 +268,7 @@ impl Cmd {
             | Cmd::NextAttention
             | Cmd::SplitRight
             | Cmd::SplitDown
+            | Cmd::SplitAuto
             | Cmd::ForkSession
             | Cmd::ClosePane
             | Cmd::ZoomPane
@@ -305,6 +310,7 @@ impl Cmd {
             Cmd::NextAttention => ".",
             Cmd::SplitRight => "v",
             Cmd::SplitDown => "s",
+            Cmd::SplitAuto => "+",
             Cmd::ForkSession => "f",
             Cmd::ClosePane => "x",
             Cmd::ZoomPane => "z",
@@ -862,6 +868,7 @@ impl App {
             Cmd::NextAttention => self.focus_next_attention(),
             Cmd::SplitRight => self.split(Axis::Col),
             Cmd::SplitDown => self.split(Axis::Row),
+            Cmd::SplitAuto => self.split_auto(),
             // Fork the focused agent pane's session into a new pane (no-op if it
             // isn't a fork-capable agent).
             Cmd::ForkSession => {
@@ -990,6 +997,7 @@ mod tests {
         assert_eq!(m.get("U"), Some(&Cmd::PrevWorkspace));
         assert_eq!(m.get("a"), Some(&Cmd::ToggleAgents));
         assert_eq!(m.get("A"), Some(&Cmd::ToggleAgentScope));
+        assert_eq!(m.get("+"), Some(&Cmd::SplitAuto));
         // Every command is reachable by at least one default binding.
         for &c in Cmd::ALL {
             assert!(m.values().any(|v| *v == c), "{c:?} default binding");
@@ -1047,6 +1055,7 @@ mod tests {
         let _env = crate::persist::test_env("jump-workspace-display-order");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].worktree = None;
         let focus = app.layout().focus;
         for position in 2..=3 {
             app.workspaces.push(Workspace {
@@ -1659,6 +1668,7 @@ mod tests {
         let _env = crate::persist::test_env("focus-workspaces-command");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].worktree = None;
         let pane = app.layout().focus;
         app.workspaces.push(Workspace {
             id: crate::ids::public_id("workspace"),

@@ -41,6 +41,7 @@ Then any of these tables, each declaring an argv `command` (a list, run as-is, c
 luvus puts context in the environment, flat, so a bash module never parses JSON:
 
 - `LUVUS_MODULE_ID`, `LUVUS_MODULE_ROOT` (the module dir), `LUVUS_MODULE_VERSION`
+- `LUVUS_MODULE_TOKEN` — UI-publisher credential for this server; the Luvus CLI forwards it automatically, so do not persist or override it
 - `LUVUS_MODULE_CONFIG_DIR`, `LUVUS_MODULE_STATE_DIR` — writable per-module dirs
 - `LUVUS_WORKSPACE_ID`, `LUVUS_WORKSPACE_CWD`, `LUVUS_TAB_INDEX`
 - `LUVUS_PANE_ID`, `LUVUS_PANE_CWD`, `LUVUS_PANE_AGENT`, `LUVUS_PANE_STATUS` (the clicked/target pane)
@@ -58,6 +59,7 @@ Run the `luvus` CLI from inside the command; it talks to the running server over
 - `luvus bar push --id <widget> --content <json>` — atomically publish structured `text`, `symbol`, `state`, `badge`, `progress`, `spacer`, and `separator` segments. Add `--compact-content`; an `action` must name one of your `[[actions]]`.
 - `luvus ui notification push --text <text> --level info|success|warning|error` — publish bounded transient status; use `--dedupe-key` for replacement.
 - `luvus ui toast "<text>"` — flash a one-line confirmation.
+- `luvus ui agent-title push --titles <json>` — publish AGENTS sidebar titles for live panes (`pane`) and resumable sessions (built-in `agent` + `session_id`). OSC still wins; never send a Luvus `=alias` as the title. `luvus ui agent-title clear` drops one key or every title owned by your module. The CLI authenticates ownership automatically.
 - `luvus ui sidebar` / `ui dock list` / `ui dock move` — sidebar/dock control.
 - `luvus tab rename <name>` / `tab list` — tabs.
 - `luvus module settings <id>` / `module settings <id> <key>` — read your settings exactly (values are masked in `settings list` when `secret`, but exact in `settings get`).
@@ -90,6 +92,6 @@ Iterate: edit the script, re-run the action or trigger the event, watch `module 
 ## Conventions
 
 - One module, one job. Keep commands fast and quiet — luvus caps a command's output (64 KiB) and runs at most 32 at a time.
-- Identity env (`LUVUS_MODULE_ID`, socket path) is injected and cannot be overridden.
+- Identity env (`LUVUS_MODULE_ID`, `LUVUS_MODULE_TOKEN`, socket path) is injected and cannot be overridden. Never log or persist the token.
 - Use `platforms` on the manifest or any item to skip a build step / hook / pane / action where it does not apply.
 - To share it: `luvus module install <owner>/<repo>` clones + builds + registers from GitHub; tag the repo with the `luvus-module` topic so `luvus module search` finds it.

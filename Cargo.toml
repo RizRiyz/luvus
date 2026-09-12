@@ -1,6 +1,6 @@
 [package]
 name = "luvus"
-version = "0.13.4"
+version = "0.14.1"
 edition = "2021"
 # ratatui 0.30 (and ratatui-core) use Rust edition 2024, so the dependency tree
 # needs rustc 1.88+. Keep this honest — a lower value makes `cargo install` fail
@@ -105,6 +105,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Console",
     "Win32_System_DataExchange",
     "Win32_System_Kernel",
+    "Win32_System_JobObjects",
     "Win32_System_Memory",
     "Win32_System_Threading",
 ] }

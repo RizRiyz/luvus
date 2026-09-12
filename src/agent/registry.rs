@@ -22,6 +22,7 @@ pub(crate) static BUILTINS: &[&AgentDescriptor] = &[
     &super::omp::DESCRIPTOR,
     &super::pi::DESCRIPTOR,
     &super::fx::DESCRIPTOR,
+    &super::devin::DESCRIPTOR,
 ];
 
 // Preserve the current Settings and CLI presentation order independently of
@@ -141,6 +142,7 @@ mod tests {
 
         assert!(find("antigravity").unwrap().automation.is_none());
         assert!(find("amp").unwrap().automation.is_none());
+        assert!(find("devin").unwrap().automation.is_none());
 
         let pi = find("pi").unwrap().automation.unwrap();
         assert!(pi.supports(AutomationAccess::ReadOnly));
@@ -244,6 +246,7 @@ mod tests {
             ("omp", &["oh-my-pi", "omp-coding-agent"][..], &["omp"][..]),
             ("pi", &["pi-coding-agent"][..], &["pi"][..]),
             ("fx", &[][..], &["fx"][..]),
+            ("devin", &[][..], &["devin"][..]),
         ];
         assert_eq!(actual, expected);
         assert!(BUILTINS.iter().all(|descriptor| {
@@ -280,6 +283,7 @@ mod tests {
                 "omp",
                 "pi",
                 "fx",
+                "devin",
             ]
         );
 

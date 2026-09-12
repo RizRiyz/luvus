@@ -75,7 +75,7 @@ FIELDS = {
     "agent.start": {"name", "kind", "pane", "anchor", "direction", "args", "timeout_s"},
     "agent.prompt": {"target", "text", "wait", "until", "timeout_s"},
     "agent.wait": {"pane", "status", "statuses", "timeout_s"},
-    "agent.keys": {"target", "keys"},
+    "agent.keys": {"target", "keys", "if_content_revision", "terminal_id"},
     "events.subscribe": set(),
 }
 
@@ -291,9 +291,20 @@ def agent_key(value):
 
 
 def valid_agent_keys_params(params):
+    """Validate an atomic key batch and its optional paired snapshot coordinates."""
+    fields = set(params)
+    if fields == {"target", "keys", "if_content_revision", "terminal_id"}:
+        if not (
+            type(params["if_content_revision"]) is int
+            and params["if_content_revision"] >= 0
+            and isinstance(params["terminal_id"], str)
+            and re.fullmatch(r"[0-9a-f]{32}", params["terminal_id"]) is not None
+        ):
+            return False
+    elif fields != {"target", "keys"}:
+        return False
     return (
-        set(params) == {"target", "keys"}
-        and bounded_string(params["target"], 128, allow_empty=False)
+        bounded_string(params["target"], 128, allow_empty=False)
         and isinstance(params["keys"], list)
         and bool(params["keys"])
         and all(agent_key(key) for key in params["keys"])
@@ -744,6 +755,12 @@ def main():
     manifest = json.loads((PACKAGE / "fixtures" / "manifest.json").read_text())
     assert manifest["protocol"] == {"name": "luvus-uhp", "major": 1, "minor": 0}
     request_schema = json.loads((PACKAGE / "schema" / "request.schema.json").read_text())
+    machine_id = request_schema["$defs"]["machineIdParams"]
+    machine_mutation = request_schema["$defs"]["machineMutationParams"]
+    assert set(machine_id["required"]) == {"id"}
+    assert set(machine_mutation["required"]) == {"id", "if_revision"}
+    for shape in (machine_id, machine_mutation):
+        assert set(shape["required"]) <= set(shape["properties"])
     methods = set(request_schema["properties"]["method"]["enum"])
     checked = 0
     for entry in manifest["files"]:

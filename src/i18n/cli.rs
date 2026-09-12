@@ -19,6 +19,50 @@ pub enum Language {
     Ko,
 }
 
+pub(crate) fn machine_install_label(language: Language) -> &'static str {
+    match language {
+        Language::En => "Install compatible Luvus if needed",
+        Language::Es => "Instalar Luvus compatible si es necesario",
+        Language::Pt => "Instalar Luvus compatível se necessário",
+        Language::Fr => "Installer Luvus compatible si nécessaire",
+        Language::De => "Kompatibles Luvus bei Bedarf installieren",
+        Language::Id => "Instal Luvus yang kompatibel jika diperlukan",
+        Language::Zh => "需要时安装兼容的 Luvus",
+        Language::Ja => "必要に応じて互換性のある Luvus をインストール",
+        Language::Ko => "필요한 경우 호환되는 Luvus 설치",
+    }
+}
+
+pub(crate) fn machine_install_action_label(language: Language) -> &'static str {
+    match language {
+        Language::En => "install",
+        Language::Es => "instalar",
+        Language::Pt => "instalar",
+        Language::Fr => "installer",
+        Language::De => "installieren",
+        Language::Id => "instal",
+        Language::Zh => "安装",
+        Language::Ja => "インストール",
+        Language::Ko => "설치",
+    }
+}
+
+pub(crate) fn machine_saved_labels(
+    language: Language,
+) -> (&'static str, &'static str, &'static str) {
+    match language {
+        Language::En => ("Saved machines", "open", "enable"),
+        Language::Es => ("Máquinas guardadas", "abrir", "habilitar"),
+        Language::Pt => ("Máquinas salvas", "abrir", "ativar"),
+        Language::Fr => ("Machines enregistrées", "ouvrir", "activer"),
+        Language::De => ("Gespeicherte Maschinen", "öffnen", "aktivieren"),
+        Language::Id => ("Mesin tersimpan", "buka", "aktifkan"),
+        Language::Zh => ("已保存的机器", "打开", "启用"),
+        Language::Ja => ("保存済みのマシン", "開く", "有効化"),
+        Language::Ko => ("저장된 머신", "열기", "활성화"),
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Context {
     language: Language,
@@ -429,6 +473,127 @@ static HELP: &[Translation] = &[
         "会话：",
         "セッション：",
         "세션:"
+    ),
+    tr!(
+        "machines:",
+        "máquinas:",
+        "máquinas:",
+        "machines :",
+        "Maschinen:",
+        "mesin:",
+        "机器：",
+        "マシン：",
+        "머신:"
+    ),
+    tr!(
+        "Save, inspect, and open Luvus machines over SSH",
+        "Guardar, inspeccionar y abrir máquinas Luvus mediante SSH",
+        "Salvar, inspecionar e abrir máquinas Luvus por SSH",
+        "Enregistrer, inspecter et ouvrir des machines Luvus via SSH",
+        "Luvus-Maschinen über SSH speichern, prüfen und öffnen",
+        "Simpan, periksa, dan buka mesin Luvus melalui SSH",
+        "通过 SSH 保存、检查并打开 Luvus 机器",
+        "SSH 経由で Luvus マシンを保存、検査、接続",
+        "SSH로 Luvus 머신을 저장하고 검사하고 열기"
+    ),
+    tr!(
+        "provision and validate one SSH machine",
+        "aprovisionar y validar una máquina SSH",
+        "provisionar e validar uma máquina SSH",
+        "provisionner et valider une machine SSH",
+        "eine SSH-Maschine bereitstellen und prüfen",
+        "sediakan dan validasi satu mesin SSH",
+        "自动配置并验证一台 SSH 机器",
+        "SSH マシンをプロビジョニングして検証",
+        "SSH 머신 하나를 프로비저닝하고 검증"
+    ),
+    tr!(
+        "list saved machine profiles and catalog revision",
+        "listar perfiles de máquina guardados y la revisión del catálogo",
+        "listar perfis de máquina salvos e a revisão do catálogo",
+        "lister les profils de machine enregistrés et la révision du catalogue",
+        "gespeicherte Maschinenprofile und Katalogrevision auflisten",
+        "tampilkan profil mesin tersimpan dan revisi katalog",
+        "列出已保存的机器配置和目录修订版本",
+        "保存済みマシンプロファイルとカタログのリビジョンを一覧表示",
+        "저장된 머신 프로필과 카탈로그 리비전 나열"
+    ),
+    tr!(
+        "show one saved profile",
+        "mostrar un perfil guardado",
+        "mostrar um perfil salvo",
+        "afficher un profil enregistré",
+        "ein gespeichertes Profil anzeigen",
+        "tampilkan satu profil tersimpan",
+        "显示一个已保存的配置",
+        "保存済みプロファイルを表示",
+        "저장된 프로필 하나 표시"
+    ),
+    tr!(
+        "rename a profile with optional revision protection",
+        "renombrar un perfil con protección de revisión opcional",
+        "renomear um perfil com proteção de revisão opcional",
+        "renommer un profil avec une protection de révision facultative",
+        "ein Profil mit optionalem Revisionsschutz umbenennen",
+        "ganti nama profil dengan perlindungan revisi opsional",
+        "重命名配置，可选择启用修订版本保护",
+        "オプションのリビジョン保護付きでプロファイル名を変更",
+        "선택적 리비전 보호로 프로필 이름 변경"
+    ),
+    tr!(
+        "provision and enable after a bounded SSH probe, or disable locally",
+        "aprovisionar y habilitar tras una prueba SSH acotada o deshabilitar localmente",
+        "provisionar e habilitar após uma sondagem SSH limitada ou desabilitar localmente",
+        "provisionner et activer après une vérification SSH bornée ou désactiver localement",
+        "nach einer begrenzten SSH-Prüfung bereitstellen und aktivieren oder lokal deaktivieren",
+        "sediakan dan aktifkan setelah pemeriksaan SSH terbatas atau nonaktifkan secara lokal",
+        "在有限 SSH 探测后自动配置并启用，或在本地禁用",
+        "制限付き SSH プローブ後にプロビジョニングして有効化、またはローカルで無効化",
+        "제한된 SSH 검사 후 프로비저닝하고 활성화하거나 로컬에서 비활성화"
+    ),
+    tr!(
+        "remove only the local profile; remote panes stay alive",
+        "eliminar solo el perfil local; los paneles remotos siguen activos",
+        "remover apenas o perfil local; os painéis remotos continuam ativos",
+        "supprimer uniquement le profil local ; les volets distants restent actifs",
+        "nur das lokale Profil entfernen; entfernte Panes bleiben aktiv",
+        "hapus hanya profil lokal; pane jarak jauh tetap aktif",
+        "仅删除本地配置；远程窗格保持运行",
+        "ローカルプロファイルのみ削除し、リモートペインは稼働を継続",
+        "로컬 프로필만 제거하며 원격 창은 계속 실행"
+    ),
+    tr!(
+        "verify the running selected server and workspace projection",
+        "verificar el servidor seleccionado en ejecución y su proyección de espacios de trabajo",
+        "verificar o servidor selecionado em execução e sua projeção de espaços de trabalho",
+        "vérifier le serveur sélectionné en cours d'exécution et sa projection des espaces de travail",
+        "den laufenden ausgewählten Server und seine Workspace-Projektion prüfen",
+        "verifikasi server terpilih yang sedang berjalan dan proyeksi ruang kerjanya",
+        "验证正在运行的所选服务器及其工作区投影",
+        "実行中の選択済みサーバーとワークスペース投影を検証",
+        "실행 중인 선택 서버와 작업 공간 프로젝션 검증"
+    ),
+    tr!(
+        "list named sessions through bounded SSH",
+        "listar sesiones con nombre mediante SSH acotado",
+        "listar sessões nomeadas por SSH limitado",
+        "lister les sessions nommées via une connexion SSH bornée",
+        "benannte Sitzungen über begrenztes SSH auflisten",
+        "tampilkan sesi bernama melalui SSH terbatas",
+        "通过有限 SSH 列出命名会话",
+        "制限付き SSH 経由で名前付きセッションを一覧表示",
+        "제한된 SSH를 통해 이름 있는 세션 나열"
+    ),
+    tr!(
+        "attach using the verified absolute remote binary",
+        "conectar usando el binario remoto absoluto verificado",
+        "conectar usando o binário remoto absoluto verificado",
+        "se connecter avec le binaire distant absolu vérifié",
+        "mit der geprüften absoluten Remote-Binärdatei verbinden",
+        "sambungkan menggunakan biner jarak jauh absolut yang terverifikasi",
+        "使用已验证的远程二进制绝对路径连接",
+        "検証済みの絶対パスのリモートバイナリで接続",
+        "검증된 절대 경로의 원격 바이너리로 연결"
     ),
     tr!(
         "remote:",
@@ -1234,15 +1399,15 @@ static HELP: &[Translation] = &[
         "현재 탭의 패널과 읽기 전용 기록 지표 나열"
     ),
     tr!(
-        "split a pane (default: side by side, creates a workspace if empty)",
-        "dividir un panel (predeterminado: lado a lado, crea un espacio de trabajo si está vacío)",
-        "dividir um painel (padrão: lado a lado, cria um espaço de trabalho se estiver vazio)",
-        "diviser un volet (par défaut : côte à côte, crée un espace de travail si vide)",
-        "Bereich teilen (Standard: nebeneinander, erstellt bei Leerstand einen Arbeitsbereich)",
-        "bagi panel (bawaan: berdampingan, membuat ruang kerja jika kosong)",
-        "拆分窗格（默认：左右并排，空状态时创建工作区）",
-        "ペインを分割（既定：横並び、空の場合はワークスペースを作成）",
-        "패널 분할 (기본값: 좌우 분할, 비어 있으면 작업 공간 생성)"
+        "split a pane (default: auto by size, creates a workspace if empty)",
+        "dividir un panel (predeterminado: automático según el tamaño, crea un espacio de trabajo si está vacío)",
+        "dividir um painel (padrão: automático pelo tamanho, cria um espaço de trabalho se estiver vazio)",
+        "diviser un volet (par défaut : automatique selon la taille, crée un espace de travail si vide)",
+        "Bereich teilen (Standard: automatisch nach Größe, erstellt bei Leerstand einen Arbeitsbereich)",
+        "bagi panel (bawaan: otomatis menurut ukuran, membuat ruang kerja jika kosong)",
+        "拆分窗格（默认：按长宽自动选择方向，空状态时创建工作区）",
+        "ペインを分割（既定：サイズに応じて自動、空の場合はワークスペースを作成）",
+        "패널 분할 (기본값: 크기에 따라 자동 분할, 비어 있으면 작업 공간 생성)"
     ),
     tr!(
         "focus a pane (jumps to its workspace/tab)",
@@ -1793,6 +1958,28 @@ static HELP: &[Translation] = &[
         "向模块侧边停靠栏提供行数据（JSON 数组，",
         "モジュールのサイドバードックへ行を送信（JSON 配列、",
         "모듈의 사이드바 도킹에 행 전달 (JSON 배열,"
+    ),
+    tr!(
+        "set AGENTS sidebar titles for live and resumable rows",
+        "definir títulos de la barra AGENTS para filas vivas y reanudables",
+        "definir títulos da barra AGENTS para linhas ativas e retomáveis",
+        "définir les titres de la barre AGENTS pour les lignes actives et reprises",
+        "AGENTS-Seitenleistentitel für Live- und fortsetzbare Zeilen setzen",
+        "atur judul bilah sisi AGENTS untuk baris live dan yang dapat dilanjutkan",
+        "设置 AGENTS 侧栏标题（活动与可恢复行）",
+        "AGENTS サイドバーのライブ行と履歴行のタイトルを設定",
+        "AGENTS 사이드바 타이틀을 실행 및 재개 행에 설정"
+    ),
+    tr!(
+        "clear module-provided AGENTS sidebar titles",
+        "borrar títulos de AGENTS aportados por un módulo",
+        "limpar títulos de AGENTS fornecidos por um módulo",
+        "effacer les titres AGENTS fournis par un module",
+        "von einem Modul gesetzte AGENTS-Titel löschen",
+        "hapus judul bilah sisi AGENTS dari modul",
+        "清除模块提供的 AGENTS 侧栏标题",
+        "モジュールが提供した AGENTS サイドバータイトルを消去",
+        "모듈이 제공한 AGENTS 사이드바 타이틀 지우기"
     ),
     tr!(
         "or piped on stdin). See docs/29 + the website",

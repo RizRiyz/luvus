@@ -698,6 +698,9 @@ impl App {
                 // A resize (or a same-size resize event a terminal emits on a
                 // move/expose) may have damaged the screen — force a full repaint.
                 self.force_redraw = true;
+                if let Some((width, height)) = crate::platform::terminal_cell_pixels() {
+                    self.set_client_cell_pixels(width, height);
+                }
                 true
             }
             AppEvent::PtyInputRejected(id) => {
@@ -1088,6 +1091,14 @@ impl App {
             AppEvent::ClientConnected { .. }
             | AppEvent::ClientDetach { .. }
             | AppEvent::ClientGraphicsSent { .. }
+            | AppEvent::ClientSurfaceInterest { .. }
+            | AppEvent::ClientPrepareSurface { .. }
+            | AppEvent::ClientShellDockLayout { .. }
+            | AppEvent::ClientShellSidebars { .. }
+            | AppEvent::ClientShellWorkspaceFocus { .. }
+            | AppEvent::ClientShellWorkspaceMenu { .. }
+            | AppEvent::ClientOpenWorkspacePicker { .. }
+            | AppEvent::ClientCellPixels { .. }
             | AppEvent::ClientInput { .. }
             | AppEvent::Shutdown => false,
             // Consumed by the pre-dispatch worker-result branch above.
@@ -1724,6 +1735,8 @@ impl App {
                         })
                         .map(|(hit, _)| *hit);
                     match hit {
+                        Some(PickerHit::OpenWorkspaceTab) => {}
+                        Some(PickerHit::RemoteMachineTab) => self.picker_open_remote_machine(),
                         Some(PickerHit::Row(i)) => self.picker_click(i),
                         Some(PickerHit::Hint(k)) => {
                             self.handle_picker_key(KeyEvent::new(k, KeyModifiers::NONE))
@@ -1915,7 +1928,10 @@ impl App {
                     match hit {
                         Some(PickerHit::Row(i)) => self.worktree_open_click(i),
                         // Inert modal surface; the footer is handled above.
-                        Some(PickerHit::Hint(_)) | Some(PickerHit::Modal) => {}
+                        Some(PickerHit::OpenWorkspaceTab)
+                        | Some(PickerHit::RemoteMachineTab)
+                        | Some(PickerHit::Hint(_))
+                        | Some(PickerHit::Modal) => {}
                         None => self.close_worktree_list(), // click outside cancels
                     }
                 }
@@ -4613,6 +4629,7 @@ mod tests {
         let _env = crate::persist::test_env("prefix-shifted-workspace-jump");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        app.workspaces[0].worktree = None;
         let focus = app.layout().focus;
         for position in 2..=9 {
             app.workspaces[0]
