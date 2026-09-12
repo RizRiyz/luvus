@@ -135,6 +135,32 @@ jobs:
             --binary target/release/luvus \
             --archive target/luvus-size.tar.gz
 
+  binary-size-intel-macos:
+    name: macos Intel binary size
+    runs-on: macos-14
+    permissions:
+      contents: read
+    env:
+      SQLITE3_LIB_DIR: /usr/lib
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - run: cargo build --release --locked --target x86_64-apple-darwin
+      - name: Package measured binary
+        run: |
+          COPYFILE_DISABLE=1 tar \
+            -C target/x86_64-apple-darwin/release \
+            -czf target/luvus-x86_64-size.tar.gz \
+            luvus
+      - name: Check reviewed baseline
+        run: |
+          python3 scripts/check-binary-size.py \
+            --target x86_64-apple-darwin \
+            --binary target/x86_64-apple-darwin/release/luvus \
+            --archive target/luvus-x86_64-size.tar.gz
+
   windows:
     name: windows protocol · ConPTY
     runs-on: windows-latest
