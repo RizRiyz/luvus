@@ -83,13 +83,25 @@ pub(super) fn draw_picker(
                 Rect::new(inner.x, footer_y, inner.width, 1),
             );
         } else {
+            let hints = [
+                ("tab", cat.act_complete, KeyCode::Tab),
+                ("⏎", cat.act_go_to, KeyCode::Enter),
+                ("esc", cat.act_cancel, KeyCode::Esc),
+            ];
+            let (hints_line, hint_x) = hint_line_with_offsets(&hints.map(|(k, l, _)| (k, l)), t);
             f.render_widget(
-                Paragraph::new(hint_line(
-                    &[("⏎", cat.act_go_to), ("esc", cat.act_cancel)],
-                    t,
-                )),
+                Paragraph::new(hints_line),
                 Rect::new(inner.x, footer_y, inner.width, 1),
             );
+            for (i, (key, label, code)) in hints.iter().enumerate() {
+                let x = inner.x.saturating_add(hint_x[i]);
+                let available = inner.right().saturating_sub(x);
+                if available == 0 {
+                    continue;
+                }
+                let w = (display_width(key) + 1 + display_width(label)).min(available as usize);
+                footer_hints.push((PickerHit::Hint(*code), Rect::new(x, footer_y, w as u16, 1)));
+            }
         }
     } else if let Some(buf) = &p.creating {
         f.render_widget(

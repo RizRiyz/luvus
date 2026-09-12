@@ -8765,6 +8765,7 @@ mod tests {
             cursor: 0,
             creating: None,
             going_to: None,
+            go_to_cycle: None,
             error: None,
             is_repo,
             show_hidden: false,

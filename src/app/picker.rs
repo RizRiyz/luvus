@@ -4,7 +4,7 @@
 //! folder is a git repo it offers a second action row, **"Open with new
 //! worktree"** (`w` also triggers it). The front door for workspaces and worktrees.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::*;
 
@@ -29,6 +29,8 @@ pub struct FolderPicker {
     /// macOS-style "Go to" input. Enter navigates to this path but deliberately
     /// does not open it as a workspace; the OpenFolder row remains confirmation.
     pub going_to: Option<String>,
+    /// Tab-completion cycle for [`FolderPicker::going_to`]. Cleared on edit/paste.
+    pub(crate) go_to_cycle: Option<GoToCycle>,
     /// Last filesystem error (e.g. permission denied), shown in the modal.
     pub error: Option<String>,
     /// Whether the browsed folder is a git repo — adds the "Open with new
@@ -65,6 +67,16 @@ pub enum PickerHit {
     Modal,
 }
 
+/// Tab-completion cycle while the Go to field is active.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GoToCycle {
+    /// Display parent, including the trailing `/` or `\` when the user typed one.
+    parent: String,
+    matches: Vec<String>,
+    /// `None` while showing the shared prefix; `Some` once cycling names.
+    index: Option<usize>,
+}
+
 impl FolderPicker {
     /// Number of action rows before the directory entries: "open" + (optional)
     /// "open with worktree" + "home" + "..".
@@ -89,6 +101,237 @@ impl FolderPicker {
             (1, false) | (2, true) => Row::Home,
             (2, false) | (3, true) => Row::Up,
             _ => Row::Entry(i - self.leading()),
+        }
+    }
+}
+
+fn unquote_go_to(input: &str) -> &str {
+    let entered = input.trim();
+    entered
+        .strip_prefix('"')
+        .and_then(|text| text.strip_suffix('"'))
+        .or_else(|| {
+            entered
+                .strip_prefix('\'')
+                .and_then(|text| text.strip_suffix('\''))
+        })
+        .unwrap_or(entered)
+        .trim()
+}
+
+fn resolve_go_to_path(
+    entered: &str,
+    current: Option<&Path>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    if entered == "~" {
+        home.map(Path::to_path_buf)
+    } else if let Some(rest) = entered
+        .strip_prefix("~/")
+        .or_else(|| entered.strip_prefix("~\\"))
+    {
+        home.map(|home| home.join(rest))
+    } else {
+        let path = PathBuf::from(entered);
+        Some(if path.is_absolute() {
+            path
+        } else {
+            current.map(|c| c.join(&path)).unwrap_or(path)
+        })
+    }
+}
+
+fn chars_match_ignore_case(a: char, b: char) -> bool {
+    a.to_lowercase().eq(b.to_lowercase())
+}
+
+fn names_equal_ignore_case(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+
+fn name_has_prefix_ignore_case(name: &str, prefix: &str) -> bool {
+    if prefix.is_empty() {
+        return true;
+    }
+    let mut chars = name.chars();
+    for pc in prefix.chars() {
+        match chars.next() {
+            Some(nc) if chars_match_ignore_case(nc, pc) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn common_name_prefix(names: &[String]) -> String {
+    let Some(first) = names.first() else {
+        return String::new();
+    };
+    let mut prefix: Vec<char> = first.chars().collect();
+    for name in &names[1..] {
+        let mut shared = Vec::new();
+        for (a, b) in prefix.iter().copied().zip(name.chars()) {
+            if chars_match_ignore_case(a, b) {
+                shared.push(a);
+            } else {
+                break;
+            }
+        }
+        prefix = shared;
+        if prefix.is_empty() {
+            break;
+        }
+    }
+    prefix.into_iter().collect()
+}
+
+fn is_path_sep(c: char) -> bool {
+    c == '/' || c == '\\'
+}
+
+/// Delete the last path component, including a trailing separator.
+/// `foo/bar/` and `foo/bar` both become `foo/`.
+fn delete_last_path_word(buf: &mut String) {
+    let mut chars: Vec<char> = buf.chars().collect();
+    while chars.last().copied().is_some_and(is_path_sep) {
+        chars.pop();
+    }
+    while chars.last().copied().is_some_and(|c| !is_path_sep(c)) {
+        chars.pop();
+    }
+    *buf = chars.into_iter().collect();
+}
+
+fn is_word_delete_key(key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Backspace
+            if key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
+        {
+            true
+        }
+        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => true,
+        _ => false,
+    }
+}
+
+fn split_go_to_stem(entered: &str) -> (String, String, char) {
+    match entered.rfind(['/', '\\']) {
+        Some(i) => {
+            let sep = entered[i..].chars().next().unwrap_or('/');
+            (
+                entered[..=i].to_string(),
+                entered[i + sep.len_utf8()..].to_string(),
+                sep,
+            )
+        }
+        None => (String::new(), entered.to_string(), '/'),
+    }
+}
+
+fn list_go_to_dirs(dir: &Path, typed_name: &str, show_hidden: bool) -> Vec<String> {
+    let include_hidden = show_hidden || typed_name.starts_with('.');
+    let mut names: Vec<String> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name().into_string().ok()?;
+                if name == "." || name == ".." {
+                    return None;
+                }
+                if !include_hidden && name.starts_with('.') {
+                    return None;
+                }
+                if !entry.file_type().map(|ty| ty.is_dir()).unwrap_or(false) {
+                    return None;
+                }
+                if !name_has_prefix_ignore_case(&name, typed_name) {
+                    return None;
+                }
+                Some(name)
+            })
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    names.sort_by(|a, b| {
+        a.to_lowercase()
+            .cmp(&b.to_lowercase())
+            .then_with(|| a.cmp(b))
+    });
+    names
+}
+
+fn cycle_go_to(cycle: &GoToCycle, reverse: bool) -> Option<(String, GoToCycle)> {
+    if cycle.matches.is_empty() {
+        return None;
+    }
+    let n = cycle.matches.len();
+    let index = match cycle.index {
+        None if reverse => n - 1,
+        None => 0,
+        Some(i) if reverse => (i + n - 1) % n,
+        Some(i) => (i + 1) % n,
+    };
+    Some((
+        format!("{}{}", cycle.parent, cycle.matches[index]),
+        GoToCycle {
+            parent: cycle.parent.clone(),
+            matches: cycle.matches.clone(),
+            index: Some(index),
+        },
+    ))
+}
+
+fn complete_go_to(
+    input: &str,
+    current: &Path,
+    home: Option<&Path>,
+    show_hidden: bool,
+    cycle: Option<&GoToCycle>,
+    reverse: bool,
+) -> Option<(String, Option<GoToCycle>)> {
+    if let Some(cycle) = cycle {
+        let (text, next) = cycle_go_to(cycle, reverse)?;
+        return Some((text, Some(next)));
+    }
+
+    let entered = unquote_go_to(input);
+    if entered == "~" {
+        return Some(("~/".to_string(), None));
+    }
+
+    let (parent, name, sep) = if entered.is_empty() {
+        (String::new(), String::new(), '/')
+    } else {
+        split_go_to_stem(entered)
+    };
+    let list_dir = if parent.is_empty() {
+        current.to_path_buf()
+    } else {
+        resolve_go_to_path(&parent, Some(current), home)?
+    };
+    if !list_dir.is_dir() {
+        return None;
+    }
+
+    let matches = list_go_to_dirs(&list_dir, &name, show_hidden);
+    match matches.len() {
+        0 => None,
+        1 => Some((format!("{}{}{sep}", parent, matches[0]), None)),
+        _ => {
+            let common = common_name_prefix(&matches);
+            let next_cycle = GoToCycle {
+                parent,
+                matches,
+                index: None,
+            };
+            if !names_equal_ignore_case(&name, &common) {
+                Some((format!("{}{common}", next_cycle.parent), Some(next_cycle)))
+            } else {
+                let (text, next) = cycle_go_to(&next_cycle, reverse)?;
+                Some((text, Some(next)))
+            }
         }
     }
 }
@@ -120,6 +363,7 @@ impl App {
             cursor: 0,
             creating: None,
             going_to: None,
+            go_to_cycle: None,
             error: None,
             is_repo: false,
             show_hidden: false,
@@ -215,6 +459,7 @@ impl App {
             }
             if let Some(buffer) = picker.going_to.as_mut() {
                 buffer.push_str(&text);
+                picker.go_to_cycle = None;
                 picker.error = None;
                 return;
             }
@@ -236,36 +481,70 @@ impl App {
                         let name = buf.clone();
                         self.picker_create_folder(name);
                     }
+                    _ if is_word_delete_key(key) => delete_last_path_word(buf),
                     KeyCode::Backspace => {
                         buf.pop();
                     }
-                    KeyCode::Char(c) => buf.push(c),
-                    _ => {}
-                }
-                return;
-            }
-            if let Some(buf) = p.going_to.as_mut() {
-                match key.code {
-                    KeyCode::Esc => {
-                        p.going_to = None;
-                        p.error = None;
-                    }
-                    KeyCode::Enter => {
-                        let path = buf.clone();
-                        self.picker_go_to(path);
-                    }
-                    KeyCode::Backspace => {
-                        buf.pop();
-                        p.error = None;
-                    }
-                    KeyCode::Char(c) => {
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                         buf.push(c);
-                        p.error = None;
                     }
                     _ => {}
                 }
                 return;
             }
+        }
+        if self.picker.as_ref().is_some_and(|p| p.going_to.is_some()) {
+            match key.code {
+                KeyCode::Esc => {
+                    if let Some(p) = self.picker.as_mut() {
+                        p.going_to = None;
+                        p.go_to_cycle = None;
+                        p.error = None;
+                    }
+                }
+                KeyCode::Enter => {
+                    let path = self
+                        .picker
+                        .as_ref()
+                        .and_then(|p| p.going_to.clone())
+                        .unwrap_or_default();
+                    self.picker_go_to(path);
+                }
+                KeyCode::Tab | KeyCode::BackTab => {
+                    let reverse = matches!(key.code, KeyCode::BackTab)
+                        || key.modifiers.contains(KeyModifiers::SHIFT);
+                    self.picker_complete_go_to(reverse);
+                }
+                _ if is_word_delete_key(key) => {
+                    if let Some(p) = self.picker.as_mut() {
+                        if let Some(buf) = p.going_to.as_mut() {
+                            delete_last_path_word(buf);
+                        }
+                        p.go_to_cycle = None;
+                        p.error = None;
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(p) = self.picker.as_mut() {
+                        if let Some(buf) = p.going_to.as_mut() {
+                            buf.pop();
+                        }
+                        p.go_to_cycle = None;
+                        p.error = None;
+                    }
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(p) = self.picker.as_mut() {
+                        if let Some(buf) = p.going_to.as_mut() {
+                            buf.push(c);
+                        }
+                        p.go_to_cycle = None;
+                        p.error = None;
+                    }
+                }
+                _ => {}
+            }
+            return;
         }
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.picker_move(1),
@@ -277,6 +556,7 @@ impl App {
                 if let Some(p) = self.picker.as_mut() {
                     p.creating = Some(String::new());
                     p.going_to = None;
+                    p.go_to_cycle = None;
                     p.error = None;
                 }
             }
@@ -335,6 +615,36 @@ impl App {
         if let Some(p) = self.picker.as_mut() {
             p.creating = None;
             p.going_to = Some(String::new());
+            p.go_to_cycle = None;
+            p.error = None;
+        }
+    }
+
+    /// Tab-complete the Go to buffer. Failed completion leaves the field unchanged.
+    fn picker_complete_go_to(&mut self, reverse: bool) {
+        let Some(picker) = self.picker.as_ref() else {
+            return;
+        };
+        let Some(input) = picker.going_to.as_deref() else {
+            return;
+        };
+        let current = picker.path.clone();
+        let show_hidden = picker.show_hidden;
+        let cycle = picker.go_to_cycle.clone();
+        let home = crate::platform::home_dir();
+        let Some((next, next_cycle)) = complete_go_to(
+            input,
+            &current,
+            home.as_deref(),
+            show_hidden,
+            cycle.as_ref(),
+            reverse,
+        ) else {
+            return;
+        };
+        if let Some(p) = self.picker.as_mut() {
+            p.going_to = Some(next);
+            p.go_to_cycle = next_cycle;
             p.error = None;
         }
     }
@@ -343,17 +653,7 @@ impl App {
     /// to the currently browsed folder, and `~` / `~/...` are supported. A file
     /// path browses its parent directory without opening a workspace.
     fn picker_go_to(&mut self, input: String) {
-        let entered = input.trim();
-        let entered = entered
-            .strip_prefix('"')
-            .and_then(|text| text.strip_suffix('"'))
-            .or_else(|| {
-                entered
-                    .strip_prefix('\'')
-                    .and_then(|text| text.strip_suffix('\''))
-            })
-            .unwrap_or(entered)
-            .trim();
+        let entered = unquote_go_to(&input);
         if entered.is_empty() {
             let error = self.catalog.enter_folder_path.to_string();
             if let Some(p) = self.picker.as_mut() {
@@ -363,21 +663,8 @@ impl App {
         }
 
         let current = self.picker.as_ref().map(|p| p.path.clone());
-        let target = if entered == "~" {
-            crate::platform::home_dir()
-        } else if let Some(rest) = entered
-            .strip_prefix("~/")
-            .or_else(|| entered.strip_prefix("~\\"))
-        {
-            crate::platform::home_dir().map(|home| home.join(rest))
-        } else {
-            let path = PathBuf::from(entered);
-            Some(if path.is_absolute() {
-                path
-            } else {
-                current.unwrap_or_default().join(path)
-            })
-        };
+        let home = crate::platform::home_dir();
+        let target = resolve_go_to_path(entered, current.as_deref(), home.as_deref());
 
         let target = target.and_then(|path| {
             if path.is_dir() {
@@ -400,6 +687,7 @@ impl App {
             p.path = target;
             p.cursor = 0;
             p.going_to = None;
+            p.go_to_cycle = None;
             p.error = None;
         }
         self.picker_refresh();
@@ -489,6 +777,7 @@ mod tests {
             cursor: 0,
             creating: None,
             going_to: None,
+            go_to_cycle: None,
             error: None,
             is_repo: false,
             show_hidden: false,
@@ -520,6 +809,7 @@ mod tests {
             cursor: 1, // the "Open with new worktree" row
             creating: None,
             going_to: None,
+            go_to_cycle: None,
             error: None,
             is_repo: true,
             show_hidden: false,
@@ -847,6 +1137,323 @@ mod tests {
         assert_eq!(
             app.picker.as_ref().unwrap().creating.as_deref(),
             Some("newfolder")
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn complete_fixture(label: &str) -> PathBuf {
+        let tmp =
+            std::env::temp_dir().join(format!("luvus-pickcomp-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn complete_go_to_unique_match_appends_separator_and_skips_files() {
+        let tmp = complete_fixture("unique");
+        std::fs::create_dir_all(tmp.join("Documents").join("src")).unwrap();
+        std::fs::write(tmp.join("file.txt"), "x").unwrap();
+        std::fs::write(tmp.join("Do-not"), "file").unwrap();
+
+        let (text, cycle) = complete_go_to("Do", &tmp, None, false, None, false).unwrap();
+        assert_eq!(text, "Documents/");
+        assert!(cycle.is_none(), "unique match does not start a cycle");
+
+        let (text, cycle) = complete_go_to("Documents/", &tmp, None, false, None, false).unwrap();
+        assert_eq!(text, "Documents/src/");
+        assert!(cycle.is_none());
+
+        assert!(
+            complete_go_to("file", &tmp, None, false, None, false).is_none(),
+            "files are not completed"
+        );
+        assert_eq!(
+            complete_go_to("\"Do\"", &tmp, None, false, None, false)
+                .unwrap()
+                .0,
+            "Documents/"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn complete_go_to_extends_shared_prefix_then_cycles() {
+        let tmp = complete_fixture("cycle");
+        std::fs::create_dir_all(tmp.join("Documents")).unwrap();
+        std::fs::create_dir_all(tmp.join("Downloads")).unwrap();
+
+        let (text, cycle) = complete_go_to("D", &tmp, None, false, None, false).unwrap();
+        assert_eq!(text, "Do");
+        let cycle = cycle.expect("ambiguous names keep cycle state");
+
+        let (text, cycle) = complete_go_to(&text, &tmp, None, false, Some(&cycle), false).unwrap();
+        assert_eq!(text, "Documents");
+        let cycle = cycle.unwrap();
+
+        let (text, cycle) = complete_go_to(&text, &tmp, None, false, Some(&cycle), false).unwrap();
+        assert_eq!(text, "Downloads");
+        let cycle = cycle.unwrap();
+
+        let (text, cycle) = complete_go_to(&text, &tmp, None, false, Some(&cycle), false).unwrap();
+        assert_eq!(text, "Documents", "Tab wraps forward");
+        let cycle = cycle.unwrap();
+
+        let (text, _) = complete_go_to(&text, &tmp, None, false, Some(&cycle), true).unwrap();
+        assert_eq!(text, "Downloads", "BackTab cycles backwards");
+
+        let (text, _) = complete_go_to("Do", &tmp, None, false, None, true).unwrap();
+        assert_eq!(text, "Downloads", "first BackTab starts at the last match");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn complete_go_to_keeps_tilde_stem_and_separator() {
+        let home = complete_fixture("home");
+        let current = complete_fixture("cwd");
+        std::fs::create_dir_all(home.join("Documents")).unwrap();
+        std::fs::create_dir_all(current.join("sub").join("docs")).unwrap();
+        std::fs::create_dir_all(current.join("other")).unwrap();
+
+        assert_eq!(
+            complete_go_to("~", &current, Some(&home), false, None, false)
+                .unwrap()
+                .0,
+            "~/"
+        );
+        assert_eq!(
+            complete_go_to("~/Do", &current, Some(&home), false, None, false)
+                .unwrap()
+                .0,
+            "~/Documents/"
+        );
+        assert_eq!(
+            complete_go_to("sub/do", &current, None, false, None, false)
+                .unwrap()
+                .0,
+            "sub/docs/"
+        );
+
+        let (text, cycle) = complete_go_to("", &current, None, false, None, false).unwrap();
+        assert_eq!(text, "other");
+        let cycle = cycle.expect("empty input cycles the current folder's children");
+        let (text, _) = complete_go_to(&text, &current, None, false, Some(&cycle), false).unwrap();
+        assert_eq!(text, "sub");
+
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&current);
+    }
+
+    #[test]
+    fn complete_go_to_hidden_dirs_follow_prefix_and_show_hidden() {
+        let tmp = complete_fixture("hidden");
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+        std::fs::create_dir_all(tmp.join(".git")).unwrap();
+
+        assert_eq!(
+            complete_go_to("", &tmp, None, false, None, false)
+                .unwrap()
+                .0,
+            "src/"
+        );
+        assert_eq!(
+            complete_go_to(".", &tmp, None, false, None, false)
+                .unwrap()
+                .0,
+            ".git/"
+        );
+        let (text, cycle) = complete_go_to("", &tmp, None, true, None, false).unwrap();
+        assert_eq!(text, ".git");
+        let cycle = cycle.unwrap();
+        let (text, _) = complete_go_to(&text, &tmp, None, true, Some(&cycle), false).unwrap();
+        assert_eq!(text, "src");
+
+        assert!(complete_go_to("missing", &tmp, None, false, None, false).is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn complete_go_to_is_case_insensitive() {
+        let tmp = complete_fixture("case");
+        std::fs::create_dir_all(tmp.join("Documents")).unwrap();
+        assert_eq!(
+            complete_go_to("doc", &tmp, None, false, None, false)
+                .unwrap()
+                .0,
+            "Documents/"
+        );
+        assert_eq!(
+            complete_go_to("DOC", &tmp, None, false, None, false)
+                .unwrap()
+                .0,
+            "Documents/"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn delete_last_path_word_drops_one_component() {
+        let mut buf = String::from("~/Documents/src/");
+        delete_last_path_word(&mut buf);
+        assert_eq!(buf, "~/Documents/");
+        delete_last_path_word(&mut buf);
+        assert_eq!(buf, "~/");
+        delete_last_path_word(&mut buf);
+        assert_eq!(buf, "");
+        delete_last_path_word(&mut buf);
+        assert_eq!(buf, "");
+
+        buf = String::from("foo/bar");
+        delete_last_path_word(&mut buf);
+        assert_eq!(buf, "foo/");
+        buf = String::from(r"foo\bar\");
+        delete_last_path_word(&mut buf);
+        assert_eq!(buf, "foo\\");
+    }
+
+    #[test]
+    fn go_to_alt_backspace_deletes_a_path_word() {
+        let _env = crate::persist::test_env("picker-go-to-word-delete");
+        let tmp = complete_fixture("word-delete");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_folder_picker_at(tmp.clone());
+        app.picker_start_go_to();
+        for c in "~/Documents/src/".chars() {
+            app.handle_picker_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+
+        app.handle_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+        assert_eq!(
+            app.picker.as_ref().unwrap().going_to.as_deref(),
+            Some("~/Documents/")
+        );
+        assert!(app.picker.as_ref().unwrap().go_to_cycle.is_none());
+
+        app.handle_picker_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(app.picker.as_ref().unwrap().going_to.as_deref(), Some("~/"));
+
+        app.handle_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+        assert_eq!(app.picker.as_ref().unwrap().going_to.as_deref(), Some(""));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn go_to_tab_completes_folders_without_opening() {
+        let _env = crate::persist::test_env("picker-go-to-tab");
+        let tmp = complete_fixture("app-tab");
+        std::fs::create_dir_all(tmp.join("Documents")).unwrap();
+        std::fs::create_dir_all(tmp.join("Downloads")).unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let workspaces_before = app.workspaces.len();
+        app.open_folder_picker_at(tmp.clone());
+
+        app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(
+            app.picker.as_ref().unwrap().going_to.is_none(),
+            "Tab is inert while browsing"
+        );
+
+        app.picker_start_go_to();
+        app.handle_picker_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
+        app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.picker.as_ref().unwrap().going_to.as_deref(), Some("Do"));
+        assert!(app.picker.as_ref().unwrap().go_to_cycle.is_some());
+
+        app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.picker.as_ref().unwrap().going_to.as_deref(),
+            Some("Documents")
+        );
+        app.handle_picker_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(
+            app.picker.as_ref().unwrap().going_to.as_deref(),
+            Some("Downloads")
+        );
+
+        app.handle_picker_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(
+            app.picker.as_ref().unwrap().go_to_cycle.is_none(),
+            "typing clears cycle state"
+        );
+        app.handle_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        app.handle_event(AppEvent::Paste("s".into()));
+        assert!(app.picker.as_ref().unwrap().go_to_cycle.is_none());
+
+        let before = app.picker.as_ref().unwrap().going_to.clone();
+        app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.picker.as_ref().unwrap().going_to,
+            before,
+            "failed completion is a no-op"
+        );
+
+        if let Some(buf) = app.picker.as_mut().unwrap().going_to.as_mut() {
+            buf.clear();
+            buf.push_str("Documents");
+        }
+        app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.picker.as_ref().unwrap().going_to.as_deref(),
+            Some("Documents/")
+        );
+        app.handle_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.picker.as_ref().unwrap().path, tmp.join("Documents"));
+        assert_eq!(app.workspaces.len(), workspaces_before);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn go_to_footer_complete_hint_is_clickable() {
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let _env = crate::persist::test_env("picker-go-to-tab-footer");
+        let tmp = complete_fixture("footer");
+        std::fs::create_dir_all(tmp.join("Documents")).unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_folder_picker_at(tmp.clone());
+        app.picker_start_go_to();
+        app.handle_picker_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("complete"));
+        assert!(screen.contains("go to"));
+
+        let tab = app
+            .picker_rects
+            .iter()
+            .find_map(|(hit, rect)| (*hit == PickerHit::Hint(KeyCode::Tab)).then_some(*rect))
+            .expect("Tab complete footer hit target");
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: tab.x,
+            row: tab.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(
+            app.picker.as_ref().unwrap().going_to.as_deref(),
+            Some("Documents/")
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
