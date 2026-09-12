@@ -112,6 +112,8 @@ pub enum GeneralRow {
     FilesShowHidden,
     ShiftEnter,
     CheckUpdates,
+    /// Resume captured native agent sessions while restoring the server.
+    ResumeAgentSessions,
     /// Replay each agent's own CLI options on resume (docs/62).
     ResumeFlags,
     /// Open a new tab/split at the workspace root instead of inheriting the
@@ -147,6 +149,7 @@ impl App {
             GeneralRow::FilesShowHidden,
             GeneralRow::ShiftEnter,
             GeneralRow::CheckUpdates,
+            GeneralRow::ResumeAgentSessions,
             GeneralRow::ResumeFlags,
             GeneralRow::NewPaneToWorkspaceRoot,
             GeneralRow::AgentTitle,
@@ -161,13 +164,11 @@ impl App {
     /// Index of the first notification row (where the `── Notify ──` divider
     /// goes), mirroring `dock_section_start` in the Layout tab.
     ///
-    /// This is one short: `AgentTitle` is a general setting, so the divider
-    /// renders above it and it reads as a notification option. That off-by-one
-    /// predates the `File click behavior` row — the constant went 6 → 7 only to
-    /// keep the divider where it already was. Fixing it properly means 8, which
-    /// moves a row users have already learned, so it is left for its own change.
+    /// `AgentTitle` remains the first row after the historical divider. New
+    /// general rows above it advance this index so the existing layout stays in
+    /// place.
     pub fn general_section_start(&self) -> usize {
-        7
+        8
     }
 
     /// The Layout tab's ordered selectable rows (docs/29). The first index of the
@@ -1305,6 +1306,10 @@ impl App {
                 self.config.check_updates = !self.config.check_updates;
                 self.persist_config();
             }
+            Some(GeneralRow::ResumeAgentSessions) => {
+                self.config.resume_agent_sessions = !self.config.resume_agent_sessions;
+                self.persist_config();
+            }
             Some(GeneralRow::ResumeFlags) => {
                 self.config.resume_launch_flags = !self.config.resume_launch_flags;
                 self.persist_config();
@@ -1722,6 +1727,36 @@ mod tests {
         assert!(!old.resume_launch_flags);
     }
 
+    #[test]
+    fn agent_session_resume_toggle_defaults_on_and_persists() {
+        let _env = crate::persist::test_env("resume-agent-sessions");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        assert!(app.config.resume_agent_sessions);
+
+        app.open_settings();
+        if let Some(ui) = app.settings.as_mut() {
+            ui.tab = SettingsTab::General;
+        }
+        let row = app
+            .general_rows()
+            .iter()
+            .position(|r| *r == GeneralRow::ResumeAgentSessions)
+            .expect("the row is on the General tab");
+        assert!(row < app.general_section_start());
+
+        app.adjust_general(row, 1);
+        assert!(!app.config.resume_agent_sessions);
+        app.flush_config_for_test(&rx);
+        assert!(!crate::config::load().resume_agent_sessions);
+
+        app.adjust_general(row, 1);
+        assert!(app.config.resume_agent_sessions);
+
+        let old: crate::config::Config = serde_json::from_str("{}").unwrap();
+        assert!(old.resume_agent_sessions, "old configs keep resume enabled");
+    }
+
     /// The "Open new pane/tab at workspace root" toggle is opt-in: off by
     /// default (a new tab/split inherits the focused pane's cwd), and flipping
     /// it in Settings → General persists.
@@ -1782,7 +1817,7 @@ mod tests {
         if let Some(ui) = app.settings.as_mut() {
             ui.tab = SettingsTab::General;
         }
-        assert_eq!(app.settings_rows(SettingsTab::General), 13);
+        assert_eq!(app.settings_rows(SettingsTab::General), 14);
         let rows = app.general_rows();
         assert_eq!(rows[0], GeneralRow::FileOpen, "file-open leads the tab");
         assert_eq!(

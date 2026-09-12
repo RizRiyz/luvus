@@ -3459,9 +3459,13 @@ impl App {
                 for (raw, ps) in &tab.panes {
                     let id = PaneId::alloc();
                     // Re-attach the pane's live name to its new id (docs: names are
-                    // pane-keyed and pane ids are reallocated each run).
+                    // pane-keyed and pane ids are reallocated each run). Agent
+                    // sessions restored as plain shells drop their alias so
+                    // `agent.start` can reuse the previous name.
                     if let Some(nm) = &ps.name {
-                        restored_names.push((nm.clone(), id));
+                        if ps.agent_session.is_none() || config.resume_agent_sessions {
+                            restored_names.push((nm.clone(), id));
+                        }
                     }
                     // A file-view leaf (docs/38 FILE-3): rebuild the view and
                     // re-read the file off-loop; no PTY is spawned.
@@ -3564,16 +3568,22 @@ impl App {
                     // PowerShell can start directly on the resume command.
                     // POSIX and unrecognised shells start normally and receive
                     // it through the PTY after interactive profile setup.
-                    // Re-apply the launch flags captured at save time (docs/62),
-                    // unless Settings → General turns that off.
-                    let resume = ps.agent_session.as_ref().and_then(|(agent, sid)| {
-                        crate::agent::resume_for(
-                            agent,
-                            sid,
-                            ps.agent_launch.as_deref(),
-                            config.resume_launch_flags,
-                        )
-                    });
+                    // Settings → General can restore this as a genuine plain
+                    // shell instead. In that mode no stale live agent identity
+                    // is rebound to the replacement terminal.
+                    let auto_resume = config.resume_agent_sessions;
+                    let resume = if auto_resume {
+                        ps.agent_session.as_ref().and_then(|(agent, sid)| {
+                            crate::agent::resume_for(
+                                agent,
+                                sid,
+                                ps.agent_launch.as_deref(),
+                                config.resume_launch_flags,
+                            )
+                        })
+                    } else {
+                        None
+                    };
                     let resume_argv = resume.as_deref().and_then(|r| {
                         crate::platform::shell_run_then_interactive(&shell, r.trim())
                     });
@@ -3648,7 +3658,7 @@ impl App {
                     }
                     let cmd = pane.command.clone();
                     let mut st = PaneStatus::new(cmd);
-                    if let Some((agent, sid)) = &ps.agent_session {
+                    if let Some((agent, sid)) = ps.agent_session.as_ref().filter(|_| auto_resume) {
                         st.agent = agent.clone();
                         st.agent_session = Some(AgentSession {
                             agent: agent.clone(),
@@ -8586,6 +8596,76 @@ mod tests {
         assert_eq!(restored.layout().len(), 2);
         assert_eq!(restored.workspaces[0].name, "Luvus website");
         assert!(restored.workspaces[0].pinned);
+    }
+
+    #[test]
+    fn disabled_agent_resume_restores_a_plain_shell_without_stale_identity() {
+        let _env = crate::persist::test_env("agent-resume-disabled");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.set_agent_name(pane, Some("reviewer"));
+        let status = app.status.get_mut(&pane).unwrap();
+        status.agent = "codex".into();
+        status.agent_session = Some(AgentSession {
+            agent: "codex".into(),
+            session_id: "saved-session".into(),
+        });
+
+        app.handle_event(key(' ', KeyModifiers::CONTROL));
+        app.handle_event(key('v', KeyModifiers::NONE));
+        let shell = *app
+            .layout()
+            .leaves()
+            .iter()
+            .find(|id| **id != pane)
+            .expect("split created a second pane");
+        app.set_agent_name(shell, Some("backend"));
+
+        let snapshot = persist::snapshot(&app);
+        assert!(
+            snapshot.workspaces[0].tabs[0]
+                .panes
+                .iter()
+                .any(|(_, pane)| {
+                    pane.name.as_deref() == Some("reviewer")
+                        && pane
+                            .agent_session
+                            .as_ref()
+                            .map(|(agent, session)| (agent.as_str(), session.as_str()))
+                            == Some(("codex", "saved-session"))
+                }),
+            "disabling restore must not make snapshot capture destructive"
+        );
+
+        let mut config = crate::config::load();
+        config.resume_agent_sessions = false;
+        crate::config::save(&config);
+
+        let (restore_tx, _restore_rx) = std::sync::mpsc::channel();
+        let restored = App::from_snapshot(snapshot, restore_tx).expect("snapshot restores");
+        assert!(
+            restored
+                .status
+                .values()
+                .all(|status| status.agent_session.is_none()),
+            "the plain shell must not retain the old live agent binding"
+        );
+        assert!(
+            restored
+                .status
+                .values()
+                .all(|status| status.agent != "codex"),
+            "the sidebar must not present the replacement shell as the old agent"
+        );
+        assert!(
+            !restored.agent_names.contains_key("reviewer"),
+            "discarded agent sessions must release their alias for reuse"
+        );
+        assert!(
+            restored.agent_names.contains_key("backend"),
+            "plain-shell aliases still restore when agent resume is disabled"
+        );
     }
 
     #[test]

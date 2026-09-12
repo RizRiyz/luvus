@@ -45,6 +45,8 @@ cleanly across versions because unknown fields get defaults.
 | `notifications.sound_style` | notification cue family: `retro` (default), `soft`, or `pulse` |
 | `notifications.sound_on_done` | play the selected done cue after an agent finishes; defaults to `false` |
 | `notifications.sound_on_blocked` | play the selected blocked cue when an agent needs attention; defaults to `false` |
+| `resume_agent_sessions` | automatically resume captured native agent sessions when restoring the server; defaults to `true`. Turn it off in **Settings → General** to restore those panes as ordinary shells. |
+| `resume_launch_flags` | replay each agent pane's captured CLI options during automatic resume; defaults to `false` and has no effect when `resume_agent_sessions` is off |
 | `agents_active_only` | show only live agents in the AGENTS dock when `true`; defaults to `false`, which also shows resumable sessions |
 | `agents_this_workspace` | scope live agents and resumable sessions to the active workspace; defaults to `false` and is independent of `agents_active_only`. Toggle it with prefix `A` or the dynamic workspace-scope action in any AGENTS row's right-click menu. |
 | `sidebars.files_side` | last side used by the FILES dock (`left` or `right`), retained while the dock is hidden |

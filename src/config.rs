@@ -47,6 +47,11 @@ pub struct Config {
     /// never self-updates (installed via cargo/brew/etc).
     #[serde(default = "yes")]
     pub check_updates: bool,
+    /// Resume a pane's captured native agent session when restoring the server
+    /// snapshot. Enabled by default to preserve Luvus's established behavior;
+    /// disabling it restores those panes as ordinary shells.
+    #[serde(default = "yes")]
+    pub resume_agent_sessions: bool,
     /// Replay the CLI options an agent pane was launched with when resuming it
     /// after a restart (docs/62): a pane started as
     /// `claude --permission-mode … --model …` comes back with those options
@@ -473,6 +478,7 @@ impl Default for Config {
             layout: LayoutConfig::default(),
             notifications: NotifyConfig::default(),
             check_updates: true,
+            resume_agent_sessions: true,
             resume_launch_flags: false,
             agents_active_only: false,
             agents_this_workspace: false,

@@ -135,6 +135,12 @@ with a stable native store, it discovers the session by pane folder with no
 setup. Integrations provide exact ownership where directory matching alone is
 not sufficient, and Luvus runs the agent's own resume command:
 
+Automatic resume remains enabled by default. Turn off **Resume agent sessions
+on restore** in **Settings → General** when you want restored agent panes to
+open as ordinary shells instead. This does not disable session discovery or
+manual `luvus agent resume`; **Remember CLI option on resume** has no effect
+while automatic resume is off.
+
 | Agent | Resumes via |
 |---|---|
 | Claude Code | its project transcript store |
