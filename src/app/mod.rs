@@ -5301,6 +5301,21 @@ impl App {
     /// folder with no error anywhere — indistinguishable from luvus ignoring
     /// them. A toast is raised here so every caller reports it the same way.
     pub fn create_workspace_at(&mut self, cwd: PathBuf) -> bool {
+        self.create_workspace_at_with_focus(cwd, true)
+    }
+
+    /// Open a static workspace while optionally preserving the current selection.
+    ///
+    /// Automatic attach-open uses `focus = false`: the new workspace must exist in
+    /// the sidebar, but attaching another client must not move every client away
+    /// from the workspace the server already had selected. Remember the selection
+    /// by stable ID so this stays correct if workspace ordering changes later.
+    fn create_workspace_at_with_focus(&mut self, cwd: PathBuf, focus: bool) -> bool {
+        let previous_active_id = if focus {
+            None
+        } else {
+            self.workspaces.get(self.active_ws).map(|ws| ws.id.clone())
+        };
         let name = ws_name(&cwd);
         let branch = git_branch(&cwd);
         let Some(id) = self.spawn_into(cwd.clone()) else {
@@ -5330,6 +5345,15 @@ impl App {
             crate::logging::EventKind::WorkspaceOpen,
             &[crate::logging::Field::WorkspaceIndex(ws as u64)],
         );
+        if let Some(previous_active_id) = previous_active_id {
+            if let Some(previous_active) = self
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.id == previous_active_id)
+            {
+                self.active_ws = previous_active;
+            }
+        }
         true
     }
 
@@ -9808,6 +9832,86 @@ mod tests {
     }
 
     #[test]
+    fn closing_an_auto_opened_workspace_keeps_restored_focus_renderable() {
+        let _env = crate::persist::test_env("close-auto-opened-workspace");
+        let root = std::env::temp_dir().join(format!(
+            "luvus-close-auto-opened-workspace-{}",
+            std::process::id()
+        ));
+        let retained = root.join("retained");
+        let automatic = root.join("automatic");
+        std::fs::create_dir_all(&retained).unwrap();
+        std::fs::create_dir_all(&automatic).unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        assert!(app.create_workspace_at(retained.clone()));
+        let selected_id = app.ws().id.clone();
+        let snapshot = crate::persist::snapshot(&app);
+        drop(app);
+
+        let (tx2, _rx2) = std::sync::mpsc::channel();
+        let mut app = App::from_snapshot(snapshot, tx2).expect("workspaces restore");
+        assert_eq!(app.ws().id, selected_id);
+
+        let open = |app: &mut App, focus: bool| {
+            let (reply, _rx) = mpsc::channel();
+            let response = app.handle_api(&ApiRequest {
+                id: "1".into(),
+                method: "workspace.open".into(),
+                params: json!({
+                    "path": automatic.display().to_string(),
+                    "focus": focus,
+                }),
+                reply,
+            });
+            let response: Value = serde_json::from_str(&response).unwrap();
+            assert!(response.get("error").is_none(), "open failed: {response}");
+        };
+
+        open(&mut app, false);
+        assert_eq!(
+            app.ws().id,
+            selected_id,
+            "automatic creation preserves the restored selection"
+        );
+        let automatic_pane = app
+            .workspaces
+            .iter()
+            .find(|workspace| crate::platform::same_path(&workspace.cwd, &automatic))
+            .map(|workspace| workspace.tabs[workspace.active_tab].layout.focus)
+            .expect("automatic workspace exists");
+
+        // A background shell can exit before the next detection tick. Closing it
+        // must leave the restored selection valid for the immediate render.
+        app.handle_event(AppEvent::PtyExit(automatic_pane));
+        assert_eq!(app.ws().id, selected_id);
+        assert!(app.panes.contains_key(&app.layout().focus));
+
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        // The explicitly focused form follows the same close path and must also
+        // fall back to a surviving workspace without waiting for repair.
+        open(&mut app, true);
+        let focused = app.layout().focus;
+        app.handle_event(AppEvent::PtyExit(focused));
+        assert!(app.active_ws < app.workspaces.len());
+        assert!(app.ws().active_tab < app.ws().tabs.len());
+        assert!(app.panes.contains_key(&app.layout().focus));
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn workspace_terminal_cwd_follows_the_focused_pane() {
         let _env = crate::persist::test_env("workspace-focused-pane-cwd");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -13436,9 +13540,37 @@ mod tests {
             "focus:false kept the active workspace on reopen"
         );
 
+        // Adding a previously unknown folder must preserve the same selection.
+        // The already-open assertion above used to pass while this case still
+        // activated the appended workspace unconditionally.
+        let background = std::env::temp_dir().join(format!(
+            "luvus-attach-open-background-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&background).unwrap();
+        let selected_id = app.ws().id.clone();
+        let before = app.workspaces.len();
+        open(&mut app, &background, false);
+        assert_eq!(app.workspaces.len(), before + 1, "new folder is added");
+        assert_eq!(
+            app.ws().id,
+            selected_id,
+            "focus:false preserves selection when it creates a workspace"
+        );
+        assert!(app
+            .workspaces
+            .iter()
+            .any(|workspace| crate::platform::same_path(&workspace.cwd, &background)));
+
+        // Explicit open keeps the existing focus behavior for the same folder.
+        open(&mut app, &background, true);
+        assert!(crate::platform::same_path(&app.ws().cwd, &background));
+
         // An explicit open (focus:true) still focuses the folder.
         open(&mut app, &first, true);
         assert_eq!(app.ws().cwd, first, "explicit open still focuses");
+        drop(app);
+        let _ = std::fs::remove_dir_all(background);
     }
 
     #[test]
