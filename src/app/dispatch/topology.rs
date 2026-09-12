@@ -639,13 +639,12 @@ impl App {
             // when `luvus` attaches to a running server from a new folder, so the
             // launch directory shows up as a workspace.
             //
-            // `focus` (default true) governs the *already-open* case. The
-            // automatic attach-open (`open_cwd_workspace`) passes `false`: it
-            // ensures the launch folder is a workspace but must NOT steal focus
-            // from the workspace a restored session left you on — otherwise
-            // reopening `luvus` always snaps back to the launch folder (usually
-            // the first workspace), never the one you were last using. An
-            // explicit `luvus workspace open <path>` omits it and still focuses.
+            // `focus` (default true) governs both existing and newly created
+            // workspaces. The automatic attach-open (`open_cwd_workspace`)
+            // passes `false`: it ensures the launch folder is a workspace but
+            // must NOT steal focus from the workspace a restored session left
+            // you on. An explicit `luvus workspace open <path>` omits it and
+            // still focuses.
             let path = PathBuf::from(req_str(p, "path")?);
             let focus = p.get("focus").and_then(|v| v.as_bool()).unwrap_or(true);
             match self
@@ -663,7 +662,7 @@ impl App {
                 // Report a failed open instead of answering with the
                 // *previously* active node, which read as success and left
                 // the caller (and the user) looking at the wrong folder.
-                None if !self.create_workspace_at(path.clone()) => {
+                None if !self.create_workspace_at_with_focus(path.clone(), focus) => {
                     return Err((
                         "spawn_failed".to_string(),
                         format!(
