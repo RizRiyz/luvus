@@ -179,8 +179,9 @@ repository, while workspace mode creates a dedicated branchless task tab there.
 `task.retry` accepts `{"id":"t1"}` for terminal `done`, `failed`, `review`, or
 `blocked` work. Manual tasks return to `queued` with an incremented `attempt`
 and bounded `previous_attempts`. Automation-owned tasks return a new
-`automation_run` whose `retry_of` points to the preserved original record. A
-superseded `review` run is finished as `cancelled` so it cannot block the retry.
+`automation_run` whose `retry_of` points to the preserved original record.
+Retrying from `review` or `blocked` finishes the superseded source run as
+`cancelled` so it cannot block the retry.
 
 ```json
 {"id":"1","method":"task.start","params":{"id":"t3","mode":"workspace","workspace_id":"workspace_example","agent":"codex"}}
