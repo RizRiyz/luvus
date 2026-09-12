@@ -117,23 +117,8 @@ fn read_handshake_message<R: Read>(reader: &mut R) -> Result<ServerMessage> {
     protocol::read_message(reader).map_err(|error| HandshakeIoError(error).into())
 }
 
-/// The v0.14.1 wire accidentally placed `ShellSidebars` before `Welcome`, so
-/// its pre-version reply used enum variant one. Accept that one released shape
-/// as well as the frozen variant-zero shape; all post-handshake traffic remains
-/// guarded by the negotiated protocol version.
-#[derive(serde::Deserialize)]
-enum WelcomeHandshakeMessage {
-    Welcome { version: u32, error: Option<String> },
-    V0141Welcome { version: u32, error: Option<String> },
-}
-
 fn read_welcome_message<R: Read>(reader: &mut R) -> Result<(u32, Option<String>)> {
-    let message: WelcomeHandshakeMessage =
-        protocol::read_message(reader).map_err(HandshakeIoError)?;
-    Ok(match message {
-        WelcomeHandshakeMessage::Welcome { version, error }
-        | WelcomeHandshakeMessage::V0141Welcome { version, error } => (version, error),
-    })
+    protocol::read_welcome_message(reader).map_err(|error| HandshakeIoError(error).into())
 }
 
 fn write_handshake_message<W: Write>(writer: &mut W, message: &ClientMessage) -> Result<()> {

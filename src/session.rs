@@ -519,6 +519,50 @@ pub fn restart_session(name: Option<&str>) -> Result<SessionInfo, String> {
     start_session(name)
 }
 
+/// Restart one server from a detached helper process. The caller may live in a
+/// pane owned by that server, so the helper must survive the server closing the
+/// caller's PTY before the replacement server is started.
+pub fn restart_session_via_helper(name: Option<&str>) -> Result<SessionInfo, String> {
+    if let Some(name) = name {
+        validate_name(name)?;
+    }
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let mut command = Command::new(executable);
+    command
+        .arg("--session")
+        .arg(name.unwrap_or(DEFAULT_SESSION_NAME))
+        .arg("__restart-session-helper")
+        .env_remove("LUVUS_SOCKET_PATH")
+        .env_remove(SESSION_ENV_VAR)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    detach_server_command(&mut command);
+    let output = command
+        .spawn()
+        .map_err(|error| format!("could not start detached restart helper: {error}"))?
+        .wait_with_output()
+        .map_err(|error| format!("could not wait for detached restart helper: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        let detail = detail.trim();
+        return Err(if detail.is_empty() {
+            format!("detached restart helper exited with {}", output.status)
+        } else {
+            detail.to_string()
+        });
+    }
+    let info = session_info(name);
+    if info.running {
+        Ok(info)
+    } else {
+        Err(format!(
+            "detached restart helper exited before session {} became ready",
+            name.unwrap_or(DEFAULT_SESSION_NAME)
+        ))
+    }
+}
+
 fn terminate_and_wait(child: &mut std::process::Child) -> Result<(), String> {
     let kill = child.kill();
     match child.wait() {

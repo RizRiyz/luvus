@@ -194,6 +194,47 @@ fn start_child(
         .stack_size(256 * 1024)
         .spawn(move || {
             let mut reader = BufReader::new(stdout);
+            let welcome = protocol::read_welcome_message(&mut reader)
+                .map(|(version, error)| ServerMessage::Welcome { version, error });
+            match welcome {
+                Ok(message) => {
+                    if !notify(LinkEvent::Message {
+                        machine_id: machine_id.clone(),
+                        session: reader_session.clone(),
+                        generation,
+                        message,
+                    }) {
+                        cleanup.close();
+                        let _ = input_writer.join();
+                        let _ = cleanup
+                            .child
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .wait();
+                        return;
+                    }
+                }
+                Err(error) => {
+                    let _ = notify(LinkEvent::Disconnected {
+                        machine_id,
+                        session: reader_session,
+                        generation,
+                        reason: if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                            "SSH connection closed".to_string()
+                        } else {
+                            "remote session protocol failed".to_string()
+                        },
+                    });
+                    cleanup.close();
+                    let _ = input_writer.join();
+                    let _ = cleanup
+                        .child
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .wait();
+                    return;
+                }
+            }
             loop {
                 match protocol::read_message::<_, ServerMessage>(&mut reader) {
                     Ok(message) => {

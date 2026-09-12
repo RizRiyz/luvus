@@ -14,6 +14,9 @@ use crate::sound::SoundSignal;
 use crate::terminal::theme_probe::TerminalColors;
 
 pub const PROTOCOL_VERSION: u32 = 18;
+/// v0.14.1 shipped protocol 17 with `Welcome` accidentally moved to enum
+/// variant one. Its mismatch reply must use that released position.
+const V0141_PROTOCOL_VERSION: u32 = 17;
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 /// Local display cell size in pixels, or `(0, 0)` when the host does not report it.
@@ -244,6 +247,59 @@ pub enum ServerMessage {
     MachineCatalogChanged {
         revision: u64,
     },
+}
+
+/// The only historical pre-negotiation server shape that shipped with
+/// `Welcome` outside variant zero. This decoder is shared by local, federated,
+/// and SSH-backed clients so every attach path reports an actionable mismatch.
+#[derive(Deserialize)]
+enum WelcomeHandshakeMessage {
+    Welcome { version: u32, error: Option<String> },
+    V0141Welcome { version: u32, error: Option<String> },
+}
+
+#[allow(dead_code)]
+#[derive(Serialize)]
+enum V0141HandshakeMessage {
+    ShellSidebars,
+    Welcome { version: u32, error: Option<String> },
+}
+
+/// Decode the frozen variant-zero `Welcome` and the released v0.14.1
+/// variant-one shape before the peers have agreed on a protocol version.
+pub(crate) fn read_welcome_message<R: Read>(
+    reader: &mut R,
+) -> std::io::Result<(u32, Option<String>)> {
+    let message: WelcomeHandshakeMessage = read_message(reader)?;
+    Ok(match message {
+        WelcomeHandshakeMessage::Welcome { version, error }
+        | WelcomeHandshakeMessage::V0141Welcome { version, error } => (version, error),
+    })
+}
+
+/// Write a protocol-mismatch response in the shape the peer can decode.
+pub(crate) fn write_version_mismatch<W: Write>(
+    writer: &mut W,
+    peer_version: Option<u32>,
+) -> std::io::Result<()> {
+    let error = Some("protocol version mismatch".to_string());
+    if peer_version == Some(V0141_PROTOCOL_VERSION) {
+        write_message(
+            writer,
+            &V0141HandshakeMessage::Welcome {
+                version: PROTOCOL_VERSION,
+                error,
+            },
+        )
+    } else {
+        write_message(
+            writer,
+            &ServerMessage::Welcome {
+                version: PROTOCOL_VERSION,
+                error,
+            },
+        )
+    }
 }
 
 /// Theme projection for the owner-local Remote Machine form. Keeping this
@@ -762,6 +818,35 @@ mod tests {
         assert!(matches!(
             read_message::<_, LegacyServerMessage>(&mut &current_reply[..]).unwrap(),
             LegacyServerMessage::Welcome { version, error: Some(error) }
+                if version == PROTOCOL_VERSION && error == "protocol version mismatch"
+        ));
+    }
+
+    /// v0.14.1 moved `Welcome` to variant one. A current server must answer
+    /// that released client in the shape it can decode, while retaining the
+    /// frozen variant-zero shape for every other protocol generation.
+    #[test]
+    fn version_mismatch_reply_matches_the_requesting_client_wire_shape() {
+        #[allow(dead_code)]
+        #[derive(Deserialize)]
+        enum V0141ServerMessage {
+            ShellSidebars,
+            Welcome { version: u32, error: Option<String> },
+        }
+
+        let mut v0141_reply = Vec::new();
+        write_version_mismatch(&mut v0141_reply, Some(V0141_PROTOCOL_VERSION)).unwrap();
+        assert!(matches!(
+            read_message::<_, V0141ServerMessage>(&mut &v0141_reply[..]).unwrap(),
+            V0141ServerMessage::Welcome { version, error: Some(error) }
+                if version == PROTOCOL_VERSION && error == "protocol version mismatch"
+        ));
+
+        let mut frozen_reply = Vec::new();
+        write_version_mismatch(&mut frozen_reply, Some(6)).unwrap();
+        assert!(matches!(
+            read_message::<_, ServerMessage>(&mut &frozen_reply[..]).unwrap(),
+            ServerMessage::Welcome { version, error: Some(error) }
                 if version == PROTOCOL_VERSION && error == "protocol version mismatch"
         ));
     }

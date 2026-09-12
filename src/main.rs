@@ -105,6 +105,17 @@ fn main() -> Result<()> {
     if args.get(1).map(String::as_str) == Some("__automation-worker") {
         std::process::exit(automation::run_worker(&args)?);
     }
+    // A server restart initiated inside one of its panes cannot synchronously
+    // survive that server closing the pane's PTY. `restart_session_via_helper`
+    // launches this private route in a detached process group first.
+    if args.get(1).map(String::as_str) == Some("__restart-session-helper") {
+        if args.len() != 2 {
+            return Err(anyhow!("invalid internal session restart invocation"));
+        }
+        let selected = session::active_name();
+        session::restart_session(selected.as_deref()).map_err(anyhow::Error::msg)?;
+        return Ok(());
+    }
 
     // One-time local cleanup of the old default-on skill installation. This
     // never downloads or installs a skill; it only removes legacy managed
@@ -1169,7 +1180,12 @@ fn server_restart_all(context: i18n::cli::Context) -> Result<()> {
     let mut errors = Vec::new();
     for info in sessions {
         let selected = (!info.default).then_some(info.name.as_str());
-        match session::restart_session(selected) {
+        let restarted = if info.name == current {
+            session::restart_session_via_helper(selected)
+        } else {
+            session::restart_session(selected)
+        };
+        match restarted {
             Ok(restarted) => print_server_card_for(
                 context,
                 context.text("restarted"),
