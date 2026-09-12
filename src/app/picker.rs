@@ -303,10 +303,14 @@ fn list_go_to_dirs(dir: &Path, typed_name: &str, show_hidden: bool) -> GoToMatch
         if !include_hidden && name.starts_with('.') {
             continue;
         }
-        if !entry.file_type().map(|ty| ty.is_dir()).unwrap_or(false) {
+        if !name_has_prefix_ignore_case(&name, typed_name) {
             continue;
         }
-        if !name_has_prefix_ignore_case(&name, typed_name) {
+        // Cheap name filters run first so only real candidates cost a `stat`.
+        // `DirEntry::file_type` describes the link itself, which would hide a
+        // symlinked directory that Enter happily navigates into; resolve the
+        // joined path instead so Tab and Enter agree on what is a folder.
+        if !dir.join(&name).is_dir() {
             continue;
         }
         if names.len() < MAX_GO_TO_MATCHES {
@@ -772,8 +776,8 @@ impl App {
             }
             return;
         }
-        // One scan at a time. A superseded scan still releases its own slot on
-        // arrival, so this cannot wedge Tab.
+        // One scan at a time for the *current* text. Editing or navigating
+        // retires the slot, so a superseded listing never gates the next Tab.
         if picker.go_to_scanning.is_some() {
             return;
         }
@@ -814,12 +818,21 @@ impl App {
     /// Retire whatever completion the Go to field currently accepts: drops an
     /// armed cycle and fences any scan still in flight. Every edit and every
     /// directory change routes through here.
+    ///
+    /// The scan slot is released too, so Tab can immediately request completion
+    /// for the new text instead of waiting on a listing whose result is already
+    /// doomed — a stalled network mount would otherwise leave Tab dead. That is
+    /// safe because the slot carries its generation: the abandoned scan can no
+    /// longer match, so it cannot release the slot a later Tab is waiting on.
+    /// A filesystem read cannot be cancelled, so the abandoned work still runs to
+    /// completion on the worker; admission stays bounded by `IoJobs`.
     fn invalidate_go_to_completion(&mut self) {
         self.picker_go_to_generation = self.picker_go_to_generation.wrapping_add(1);
         let generation = self.picker_go_to_generation;
         if let Some(p) = self.picker.as_mut() {
             p.go_to_generation = generation;
             p.go_to_cycle = None;
+            p.go_to_scanning = None;
         }
     }
 
@@ -2069,31 +2082,28 @@ mod tests {
         app.picker_start_go_to();
         app.handle_picker_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
 
-        // Queue one scan, then invalidate it by editing so it can never apply.
+        // Queue one scan and hold its completion, then edit so it can never
+        // apply. Editing retires its slot, which is what lets the next Tab run.
         app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         let first = take_completion(&rx);
-        let first_slot = app.picker.as_ref().unwrap().go_to_scanning;
+        let first_slot = app
+            .picker
+            .as_ref()
+            .unwrap()
+            .go_to_scanning
+            .expect("the first scan holds a slot");
         app.handle_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        assert_eq!(
-            app.picker.as_ref().unwrap().go_to_scanning,
-            first_slot,
-            "editing does not pretend the queued scan finished"
-        );
+        assert!(app.picker.as_ref().unwrap().go_to_scanning.is_none());
 
-        // The superseded scan releases its own slot and changes nothing else.
-        assert!(!first.apply(&mut app));
-        let p = app.picker.as_ref().unwrap();
-        assert!(p.go_to_scanning.is_none(), "its own slot is freed");
-        assert_eq!(p.going_to.as_deref(), Some(""));
-
-        // Queue a second scan, then deliver a stale result carrying the first
-        // scan's generation: it must not free the newer scan's slot.
+        // Queue a second scan, then deliver the first scan's late result. It must
+        // neither write the field nor free the slot the second scan is waiting on.
         app.handle_picker_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
         app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         let second_slot = app.picker.as_ref().unwrap().go_to_scanning;
         assert!(second_slot.is_some());
-        let stale = first_slot.expect("the first scan had a generation");
-        assert!(!app.apply_go_to_completion(stale, Some(("bogus".into(), None))));
+        assert_ne!(second_slot, Some(first_slot), "a fresh generation");
+
+        assert!(!first.apply(&mut app));
         assert_eq!(
             app.picker.as_ref().unwrap().go_to_scanning,
             second_slot,
@@ -2105,10 +2115,107 @@ mod tests {
             "and must not write the field"
         );
 
+        // The second scan still applies normally.
         take_completion(&rx).apply(&mut app);
         let p = app.picker.as_ref().unwrap();
         assert_eq!(p.going_to.as_deref(), Some("Documents/"));
         assert!(p.go_to_scanning.is_none());
+
+        app.drain_io_jobs();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn an_obsolete_scan_does_not_gate_the_next_tab() {
+        let _env = crate::persist::test_env("picker-go-to-supersede");
+        let tmp = complete_fixture("supersede");
+        std::fs::create_dir_all(tmp.join("Documents")).unwrap();
+        std::fs::create_dir_all(tmp.join("Music")).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_folder_picker_at(tmp.clone());
+        app.picker_start_go_to();
+        app.handle_picker_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
+        app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        // Hold the first scan's completion: on a stalled mount this is the
+        // listing that has not come back yet.
+        let stalled = take_completion(&rx);
+        let stalled_slot = app.picker.as_ref().unwrap().go_to_scanning;
+        assert!(stalled_slot.is_some());
+
+        // The user gives up on it and types something else. Tab must serve the
+        // new text immediately rather than wait on the doomed listing.
+        app.handle_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(
+            app.picker.as_ref().unwrap().go_to_scanning.is_none(),
+            "editing retires the doomed scan's slot"
+        );
+        app.handle_picker_key(KeyEvent::new(KeyCode::Char('M'), KeyModifiers::NONE));
+        press_tab(
+            &mut app,
+            &rx,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        );
+        assert_eq!(
+            app.picker.as_ref().unwrap().going_to.as_deref(),
+            Some("Music/"),
+            "Tab is not gated on the abandoned scan"
+        );
+
+        // The abandoned listing finally lands and must change nothing.
+        assert!(!stalled.apply(&mut app));
+        assert_eq!(
+            app.picker.as_ref().unwrap().going_to.as_deref(),
+            Some("Music/")
+        );
+
+        app.drain_io_jobs();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn go_to_completes_symlinked_directories_like_enter_does() {
+        let _env = crate::persist::test_env("picker-go-to-symlink");
+        let tmp = complete_fixture("symlink");
+        let target = tmp.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, tmp.join("linked")).unwrap();
+        std::os::unix::fs::symlink(tmp.join("nowhere"), tmp.join("dangling")).unwrap();
+        std::fs::write(tmp.join("plain-file"), b"x").unwrap();
+        std::os::unix::fs::symlink(tmp.join("plain-file"), tmp.join("linked-file")).unwrap();
+
+        // A link to a directory completes: Enter resolves it with `is_dir`, so
+        // refusing to complete it would make Tab disagree with Enter.
+        assert_eq!(
+            scan_go_to("link", &tmp, None, false, false).unwrap().0,
+            "linked/"
+        );
+        // A link to a file, and one that resolves to nothing, are not folders.
+        assert!(scan_go_to("linked-f", &tmp, None, false, false).is_none());
+        assert!(scan_go_to("dang", &tmp, None, false, false).is_none());
+
+        // And Enter agrees, which is the contract being matched.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_folder_picker_at(tmp.clone());
+        app.picker_start_go_to();
+        for c in "link".chars() {
+            app.handle_picker_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        press_tab(
+            &mut app,
+            &rx,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        );
+        assert_eq!(
+            app.picker.as_ref().unwrap().going_to.as_deref(),
+            Some("linked/")
+        );
+        app.handle_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.picker.as_ref().unwrap().path, tmp.join("linked"));
 
         app.drain_io_jobs();
         let _ = std::fs::remove_dir_all(&tmp);
