@@ -500,7 +500,7 @@ impl App {
         // user reopens later. The abandoned listing still occupies IoJobs until
         // it lands; do not clear inflight here.
         self.picker_go_to_generation = self.picker_go_to_generation.wrapping_add(1);
-        self.picker_go_to_rescan = false;
+        self.picker_go_to_rescan = None;
         self.picker = None;
     }
 
@@ -786,7 +786,7 @@ impl App {
         // lands. Remember the Tab instead of admitting another job that would
         // sit behind the stalled read on the single worker anyway.
         if self.picker_go_to_inflight {
-            self.picker_go_to_rescan = true;
+            self.picker_go_to_rescan = Some(reverse);
             return;
         }
         let scan = GoToScan {
@@ -803,7 +803,7 @@ impl App {
         });
         if accepted.is_ok() {
             self.picker_go_to_inflight = true;
-            self.picker_go_to_rescan = false;
+            self.picker_go_to_rescan = None;
         } else if let Some(p) = self.picker.as_mut() {
             // A completion that cannot even be queued stays a no-op, like one
             // that finds nothing. Just free the slot for the next Tab.
@@ -854,9 +854,9 @@ impl App {
         result: Option<(String, Option<GoToCycle>)>,
     ) -> bool {
         self.picker_go_to_inflight = false;
-        let rescan = {
+        let reverse = {
             let Some(p) = self.picker.as_mut() else {
-                self.picker_go_to_rescan = false;
+                self.picker_go_to_rescan = None;
                 return false;
             };
             // Only this scan's own UI slot is freed: a newer one may already be
@@ -865,7 +865,7 @@ impl App {
                 p.go_to_scanning = None;
             }
             if p.go_to_generation == generation && p.going_to.is_some() {
-                self.picker_go_to_rescan = false;
+                self.picker_go_to_rescan = None;
                 let Some((text, cycle)) = result else {
                     return false;
                 };
@@ -874,14 +874,15 @@ impl App {
                 p.error = None;
                 return true;
             }
-            self.picker_go_to_rescan
-                && p.going_to.is_some()
-                && p.go_to_cycle.is_none()
-                && p.go_to_scanning.is_none()
+            if p.going_to.is_some() && p.go_to_cycle.is_none() && p.go_to_scanning.is_none() {
+                self.picker_go_to_rescan
+            } else {
+                None
+            }
         };
-        self.picker_go_to_rescan = false;
-        if rescan {
-            self.picker_complete_go_to(false);
+        self.picker_go_to_rescan = None;
+        if let Some(reverse) = reverse {
+            self.picker_complete_go_to(reverse);
         }
         false
     }
@@ -2182,6 +2183,38 @@ mod tests {
             app.picker.as_ref().unwrap().going_to.as_deref(),
             Some("Music/"),
             "the remembered Tab completes against the live field"
+        );
+
+        app.drain_io_jobs();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_deferred_backtab_keeps_reverse_direction() {
+        let _env = crate::persist::test_env("picker-go-to-deferred-backtab");
+        let tmp = complete_fixture("deferred-backtab");
+        std::fs::create_dir_all(tmp.join("Documents")).unwrap();
+        std::fs::create_dir_all(tmp.join("Downloads")).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_folder_picker_at(tmp.clone());
+        app.picker_start_go_to();
+        for c in "Do".chars() {
+            app.handle_picker_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_picker_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let stalled = take_completion(&rx);
+
+        app.handle_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        app.handle_picker_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        app.handle_picker_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert!(!stalled.apply(&mut app));
+        take_completion(&rx).apply(&mut app);
+        assert_eq!(
+            app.picker.as_ref().unwrap().going_to.as_deref(),
+            Some("Downloads"),
+            "deferred BackTab must start at the last match"
         );
 
         app.drain_io_jobs();
