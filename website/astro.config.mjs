@@ -19,8 +19,8 @@ export default defineConfig({
       title: 'Luvus',
       description:
         'Mission control for your AI coding agents. Run Claude Code, Copilot, Codex, and opencode side by side, with a live view of every agent, session resume, and multi-agent orchestration.',
-      // No `logo` option: the SiteTitle override renders the canonical,
-      // theme-aware Luvus SVG shared with the landing pages. `favicon` covers
+      // No `logo` option: the SiteTitle override renders the canonical Luvus
+      // pixel mark shared with the landing pages. `favicon` covers
       // the default <link>; the small and Apple sizes are added by hand.
       favicon: '/favicon.png',
       head: [

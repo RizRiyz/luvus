@@ -232,9 +232,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 /* The wordmark, at the landing page's weight and size. `a.site-title` + the
-   span outweigh Starlight's own `.site-title` rule so these apply. The mark is
-   a dense illustration, so the word sits close to it and on its optical centre
-   rather than floating at the head of a wide gap. */
+   span outweigh Starlight's own `.site-title` rule so these apply. */
 a.site-title,
 a.site-title span {
   font-family: var(--bh-brand);
@@ -253,8 +251,7 @@ a.site-title span {
    override replaces — so the layout is stated here in full. */
 a.site-title {
   align-items: center;
-  /* Tight, so the word sits against the mark. `color` here drives both: the mark
-     is drawn in `currentColor`, so the pair can never be two different whites. */
+  /* The word follows the active palette; the pixel mark keeps its brand gold. */
   color: var(--text);
   gap: 0.35rem;
   text-decoration: none;
@@ -272,14 +269,11 @@ a.site-title span {
      line. */
   display: block;
 }
-/* Rounded like an app icon: the artwork is a full-bleed square, so the corners
-   have to be cut or it reads as a cropped screenshot. The percentage keeps the
-   curve proportional at every size the mark is used. */
+/* The navigation asset has an optically cropped viewBox for small sizes. */
 a.site-title :is(img, svg) {
   width: 2.1rem;
   height: 2.1rem;
-  border-radius: 22%;
-  object-fit: cover;
+  object-fit: contain;
   flex-shrink: 0;
 }
 .sl-markdown-content h2 {
