@@ -226,7 +226,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         // When rotating the entire region, just reset everything.
         if region.end - region.start <= positions {
             for i in (region.start.0..region.end.0).map(Line::from) {
-                self.raw[i].reset(&self.cursor.template);
+                self.raw.row_mut(i).reset(&self.cursor.template);
             }
 
             return;
@@ -255,7 +255,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
             // Ensure all new lines are fully cleared.
             for i in (0..positions).map(Line::from) {
-                self.raw[i].reset(&self.cursor.template);
+                self.raw.row_mut(i).reset(&self.cursor.template);
             }
 
             // Swap the fixed lines at the top back into position.
@@ -271,7 +271,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
             let range = region.start.0..(region.start + positions).0;
             for line in range.rev().map(Line::from) {
-                self.raw[line].reset(&self.cursor.template);
+                self.raw.row_mut(line).reset(&self.cursor.template);
             }
         }
     }
@@ -287,7 +287,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         // When rotating the entire region with fixed lines at the top, just reset everything.
         if region.end - region.start <= positions && region.start != 0 {
             for i in (region.start.0..region.end.0).map(Line::from) {
-                self.raw[i].reset(&self.cursor.template);
+                self.raw.row_mut(i).reset(&self.cursor.template);
             }
 
             return;
@@ -328,7 +328,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             // ordinary dense representation used by Alacritty's parser.
             let added = min(positions, self.history_size());
             for line in -(added as i32)..0 {
-                self.raw[Line(line)].compact_trailing();
+                self.raw.row_mut(Line(line)).compact_trailing();
             }
         } else {
             // Rotate lines without moving anything into history.
@@ -365,7 +365,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         // Reset rotated lines.
         for line in (0..(self.lines - positions)).map(Line::from) {
-            self.raw[line].reset(&self.cursor.template);
+            self.raw.row_mut(line).reset(&self.cursor.template);
         }
     }
 
@@ -384,7 +384,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         // Reset all visible lines.
         let range = self.topmost_line().0..(self.screen_lines() as i32);
         for line in range.map(Line::from) {
-            self.raw[line].reset(&self.cursor.template);
+            self.raw.row_mut(line).reset(&self.cursor.template);
         }
     }
 }
@@ -412,7 +412,7 @@ impl<T> Grid<T> {
         debug_assert!(end <= self.screen_lines() as i32);
 
         for line in (start.0..end.0).map(Line::from) {
-            self.raw[line].reset(&self.cursor.template);
+            self.raw.row_mut(line).reset(&self.cursor.template);
         }
     }
 
@@ -571,14 +571,14 @@ impl<T> Index<Line> for Grid<T> {
 
     #[inline]
     fn index(&self, index: Line) -> &Row<T> {
-        &self.raw[index]
+        self.raw.active_row(index)
     }
 }
 
 impl<T: Clone> IndexMut<Line> for Grid<T> {
     #[inline]
     fn index_mut(&mut self, index: Line) -> &mut Row<T> {
-        &mut self.raw[index]
+        self.raw.row_mut(index)
     }
 }
 

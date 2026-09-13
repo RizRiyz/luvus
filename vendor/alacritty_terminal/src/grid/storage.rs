@@ -2,7 +2,7 @@ use std::cmp::max;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::mem;
-use std::ops::{Deref, Index, IndexMut};
+use std::ops::Deref;
 use std::sync::Arc;
 
 #[cfg(feature = "serde")]
@@ -257,8 +257,9 @@ fn cache_row_limit<T>(columns: usize) -> usize {
 /// the internal [`zero`] field. As compared with [`slice::rotate_left`] which must rearrange items
 /// in memory.
 ///
-/// As a consequence, both [`Index`] and [`IndexMut`] are reimplemented for this type to account
-/// for the zeroth element not always being at the start of the allocation.
+/// As a consequence, row access goes through [`Storage::row`] and
+/// [`Storage::row_mut`] to account for the zeroth element not always being at
+/// the start of the allocation and for page-owned cold history.
 ///
 /// Because certain [`Vec`] operations are no longer valid on this type, no [`Deref`]
 /// implementation is provided. Anything from [`Vec`] that should be exposed must be done so
@@ -413,6 +414,22 @@ impl<T> Storage<T> {
             columns,
             page.rows[row_index].occ,
         ))
+    }
+
+    /// Borrow a row that is still owned by the active ring.
+    ///
+    /// Mutable row indexing on [`Grid`](super::Grid) requires an immutable
+    /// `Index` implementation too. Keep that compatibility path restricted to
+    /// active rows; immutable history consumers must use `Grid::row`, which can
+    /// represent page-owned rows without materializing them.
+    #[inline]
+    pub(crate) fn active_row(&self, requested: Line) -> &Row<T> {
+        let logical = self.logical_index(requested);
+        assert!(
+            logical < self.active_len(),
+            "page-owned history requires the cold-aware row accessor"
+        );
+        &self.inner[self.compute_active_index(logical)]
     }
 
     pub(crate) fn row_mut(&mut self, requested: Line) -> &mut Row<T> {
@@ -581,7 +598,7 @@ impl<T> Storage<T> {
         // Number of lines the buffer needs to grow.
         let additional_lines = next - self.visible_lines;
 
-        let columns = self[Line(0)].len();
+        let columns = self.row(Line(0)).len();
         self.initialize(additional_lines, columns);
 
         // Update visible lines.
@@ -1214,23 +1231,6 @@ impl<T> Storage<T> {
     }
 }
 
-impl<T> Index<Line> for Storage<T> {
-    type Output = Row<T>;
-
-    #[inline]
-    fn index(&self, index: Line) -> &Self::Output {
-        let index = self.compute_index(index);
-        &self.inner[index]
-    }
-}
-
-impl<T> IndexMut<Line> for Storage<T> {
-    #[inline]
-    fn index_mut(&mut self, index: Line) -> &mut Self::Output {
-        self.row_mut(index)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -1348,15 +1348,15 @@ mod tests {
     fn indexing() {
         let mut storage = Storage::<char>::with_capacity(3, 1);
 
-        storage[Line(0)] = filled_row('0');
-        storage[Line(1)] = filled_row('1');
-        storage[Line(2)] = filled_row('2');
+        *storage.row_mut(Line(0)) = filled_row('0');
+        *storage.row_mut(Line(1)) = filled_row('1');
+        *storage.row_mut(Line(2)) = filled_row('2');
 
         storage.zero += 1;
 
-        assert_eq!(storage[Line(0)], filled_row('2'));
-        assert_eq!(storage[Line(1)], filled_row('0'));
-        assert_eq!(storage[Line(2)], filled_row('1'));
+        assert_eq!(&*storage.row(Line(0)), &filled_row('2'));
+        assert_eq!(&*storage.row(Line(1)), &filled_row('0'));
+        assert_eq!(&*storage.row(Line(2)), &filled_row('1'));
     }
 
     #[test]
@@ -1364,7 +1364,7 @@ mod tests {
     #[cfg(debug_assertions)]
     fn indexing_above_inner_len() {
         let storage = Storage::<char>::with_capacity(1, 1);
-        let _ = &storage[Line(-1)];
+        let _ = storage.row(Line(-1));
     }
 
     #[test]
@@ -1966,7 +1966,7 @@ mod tests {
         let mut storage = Storage::<char>::with_capacity(3, columns);
         storage.initialize(256, columns);
         for age in 0..256 {
-            storage[Line(-(age + 1))][Column(0)] = 'x';
+            storage.row_mut(Line(-(age + 1)))[Column(0)] = 'x';
         }
 
         let before = storage.storage_metrics();
@@ -1986,9 +1986,9 @@ mod tests {
         assert_eq!(storage.reusable_rows.len(), reusable - 1);
         assert!(!storage.row(Line(-200)).is_packed());
 
-        storage[Line(-200)][Column(0)] = 'y';
-        assert_eq!(storage[Line(-200)][Column(0)], 'y');
-        assert_eq!(storage[Line(-201)][Column(0)], 'x');
+        storage.row_mut(Line(-200))[Column(0)] = 'y';
+        assert_eq!(*storage.cell(Line(-200), Column(0)), 'y');
+        assert_eq!(*storage.cell(Line(-201), Column(0)), 'x');
         assert_eq!(storage.storage_metrics().packed_rows, 223);
     }
 
@@ -2004,7 +2004,7 @@ mod tests {
                 let mut value = [0; 32];
                 value[..8]
                     .copy_from_slice(&((age * columns + column) as u64).to_le_bytes());
-                storage[Line(-((age + 1) as i32))][Column(column)] = value;
+                storage.row_mut(Line(-((age + 1) as i32)))[Column(column)] = value;
             }
         }
 
@@ -2046,7 +2046,7 @@ mod tests {
             for age in 0..history_rows {
                 for column in 0..columns {
                     let value = if unique { (age * columns + column) as u32 } else { column as u32 };
-                    storage[Line(-((age + 1) as i32))][Column(column)] =
+                    storage.row_mut(Line(-((age + 1) as i32)))[Column(column)] =
                         CloneProbe { value, clones: clones.clone() };
                 }
             }
@@ -2066,7 +2066,8 @@ mod tests {
         for age in 0..history_rows {
             for column in 0..columns {
                 let value = if column % 7 == 0 { 7 } else { (age * columns + column) as u32 };
-                storage[Line(-((age + 1) as i32))][Column(column)] = CollisionProbe(value);
+                storage.row_mut(Line(-((age + 1) as i32)))[Column(column)] =
+                    CollisionProbe(value);
             }
         }
 
@@ -2102,7 +2103,7 @@ mod tests {
         let mut storage = Storage::<u32>::with_capacity(2, 1);
         storage.initialize(history_rows, 1);
         for age in 1..=history_rows {
-            storage[Line(-(age as i32))][Column(0)] = age as u32;
+            storage.row_mut(Line(-(age as i32)))[Column(0)] = age as u32;
         }
 
         assert_eq!(storage.pack_cold_history(), history_rows - super::HOT_HISTORY_ROWS);
@@ -2128,15 +2129,70 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "serde")]
+    #[test]
+    fn packed_history_serialization_preserves_every_logical_row() {
+        let columns = 32;
+        let history_rows = 2_200;
+        let mut storage = Storage::<char>::with_capacity(3, columns);
+        storage.initialize(history_rows, columns);
+
+        for age in 1..=history_rows {
+            let row = storage.row_mut(Line(-(age as i32)));
+            row[Column(0)] = char::from_u32(33 + (age % 90) as u32).unwrap();
+            row[Column(1)] = char::from_u32(33 + ((age / 90) % 90) as u32).unwrap();
+            assert!(row.is_compacted());
+        }
+
+        assert_eq!(storage.pack_cold_history(), history_rows - super::HOT_HISTORY_ROWS);
+        assert!(storage.cold_pages.len() >= 2);
+        assert!(!storage.reusable_rows.is_empty());
+
+        // Keep the active ring rotated while page-owned history and reusable
+        // row allocations are both present. Serialization must emit logical
+        // order rather than physical ring or page order.
+        storage.scroll_up_full(1, storage.len() + 1);
+        storage.row_mut(Line(2))[Column(0)] = 'z';
+        assert_ne!(storage.zero, 0);
+        assert!(storage.cold_pages.len() >= 2);
+        assert!(!storage.reusable_rows.is_empty());
+
+        let expected = (0..storage.len)
+            .map(|logical| {
+                let line = Line(storage.visible_lines as i32 - logical as i32 - 1);
+                (0..columns)
+                    .map(|column| *storage.cell(line, Column(column)))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        let serialized = serde_json::to_string(&storage).expect("serialize packed storage");
+        let restored =
+            serde_json::from_str::<Storage<char>>(&serialized).expect("restore packed storage");
+        let actual = (0..restored.len)
+            .map(|logical| {
+                let line = Line(restored.visible_lines as i32 - logical as i32 - 1);
+                (0..columns)
+                    .map(|column| *restored.cell(line, Column(column)))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(restored.zero, 0);
+        assert!(restored.cold_pages.is_empty());
+        assert!(restored.reusable_rows.is_empty());
+        assert_eq!(actual, expected);
+    }
+
     #[test]
     fn full_scroll_rotates_active_rows_without_materializing_cold_pages() {
         let mut storage = Storage::<u32>::with_capacity(3, 1);
-        storage[Line(0)][Column(0)] = 10;
-        storage[Line(1)][Column(0)] = 11;
-        storage[Line(2)][Column(0)] = 12;
+        storage.row_mut(Line(0))[Column(0)] = 10;
+        storage.row_mut(Line(1))[Column(0)] = 11;
+        storage.row_mut(Line(2))[Column(0)] = 12;
         storage.initialize(64, 1);
         for age in 1_i32..=64 {
-            storage[Line(-age)][Column(0)] = 100 + age as u32;
+            storage.row_mut(Line(-age))[Column(0)] = 100 + age as u32;
         }
         assert_eq!(storage.pack_cold_history(), 32);
 
@@ -2144,7 +2200,7 @@ mod tests {
         let cold_block = storage.cold_pages.front().unwrap().block.clone();
         let allocation = storage.inner.as_ptr();
         storage.scroll_up_full(1, storage.len() + 1);
-        storage[Line(2)][Column(0)] = 99;
+        storage.row_mut(Line(2))[Column(0)] = 99;
 
         assert_ne!(storage.zero, 0, "full scroll should rotate the active ring");
         assert_eq!(storage.inner.as_ptr(), allocation);
@@ -2164,12 +2220,12 @@ mod tests {
     #[test]
     fn full_scroll_evicts_only_the_oldest_page_row_at_capacity() {
         let mut storage = Storage::<u32>::with_capacity(3, 1);
-        storage[Line(0)][Column(0)] = 10;
-        storage[Line(1)][Column(0)] = 11;
-        storage[Line(2)][Column(0)] = 12;
+        storage.row_mut(Line(0))[Column(0)] = 10;
+        storage.row_mut(Line(1))[Column(0)] = 11;
+        storage.row_mut(Line(2))[Column(0)] = 12;
         storage.initialize(64, 1);
         for age in 1_i32..=64 {
-            storage[Line(-age)][Column(0)] = 100 + age as u32;
+            storage.row_mut(Line(-age))[Column(0)] = 100 + age as u32;
         }
         assert_eq!(storage.pack_cold_history(), 32);
 
