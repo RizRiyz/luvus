@@ -1406,6 +1406,41 @@ mod tests {
         }
     }
 
+    /// Measure terminal parsing/scrolling and cold-history maintenance
+    /// separately from PTY syscalls.
+    #[test]
+    #[ignore]
+    fn bulk_history_ingestion_benchmark() {
+        use std::{hint::black_box, io::Write, time::Instant};
+
+        let mut corpus = Vec::new();
+        for line in 1..=7_600 {
+            write!(&mut corpus, "{line}\r\n").unwrap();
+        }
+        for chunk_bytes in [8 * 1024, 32 * 1024, 64 * 1024] {
+            for trial in 1..=3 {
+                let (tx, _rx) = channel();
+                let mut engine = AlacrittyEngine::new(27, 24, tx, 32 * 1024 * 1024);
+                let start = Instant::now();
+                for chunk in corpus.chunks(chunk_bytes) {
+                    engine.advance(chunk);
+                }
+                let ingestion = start.elapsed();
+                let maintenance_start = Instant::now();
+                engine.finish_output_batch();
+                let maintenance = maintenance_start.elapsed();
+                black_box(engine.history_len());
+                eprintln!(
+                    "bulk_history_ingestion chunk_bytes={chunk_bytes} trial={trial} rows={} ingestion_ms={:.3} maintenance_ms={:.3} total_ms={:.3}",
+                    engine.history_len(),
+                    ingestion.as_secs_f64() * 1000.0,
+                    maintenance.as_secs_f64() * 1000.0,
+                    (ingestion + maintenance).as_secs_f64() * 1000.0,
+                );
+            }
+        }
+    }
+
     #[test]
     fn incremental_history_maintenance_is_lossless_and_restarts_after_mutation() {
         fn rows(engine: &AlacrittyEngine) -> Vec<String> {
@@ -1424,7 +1459,7 @@ mod tests {
             "large backlog takes multiple turns"
         );
         let packed = engine.history_metrics().packed_rows.unwrap();
-        assert!(packed > 0 && packed <= 512);
+        assert!(packed > 0 && packed <= 1_024);
         assert_eq!(before, rows(&engine));
         engine.advance(b"new output\r\n");
         engine.resize(90, 24);

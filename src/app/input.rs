@@ -303,6 +303,10 @@ fn copy_link_at_grid(
 
 impl App {
     fn handle_api_request(&mut self, req: crate::ipc::api::ApiRequest) -> bool {
+        // Input-only requests do not mutate projected application state. Their
+        // resulting PTY bytes will schedule the real frame, so rendering here
+        // only projects an unchanged surface once per submitted command.
+        let projects_immediately = req.method != "pane.run";
         if req.method == "terminal.backend.create" {
             self.start_backend_create(req);
             return true;
@@ -338,7 +342,7 @@ impl App {
         };
         let response = self.handle_api(&req);
         self.reply_after_automation_save(req, response);
-        true
+        projects_immediately
     }
 
     /// Park `task.merge` until its off-loop Git job returns. This preserves the
@@ -723,7 +727,9 @@ impl App {
                 // so a saturated pane wakes the loop at the render rate, not
                 // once per PTY read.
                 if let Some(s) = self.status.get_mut(&id) {
-                    s.last_activity = Instant::now();
+                    let now = Instant::now();
+                    s.last_activity = now;
+                    s.quiet_check_at = Some(now + ACTIVITY_WINDOW);
                 }
                 self.detection_dirty.insert(id);
                 if self.panes.contains_key(&id) {
@@ -4752,6 +4758,32 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("an empty server still answers its control API");
         assert!(resp.contains("pong"), "got a real pong, not EOF: {resp}");
+    }
+
+    #[test]
+    fn pane_run_waits_for_pty_output_before_requesting_a_render() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (reply, response) = std::sync::mpsc::channel();
+        let request = crate::ipc::api::ApiRequest {
+            id: "pane-run".into(),
+            method: "pane.run".into(),
+            params: json!({"pane": pane.0.to_string(), "command": "true"}),
+            reply,
+        };
+
+        assert!(
+            !app.handle_event(AppEvent::Api(request)),
+            "queueing terminal input does not change the projected surface"
+        );
+        let response: serde_json::Value = serde_json::from_str(
+            &response
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("pane.run returns its API response"),
+        )
+        .unwrap();
+        assert_eq!(response["result"]["type"], "ok");
     }
 
     #[test]

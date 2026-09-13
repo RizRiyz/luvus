@@ -12,7 +12,7 @@ use serde::ser::{SerializeSeq, SerializeStruct, Serializer};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use super::Row;
+use super::{GridCell, Row};
 use crate::index::Line;
 
 /// Maximum shallow allocation retained for rows outside the active grid.
@@ -39,8 +39,13 @@ const HOT_HISTORY_ROWS: usize = 32;
 
 /// Bound packing work and block fan-out. This also bounds the memory retained
 /// when only part of the oldest block remains inside the history limit.
-const PACKED_BLOCK_MAX_ROWS: usize = 512;
+const PACKED_BLOCK_MAX_ROWS: usize = 1_024;
 const PACKED_BLOCK_TARGET_BYTES: usize = 128 * 1024;
+// Short rows stay cheap to encode and decode, so allow a larger page to reduce
+// block metadata and dictionary setup without extending styled/wide-row work.
+const PACKED_COMPACT_BLOCK_MAX_ROWS: usize = 2_048;
+const PACKED_COMPACT_BLOCK_TARGET_BYTES: usize = 256 * 1024;
+const PACKED_COMPACT_ROW_CELLS: usize = 16;
 const MIN_PACKED_BLOCK_ROWS: usize = 32;
 const LINEAR_DICTIONARY_CELLS: usize = 16;
 
@@ -457,22 +462,6 @@ impl<T> Storage<T> {
         debug_assert_eq!(self.inner.len(), self.len);
     }
 
-    fn evict_oldest(&mut self) {
-        if let Some(page) = self.cold_pages.back_mut() {
-            page.rows.pop();
-            page.end_row -= 1;
-            self.cold_rows -= 1;
-            if page.rows.is_empty() {
-                self.cold_pages.pop_back();
-            }
-        } else {
-            self.rezero();
-            self.inner.truncate(self.active_len());
-            self.inner.pop();
-        }
-        self.len = self.len.saturating_sub(1);
-    }
-
     fn shrink_oldest(&mut self, mut shrinkage: usize) {
         while shrinkage != 0 {
             let Some(page) = self.cold_pages.back_mut() else {
@@ -495,16 +484,51 @@ impl<T> Storage<T> {
     where
         T: Default,
     {
-        self.rezero();
-        self.inner.truncate(self.active_len());
-        for _ in 0..positions {
-            if self.len == max_len {
-                self.evict_oldest();
-            }
-            let columns = self.columns();
-            self.inner.insert(0, Row::new(columns));
-            self.len += 1;
+        if positions == 0 {
+            return;
         }
+
+        // Keep the parser-facing rows in the same circular storage used by
+        // upstream Alacritty. Inserting at the front shifts every active row
+        // for every printed line and turns a burst received before history
+        // maintenance into quadratic descriptor movement.
+        let evicted = self
+            .len
+            .saturating_add(positions)
+            .saturating_sub(max_len)
+            .min(self.len);
+        self.shrink_oldest(evicted);
+
+        let columns = self.columns();
+        let required = self.active_len().saturating_add(positions);
+        if required > self.inner.len() {
+            // Changing the physical ring length changes its wrap point, so
+            // normalize only when the byte-bounded spare rows are exhausted.
+            // Ordinary scrolls remain an O(1) zero-offset update.
+            self.rezero();
+            let additional = required - self.inner.len();
+            let cache_rows = cache_row_limit::<T>(columns);
+            // Grow geometrically while a burst is expanding the dense
+            // frontier, capped at one packing page. This avoids rotating an
+            // ever-larger descriptor ring once per tiny cache refill without
+            // retaining the burst reserve after quiet maintenance trims it.
+            let growth = max(additional, cache_rows.min(PACKED_BLOCK_MAX_ROWS))
+                .max(self.active_len().min(PACKED_BLOCK_MAX_ROWS));
+            let fill = Arc::new(T::default());
+            self.inner
+                .resize_with(self.inner.len() + growth, || {
+                    Row::new_uniform(columns, fill.clone())
+                });
+        }
+
+        self.len += positions;
+        let ring_len = self.inner.len();
+        let shift = positions % ring_len;
+        self.zero = if self.zero >= shift {
+            self.zero - shift
+        } else {
+            ring_len - (shift - self.zero)
+        };
     }
 
     #[inline]
@@ -516,13 +540,14 @@ impl<T> Storage<T> {
     }
 
     #[inline]
-    fn cache_reusable_row(&mut self, row: Vec<T>) {
+    fn cache_reusable_row(&mut self, row: Vec<T>, reusable_bytes: &mut usize) {
         if self.reusable_rows.len() >= MAX_REUSABLE_ROW_BUFFERS {
             return;
         }
         let bytes = row.capacity().saturating_mul(mem::size_of::<T>());
-        if self.reusable_row_bytes().saturating_add(bytes) <= MAX_REUSABLE_ROW_BYTES {
+        if reusable_bytes.saturating_add(bytes) <= MAX_REUSABLE_ROW_BYTES {
             self.reusable_rows.push(row);
+            *reusable_bytes = reusable_bytes.saturating_add(bytes);
         }
     }
 
@@ -781,7 +806,7 @@ impl<T> Storage<T> {
     /// blocks; later calls inspect only the new dense frontier.
     pub(crate) fn pack_cold_history(&mut self) -> usize
     where
-        T: Clone + Eq + Hash,
+        T: GridCell + Eq + Hash,
     {
         let mut packed_rows = 0;
         while let count @ 1.. = self.pack_one_cold_page(true) {
@@ -790,11 +815,12 @@ impl<T> Storage<T> {
         packed_rows
     }
 
-    /// Incremental consumer boundary. Visits at most 512 rows and encodes at
-    /// most one ordinary block. Reset `cursor` after any grid mutation.
+    /// Incremental consumer boundary. Encodes at most one bounded block: 1,024
+    /// ordinary rows, or 2,048 short compact rows. Reset `cursor` after any
+    /// grid mutation.
     pub(crate) fn pack_cold_history_step(&mut self, cursor: &mut usize, full_scan: bool) -> bool
     where
-        T: Clone + Eq + Hash,
+        T: GridCell + Eq + Hash,
     {
         let _ = full_scan;
         let packed = self.pack_one_cold_page(full_scan);
@@ -805,7 +831,7 @@ impl<T> Storage<T> {
     /// Repack every dense cold run after operations such as width reflow.
     pub(crate) fn pack_all_cold_history(&mut self) -> usize
     where
-        T: Clone + Eq + Hash,
+        T: GridCell + Eq + Hash,
     {
         let mut packed_rows = 0;
         while let count @ 1.. = self.pack_one_cold_page(true) {
@@ -816,7 +842,7 @@ impl<T> Storage<T> {
 
     fn pack_one_cold_page(&mut self, allow_small: bool) -> usize
     where
-        T: Clone + Eq + Hash,
+        T: GridCell + Eq + Hash,
     {
         self.rezero();
         self.inner.truncate(self.active_len());
@@ -829,24 +855,35 @@ impl<T> Storage<T> {
         let end = self.inner.len();
         let mut start = end;
         let mut shallow_bytes = 0usize;
-        while start > frontier && end - start < PACKED_BLOCK_MAX_ROWS {
+        let mut compact_page = true;
+        while start > frontier && end - start < PACKED_COMPACT_BLOCK_MAX_ROWS {
             let next = start - 1;
-            let row_bytes = self.inner[next]
-                .physical_len()
-                .saturating_mul(mem::size_of::<T>());
-            if start != end
-                && shallow_bytes.saturating_add(row_bytes) > PACKED_BLOCK_TARGET_BYTES
-            {
+            let physical_cells = self.inner[next].physical_len();
+            let row_bytes = physical_cells.saturating_mul(mem::size_of::<T>());
+            let next_compact = compact_page && physical_cells <= PACKED_COMPACT_ROW_CELLS;
+            if !next_compact && end - start >= PACKED_BLOCK_MAX_ROWS {
+                break;
+            }
+            let target_bytes = if next_compact {
+                PACKED_COMPACT_BLOCK_TARGET_BYTES
+            } else {
+                PACKED_BLOCK_TARGET_BYTES
+            };
+            if start != end && shallow_bytes.saturating_add(row_bytes) > target_bytes {
                 break;
             }
             shallow_bytes = shallow_bytes.saturating_add(row_bytes);
+            compact_page = next_compact;
             start = next;
         }
         if !allow_small && end - start < MIN_PACKED_BLOCK_ROWS {
             return 0;
         }
 
-        let rows: Vec<_> = self.inner.drain(start..end).collect();
+        // The packed frontier is always the physical tail after `rezero`.
+        // Split it directly instead of driving a draining iterator and its
+        // generic collection path for every cold page.
+        let rows = self.inner.split_off(start);
         let count = rows.len();
         let mut page = self.pack_rows(rows);
         for older in &mut self.cold_pages {
@@ -860,7 +897,7 @@ impl<T> Storage<T> {
 
     fn pack_rows(&mut self, mut rows: Vec<Row<T>>) -> ColdPage<T>
     where
-        T: Clone + Eq + Hash,
+        T: GridCell + Eq + Hash,
     {
         debug_assert!(!rows.is_empty());
         debug_assert!(rows.iter().all(|row| !row.is_packed()));
@@ -876,6 +913,8 @@ impl<T> Storage<T> {
         let mut narrow_indices = Vec::with_capacity(total_cells);
         let mut wide_indices = None::<Vec<u16>>;
         let mut direct_cells = None::<Vec<T>>;
+        let mut plain_ascii_indices = [u16::MAX; 128];
+        let mut reusable_bytes = self.reusable_row_bytes();
 
         // Release each dense source allocation as soon as its cells have been
         // encoded. The final page grows while the remaining source shrinks,
@@ -889,23 +928,54 @@ impl<T> Storage<T> {
                     continue;
                 }
 
+                let plain_ascii = cell.plain_ascii_identity().map(usize::from);
+                let cached_ascii = plain_ascii
+                    .map(|identity| plain_ascii_indices[identity])
+                    .filter(|index| *index != u16::MAX);
                 let mut added_value = false;
-                let dictionary_index = match dictionary.as_mut() {
-                    Some(dictionary) => {
-                        let key = fingerprint(&cell);
-                        match dictionary.get(&key).copied() {
-                            Some(index) if values[index as usize] == cell => index,
-                            Some(_) => {
-                                let mut direct = indexed_cells_into_direct(
-                                    mem::take(&mut values),
-                                    mem::take(&mut narrow_indices),
-                                    wide_indices.take(),
-                                    total_cells,
-                                );
-                                direct.push(cell);
-                                direct_cells = Some(direct);
-                                continue;
-                            },
+                let dictionary_index = match cached_ascii {
+                    Some(index) => {
+                        debug_assert!(values[index as usize] == cell);
+                        index
+                    },
+                    None => match dictionary.as_mut() {
+                        Some(dictionary) => {
+                            let key = fingerprint(&cell);
+                            match dictionary.get(&key).copied() {
+                                Some(index) if values[index as usize] == cell => index,
+                                Some(_) => {
+                                    let mut direct = indexed_cells_into_direct(
+                                        mem::take(&mut values),
+                                        mem::take(&mut narrow_indices),
+                                        wide_indices.take(),
+                                        total_cells,
+                                    );
+                                    direct.push(cell);
+                                    direct_cells = Some(direct);
+                                    continue;
+                                },
+                                None => {
+                                    let Ok(index) = u16::try_from(values.len()) else {
+                                        let mut direct = indexed_cells_into_direct(
+                                            mem::take(&mut values),
+                                            mem::take(&mut narrow_indices),
+                                            wide_indices.take(),
+                                            total_cells,
+                                        );
+                                        direct.push(cell);
+                                        direct_cells = Some(direct);
+                                        continue;
+                                    };
+                                    reserve_dictionary_value(&mut values, total_cells);
+                                    values.push(cell);
+                                    added_value = true;
+                                    dictionary.insert(key, index);
+                                    index
+                                },
+                            }
+                        },
+                        None => match values.iter().position(|value| value == &cell) {
+                            Some(index) => index as u16,
                             None => {
                                 let Ok(index) = u16::try_from(values.len()) else {
                                     let mut direct = indexed_cells_into_direct(
@@ -921,32 +991,17 @@ impl<T> Storage<T> {
                                 reserve_dictionary_value(&mut values, total_cells);
                                 values.push(cell);
                                 added_value = true;
-                                dictionary.insert(key, index);
                                 index
                             },
-                        }
-                    },
-                    None => match values.iter().position(|value| value == &cell) {
-                        Some(index) => index as u16,
-                        None => {
-                            let Ok(index) = u16::try_from(values.len()) else {
-                                let mut direct = indexed_cells_into_direct(
-                                    mem::take(&mut values),
-                                    mem::take(&mut narrow_indices),
-                                    wide_indices.take(),
-                                    total_cells,
-                                );
-                                direct.push(cell);
-                                direct_cells = Some(direct);
-                                continue;
-                            };
-                            reserve_dictionary_value(&mut values, total_cells);
-                            values.push(cell);
-                            added_value = true;
-                            index
                         },
                     },
                 };
+
+                if added_value {
+                    if let Some(identity) = plain_ascii {
+                        plain_ascii_indices[identity] = dictionary_index;
+                    }
+                }
 
                 match wide_indices.as_mut() {
                     Some(indices) => indices.push(dictionary_index),
@@ -994,7 +1049,7 @@ impl<T> Storage<T> {
                     }
                 }
             }
-            self.cache_reusable_row(cells);
+            self.cache_reusable_row(cells, &mut reusable_bytes);
         }
 
         let block = match direct_cells {
@@ -1234,6 +1289,32 @@ mod tests {
             0_u8.hash(state);
         }
     }
+
+    macro_rules! impl_test_grid_cell {
+        ($($type:ty),+ $(,)?) => {
+            $(
+                impl GridCell for $type {
+                    fn is_empty(&self) -> bool {
+                        false
+                    }
+
+                    fn reset(&mut self, template: &Self) {
+                        self.clone_from(template);
+                    }
+
+                    fn flags(&self) -> &Flags {
+                        unimplemented!();
+                    }
+
+                    fn flags_mut(&mut self) -> &mut Flags {
+                        unimplemented!();
+                    }
+                }
+            )+
+        };
+    }
+
+    impl_test_grid_cell!(u32, [u8; 32], CloneProbe, CollisionProbe);
 
     impl GridCell for char {
         fn is_empty(&self) -> bool {
@@ -1865,15 +1946,17 @@ mod tests {
     fn reusable_row_cache_is_bounded_by_count_and_bytes() {
         let mut storage = Storage::<char>::with_capacity(3, 1);
         storage.reusable_rows.clear();
+        let mut reusable_bytes = 0;
 
         for _ in 0..MAX_REUSABLE_ROW_BUFFERS + 8 {
-            storage.cache_reusable_row(vec!['x']);
+            storage.cache_reusable_row(vec!['x'], &mut reusable_bytes);
         }
         assert_eq!(storage.reusable_rows.len(), MAX_REUSABLE_ROW_BUFFERS);
 
         storage.reusable_rows.clear();
+        reusable_bytes = 0;
         let oversized_cells = MAX_REUSABLE_ROW_BYTES / mem::size_of::<char>() + 1;
-        storage.cache_reusable_row(vec!['x'; oversized_cells]);
+        storage.cache_reusable_row(vec!['x'; oversized_cells], &mut reusable_bytes);
         assert!(storage.reusable_rows.is_empty());
     }
 
@@ -1883,7 +1966,7 @@ mod tests {
         let mut storage = Storage::<char>::with_capacity(3, columns);
         storage.initialize(256, columns);
         for age in 0..256 {
-            storage[Line(-((age + 1) as i32))][Column(0)] = 'x';
+            storage[Line(-(age + 1))][Column(0)] = 'x';
         }
 
         let before = storage.storage_metrics();
@@ -2015,7 +2098,7 @@ mod tests {
 
     #[test]
     fn cold_page_lookup_and_oldest_shrink_cross_page_boundaries() {
-        let history_rows = 1_100;
+        let history_rows = 2_200;
         let mut storage = Storage::<u32>::with_capacity(2, 1);
         storage.initialize(history_rows, 1);
         for age in 1..=history_rows {
@@ -2023,7 +2106,7 @@ mod tests {
         }
 
         assert_eq!(storage.pack_cold_history(), history_rows - super::HOT_HISTORY_ROWS);
-        assert!(storage.cold_pages.len() >= 3);
+        assert!(storage.cold_pages.len() >= 2);
         assert_eq!(storage.cold_pages.back().unwrap().end_row, storage.cold_rows);
         assert!(
             storage
@@ -2032,17 +2115,72 @@ mod tests {
                 .map(|page| page.end_row)
                 .is_sorted()
         );
-        for age in [33, 511, 512, 513, 1_024, 1_100] {
+        for age in [33, 511, 512, 513, 1_024, 2_048, 2_200] {
             assert_eq!(*storage.cell(Line(-age), Column(0)), age as u32);
         }
 
         storage.shrink_lines(300);
-        assert_eq!(storage.len(), 802);
+        assert_eq!(storage.len(), 1_902);
         assert_eq!(storage.cold_pages.back().unwrap().end_row, storage.cold_rows);
-        assert_eq!(*storage.cell(Line(-800), Column(0)), 800);
-        for age in [33, 511, 512, 513, 799] {
+        assert_eq!(*storage.cell(Line(-1_900), Column(0)), 1_900);
+        for age in [33, 511, 512, 513, 1_024, 1_899] {
             assert_eq!(*storage.cell(Line(-age), Column(0)), age as u32);
         }
+    }
+
+    #[test]
+    fn full_scroll_rotates_active_rows_without_materializing_cold_pages() {
+        let mut storage = Storage::<u32>::with_capacity(3, 1);
+        storage[Line(0)][Column(0)] = 10;
+        storage[Line(1)][Column(0)] = 11;
+        storage[Line(2)][Column(0)] = 12;
+        storage.initialize(64, 1);
+        for age in 1_i32..=64 {
+            storage[Line(-age)][Column(0)] = 100 + age as u32;
+        }
+        assert_eq!(storage.pack_cold_history(), 32);
+
+        let cold_rows = storage.cold_rows;
+        let cold_block = storage.cold_pages.front().unwrap().block.clone();
+        let allocation = storage.inner.as_ptr();
+        storage.scroll_up_full(1, storage.len() + 1);
+        storage[Line(2)][Column(0)] = 99;
+
+        assert_ne!(storage.zero, 0, "full scroll should rotate the active ring");
+        assert_eq!(storage.inner.as_ptr(), allocation);
+        assert_eq!(storage.cold_rows, cold_rows);
+        assert!(Arc::ptr_eq(
+            &storage.cold_pages.front().unwrap().block,
+            &cold_block
+        ));
+        assert_eq!(*storage.cell(Line(2), Column(0)), 99);
+        assert_eq!(*storage.cell(Line(1), Column(0)), 12);
+        assert_eq!(*storage.cell(Line(0), Column(0)), 11);
+        assert_eq!(*storage.cell(Line(-1), Column(0)), 10);
+        assert_eq!(*storage.cell(Line(-2), Column(0)), 101);
+        assert_eq!(*storage.cell(Line(-34), Column(0)), 133);
+    }
+
+    #[test]
+    fn full_scroll_evicts_only_the_oldest_page_row_at_capacity() {
+        let mut storage = Storage::<u32>::with_capacity(3, 1);
+        storage[Line(0)][Column(0)] = 10;
+        storage[Line(1)][Column(0)] = 11;
+        storage[Line(2)][Column(0)] = 12;
+        storage.initialize(64, 1);
+        for age in 1_i32..=64 {
+            storage[Line(-age)][Column(0)] = 100 + age as u32;
+        }
+        assert_eq!(storage.pack_cold_history(), 32);
+
+        let max_len = storage.len();
+        let cold_rows = storage.cold_rows;
+        storage.scroll_up_full(1, max_len);
+
+        assert_eq!(storage.len(), max_len);
+        assert_eq!(storage.cold_rows, cold_rows - 1);
+        assert_eq!(*storage.cell(Line(-1), Column(0)), 10);
+        assert_eq!(*storage.cell(Line(-64), Column(0)), 163);
     }
 
     fn filled_row(content: char) -> Row<char> {

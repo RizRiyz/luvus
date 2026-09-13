@@ -1824,6 +1824,10 @@ pub struct PaneStatus {
     pub state: State,
     pub agent: String,
     pub last_activity: Instant,
+    /// One exact follow-up after recent output leaves `ACTIVITY_WINDOW`.
+    /// PTY events move this deadline forward; detection clears it after the
+    /// boundary is inspected, avoiding a 100 ms poll throughout the window.
+    quiet_check_at: Option<Instant>,
     /// When the user last sent input (keystrokes/paste) to this pane. Lets
     /// detection tell a user typing (whose echo is also output) apart from the
     /// agent generating (docs/07). Defaults old so unfocused/new panes aren't
@@ -1890,6 +1894,7 @@ impl PaneStatus {
             state: State::Idle,
             agent,
             last_activity: Instant::now(),
+            quiet_check_at: None,
             // Old by default so a freshly spawned pane's first output isn't gated
             // as "the user is typing".
             last_input: Instant::now()
@@ -11166,6 +11171,7 @@ mod tests {
 
         app.detect_tick(first);
         let extracted = app.detection_extractions;
+        let considered = app.detection_panes_considered;
         assert!(extracted > 0, "the first tick inspects every pane");
 
         app.detect_tick(first + Duration::from_millis(200));
@@ -11173,12 +11179,15 @@ mod tests {
             app.detection_extractions, extracted,
             "an unchanged pane does not rebuild title or bottom text"
         );
-        assert!(app.detection_skips > 0);
+        assert_eq!(
+            app.detection_panes_considered, considered,
+            "event-driven detection does not revisit a quiet pane between audits"
+        );
 
         if let Some(pane) = app.panes.get(&pane) {
             pane.engine.lock().unwrap().advance(b"new output\r\n");
         }
-        app.detect_tick(first + Duration::from_millis(400));
+        app.detect_tick(first + Duration::from_secs(3));
         assert_eq!(app.detection_extractions, extracted + 1);
     }
 

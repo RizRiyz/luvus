@@ -31,6 +31,14 @@ pub trait GridCell: Sized + Clone {
 
     fn flags(&self) -> &Flags;
     fn flags_mut(&mut self) -> &mut Flags;
+
+    /// Return an exact one-byte identity for the overwhelmingly common plain
+    /// ASCII cell shape. Cold-history packing uses this only as a lookup hint
+    /// and retains exact equality checks for every general cell shape.
+    #[inline]
+    fn plain_ascii_identity(&self) -> Option<u8> {
+        None
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
