@@ -218,7 +218,7 @@ impl AlacrittyEngine {
         }
 
         output.clear();
-        let row = &grid[Line(line)];
+        let row = grid.row(Line(line));
         for column in 0..grid.columns() {
             let cell = &row[Column(column)];
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
@@ -243,7 +243,7 @@ impl AlacrittyEngine {
         if line > grid.bottommost_line().0 || grid.columns() == 0 {
             return false;
         }
-        grid[Line(line)][Column(grid.columns() - 1)]
+        grid[Point::new(Line(line), Column(grid.columns() - 1))]
             .flags
             .contains(Flags::WRAPLINE)
     }
@@ -257,7 +257,7 @@ impl AlacrittyEngine {
 
     fn append_plain_grid_row(&self, line: Line, output: &mut String, max_bytes: usize) -> bool {
         let grid = self.term.grid();
-        let row = &grid[line];
+        let row = grid.row(line);
         let last = (0..grid.columns())
             .rfind(|column| {
                 let cell = &row[Column(*column)];
@@ -290,7 +290,7 @@ impl AlacrittyEngine {
 
     fn append_ansi_grid_row(&self, line: Line, output: &mut String, max_bytes: usize) -> bool {
         let grid = self.term.grid();
-        let row = &grid[line];
+        let row = grid.row(line);
         let last = (0..grid.columns())
             .rfind(|column| {
                 let cell = &row[Column(*column)];
@@ -581,8 +581,9 @@ impl VtEngine for AlacrittyEngine {
             damaged_row.row = row;
             let line = Line(row as i32 - display_offset);
             let mut used = 0;
+            let grid_row = grid.row(line);
             for column in 0..columns {
-                let cell = &grid[line][Column(column)];
+                let cell = &grid_row[Column(column)];
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     continue;
                 }
@@ -1039,7 +1040,7 @@ impl VtEngine for AlacrittyEngine {
     fn retained_row_layout(&self, index: usize) -> Option<RetainedRowLayout> {
         let line = self.retained_line(index)?;
         let grid = self.term.grid();
-        let row = &grid[line];
+        let row = grid.row(line);
         let mut whitespace = Vec::with_capacity(grid.columns());
         let mut previous_whitespace = true;
         let mut last_content = None;
@@ -1439,7 +1440,7 @@ mod tests {
         let metrics = engine.history_metrics();
         assert_eq!(
             metrics.packed_rows.unwrap(),
-            metrics.retained_rows.saturating_sub(128)
+            metrics.retained_rows.saturating_sub(32)
         );
         assert!(
             !engine.finish_output_batch_step(),

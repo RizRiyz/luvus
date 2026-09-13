@@ -18,6 +18,7 @@ mod storage;
 mod tests;
 
 pub use self::row::Row;
+pub use self::storage::RowRef;
 use self::storage::Storage;
 use self::storage::StorageMetrics;
 
@@ -192,6 +193,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         };
     }
 
+    #[cfg(test)]
     fn increase_scroll_limit(&mut self, count: usize) {
         let count = min(count, self.max_scroll_limit - self.history_size());
         if count != 0 {
@@ -290,8 +292,10 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         // Only rotate the entire history if the active region starts at the top.
         if region.start == 0 {
-            // Create scrollback for the new lines.
-            self.increase_scroll_limit(positions);
+            // Create scrollback and rotate in fresh bottom rows without
+            // materializing page-owned cold history.
+            self.raw
+                .scroll_up_full(positions, self.max_scroll_limit + self.lines);
 
             // Swap the lines fixed at the top to their target positions after rotation.
             //
@@ -304,9 +308,6 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             for i in (0..region.start.0).rev().map(Line::from) {
                 self.raw.swap(i, i + positions);
             }
-
-            // Rotate the entire line buffer upward.
-            self.raw.rotate(-(positions as isize));
 
             // Swap the fixed lines at the bottom back into position.
             let screen_lines = self.screen_lines() as i32;
@@ -434,6 +435,11 @@ impl<T> Grid<T> {
         self.raw.storage_metrics()
     }
 
+    #[inline]
+    pub fn row(&self, line: Line) -> RowRef<'_, T> {
+        self.raw.row(line)
+    }
+
     /// Estimated shallow allocation for the grid's row and cell vectors.
     #[inline]
     pub fn estimated_storage_bytes(&self) -> usize {
@@ -445,7 +451,7 @@ impl<T> Grid<T> {
     pub fn compacted_history_rows(&self) -> usize {
         (self.topmost_line().0..0)
             .map(Line)
-            .filter(|line| self.raw[*line].is_compacted())
+            .filter(|line| self.raw.row(*line).is_compacted())
             .count()
     }
 
@@ -461,7 +467,7 @@ impl<T> Grid<T> {
         T: Clone + PartialEq,
     {
         for line in self.topmost_line().0..0 {
-            self.raw[Line(line)].compact_trailing();
+            self.raw.row_mut(Line(line)).compact_trailing();
         }
     }
 
@@ -573,14 +579,14 @@ impl<T> Index<Point> for Grid<T> {
 
     #[inline]
     fn index(&self, point: Point) -> &T {
-        &self[point.line][point.column]
+        self.raw.cell(point.line, point.column)
     }
 }
 
 impl<T: Clone> IndexMut<Point> for Grid<T> {
     #[inline]
     fn index_mut(&mut self, point: Point) -> &mut T {
-        &mut self[point.line][point.column]
+        &mut self.raw.row_mut(point.line)[point.column]
     }
 }
 
