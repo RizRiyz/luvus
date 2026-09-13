@@ -7916,6 +7916,7 @@ impl App {
     }
 
     fn close_pane(&mut self, id: PaneId) {
+        crate::orch::worker::discard(id);
         let owner = self.pane_location(id);
         let durable = self
             .automation

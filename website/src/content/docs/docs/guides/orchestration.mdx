@@ -59,13 +59,15 @@ no live task owner are discarded so stale reservations cannot block the queue.
 If older persisted state contains two already-running workers with overlapping
 paths, Luvus keeps the existing holder and marks the unprotected task blocked.
 
-When an agent is selected, Luvus queues its launch command and Enter as one
-submission before it marks the task running. A queue failure closes the new pane
-and leaves the task unclaimed without closing any pre-existing worker. Any
-workspace, worktree, or branch created only for that failed attempt is removed,
-and the previous workspace selection is restored. Multiline prompts and progress
-notes remain multiline in task storage; their line boundaries are folded into
-one safe paragraph only when they become part of a shell launch command.
+When an agent is selected, Luvus queues a short private-runner command and Enter
+as one submission before it marks the task running. The runner reloads the
+claimed task and passes its complete briefing directly to the agent process, so
+long or multiline prompts never cross the shell's terminal-input line buffer.
+A queue failure closes the new pane and leaves the task unclaimed without
+closing any pre-existing worker. Any workspace, worktree, or branch created only
+for that failed attempt is removed, and the previous workspace selection is
+restored. Multiline prompts and progress notes remain structured in both task
+storage and the briefing delivered to the agent.
 
 ## The board
 

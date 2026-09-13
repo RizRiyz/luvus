@@ -99,9 +99,12 @@ fn main() -> Result<()> {
     {
         return remote_client_info(&args);
     }
-    // Private foreground route used only by scheduled worker panes. Keep it
+    // Private foreground routes used only by ORCH worker panes. Keep them
     // ahead of migrations and TUI/server routing: it must run exactly one
     // adapter process, settle its ORCH task, and exit.
+    if args.get(1).map(String::as_str) == Some("__task-worker") {
+        std::process::exit(orch::worker::run(&args)?);
+    }
     if args.get(1).map(String::as_str) == Some("__automation-worker") {
         std::process::exit(automation::run_worker(&args)?);
     }

@@ -14,6 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod worker;
+
 /// Human-friendly, CLI-typeable task id (`t1`, `t2`, …).
 pub type TaskId = String;
 
@@ -220,19 +222,25 @@ pub const MAX_LEASE_PATHS: usize = 64;
 /// Maximum UTF-8 byte length of one path pattern.
 pub const MAX_LEASE_PATH_BYTES: usize = 1024;
 
-/// Task briefings are sent to a live shell as terminal input. Reject every
-/// control character before launch so restored task text cannot synthesize an
-/// Enter, Escape, or another terminal action.
+/// Shell-facing fields cannot contain any terminal control character.
 pub(crate) fn contains_terminal_control(value: &str) -> bool {
     value.chars().any(char::is_control)
 }
 
+/// Structured briefings retain LF line breaks but reject every other control.
+pub(crate) fn contains_multiline_control(value: &str) -> bool {
+    value
+        .chars()
+        .any(|character| character.is_control() && character != '\n')
+}
+
 /// Reject terminal actions while optionally retaining ordinary line breaks.
 fn validate_text_controls(field: &'static str, value: &str, multiline: bool) -> OrchResult<()> {
-    if value
-        .chars()
-        .any(|character| character.is_control() && !(multiline && character == '\n'))
-    {
+    if if multiline {
+        contains_multiline_control(value)
+    } else {
+        contains_terminal_control(value)
+    } {
         return Err(Reject::new(
             "bad_request",
             format!("{field} contains an unsupported control character"),

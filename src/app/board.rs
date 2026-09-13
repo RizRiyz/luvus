@@ -46,6 +46,11 @@ struct TaskStartSelection {
     zoomed: bool,
 }
 
+enum TaskAgentLaunch {
+    Manual { agent: String, briefing: String },
+    Automation(String),
+}
+
 pub enum TaskRetryResult {
     Task(crate::orch::Task),
     AutomationRun(crate::automation::AutomationRun),
@@ -245,14 +250,15 @@ impl App {
             }
         }
 
-        // Validate the exact shell input before creating a tab, worktree,
-        // pane, claim, or lease. This also protects task text restored from an
-        // older ledger that predates current input validation.
-        let launch_line = agent
+        // Validate the launch data before creating a tab, worktree, pane,
+        // claim, or lease. This also protects task text restored from an older
+        // ledger that predates current input validation.
+        let launch = agent
             .as_deref()
             .map(|command| match automation_access {
-                Some(access) => automation_agent_launch_line(command, &task, access),
-                None => agent_launch_line(command, &task, mode),
+                Some(access) => automation_agent_launch_line(command, &task, access)
+                    .map(TaskAgentLaunch::Automation),
+                None => manual_agent_launch(command, &task, mode),
             })
             .transpose()
             .map_err(|message| ("invalid_prompt".to_string(), message))?;
@@ -273,14 +279,29 @@ impl App {
         let result = &prepared.result;
         let pane = result.pane;
 
-        // A task prompt launches the agent through the new pane's shell. Queue
-        // the command and Enter as one admitted action so a deferred PTY cannot
-        // receive visible command text without the submit that starts it.
-        if let Some(line) = launch_line.as_deref() {
+        // A manual task stages its briefing outside the PTY, then sends only a
+        // short private-runner command through the new pane's shell. Queue that
+        // command and Enter as one admitted action before claiming the task.
+        if let Some(launch) = launch.as_ref() {
             let failure = match self.panes.get(&pane) {
-                Some(worker) => submit(worker, line)
-                    .err()
-                    .map(|message| ("send_failed".to_string(), message)),
+                Some(worker) => match launch {
+                    TaskAgentLaunch::Manual { agent, briefing } => {
+                        match crate::orch::worker::stage(pane, &task.id, agent, briefing) {
+                            Ok(()) => {
+                                let line = manual_agent_runner_line(&worker.command);
+                                let failure = submit(worker, &line).err();
+                                if failure.is_some() {
+                                    crate::orch::worker::discard(pane);
+                                }
+                                failure.map(|message| ("send_failed".to_string(), message))
+                            }
+                            Err(error) => Some(("send_failed".to_string(), error.to_string())),
+                        }
+                    }
+                    TaskAgentLaunch::Automation(line) => submit(worker, line)
+                        .err()
+                        .map(|message| ("send_failed".to_string(), message)),
+                },
                 None => Some((
                     "spawn_failed".to_string(),
                     "task worker pane was not created".to_string(),
@@ -2401,25 +2422,14 @@ fn task_tab_name(task: &crate::orch::Task) -> String {
     value.chars().take(crate::app::TAB_NAME_MAX).collect()
 }
 
-/// Append user-authored lines as one shell-safe argument paragraph.
-fn append_folded_lines(target: &mut String, value: &str) {
-    for (index, line) in value.lines().map(str::trim).enumerate() {
-        if index > 0 {
-            target.push(' ');
-        }
-        target.push_str(line);
-    }
-}
-
 /// Queue the launch text and its Enter as one ordered PTY action.
 fn submit_agent_launch(pane: &crate::terminal::pty::Pane, line: &str) -> Result<(), String> {
     pane.try_submit_text(line)
 }
 
-/// The briefing a worker agent starts with: what the task is, its boundaries,
-/// its gate, and the contract for reporting back over the socket. One line —
-/// it's typed into the worker's shell as a quoted argument.
-fn task_briefing(task: &crate::orch::Task, mode: TaskWorkerMode) -> String {
+/// The structured briefing a worker agent starts with: what the task is, its
+/// boundaries, its gate, and the contract for reporting back over the socket.
+pub(crate) fn task_briefing(task: &crate::orch::Task, mode: TaskWorkerMode) -> String {
     let id = &task.id;
     let location = match mode {
         TaskWorkerMode::Worktree => "This directory is your isolated git worktree.",
@@ -2436,12 +2446,8 @@ fn task_briefing(task: &crate::orch::Task, mode: TaskWorkerMode) -> String {
         .as_deref()
         .filter(|prompt| !prompt.trim().is_empty())
     {
-        b.push(' ');
-        // Manual workers are launched by typing one command into a PTY. Keep
-        // the stored prompt multiline for editing and APIs, but fold its line
-        // boundaries at this final terminal boundary so a newline can never
-        // submit a partial shell command.
-        append_folded_lines(&mut b, prompt);
+        b.push('\n');
+        b.push_str(prompt.trim());
     }
     if !task.paths.is_empty() {
         b.push_str(&format!(
@@ -2453,9 +2459,8 @@ fn task_briefing(task: &crate::orch::Task, mode: TaskWorkerMode) -> String {
         b.push_str(&format!(" The quality gate is `{g}` — it must pass."));
     }
     if let Some(note) = task.notes.last().filter(|note| !note.trim().is_empty()) {
-        b.push_str(" Note from earlier work: ");
-        append_folded_lines(&mut b, note);
-        b.push('.');
+        b.push_str("\n\nNote from earlier work:\n");
+        b.push_str(note.trim());
     }
     match mode {
         TaskWorkerMode::Worktree => b.push_str(&format!(
@@ -2475,23 +2480,51 @@ fn task_briefing(task: &crate::orch::Task, mode: TaskWorkerMode) -> String {
     b
 }
 
-/// The full line typed into a fresh worker shell to launch `agent` with the
-/// task briefing, with the task id available to Unix workers.
-fn agent_launch_line(
+/// Validate and stage the data for one manual launch before creating resources.
+fn manual_agent_launch(
     agent: &str,
     task: &crate::orch::Task,
     mode: TaskWorkerMode,
-) -> Result<String, String> {
+) -> Result<TaskAgentLaunch, String> {
     let briefing = task_briefing(task, mode);
-    if crate::orch::contains_terminal_control(&briefing) {
+    if crate::orch::contains_multiline_control(&briefing) {
         return Err("task briefing must not contain terminal control characters".to_string());
     }
-    let brief = shell_quote(&briefing);
-    let command = agent_task_command(agent);
-    if cfg!(windows) {
-        Ok(format!("{command} {brief}"))
-    } else {
-        Ok(format!("LUVUS_TASK_ID={} {command} {brief}", task.id))
+    let agent = agent.trim();
+    if agent.is_empty() {
+        return Err("agent command cannot be empty".to_string());
+    }
+    if crate::orch::contains_terminal_control(agent) {
+        return Err("agent command must not contain terminal control characters".to_string());
+    }
+    Ok(TaskAgentLaunch::Manual {
+        agent: agent.to_string(),
+        briefing,
+    })
+}
+
+/// The shell receives only a bounded private-runner command. The runner reloads
+/// the claimed task and passes its full briefing directly to the agent process.
+fn manual_agent_runner_line(shell: &str) -> String {
+    #[cfg(not(windows))]
+    let _ = shell;
+    #[cfg(not(windows))]
+    {
+        "\"$LUVUS_BIN_PATH\" __task-worker".to_string()
+    }
+    #[cfg(windows)]
+    {
+        let base = std::path::Path::new(shell)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(shell)
+            .trim_end_matches(".exe")
+            .to_ascii_lowercase();
+        match base.as_str() {
+            "pwsh" | "powershell" => "& \"$env:LUVUS_BIN_PATH\" __task-worker".to_string(),
+            "cmd" => "\"%LUVUS_BIN_PATH%\" __task-worker".to_string(),
+            _ => "\"$LUVUS_BIN_PATH\" __task-worker".to_string(),
+        }
     }
 }
 
@@ -2525,17 +2558,6 @@ fn automation_agent_launch_line(
     } else {
         Ok(format!("LUVUS_TASK_ID={} {command}", task.id))
     }
-}
-
-fn agent_task_command(agent: &str) -> String {
-    crate::agent::registry::find(agent)
-        .map(|descriptor| {
-            std::iter::once(descriptor.launch_command)
-                .chain(descriptor.task_prompt_args.iter().copied())
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .unwrap_or_else(|| agent.to_string())
 }
 
 fn agent_automation_command(
@@ -3689,7 +3711,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_launch_line_is_one_quoted_line_with_the_contract() {
+    fn manual_agent_launch_keeps_the_briefing_out_of_the_shell_line() {
         let mut s = crate::orch::OrchState::default();
         let mut t = s
             .add_task(
@@ -3702,24 +3724,32 @@ mod tests {
         t.prompt = Some("Review the contract.\nInclude rollback risks.".into());
         t.notes
             .push("First investigation line.\nSecond investigation line.".into());
-        let line = agent_launch_line("claude", &t, TaskWorkerMode::Worktree).unwrap();
-        assert!(!line.contains('\n'), "typed into a shell — one line");
-        assert!(line.contains("Review the contract. Include rollback risks."));
-        assert!(line.contains(
-            "Note from earlier work: First investigation line. Second investigation line."
+        let briefing = task_briefing(&t, TaskWorkerMode::Worktree);
+        assert!(briefing.contains("Review the contract.\nInclude rollback risks."));
+        assert!(briefing.contains(
+            "Note from earlier work:\nFirst investigation line.\nSecond investigation line."
         ));
-        assert!(line.contains("claude"));
-        assert!(line.contains("luvus task done t1"));
+        assert!(briefing.contains("fix the auth's bug"));
+        assert!(briefing.contains("luvus task done t1"));
+        assert!(briefing.contains("LUVUS_BIN_PATH"));
+        assert!(briefing.contains("cargo test auth"));
+        assert!(briefing.contains("--context-used <0..1>"));
+        assert!(briefing.contains("not 60% task progress"));
+        assert!(!briefing.contains("--context <0..1>"));
+
+        let TaskAgentLaunch::Manual { agent, briefing } =
+            manual_agent_launch("claude", &t, TaskWorkerMode::Worktree).unwrap()
+        else {
+            panic!("manual launch must use the private runner")
+        };
+        let line = manual_agent_runner_line("zsh");
+        assert!(!line.contains('\n'), "the shell receives one short line");
+        assert!(line.contains("__task-worker"));
         assert!(line.contains("LUVUS_BIN_PATH"));
-        assert!(line.contains("cargo test auth"));
-        assert!(line.contains("--context-used <0..1>"));
-        assert!(line.contains("not 60% task progress"));
-        assert!(!line.contains("--context <0..1>"));
-        if !cfg!(windows) {
-            assert!(line.starts_with("LUVUS_TASK_ID=t1 "));
-            // The apostrophe in the title survives POSIX single-quoting.
-            assert!(line.contains(r"auth'\''s"));
-        }
+        assert!(line.len() < 1024, "runner line remains below TTY limits");
+        assert!(!line.contains("Review the contract"));
+        assert_eq!(agent, "claude");
+        assert!(briefing.contains("Review the contract.\nInclude rollback risks."));
     }
 
     #[test]
@@ -3755,30 +3785,32 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn prompted_task_start_executes_the_deferred_shell_command() {
+    fn long_prompted_task_start_queues_only_a_short_deferred_shell_command() {
         let _env = crate::persist::test_env("orch-prompted-start");
         let (app_tx, _app_rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, app_tx).unwrap();
         let workspace_id = app.ws().id.clone();
+        let prompt = format!("ORCH-LONG-PROMPT\n{}", "x".repeat(8 * 1024));
         app.orch
-            .add_task_with_prompt(
-                "Prompt delivery".into(),
-                Some("ORCH-PROMPT-WAS-SUBMITTED".into()),
-                vec![],
-                vec![],
-                None,
-            )
+            .add_task_with_prompt("Prompt delivery".into(), Some(prompt), vec![], vec![], None)
             .unwrap();
 
-        // `echo` stands in for an agent executable while exercising the real
-        // deferred PTY, shell parsing, task binding, and submit path.
+        let submitted = std::cell::RefCell::new(String::new());
+        // Exercise the real deferred PTY while recording the production launch
+        // line. The test process cannot re-enter `main` as `__task-worker`, so a
+        // short echo is substituted only for this shell-execution assertion.
         let started = app
-            .task_start(
+            .task_start_impl_with_submit(
                 "t1",
                 None,
                 Some("echo".into()),
                 TaskWorkerMode::Workspace,
                 Some(workspace_id),
+                None,
+                |pane, line| {
+                    submitted.replace(line.to_string());
+                    pane.try_submit_text("echo ORCH-RUNNER-WAS-SUBMITTED")
+                },
             )
             .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -3792,10 +3824,7 @@ mod tests {
                 .unwrap()
                 .detection_text(200);
             let unwrapped = text.replace('\n', "");
-            // The shell echoes the submitted command once and `echo` emits
-            // its argument once. Seeing both proves Enter executed the line
-            // instead of leaving the briefing parked at a shell prompt.
-            if unwrapped.matches("ORCH-PROMPT-WAS-SUBMITTED").count() >= 2 {
+            if unwrapped.contains("ORCH-RUNNER-WAS-SUBMITTED") {
                 break;
             }
             assert!(
@@ -3804,6 +3833,11 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+        let submitted = submitted.into_inner();
+        assert!(submitted.contains("__task-worker"));
+        assert!(submitted.len() < 1024, "{submitted}");
+        assert!(!submitted.contains("ORCH-LONG-PROMPT"));
+        assert!(!submitted.contains(&"x".repeat(4096)));
         assert_eq!(
             app.orch.task("t1").unwrap().status,
             crate::orch::TaskStatus::Running
@@ -3870,7 +3904,12 @@ mod tests {
         ];
         assert_eq!(expected.len(), crate::agent::registry::descriptors().len());
         for (agent, command) in expected {
-            assert_eq!(agent_task_command(agent), command, "{agent}");
+            let descriptor = crate::agent::registry::find(agent).unwrap();
+            let actual = std::iter::once(descriptor.launch_command)
+                .chain(descriptor.task_prompt_args.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(actual, command, "{agent}");
         }
     }
 

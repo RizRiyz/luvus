@@ -145,9 +145,10 @@ model context window already consumed. `0.6` means 60% of that window has been
 used, not 60% task progress. Send work progress through the `note` field of
 `task.update` and omit the heartbeat when context-window usage is unknown.
 Notes may contain ordinary LF line breaks; other terminal control characters
-are rejected, and a stored multiline note is folded into one paragraph only
-when it is included in a later worker launch. The CLI exposes the same field as
-the clearer `--context-used` flag.
+are rejected. Manual worker launch passes the complete briefing directly to the
+agent process instead of typing it through the shell, so stored prompt and note
+line breaks remain intact. The CLI exposes the same field as the clearer
+`--context-used` flag.
 
 `pane.report_session` binds an exact built-in agent session to its owning pane.
 The identity-only form remains compatible with existing integrations:
