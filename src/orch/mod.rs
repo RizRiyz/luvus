@@ -227,6 +227,20 @@ pub(crate) fn contains_terminal_control(value: &str) -> bool {
     value.chars().any(char::is_control)
 }
 
+/// Reject terminal actions while optionally retaining ordinary line breaks.
+fn validate_text_controls(field: &'static str, value: &str, multiline: bool) -> OrchResult<()> {
+    if value
+        .chars()
+        .any(|character| character.is_control() && !(multiline && character == '\n'))
+    {
+        return Err(Reject::new(
+            "bad_request",
+            format!("{field} contains an unsupported control character"),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_task_text(
     field: &'static str,
     value: &str,
@@ -239,16 +253,7 @@ fn validate_task_text(
             format!("{field} exceeds the {max_bytes}-byte limit"),
         ));
     }
-    if value
-        .chars()
-        .any(|character| character.is_control() && !(multiline && character == '\n'))
-    {
-        return Err(Reject::new(
-            "bad_request",
-            format!("{field} contains an unsupported control character"),
-        ));
-    }
-    Ok(())
+    validate_text_controls(field, value, multiline)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -732,6 +737,10 @@ impl OrchState {
             .iter_mut()
             .find(|t| t.id == id)
             .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        // Notes may be multiline progress summaries and the latest note is
+        // included in a future worker briefing. Reject terminal actions at the
+        // mutation boundary while allowing ordinary LF paragraph boundaries.
+        validate_text_controls("task note", &note, true)?;
         push_log(&mut t.notes, note);
         t.updated = unix_now();
         Ok(())
@@ -1271,6 +1280,27 @@ mod tests {
         let stored = s.task("t2").unwrap().outputs.last().unwrap().clone();
         assert!(stored.len() <= MAX_LOG_ENTRY + '…'.len_utf8());
         assert!(stored.ends_with('…'));
+    }
+
+    #[test]
+    fn task_notes_allow_lines_but_reject_terminal_actions() {
+        let mut state = OrchState::default();
+        state
+            .add_task("Review".into(), vec![], vec![], None)
+            .unwrap();
+        state
+            .add_note("t1", "First line\nSecond line".into())
+            .unwrap();
+        assert_eq!(
+            state.task("t1").unwrap().notes.last().map(String::as_str),
+            Some("First line\nSecond line")
+        );
+
+        let error = state
+            .add_note("t1", "unsafe\u{1b}[2Jnote".into())
+            .unwrap_err();
+        assert_eq!(error.code, "bad_request");
+        assert_eq!(state.task("t1").unwrap().notes.len(), 1);
     }
 
     #[test]

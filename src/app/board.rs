@@ -215,6 +215,23 @@ impl App {
         };
         let pane = result.pane;
 
+        // A task prompt launches the agent through the new pane's shell. Queue
+        // the command and Enter as one admitted action so a deferred PTY cannot
+        // receive visible command text without the submit that starts it.
+        if let Some(line) = launch_line.as_deref() {
+            let worker = self.panes.get(&pane).ok_or_else(|| {
+                (
+                    "spawn_failed".to_string(),
+                    "task worker pane was not created".to_string(),
+                )
+            })?;
+            let submit = submit_agent_launch(worker, line);
+            if let Err(message) = submit {
+                self.close_pane(pane);
+                return Err(("send_failed".to_string(), message));
+            }
+        }
+
         // Claim + lease + record the binding for the worker.
         // A started worker is *running* — claimed is reserved for the CLI's
         // claim-without-start, so the board never shows live work as waiting.
@@ -246,12 +263,6 @@ impl App {
                     root: result.cwd.display().to_string(),
                 },
             ),
-        }
-        if let Some(line) = launch_line {
-            if let Some(p) = self.panes.get(&pane) {
-                p.send(line.as_bytes());
-                p.send(b"\r");
-            }
         }
         self.orch.save();
         self.emit_event(
@@ -2178,6 +2189,21 @@ fn task_tab_name(task: &crate::orch::Task) -> String {
     value.chars().take(crate::app::TAB_NAME_MAX).collect()
 }
 
+/// Append user-authored lines as one shell-safe argument paragraph.
+fn append_folded_lines(target: &mut String, value: &str) {
+    for (index, line) in value.lines().map(str::trim).enumerate() {
+        if index > 0 {
+            target.push(' ');
+        }
+        target.push_str(line);
+    }
+}
+
+/// Queue the launch text and its Enter as one ordered PTY action.
+fn submit_agent_launch(pane: &crate::terminal::pty::Pane, line: &str) -> Result<(), String> {
+    pane.try_submit_text(line)
+}
+
 /// The briefing a worker agent starts with: what the task is, its boundaries,
 /// its gate, and the contract for reporting back over the socket. One line —
 /// it's typed into the worker's shell as a quoted argument.
@@ -2203,12 +2229,7 @@ fn task_briefing(task: &crate::orch::Task, mode: TaskWorkerMode) -> String {
         // the stored prompt multiline for editing and APIs, but fold its line
         // boundaries at this final terminal boundary so a newline can never
         // submit a partial shell command.
-        for (index, line) in prompt.lines().map(str::trim).enumerate() {
-            if index > 0 {
-                b.push(' ');
-            }
-            b.push_str(line);
-        }
+        append_folded_lines(&mut b, prompt);
     }
     if !task.paths.is_empty() {
         b.push_str(&format!(
@@ -2219,8 +2240,10 @@ fn task_briefing(task: &crate::orch::Task, mode: TaskWorkerMode) -> String {
     if let Some(g) = task.gate.as_deref().filter(|g| !g.trim().is_empty()) {
         b.push_str(&format!(" The quality gate is `{g}` — it must pass."));
     }
-    if let Some(note) = task.notes.last() {
-        b.push_str(&format!(" Note from earlier work: {note}."));
+    if let Some(note) = task.notes.last().filter(|note| !note.trim().is_empty()) {
+        b.push_str(" Note from earlier work: ");
+        append_folded_lines(&mut b, note);
+        b.push('.');
     }
     match mode {
         TaskWorkerMode::Worktree => b.push_str(&format!(
@@ -3356,9 +3379,14 @@ mod tests {
             )
             .unwrap();
         t.prompt = Some("Review the contract.\nInclude rollback risks.".into());
+        t.notes
+            .push("First investigation line.\nSecond investigation line.".into());
         let line = agent_launch_line("claude", &t, TaskWorkerMode::Worktree).unwrap();
         assert!(!line.contains('\n'), "typed into a shell — one line");
         assert!(line.contains("Review the contract. Include rollback risks."));
+        assert!(line.contains(
+            "Note from earlier work: First investigation line. Second investigation line."
+        ));
         assert!(line.contains("claude"));
         assert!(line.contains("luvus task done t1"));
         assert!(line.contains("LUVUS_BIN_PATH"));
@@ -3371,6 +3399,94 @@ mod tests {
             // The apostrophe in the title survives POSIX single-quoting.
             assert!(line.contains(r"auth'\''s"));
         }
+    }
+
+    #[test]
+    fn task_agent_launch_queues_text_and_enter_as_one_submit() {
+        let _env = crate::persist::test_env("orch-agent-submit");
+        let (app_tx, _app_rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, app_tx).unwrap();
+        let pane = app.layout().focus;
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+
+        let line = "claude 'review the contract'";
+        submit_agent_launch(app.panes.get(&pane).unwrap(), line).unwrap();
+        match input_rx.recv().unwrap() {
+            crate::terminal::pty::InputAction::Submit { paste, settle } => {
+                assert!(
+                    paste
+                        .windows(line.len())
+                        .any(|window| window == line.as_bytes()),
+                    "the complete launch line is kept in the atomic submit"
+                );
+                assert!(!settle.is_zero(), "Enter is settled after the command text");
+            }
+            crate::terminal::pty::InputAction::Bytes(_) => {
+                panic!("task launch must not split command text and Enter")
+            }
+        }
+        assert!(input_rx.try_recv().is_err(), "only one action is queued");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prompted_task_start_executes_the_deferred_shell_command() {
+        let _env = crate::persist::test_env("orch-prompted-start");
+        let (app_tx, _app_rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, app_tx).unwrap();
+        let workspace_id = app.ws().id.clone();
+        app.orch
+            .add_task_with_prompt(
+                "Prompt delivery".into(),
+                Some("ORCH-PROMPT-WAS-SUBMITTED".into()),
+                vec![],
+                vec![],
+                None,
+            )
+            .unwrap();
+
+        // `printf` stands in for an agent executable while exercising the real
+        // deferred PTY, shell parsing, task binding, and submit path.
+        let started = app
+            .task_start(
+                "t1",
+                None,
+                Some("printf".into()),
+                TaskWorkerMode::Workspace,
+                Some(workspace_id),
+            )
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let text = app
+                .panes
+                .get(&started.pane)
+                .unwrap()
+                .engine
+                .lock()
+                .unwrap()
+                .detection_text(24);
+            // The shell echoes the submitted command once and `printf` emits
+            // its argument once. Seeing both proves Enter executed the line
+            // instead of leaving the briefing parked at a shell prompt.
+            if text.matches("ORCH-PROMPT-WAS-SUBMITTED").count() >= 2 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the prompted task command was not submitted to its shell"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            app.orch.task("t1").unwrap().status,
+            crate::orch::TaskStatus::Running
+        );
+        app.close_pane(started.pane);
     }
 
     #[test]

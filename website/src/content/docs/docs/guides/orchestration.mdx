@@ -59,6 +59,12 @@ no live task owner are discarded so stale reservations cannot block the queue.
 If older persisted state contains two already-running workers with overlapping
 paths, Luvus keeps the existing holder and marks the unprotected task blocked.
 
+When an agent is selected, Luvus queues its launch command and Enter as one
+submission before it marks the task running. A queue failure closes the new pane
+and leaves the task unclaimed. Multiline prompts and progress notes remain
+multiline in task storage; their line boundaries are folded into one safe
+paragraph only when they become part of a shell launch command.
+
 ## The board
 
 Open the `◇ orch` tab with **`Ctrl+Space o`**. It shows every task (status ·
