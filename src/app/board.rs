@@ -2497,6 +2497,7 @@ fn manual_agent_launch(
     if crate::orch::contains_terminal_control(agent) {
         return Err("agent command must not contain terminal control characters".to_string());
     }
+    crate::orch::worker::validate_agent_command(agent)?;
     Ok(TaskAgentLaunch::Manual {
         agent: agent.to_string(),
         briefing,

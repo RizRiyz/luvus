@@ -232,6 +232,10 @@ luvus automation run a1 --idempotency-key manual-review-1
 luvus events
 ```
 
+For an unregistered agent, `--agent` accepts an executable followed by quoted
+arguments. Luvus parses that argv directly; shell pipelines and redirections are
+not evaluated. The task briefing is always appended as the final argument.
+
 Inside a luvus pane, commands default to the calling pane via
 `$LUVUS_PANE_ID`, so a worker agent can `luvus task heartbeat` itself.
 `--context-used` is the fraction of the model's context window already consumed:
