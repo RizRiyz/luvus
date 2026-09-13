@@ -61,9 +61,11 @@ paths, Luvus keeps the existing holder and marks the unprotected task blocked.
 
 When an agent is selected, Luvus queues its launch command and Enter as one
 submission before it marks the task running. A queue failure closes the new pane
-and leaves the task unclaimed. Multiline prompts and progress notes remain
-multiline in task storage; their line boundaries are folded into one safe
-paragraph only when they become part of a shell launch command.
+and leaves the task unclaimed without closing any pre-existing worker. Any
+workspace, worktree, or branch created only for that failed attempt is removed,
+and the previous workspace selection is restored. Multiline prompts and progress
+notes remain multiline in task storage; their line boundaries are folded into
+one safe paragraph only when they become part of a shell launch command.
 
 ## The board
 

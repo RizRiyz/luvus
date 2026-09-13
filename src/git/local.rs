@@ -460,7 +460,8 @@ fn run_status(cwd: &Path, args: &[&str]) -> Result<(bool, String, String), Strin
     ))
 }
 
-fn branch_exists(repo: &Path, branch: &str) -> bool {
+/// Whether a local branch exists in `repo`.
+pub(crate) fn branch_exists(repo: &Path, branch: &str) -> bool {
     run(
         repo,
         &[
@@ -471,6 +472,11 @@ fn branch_exists(repo: &Path, branch: &str) -> bool {
         ],
     )
     .is_ok()
+}
+
+/// Delete a local branch that the caller has proved it created and no longer uses.
+pub(crate) fn branch_delete_force(repo: &Path, branch: &str) -> Result<(), String> {
+    run(repo, &["branch", "-D", "--", branch]).map(|_| ())
 }
 
 /// The repo's default branch — `main`/`master` if present, else current `HEAD`.

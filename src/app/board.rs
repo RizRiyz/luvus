@@ -19,6 +19,33 @@ pub struct TaskStartResult {
     pub branch: Option<String>,
 }
 
+struct PreparedTaskStart {
+    result: TaskStartResult,
+    rollback: TaskStartRollback,
+}
+
+enum TaskStartRollback {
+    Reused,
+    Tab,
+    Workspace {
+        workspace_id: String,
+    },
+    Worktree {
+        workspace_id: String,
+        repo: std::path::PathBuf,
+        path: std::path::PathBuf,
+        branch: String,
+        branch_created: bool,
+    },
+}
+
+struct TaskStartSelection {
+    workspace_id: String,
+    tab_id: String,
+    pane: Option<PaneId>,
+    zoomed: bool,
+}
+
 pub enum TaskRetryResult {
     Task(crate::orch::Task),
     AutomationRun(crate::automation::AutomationRun),
@@ -134,6 +161,7 @@ impl App {
         )
     }
 
+    /// Start a task through the production PTY submitter.
     fn task_start_impl(
         &mut self,
         id: &str,
@@ -142,6 +170,30 @@ impl App {
         mode: TaskWorkerMode,
         workspace_id: Option<String>,
         automation_access: Option<crate::automation::AutomationAccess>,
+    ) -> Result<TaskStartResult, (String, String)> {
+        self.task_start_impl_with_submit(
+            id,
+            branch,
+            agent,
+            mode,
+            workspace_id,
+            automation_access,
+            submit_agent_launch,
+        )
+    }
+
+    /// Prepare and commit one task start, using an injectable final submitter so
+    /// failure rollback can be exercised without racing a real PTY.
+    #[allow(clippy::too_many_arguments)]
+    fn task_start_impl_with_submit(
+        &mut self,
+        id: &str,
+        branch: Option<String>,
+        agent: Option<String>,
+        mode: TaskWorkerMode,
+        workspace_id: Option<String>,
+        automation_access: Option<crate::automation::AutomationAccess>,
+        submit: impl FnOnce(&crate::terminal::pty::Pane, &str) -> Result<(), String>,
     ) -> Result<TaskStartResult, (String, String)> {
         let task = self
             .orch
@@ -205,32 +257,46 @@ impl App {
             .transpose()
             .map_err(|message| ("invalid_prompt".to_string(), message))?;
 
-        let result = match mode {
+        let previous = self.task_start_selection();
+        let prepared = match match mode {
             TaskWorkerMode::Worktree => {
-                self.start_task_worktree(&task, branch, workspace_id.as_deref())?
+                self.start_task_worktree(&task, branch, workspace_id.as_deref())
             }
-            TaskWorkerMode::Workspace => {
-                self.start_task_workspace(&task, workspace_id.as_deref())?
+            TaskWorkerMode::Workspace => self.start_task_workspace(&task, workspace_id.as_deref()),
+        } {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.restore_task_start_selection(&previous);
+                return Err(error);
             }
         };
+        let result = &prepared.result;
         let pane = result.pane;
 
         // A task prompt launches the agent through the new pane's shell. Queue
         // the command and Enter as one admitted action so a deferred PTY cannot
         // receive visible command text without the submit that starts it.
         if let Some(line) = launch_line.as_deref() {
-            let worker = self.panes.get(&pane).ok_or_else(|| {
-                (
+            let failure = match self.panes.get(&pane) {
+                Some(worker) => submit(worker, line)
+                    .err()
+                    .map(|message| ("send_failed".to_string(), message)),
+                None => Some((
                     "spawn_failed".to_string(),
                     "task worker pane was not created".to_string(),
-                )
-            })?;
-            let submit = submit_agent_launch(worker, line);
-            if let Err(message) = submit {
-                self.close_pane(pane);
-                return Err(("send_failed".to_string(), message));
+                )),
+            };
+            if let Some((code, message)) = failure {
+                let cleanup = self.rollback_task_start(prepared.rollback, pane, &previous);
+                let message = match cleanup {
+                    Ok(()) => message,
+                    Err(cleanup) => format!("{message}; task-start cleanup failed: {cleanup}"),
+                };
+                return Err((code, message));
             }
         }
+
+        let result = prepared.result;
 
         // Claim + lease + record the binding for the worker.
         // A started worker is *running* — claimed is reserved for the CLI's
@@ -281,12 +347,13 @@ impl App {
         Ok(result)
     }
 
+    /// Prepare a worktree worker and record exactly what a failed submit owns.
     fn start_task_worktree(
         &mut self,
         task: &crate::orch::Task,
         branch: Option<String>,
         requested_workspace: Option<&str>,
-    ) -> Result<TaskStartResult, (String, String)> {
+    ) -> Result<PreparedTaskStart, (String, String)> {
         if let Some(id) = requested_workspace {
             self.active_ws = self
                 .workspaces
@@ -340,23 +407,28 @@ impl App {
                         .map(|worktree| worktree.path)
                 })
         };
-        let path = if let Some(path) = existing {
+        let (path, rollback) = if let Some(path) = existing {
             let live = self
                 .panes
                 .iter()
                 .find(|(_, pane)| crate::platform::same_path(&pane.cwd, &path))
                 .map(|(&pane, _)| pane);
-            match live {
-                Some(pane) => self.focus_pane_global(pane),
+            let rollback = match live {
+                Some(pane) => {
+                    self.focus_pane_global(pane);
+                    TaskStartRollback::Reused
+                }
                 None if !self.create_workspace_at(path.clone()) => {
                     return Err((
                         "spawn_failed".to_string(),
                         "the worker pane didn't start".to_string(),
                     ));
                 }
-                None => {}
-            }
-            path
+                None => TaskStartRollback::Workspace {
+                    workspace_id: self.ws().id.clone(),
+                },
+            };
+            (path, rollback)
         } else {
             let repo = self.ws().cwd.clone();
             if !crate::git::local::is_repo(&repo) {
@@ -365,36 +437,59 @@ impl App {
                     "task start needs a git repo in worktree mode — use --mode workspace for the current checkout".to_string(),
                 ));
             }
+            let branch_created = !crate::git::local::branch_exists(&repo, &branch);
             let path = self
                 .create_worktree(&repo, &branch)
                 .map_err(|error| ("git_error".to_string(), error))?;
             if !crate::platform::same_path(&self.ws().cwd, &path) {
+                let mut cleanup = crate::git::local::worktree_remove_force(&repo, &path);
+                if cleanup.is_ok() && branch_created {
+                    cleanup = crate::git::local::branch_delete_force(&repo, &branch);
+                }
+                let detail = cleanup
+                    .err()
+                    .map(|error| format!("; cleanup failed: {error}"))
+                    .unwrap_or_default();
                 return Err((
                     "spawn_failed".to_string(),
-                    "worktree created but the worker pane didn't start".to_string(),
+                    format!("worktree created but the worker pane didn't start{detail}"),
                 ));
             }
-            path
+            let workspace_id = self.ws().id.clone();
+            (
+                path.clone(),
+                TaskStartRollback::Worktree {
+                    workspace_id,
+                    repo,
+                    path,
+                    branch: branch.clone(),
+                    branch_created,
+                },
+            )
         };
         let pane = self.layout().focus;
         let workspace_id = self.ws().id.clone();
         let tab_id = self.ws().tabs[self.ws().active_tab].id.clone();
-        Ok(TaskStartResult {
-            pane,
-            cwd: path.clone(),
-            mode: TaskWorkerMode::Worktree,
-            workspace_id,
-            tab_id,
-            worktree: Some(path.display().to_string()),
-            branch: Some(branch),
+        Ok(PreparedTaskStart {
+            result: TaskStartResult {
+                pane,
+                cwd: path.clone(),
+                mode: TaskWorkerMode::Worktree,
+                workspace_id,
+                tab_id,
+                worktree: Some(path.display().to_string()),
+                branch: Some(branch),
+            },
+            rollback,
         })
     }
 
+    /// Prepare a shared-workspace worker without claiming the task yet.
     fn start_task_workspace(
         &mut self,
         task: &crate::orch::Task,
         requested_workspace: Option<&str>,
-    ) -> Result<TaskStartResult, (String, String)> {
+    ) -> Result<PreparedTaskStart, (String, String)> {
         if let Some(binding) = task.workspace_worker.as_ref() {
             let binding_matches_request = requested_workspace
                 .map(|requested| requested == binding.workspace_id)
@@ -417,20 +512,24 @@ impl App {
                         .find(|pane| self.panes.contains_key(pane));
                     if let Some(pane) = pane {
                         self.focus_pane_global(pane);
-                        return Ok(TaskStartResult {
-                            pane,
-                            cwd: self.workspaces[workspace].cwd.clone(),
-                            mode: TaskWorkerMode::Workspace,
-                            workspace_id: self.workspaces[workspace].id.clone(),
-                            tab_id: self.workspaces[workspace].tabs[tab].id.clone(),
-                            worktree: None,
-                            branch: None,
+                        return Ok(PreparedTaskStart {
+                            result: TaskStartResult {
+                                pane,
+                                cwd: self.workspaces[workspace].cwd.clone(),
+                                mode: TaskWorkerMode::Workspace,
+                                workspace_id: self.workspaces[workspace].id.clone(),
+                                tab_id: self.workspaces[workspace].tabs[tab].id.clone(),
+                                worktree: None,
+                                branch: None,
+                            },
+                            rollback: TaskStartRollback::Reused,
                         });
                     }
                 }
             }
         }
 
+        let mut opened_workspace_id = None;
         let target = if let Some(id) = requested_workspace {
             self.workspaces
                 .iter()
@@ -462,7 +561,8 @@ impl App {
                         format!("workspace directory is unavailable: {}", root.display()),
                     ));
                 }
-                self.workspaces
+                let target = self
+                    .workspaces
                     .iter()
                     .position(|workspace| crate::platform::same_path(&workspace.cwd, &root))
                     .ok_or_else(|| {
@@ -470,7 +570,9 @@ impl App {
                             "workspace_not_found".to_string(),
                             "the worker workspace could not be reopened".to_string(),
                         )
-                    })?
+                    })?;
+                opened_workspace_id = Some(self.workspaces[target].id.clone());
+                target
             }
         } else {
             self.active_ws
@@ -491,12 +593,24 @@ impl App {
                 format!("workspace directory is unavailable: {}", root.display()),
             ));
         }
-        let pane = self.spawn_into(root.clone()).ok_or_else(|| {
-            (
-                "spawn_failed".to_string(),
-                "the workspace worker pane didn't start".to_string(),
-            )
-        })?;
+        let pane = match self.spawn_into(root.clone()) {
+            Some(pane) => pane,
+            None => {
+                if let Some(workspace_id) = opened_workspace_id.as_deref() {
+                    if let Some(index) = self
+                        .workspaces
+                        .iter()
+                        .position(|workspace| workspace.id == workspace_id)
+                    {
+                        self.close_workspace_after_rehome(index);
+                    }
+                }
+                return Err((
+                    "spawn_failed".to_string(),
+                    "the workspace worker pane didn't start".to_string(),
+                ));
+            }
+        };
         let mut tab = Tab::panes(TileLayout::new(pane));
         tab.name = Some(task_tab_name(task));
         let tab_id = tab.id.clone();
@@ -506,15 +620,113 @@ impl App {
         workspace.active_tab = workspace.tabs.len() - 1;
         let workspace_id = workspace.id.clone();
         self.session_dirty = true;
-        Ok(TaskStartResult {
-            pane,
-            cwd: root,
-            mode: TaskWorkerMode::Workspace,
-            workspace_id,
-            tab_id,
-            worktree: None,
-            branch: None,
+        let rollback = opened_workspace_id
+            .map(|workspace_id| TaskStartRollback::Workspace { workspace_id })
+            .unwrap_or(TaskStartRollback::Tab);
+        Ok(PreparedTaskStart {
+            result: TaskStartResult {
+                pane,
+                cwd: root,
+                mode: TaskWorkerMode::Workspace,
+                workspace_id,
+                tab_id,
+                worktree: None,
+                branch: None,
+            },
+            rollback,
         })
+    }
+
+    /// Snapshot the stable selection that a failed worker preparation must restore.
+    fn task_start_selection(&self) -> Option<TaskStartSelection> {
+        let workspace = self.workspaces.get(self.active_ws)?;
+        let tab = workspace.tabs.get(workspace.active_tab)?;
+        let focus = tab.layout.focus;
+        Some(TaskStartSelection {
+            workspace_id: workspace.id.clone(),
+            tab_id: tab.id.clone(),
+            pane: self.panes.contains_key(&focus).then_some(focus),
+            zoomed: self.zoomed,
+        })
+    }
+
+    /// Restore selection by stable IDs after task preparation changes topology.
+    fn restore_task_start_selection(&mut self, selection: &Option<TaskStartSelection>) {
+        let Some(selection) = selection else {
+            return;
+        };
+        let Some(workspace) = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == selection.workspace_id)
+        else {
+            return;
+        };
+        self.active_ws = workspace;
+        if let Some(tab) = self.workspaces[workspace]
+            .tabs
+            .iter()
+            .position(|tab| tab.id == selection.tab_id)
+        {
+            self.workspaces[workspace].active_tab = tab;
+            if let Some(pane) = selection.pane.filter(|pane| {
+                self.panes.contains_key(pane)
+                    && self.workspaces[workspace].tabs[tab].layout.contains(*pane)
+            }) {
+                self.workspaces[workspace].tabs[tab].layout.focus = pane;
+            }
+            self.zoomed = selection.zoomed;
+        }
+    }
+
+    /// Remove only resources created for an uncommitted task start, then return
+    /// the caller to its original workspace and tab.
+    fn rollback_task_start(
+        &mut self,
+        rollback: TaskStartRollback,
+        pane: PaneId,
+        selection: &Option<TaskStartSelection>,
+    ) -> Result<(), String> {
+        let mut cleanup_error = None;
+        match rollback {
+            TaskStartRollback::Reused => {}
+            TaskStartRollback::Tab => self.close_pane(pane),
+            TaskStartRollback::Workspace { workspace_id } => {
+                if let Some(index) = self
+                    .workspaces
+                    .iter()
+                    .position(|workspace| workspace.id == workspace_id)
+                {
+                    self.close_workspace_after_rehome(index);
+                }
+            }
+            TaskStartRollback::Worktree {
+                workspace_id,
+                repo,
+                path,
+                branch,
+                branch_created,
+            } => {
+                if let Some(index) = self
+                    .workspaces
+                    .iter()
+                    .position(|workspace| workspace.id == workspace_id)
+                {
+                    self.close_workspace_after_rehome(index);
+                }
+                match crate::git::local::worktree_remove_force(&repo, &path) {
+                    Ok(()) if branch_created => {
+                        if let Err(error) = crate::git::local::branch_delete_force(&repo, &branch) {
+                            cleanup_error = Some(error);
+                        }
+                    }
+                    Ok(()) => {}
+                    Err(error) => cleanup_error = Some(error),
+                }
+            }
+        }
+        self.restore_task_start_selection(selection);
+        cleanup_error.map_or(Ok(()), Err)
     }
 
     /// Reconcile the ledger's pane bindings with the live panes. Called at
@@ -2706,6 +2918,115 @@ mod tests {
     }
 
     #[test]
+    fn failed_agent_submit_rolls_back_new_worktree_and_selection() {
+        let _env = crate::persist::test_env("orch-start-submit-rollback");
+        let base = crate::persist::config_dir().join("submit-rollback-repo");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&base)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {:?} failed", args);
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        assert!(app.create_workspace_at(base.clone()));
+        let original_workspace = app.ws().id.clone();
+        let original_tab = app.ws().tabs[app.ws().active_tab].id.clone();
+        let original_pane = app.layout().focus;
+        let workspace_count = app.workspaces.len();
+        let pane_count = app.panes.len();
+        app.orch
+            .add_task("rollback".into(), vec![], vec![], None)
+            .unwrap();
+
+        let error = app
+            .task_start_impl_with_submit(
+                "t1",
+                None,
+                Some("codex".into()),
+                TaskWorkerMode::Worktree,
+                None,
+                None,
+                |_pane, _line| Err("injected submit failure".into()),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.0, "send_failed");
+        assert_eq!(error.1, "injected submit failure");
+        assert_eq!(app.workspaces.len(), workspace_count);
+        assert_eq!(app.panes.len(), pane_count);
+        assert_eq!(app.ws().id, original_workspace);
+        assert_eq!(app.ws().tabs[app.ws().active_tab].id, original_tab);
+        assert_eq!(app.layout().focus, original_pane);
+        assert!(!crate::git::local::branch_exists(&base, "luvus/t1"));
+        assert!(crate::git::local::worktrees(&base)
+            .unwrap()
+            .iter()
+            .all(|worktree| worktree.branch.as_deref() != Some("luvus/t1")));
+        let task = app.orch.task("t1").unwrap();
+        assert_eq!(task.status, TaskStatus::Queued);
+        assert_eq!(task.assignee, None);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn failed_agent_submit_does_not_close_a_reused_worker() {
+        let _env = crate::persist::test_env("orch-start-reused-rollback");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let workspace_id = app.ws().id.clone();
+        let tab_id = app.ws().tabs[app.ws().active_tab].id.clone();
+        let root = app.ws().cwd.display().to_string();
+        app.orch
+            .add_task("reuse".into(), vec![], vec![], None)
+            .unwrap();
+        app.orch.bind_workspace(
+            "t1",
+            WorkspaceWorkerBinding {
+                workspace_id,
+                tab_id,
+                root,
+            },
+        );
+
+        let error = app
+            .task_start_impl_with_submit(
+                "t1",
+                None,
+                Some("codex".into()),
+                TaskWorkerMode::Workspace,
+                None,
+                None,
+                |_pane, _line| Err("injected submit failure".into()),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.0, "send_failed");
+        assert!(app.panes.contains_key(&pane));
+        assert_eq!(app.layout().focus, pane);
+        assert_eq!(app.orch.task("t1").unwrap().status, TaskStatus::Queued);
+    }
+
+    #[test]
     fn task_start_workspace_creates_a_task_tab_without_a_worktree() {
         let _env = crate::persist::test_env("orch-workspace-worker");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -3449,13 +3770,13 @@ mod tests {
             )
             .unwrap();
 
-        // `printf` stands in for an agent executable while exercising the real
+        // `echo` stands in for an agent executable while exercising the real
         // deferred PTY, shell parsing, task binding, and submit path.
         let started = app
             .task_start(
                 "t1",
                 None,
-                Some("printf".into()),
+                Some("echo".into()),
                 TaskWorkerMode::Workspace,
                 Some(workspace_id),
             )
@@ -3469,16 +3790,17 @@ mod tests {
                 .engine
                 .lock()
                 .unwrap()
-                .detection_text(24);
-            // The shell echoes the submitted command once and `printf` emits
+                .detection_text(200);
+            let unwrapped = text.replace('\n', "");
+            // The shell echoes the submitted command once and `echo` emits
             // its argument once. Seeing both proves Enter executed the line
             // instead of leaving the briefing parked at a shell prompt.
-            if text.matches("ORCH-PROMPT-WAS-SUBMITTED").count() >= 2 {
+            if unwrapped.matches("ORCH-PROMPT-WAS-SUBMITTED").count() >= 2 {
                 break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "the prompted task command was not submitted to its shell"
+                "the prompted task command was not submitted to its shell; terminal text:\n{text}"
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
