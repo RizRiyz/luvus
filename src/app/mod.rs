@@ -5311,10 +5311,12 @@ impl App {
     /// from the workspace the server already had selected. Remember the selection
     /// by stable ID so this stays correct if workspace ordering changes later.
     fn create_workspace_at_with_focus(&mut self, cwd: PathBuf, focus: bool) -> bool {
-        let previous_active_id = if focus {
+        let previous_selection = if focus {
             None
         } else {
-            self.workspaces.get(self.active_ws).map(|ws| ws.id.clone())
+            self.workspaces
+                .get(self.active_ws)
+                .map(|ws| (ws.id.clone(), self.zoomed))
         };
         let name = ws_name(&cwd);
         let branch = git_branch(&cwd);
@@ -5345,13 +5347,14 @@ impl App {
             crate::logging::EventKind::WorkspaceOpen,
             &[crate::logging::Field::WorkspaceIndex(ws as u64)],
         );
-        if let Some(previous_active_id) = previous_active_id {
+        if let Some((previous_active_id, previous_zoomed)) = previous_selection {
             if let Some(previous_active) = self
                 .workspaces
                 .iter()
                 .position(|workspace| workspace.id == previous_active_id)
             {
                 self.active_ws = previous_active;
+                self.zoomed = previous_zoomed;
             }
         }
         true
@@ -8027,6 +8030,7 @@ impl App {
             removed = true;
         }
         if removed {
+            self.repair_active_workspace_after_removal(workspace_index);
             self.emit_event(
                 "workspace.closed",
                 serde_json::json!({"workspace": workspace_index.to_string()}),
@@ -8037,11 +8041,6 @@ impl App {
                     workspace_index as u64,
                 )],
             );
-        }
-        if self.workspaces.is_empty() {
-            self.all_workspaces_closed();
-        } else if self.active_ws >= self.workspaces.len() {
-            self.active_ws = self.workspaces.len() - 1;
         }
     }
 
@@ -8098,6 +8097,7 @@ impl App {
         if suppress_reopen {
             self.remember_closed_workspace_path(closed_root);
         }
+        self.repair_active_workspace_after_removal(index);
         self.emit_event(
             "workspace.closed",
             serde_json::json!({"workspace": index.to_string()}),
@@ -8106,8 +8106,16 @@ impl App {
             crate::logging::EventKind::WorkspaceClose,
             &[crate::logging::Field::WorkspaceIndex(index as u64)],
         );
+    }
+
+    /// Restore a valid active selection before workspace-removal observers run.
+    /// Module hooks build their context synchronously during `emit_event`, so
+    /// publishing the shortened list with the old index can panic immediately.
+    fn repair_active_workspace_after_removal(&mut self, removed_index: usize) {
         if self.workspaces.is_empty() {
             self.all_workspaces_closed();
+        } else if self.active_ws > removed_index {
+            self.active_ws -= 1;
         } else if self.active_ws >= self.workspaces.len() {
             self.active_ws = self.workspaces.len() - 1;
         }
@@ -13550,12 +13558,17 @@ mod tests {
         std::fs::create_dir_all(&background).unwrap();
         let selected_id = app.ws().id.clone();
         let before = app.workspaces.len();
+        app.zoomed = true;
         open(&mut app, &background, false);
         assert_eq!(app.workspaces.len(), before + 1, "new folder is added");
         assert_eq!(
             app.ws().id,
             selected_id,
             "focus:false preserves selection when it creates a workspace"
+        );
+        assert!(
+            app.zoomed,
+            "focus:false preserves the selected workspace's zoom state"
         );
         assert!(app
             .workspaces

@@ -1153,6 +1153,65 @@ command = ["sh", "-c", "echo event=$LUVUS_MODULE_EVENT json=$LUVUS_MODULE_EVENT_
     }
 
     #[test]
+    fn closing_active_workspace_repairs_context_before_event_hook_runs() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("luvus-workspace-close-hook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("LUVUS_HOME", &home);
+
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let surviving_pane = app.workspaces[0].tabs[0].layout.focus;
+        assert!(app.create_workspace_at(project));
+        assert_eq!(app.active_ws, 1, "the new workspace is selected");
+
+        link(
+            &mut app,
+            &home,
+            "workspace-close-mod",
+            r#"
+id = "you.workspace-close"
+name = "Workspace Close"
+version = "0.1.0"
+min_luvus_version = "0.1.0"
+
+[[events]]
+on = "workspace.closed"
+command = ["sh", "-c", "echo workspace=$LUVUS_WORKSPACE_ID pane=$LUVUS_PANE_ID"]
+"#,
+        );
+
+        // Regression for issue #350: the hook synchronously builds context as
+        // the active last workspace is removed. The old active index must not
+        // reach context::build_for after the workspace vector shrinks.
+        app.close_workspace(1);
+        assert_eq!(app.active_ws, 0);
+        assert_eq!(app.workspaces.len(), 1);
+
+        let log_id = app
+            .module_logs
+            .iter()
+            .find(|log| log.label == "event:workspace.closed")
+            .map(|log| log.id)
+            .expect("the workspace.closed hook was queued");
+        settle(&mut app, &rx, log_id);
+        let log = app.module_logs.iter().find(|log| log.id == log_id).unwrap();
+        assert_eq!(log.status, ModuleStatus::Succeeded, "stderr: {}", log.err);
+        assert!(log.out.contains("workspace=0"), "stdout: {:?}", log.out);
+        assert!(
+            log.out.contains(&format!("pane={}", surviving_pane.0)),
+            "the hook context points at the surviving pane: {:?}",
+            log.out
+        );
+
+        std::env::remove_var("LUVUS_HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn module_pane_survives_snapshot_restore() {
         let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = std::env::temp_dir().join(format!("luvus-restoretest-{}", std::process::id()));
