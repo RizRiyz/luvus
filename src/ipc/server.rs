@@ -1908,7 +1908,12 @@ fn ends_client_writer(message: &ServerMessage) -> bool {
     )
 }
 
-fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme: Arc<AtomicBool>) {
+pub(super) fn handle_client(
+    id: u64,
+    stream: Conn,
+    app_tx: Sender<AppEvent>,
+    terminal_theme: Arc<AtomicBool>,
+) {
     let mut reader = BufReader::new(stream.clone());
     let mut writer = stream;
 

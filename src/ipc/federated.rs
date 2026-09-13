@@ -471,20 +471,26 @@ fn validate_local_welcome(reader: &mut impl std::io::Read) -> Result<()> {
     Ok(())
 }
 
-fn run_inner(
+struct LocalNegotiation {
+    events_tx: Sender<ShellEvent>,
+    events_rx: mpsc::Receiver<ShellEvent>,
+    probe: crate::terminal::theme_probe::ProbeResult,
+}
+
+/// Performs the local attach handshake through `CellPixels`.
+fn negotiate_local(
     reader: crate::ipc::transport::Conn,
-    mut writer: crate::ipc::transport::Conn,
-    profiles: Vec<MachineProfile>,
-    terminal: &mut DefaultTerminal,
-) -> Result<super::client::ClientExit> {
-    let truecolor = protocol::truecolor_supported();
-    let size = terminal.size()?;
+    writer: &mut crate::ipc::transport::Conn,
+    (cols, rows): (u16, u16),
+    generation: u64,
+    probe_terminal_colors: impl FnOnce() -> crate::terminal::theme_probe::ProbeResult,
+) -> Result<LocalNegotiation> {
     protocol::write_message(
-        &mut writer,
+        writer,
         &ClientMessage::Hello {
             version: PROTOCOL_VERSION,
-            cols: size.width,
-            rows: size.height,
+            cols,
+            rows,
         },
     )?;
     let mut reader = BufReader::new(reader);
@@ -493,8 +499,12 @@ fn run_inner(
         ServerMessage::Ready { probe_terminal } => probe_terminal,
         _ => return Err(anyhow!("unexpected local server negotiation")),
     };
+    // Windows named-pipe flushes block until the peer reads. The server writes
+    // EndpointIdentity after Ready, so read it before sending negotiation data.
+    let (events_tx, events_rx) = mpsc::sync_channel(8);
+    start_local_reader(reader, events_tx.clone(), generation)?;
     let probe = if probe_terminal {
-        crate::terminal::theme_probe::probe()
+        probe_terminal_colors()
     } else {
         crate::terminal::theme_probe::ProbeResult {
             colors: None,
@@ -502,12 +512,36 @@ fn run_inner(
         }
     };
     if probe_terminal {
-        protocol::write_message(
-            &mut writer,
-            &ClientMessage::TerminalColors(probe.colors.clone()),
-        )?;
+        protocol::write_message(writer, &ClientMessage::TerminalColors(probe.colors.clone()))?;
     }
-    protocol::write_message(&mut writer, &super::client::cell_pixels_message())?;
+    protocol::write_message(writer, &super::client::cell_pixels_message())?;
+    Ok(LocalNegotiation {
+        events_tx,
+        events_rx,
+        probe,
+    })
+}
+
+fn run_inner(
+    reader: crate::ipc::transport::Conn,
+    mut writer: crate::ipc::transport::Conn,
+    profiles: Vec<MachineProfile>,
+    terminal: &mut DefaultTerminal,
+) -> Result<super::client::ClientExit> {
+    let truecolor = protocol::truecolor_supported();
+    let size = terminal.size()?;
+    let local_generation = 0u64;
+    let LocalNegotiation {
+        events_tx,
+        events_rx,
+        probe,
+    } = negotiate_local(
+        reader,
+        &mut writer,
+        (size.width, size.height),
+        local_generation,
+        crate::terminal::theme_probe::probe,
+    )?;
 
     let mut machines = profiles
         .into_iter()
@@ -525,9 +559,6 @@ fn run_inner(
     )?;
 
     let writer = Arc::new(Mutex::new(writer));
-    let (events_tx, events_rx) = mpsc::sync_channel(8);
-    let local_generation = 0u64;
-    start_local_reader(reader, events_tx.clone(), local_generation)?;
 
     let _ = execute!(
         std::io::stdout(),
@@ -5543,6 +5574,65 @@ fn write_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_negotiation_reads_server_identity_before_sending_metadata() {
+        // Windows named-pipe flushes wait for the peer to read. The server sends
+        // EndpointIdentity after Ready, so a client that writes CellPixels before
+        // reading deadlocks with the server and never attaches.
+        for probe_terminal in [false, true] {
+            let dir = std::env::temp_dir().join(format!(
+                "luvus-local-negotiation-{}-{probe_terminal}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("s");
+            let _ = std::fs::remove_file(&sock);
+            let listener = crate::ipc::transport::bind(&sock).unwrap();
+            let (app_tx, app_rx) = std::sync::mpsc::channel();
+            let terminal_theme = Arc::new(std::sync::atomic::AtomicBool::new(probe_terminal));
+            std::thread::spawn(move || {
+                let conn = crate::ipc::transport::incoming(&listener).next().unwrap();
+                crate::ipc::server::handle_client(1, conn, app_tx, terminal_theme);
+            });
+
+            let client = crate::ipc::transport::connect(&sock).unwrap();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut writer = client.clone();
+                let result = negotiate_local(client, &mut writer, (80, 24), 0, || {
+                    crate::terminal::theme_probe::ProbeResult {
+                        colors: None,
+                        pending: Vec::new(),
+                    }
+                });
+                let result = result.map(|_| ()).map_err(|error| error.to_string());
+                // Hand the writer back so the connection stays open while the test waits.
+                let _ = done_tx.send((result, writer));
+            });
+
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let (mut connected, mut cell_pixels) = (false, false);
+            while !(connected && cell_pixels) {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                match app_rx.recv_timeout(remaining) {
+                    Ok(crate::event::AppEvent::ClientConnected { .. }) => connected = true,
+                    Ok(crate::event::AppEvent::ClientCellPixels { .. }) => cell_pixels = true,
+                    Ok(_) => {}
+                    Err(_) => panic!(
+                        "local handshake stalled (probe_terminal={probe_terminal}, \
+                         connected={connected}, cell_pixels={cell_pixels})"
+                    ),
+                }
+            }
+            let (result, _writer) = done_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("client negotiation must finish");
+            assert_eq!(result, Ok(()));
+            let _ = std::fs::remove_file(&sock);
+            let _ = std::fs::remove_dir(&dir);
+        }
+    }
 
     #[test]
     fn local_handshake_decodes_v0141_mismatch_as_actionable_error() {
