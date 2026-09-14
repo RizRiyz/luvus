@@ -512,10 +512,11 @@ surface:
 - For Antigravity CLI, `luvus integration install antigravity` adds exact
   conversation identity for restore. It is session-only; native screen
   detection remains authoritative for agent state.
-- For OpenCode, `luvus integration install opencode` adds exact TUI-local root
-  session ownership and structured usage. Without it, usage stays unavailable.
-- OpenCode 2 Preview is a separate `opencode2` agent. Do not install the
-  OpenCode V1 integration for it or infer session IDs from its live database.
+- For OpenCode, `luvus integration install opencode` detects V1 or V2 and adds
+  exact TUI-local root session ownership through the matching integration
+  contract.
+  `opencode2` is a compatibility alias for the canonical `opencode` agent.
+  Never infer V2 session IDs from its live database.
 - Devin has native detection and exact-ID resume only. Do not infer session
   IDs from its private database; `luvus agent resume <id>` cannot find Devin
   sessions, so bind a pane with `luvus pane report --agent devin --session

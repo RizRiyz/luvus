@@ -3296,7 +3296,7 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         let mut target = RenderTarget::new(&mut buffer, area);
         let mut form = OrchForm::for_kind(crate::app::OrchFormKind::Automation);
-        form.agent = "opencode2".into();
+        form.agent = "opencode".into();
         form.access = crate::automation::AutomationAccess::ReadOnly;
         form.field = crate::app::OrchFormField::Agent;
 
@@ -3313,7 +3313,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("opencode2  ·  Full access▏"));
+        assert!(rendered.contains("opencode  ·  Full access▏"));
     }
 
     #[test]

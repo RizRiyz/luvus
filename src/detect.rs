@@ -2981,18 +2981,18 @@ Would you like to proceed?
     }
 
     #[test]
-    fn opencode_versions_have_distinct_process_identity() {
+    fn opencode_v2_preview_name_normalizes_to_the_canonical_agent() {
         let manifests = Manifests::builtin();
 
         assert_eq!(
             manifests.agent_in_processes(&["/Users/me/.opencode/bin/opencode2 --auto".into()]),
-            Some("opencode2".into())
+            Some("opencode".into())
         );
         assert_eq!(
             manifests.agent_in_processes(&[
                 r#"C:\Users\me\.opencode\bin\opencode2.exe --session ses_123"#.into()
             ]),
-            Some("opencode2".into())
+            Some("opencode".into())
         );
         assert_eq!(
             manifests.agent_in_processes(&["/usr/local/bin/opencode --session ses_v1".into()]),
@@ -3001,7 +3001,7 @@ Would you like to proceed?
         assert_eq!(
             manifests.launch_args_for(
                 &["/Users/me/.opencode/bin/opencode2 --session ses_2".into()],
-                "opencode2"
+                "opencode"
             ),
             Some(vec!["--session".into(), "ses_2".into()])
         );

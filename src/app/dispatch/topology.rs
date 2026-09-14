@@ -435,6 +435,64 @@ impl App {
         }
     }
 
+    /// Release only the exact native session identity previously reported by
+    /// this pane. The agent and session fence prevents a delayed navigation
+    /// event from clearing a newer session that has already claimed the pane.
+    pub(super) fn api_pane_release_session(&mut self, method: &str, p: &Value) -> DispatchResult {
+        let _ = method;
+        reject_api_fields(p, &["pane", "agent", "session_id"])?;
+        let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
+        let raw_agent = required_bounded_string(p, "agent", 64)?;
+        let agent = crate::agent::canonical_builtin(&raw_agent).ok_or_else(|| {
+            (
+                "invalid_request".to_string(),
+                "agent must name a built-in Luvus adapter".to_string(),
+            )
+        })?;
+        let session_id = required_bounded_string(p, "session_id", 256)?;
+        if !crate::agent::safe_session_id(&session_id) {
+            return Err((
+                "invalid_request".to_string(),
+                "session_id must contain only safe identifier characters".to_string(),
+            ));
+        }
+
+        let Some(owned) = self
+            .status
+            .get(&id)
+            .ok_or_else(not_found)?
+            .agent_session
+            .as_ref()
+        else {
+            return Ok(
+                json!({"type":"pane_session_release", "pane":id.0.to_string(), "released":false}),
+            );
+        };
+        if owned.agent != agent || owned.session_id != session_id {
+            return Err((
+                "ownership_conflict".to_string(),
+                "pane is owned by a different agent session".to_string(),
+            ));
+        }
+
+        let key = crate::mission::UsageKey::new(agent, &session_id);
+        if self
+            .reported_usage
+            .get(&key)
+            .is_some_and(|owner| owner.pane == id)
+        {
+            self.reported_usage.remove(&key);
+            self.agent_usage.remove(&key);
+            self.usage_mtimes.remove(&key);
+        }
+        let status = self.status.get_mut(&id).ok_or_else(not_found)?;
+        status.agent_session = None;
+        status.force_detect = true;
+        self.session_dirty = true;
+        self.reconcile_durable_active_targets(Some(id));
+        Ok(json!({"type":"pane_session_release", "pane":id.0.to_string(), "released":true}))
+    }
+
     // A precise agent lifecycle event from an integration hook:
     // permission prompt, question, turn end. Forwarded verbatim onto the
     // event bus as `agent.hook` for modules and API clients.

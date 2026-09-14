@@ -3986,7 +3986,6 @@ mod tests {
             ("muse", "muse"),
             ("omp", "omp"),
             ("opencode", "opencode --prompt"),
-            ("opencode2", "opencode2 --prompt"),
             ("pi", "pi"),
             ("qwen", "qwen --prompt-interactive"),
         ];
@@ -4021,7 +4020,7 @@ mod tests {
         assert!(agent_automation_command("kilo", AutomationAccess::Workspace).is_err());
         assert_eq!(
             agent_automation_command("opencode2", AutomationAccess::FullAccess).unwrap(),
-            "opencode2 run --auto"
+            "opencode run --auto"
         );
         assert!(agent_automation_command("opencode2", AutomationAccess::ReadOnly).is_err());
         assert!(agent_automation_command("opencode2", AutomationAccess::Workspace).is_err());
@@ -4450,7 +4449,7 @@ mod tests {
     fn automation_agent_picker_keeps_all_launch_capable_agents_visible() {
         use crate::automation::AutomationAccess;
 
-        assert_eq!(automation_agent_choices().len(), 19);
+        assert_eq!(automation_agent_choices().len(), 18);
         assert!(automation_agent_choices().contains(&"kilo"));
         assert!(automation_agent_choices().contains(&"pi"));
         assert!(!automation_agent_choices().contains(&"antigravity"));
@@ -4462,11 +4461,11 @@ mod tests {
         form.field = crate::app::OrchFormField::Agent;
         form.cycle_choice(false);
 
-        assert_eq!(form.agent, "opencode2");
+        assert_eq!(form.agent, "copilot");
         assert_eq!(form.access, AutomationAccess::ReadOnly);
-        assert!(!automation_agent_supports(&form.agent, form.access));
+        assert!(automation_agent_supports(&form.agent, form.access));
         assert!(automation_agent_supports(
-            &form.agent,
+            "opencode2",
             AutomationAccess::FullAccess
         ));
     }
@@ -4479,9 +4478,9 @@ mod tests {
         app.open_orch_board();
         app.orch_form = Some(crate::app::OrchForm {
             kind: crate::app::OrchFormKind::Automation,
-            title: "OpenCode 2 review".into(),
+            title: "OpenCode review".into(),
             prompt: "Review the workspace.".into(),
-            agent: "opencode2".into(),
+            agent: "opencode".into(),
             access: crate::automation::AutomationAccess::ReadOnly,
             start: crate::app::OrchFormStart::Daily,
             schedule: "08:00".into(),

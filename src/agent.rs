@@ -34,7 +34,6 @@ pub(crate) mod kiro;
 pub(crate) mod muse;
 pub(crate) mod omp;
 pub(crate) mod opencode;
-pub(crate) mod opencode2;
 pub(crate) mod pi;
 pub(crate) mod qwen;
 pub(crate) mod registry;
@@ -379,7 +378,7 @@ mod tests {
             .contains("opencode --session"));
         assert_eq!(
             resume_command("opencode2", "ses_2").as_deref(),
-            Some("opencode2 --session 'ses_2'\r")
+            Some("opencode --session 'ses_2'\r")
         );
         // Aliases + resume-only agents resolve through the registry.
         assert!(resume_command("codex", "c1")
@@ -799,7 +798,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             resume_command_with_flags("opencode2", "ses_2", &opencode2_launch).as_deref(),
-            Some("opencode2 --session 'ses_2' '--standalone'\r")
+            Some("opencode --session 'ses_2' '--standalone'\r")
         );
 
         // Devin keeps its option but never the `-- <briefing>` it was launched with.

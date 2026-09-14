@@ -19,7 +19,7 @@
         "workspace.list", "workspace.get", "workspace.new", "workspace.open", "workspace.focus", "workspace.rename", "workspace.pin", "workspace.move", "workspace.move_block", "workspace.report_metadata", "workspace.close",
         "node.list", "node.new", "node.open", "node.focus", "node.rename", "node.pin", "node.close",
         "tab.list", "tab.get", "tab.new", "tab.focus", "tab.move", "tab.swap", "tab.rename", "tab.close",
-        "pane.list", "pane.get", "pane.current", "pane.layout", "pane.neighbor", "pane.edges", "pane.split", "pane.move", "pane.swap", "pane.focus", "pane.focus_direction", "pane.resize", "pane.zoom", "pane.rename", "pane.run", "pane.send_input", "pane.read", "pane.status", "pane.processes", "pane.report_session", "pane.report_event", "pane.close", "attach.pane",
+        "pane.list", "pane.get", "pane.current", "pane.layout", "pane.neighbor", "pane.edges", "pane.split", "pane.move", "pane.swap", "pane.focus", "pane.focus_direction", "pane.resize", "pane.zoom", "pane.rename", "pane.run", "pane.send_input", "pane.read", "pane.status", "pane.processes", "pane.report_session", "pane.release_session", "pane.report_event", "pane.close", "attach.pane",
         "layout.export", "layout.apply", "layout.set_split_ratio",
         "agent.list", "agent.get", "agent.explain", "agent.report", "agent.release", "agent.start", "agent.prompt", "agent.wait", "agent.name", "agent.fork", "agent.send", "agent.keys", "agent.read", "agent.sessions", "agent.resume",
         "search", "search.capabilities", "search.query", "search.activate",
@@ -183,6 +183,14 @@
             "updated_at": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
           }
         }
+      }
+    },
+    "paneReleaseSessionParams": {
+      "type": "object", "additionalProperties": false, "required": ["agent", "session_id"],
+      "properties": {
+        "pane": { "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "integer", "minimum": 0 }] },
+        "agent": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9._:/-]+$" }
       }
     },
     "taskAddParams": {
@@ -382,6 +390,8 @@
       "then": { "properties": { "params": { "$ref": "#/$defs/integrationChangeParams" } } } },
     { "if": { "properties": { "method": { "const": "pane.report_session" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/paneReportSessionParams" } } } },
+    { "if": { "properties": { "method": { "const": "pane.release_session" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/paneReleaseSessionParams" } } } },
     { "if": { "properties": { "method": { "const": "task.add" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/taskAddParams" } } } },
     { "if": { "properties": { "method": { "const": "task.update" } } },

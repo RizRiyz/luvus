@@ -65,6 +65,7 @@ pub const METHODS: &[&str] = &[
     "pane.status",
     "pane.processes",
     "pane.report_session",
+    "pane.release_session",
     "pane.report_event",
     "pane.close",
     "attach.pane",

@@ -10,7 +10,6 @@ description: What luvus supports per agent, covering live status, session resume
 | Codex | ✓ | ✓ | ✓ | ✓ |
 | Antigravity CLI (`agy`) | ✓ | ✓ | no | session only |
 | opencode | ✓ | ✓ | no | ✓ |
-| OpenCode 2 Preview (`opencode2`) | ✓ | with exact session ID | no | no |
 | Kimi Code CLI | ✓ | ✓ | no | ✓ |
 | Grok Build | ✓ | ✓ | ✓ | ✓ |
 | Hermes CLI | ✓ | ✓ with integration | no | session only |
@@ -66,22 +65,17 @@ description: What luvus supports per agent, covering live status, session resume
   remains responsible for idle/working/blocked state, and uninstall preserves
   every other named hook.
 
-  OpenCode installs `~/.config/opencode/luvus-tui.mjs`, or the equivalent under
-  `XDG_CONFIG_HOME`, and adds only that file to the TUI plugin list. The plugin
-  binds the root session selected by that specific TUI and reports its
-  structured usage over the inherited local Luvus endpoint. Background and
-  child-session events cannot claim the pane. Without the integration,
-  OpenCode detection and legacy JSON session discovery still work while usage
-  remains unavailable.
-
-  OpenCode 2 Preview is a separate built-in agent because its `opencode2`
-  executable can run beside OpenCode V1 and uses a different service, database,
-  plugin, and permission contract. Luvus detects and launches it natively and
-  can resume `opencode2 --session <id>` when an exact session ID is already
-  known. Luvus does not open its live SQLite database, start its service for
-  background discovery, reuse the V1 integration, or claim native TUI forking.
-  Scheduled OpenCode 2 workers require explicit **Full access**, mapped to its
-  documented `opencode2 run --auto` command.
+  OpenCode V2 is the canonical `opencode` executable. Its former preview name,
+  `opencode2`, remains accepted as a compatibility alias and is normalized to
+  the same agent. `luvus integration install opencode` detects the installed
+  generation: V1 receives the legacy TUI-local plugin, while V2 receives a
+  CLI-only plugin under `${XDG_CONFIG_HOME:-~/.config}/opencode/luvus-v2/` and
+  one surgical `cli.json` entry. The V2 plugin binds only the root session
+  selected by that specific TUI, retries bounded local delivery, and releases
+  ownership when navigation leaves it. Luvus never opens the V2 service's live
+  SQLite database or starts that service for discovery. Exact known IDs resume
+  through `opencode --session <id>`. Scheduled OpenCode workers require
+  explicit **Full access**, mapped to `opencode run --auto`.
 
   Kilo Code is detected through either official executable (`kilo` or
   `kilocode`) and the exact `@kilocode/cli` package identity. Luvus can resume
@@ -126,7 +120,7 @@ Print the release-matched instructions for one conversation with
 The shared `~/.agents/skills/luvus/` destination is understood by Codex,
 GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, fx, Kilo Code, and
 Devin. Luvus uses dedicated native destinations for Claude Code, OpenCode,
-OpenCode 2 Preview, Kimi Code CLI, Grok Build, Hermes CLI, Qwen Code, Oh My Pi
+Kimi Code CLI, Grok Build, Hermes CLI, Qwen Code, Oh My Pi
 (omp), and Kiro. Aider does not expose a native Agent Skills installation
 directory, so use `luvus skill show` when an Aider conversation needs the
 instructions.

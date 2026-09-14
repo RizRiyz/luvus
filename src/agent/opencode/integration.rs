@@ -1,5 +1,8 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -7,11 +10,113 @@ use super::super::types::IntegrationOperations;
 use crate::integration;
 
 pub(super) const OPERATIONS: IntegrationOperations = IntegrationOperations {
-    install,
-    uninstall,
-    is_installed,
+    install: install_current,
+    uninstall: uninstall_current,
+    is_installed: current_installed,
     hook: None,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Generation {
+    V1,
+    V2,
+}
+
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_VERSION_OUTPUT: u64 = 4096;
+
+fn major_version(output: &str) -> Option<u64> {
+    output
+        .split_whitespace()
+        .rev()
+        .find_map(|part| part.trim_start_matches('v').split('.').next()?.parse().ok())
+}
+
+/// Probe only during an explicit integration install. `is_installed` remains a
+/// filesystem-only query so opening Settings never spawns an agent process.
+fn installed_generation() -> Generation {
+    if std::env::var_os("OPENCODE_TUI_CONFIG").is_some_and(|value| !value.is_empty()) {
+        return Generation::V1;
+    }
+
+    let mut command = Command::new("opencode");
+    command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    crate::platform::no_window(&mut command);
+    if let Ok(mut child) = command.spawn() {
+        let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Ok(None) | Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+            }
+        };
+        if status.is_some_and(|status| status.success()) {
+            let mut bytes = Vec::new();
+            if child.stdout.take().is_some_and(|stdout| {
+                stdout
+                    .take(MAX_VERSION_OUTPUT)
+                    .read_to_end(&mut bytes)
+                    .is_ok()
+            }) {
+                let version = String::from_utf8_lossy(&bytes);
+                if let Some(major) = major_version(&version) {
+                    return if major >= 2 {
+                        Generation::V2
+                    } else {
+                        Generation::V1
+                    };
+                }
+            }
+        }
+    }
+
+    // Installation remains useful before the agent binary is on PATH. Prefer
+    // explicit config evidence, then the current released generation.
+    let directory = config_dir();
+    if (directory.join("tui.json").is_file() || directory.join("tui.jsonc").is_file())
+        && !directory.join("cli.json").is_file()
+    {
+        Generation::V1
+    } else {
+        Generation::V2
+    }
+}
+
+fn install_current() -> Result<()> {
+    match installed_generation() {
+        Generation::V1 => {
+            install_legacy()?;
+            let _ = super::v2_integration::uninstall();
+            Ok(())
+        }
+        Generation::V2 => {
+            super::v2_integration::install()?;
+            let _ = uninstall_legacy();
+            Ok(())
+        }
+    }
+}
+
+fn uninstall_current() -> Result<()> {
+    let v2 = super::v2_integration::uninstall();
+    let legacy = uninstall_legacy();
+    v2.and(legacy)
+}
+
+fn current_installed() -> bool {
+    super::v2_integration::is_installed() || legacy_installed()
+}
 
 const TUI_PLUGIN: &str = include_str!("luvus-tui.js");
 
@@ -57,7 +162,7 @@ fn restore(path: &Path, previous: Option<&[u8]>) {
     }
 }
 
-fn install() -> Result<()> {
+fn install_legacy() -> Result<()> {
     let config_path = tui_config_path();
     if let Some(parent) = config_path
         .parent()
@@ -96,7 +201,7 @@ fn install() -> Result<()> {
     Ok(())
 }
 
-fn uninstall() -> Result<()> {
+fn uninstall_legacy() -> Result<()> {
     let config_path = tui_config_path();
     match fs::read_to_string(&config_path) {
         Ok(original) => {
@@ -115,7 +220,7 @@ fn uninstall() -> Result<()> {
     Ok(())
 }
 
-fn is_installed() -> bool {
+fn legacy_installed() -> bool {
     tui_plugin_path().is_file()
         && fs::read_to_string(tui_config_path())
             .ok()
@@ -125,6 +230,14 @@ fn is_installed() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_released_and_preview_version_output() {
+        assert_eq!(major_version("opencode v2.0.1\n"), Some(2));
+        assert_eq!(major_version("1.18.30"), Some(1));
+        assert_eq!(major_version("opencode2 v0.0.0-beta-18219"), Some(0));
+        assert_eq!(major_version("unknown"), None);
+    }
 
     fn fixture(tag: &str) -> PathBuf {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -153,9 +266,9 @@ mod tests {
         )
         .unwrap();
 
-        install().unwrap();
-        install().unwrap();
-        assert!(is_installed());
+        install_legacy().unwrap();
+        install_legacy().unwrap();
+        assert!(legacy_installed());
         let installed = fs::read_to_string(&config).unwrap();
         assert_eq!(
             installed
@@ -167,8 +280,8 @@ mod tests {
         assert!(installed.contains("other"));
         assert_eq!(fs::read_to_string(tui_plugin_path()).unwrap(), TUI_PLUGIN);
 
-        uninstall().unwrap();
-        assert!(!is_installed());
+        uninstall_legacy().unwrap();
+        assert!(!legacy_installed());
         let removed = fs::read_to_string(&config).unwrap();
         assert!(removed.contains("// user setting"));
         assert!(removed.contains("other"));
@@ -199,23 +312,23 @@ mod tests {
         let jsonc = root.join("opencode/tui.jsonc");
         fs::create_dir_all(jsonc.parent().unwrap()).unwrap();
         fs::write(&jsonc, "{ // jsonc wins\n}\n").unwrap();
-        install().unwrap();
+        install_legacy().unwrap();
         assert!(fs::read_to_string(&jsonc)
             .unwrap()
             .contains(super::super::config::TUI_PLUGIN_SPEC));
         assert!(!root.join("opencode/tui.json").exists());
-        uninstall().unwrap();
+        uninstall_legacy().unwrap();
 
         let explicit = root.join("custom/client.jsonc");
         fs::create_dir_all(explicit.parent().unwrap()).unwrap();
         fs::write(&explicit, "{ // explicit\n}\n").unwrap();
         std::env::set_var("OPENCODE_TUI_CONFIG", &explicit);
-        install().unwrap();
+        install_legacy().unwrap();
         assert!(fs::read_to_string(&explicit)
             .unwrap()
             .contains(super::super::config::TUI_PLUGIN_SPEC));
         assert!(explicit.parent().unwrap().join("luvus-tui.mjs").is_file());
-        uninstall().unwrap();
+        uninstall_legacy().unwrap();
 
         match old {
             Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
@@ -242,7 +355,7 @@ mod tests {
         fs::create_dir_all(config.parent().unwrap()).unwrap();
         fs::write(&config, r#"{"plugin":"do-not-replace"}"#).unwrap();
 
-        assert!(install().is_err());
+        assert!(install_legacy().is_err());
         assert!(!tui_plugin_path().exists());
         assert_eq!(
             fs::read_to_string(&config).unwrap(),
@@ -275,7 +388,7 @@ mod tests {
         fs::write(&config, "{}\n").unwrap();
         fs::create_dir(tui_plugin_path()).unwrap();
 
-        let error = install().unwrap_err().to_string();
+        let error = install_legacy().unwrap_err().to_string();
         assert!(error.contains("read"), "unexpected error: {error}");
         assert_eq!(fs::read_to_string(&config).unwrap(), "{}\n");
         assert!(tui_plugin_path().is_dir());
@@ -303,11 +416,11 @@ mod tests {
         std::env::set_var("XDG_CONFIG_HOME", root.join("xdg"));
         std::env::set_var("OPENCODE_TUI_CONFIG", &explicit);
 
-        install().unwrap();
+        install_legacy().unwrap();
         assert!(explicit.is_file());
         assert!(root.join("custom/luvus-tui.mjs").is_file());
         assert!(!root.join("xdg/opencode").exists());
-        uninstall().unwrap();
+        uninstall_legacy().unwrap();
 
         match old {
             Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),

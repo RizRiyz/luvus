@@ -194,6 +194,7 @@ impl App {
             "pane.status" => self.api_pane_status(method, p),
             "pane.processes" => self.api_pane_processes(method, p),
             "pane.report_session" => self.api_pane_report_session(method, p),
+            "pane.release_session" => self.api_pane_release_session(method, p),
             // A precise agent lifecycle event from an integration hook:
             // permission prompt, question, turn end. Forwarded verbatim onto the
             // event bus as `agent.hook` for modules and API clients.

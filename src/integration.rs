@@ -821,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_installs_a_tui_plugin_without_process_spawns() {
+    fn opencode_installs_the_current_v2_cli_plugin_without_touching_neighbors() {
         let _env = crate::persist::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -831,14 +831,22 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
         let old = std::env::var_os("XDG_CONFIG_HOME");
         let old_tui = std::env::var_os("OPENCODE_TUI_CONFIG");
+        let old_path = std::env::var_os("PATH");
         std::env::set_var("XDG_CONFIG_HOME", &tmp);
         std::env::remove_var("OPENCODE_TUI_CONFIG");
+        // Make the no-binary fallback deterministic even on a maintainer host
+        // that still has OpenCode V1 installed.
+        std::env::set_var("PATH", &tmp);
 
         install("opencode").unwrap();
-        let plugin = tmp.join("opencode").join("luvus-tui.mjs");
+        let plugin = tmp.join("opencode/luvus-v2/tui.js");
         let js = fs::read_to_string(&plugin).unwrap();
-        assert!(js.contains("session.created"), "hooks the session event");
+        assert!(js.contains("session.updated"), "hooks the session event");
         assert!(js.contains("pane.report_session"), "reports the session");
+        assert!(
+            js.contains("pane.release_session"),
+            "releases old ownership"
+        );
         assert!(
             js.contains("net.createConnection"),
             "uses direct bounded local transport"
@@ -854,6 +862,10 @@ mod tests {
         match old_tui {
             Some(value) => std::env::set_var("OPENCODE_TUI_CONFIG", value),
             None => std::env::remove_var("OPENCODE_TUI_CONFIG"),
+        }
+        match old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
         }
         let _ = fs::remove_dir_all(&tmp);
     }
