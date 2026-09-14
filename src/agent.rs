@@ -162,7 +162,10 @@ fn filter_launch_flags(agent: &str, launch: &[String]) -> Vec<String> {
                 }
                 continue;
             }
-            if matches!(head, "--resume" | "-r" | "--new" | "--new-agent") {
+            if matches!(
+                head,
+                "--resume" | "-r" | "--new" | "--new-agent" | "--default"
+            ) {
                 i += 1;
                 continue;
             }
@@ -811,7 +814,10 @@ mod tests {
             vec!["--model", "sonnet"]
         );
         assert_eq!(
-            f("letta", &["--conv=old", "-C", "other", "--new", "--yolo"]),
+            f(
+                "letta",
+                &["--conv=old", "-C", "other", "--new", "--default", "--yolo",],
+            ),
             vec!["--yolo"]
         );
         // A kept flag keeps its value.
