@@ -70,6 +70,11 @@ pub(crate) fn discard(pane: crate::ids::PaneId) {
     let _ = std::fs::remove_file(launch_path(pane));
 }
 
+#[cfg(test)]
+pub(crate) fn staged_for_test(pane: crate::ids::PaneId) -> bool {
+    launch_path(pane).exists()
+}
+
 pub(crate) fn validate_agent_command(agent: &str) -> Result<(), String> {
     if crate::agent::registry::find(agent).is_some() {
         return Ok(());

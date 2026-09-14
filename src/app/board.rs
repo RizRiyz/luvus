@@ -308,35 +308,48 @@ impl App {
                 )),
             };
             if let Some((code, message)) = failure {
-                let cleanup = self.rollback_task_start(prepared.rollback, pane, &previous);
-                let message = match cleanup {
-                    Ok(()) => message,
-                    Err(cleanup) => format!("{message}; task-start cleanup failed: {cleanup}"),
-                };
-                return Err((code, message));
+                return Err(
+                    self.fail_prepared_task_start(id, prepared, &previous, false, code, message)
+                );
             }
         }
-
-        let result = prepared.result;
 
         // Claim + lease + record the binding for the worker.
         // A started worker is *running* — claimed is reserved for the CLI's
         // claim-without-start, so the board never shows live work as waiting.
-        self.orch
-            .claim(id, pane.0)
-            .map_err(|r| (r.code.to_string(), r.message))?;
+        if let Err(reject) = self.orch.claim(id, pane.0) {
+            return Err(self.fail_prepared_task_start(
+                id,
+                prepared,
+                &previous,
+                false,
+                reject.code.to_string(),
+                reject.message,
+            ));
+        }
         if !task.paths.is_empty() {
             if let Err(reject) = self.orch.bind_task_paths(id, pane.0, &task.paths) {
-                // The preflight above makes this unreachable during ordinary
-                // single-writer operation, but keep a failed acquisition from
-                // exposing a running task without its promised lease.
-                let _ = self.orch.release_task(id);
-                self.orch.release_task_leases(id);
-                self.orch.save();
-                return Err((reject.code.to_string(), reject.message));
+                return Err(self.fail_prepared_task_start(
+                    id,
+                    prepared,
+                    &previous,
+                    true,
+                    reject.code.to_string(),
+                    reject.message,
+                ));
             }
         }
-        let _ = self.orch.set_status(id, crate::orch::TaskStatus::Running);
+        if let Err(reject) = self.orch.set_status(id, crate::orch::TaskStatus::Running) {
+            return Err(self.fail_prepared_task_start(
+                id,
+                prepared,
+                &previous,
+                true,
+                reject.code.to_string(),
+                reject.message,
+            ));
+        }
+        let result = prepared.result;
         match mode {
             TaskWorkerMode::Worktree => {
                 self.orch
@@ -748,6 +761,42 @@ impl App {
         }
         self.restore_task_start_selection(selection);
         cleanup_error.map_or(Ok(()), Err)
+    }
+
+    /// Undo both ORCH ownership and resources after a prepared start fails.
+    fn fail_prepared_task_start(
+        &mut self,
+        task_id: &str,
+        prepared: PreparedTaskStart,
+        selection: &Option<TaskStartSelection>,
+        claimed: bool,
+        code: String,
+        message: String,
+    ) -> (String, String) {
+        let pane = prepared.result.pane;
+        crate::orch::worker::discard(pane);
+        let mut cleanup_errors = Vec::new();
+        if claimed {
+            if let Err(error) = self.orch.release_task(task_id) {
+                cleanup_errors.push(error.message);
+            }
+            self.orch.release_task_leases(task_id);
+            self.orch.save();
+        }
+        if let Err(error) = self.rollback_task_start(prepared.rollback, pane, selection) {
+            cleanup_errors.push(error);
+        }
+        if cleanup_errors.is_empty() {
+            (code, message)
+        } else {
+            (
+                code,
+                format!(
+                    "{message}; task-start cleanup failed: {}",
+                    cleanup_errors.join("; ")
+                ),
+            )
+        }
     }
 
     /// Reconcile the ledger's pane bindings with the live panes. Called at
@@ -3047,6 +3096,44 @@ mod tests {
         assert!(app.panes.contains_key(&pane));
         assert_eq!(app.layout().focus, pane);
         assert_eq!(app.orch.task("t1").unwrap().status, TaskStatus::Queued);
+    }
+
+    #[test]
+    fn post_submit_failure_releases_claim_and_prepared_resources() {
+        let _env = crate::persist::test_env("orch-start-finalize-rollback");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let original_pane = app.layout().focus;
+        let original_tabs = app.ws().tabs.len();
+        app.orch
+            .add_task("finalize rollback".into(), vec![], vec![], None)
+            .unwrap();
+        let task = app.orch.task("t1").unwrap().clone();
+        let selection = app.task_start_selection();
+        let prepared = app.start_task_workspace(&task, None).unwrap();
+        let worker = prepared.result.pane;
+        crate::orch::worker::stage(worker, "t1", "codex", "briefing").unwrap();
+        app.orch.claim("t1", worker.0).unwrap();
+        app.orch.set_status("t1", TaskStatus::Running).unwrap();
+
+        let error = app.fail_prepared_task_start(
+            "t1",
+            prepared,
+            &selection,
+            true,
+            "injected_finalize_failure".into(),
+            "injected finalize failure".into(),
+        );
+
+        assert_eq!(error.0, "injected_finalize_failure");
+        assert_eq!(error.1, "injected finalize failure");
+        assert_eq!(app.ws().tabs.len(), original_tabs);
+        assert_eq!(app.layout().focus, original_pane);
+        assert!(!app.panes.contains_key(&worker));
+        assert!(!crate::orch::worker::staged_for_test(worker));
+        let task = app.orch.task("t1").unwrap();
+        assert_eq!(task.status, TaskStatus::Queued);
+        assert_eq!(task.assignee, None);
     }
 
     #[test]
