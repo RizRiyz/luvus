@@ -163,8 +163,8 @@ impl ViModeCursor {
                 let topmost_line = term.topmost_line();
                 self.point.line = (*topmost_line..=*self.point.line)
                     .rev()
-                    .skip_while(|line| term.grid()[Line(*line)].is_clear())
-                    .find(|line| term.grid()[Line(*line)].is_clear())
+                    .skip_while(|line| term.grid().row(Line(*line)).is_clear())
+                    .find(|line| term.grid().row(Line(*line)).is_clear())
                     .map_or(topmost_line, Line);
                 self.point.column = Column(0);
             },
@@ -173,8 +173,8 @@ impl ViModeCursor {
                 // then skip over the paragraph until we reach the next empty line.
                 let bottommost_line = term.bottommost_line();
                 self.point.line = (*self.point.line..*bottommost_line)
-                    .skip_while(|line| term.grid()[Line(*line)].is_clear())
-                    .find(|line| term.grid()[Line(*line)].is_clear())
+                    .skip_while(|line| term.grid().row(Line(*line)).is_clear())
+                    .find(|line| term.grid().row(Line(*line)).is_clear())
                     .map_or(bottommost_line, Line);
                 self.point.column = Column(0);
             },
@@ -391,7 +391,8 @@ fn advance<T>(term: &Term<T>, point: Point, direction: Direction) -> Point {
 
 /// Check if cell at point contains whitespace.
 fn is_space<T>(term: &Term<T>, point: Point) -> bool {
-    let cell = &term.grid()[point.line][point.column];
+    let row = term.grid().row(point.line);
+    let cell = &row[point.column];
     !cell.flags().intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
         && (cell.c == ' ' || cell.c == '\t')
 }

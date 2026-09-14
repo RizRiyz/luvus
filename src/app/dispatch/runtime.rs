@@ -48,9 +48,9 @@ impl App {
 
     /// Whether any parked or detection work still has a near-term deadline.
     ///
-    /// Idle prompt redraws do not keep the 100 ms cadence. Working panes still
-    /// do until `ACTIVITY_WINDOW + QUIET_DWELL` elapses, as do in-flight dwells,
-    /// integration leases, and parked API waits.
+    /// Idle prompt redraws do not keep the 100 ms cadence. PTY output, quiet
+    /// transitions, integration leases, and resize grace periods wake at their
+    /// exact deadlines instead of polling between them.
     #[cfg(test)]
     pub(crate) fn needs_fast_runtime_tick(&self, now: Instant) -> bool {
         self.detection_work_pending(now)
@@ -67,12 +67,16 @@ impl App {
         !self.detection_dirty.is_empty()
             || self.status.values().any(|status| {
                 status.force_detect
-                    || status.candidate != status.state
-                    || status.agent_report.is_some()
+                    || (status.candidate != status.state
+                        && now >= status.candidate_since + commit_dwell(status.candidate))
+                    || status
+                        .agent_report
+                        .as_ref()
+                        .is_some_and(|report| now >= report.expires_at)
                     || status.last_resize.is_some_and(|t| now >= t + RESIZE_GRACE)
-                    || (status.state == State::Working
-                        && now.saturating_duration_since(status.last_activity)
-                            < ACTIVITY_WINDOW + QUIET_DWELL)
+                    || status
+                        .quiet_check_at
+                        .is_some_and(|deadline| now >= deadline)
             })
     }
 
@@ -147,12 +151,18 @@ impl App {
         for status in self.status.values() {
             if status.candidate != status.state {
                 consider(
-                    status.candidate_since + commit_dwell(status.candidate),
+                    (status.candidate_since + commit_dwell(status.candidate))
+                        .max(self.last_detect_at + DETECTION_INTERVAL),
                     true,
                 );
             }
             if let Some(report) = status.agent_report.as_ref() {
-                consider(report.expires_at, true);
+                consider(
+                    report
+                        .expires_at
+                        .max(self.last_detect_at + DETECTION_INTERVAL),
+                    true,
+                );
             }
             if let Some(resized) = status.last_resize {
                 consider(
@@ -160,8 +170,11 @@ impl App {
                     true,
                 );
             }
-            if status.state == State::Working {
-                consider(status.last_activity + ACTIVITY_WINDOW + QUIET_DWELL, false);
+            if let Some(quiet_check_at) = status.quiet_check_at {
+                consider(
+                    quiet_check_at.max(self.last_detect_at + DETECTION_INTERVAL),
+                    true,
+                );
             }
         }
 
@@ -509,9 +522,9 @@ impl App {
                             || status.candidate != status.state
                             || status.agent_report.is_some()
                             || status.last_resize.is_some_and(|t| now >= t + RESIZE_GRACE)
-                            || (status.state == State::Working
-                                && now.saturating_duration_since(status.last_activity)
-                                    < ACTIVITY_WINDOW + QUIET_DWELL)
+                            || status
+                                .quiet_check_at
+                                .is_some_and(|deadline| now >= deadline)
                     })
             })
             .collect();
@@ -538,14 +551,20 @@ impl App {
                 && self.status.get(&id).is_none_or(|status| {
                     !status.force_detect
                         && status.candidate == status.state
-                        && status.state != State::Working
                         && status.agent_report.is_none()
+                        && status.quiet_check_at.is_none()
                 });
             self.detection_dirty.remove(&id);
             let Some(pane) = self.panes.get(&id) else {
                 continue;
             };
             if let Some(status) = self.status.get_mut(&id) {
+                if status
+                    .quiet_check_at
+                    .is_some_and(|deadline| now >= deadline)
+                {
+                    status.quiet_check_at = None;
+                }
                 if status
                     .agent_report
                     .as_ref()
@@ -597,10 +616,10 @@ impl App {
                 .get(&id)
                 .map(|s| (s.last_detect_generation, s.force_detect))
                 .unwrap_or((None, true));
-            let inspected = if report.is_some() {
+            let (inspected, unchanged_generation) = if report.is_some() {
                 // An explicit lease is the state authority. Keep the cached
                 // screen untouched and avoid a needless VT lock/extraction.
-                None
+                (None, false)
             } else {
                 match pane.engine.lock() {
                     Ok(engine) => {
@@ -613,19 +632,29 @@ impl App {
                             };
                             let codex_composer_ready = inspect_codex_composer
                                 .then(|| engine.codex_composer_region().is_some());
-                            Some((
-                                generation,
-                                engine.title().map(Arc::<str>::from),
-                                Arc::<str>::from(text),
-                                codex_composer_ready,
-                            ))
+                            (
+                                Some((
+                                    generation,
+                                    engine.title().map(Arc::<str>::from),
+                                    Arc::<str>::from(text),
+                                    codex_composer_ready,
+                                )),
+                                false,
+                            )
                         } else {
-                            None
+                            (None, true)
                         }
                     }
-                    Err(_) => None,
+                    Err(_) => (None, false),
                 }
             };
+            // A bounded fleet audit repairs missed PTY invalidations by comparing
+            // output generations. If the generation and every time-dependent
+            // status input are unchanged, the cached classification cannot change.
+            if audit_only && unchanged_generation {
+                self.detection_skips = self.detection_skips.saturating_add(1);
+                continue;
+            }
             let inspected_composer_ready = inspected
                 .as_ref()
                 .and_then(|(_, _, _, composer_ready)| *composer_ready);
@@ -796,7 +825,14 @@ impl App {
                     let was_working = s.state == State::Working;
                     let previous = s.state;
                     s.state = desired;
-                    log_agent_state(id, &s.agent, previous, desired);
+                    // `agent.state` is an agent audit record, not a generic PTY
+                    // activity trace. Shell commands can transition through the
+                    // same heuristic states, but logging every such transition
+                    // adds synchronous file I/O to bulk terminal output without
+                    // providing agent evidence.
+                    if was_visible_agent || is_visible_agent {
+                        log_agent_state(id, &s.agent, previous, desired);
+                    }
                     // Snapshot what a blocked agent is waiting on **once**, at the
                     // moment it enters Blocked (not every tick), for Mission
                     // Control's "why blocked / answer inline" (docs/54); cleared
