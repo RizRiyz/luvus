@@ -13614,6 +13614,19 @@ mod tests {
             json!({"workspace_id":workspace_b, "pane":pane_b.0.to_string()}),
         );
         assert_eq!(next_b["result"]["task"]["id"], "t2");
+
+        app.orch
+            .add_task("legacy".into(), vec![], vec![], None)
+            .unwrap();
+        app.active_ws = 0;
+        let rejected_legacy = call(&mut app, "task.next", json!({"workspace_id":workspace_b}));
+        assert_eq!(rejected_legacy["error"]["code"], "workspace_mismatch");
+        let legacy = app.orch.task("t3").unwrap();
+        assert_eq!(legacy.status, crate::orch::TaskStatus::Queued);
+        assert!(legacy.project.is_none());
+        let persisted = serde_json::to_value(&app.orch).unwrap();
+        assert!(persisted["tasks"][2]["project"].is_null());
+
         let lease_b = call(
             &mut app,
             "lease.acquire",

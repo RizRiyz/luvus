@@ -143,11 +143,13 @@ byte budgets as `task_title_bytes` and `task_prompt_bytes`.
 
 `task.add` binds the task to the selected workspace's project and returns a
 `project` object containing its preferred `workspace_id` and durable root.
-Include `workspace_id` when more than one project is open. A request originating
-inside a Luvus pane may instead include its stable `pane` id. `task.next` filters
-the ready queue to that project, and path leases collide only between tasks in
-the same project. Git worktrees share the repository common directory, so they
-still coordinate with each other while unrelated repositories do not.
+Include `workspace_id` when project selection is ambiguous. The sole focused
+Git project remains implicitly selectable beside a non-Git launch-directory
+workspace. A request originating inside a Luvus pane may instead include its
+stable `pane` id. `task.next` filters the ready queue to that project, and path
+leases collide only between tasks in the same project. Git worktrees share the
+repository common directory, so they still coordinate with each other while
+unrelated repositories do not.
 
 For `task.heartbeat`, the canonical UHP `context` field is the fraction of the
 model context window already consumed. `0.6` means 60% of that window has been

@@ -596,7 +596,6 @@ impl App {
             match self.orch.next_ready_in_project(&project) {
                 None => Ok(json!({ "type": "none", "message": "no ready tasks" })),
                 Some(id) => {
-                    self.orch.bind_project(&id, project).map_err(orch_err)?;
                     if p.get("start").and_then(|v| v.as_bool()).unwrap_or(false) {
                         let mode = task_worker_mode(
                             p,
@@ -622,7 +621,17 @@ impl App {
                         }))
                     } else {
                         let pane = self.orch_pane(p)?;
-                        self.bind_task_to_pane_workspace(&id, pane)?;
+                        let pane_project = self.task_project_for_pane(pane)?;
+                        if !crate::platform::same_path(
+                            std::path::Path::new(&pane_project.root),
+                            std::path::Path::new(&project.root),
+                        ) {
+                            return Err((
+                                "workspace_mismatch".to_string(),
+                                "workspace_id and pane belong to different projects".to_string(),
+                            ));
+                        }
+                        self.orch.bind_project(&id, project).map_err(orch_err)?;
                         let task = self.orch.claim(&id, pane).map_err(orch_err)?;
                         self.orch.save();
                         self.emit_event("task.claimed", task_json(&task));
@@ -1193,6 +1202,15 @@ impl App {
         task: &str,
         pane: u32,
     ) -> Result<(), (String, String)> {
+        let project = self.task_project_for_pane(pane)?;
+        self.orch.bind_project(task, project).map_err(orch_err)?;
+        Ok(())
+    }
+
+    fn task_project_for_pane(
+        &self,
+        pane: u32,
+    ) -> Result<crate::orch::TaskProject, (String, String)> {
         let pane = crate::ids::PaneId(pane);
         let workspace = self
             .workspaces
@@ -1210,8 +1228,7 @@ impl App {
                 "task workspace is unavailable".to_string(),
             )
         })?;
-        self.orch.bind_project(task, project).map_err(orch_err)?;
-        Ok(())
+        Ok(project)
     }
 
     /// The pane a task/lease call acts for: the passed `pane`, else the caller's
