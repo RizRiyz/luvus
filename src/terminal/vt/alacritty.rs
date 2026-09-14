@@ -130,11 +130,13 @@ impl EventListener for EventProxy {
                 }
                 self.host_graphics.mark_pending();
                 if let Ok(mut queue) = self.graphics_queue.lock() {
-                    queue.push(
+                    if let Some(reply) = queue.push(
                         &command.payload,
                         (command.line, command.column),
                         self.host_graphics.cell_size(),
-                    );
+                    ) {
+                        let _ = self.tx.send(InputAction::Bytes(reply));
+                    }
                 }
             }
             _ => {}
@@ -329,10 +331,13 @@ impl AlacrittyEngine {
     }
 
     fn apply_pending_placements(&mut self) {
-        let placements = match self.graphics_queue.lock() {
-            Ok(mut queue) => queue.drain_placements(),
+        let (placements, notices) = match self.graphics_queue.lock() {
+            Ok(mut queue) => (queue.drain_placements(), queue.drain_notices()),
             Err(_) => return,
         };
+        for notice in notices {
+            self.write_drop_notice(notice);
+        }
         for placement in placements {
             let applied_index = self
                 .applied
@@ -413,6 +418,33 @@ impl AlacrittyEngine {
                 }
             }
         }
+    }
+
+    /// Write one visible line where a direct placement was dropped.
+    ///
+    /// A guessed rectangle would draw the image at the wrong scale, so the
+    /// command is refused; silence there reads as a broken feature the first
+    /// time someone types `icat`. The child's cursor is left alone, same as a
+    /// real placement: this line is feedback, not output the child printed.
+    fn write_drop_notice(&mut self, notice: graphics::DropNotice) {
+        let grid = self.term.grid_mut();
+        let columns = grid.columns();
+        let screen_lines = grid.screen_lines() as i32;
+        if notice.line < 0 || notice.line >= screen_lines {
+            return;
+        }
+        let mut column = notice.column;
+        let text = format!("[luvus] {}", notice.text);
+        for ch in text.chars() {
+            if column >= columns {
+                break;
+            }
+            let cell = &mut grid[Line(notice.line)][Column(column)];
+            *cell = alacritty_terminal::term::cell::Cell::default();
+            cell.c = ch;
+            column += 1;
+        }
+        self.placement_damage = true;
     }
 
     /// Write the placeholder cells that make one forwarded image appear.
@@ -2695,6 +2727,34 @@ mod tests {
         // The size in cells needs no client, so that report is always owed.
         e.advance(b"\x1b[18t");
         assert_eq!(recv_bytes(&rx), b"\x1b[8;24;80t");
+    }
+
+    #[test]
+    fn a_dropped_direct_placement_writes_one_visible_line() {
+        let (tx, rx) = channel();
+        let host_graphics = graphics::HostGraphics::default();
+        host_graphics.set(true);
+        let mut e = AlacrittyEngine::with_appearance(
+            40,
+            5,
+            tx,
+            budget_for_rows(40, 20),
+            PaneAppearance::default(),
+            host_graphics,
+        );
+
+        e.advance(b"\x1b_Ga=T,i=1,f=100,s=28,v=68;AAAA\x1b\\");
+        let rows = e.visible_rows();
+        assert!(
+            rows.iter()
+                .any(|line| line.contains("[luvus] image needs a cell or pixel size")),
+            "the pane must not stay blank: {rows:?}"
+        );
+        let reply = String::from_utf8(recv_bytes(&rx)).unwrap();
+        assert!(
+            reply.contains("EINVAL:image needs a cell or pixel size"),
+            "{reply}"
+        );
     }
 
     /// The whole path a real image takes through a pane: the child transmits it

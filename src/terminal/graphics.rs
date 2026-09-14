@@ -181,6 +181,17 @@ pub(crate) struct GraphicsQueue {
     /// itself. A change is preceded by deleting the image's placements —
     /// see [`GraphicsQueue::clear_stale_virtual_rect`].
     virtual_rects: Vec<VirtualRect>,
+    /// Direct placements that could not be turned into cells. Written into the
+    /// grid so a first `icat` is not met with a blank pane.
+    notices: Vec<DropNotice>,
+}
+
+/// One line the engine owes the grid when a direct placement was dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DropNotice {
+    pub line: i32,
+    pub column: usize,
+    pub text: &'static str,
 }
 
 /// The rectangle a terminal was last told to fit one image into.
@@ -222,15 +233,16 @@ impl GraphicsQueue {
     /// `payload` is the APC body with the `G` introducer stripped. `cursor` is
     /// where the grid cursor stood when the command arrived, which is where a
     /// terminal placing the image directly would have put its top-left corner.
+    /// Returns a protocol error the child should read, when the drop is one a
+    /// quiet-less sender is owed an answer for. `q=2` stays silent on the
+    /// socket; the grid notice still paints.
     pub(crate) fn push(
         &mut self,
         payload: &[u8],
         cursor: (i32, usize),
         cell_size: Option<CellSize>,
-    ) {
-        let Some(control) = ControlData::parse(payload) else {
-            return;
-        };
+    ) -> Option<Vec<u8>> {
+        let control = ControlData::parse(payload)?;
 
         if control.is_continuation {
             // Chunks belong to the transfer that opened them, which already
@@ -244,7 +256,7 @@ impl GraphicsQueue {
                 self.transfer_start = None;
                 self.retaining = None;
             }
-            return;
+            return None;
         }
 
         // A new child command before the final chunk is an invalid transfer.
@@ -271,8 +283,19 @@ impl GraphicsQueue {
         // belong to; those are forwarded as they came.
         self.forwarding_transfer = control.more && !matches!(handling, Handling::Drop);
 
+        let mut reply = None;
         match handling {
-            Handling::Drop => {}
+            Handling::Drop => {
+                if matches!(control.action, b'T' | b'p') && !control.virtual_placement {
+                    let reason = direct_drop_reason(&control, cell_size);
+                    self.notices.push(DropNotice {
+                        line: cursor.0,
+                        column: cursor.1,
+                        text: reason,
+                    });
+                    reply = dropped_direct_reply(&control, reason);
+                }
+            }
             Handling::Forward => {
                 let retain = self.plan_retention(&control);
                 self.queue(payload, retain);
@@ -291,6 +314,7 @@ impl GraphicsQueue {
         }
         self.continuation_index = self.forwarding_transfer.then_some(self.commands.len());
         self.transfer_start = self.forwarding_transfer.then_some(transfer_start);
+        reply
     }
 
     /// Delete a terminal's placements of an image whose virtual rectangle is
@@ -523,6 +547,11 @@ impl GraphicsQueue {
             return Vec::new();
         }
         std::mem::take(&mut self.placements)
+    }
+
+    /// Take the lines owed to dropped direct placements.
+    pub(crate) fn drain_notices(&mut self) -> Vec<DropNotice> {
+        std::mem::take(&mut self.notices)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -942,6 +971,55 @@ fn rewrite_placement(payload: &[u8], columns: usize, rows: usize, placement_id: 
     rewritten
 }
 
+/// Why a direct `a=T` / `a=p` could not be turned into placeholder cells.
+fn direct_drop_reason(control: &ControlData, cell_size: Option<CellSize>) -> &'static str {
+    if control.image_id.is_none() {
+        return "image needs an id";
+    }
+    let cells = |pixels: Option<u32>, per_cell: u16| {
+        pixels.map(|pixels| pixels.div_ceil(u32::from(per_cell.max(1))) as usize)
+    };
+    let columns = control
+        .columns
+        .map(|columns| columns as usize)
+        .or_else(|| cells(control.width_px, cell_size?.width));
+    let rows = control
+        .rows
+        .map(|rows| rows as usize)
+        .or_else(|| cells(control.height_px, cell_size?.height));
+    match (columns, rows) {
+        (Some(columns), Some(rows))
+            if columns == 0
+                || rows == 0
+                || columns > placeholder::MAX_EXTENT
+                || rows > placeholder::MAX_EXTENT =>
+        {
+            "image size is not drawable"
+        }
+        _ => "image needs a cell or pixel size",
+    }
+}
+
+/// Protocol error a child that did not ask for silence is owed when its
+/// direct placement was dropped. The grid notice still paints either way.
+fn dropped_direct_reply(control: &ControlData, reason: &str) -> Option<Vec<u8>> {
+    if control.quiet >= 2 {
+        return None;
+    }
+    let mut reply = b"\x1b_G".to_vec();
+    if let Some(id) = control.image_id {
+        reply.extend_from_slice(b"i=");
+        reply.extend_from_slice(id.to_string().as_bytes());
+        reply.push(b';');
+    } else {
+        reply.extend_from_slice(b"a=T;");
+    }
+    reply.extend_from_slice(b"EINVAL:");
+    reply.extend_from_slice(reason.as_bytes());
+    reply.extend_from_slice(b"\x1b\\");
+    Some(reply)
+}
+
 /// Whether a command is one whole kitty APC sequence and nothing besides.
 ///
 /// Luvus builds what it forwards, but a display applies what its server sends,
@@ -1303,6 +1381,63 @@ mod tests {
         assert!(
             queued(&["a=T,U=1,i=1,c=0,r=1,f=100,m=1;AAAA", "m=1;BBBB", "m=0;CCCC",]).is_empty()
         );
+    }
+
+    #[test]
+    fn a_direct_placement_without_a_rectangle_leaves_a_visible_notice() {
+        // `icat foo.png` before any client has reported a cell size: pixels
+        // alone cannot become cells, and guessing a scale is worse than none.
+        let mut queue = GraphicsQueue::default();
+        let reply = queue.push(b"a=T,i=1,f=100,s=28,v=68;AAAA", (2, 3), None);
+        assert!(queue.drain().is_empty(), "the image is not forwarded");
+        assert_eq!(
+            queue.drain_notices(),
+            vec![DropNotice {
+                line: 2,
+                column: 3,
+                text: "image needs a cell or pixel size",
+            }]
+        );
+        let reply = String::from_utf8(reply.expect("a quiet-less sender is told")).unwrap();
+        assert!(
+            reply.contains("EINVAL:image needs a cell or pixel size"),
+            "{reply}"
+        );
+    }
+
+    #[test]
+    fn quiet_two_still_paints_the_notice_but_sends_no_reply() {
+        let mut queue = GraphicsQueue::default();
+        assert!(
+            queue
+                .push(b"a=T,i=1,q=2,f=100,s=28,v=68;AAAA", (0, 0), None)
+                .is_none(),
+            "q=2 asked for silence on the socket"
+        );
+        assert_eq!(queue.drain_notices().len(), 1);
+    }
+
+    #[test]
+    fn a_direct_placement_without_an_id_says_so() {
+        let mut queue = GraphicsQueue::default();
+        queue.push(b"a=T,f=100,s=28,v=68;AAAA", (0, 0), Some(CELL));
+        assert_eq!(queue.drain_notices()[0].text, "image needs an id");
+        assert!(queue.drain().is_empty());
+    }
+
+    #[test]
+    fn a_placeable_direct_image_is_not_a_notice() {
+        let mut queue = GraphicsQueue::default();
+        queue.push(b"a=T,i=7,f=32,s=28,v=68,C=1;DATA", (0, 0), Some(CELL));
+        assert!(queue.drain_notices().is_empty());
+        assert!(!queue.drain().is_empty());
+    }
+
+    #[test]
+    fn a_virtual_bounds_refusal_is_not_this_notice() {
+        let mut queue = GraphicsQueue::default();
+        queue.push(b"a=p,U=1,i=1,c=0,r=1", (0, 0), Some(CELL));
+        assert!(queue.drain_notices().is_empty());
     }
 
     #[test]
