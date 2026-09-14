@@ -145,9 +145,11 @@ briefing. A manual task's prompt can be replaced with `task update` only while
 the task is queued and unassigned; inspect it before starting the worker.
 Tasks belong to the project selected at creation. Inside a Luvus pane the CLI
 supplies that pane automatically. Outside a pane, pass the stable
-`--workspace-id` when multiple projects are open. `task next` stays within that
-project, and path leases overlap only among tasks in the same project, including
-different worktrees of one repository.
+`--workspace-id` when multiple repositories or multiple non-Git projects are
+open. The sole focused Git project remains unambiguous when another workspace
+is only a non-Git launch directory. `task next` stays within that project, and
+path leases overlap only among tasks in the same project, including different
+worktrees of one repository.
 Use `task update --note` for work progress. `task heartbeat --context-used
 <0..1>` reports only the fraction of the model context window already consumed,
 where `0.6` means 60% consumed, not 60% task progress. Omit the heartbeat when
@@ -263,7 +265,8 @@ luvus --session <name> pane list
 
 Each named session owns an independent workspace tree and saved-machine
 catalog. A session switch must not copy workspaces or machine profiles from the
-previous session.
+previous session. An explicit selector for another server also discards the
+caller's inherited pane id because pane identities are session-scoped.
 
 ## Panes and agents
 

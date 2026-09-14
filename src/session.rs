@@ -132,7 +132,16 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
 }
 
 fn apply_explicit_name(name: &str) -> Result<(), String> {
-    match normalize_name(name)? {
+    let normalized = normalize_name(name)?;
+    let target_socket = api_socket_path_for(normalized.as_deref());
+    let inherited_socket = std::env::var_os("LUVUS_SOCKET_PATH").map(PathBuf::from);
+    if inherited_socket.as_deref() != Some(target_socket.as_path()) {
+        // Pane ids are scoped to one server lifetime and may collide across
+        // named sessions. An explicit cross-session command must not inherit
+        // the caller pane's otherwise-valid numeric id.
+        std::env::remove_var("LUVUS_PANE_ID");
+    }
+    match normalized {
         Some(name) => {
             std::env::set_var(SESSION_ENV_VAR, name);
         }
@@ -725,6 +734,37 @@ mod tests {
             crate::persist::cli_socket_path(),
             api_socket_path_for(Some("alpha"))
         );
+    }
+
+    #[test]
+    fn explicit_cross_session_selector_discards_inherited_pane_context() {
+        let _env = crate::persist::test_env("session-cross-pane-context");
+        std::env::set_var(SESSION_ENV_VAR, "source");
+        std::env::set_var("LUVUS_SOCKET_PATH", api_socket_path_for(Some("source")));
+        std::env::set_var("LUVUS_PANE_ID", "7");
+
+        let cleaned =
+            configure_from_args(&argv(&["luvus", "--session", "target", "task", "add", "x"]))
+                .unwrap();
+        let inherited_pane = std::env::var_os("LUVUS_PANE_ID");
+        std::env::remove_var("LUVUS_PANE_ID");
+
+        assert_eq!(cleaned, argv(&["luvus", "task", "add", "x"]));
+        assert!(inherited_pane.is_none());
+    }
+
+    #[test]
+    fn explicit_same_session_selector_keeps_inherited_pane_context() {
+        let _env = crate::persist::test_env("session-same-pane-context");
+        std::env::set_var(SESSION_ENV_VAR, "target");
+        std::env::set_var("LUVUS_SOCKET_PATH", api_socket_path_for(Some("target")));
+        std::env::set_var("LUVUS_PANE_ID", "7");
+
+        configure_from_args(&argv(&["luvus", "--session", "target", "task", "add", "x"])).unwrap();
+        let inherited_pane = std::env::var("LUVUS_PANE_ID");
+        std::env::remove_var("LUVUS_PANE_ID");
+
+        assert_eq!(inherited_pane.as_deref(), Ok("7"));
     }
 
     #[test]

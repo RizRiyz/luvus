@@ -57,10 +57,12 @@ worktrees from one repository share a project identity, while unrelated
 repositories have independent task queues and path leases. `task next` only
 selects work from its workspace's project, so changing the focused workspace
 cannot launch an older task in the wrong repository. Commands run inside a
-Luvus pane infer its workspace. With multiple projects, callers outside a pane
-must pass `--workspace-id`; use `luvus workspace list` to discover the stable
-id. Legacy tasks without project metadata require an explicit workspace when
-the session contains more than one project.
+Luvus pane infer its workspace. Callers outside a pane must pass
+`--workspace-id` when multiple repositories or multiple non-Git projects are
+open; use `luvus workspace list` to discover the stable id. When the focused
+workspace belongs to the session's only Git repository, an incidental non-Git
+launch-directory workspace does not make that repository ambiguous. Legacy
+tasks use the same rule when acquiring project metadata.
 
 `task start` validates the task's path lease before it creates a worktree or
 workspace worker pane. If another task already holds an overlapping path, start

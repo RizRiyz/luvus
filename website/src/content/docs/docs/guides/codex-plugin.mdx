@@ -24,7 +24,9 @@ luvus --session api pane focus 7
 ```
 
 The skill preserves the inherited socket inside a managed pane. Outside a
-pane, an explicit `--session` wins over any inherited socket. It does not run
+pane, an explicit `--session` wins over any inherited socket. When that selector
+targets another server, Luvus also discards the caller's inherited pane id;
+pane ids are valid only in the session that issued them. It does not run
 `session list`, `help`, or `ping` before an ordinary operation, so named-session
 routing adds no discovery round trip to the fast command path.
 

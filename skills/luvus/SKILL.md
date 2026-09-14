@@ -70,6 +70,8 @@ Use the installed production Luvus client:
 - Preserve an explicitly configured `LUVUS_HOME` or `LUVUS_SOCKET_PATH`.
   Preserve `LUVUS_SESSION` too. When the user explicitly names a server
   session, pass `--session <name>` directly to every related Luvus command.
+  If that selects another server, Luvus discards the inherited pane id because
+  pane identities are scoped to their issuing session.
   Do not list sessions first, and do not silently fall back to `default`.
   Otherwise let the installed release binary use its production default at
   `$HOME/.luvus/luvus.sock`.
@@ -469,9 +471,11 @@ surface:
   queued and unassigned. Inspect the stored prompt before starting the worker.
   A task is bound to the selected workspace's project when it is created.
   Commands inside a Luvus pane supply that workspace automatically. Outside a
-  pane, pass `--workspace-id` when multiple projects are open. `task next` stays
-  inside that project, and leases collide only inside the same project,
-  including across its Git worktrees.
+  pane, pass `--workspace-id` when multiple repositories or multiple non-Git
+  projects are open. The sole focused Git project remains unambiguous beside a
+  non-Git launch-directory workspace. `task next` stays inside that project,
+  and leases collide only inside the same project, including across its Git
+  worktrees.
   Report work progress only with `task update --note`. `task heartbeat
   --context-used <0..1>` means the fraction of the model context window already
   consumed, never task-completion progress; `0.6` means 60% consumed. Omit the

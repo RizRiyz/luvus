@@ -144,6 +144,57 @@ impl App {
         })
     }
 
+    /// Pick a workspace for a request with no explicit workspace or pane.
+    /// Multiple non-Git projects remain ambiguous. A sole Git project may be
+    /// selected only while one of its workspaces is focused; this ignores an
+    /// incidental launch-directory workspace without guessing across repos.
+    pub(crate) fn implicit_task_workspace_index(&self) -> Result<Option<usize>, ()> {
+        let Some(active) = self.workspaces.get(self.active_ws) else {
+            return Ok(None);
+        };
+
+        let mut project_roots: Vec<&std::path::Path> = Vec::new();
+        for workspace in &self.workspaces {
+            let root = workspace
+                .worktree
+                .as_ref()
+                .map(|membership| membership.common_dir.as_path())
+                .unwrap_or(workspace.cwd.as_path());
+            if !project_roots
+                .iter()
+                .any(|known| crate::platform::same_path(known, root))
+            {
+                project_roots.push(root);
+            }
+        }
+        if project_roots.len() <= 1 {
+            return Ok(Some(self.active_ws));
+        }
+
+        let Some(active_repo) = active.worktree.as_ref() else {
+            return Err(());
+        };
+        let mut repository_roots: Vec<&std::path::Path> = Vec::new();
+        for workspace in &self.workspaces {
+            let Some(membership) = workspace.worktree.as_ref() else {
+                continue;
+            };
+            let root = membership.common_dir.as_path();
+            if !repository_roots
+                .iter()
+                .any(|known| crate::platform::same_path(known, root))
+            {
+                repository_roots.push(root);
+            }
+        }
+        (project_roots.len() == 2
+            && repository_roots.len() == 1
+            && crate::platform::same_path(repository_roots[0], active_repo.common_dir.as_path()))
+        .then_some(self.active_ws)
+        .ok_or(())
+        .map(Some)
+    }
+
     /// Resolve the workspace that owns a task and bind projectless legacy tasks
     /// only when the choice is explicit or the session contains one project.
     fn resolve_task_workspace(
@@ -215,28 +266,15 @@ impl App {
         } else if let Some(requested) = requested {
             requested
         } else {
-            let mut projects: Vec<crate::orch::TaskProject> = Vec::new();
-            for index in 0..self.workspaces.len() {
-                if let Some(project) = self.task_project_at(index) {
-                    if !projects.iter().any(|known| {
-                        crate::platform::same_path(
-                            std::path::Path::new(&known.root),
-                            std::path::Path::new(&project.root),
-                        )
-                    }) {
-                        projects.push(project);
-                    }
-                }
-            }
-            match projects.len() {
-                0 => {
+            match self.implicit_task_workspace_index() {
+                Ok(None) => {
                     return Err((
                         "workspace_not_found".to_string(),
                         "no workspace is available for this task".to_string(),
                     ));
                 }
-                1 => self.active_ws.min(self.workspaces.len().saturating_sub(1)),
-                _ => {
+                Ok(Some(workspace)) => workspace,
+                Err(()) => {
                     return Err((
                         "workspace_required".to_string(),
                         format!(

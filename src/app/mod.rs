@@ -13535,6 +13535,75 @@ mod tests {
     }
 
     #[test]
+    fn orchestration_uses_the_focused_repository_beside_a_non_repo_workspace() {
+        let _env = crate::persist::test_env("orch-focused-repository");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].cwd = crate::persist::config_dir().join("launch-home");
+        app.workspaces[0].worktree = None;
+        assert!(app.ws().worktree.is_none());
+
+        let repo = crate::persist::config_dir().join("solo");
+        let repo_id = crate::ids::public_id("workspace");
+        app.workspaces.push(Workspace {
+            id: repo_id.clone(),
+            name: "solo".into(),
+            cwd: repo.clone(),
+            branch: Some("main".into()),
+            git_ahead_behind: None,
+            worktree: Some(crate::git::WorktreeMembership {
+                common_dir: repo.join(".git"),
+                linked: false,
+            }),
+            tabs: vec![],
+            active_tab: 0,
+            pinned: false,
+        });
+        app.active_ws = 1;
+
+        let call = |app: &mut App, method: &str, params: Value| {
+            let (reply, _rx) = mpsc::channel();
+            let response = app.handle_api(&ApiRequest {
+                id: "1".into(),
+                method: method.into(),
+                params,
+                reply,
+            });
+            serde_json::from_str::<Value>(&response).unwrap()
+        };
+        let added = call(&mut app, "task.add", json!({"title":"repository work"}));
+        assert_eq!(added["result"]["task"]["project"]["workspace_id"], repo_id);
+
+        app.active_ws = 0;
+        let ambiguous = call(&mut app, "task.add", json!({"title":"ambiguous"}));
+        assert_eq!(ambiguous["error"]["code"], "workspace_required");
+
+        let other_repo = crate::persist::config_dir().join("other-project");
+        app.workspaces.push(Workspace {
+            id: crate::ids::public_id("workspace"),
+            name: "other-project".into(),
+            cwd: other_repo.clone(),
+            branch: None,
+            git_ahead_behind: None,
+            worktree: None,
+            tabs: vec![],
+            active_tab: 0,
+            pinned: false,
+        });
+        app.active_ws = 1;
+        let multiple_non_git = call(&mut app, "task.add", json!({"title":"non-Git ambiguity"}));
+        assert_eq!(multiple_non_git["error"]["code"], "workspace_required");
+
+        app.workspaces[2].branch = Some("main".into());
+        app.workspaces[2].worktree = Some(crate::git::WorktreeMembership {
+            common_dir: other_repo.join(".git"),
+            linked: false,
+        });
+        let two_repositories = call(&mut app, "task.add", json!({"title":"still ambiguous"}));
+        assert_eq!(two_repositories["error"]["code"], "workspace_required");
+    }
+
+    #[test]
     fn task_update_rejects_all_fields_after_merge_starts() {
         let _env = crate::persist::test_env("orch-update-complete");
         let (tx, _rx) = std::sync::mpsc::channel();

@@ -1135,31 +1135,14 @@ impl App {
             return Ok(None);
         }
 
-        let mut project_roots: Vec<&std::path::Path> = Vec::new();
-        for workspace in &self.workspaces {
-            let root = workspace
-                .worktree
-                .as_ref()
-                .map(|membership| membership.common_dir.as_path())
-                .unwrap_or(workspace.cwd.as_path());
-            if !project_roots
-                .iter()
-                .any(|known| crate::platform::same_path(known, root))
-            {
-                project_roots.push(root);
-            }
-        }
-        if project_roots.len() > 1 {
-            return Err((
+        let workspace = self.implicit_task_workspace_index().map_err(|()| {
+            (
                 "workspace_required".to_string(),
                 "multiple projects are open; pass --workspace-id or run from a Luvus pane"
                     .to_string(),
-            ));
-        }
-        Ok(self
-            .workspaces
-            .get(self.active_ws)
-            .map(|workspace| workspace.id.clone()))
+            )
+        })?;
+        Ok(workspace.map(|index| self.workspaces[index].id.clone()))
     }
 
     fn task_project_from_request(
