@@ -14,11 +14,13 @@
 //! The model is pure: it never touches the filesystem itself. The app reads
 //! directories on a worker thread and feeds them back via [`FileTree::apply_dir`].
 
+pub mod highlight;
 pub mod preview;
 mod view;
+#[allow(unused_imports)]
 pub use view::{
-    gutter_width, read_file, seg_text, selection_text, token_rows, view_text_w, wrap_ranges,
-    FileLoad, FileView, SIZE_CAP,
+    gutter_width, read_file, read_file_prepared, selection_text, token_rows, view_text_w,
+    wrap_ranges, wrap_ranges_limited, wrap_rows, FileLoad, FileView, SIZE_CAP,
 };
 
 use std::collections::{HashMap, HashSet};
