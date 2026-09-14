@@ -60,8 +60,12 @@ fn read_transcript(
             return;
         };
         let mut text = String::new();
+        let mut has_text = false;
         match content {
-            Value::String(body) => text.push_str(body),
+            Value::String(body) => {
+                text.push_str(body);
+                has_text = true;
+            }
             Value::Array(parts) => {
                 let mut first = true;
                 for part in parts {
@@ -74,12 +78,13 @@ fn read_transcript(
                         }
                         text.push_str(body);
                         first = false;
+                        has_text = true;
                     }
                 }
             }
             _ => return,
         }
-        if text.is_empty() {
+        if !has_text {
             return;
         }
         if let Some(id) = record
@@ -312,6 +317,24 @@ mod tests {
         assert_eq!(
             read_transcript(&std::env::temp_dir(), 50, None),
             Err("not_found")
+        );
+    }
+
+    #[test]
+    fn transcript_preserves_empty_text_turns_without_emitting_tool_only_rows() {
+        let file = fixture(
+            concat!(
+                "{\"role\":\"user\",\"content\":\"\"}\n",
+                "{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"\"}]}\n",
+                "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\"}]}\n"
+            )
+            .as_bytes(),
+        );
+        assert_eq!(
+            read_transcript(file.path(), 50, None).unwrap()["turns"],
+            json!([
+                {"role":"user","text":""}, {"role":"assistant","text":""}
+            ])
         );
     }
 }
