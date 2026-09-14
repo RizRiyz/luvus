@@ -292,10 +292,10 @@ Windows saved-machine compilation and focused CI coverage are included; real
 Windows-to-remote and Windows SSH-host lifecycle validation is still required
 before claiming the same runtime verification as macOS-to-Linux.
 
-FreeBSD amd64 currently has native build and portable-contract CI coverage,
-not full runtime support. Process inspection and PTY lifecycle tests still
-need platform work; published FreeBSD artifacts and automatic provisioning
-are not provided by this feature.
+FreeBSD amd64 has native build and portable-contract CI coverage. Published
+FreeBSD archives support `install.sh` and direct Luvus updates, but full runtime
+support is not yet claimed: process inspection, PTY lifecycle testing, and
+automatic saved-machine provisioning still need platform work.
 
 Catalog limits are checked before preparation, and a revision fence rejects
 concurrent changes before saving. Remote installation and the local catalog
