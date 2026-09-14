@@ -1112,6 +1112,10 @@ impl App {
                     })
             })
             .transpose()?;
+        // Do not let a headless task request inherit the mutable TUI focus.
+        // The CLI includes LUVUS_PANE_ID explicitly when it has pane context;
+        // otherwise multi-project callers must identify a workspace. This is
+        // intentionally stricter than the general API pane default.
         let pane_index = if p.get("pane").is_some_and(|pane| !pane.is_null()) {
             self.resolve_optional_pane(p)?
                 .map(|pane| {

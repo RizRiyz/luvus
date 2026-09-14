@@ -13588,6 +13588,9 @@ mod tests {
             workspace_b
         );
 
+        let ambiguous_next = call(&mut app, "task.next", json!({}));
+        assert_eq!(ambiguous_next["error"]["code"], "workspace_required");
+
         let wrong_project = call(
             &mut app,
             "task.start",
