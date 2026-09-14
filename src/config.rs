@@ -292,12 +292,14 @@ pub struct LayoutConfig {
     /// client's viewport. `0` disables mobile presentation entirely.
     #[serde(default = "default_mobile_width", alias = "compact_width")]
     pub mobile_width: u16,
-    /// What luvus forwards to a pane for **Shift/Alt+Enter** ("new line, don't
-    /// submit"). A keyword from [`SHIFT_ENTER_CHOICES`]; default `esc-cr`
-    /// (`ESC CR`, the sequence Claude Code's `/terminal-setup` installs). Exposed
-    /// because agents/terminals disagree on which byte sequence they treat as a
-    /// newline — notably some Windows agents want a bare `LF` where macOS wants
-    /// `ESC CR`. Set once, applied to every pane's keystroke encoding.
+    /// What luvus forwards to a pane for modified Enter when the child has not
+    /// negotiated the Kitty keyboard protocol. A keyword from
+    /// [`SHIFT_ENTER_CHOICES`]; default `esc-cr` (`ESC CR`, the sequence Claude
+    /// Code's `/terminal-setup` installs). Kitty modes preserve the real
+    /// modifiers instead, so Shift+Enter and Alt+Enter remain distinct. Exposed
+    /// because agents/terminals disagree on which legacy byte sequence they
+    /// treat as a newline — notably some Windows agents want a bare `LF` where
+    /// macOS wants `ESC CR`. Set once, applied to every pane's key encoding.
     #[serde(default = "default_shift_enter")]
     pub shift_enter: String,
 }
@@ -314,12 +316,13 @@ fn default_shift_enter() -> String {
     SHIFT_ENTER_CHOICES[0].0.to_string()
 }
 
-/// Ordered choices for what Shift/Alt+Enter sends to a pane: `(keyword, label,
+/// Ordered choices for the legacy modified-Enter fallback: `(keyword, label,
 /// bytes)`. The keyword is the stable `config.layout.shift_enter` value; the
 /// label is shown in the Settings chooser; the bytes are what `encode_key`
-/// forwards. `ESC CR` leads because it is what agent CLIs expect out of the box
-/// (Claude Code's `/terminal-setup`). The others cover agents/terminals that
-/// bind a plain `LF` or the CSI-u modified-Enter form instead.
+/// forwards when no Kitty keyboard mode is active. `ESC CR` leads because it is
+/// what agent CLIs expect out of the box (Claude Code's `/terminal-setup`). The
+/// others cover agents/terminals that bind a plain `LF` or the CSI-u Shift+Enter
+/// form instead.
 pub const SHIFT_ENTER_CHOICES: &[(&str, &str, &[u8])] = &[
     ("esc-cr", "ESC CR (default)", b"\x1b\r"),
     ("lf", "LF (newline)", b"\n"),

@@ -4393,15 +4393,16 @@ fn encode_key_with_modes(
                 }
             }
         }
-        // Shift/Alt+Enter means "new line, don't submit" in every agent CLI.
-        // A terminal sends a bare `CR` for both Enter and Shift+Enter, so this
-        // only ever fires when the terminal disambiguates modified keys — either
-        // via the keyboard protocol (`main::push_key_protocol`, macOS/Linux) or
-        // native console records (Windows). The bytes are configurable
-        // (`config::shift_enter`); the default `ESC CR` is what agents expect out
-        // of the box (Claude Code's `/terminal-setup`).
-        KeyCode::Enter if shift || alt => newline.to_vec(),
+        // Preserve modified Enter identities after the child negotiates Kitty
+        // disambiguation. Some agents assign Shift+Enter and Alt+Enter distinct
+        // actions, so collapsing both to the configured newline would lose an
+        // identity the protocol explicitly preserves.
+        KeyCode::Enter if disambiguate && (shift || alt) => csi_u_code(13, key.modifiers),
         KeyCode::Enter if report_all => csi_u_code(13, key.modifiers),
+        // Legacy input cannot reliably distinguish modified Enter variants.
+        // Keep the configurable compatibility sequence for agents that use
+        // either Shift+Enter or Alt+Enter as their newline chord.
+        KeyCode::Enter if shift || alt => newline.to_vec(),
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Tab => {
             if report_all {
@@ -5031,12 +5032,10 @@ mod tests {
         assert!(crate::platform::same_path(&app.ws().cwd, &open_root));
     }
 
-    // Agents treat Enter as "submit" and Shift+Enter as "new line". A terminal
-    // sends a bare CR for both, so luvus asks for the disambiguating keyboard
-    // protocol and forwards the modified form as `ESC CR` — the sequence agent
-    // CLIs already understand.
+    // Legacy input cannot preserve distinct Shift/Alt+Enter identities, so it
+    // keeps the configured compatibility sequence while plain Enter submits.
     #[test]
-    fn shift_enter_sends_a_newline_not_a_submit() {
+    fn legacy_modified_enter_sends_a_newline_not_a_submit() {
         // The default newline sequence is `ESC CR`.
         let nl = b"\x1b\r";
         let enter =
@@ -5065,6 +5064,42 @@ mod tests {
                 false
             ),
             Some(b"\r".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_modes_preserve_modified_enter_identity() {
+        let encode = |modifiers, disambiguate, report_all| {
+            encode_key_with_modes(
+                &KeyEvent::new(KeyCode::Enter, modifiers),
+                b"\x1b\r",
+                false,
+                disambiguate,
+                report_all,
+            )
+        };
+
+        for modes in [(true, false), (false, true)] {
+            assert_eq!(
+                encode(KeyModifiers::SHIFT, modes.0, modes.1),
+                Some(b"\x1b[13;2u".to_vec())
+            );
+            assert_eq!(
+                encode(KeyModifiers::ALT, modes.0, modes.1),
+                Some(b"\x1b[13;3u".to_vec())
+            );
+            assert_eq!(
+                encode(KeyModifiers::SHIFT | KeyModifiers::ALT, modes.0, modes.1),
+                Some(b"\x1b[13;4u".to_vec())
+            );
+        }
+        assert_eq!(
+            encode(KeyModifiers::NONE, true, false),
+            Some(b"\r".to_vec())
+        );
+        assert_eq!(
+            encode(KeyModifiers::NONE, false, true),
+            Some(b"\x1b[13u".to_vec())
         );
     }
 
