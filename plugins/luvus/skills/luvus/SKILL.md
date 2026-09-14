@@ -323,6 +323,20 @@ For a blocked agent:
 key names. It validates the entire list before queuing one ordered action; any
 invalid entry sends nothing, and a closed target returns `send_failed`.
 
+For message-level history, UHP `agent.transcript` accepts `{target, limit?, cursor?}`
+and supports only a bound Claude native session. `limit` is 1–50 (default 50);
+omitting `cursor` returns the latest turns. A decimal cursor indexes the oldest-first
+turns in the current 8 MiB tail window; use the returned `next_cursor` until it is
+null. Pages may contain fewer turns to fit the existing 1 MiB response frame.
+`truncated` is always present and signals omitted history, turns, oversized
+rows, or text capped at 8192 UTF-8 bytes. Cursors are not snapshots and cannot
+reach a dropped prefix. Missing bindings/files return `not_found`; other agent
+kinds return `unsupported_agent`. Read-only Access can read the operator's full
+Claude history for that pane, subject to these bounds, using the same access bit
+as `agent.read`. History is not approval evidence: approvals stay on
+`agent.read` with `source:"visible"` and fenced `agent.keys`. No CLI transcript
+verb exists in v1.
+
 For UHP interactions that must match the inspected screen, use `agent.read`
 with `source:"visible"` and pass its `content_revision` as `if_content_revision`
 together with its `terminal_id` in `agent.keys` params. The revision is a

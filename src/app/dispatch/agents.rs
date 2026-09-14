@@ -322,6 +322,69 @@ impl App {
         }
     }
 
+    /// Read native history without touching the terminal or changing its binding.
+    pub(super) fn api_agent_transcript(&mut self, p: &Value) -> DispatchResult {
+        reject_api_fields(p, &["target", "limit", "cursor"])?;
+        let invalid = || {
+            (
+                "invalid_request".to_string(),
+                "limit must be 1..50 and cursor must be 1..10 ASCII digits".to_string(),
+            )
+        };
+        let limit = match p.get("limit") {
+            None => 50,
+            Some(value) => value
+                .as_u64()
+                .filter(|limit| (1..=50).contains(limit))
+                .ok_or_else(invalid)?,
+        };
+        let limit = usize::try_from(limit).map_err(|_| invalid())?;
+        let cursor = match p.get("cursor") {
+            None => None,
+            Some(value) => {
+                let value = value.as_str().ok_or_else(invalid)?;
+                if !(1..=10).contains(&value.len())
+                    || !value.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    return Err(invalid());
+                }
+                Some(value.parse::<usize>().map_err(|_| invalid())?)
+            }
+        };
+        let id = self.resolve_agent_target(p)?;
+        let session = self
+            .status
+            .get(&id)
+            .and_then(|status| status.agent_session.as_ref())
+            .ok_or_else(|| {
+                (
+                    "not_found".to_string(),
+                    "target pane has no bound native session".to_string(),
+                )
+            })?;
+        let pane = self.panes.get(&id).ok_or_else(agent_not_found)?;
+        let mut result = crate::agent::session_transcript(
+            &session.agent,
+            &pane.cwd,
+            &session.session_id,
+            limit,
+            cursor,
+        )
+        .map_err(|code| {
+            let message = match code {
+                "unsupported_agent" => "native transcript is supported only for Claude",
+                "invalid_request" => "cursor is outside the bounded transcript window",
+                _ => "native transcript not available",
+            };
+            (code.to_string(), message.to_string())
+        })?;
+        result["type"] = json!("agent_transcript");
+        result["pane"] = json!(id.0.to_string());
+        result["agent"] = json!(session.agent);
+        result["session_id"] = json!(session.session_id);
+        Ok(result)
+    }
+
     // One agent's live info, resolved by name / pane id / kind — what to
     // check before deciding how to answer a blocked agent.
     pub(super) fn api_agent_get(&mut self, method: &str, p: &Value) -> DispatchResult {

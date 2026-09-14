@@ -18,6 +18,12 @@
   "oneOf": [ { "required": ["result"] }, { "required": ["error"] } ],
   "allOf": [
     {
+      "if": { "required": ["result"], "properties": { "result": {
+        "required": ["type"], "properties": { "type": { "const": "agent_transcript" } }
+      } } },
+      "then": { "properties": { "result": { "$ref": "#/$defs/agentTranscriptResult" } } }
+    },
+    {
       "if": {
         "required": ["result"],
         "properties": { "result": { "required": ["type"], "properties": { "type": { "const": "session_snapshot" } } } }
@@ -170,6 +176,26 @@
             "requests_per_minute": { "type": "integer", "minimum": 1 }
           }
         }
+      }
+    },
+    "agentTranscriptResult": {
+      "type": "object",
+      "required": ["type", "pane", "agent", "session_id", "turns", "next_cursor", "truncated"],
+      "properties": {
+        "type": { "const": "agent_transcript" },
+        "pane": { "type": "string", "pattern": "^[1-9][0-9]{0,9}$" },
+        "agent": { "const": "claude" },
+        "session_id": { "type": "string", "minLength": 1 },
+        "turns": { "type": "array", "maxItems": 50, "items": {
+          "type": "object", "additionalProperties": false, "required": ["role", "text"],
+          "properties": {
+            "role": { "enum": ["user", "assistant", "system"] },
+            "text": { "type": "string", "maxLength": 8192, "description": "At most 8192 UTF-8 bytes; the reader enforces the byte bound." },
+            "ts": { "type": "number" }
+          }
+        } },
+        "next_cursor": { "type": ["string", "null"], "pattern": "^[0-9]{1,10}$", "not": { "type": "string", "pattern": "[^0-9]" } },
+        "truncated": { "type": "boolean" }
       }
     },
     "agentWaitResult": {

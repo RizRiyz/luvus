@@ -20,7 +20,7 @@ use crate::mission::{context_frac, estimate_cost, AgentUsage};
 /// or inline image. Usage records are tiny, so skip oversized records without
 /// ever allocating their full payload. This replaces the old whole-transcript
 /// read and keeps a malicious/corrupt transcript from becoming an OOM vector.
-const MAX_USAGE_LINE: usize = 2 * 1024 * 1024;
+pub(in crate::agent) const MAX_USAGE_LINE: usize = 2 * 1024 * 1024;
 
 /// Codex persists cumulative token counters, so the newest counter is enough.
 /// Keep refresh work independent of the total rollout size: large tool results
@@ -84,7 +84,7 @@ fn for_each_json_line(path: &Path, mut visit: impl FnMut(&Value)) -> Option<()> 
     }
 }
 
-fn read_window(path: &Path, start: u64, limit: u64) -> Option<Vec<u8>> {
+pub(in crate::agent) fn read_window(path: &Path, start: u64, limit: u64) -> Option<Vec<u8>> {
     let mut file = File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
     let start = start.min(len);
@@ -94,7 +94,11 @@ fn read_window(path: &Path, start: u64, limit: u64) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-fn for_each_json_slice(bytes: &[u8], skip_partial_first: bool, mut visit: impl FnMut(&Value)) {
+pub(in crate::agent) fn for_each_json_slice(
+    bytes: &[u8],
+    skip_partial_first: bool,
+    mut visit: impl FnMut(&Value),
+) {
     let bytes = if skip_partial_first {
         bytes
             .iter()
@@ -217,7 +221,7 @@ fn canonical(agent: &str) -> &str {
     registry::find(agent).map_or(agent, |descriptor| descriptor.id)
 }
 
-fn claude_path(base: &Path, cwd: &Path, session_id: &str) -> PathBuf {
+pub(in crate::agent) fn claude_path(base: &Path, cwd: &Path, session_id: &str) -> PathBuf {
     claude::sessions::project_dir(base, cwd).join(format!("{session_id}.jsonl"))
 }
 

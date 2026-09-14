@@ -89,7 +89,7 @@ Luvus release number.
 | runtime and agents | `session.snapshot` · `agent.start` · `agent.prompt` · `agent.wait` · `events.subscribe` |
 | panes | `pane.list` · `pane.get` · `pane.current` · `pane.layout` · `pane.neighbor` · `pane.edges` · `pane.split` · `pane.move` · `pane.swap` · `pane.focus` · `pane.focus_direction` · `pane.resize` · `pane.zoom` · `pane.rename` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.processes` · `pane.close` · `attach.pane` |
 | layouts | `layout.export` · `layout.apply` · `layout.set_split_ratio` |
-| agents | `agent.list` · `agent.get` · `agent.explain` · `agent.report` · `agent.release` · `agent.start` · `agent.prompt` · `agent.wait` · `agent.name` · `agent.fork` · `agent.send` · `agent.keys` · `agent.read` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.release_session` · `pane.report_event` |
+| agents | `agent.list` · `agent.get` · `agent.explain` · `agent.report` · `agent.release` · `agent.start` · `agent.prompt` · `agent.wait` · `agent.name` · `agent.fork` · `agent.send` · `agent.keys` · `agent.read` · `agent.transcript` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.release_session` · `pane.report_event` |
 | search | `search` · `search.capabilities` · `search.query` · `search.activate` |
 | files | `files.tree` · `files.open` · `files.reveal` · `files.refresh` |
 | git | `git.status` · `git.branches` · `git.log` · `git.open` |
@@ -508,6 +508,56 @@ Before either prompt method queues input, Luvus rejects a currently detected
 startup, sign-in, selection, or approval screen with `agent_not_ready`. The
 rejection queues neither text nor Enter. Read the visible agent output and use
 `agent.keys` only when an explicit interaction is intended.
+
+### Claude transcript history
+
+`agent.transcript` returns message-level history for the target pane's bound
+Claude native session. It resolves the same live alias, pane ID, or unique agent
+kind as `agent.read`; it never discovers a replacement session. This is a UHP
+method only in v1.
+
+```json
+{"id":"history","method":"agent.transcript","params":{"target":"reviewer","limit":50}}
+{"id":"page","method":"agent.transcript","params":{"target":"7","limit":20,"cursor":"0"}}
+```
+
+Only `target` (required), integer `limit` (1–50, default 50), and optional `cursor`
+(a string of 1–10 ASCII digits) are accepted. The result always contains `type`,
+`pane`, `agent`, `session_id`, `turns`, `next_cursor`, and `truncated`:
+
+```json
+{"type":"agent_transcript","pane":"7","agent":"claude","session_id":"sess-1","turns":[{"role":"user","text":"hello"},{"role":"assistant","text":"Hi","ts":1710000000}],"next_cursor":null,"truncated":false}
+```
+
+Turns are oldest-first, with `role` equal to `user`, `assistant`, or `system`.
+Text parts are joined with newlines; tool-only records and other payloads are
+omitted, and duplicate message IDs appear once. Numeric Unix timestamps become
+optional `ts`; freeform timestamps are not parsed.
+
+Each request reads at most the final 8 MiB of the JSONL file. Rows larger than
+2 MiB are skipped; each turn's text is capped at 8192 UTF-8 bytes while keeping
+the turn. `truncated:true` signals a dropped file prefix, oversized row, shortened
+text, or turns outside the returned page. Omitting `cursor` returns the latest
+`limit` turns. Pages may contain fewer turns to keep JSON-escaped text within
+the existing 1 MiB response frame; `next_cursor` still identifies the first
+omitted later turn. An explicit cursor is a zero-based index in the current bounded
+window; `next_cursor` is the next index or null when no later turns remain.
+An index at or beyond the turn count is invalid. Cursors are not snapshots:
+file growth or compaction can change their meaning between requests, and v1
+cannot page into the dropped prefix.
+
+| Condition | Error code |
+| --- | --- |
+| Missing/unknown target, unbound native session, missing or rotated transcript | `not_found` |
+| Target kind matches multiple panes | `ambiguous_target` |
+| Bound agent is not Claude | `unsupported_agent` |
+| Unknown parameter, invalid limit/cursor, cursor outside the window | `invalid_request` |
+
+Read-only Access can read the operator's full Claude history for that pane,
+subject to the window and text limits above, using the same access bit as
+`agent.read`. No filesystem path is exposed. Transcript turns are not approval
+evidence: approvals stay on `agent.read` with `source:"visible"` and fenced
+`agent.keys`; keys still require Control access.
 
 For explicit key interactions, `agent.read` adds `content_revision` (the pane's
 PTY output counter) and `terminal_id` (32 lowercase hexadecimal characters for
